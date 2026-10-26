@@ -5,7 +5,7 @@ use super::covering::{build_covering_projection, decode_sorted_index_name, extra
 use super::SortedIndexDefinition;
 use crate::write_ops::IndexWriteOp;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::RecordKey;
+use shamir_storage::types::{KvOp, RecordKey};
 use shamir_types::core::interner::Interner;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
@@ -75,9 +75,9 @@ impl super::inner::SortedIndexManager {
         if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let defs = self.snapshot();
         let mut ops = Vec::with_capacity(4);
-        for def in &defs {
+        for def in defs.iter() {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
                 let value = if def.is_covering() {
@@ -116,9 +116,9 @@ impl super::inner::SortedIndexManager {
         if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let defs = self.snapshot();
         let mut ops = Vec::new();
-        for def in &defs {
+        for def in defs.iter() {
             let provenance = def.provenance();
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {
@@ -155,9 +155,9 @@ impl super::inner::SortedIndexManager {
         if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let defs = self.snapshot();
         let mut ops = Vec::new();
-        for def in &defs {
+        for def in defs.iter() {
             let provenance = def.provenance();
             let old_enc = extract_and_encode(old, &def.field_path)?;
             let new_enc = extract_and_encode(new, &def.field_path)?;
@@ -228,9 +228,9 @@ impl super::inner::SortedIndexManager {
         if self.indexes.load_local().is_empty() {
             return Ok(Vec::new());
         }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let defs = self.snapshot();
         let mut ops = Vec::new();
-        for def in &defs {
+        for def in defs.iter() {
             if let Some(encoded) = extract_and_encode(record, &def.field_path)? {
                 let key = self.build_entry_key(def.name_interned, &encoded, record_id);
                 ops.push(IndexWriteOp::RemovePosting {
@@ -248,21 +248,28 @@ impl super::inner::SortedIndexManager {
     // ============================================================================
 
     /// Apply a slice of `IndexWriteOp` against `self.info_store`.
+    ///
+    /// All SetPosting/RemovePosting ops are collapsed into ONE ordered
+    /// `Store::transact` call, preserving mixed op order (per-key
+    /// last-write-wins semantics unchanged); `transact`'s own atomicity
+    /// contract is backend-dependent and nothing here assumes it.
     async fn apply_ops(&self, ops: &[IndexWriteOp]) -> DbResult<()> {
+        let mut kv_ops: Vec<KvOp> = Vec::with_capacity(ops.len());
         for op in ops {
             match op {
                 IndexWriteOp::SetPosting { key, value, .. } => {
-                    self.info_store
-                        .set(key.clone().into(), value.clone())
-                        .await?;
+                    kv_ops.push(KvOp::Set(key.clone().into(), value.clone()));
                 }
                 IndexWriteOp::RemovePosting { key, .. } => {
-                    let _ = self.info_store.remove(key.clone().into()).await?;
+                    kv_ops.push(KvOp::Remove(key.clone().into()));
                 }
                 IndexWriteOp::BumpFtsStats { .. } => {
                     // Not relevant for SortedIndexManager.
                 }
             }
+        }
+        if !kv_ops.is_empty() {
+            self.info_store.transact(kv_ops).await?;
         }
         Ok(())
     }
@@ -372,11 +379,11 @@ impl super::inner::SortedIndexManager {
         if self.indexes.load_local().is_empty() {
             return Ok(());
         }
-        let defs: Vec<SortedIndexDefinition> = self.iter_indexes();
+        let defs = self.snapshot();
         // `RecordKey` keys (fed to the store `set_many`); entry keys are
         // built as `Bytes` and converted byte-identically at each push.
         let mut writes: Vec<(RecordKey, Bytes)> = Vec::new();
-        for def in &defs {
+        for def in defs.iter() {
             let mut touched = false;
             for (rid, value) in items.clone() {
                 if let Some(encoded) = extract_and_encode(value, &def.field_path)? {

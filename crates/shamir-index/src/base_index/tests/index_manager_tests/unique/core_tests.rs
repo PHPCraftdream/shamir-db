@@ -2,6 +2,7 @@ use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_info_item::IndexInfoItem;
 use crate::base_index::index_manager::IndexManager;
 use crate::base_index::tests::index_manager_tests::helpers::{create_manager, create_test_value};
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;
@@ -726,4 +727,150 @@ async fn test_create_same_unique_index_twice() {
 
     assert!(manager.has_unique_indexes());
     assert!(manager.unique_index_exists(1001));
+}
+
+// ---------------------------------------------------------------------------
+// RV-INDEX-0577E3C4 — direct unique update batching
+// ---------------------------------------------------------------------------
+
+struct CountingUniqueStore {
+    inner: Arc<dyn Store>,
+    transacts: std::sync::atomic::AtomicUsize,
+    direct_sets: std::sync::atomic::AtomicUsize,
+    direct_removes: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingUniqueStore {
+    fn new(inner: Arc<dyn Store>) -> Self {
+        Self {
+            inner,
+            transacts: std::sync::atomic::AtomicUsize::new(0),
+            direct_sets: std::sync::atomic::AtomicUsize::new(0),
+            direct_removes: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+type UniqueTestStream = std::pin::Pin<
+    Box<
+        dyn futures::Stream<
+                Item = shamir_storage::error::DbResult<
+                    Vec<(shamir_storage::types::RecordKey, bytes::Bytes)>,
+                >,
+            > + Send,
+    >,
+>;
+
+#[async_trait::async_trait]
+impl Store for CountingUniqueStore {
+    async fn insert(
+        &self,
+        value: Bytes,
+    ) -> shamir_storage::error::DbResult<shamir_storage::types::RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(
+        &self,
+        key: shamir_storage::types::RecordKey,
+        value: Bytes,
+    ) -> shamir_storage::error::DbResult<bool> {
+        self.direct_sets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.set(key, value).await
+    }
+    async fn get(
+        &self,
+        key: shamir_storage::types::RecordKey,
+    ) -> shamir_storage::error::DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(
+        &self,
+        key: shamir_storage::types::RecordKey,
+    ) -> shamir_storage::error::DbResult<bool> {
+        self.direct_removes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.remove(key).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> UniqueTestStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> UniqueTestStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+    async fn transact(
+        &self,
+        ops: Vec<shamir_storage::types::KvOp>,
+    ) -> shamir_storage::error::DbResult<()> {
+        self.transacts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.transact(ops).await
+    }
+}
+
+/// Old-code failure: `on_record_updated_unique` awaited
+/// `remove_unique_entry_by_key` then `add_unique_entry_by_key` per changed
+/// def — two separate store round-trips, zero transacts. The fix applies the
+/// mixed remove-then-set batch as ONE ordered `transact`.
+#[tokio::test]
+async fn rv_index_0577e3c4_unique_update_batches_remove_and_set_into_one_transact() {
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let counting = Arc::new(CountingUniqueStore::new(Arc::clone(&inner)));
+    let manager = IndexManager::new(Arc::clone(&data), Arc::clone(&counting) as Arc<dyn Store>)
+        .await
+        .unwrap();
+    manager
+        .create_unique_index(IndexDefinition::new(
+            1001,
+            vec![IndexInfoItem::new(vec![1])],
+        ))
+        .await
+        .unwrap();
+
+    let id = RecordId::new();
+    let old = create_test_value(&[(1, InnerValue::Int(10))]);
+    let new = create_test_value(&[(1, InnerValue::Int(20))]);
+    manager.on_record_created_unique(&id, &old).await.unwrap();
+    let transacts_after_create = counting.transacts.load(std::sync::atomic::Ordering::SeqCst);
+    let direct_sets_after_create = counting
+        .direct_sets
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    manager
+        .on_record_updated_unique(&id, &old, &new)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        counting.transacts.load(std::sync::atomic::Ordering::SeqCst),
+        transacts_after_create + 1,
+        "the unique update must apply remove+set as ONE transact"
+    );
+    assert_eq!(
+        counting
+            .direct_sets
+            .load(std::sync::atomic::Ordering::SeqCst),
+        direct_sets_after_create,
+        "no per-key direct set may bypass the batch"
+    );
+    assert_eq!(
+        counting
+            .direct_removes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no per-key direct remove may bypass the batch"
+    );
+
+    // Correctness: old key gone, new key resolves to the same record id.
+    let old_id = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Int(10)])
+        .await
+        .unwrap();
+    assert!(old_id.is_none(), "old unique posting must be removed");
+    let new_id = manager
+        .lookup_by_unique_index(1001, &[InnerValue::Int(20)])
+        .await
+        .unwrap();
+    assert_eq!(new_id, Some(id), "new unique posting must resolve the id");
 }

@@ -15,7 +15,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-struct DummyBackend(IndexDescriptor);
+pub(super) struct DummyBackend(pub(super) IndexDescriptor);
 
 #[async_trait]
 impl IndexBackend for DummyBackend {

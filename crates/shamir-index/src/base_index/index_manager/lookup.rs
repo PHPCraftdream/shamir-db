@@ -47,8 +47,9 @@ impl IndexManager {
             return Ok(Vec::new());
         }
 
+        let defs = self.indexes.snapshot();
         let mut ops = Vec::with_capacity(4);
-        for def in self.indexes.iter() {
+        for def in defs.iter() {
             // #1058: if this def is Building AND has an active in-flight build,
             // capture RecordId to dirty-set instead of producing SetPosting.
             let in_flight =
@@ -73,7 +74,7 @@ impl IndexManager {
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
                         value: Bytes::new(),
-                        provenance: regular_provenance(&def),
+                        provenance: regular_provenance(def),
                     });
                 }
             }
@@ -116,8 +117,9 @@ impl IndexManager {
         }
 
         let mut ops = Vec::with_capacity(1024);
-        for def in self.indexes.iter() {
-            let provenance = regular_provenance(&def);
+        let defs = self.indexes.snapshot();
+        for def in defs.iter() {
+            let provenance = regular_provenance(def);
             for (rid, value) in items.clone() {
                 if let Some(irk) =
                     build_index_key_from_record(false, def.name_interned, value, &def.paths)
@@ -172,13 +174,14 @@ impl IndexManager {
         }
 
         let mut ops = Vec::with_capacity(4);
-        for def in self.indexes.iter() {
+        let defs = self.indexes.snapshot();
+        for def in defs.iter() {
             // #1058: if this def is Building AND has an active in-flight build,
             // capture RecordId to dirty-set instead of producing posting ops.
             let in_flight =
                 def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
 
-            let provenance = regular_provenance(&def);
+            let provenance = regular_provenance(def);
             let old_key =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths);
             let new_key =
@@ -274,7 +277,8 @@ impl IndexManager {
         }
 
         let mut ops = Vec::with_capacity(4);
-        for def in self.indexes.iter() {
+        let defs = self.indexes.snapshot();
+        for def in defs.iter() {
             // #1058: if this def is Building AND has an active in-flight build,
             // capture RecordId to dirty-set instead of producing RemovePosting.
             let in_flight =
@@ -296,7 +300,7 @@ impl IndexManager {
                     let posting_key = build_posting_key(&index_key, record_id);
                     ops.push(IndexWriteOp::RemovePosting {
                         key: posting_key,
-                        provenance: regular_provenance(&def),
+                        provenance: regular_provenance(def),
                         owner: None,
                     });
                 }
@@ -335,6 +339,11 @@ impl IndexManager {
                 }
             }
         }
+        // Bump the cache epoch BEFORE mutating the store: any scan that
+        // sampled the pre-bump epoch reflects pre-mutation state valid at
+        // bump time, so publishing it can never outlive this invalidation.
+        self.posting_cache_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if !kv_ops.is_empty() {
             self.info_store.transact(kv_ops).await?;
         }
@@ -417,8 +426,21 @@ impl IndexManager {
         // the index name is re-created — finding C-5 in the plan doc.
         // Audit 1.5: cache-HIT — это атомарный refcount-bump через
         // `Arc::clone`, а НЕ полный node-by-node клон `BTreeSet`.
+        // HIT is served only when the entry's scan generation still matches
+        // the current shared epoch; a writer bump invalidates every older tag.
+        let generation = self
+            .posting_cache_generation
+            .load(std::sync::atomic::Ordering::Acquire);
         if let Some(cached) = self.posting_cache.get(&index_key) {
-            return Ok(Some(Arc::clone(cached.value())));
+            let (cached_generation, values) = cached.value();
+            if *cached_generation == generation
+                && self
+                    .posting_cache_generation
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    == generation
+            {
+                return Ok(Some(Arc::clone(values)));
+            }
         }
 
         // P0-3a (#1011) test seam: park here (guard HELD, scan not yet started)
@@ -429,6 +451,12 @@ impl IndexManager {
         if let Some(hook) = self.lookup_pause_hook.load_full() {
             hook.wait_at_window().await;
         }
+
+        // Capture before scanning; cache hits and publication validate this
+        // shared epoch so invalidation cannot leave an old scan reusable.
+        let scan_generation = self
+            .posting_cache_generation
+            .load(std::sync::atomic::Ordering::Acquire);
 
         // Scan the 25-byte index prefix; every match is a posting
         // entry whose final 16 bytes are the record_id. The scan visits
@@ -451,18 +479,13 @@ impl IndexManager {
             }
         }
 
-        // Populate cache (bounded — evict arbitrary entry on
-        // overflow; exact LRU isn't worth the dep, index hotsets are
-        // small). Empty results are cached too — the next identical
-        // lookup short-circuits without re-scanning.
-        //
-        // Audit 1.5/3.2 (miss path): построить `Arc<[RecordId]>` ровно
-        // один раз, вставить в кэш `Arc::clone` того же `Arc` и вернуть
-        // исходный `Arc` вызывающему — без лишних клонов.
+        // Deterministic regression seam for the scan-to-publication race.
+        if let Some(hook) = self.lookup_post_scan_pause_hook.load_full() {
+            hook.wait_at_window().await;
+        }
+
+        // Bounded cache — evict an arbitrary entry on overflow.
         if self.posting_cache.len() >= POSTING_CACHE_CAP {
-            // `iter().next()` on DashMap acquires a single shard's
-            // read lock — bounded; evicting an arbitrary entry is
-            // explicitly allowed by the cache contract.
             if let Some(victim) = self.posting_cache.iter().next() {
                 let k = victim.key().clone();
                 drop(victim);
@@ -470,8 +493,22 @@ impl IndexManager {
             }
         }
         let record_ids_arc: Arc<[RecordId]> = Arc::from(record_ids);
-        self.posting_cache
-            .insert(index_key, Arc::clone(&record_ids_arc));
+        // Validate the scan's generation in the SAME atomic cell writers bump:
+        // publication proceeds only while the epoch is still the sampled one,
+        // closing the check-before-insert gap without a per-key tombstone map.
+        let publish_allowed = self
+            .posting_cache_generation
+            .compare_exchange(
+                scan_generation,
+                scan_generation,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok();
+        if publish_allowed {
+            self.posting_cache
+                .insert(index_key, (scan_generation, Arc::clone(&record_ids_arc)));
+        }
 
         Ok(Some(record_ids_arc))
     }
@@ -481,6 +518,7 @@ impl IndexManager {
     /// (`apply_index_batch`) after durably writing the ops, so the
     /// next `lookup_by_index` re-fetches from the store.
     pub fn invalidate_posting_cache_for_ops(&self, ops: &[IndexWriteOp]) {
+        let mut touched = false;
         for op in ops {
             let key = match op {
                 IndexWriteOp::SetPosting { key, .. } | IndexWriteOp::RemovePosting { key, .. } => {
@@ -491,7 +529,12 @@ impl IndexManager {
             if key.len() >= 25 {
                 let index_key = key.slice(..25);
                 self.posting_cache.remove(&index_key);
+                touched = true;
             }
+        }
+        if touched {
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
     }
 
@@ -501,10 +544,16 @@ impl IndexManager {
     /// AFTER the write lands so no reader can re-cache the old state between
     /// the two. Keys shorter than the 25-byte index prefix are ignored.
     pub fn invalidate_posting_cache_for_keys<'a>(&self, keys: impl IntoIterator<Item = &'a [u8]>) {
+        let mut touched = false;
         for key in keys {
             if key.len() >= 25 {
                 self.posting_cache.remove(&key[..25]);
+                touched = true;
             }
+        }
+        if touched {
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         }
     }
 

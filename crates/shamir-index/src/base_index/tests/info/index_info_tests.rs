@@ -106,3 +106,23 @@ fn test_zero_copy() {
     // Can access indexes without allocation - IndexInfo PartialEq compares indexes
     assert_eq!(info2, target);
 }
+
+#[test]
+fn rv_index_8f977bf5_snapshot_shares_one_arc_no_per_definition_clone() {
+    let target = IndexInfo::from_definitions(vec![
+        IndexDefinition::new(1011, vec![IndexInfoItem::new(vec![1])]),
+        IndexDefinition::new(1012, vec![IndexInfoItem::new(vec![2])]),
+    ]);
+
+    let snap = target.snapshot();
+    assert_eq!(snap.len(), 2);
+    // A definition clone copies the owned paths; shared snapshot identity alone
+    // does not prove a planner iterates the borrowed snapshot.
+    let snap_again = target.snapshot();
+    assert!(
+        std::sync::Arc::ptr_eq(&snap, &snap_again),
+        "snapshot() must return the shared node-local Arc, not a rebuilt Vec"
+    );
+    let names: Vec<u64> = snap.iter().map(|d| d.name_interned).collect();
+    assert!(names.contains(&1011) && names.contains(&1012));
+}

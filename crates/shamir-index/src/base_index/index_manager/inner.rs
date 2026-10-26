@@ -12,6 +12,8 @@ use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+type PostingCache = DashMap<Bytes, (u64, Arc<[RecordId]>), THasher>;
+
 /// R0-B (#1008): [`Provenance`] for an op planned against `def` on the
 /// REGULAR (non-unique) base_index family. See
 /// `IndexDefinition::provenance`'s doc.
@@ -144,8 +146,8 @@ pub struct IndexManager {
     /// consumer then iterates a contiguous, cache-friendly buffer
     /// instead of chasing `BTreeSet` tree-node pointers.
     ///
-    /// Invalidated by every write hook on the affected
-    /// `(index_name, value)` key. Bounded — when full we evict an
+    /// Cache entries carry the generation at scan time. Writes advance the
+    /// shared epoch so even a missed per-key removal cannot serve stale data.
     /// arbitrary entry (exact LRU not worth the dep here; index
     /// hotsets are typically small).
     ///
@@ -154,7 +156,10 @@ pub struct IndexManager {
     /// is independently lockable and the read path on a cache hit is
     /// fully lock-free against unrelated index keys. Cache hits on
     /// the same shard still take the per-shard read lock.
-    pub(in crate::base_index) posting_cache: Arc<DashMap<Bytes, Arc<[RecordId]>, THasher>>,
+    pub(in crate::base_index) posting_cache: Arc<PostingCache>,
+
+    /// Monotonic cache invalidation epoch, shared by all manager clones.
+    pub(in crate::base_index) posting_cache_generation: Arc<AtomicU64>,
 
     /// F-72 (#899, P0) test-only deterministic pause point: parks
     /// `create_index_from_records`'s Phase 2 backfill loop (definition
@@ -192,6 +197,11 @@ pub struct IndexManager {
     /// `drop_index_pause_hook` above. `None` on every real path; one
     /// uncontended `ArcSwapOption::load_full()` Acquire load at the call site.
     pub(in crate::base_index) lookup_pause_hook:
+        Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+
+    /// D3ED367D test seam: pause after the posting scan and before cache publication.
+    /// NOT `#[cfg(test)]`-gated for cross-crate regression consumers.
+    pub(in crate::base_index) lookup_post_scan_pause_hook:
         Arc<arc_swap::ArcSwapOption<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
 
     /// P0-2 (#958): monotonic generation counter bumped whenever the set of
@@ -404,9 +414,11 @@ impl Clone for IndexManager {
             indexes_unique: Arc::clone(&self.indexes_unique),
             write_barrier_flags: self.write_barrier_flags.clone(),
             posting_cache: Arc::clone(&self.posting_cache),
+            posting_cache_generation: Arc::clone(&self.posting_cache_generation),
             create_index_backfill_hook: Arc::clone(&self.create_index_backfill_hook),
             drop_index_pause_hook: Arc::clone(&self.drop_index_pause_hook),
             lookup_pause_hook: Arc::clone(&self.lookup_pause_hook),
+            lookup_post_scan_pause_hook: Arc::clone(&self.lookup_post_scan_pause_hook),
             generation: Arc::clone(&self.generation),
             dropping_regular: Arc::clone(&self.dropping_regular),
             dropping_unique: Arc::clone(&self.dropping_unique),
@@ -548,9 +560,11 @@ impl IndexManager {
                 POSTING_CACHE_CAP,
                 THasher::default(),
             )),
+            posting_cache_generation: Arc::new(AtomicU64::new(0)),
             create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             lookup_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
+            lookup_post_scan_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             generation: Arc::new(AtomicU64::new(0)),
             dropping_regular: Arc::new(Mutex::new(BTreeMap::new())),
             dropping_unique: Arc::new(Mutex::new(BTreeMap::new())),

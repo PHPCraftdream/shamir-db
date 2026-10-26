@@ -53,9 +53,7 @@ impl FtsRankedBackend {
     /// `BumpFtsStats` was applied exactly once (not double-counted) for a
     /// quiescent tx that planned the FTS insert at stage time.
     pub fn doc_count(&self) -> u64 {
-        self.stats
-            .doc_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.stats.doc_count()
     }
 
     /// #1063: sum of all document lengths tracked by the in-memory BM25 stats.
@@ -63,9 +61,7 @@ impl FtsRankedBackend {
     /// one FTS backend's stats with another's when multiple FTS indexes exist
     /// on the same table (cross-field `doc_len` contamination).
     pub fn sum_doc_len(&self) -> u64 {
-        self.stats
-            .sum_doc_len
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.stats.sum_doc_len()
     }
 
     /// Resolve `self.field_path` to its interned-key form (see
@@ -220,16 +216,20 @@ impl IndexBackend for FtsRankedBackend {
                 provenance,
             });
         }
-        ops.push(IndexWriteOp::BumpFtsStats {
-            doc_len: old_doc_len,
-            sign: -1,
-            provenance,
-        });
-        ops.push(IndexWriteOp::BumpFtsStats {
-            doc_len: new_doc_len,
-            sign: 1,
-            provenance,
-        });
+        if old_doc_len > 0 {
+            ops.push(IndexWriteOp::BumpFtsStats {
+                doc_len: old_doc_len,
+                sign: -1,
+                provenance,
+            });
+        }
+        if new_doc_len > 0 {
+            ops.push(IndexWriteOp::BumpFtsStats {
+                doc_len: new_doc_len,
+                sign: 1,
+                provenance,
+            });
+        }
         Ok(ops)
     }
 
@@ -284,10 +284,12 @@ impl IndexBackend for FtsRankedBackend {
     async fn apply_in_memory(&self, ops: &[IndexWriteOp]) -> Result<(), IndexError> {
         for op in ops {
             if let IndexWriteOp::BumpFtsStats { doc_len, sign, .. } = op {
-                if *sign > 0 {
-                    self.stats.on_insert(*doc_len);
-                } else {
-                    self.stats.on_delete(*doc_len);
+                if *doc_len > 0 {
+                    if *sign > 0 {
+                        self.stats.on_insert(*doc_len);
+                    } else if *sign < 0 {
+                        self.stats.on_delete(*doc_len);
+                    }
                 }
             }
         }
@@ -300,11 +302,13 @@ impl IndexBackend for FtsRankedBackend {
                 if tokens.is_empty() {
                     return Ok(IndexResult::Ranked(Vec::new()));
                 }
-                let total_docs = self
-                    .stats
-                    .doc_count
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let avg_dl = self.stats.avg_doc_len();
+                let snapshot = self.stats.snapshot();
+                let total_docs = snapshot.doc_count;
+                let avg_dl = if total_docs == 0 || snapshot.sum_doc_len == 0 {
+                    1.0
+                } else {
+                    snapshot.sum_doc_len as f64 / total_docs as f64
+                };
 
                 // Collect per-token posting lists with tf/doc_len.
                 let mut per_token: Vec<Vec<(RecordId, FtsPostingValue)>> =
@@ -378,7 +382,6 @@ impl IndexBackend for FtsRankedBackend {
             )),
         }
     }
-
     async fn rebuild(&self, source: Arc<dyn Store>) -> Result<(), IndexError> {
         let batch_size = 1000usize;
         let mut stream = source.iter_stream(batch_size);

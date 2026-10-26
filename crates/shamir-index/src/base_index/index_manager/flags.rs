@@ -539,6 +539,8 @@ impl IndexManager {
         if !to_remove.is_empty() {
             let _ = self.info_store.remove_many(to_remove).await?;
         }
+        self.posting_cache_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         self.posting_cache.retain(|k, _| !k.starts_with(&prefix));
         Ok(())
     }

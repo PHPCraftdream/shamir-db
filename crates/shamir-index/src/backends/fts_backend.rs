@@ -201,7 +201,7 @@ impl IndexBackend for FtsBackend {
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
-            IndexQuery::Fts { tokens, mode } => {
+            IndexQuery::Fts { tokens, mode, .. } => {
                 if tokens.is_empty() {
                     return Ok(IndexResult::Set(BTreeSet::new()));
                 }

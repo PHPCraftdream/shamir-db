@@ -314,6 +314,12 @@ impl IndexInfo {
         (0..len).map(move |i| snap[i].clone())
     }
 
+    /// Borrowed snapshot of the whole definition set: one `Arc` clone, no
+    /// per-definition cloning. Singular planners iterate `&defs` from this.
+    pub fn snapshot(&self) -> Arc<Vec<IndexDefinition>> {
+        Arc::clone(&*self.indexes.load_local())
+    }
+
     /// Check if an index exists
     pub fn contains(&self, name_interned: u64) -> bool {
         self.indexes
