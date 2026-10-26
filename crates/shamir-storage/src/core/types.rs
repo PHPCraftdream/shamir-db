@@ -151,8 +151,10 @@ pub trait Store: Send + Sync {
     /// Inserts a new record with a generated `RecordKey`.
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey>;
 
-    /// Creates or updates a record for a given `RecordKey`.
-    /// Returns `true` if the record was created, `false` if it was updated.
+    /// Returns `true` if created, `false` if updated. The value is exact for
+    /// serialized mutation paths of a wrapper; direct writes through another
+    /// handle can race a backend probe unless that backend provides atomic
+    /// compare-and-set semantics. Fjall's probe and write are not one atomic op.
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool>;
 
     /// Retrieves a record's raw bytes by its `RecordKey`.
@@ -180,7 +182,9 @@ pub trait Store: Send + Sync {
         Ok(out)
     }
 
-    /// Removes a record by its `RecordKey`.
+    /// Removes a record by its `RecordKey`; returns whether it existed.
+    /// Exactness is subject to the same concurrent-backend limitation as
+    /// [`Self::set`].
     async fn remove(&self, key: RecordKey) -> DbResult<bool>;
 
     /// Like [`Self::set`] but for callers that don't need the "was created"

@@ -18,13 +18,12 @@ use super::revision::{Stamp, StripedRevisions};
 /// (serialized into `info_store` by the DDL layer).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemBufferConfig {
-    /// Soft cap on the sum of key+value bytes held in the cache.
-    /// Default `64 MiB`. Enforced by moka via the `weigher`.
+    /// Soft cap for total cache accounting weight; conservative count-limit
+    /// rounding can evict entries before this byte budget is reached.
+    /// Default `64 MiB`.
     pub max_bytes: usize,
-    /// Hard cap on the entry count. Enforced by moka via
-    /// `max_capacity`. Note: `moka` requires `max_capacity` and
-    /// `weigher` to be self-consistent — we set both, and moka
-    /// picks the tighter binding constraint.
+    /// Maximum resident entry count, enforced conservatively through moka's
+    /// weighted capacity and maintenance.
     pub max_entries: usize,
     /// Optional time-to-live for cache entries. `None` = no TTL.
     pub ttl_ms: Option<u64>,
@@ -117,6 +116,10 @@ impl FillPauseHook {
     }
 }
 
+pub(super) struct BufferTelemetry {
+    pub(super) dirty_drop_losses: Arc<AtomicU64>,
+}
+
 /// Shared mutable state. Lives behind `Arc` so the background
 /// flusher (and moka's eviction listener) can hold weak refs.
 pub(super) struct MemBufferState {
@@ -135,7 +138,7 @@ pub(super) struct MemBufferState {
     /// still has the value. The flusher drains via a
     /// snapshot-then-`remove_if` pattern so concurrent
     /// overwrites aren't lost.
-    pub(super) dirty: Arc<DashMap<RecordKey, Slot, THasher>>,
+    pub(super) dirty: Arc<DashMap<RecordKey, Arc<Slot>, THasher>>,
     /// Fixed-size striped revision state (RV-STORAGE-98f6650d): every
     /// dirty mutation route (insert/insert_many/set/set_many/remove/
     /// remove_many/transact/drain) takes a `StripeGuard` — a packed
@@ -143,6 +146,10 @@ pub(super) struct MemBufferState {
     /// cache hit/fill validates against the stripe stamp. No per-key
     /// mutex map, no leases.
     pub(super) revisions: StripedRevisions,
+    /// Serializes backing submissions to prevent older snapshots applying later.
+    pub(super) drain_lock: tokio::sync::Mutex<()>,
+    /// Orders dirty publication against snapshot capture and transaction commit.
+    pub(super) mutation_lock: tokio::sync::Mutex<()>,
     /// Task #539: O(1) cardinality mirror of `dirty`'s entry count — replaces
     /// the earlier `AtomicBool dirty_nonempty` sentinel (task #535 rounds 1+2),
     /// which could never be linearizable with `dirty` because it used a
@@ -169,12 +176,7 @@ pub(super) struct MemBufferState {
     pub(super) ttl_ms: AtomicU64,
     pub(super) flush_interval_ms: AtomicU64,
     pub(super) flush_batch_size: AtomicUsize,
-    /// Audit §2.2: telemetry counter for background-flush errors. The
-    /// background flusher previously swallowed errors silently (`let _ =
-    /// drain_once(...)`); now each failure increments this counter and logs
-    /// an error so disk-full / I/O failures are observable (otherwise dirty
-    /// grows unboundedly with zero signal).
-    pub(super) flush_errors: AtomicU64,
+    #[cfg(test)]
     /// Task #535 (updated #539): deterministic test seam originally used to
     /// reproduce the `dirty_nonempty` boolean's clear-race. Since #539
     /// replaced that boolean with an inline `dirty_count` counter (no
@@ -183,21 +185,26 @@ pub(super) struct MemBufferState {
     /// `drain_once`'s removal loop purely to preserve the existing
     /// regression tests' shape (they install a racing-writer-insert
     /// callback here). `None` in production (zero overhead).
-    #[cfg(test)]
     pub(super) clear_race_hook: crate::membuffer_clear_race_hook::ClearRaceHook,
+    #[cfg(test)]
     /// Task #535 round 2: deterministic test seam for the narrower
     /// stall-across-`.await` gap in `insert_many`'s batch loop. See
     /// `membuffer_clear_race_hook::BatchInsertPauseHook`. `None`/absent
     /// callback in production (zero overhead — the hook is only ever
     /// installed by the round-2 regression test).
-    #[cfg(test)]
     pub(super) batch_pause_hook:
         arc_swap::ArcSwapOption<crate::membuffer_clear_race_hook::BatchInsertPauseHook>,
+    #[cfg(test)]
     /// RV-STORAGE-98f6650d test seam: pause a clean fill at the final
     /// publication boundary (right before the physical moka insertion).
     /// `None` in production.
-    #[cfg(test)]
     pub(super) fill_pause_hook: arc_swap::ArcSwapOption<FillPauseHook>,
+    /// Audit §2.2: telemetry counter for background-flush errors. The
+    /// background flusher previously swallowed errors silently (`let _ =
+    /// drain_once(...)`); now each failure increments this counter and logs
+    /// an error so disk-full / I/O failures are observable (otherwise dirty
+    /// grows unboundedly with zero signal).
+    pub(super) flush_errors: Arc<AtomicU64>,
 }
 
 impl MemBufferState {
@@ -224,8 +231,8 @@ impl MemBufferState {
 
     /// Clean-fill publication (RV-STORAGE-98f6650d): insert a backing-read
     /// result into the cache, tagged with the revision captured BEFORE the
-    /// backing lookup (`raw_stamp`) — NOT the current revision — so any
-    /// write that raced the read invalidates the entry. Skipped entirely
+    /// backing lookup (`raw_stamp`) — NOT the current revision — so any write
+    /// that raced the read invalidates the entry. Skipped entirely
     /// on an exhausted stripe (fail-closed caching disabled).
     pub(super) async fn clean_fill(&self, key: &RecordKey, raw_stamp: u64, slot: Slot) {
         #[cfg(test)]
@@ -242,17 +249,25 @@ impl MemBufferState {
         self.cache.load().insert(key.clone(), entry).await;
     }
 
-    /// Best-effort existence probe used by `set`/`remove` for their `bool`
-    /// return: authoritative dirty lookup first, then a VALIDATED cache
-    /// probe whose pre-lookup stamp is captured BEFORE the dirty probe (an
-    /// unvalidated stale entry could report a deleted key as existing).
-    /// Still best-effort — a miss falls through to `false`.
-    pub(super) async fn existed_hint(&self, key: &RecordKey) -> bool {
+    /// Existence hint combining authoritative dirty, validated cache and inner.
+    pub(super) async fn existed_hint(&self, inner: &dyn Store, key: &RecordKey) -> DbResult<bool> {
         let s0 = self.revisions.stamp(key);
-        match self.dirty.get(key).map(|e| e.value().clone()) {
-            Some(Slot::Live(_)) => true,
-            Some(Slot::Tombstone) => false,
-            None => matches!(self.validated_cache_get(key, s0).await, Some(Slot::Live(_))),
+        match self
+            .dirty
+            .get(key)
+            .map(|entry| entry.value().as_ref().clone())
+        {
+            Some(Slot::Live(_)) => Ok(true),
+            Some(Slot::Tombstone) => Ok(false),
+            None => match self.validated_cache_get(key, s0).await {
+                Some(Slot::Live(_)) => Ok(true),
+                Some(Slot::Tombstone) => Ok(false),
+                None => match inner.get(key.clone()).await {
+                    Ok(_) => Ok(true),
+                    Err(crate::error::DbError::NotFound(_)) => Ok(false),
+                    Err(error) => Err(error),
+                },
+            },
         }
     }
 
@@ -260,7 +275,9 @@ impl MemBufferState {
     /// (RV-STORAGE-98f6650d: the read path always probes `dirty` directly;
     /// `dirty_count` is never correctness evidence.)
     pub(super) fn dirty_probe(&self, key: &RecordKey) -> Option<Slot> {
-        self.dirty.get(key).map(|e| e.value().clone())
+        self.dirty
+            .get(key)
+            .map(|entry| entry.value().as_ref().clone())
     }
 }
 
@@ -271,29 +288,46 @@ pub struct MemBufferStore {
     pub(super) notify: Arc<Notify>,
     /// Set on Drop — the flusher checks it on each wakeup and exits.
     pub(super) shutdown: Arc<AtomicBool>,
+    pub(super) flush_errors: Arc<AtomicU64>,
+    pub(super) telemetry: Arc<BufferTelemetry>,
 }
 
 /// Build a fresh moka cache configured from `cfg`. Values are tagged
 /// `CacheEntry`s.
 pub(super) fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, CacheEntry> {
-    // moka's `max_capacity` is **total weighted size** when a
-    // weigher is set, NOT entry count. We pick byte-weight as
-    // the binding cap (`max_bytes`); `max_entries` is kept in
-    // config for legacy callers but is informational here.
+    // moka cannot express two independent limits. Scale each positive entry's
+    // weight to ceil(max_bytes / max_entries), preserving byte weight except
+    // where the count cap requires conservative rounding. Zero disables cache.
+    //
     //
     // NO eviction listener — the cache is purely a read
     // accelerator. Dirty is the authoritative write-back buffer
     // (holds values, survives cache eviction). moka can evict
     // freely without risking data loss.
-    let mut builder = MokaCache::builder()
-        .max_capacity(cfg.max_bytes as u64)
-        .weigher(|k: &RecordKey, v: &CacheEntry| -> u32 {
+    let max_entries = cfg.max_entries;
+    let entry_weight_cap = (u32::MAX as usize).saturating_mul(max_entries);
+    let max_capacity = if max_entries == 0 || cfg.max_bytes == 0 {
+        0
+    } else {
+        cfg.max_bytes.min(entry_weight_cap) as u64
+    };
+    let min_weight = if max_entries == 0 || cfg.max_bytes == 0 {
+        u32::MAX
+    } else {
+        max_capacity.div_ceil(max_entries as u64) as u32
+    };
+    let mut builder = MokaCache::builder().max_capacity(max_capacity).weigher(
+        move |k: &RecordKey, v: &CacheEntry| -> u32 {
+            if max_entries == 0 || max_capacity == 0 {
+                return u32::MAX;
+            }
             let bytes = match &v.slot {
-                Slot::Live(b) => k.len() + b.len(),
+                Slot::Live(b) => k.len().saturating_add(b.len()),
                 Slot::Tombstone => k.len(),
             };
-            bytes.min(u32::MAX as usize) as u32
-        });
+            (bytes.min(u32::MAX as usize) as u32).max(min_weight)
+        },
+    );
     if let Some(ttl) = cfg.ttl_ms {
         builder = builder.time_to_live(Duration::from_millis(ttl));
     }
@@ -348,21 +382,27 @@ impl MemBufferStore {
         config: MemBufferConfig,
         #[cfg(test)] clear_race_hook: crate::membuffer_clear_race_hook::ClearRaceHook,
     ) -> Self {
-        let dirty: Arc<DashMap<RecordKey, Slot, THasher>> =
+        let dirty: Arc<DashMap<RecordKey, Arc<Slot>, THasher>> =
             Arc::new(DashMap::with_hasher(THasher::default()));
         let cache = Arc::new(build_cache(&config));
 
+        let flush_errors = Arc::new(AtomicU64::new(0));
+        let telemetry = Arc::new(BufferTelemetry {
+            dirty_drop_losses: Arc::new(AtomicU64::new(0)),
+        });
         let state = Arc::new(MemBufferState {
             cache: ArcSwap::from(cache),
             dirty,
             revisions: StripedRevisions::new(),
+            drain_lock: tokio::sync::Mutex::new(()),
+            mutation_lock: tokio::sync::Mutex::new(()),
             dirty_count: AtomicUsize::new(0),
             max_bytes: AtomicUsize::new(config.max_bytes),
             max_entries: AtomicUsize::new(config.max_entries),
             ttl_ms: AtomicU64::new(config.ttl_ms.unwrap_or(0)),
             flush_interval_ms: AtomicU64::new(config.flush_interval_ms),
             flush_batch_size: AtomicUsize::new(config.flush_batch_size),
-            flush_errors: AtomicU64::new(0),
+            flush_errors: Arc::clone(&flush_errors),
             #[cfg(test)]
             clear_race_hook,
             #[cfg(test)]
@@ -406,7 +446,9 @@ impl MemBufferStore {
                 // I/O failure now increments a telemetry counter and logs an
                 // error so it is observable — without this, dirty grows
                 // unboundedly with zero signal.
-                if let Err(e) = Self::drain_once(&state, inner_for_task.as_ref(), batch_size).await
+                if let Err(e) =
+                    Self::drain_once(Arc::clone(&state), Arc::clone(&inner_for_task), batch_size)
+                        .await
                 {
                     state.flush_errors.fetch_add(1, Ordering::Relaxed);
                     log::error!(
@@ -424,6 +466,8 @@ impl MemBufferStore {
             state,
             notify,
             shutdown,
+            flush_errors,
+            telemetry,
         }
     }
 
@@ -463,10 +507,45 @@ impl MemBufferStore {
         &self.inner
     }
 
-    /// Total resident bytes in the cache (sum of key + value
-    /// lengths over Live slots). Used by tests + DDL monitoring.
+    /// Total cache accounting weight: key + value bytes per Live slot, raised
+    /// to a capacity-derived minimum per entry so `max_entries` is enforced.
+    /// May exceed the actual resident payload bytes. Used by tests + DDL monitoring.
     pub fn cache_bytes(&self) -> usize {
         self.state.cache.load().weighted_size() as usize
+    }
+
+    /// Explicit, awaitable shutdown: stop background draining, drain every
+    /// dirty entry and flush the backing store before returning.
+    pub async fn shutdown(&self) -> DbResult<()> {
+        self.shutdown.store(true, Ordering::Release);
+        self.notify.notify_one();
+        self.drain_all().await?;
+        self.inner.flush().await
+    }
+
+    /// Publicly readable count of failed background flushes.
+    pub fn flush_errors(&self) -> u64 {
+        self.flush_errors.load(Ordering::Relaxed)
+    }
+
+    /// Publicly readable count of dirty entries abandoned by Drop.
+    pub fn dirty_drop_losses(&self) -> u64 {
+        self.telemetry.dirty_drop_losses.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dirty_drop_telemetry_for_test(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.telemetry.dirty_drop_losses)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cache_entry_count_for_test(&self) -> usize {
+        self.state.cache.load().entry_count() as usize
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wake_flusher_for_test(&self) {
+        self.notify.notify_one();
     }
 
     /// Run moka's pending maintenance tasks (eviction, sizing). For tests only.
@@ -488,6 +567,11 @@ impl MemBufferStore {
         self.state.dirty_count.load(Ordering::Acquire) > 0
     }
 
+    #[cfg(test)]
+    pub(crate) fn dirty_count_for_test(&self) -> usize {
+        self.state.dirty_count.load(Ordering::Acquire)
+    }
+
     /// Task #535 test seam (updated #539 for the counter redesign): perform
     /// the SYNCHRONOUS writer publish+insert used by the clear-race
     /// regression test's hook to simulate a writer whose insert lands in the
@@ -495,7 +579,12 @@ impl MemBufferStore {
     /// the flusher.
     #[cfg(test)]
     pub(crate) fn inject_racing_dirty_write(&self, key: RecordKey, value: Bytes) {
-        if self.state.dirty.insert(key, Slot::Live(value)).is_none() {
+        if self
+            .state
+            .dirty
+            .insert(key, Arc::new(Slot::Live(value)))
+            .is_none()
+        {
             self.state.dirty_count.fetch_add(1, Ordering::Release);
         }
     }
@@ -505,8 +594,13 @@ impl MemBufferStore {
     /// state at the instant right after ONE drain — while a hook-injected entry
     /// is still in `dirty` and has NOT yet reached `inner`.
     #[cfg(test)]
+    pub(crate) async fn wait_flush_notification_for_test(&self) {
+        self.notify.notified().await;
+    }
+
+    #[cfg(test)]
     pub(crate) async fn drain_once_for_test(&self, batch_size: usize) -> DbResult<usize> {
-        Self::drain_once(&self.state, self.inner.as_ref(), batch_size).await
+        Self::drain_once_owned(Arc::clone(&self.state), Arc::clone(&self.inner), batch_size).await
     }
 
     /// Task #535 round 2 test seam: pre-empt the background flusher task
@@ -542,47 +636,53 @@ impl MemBufferStore {
     /// release necessarily bumped the revision, invalidating pre-drain
     /// fills.
     async fn drain_once(
-        state: &Arc<MemBufferState>,
-        inner: &dyn Store,
+        state: Arc<MemBufferState>,
+        inner: Arc<dyn Store>,
         batch_size: usize,
     ) -> DbResult<usize> {
+        let worker =
+            tokio::spawn(async move { Self::drain_once_owned(state, inner, batch_size).await });
+        // Caller cancellation detaches the task, which retains its fences.
+        worker.await.map_err(|error| {
+            crate::error::DbError::Storage(format!("drain task failed: {error}"))
+        })?
+    }
+
+    async fn drain_once_owned(
+        state: Arc<MemBufferState>,
+        inner: Arc<dyn Store>,
+        batch_size: usize,
+    ) -> DbResult<usize> {
+        let _drain_guard = state.drain_lock.lock().await;
         if state.dirty_count.load(Ordering::Acquire) == 0 {
             return Ok(0);
         }
-        // Snapshot keys + their current slot values.
-        let snapshots: Vec<(RecordKey, Slot)> = state
-            .dirty
-            .iter()
-            .take(batch_size)
-            .map(|e| (e.key().clone(), e.value().clone()))
-            .collect();
+        let snapshots: Vec<(RecordKey, Arc<Slot>)> = {
+            let _mutation_guard = state.mutation_lock.lock().await;
+            state
+                .dirty
+                .iter()
+                .take(batch_size)
+                .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+                .collect()
+        };
         if snapshots.is_empty() {
             return Ok(0);
         }
-
-        let mut sets: Vec<(RecordKey, Bytes)> = Vec::with_capacity(snapshots.len());
-        let mut removes: Vec<RecordKey> = Vec::with_capacity(4);
-        for (k, slot) in &snapshots {
-            match slot {
-                Slot::Live(v) => sets.push((k.clone(), v.clone())),
-                Slot::Tombstone => removes.push(k.clone()),
+        let mut sets = Vec::new();
+        let mut removes = Vec::new();
+        for (key, slot) in &snapshots {
+            match slot.as_ref() {
+                Slot::Live(value) => sets.push((key.clone(), value.clone())),
+                Slot::Tombstone => removes.push(key.clone()),
             }
         }
-
-        // RV-STORAGE-98f6650d: hold a stripe guard per snapshot key across
-        // the backing write AND the conditional dirty removal below. Guards
-        // are pure CAS epochs (never blocking), so acquisition order cannot
-        // deadlock; ordering by stripe keeps the CAS contention local.
-        let mut by_stripe: Vec<RecordKey> = snapshots.iter().map(|(k, _)| k.clone()).collect();
-        by_stripe.sort_by(|a, b| {
-            state
-                .revisions
-                .stripe_of(a)
-                .cmp(&state.revisions.stripe_of(b))
-        });
-        let _guards: Vec<super::revision::StripeGuard<'_>> =
-            by_stripe.iter().map(|k| state.revisions.begin(k)).collect();
-
+        let mut by_stripe: Vec<RecordKey> = snapshots.iter().map(|(key, _)| key.clone()).collect();
+        by_stripe.sort_by_key(|key| state.revisions.stripe_of(key));
+        let _guards: Vec<super::revision::StripeGuard<'_>> = by_stripe
+            .iter()
+            .map(|key| state.revisions.begin(key))
+            .collect();
         let n = sets.len() + removes.len();
         if !sets.is_empty() {
             inner.set_many(sets).await?;
@@ -590,15 +690,14 @@ impl MemBufferStore {
         if !removes.is_empty() {
             inner.remove_many(removes).await?;
         }
-
         // Test seam (#535/#539): fire the racing-writer-insert hook HERE, in
         // the same spot rounds 1/2 used to reproduce their interleavings.
         #[cfg(test)]
         state.clear_race_hook.at_clear_window();
-        for (k, snapshot) in snapshots {
+        for (key, snapshot) in snapshots {
             if state
                 .dirty
-                .remove_if(&k, |_, current| *current == snapshot)
+                .remove_if(&key, |_, current| Arc::ptr_eq(current, &snapshot))
                 .is_some()
             {
                 state.dirty_count.fetch_sub(1, Ordering::Release);
@@ -635,7 +734,7 @@ impl MemBufferStore {
             .dirty
             .iter()
             .filter(|e| pred(e.key()))
-            .map(|e| (e.key().clone(), e.value().clone()))
+            .map(|e| (e.key().clone(), e.value().as_ref().clone()))
             .collect();
         // Sorted ascending by key — matches the `inner` stream's ascending
         // lexicographic ordering so the merge below is a single linear pass.
@@ -646,14 +745,18 @@ impl MemBufferStore {
     /// Drain the entire dirty queue.
     pub(super) async fn drain_all(&self) -> DbResult<()> {
         loop {
-            let drained = Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
+            let drained =
+                Self::drain_once(Arc::clone(&self.state), Arc::clone(&self.inner), usize::MAX)
+                    .await?;
             if drained == 0 {
                 break;
             }
         }
         // Defensive second pass (moka maintenance may have run in between).
         loop {
-            let drained = Self::drain_once(&self.state, self.inner.as_ref(), usize::MAX).await?;
+            let drained =
+                Self::drain_once(Arc::clone(&self.state), Arc::clone(&self.inner), usize::MAX)
+                    .await?;
             if drained == 0 {
                 break;
             }
@@ -664,6 +767,15 @@ impl MemBufferStore {
 
 impl Drop for MemBufferStore {
     fn drop(&mut self) {
+        let pending = self.state.dirty_count.load(Ordering::Acquire);
+        if pending > 0 {
+            self.telemetry
+                .dirty_drop_losses
+                .fetch_add(pending as u64, Ordering::Relaxed);
+            log::error!(
+                "MemBufferStore dropped with {pending} dirty entries; shutdown is best-effort"
+            );
+        }
         self.shutdown.store(true, Ordering::Release);
         self.notify.notify_one();
     }

@@ -923,6 +923,36 @@ impl Store for FjallStore {
 // ============================================================================
 
 #[cfg(test)]
+pub(crate) mod write_worker_test_seam {
+    use super::*;
+    pub async fn submit_closed() -> DbResult<()> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        drop(rx);
+        submit(&tx, |reply| WriteJob::Transact {
+            ops: Vec::new(),
+            reply,
+        })
+        .await
+    }
+    pub async fn submit_dropped_reply() -> DbResult<()> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            if let Ok(WriteJob::Transact { reply, .. }) = rx.recv() {
+                drop(reply);
+            }
+        });
+        let result = submit(&tx, |reply| WriteJob::Transact {
+            ops: Vec::new(),
+            reply,
+        })
+        .await;
+        drop(tx);
+        let _ = worker.join();
+        result
+    }
+}
+
+#[cfg(test)]
 pub(crate) mod atomic_batch_test_seam {
     use std::sync::atomic::{AtomicBool, Ordering};
 
