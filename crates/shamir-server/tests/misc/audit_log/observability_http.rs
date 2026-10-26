@@ -489,3 +489,44 @@ async fn metrics_exposes_degraded_indexes_gauge_at_zero() {
 
     handle.shutdown().await;
 }
+
+/// Regression (RV-SERVER-D card 2): `/readyz` must be strictly binary —
+/// `503 "not ready"` before `ObservabilityState::mark_ready()` and `200`
+/// containing "ready" after it. Revert-fails: removing the false→503 branch
+/// (or inverting readiness) makes the first/second status assert fail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rv_server_4046c528_readyz_transitions_from_503_to_200() {
+    use shamir_server::observability::{spawn, ObservabilityError, ObservabilityState};
+
+    let state = ObservabilityState::new();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let handle = match spawn(addr, state.clone(), false, None, false).await {
+        Ok(h) => h,
+        Err(ObservabilityError::RecorderInstall(_)) => {
+            spawn(addr, state.clone(), false, None, false)
+                .await
+                .expect("spawn (recorder already installed)")
+        }
+        Err(e) => panic!("spawn: {e}"),
+    };
+
+    // Before mark_ready(): strictly not-ready.
+    let (status, body) = http_get(handle.bound_addr, "/readyz").await;
+    assert_eq!(status, 503, "/readyz must be 503 before mark_ready");
+    assert!(
+        body.contains("not ready"),
+        "503 body must say \"not ready\", got: {body:?}"
+    );
+
+    state.mark_ready();
+
+    // After mark_ready(): 200 and ready.
+    let (status, body) = http_get(handle.bound_addr, "/readyz").await;
+    assert_eq!(status, 200, "/readyz must be 200 after mark_ready");
+    assert!(
+        body.contains("ready"),
+        "200 body must mention ready, got: {body:?}"
+    );
+
+    handle.shutdown().await;
+}

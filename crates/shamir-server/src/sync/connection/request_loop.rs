@@ -329,23 +329,22 @@ pub async fn request_loop<R, W>(
                     let lookup_tib = |uid: &[u8; 16]| -> u64 {
                         ctx_clone.user_dir.tickets_invalid_before_ns_by_user_id(uid)
                     };
-                    // RI-15: `run_with_guard_slot` scopes a fresh task-local
-                    // slot around the dispatch call. Deep inside it,
-                    // `ShamirDbHandler::execute` (via `stash_guard`) may
-                    // stash a `ByteBudgetGuard` for the response about to be
-                    // returned — retrieved immediately below via
-                    // `take_stashed_guard` and attached to the `WriterMsg`
-                    // so the writer task (not this dispatch task) releases
-                    // it after the socket write completes.
-                    let dispatch_result = byte_budget::run_with_guard_slot(dispatch_request_view(
-                        &v,
-                        &ctx_clone.session_store,
-                        lookup_tib,
-                        ctx_clone.handler.as_ref(),
-                        &conn_clone,
-                    ))
-                    .await;
-                    let budget_guard = byte_budget::take_stashed_guard();
+                    // RI-15 / FB3EC046: `byte_budget::run_with_handoff`
+                    // scopes a fresh task-local slot around the dispatch
+                    // call AND takes the stashed `ByteBudgetGuard` in that
+                    // SAME scoped task the moment the dispatch resolves —
+                    // the guard is then attached to the `WriterMsg` so the
+                    // writer task (not this dispatch task) releases it
+                    // after the socket write completes.
+                    let (dispatch_result, budget_guard) =
+                        byte_budget::run_with_handoff(dispatch_request_view(
+                            &v,
+                            &ctx_clone.session_store,
+                            lookup_tib,
+                            ctx_clone.handler.as_ref(),
+                            &conn_clone,
+                        ))
+                        .await;
                     match dispatch_result {
                         Ok(DispatchOutcome::Response(resp)) => {
                             let rid = v.request_id;

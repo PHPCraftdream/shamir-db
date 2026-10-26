@@ -345,6 +345,33 @@ pub async fn run_with_guard_slot<F: std::future::Future>(fut: F) -> F::Output {
         .await
 }
 
+/// FB3EC046 — guard-handoff seam. Runs `fut` inside a fresh
+/// [`PENDING_RESPONSE_BUDGET_GUARD`] (and serialized-response) scope and, in
+/// that SAME scoped task, takes ownership of any guard the future stashed
+/// (mirroring `ShamirDbHandler::execute` via [`stash_guard`]) as soon as the
+/// future resolves. Returns `(output, guard)` so the caller — in production,
+/// the per-request dispatch task in `sync/connection/request_loop` — can
+/// attach the guard to the `WriterMsg` and keep the reservation charged
+/// until the socket write completes.
+///
+/// Production AND the regression test (`response_budget_scope_tests.rs`)
+/// both go through this helper, so the handoff shape (take-inside-scope,
+/// guard outlives the scope via the returned tuple) is encoded in exactly
+/// one place: reintroducing an out-of-scope `take_stashed_guard()` in this
+/// helper makes the test fail. HONEST LIMIT: a direct revert of
+/// `request_loop.rs` back to calling `run_with_guard_slot` +
+/// `take_stashed_guard` by hand would NOT be discriminated by the test —
+/// the test pins the shared helper, not every call site.
+pub(crate) async fn run_with_handoff<F: std::future::Future>(
+    fut: F,
+) -> (F::Output, Option<ByteBudgetGuard>) {
+    run_with_guard_slot(async {
+        let output = fut.await;
+        (output, take_stashed_guard())
+    })
+    .await
+}
+
 /// Called from inside `ShamirDbHandler::execute` right after acquiring the
 /// budget for the response about to be returned. Overwrites any previously
 /// stashed guard for this request (there is at most one response per

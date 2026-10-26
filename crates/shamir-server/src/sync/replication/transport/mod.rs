@@ -4,5 +4,6 @@
 
 pub mod in_process;
 pub mod prod_factory;
+pub(crate) mod replicator_password;
 pub mod source;
 pub mod wire_source;

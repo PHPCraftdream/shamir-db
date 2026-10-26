@@ -20,6 +20,7 @@ use shamir_query_types::batch::BatchError;
 use shamir_query_types::wire::repl::ReplRequest;
 use shamir_server::replication::prod_factory::build_prod_factory;
 use shamir_server::replication::supervisor::SubscriptionSupervisor;
+use shamir_server::replication::ReplicatorPassword;
 use shamir_types::types::value::QueryValue;
 use zeroize::Zeroizing;
 
@@ -146,7 +147,7 @@ pub fn u64_field(entry: &QueryValue, key: &str) -> Option<u64> {
 pub fn supervisor(home: &Arc<ShamirDb>) -> SubscriptionSupervisor {
     let factory = build_prod_factory(
         Some(child::REPLICATOR.to_string()),
-        Some(child::REPLICATOR_PW.to_string()),
+        Some(ReplicatorPassword::from(child::REPLICATOR_PW.to_string())),
         "localhost".to_string(),
     )
     .expect("replicator credentials resolve");

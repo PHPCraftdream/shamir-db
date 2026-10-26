@@ -29,6 +29,37 @@ fn deploy_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+// =============== RV-SERVER-EBC0829D — secret-type replicator password ===============
+
+#[test]
+fn rv_server_ebc0829d_password_deserializes_redacted_and_zeroizing() {
+    let config: crate::boot::config::ReplicationConfig = ktav::from_str(
+        "node_id: follower\nreplicator_user: replicator\nreplicator_password: sensitive-value\n",
+    )
+    .expect("replication config");
+    let password = config.replicator_password.expect("password");
+    assert_eq!(password.reveal(), "sensitive-value");
+    assert!(!format!("{password:?}").contains("sensitive-value"));
+}
+
+#[test]
+fn rv_server_ebc0829d_password_factory_accepts_secret_type() {
+    // HONEST LIMIT (F): this test only proves `build_prod_factory` accepts
+    // `Option<ReplicatorPassword>` and returns `Some` for configured
+    // credentials. Nothing deeper is assertable without actually opening a
+    // replication connection (which would need a live leader); the
+    // redaction/zeroizing property is covered by the deserialization test
+    // above instead.
+    let factory = crate::replication::build_prod_factory(
+        Some("replicator".into()),
+        Some(crate::replication::ReplicatorPassword::new(
+            "sensitive-value".into(),
+        )),
+        "localhost".into(),
+    );
+    assert!(factory.is_some());
+}
+
 // =============== code-level defaults (RI-8) ===============
 
 #[test]

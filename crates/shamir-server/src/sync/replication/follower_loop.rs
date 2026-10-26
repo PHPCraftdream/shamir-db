@@ -668,17 +668,24 @@ async fn run_follower_loop_internal(
             max_seen_epoch = resp_epoch;
         }
 
-        // Reset backoff on any successful (non-fencing) pull reply.
-        backoff_ms = INITIAL_BACKOFF_MS;
-
         // 5. dispatch on the reply payload.
+        //
+        // D3B174F4: the backoff reset lives INSIDE the `Pull` arm. Only a
+        // successfully dispatched pull reply proves the upstream is healthy;
+        // `Hello` and `Error` replies fall straight through to `sleep_backoff`,
+        // so they must NOT reset `backoff_ms` (otherwise a leader answering
+        // every pull with an error or a Hello is retried at latency-limited
+        // busy-loop speed).
         let (events_bytes, gap_at, current_version) = match resp {
             ReplResponse::Pull {
                 events,
                 gap_at,
                 current_version,
                 ..
-            } => (events, gap_at, current_version),
+            } => {
+                backoff_ms = INITIAL_BACKOFF_MS;
+                (events, gap_at, current_version)
+            }
             ReplResponse::Error { code, message, .. } => {
                 // S5c-X 2c: the leader refuses to serve a completed_reseed
                 // repo to a legacy follower. New enough to understand the
@@ -714,11 +721,15 @@ async fn run_follower_loop_internal(
                 continue;
             }
             ReplResponse::Hello { .. } => {
-                // Unexpected reply variant for a pull — skip this iteration.
+                // RV-SERVER-D3B174F4 — unexpected reply variant for a pull.
+                // Back off (not a bare `continue`): a malformed/replaying
+                // upstream that answers every pull with a Hello must not be
+                // retried at latency-limited (busy-loop) speed.
                 warn!(
                     node_id = %node_id,
-                    "follower_loop: expected Pull, got Hello; skipping iteration"
+                    "follower_loop: expected Pull, got Hello; backing off"
                 );
+                sleep_backoff(&cancel, &mut backoff_ms).await;
                 continue;
             }
         };

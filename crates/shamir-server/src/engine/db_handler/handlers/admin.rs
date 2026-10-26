@@ -118,7 +118,6 @@ pub(crate) async fn create_scram_user(
 
     // 2. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
     //    `check_destructive_hmacs`).
-    use shamir_query_types::hmac as canon;
     let canonical = canon::canonical_create_scram_user(&name, &roles);
     let Some(tag) = hmac.as_ref() else {
         return DbResponse::Error {
@@ -293,7 +292,6 @@ pub(crate) async fn set_superuser(
 
     // 3. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
     //    `check_destructive_hmacs`).
-    use shamir_query_types::hmac as canon;
     let canonical = canon::canonical_set_superuser(&user, on);
     let Some(tag) = hmac.as_ref() else {
         return DbResponse::Error {
@@ -374,7 +372,6 @@ pub(crate) async fn set_replicator(
 
     // 3. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
     //    `check_destructive_hmacs`).
-    use shamir_query_types::hmac as canon;
     let canonical = canon::canonical_set_replicator(&user, on);
     let Some(tag) = hmac.as_ref() else {
         return DbResponse::Error {
