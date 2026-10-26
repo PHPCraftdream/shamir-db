@@ -10,7 +10,7 @@
 
 use async_trait::async_trait;
 use shamir_engine::function::{
-    check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway, ResolvedPin,
+    check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway, NetGatewayError, ResolvedPin,
 };
 use std::path::Path;
 use tokio::io::AsyncReadExt;
@@ -57,11 +57,11 @@ impl CurlNetGateway {
 
 #[async_trait]
 impl NetGateway for CurlNetGateway {
-    async fn fetch(&self, req: HttpRequest) -> Result<HttpResponse, String> {
+    async fn fetch(&self, req: HttpRequest) -> Result<HttpResponse, NetGatewayError> {
         // 0. Config-directive injection guard (RV-DB-C9444758): reject
         //    CR/LF/controls in guest-controlled method/header strings BEFORE
         //    the SSRF guard, so no network/DNS is touched on rejection.
-        validate_curl_request(&req)?;
+        validate_curl_request(&req).map_err(NetGatewayError::Transport)?;
 
         // 1. Allowlist + DNS-resolved SSRF guard — reject before any network
         //    I/O. `check_url_allowed_resolved` resolves the host and rejects a
@@ -80,8 +80,10 @@ impl NetGateway for CurlNetGateway {
         let pin: ResolvedPin = check_url_allowed_resolved(&req.url, &self.allowlist).await?;
 
         // 2. Build temp directory for all temp files.
-        let tmp_dir =
-            tempfile::tempdir().map_err(|e| format!("egress: failed to create temp dir: {e}"))?;
+        let tmp_dir = tempfile::tempdir().map_err(|source| NetGatewayError::Io {
+            operation: "failed to create temp dir",
+            source,
+        })?;
 
         let config_path = tmp_dir.path().join("curl.cfg");
         let body_in_path = tmp_dir.path().join("body_in");
@@ -92,7 +94,10 @@ impl NetGateway for CurlNetGateway {
         if !req.body.is_empty() {
             tokio::fs::write(&body_in_path, &req.body)
                 .await
-                .map_err(|e| format!("egress: failed to write body temp file: {e}"))?;
+                .map_err(|source| NetGatewayError::Io {
+                    operation: "failed to write body temp file",
+                    source,
+                })?;
         }
 
         // 4. Build curl config file.
@@ -141,7 +146,10 @@ impl NetGateway for CurlNetGateway {
 
         tokio::fs::write(&config_path, &cfg)
             .await
-            .map_err(|e| format!("egress: failed to write curl config: {e}"))?;
+            .map_err(|source| NetGatewayError::Io {
+                operation: "failed to write curl config",
+                source,
+            })?;
 
         // 5. Invoke curl -K <config>.
         let output = match tokio::process::Command::new("curl")
@@ -153,9 +161,15 @@ impl NetGateway for CurlNetGateway {
             Ok(o) => o,
             Err(e) => {
                 return if e.kind() == std::io::ErrorKind::NotFound {
-                    Err("egress unavailable: curl not found".to_string())
+                    Err(NetGatewayError::Io {
+                        operation: "egress unavailable: curl not found",
+                        source: e,
+                    })
                 } else {
-                    Err(format!("egress: curl spawn error: {e}"))
+                    Err(NetGatewayError::Io {
+                        operation: "curl spawn error",
+                        source: e,
+                    })
                 }
             }
         }
@@ -165,22 +179,26 @@ impl NetGateway for CurlNetGateway {
 
         if !output.status.success() && output.stdout.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("egress: curl failed: {stderr}"));
+            return Err(NetGatewayError::Transport(format!(
+                "egress: curl failed: {stderr}"
+            )));
         }
 
         // 6. Parse status code from stdout (write-out).
         let status_str = String::from_utf8_lossy(&output.stdout);
         let status: u16 = status_str.trim().parse().map_err(|_| {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            format!("egress: could not parse HTTP status from curl output: '{status_str}' (stderr: {stderr})")
+            NetGatewayError::Transport(format!(
+                "egress: could not parse HTTP status from curl output: '{status_str}' (stderr: {stderr})"
+            ))
         })?;
 
         // Status 000 means curl couldn't connect / complete the request.
         if status == 0 {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!(
+            return Err(NetGatewayError::Transport(format!(
                 "egress: curl request failed (status 000): {stderr}"
-            ));
+            )));
         }
 
         // 7. Read response body from output file.
@@ -188,10 +206,16 @@ impl NetGateway for CurlNetGateway {
             let mut buf = Vec::new();
             let mut f = tokio::fs::File::open(&body_out_path)
                 .await
-                .map_err(|e| format!("egress: could not open response body file: {e}"))?;
+                .map_err(|source| NetGatewayError::Io {
+                    operation: "could not open response body file",
+                    source,
+                })?;
             f.read_to_end(&mut buf)
                 .await
-                .map_err(|e| format!("egress: could not read response body: {e}"))?;
+                .map_err(|source| NetGatewayError::Io {
+                    operation: "could not read response body",
+                    source,
+                })?;
             buf
         } else {
             Vec::new()
