@@ -198,12 +198,13 @@ impl TableManager {
                     // key was newly created so we can record the delta for WAL /
                     // recovery — the overlay path's `commit_interner_overlay`
                     // builds the identical `(name, id)` delta from `is_new`.
-                    let ti = interner.touch_ind(key).map_err(|e| {
-                        shamir_types::codecs::CodecError::Decode(format!(
-                            "Failed to intern key '{}': {}",
-                            key, e
-                        ))
-                    })?;
+                    // RU8: map through CodecError::Interner so the typed
+                    // quota error (wire code interner_quota_exceeded)
+                    // survives into DbError; Err here precedes any staging,
+                    // so no WAL record or visible row is produced.
+                    let ti = interner
+                        .touch_ind(key)
+                        .map_err(shamir_types::codecs::CodecError::from)?;
                     if ti.is_new() {
                         new_base_keys
                             .borrow_mut()
@@ -244,7 +245,9 @@ impl TableManager {
                     );
                 }
                 let bytes = query_value_to_storage_bytes_into(&resolved, &intern_fn, &mut scratch)
-                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                    // From<CodecError> preserves CodecError::Interner as the
+                    // typed DbError::InternerQuotaExceeded (with wire code).
+                    .map_err(shamir_storage::error::DbError::from)?;
                 out.push(bytes);
                 resolved_values.push(resolved);
             }

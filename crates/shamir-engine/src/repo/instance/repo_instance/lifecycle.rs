@@ -207,10 +207,33 @@ impl RepoInstance {
         self.repo.store_get("__tx__").await
     }
 
-    /// Install a fault-injecting manager before any repo/table interner access.
-    /// Never replace an initialized manager (including one shared by clones).
-    #[cfg(test)]
-    pub(crate) fn install_repo_interner_for_test(&self, manager: InternerManager) {
+    #[cfg(any(test, feature = "test-util"))]
+    pub async fn from_factory_with_interner_quota_for_test(
+        name: String,
+        factory: BoxRepoFactory,
+        configs: Vec<TableConfig>,
+        quota: shamir_types::core::interner::InternerQuota,
+    ) -> DbResult<Self> {
+        let instance = Self::from_factory_unrecovered(name, factory, configs).await?;
+        let manager = InternerManager::new_labeled(
+            instance.repo.store_get("__interner__").await?,
+            instance.name().to_string(),
+        )
+        .with_quota_for_test(quota);
+        instance.install_repo_interner_for_test(manager);
+        let permit = instance
+            .write_domain()
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        instance.repo_identity_admitted(&permit).await?;
+        instance.recover_v2_inflight_admitted(&permit).await?;
+        drop(permit);
+        Ok(instance)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn install_repo_interner_for_test(&self, manager: InternerManager) {
         assert!(
             self.repo_interner.set(manager).is_ok(),
             "repo interner must be uninitialized before test injection",
@@ -235,7 +258,10 @@ impl RepoInstance {
         self.repo_interner
             .get_or_try_init(|| async {
                 let store: Arc<dyn Store> = self.repo.store_get("__interner__").await?;
-                Ok::<InternerManager, DbError>(InternerManager::new(store))
+                Ok::<InternerManager, DbError>(InternerManager::new_labeled(
+                    store,
+                    self.name().to_string(),
+                ))
             })
             .await
             .cloned()

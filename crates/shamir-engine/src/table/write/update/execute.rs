@@ -78,7 +78,7 @@ impl TableManager {
             let layered = make_layered_interner(interner, tx);
             let intern_fn = intern_via_layered(&layered);
             query_value_to_inner_with(&resolved_set, &intern_fn)
-                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?
+                .map_err(shamir_storage::error::DbError::from)?
         };
         let set_map = match &set_inner {
             InnerValue::Map(m) => m,

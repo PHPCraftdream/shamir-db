@@ -150,7 +150,9 @@ pub(crate) fn try_apply_group_by(
     // `RecordRef` adapter that re-keys String → `InternerKey` once and
     // serves leaves as `ScalarRef` straight off the `QueryValue`.
     if let Some(having_filter) = &group_by.having {
-        pre_intern_select_keys(select, interner);
+        // RU8: a HAVING on a new alias at the quota cap must surface the
+        // typed error, not silently absorb the failed intern.
+        pre_intern_select_keys(select, interner)?;
         let having_cb = compile_filter(having_filter, interner);
         result.retain(|qv| {
             let view = HavingView::new(qv, interner);

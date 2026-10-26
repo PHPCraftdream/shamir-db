@@ -27,10 +27,14 @@ use crate::subscribe::{SubscribeOp, UnsubscribeOp};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use crate::batch::for_each_op::ForEachOp;
+use crate::batch::req::options::assert_nested_batch_caps;
 use crate::batch::sub_batch_op::SubBatchOp;
 use crate::batch::tree_visitor::BatchTreeVisitor;
 
 /// Batch operation - can be a read or a write operation.
+///
+/// Untrusted request bytes must pass `validate_request_alias_caps` before typed
+/// decoding: nested batch aliases may collapse while buffering into QueryValue.
 ///
 /// Detected by unique key in the wire map:
 /// - `from` → Read
@@ -269,6 +273,7 @@ impl<'de> Deserialize<'de> for BatchOp {
         use shamir_types::types::value::{QueryValue, Value};
 
         let qv = QueryValue::deserialize(deserializer)?;
+        assert_nested_batch_caps(&qv).map_err(serde::de::Error::custom)?;
 
         // Collect the set of top-level keys for dispatch. This is cheap:
         // just the key strings, not the values.

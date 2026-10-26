@@ -14,7 +14,7 @@ pub fn intern_string_key(interner: &Interner, key_str: &str) -> Result<InternerK
     interner
         .touch_ind(key_str)
         .map(|t| t.into_key())
-        .map_err(|e| CodecError::Decode(format!("Failed to intern key '{}': {}", key_str, e)))
+        .map_err(CodecError::from)
 }
 
 /// Helper function to de-intern a key from InternedKey to String
