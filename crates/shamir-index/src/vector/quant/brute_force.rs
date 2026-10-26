@@ -308,6 +308,12 @@ impl VectorAdapter for BruteForceAdapter {
         // Staged (in-tx) vectors — caller's own un-committed writes.
         if let Some(staged) = staged {
             for (rid, vec) in staged {
+                if vec.len() != self.dim as usize {
+                    return Err(VectorError::DimMismatch {
+                        expected: self.dim,
+                        got: u32::try_from(vec.len()).unwrap_or(u32::MAX),
+                    });
+                }
                 let stored_norm = match metric {
                     VectorMetric::Cosine => norm_of(vec),
                     _ => 0.0,
