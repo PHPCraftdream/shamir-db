@@ -9,7 +9,65 @@ use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+/// Lock graph: `drain_lock` is held across backing awaits. `mutation_lock` is
+/// held only for snapshot capture and cleanup; writers (`set`/`remove`) take
+/// `mutation_lock` but not `drain_lock`, and `get_many` takes neither. Stripe
+/// guards are non-blocking CAS epochs.
+async fn transact_owned(
+    state: Arc<super::core::MemBufferState>,
+    inner: Arc<dyn Store>,
+    ops: Vec<crate::types::KvOp>,
+) -> DbResult<()> {
+    let _drain = state.drain_lock.lock().await;
+    let mut touched: Vec<RecordKey> = ops
+        .iter()
+        .map(|op| match op {
+            crate::types::KvOp::Set(key, _) | crate::types::KvOp::Remove(key) => key.clone(),
+        })
+        .collect();
+    touched.sort();
+    touched.dedup();
+    touched.sort_by_key(|key| state.revisions.stripe_of(key));
+    let guards: Vec<StripeGuard<'_>> = touched
+        .iter()
+        .map(|key| state.revisions.begin(key))
+        .collect();
+    let snapshots = {
+        let _mutation = state.mutation_lock.lock().await;
+        touched
+            .iter()
+            .filter_map(|key| {
+                state
+                    .dirty
+                    .get(key)
+                    .map(|entry| (key.clone(), Arc::clone(entry.value())))
+            })
+            .collect::<Vec<_>>()
+    };
+    inner.transact(ops).await?;
+    let _mutation = state.mutation_lock.lock().await;
+    for (key, snapshot) in snapshots {
+        if state
+            .dirty
+            .remove_if(&key, |_, current| Arc::ptr_eq(current, &snapshot))
+            .is_some()
+        {
+            state.dirty_count.fetch_sub(1, Ordering::Release);
+        }
+    }
+    drop(guards);
+    Ok(())
+}
+
 impl MemBufferStore {
+    #[cfg(test)]
+    pub(crate) async fn transact_once_for_test(
+        &self,
+        ops: Vec<crate::types::KvOp>,
+    ) -> DbResult<()> {
+        transact_owned(Arc::clone(&self.state), Arc::clone(&self.inner), ops).await
+    }
+
     /// Route all dirty-mutation paths through one guard helper: every
     /// publication holds the key's stripe epoch (revision bump + active
     /// count) so a concurrent clean fill can never validate an entry
@@ -25,14 +83,11 @@ impl Store for MemBufferStore {
         let id = RecordId::new();
         let key = RecordKey::from_slice(id.as_bytes());
         let slot = Slot::Live(value);
-        // RV-STORAGE-98f6650d: the fresh-key guard bypass is REMOVED —
-        // `insert` takes the stripe epoch like every other dirty mutation,
-        // bumping the revision so any in-flight/pre-existing cache entry
-        // for a colliding stripe key cannot validate against this write.
+        let _mutation = self.state.mutation_lock.lock().await;
         let _g = self.guard_for(&key);
         // Task #539: `key` is a freshly-generated `RecordId`, so it can never
         // already be in `dirty` — the increment is unconditional.
-        self.state.dirty.insert(key.clone(), slot);
+        self.state.dirty.insert(key.clone(), Arc::new(slot));
         self.state.dirty_count.fetch_add(1, Ordering::Release);
         // RV-STORAGE-98f6650d: NO writer-side cache republish — dirty is
         // the authority; the cache is only ever populated by validated
@@ -43,17 +98,18 @@ impl Store for MemBufferStore {
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         // `bool` return = was the key created (vs updated)?
-        // Best-effort: authoritative dirty lookup + validated cache probe;
-        // a miss falls through to `false` (presumed new). shamir-engine
-        // doesn't depend on strict bool.
-        let existed = self.state.existed_hint(&key).await;
-        // RV-STORAGE-98f6650d: stripe epoch held across the dirty
-        // publication; revision bump invalidates any pre-write cache entry.
+        let _mutation = self.state.mutation_lock.lock().await;
+        let existed = self.state.existed_hint(self.inner.as_ref(), &key).await?;
         let _g = self.guard_for(&key);
         // Task #539: increment `dirty_count` ONLY when `key` was genuinely
         // new to `dirty` (`insert()` returned `None`) — an overwrite of an
         // already-dirty key must not double-count.
-        if self.state.dirty.insert(key, Slot::Live(value)).is_none() {
+        if self
+            .state
+            .dirty
+            .insert(key, Arc::new(Slot::Live(value)))
+            .is_none()
+        {
             self.state.dirty_count.fetch_add(1, Ordering::Release);
         }
         // No writer-side cache republish (RV-STORAGE-98f6650d).
@@ -119,12 +175,17 @@ impl Store for MemBufferStore {
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
-        // Best-effort bool — see `set` for rationale.
-        let existed = self.state.existed_hint(&key).await;
+        let _mutation = self.state.mutation_lock.lock().await;
+        let existed = self.state.existed_hint(self.inner.as_ref(), &key).await?;
         // RV-STORAGE-98f6650d: stripe epoch across the publication.
         let _g = self.guard_for(&key);
         // Task #539 — increment only on a genuinely-new key.
-        if self.state.dirty.insert(key, Slot::Tombstone).is_none() {
+        if self
+            .state
+            .dirty
+            .insert(key, Arc::new(Slot::Tombstone))
+            .is_none()
+        {
             self.state.dirty_count.fetch_add(1, Ordering::Release);
         }
         // No writer-side cache republish (RV-STORAGE-98f6650d).
@@ -269,47 +330,12 @@ impl Store for MemBufferStore {
         if ops.is_empty() {
             return Ok(());
         }
-        // Drain any pending dirty entries for the affected keys first
-        // so the inner store has a consistent view before transact.
-        self.drain_all().await?;
-
-        // Acquire all touched keys' stripe guards, ascending stripe order.
-        let mut touched: Vec<RecordKey> = ops
-            .iter()
-            .map(|op| match op {
-                crate::types::KvOp::Set(k, _) => k.clone(),
-                crate::types::KvOp::Remove(k) => k.clone(),
-            })
-            .collect();
-        touched.sort_by(|a, b| {
-            self.state
-                .revisions
-                .stripe_of(a)
-                .cmp(&self.state.revisions.stripe_of(b))
-        });
-        let guards: Vec<StripeGuard<'_>> = touched.iter().map(|k| self.guard_for(k)).collect();
-
-        // Delegate to inner's native transact.
-        self.inner.transact(ops.clone()).await?;
-
-        // Conditional dirty cleanup — same snapshot + `remove_if` pattern
-        // as `drain_once` (Audit §2.3 / task #539 inline decrement rule).
-        for op in ops {
-            let (k, slot): (RecordKey, Slot) = match op {
-                crate::types::KvOp::Set(k, v) => (k, Slot::Live(v)),
-                crate::types::KvOp::Remove(k) => (k, Slot::Tombstone),
-            };
-            if self
-                .state
-                .dirty
-                .remove_if(&k, |_, current| *current == slot)
-                .is_some()
-            {
-                self.state.dirty_count.fetch_sub(1, Ordering::Release);
-            }
-        }
-        drop(guards);
-        Ok(())
+        let state = Arc::clone(&self.state);
+        let inner = Arc::clone(&self.inner);
+        let worker = tokio::spawn(async move { transact_owned(state, inner, ops).await });
+        worker
+            .await
+            .map_err(|error| DbError::Storage(format!("transact task failed: {error}")))?
     }
 
     /// Delegates to `inner` — the buffer layer drains its dirty overlay
@@ -322,8 +348,7 @@ impl Store for MemBufferStore {
 
     async fn insert_many(&self, values: Vec<Bytes>) -> DbResult<Vec<RecordKey>> {
         let mut keys = Vec::with_capacity(values.len());
-        #[cfg(test)]
-        let mut first_iteration = true;
+        let mut _mutation = self.state.mutation_lock.lock().await;
         for v in values {
             let id = RecordId::new();
             let key = RecordKey::from_slice(id.as_bytes());
@@ -334,21 +359,22 @@ impl Store for MemBufferStore {
             // Task #539: `key` is a freshly-generated `RecordId` — always
             // new to `dirty`, so the increment is unconditional and inline
             // with the insert.
-            self.state.dirty.insert(key.clone(), slot);
+            self.state.dirty.insert(key.clone(), Arc::new(slot));
             self.state.dirty_count.fetch_add(1, Ordering::Release);
-            keys.push(key);
-            // Task #535 round 2 test seam: park here (after the FIRST item
-            // is fully committed — dirty+count done) so a regression test
-            // can drive a real `drain_once` into the exact
-            // stall-across-`.await` gap, before the NEXT item's
-            // `dirty.insert` runs. No-op in production.
             #[cfg(test)]
-            if first_iteration {
-                first_iteration = false;
-                if let Some(hook) = self.state.batch_pause_hook.load_full() {
-                    hook.wait_after_first_item().await;
+            {
+                keys.push(key.clone());
+                if keys.len() == 1 {
+                    if let Some(hook) = self.state.batch_pause_hook.load_full() {
+                        drop(_g);
+                        drop(_mutation);
+                        hook.wait_after_first_item().await;
+                        _mutation = self.state.mutation_lock.lock().await;
+                    }
                 }
             }
+            #[cfg(not(test))]
+            keys.push(key);
         }
         self.notify.notify_one();
         Ok(keys)
@@ -358,13 +384,9 @@ impl Store for MemBufferStore {
         if items.is_empty() {
             return Ok(Vec::new());
         }
-        // Batched mirror of `set` for each (k,v) — same dirty-only
-        // publication and best-effort `existed` semantics, with a SINGLE
-        // notify_one at the end. Last-write-wins within the batch on
-        // duplicate keys.
+        // Batch outcome flags are derived atomically against wrapper mutations.
         let mut flags = Vec::with_capacity(items.len());
-        // RV-STORAGE-98f6650d: stripe guards for all batch keys, ascending
-        // stripe order (deadlock-free), held across the whole publication.
+        let _mutation = self.state.mutation_lock.lock().await;
         let mut unique: Vec<RecordKey> = items.iter().map(|(k, _)| k.clone()).collect();
         unique.sort();
         unique.dedup();
@@ -376,11 +398,16 @@ impl Store for MemBufferStore {
         });
         let guards: Vec<StripeGuard<'_>> = unique.iter().map(|k| self.guard_for(k)).collect();
         for (k, v) in items {
-            let existed = self.state.existed_hint(&k).await;
+            let existed = self.state.existed_hint(self.inner.as_ref(), &k).await?;
             // Task #539 — increment inline, only on a genuinely-new key.
             // A duplicate key within the same batch correctly increments at
             // most once.
-            if self.state.dirty.insert(k, Slot::Live(v)).is_none() {
+            if self
+                .state
+                .dirty
+                .insert(k, Arc::new(Slot::Live(v)))
+                .is_none()
+            {
                 self.state.dirty_count.fetch_add(1, Ordering::Release);
             }
             flags.push(!existed);
@@ -394,10 +421,8 @@ impl Store for MemBufferStore {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        // Batched mirror of `remove` — see `set_many` for the batching
-        // shape. Tombstones replace Live slots; ONE notify_one.
         let mut flags = Vec::with_capacity(keys.len());
-        // RV-STORAGE-98f6650d: same guard shape as `set_many`.
+        let _mutation = self.state.mutation_lock.lock().await;
         let mut unique: Vec<RecordKey> = keys.clone();
         unique.sort();
         unique.dedup();
@@ -409,9 +434,14 @@ impl Store for MemBufferStore {
         });
         let guards: Vec<StripeGuard<'_>> = unique.iter().map(|k| self.guard_for(k)).collect();
         for k in keys {
-            let existed = self.state.existed_hint(&k).await;
+            let existed = self.state.existed_hint(self.inner.as_ref(), &k).await?;
             // Task #539 — increment inline, only on a genuinely-new key.
-            if self.state.dirty.insert(k, Slot::Tombstone).is_none() {
+            if self
+                .state
+                .dirty
+                .insert(k, Arc::new(Slot::Tombstone))
+                .is_none()
+            {
                 self.state.dirty_count.fetch_add(1, Ordering::Release);
             }
             flags.push(existed);

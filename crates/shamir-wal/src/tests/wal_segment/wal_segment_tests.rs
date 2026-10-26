@@ -5,6 +5,7 @@ use std::sync::Arc;
 use shamir_types::types::record_id::RecordId;
 use tempfile::TempDir;
 
+use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::{WalEntryV2, WalOpV2};
 use crate::wal_segment::WalSegment;
 
@@ -144,6 +145,222 @@ async fn empty_segment_replays_empty() {
     assert!(replayed.is_empty());
 }
 
+#[tokio::test]
+async fn rv_wal_5a825f98_sealed_incomplete_tail_fails() {
+    for suffix_len in 1..=3 {
+        let dir = TempDir::new().unwrap();
+        let path = seg_path(&dir);
+        let seg = WalSegment::open(path.clone()).await.unwrap();
+        seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+            .await
+            .unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend(std::iter::repeat_n(0, suffix_len));
+        std::fs::write(&path, bytes).unwrap();
+        assert!(seg.replay_sealed().await.is_err());
+        assert_eq!(seg.replay().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn rv_wal_5a825f98_oversized_middle_length_fails_sealed() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    let entries = [entry(1, 10), entry(2, 20), entry(3, 30)];
+    seg.append_batch(
+        Arc::new(entries.iter().map(|e| e.encode().unwrap()).collect()),
+        30,
+    )
+    .await
+    .unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let second = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize + 8;
+    let mut oversized = bytes.clone();
+    oversized[second..second + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    std::fs::write(&path, &oversized).unwrap();
+    assert!(seg.replay_sealed().await.is_err());
+    assert_eq!(seg.replay().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rv_wal_5a825f98_incomplete_payload_and_crc_fail_sealed() {
+    let payload = entry(1, 10).encode().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    for keep in [5usize, frame.len() - 2] {
+        let dir = TempDir::new().unwrap();
+        let path = seg_path(&dir);
+        let seg = WalSegment::open(path.clone()).await.unwrap();
+        let mut truncated = frame.clone();
+        truncated.truncate(keep);
+        std::fs::write(&path, truncated).unwrap();
+        assert!(seg.replay_sealed().await.is_err());
+        assert!(seg.replay().await.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rv_wal_9cb60c5a_sealed_crc_valid_undecodable_frame_fails() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let payload = b"WAL2\x63not-supported";
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(payload);
+    frame.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+    std::fs::write(path.clone(), &frame).unwrap();
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    assert!(seg.replay_sealed().await.is_err());
+    assert_eq!(std::fs::read(path).unwrap(), frame);
+}
+
+#[tokio::test]
+async fn rv_wal_4470bef3_append_validation_is_atomic() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    let valid = entry(1, 10).encode().unwrap();
+    let mut bad_magic = valid.clone();
+    bad_magic[0] = b'X';
+    for invalid in [
+        Vec::new(),
+        b"raw".to_vec(),
+        bad_magic,
+        b"WAL2\x7fbad".to_vec(),
+    ] {
+        assert!(seg
+            .append_batch(Arc::new(vec![valid.clone(), invalid]), 88)
+            .await
+            .is_err());
+        assert_eq!(seg.max_committed(), 0);
+        assert_eq!(seg.approx_len_bytes(), 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert!(!seg.is_poisoned());
+    }
+    assert_eq!(
+        seg.append_batch(Arc::new(vec![valid]), 10).await.unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn rv_wal_6b27be88_repair_preserves_crc_bad_frame_and_suffix() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    let payloads = vec![
+        entry(1, 10).encode().unwrap(),
+        entry(2, 20).encode().unwrap(),
+    ];
+    seg.append_batch(Arc::new(payloads), 20).await.unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[6] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(seg.repair_torn_tail().await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    let reopened = WalSegment::open(path.clone()).await.unwrap();
+    assert!(reopened.repair_torn_tail().await.is_err());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn rv_wal_6b27be88_repair_truncates_last_crc_bad_frame() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    let payload = entry(1, 10).encode().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    let mut bad = frame.clone();
+    *bad.last_mut().unwrap() ^= 1;
+    let mut bytes = frame.clone();
+    bytes.extend_from_slice(&bad);
+    std::fs::write(&path, &bytes).unwrap();
+    seg.repair_torn_tail().await.unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), frame);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), frame.len() as u64);
+    seg.repair_torn_tail().await.unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), frame);
+}
+
+#[tokio::test]
+async fn rv_wal_4470bef3_segment_set_invalid_append_does_not_rotate_healthy_segment() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 1).await.unwrap();
+    let path = dir.path().join("00000000.wal");
+    assert!(set
+        .append_batch(vec![b"invalid".to_vec()], 100)
+        .await
+        .is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    assert!(path.exists());
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    assert_eq!(set.max_committed(), 0);
+    assert_eq!(
+        set.append_batch(vec![entry(1, 1).encode().unwrap()], 1)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn rv_wal_6b27be88_segment_set_open_preserves_corrupt_active_suffix() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), u64::MAX)
+        .await
+        .unwrap();
+    let path = dir.path().join("00000000.wal");
+    set.append_batch(vec![entry(1, 10).encode().unwrap()], 10)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(2, 20).encode().unwrap()], 20)
+        .await
+        .unwrap();
+    drop(set);
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[6] ^= 1;
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(SegmentSet::open(dir.path().to_path_buf(), u64::MAX)
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn rv_wal_5a825f98_active_torn_suffix_remains_tolerated() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(&[1, 2, 3]);
+    std::fs::write(path, bytes).unwrap();
+    assert_eq!(seg.replay().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn rv_wal_5a825f98_active_incomplete_crc_remains_tolerated() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    let payload = entry(1, 10).encode().unwrap();
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    frame.extend_from_slice(&payload);
+    frame.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
+    frame.truncate(frame.len() - 2);
+    std::fs::write(path, frame).unwrap();
+    assert!(seg.replay().await.unwrap().is_empty());
+}
+
 /// Audit §1.8 regression: a CRC mismatch in a SEALED segment must be a LOUD
 /// error, not a silent warn that discards the valid tail. A sealed segment
 /// is fully fsync'd (I4), so CRC failure = disk corruption — the valid tail
@@ -234,9 +451,37 @@ async fn startup_replay_api_surface_exists() {
     assert_eq!(replayed_sealed.len(), 1);
 }
 
-/// Startup replay absorbs a short-lived open denial (an antivirus / backup
-/// scanner or a delete-pending handle on a fresh segment) instead of failing
-/// the whole open or drain pass.
+#[tokio::test]
+async fn rv_wal_0375857f_sealed_startup_replay_rejects_persistent_permission_denial() {
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap();
+
+    // Arm the denial for BOTH callers below: the same injected
+    // PermissionDenied is classified by the production policy on each call.
+    seg.inject_startup_open_denial(2);
+
+    // Startup path (strict): persistent denial is a HARD error (audit §2.4),
+    // surfaced after the bounded retry loop.
+    let err = seg
+        .replay_sealed_at_startup()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("PermissionDenied"), "unexpected error: {err}");
+
+    // The SAME denial through the tolerant live variant (`replay_sealed`):
+    // silently empty, no error — proving the test discriminates the
+    // `tolerate_permission_denied` argument (flipping either call's
+    // tolerance flips its outcome).
+    let tolerant = seg.replay_sealed().await.unwrap();
+    assert!(tolerant.is_empty());
+}
+
+/// Startup retry absorbs a transient denial, but persistent PermissionDenied
+/// remains an error for both startup and live replay callers.
 #[cfg(unix)]
 #[tokio::test]
 async fn startup_replay_retries_a_transient_permission_denial() {

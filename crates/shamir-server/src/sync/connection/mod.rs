@@ -18,6 +18,8 @@ mod session;
 // can name `RedbUserStateLookup`; production use stays internal to this module.
 pub(crate) mod user_state_lookup;
 
+#[cfg(test)]
+pub(crate) use handshake::checked_query_version;
 pub use handshake::handle_connection;
 #[cfg(test)]
 pub(crate) use handshake::{handshake_budget, CLOCK_OVERRIDE_NS};

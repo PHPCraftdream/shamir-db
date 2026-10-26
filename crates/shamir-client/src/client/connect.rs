@@ -18,11 +18,14 @@ use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerCh
 use shamir_connect::common::crypto::{ed25519_verify_strict, sha256};
 use shamir_connect::common::identity::resume_proof_message;
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
-use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
-use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
+use shamir_transport_tcp::framing::{read_frame, write_frame};
+use shamir_transport_tcp::tls::{
+    extract_tls_exporter, make_client_config_app_authenticated, AppLayerServerAuth,
+};
 
 use crate::client::options::{ConnectLocalOptions, ConnectOptions, ResumeOptions};
 use crate::client::transport::{
@@ -257,7 +260,8 @@ impl Client {
     ) -> Result<Self, ClientError> {
         // ---- TLS ----
         phase.store(PHASE_TCP, Ordering::Relaxed);
-        let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
+        let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
+            .map_err(|e| ClientError::Tls(e.to_string()))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
@@ -265,7 +269,7 @@ impl Client {
         phase.store(PHASE_TLS, Ordering::Relaxed);
         let tls = connector.connect(server_name, tcp).await?;
         let exporter = extract_tls_exporter(&tls)
-            .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
+            .map_err(|e| ClientError::Handshake(format!("TLS exporter unavailable: {e}")))?;
 
         // ---- SCRAM ----
         phase.store(PHASE_SCRAM, Ordering::Relaxed);
@@ -294,7 +298,7 @@ impl Client {
             .map_err(|e| ClientError::Transport(format!("send auth_init: {e}")))?;
 
         // Step 2: challenge
-        let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ch_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
             .map_err(|e| ClientError::Transport(format!("read challenge: {e}")))?;
         let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes)?;
@@ -347,7 +351,7 @@ impl Client {
             .map_err(|e| ClientError::Transport(format!("send proof: {e}")))?;
 
         // Step 5: auth_ok
-        let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ok_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
             .map_err(|e| ClientError::Transport(format!("read auth_ok: {e}")))?;
         let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
@@ -478,7 +482,7 @@ impl Client {
             .map_err(|e| ClientError::Transport(format!("send auth_init: {e}")))?;
 
         // Step 2: challenge
-        let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ch_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
             .map_err(|e| ClientError::Transport(format!("read challenge: {e}")))?;
         let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes)?;
@@ -523,7 +527,7 @@ impl Client {
             .map_err(|e| ClientError::Transport(format!("send proof: {e}")))?;
 
         // Step 5: auth_ok
-        let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ok_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
             .map_err(|e| ClientError::Transport(format!("read auth_ok: {e}")))?;
         let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
@@ -620,7 +624,8 @@ impl Client {
         let _ = default_provider().install_default();
 
         // ---- TLS ----
-        let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
+        let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
+            .map_err(|e| ClientError::Tls(e.to_string()))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
             .map_err(|e| ClientError::Tls(e.to_string()))?;
@@ -632,7 +637,7 @@ impl Client {
         // exporter value will be used by the server to verify binding; the
         // client sends it implicitly via binding_mode in WireResumeInit.
         let tls_exporter = extract_tls_exporter(&tls)
-            .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
+            .map_err(|e| ClientError::Handshake(format!("TLS exporter unavailable: {e}")))?;
 
         let (mut r, mut w) = split(tls);
 
@@ -704,7 +709,7 @@ where
     write_frame(w, &rmp_serde::to_vec(&proof_init)?)
         .await
         .map_err(|e| ClientError::Transport(format!("send resume_proof: {e}")))?;
-    let proof_bytes = read_frame(r, MAX_FRAME_SIZE_DEFAULT)
+    let proof_bytes = read_frame(r, MAX_PRE_AUTH_FRAME)
         .await
         .map_err(|e| ClientError::Transport(format!("read resume_proof_ok: {e}")))?;
     let proof_ok: WireResumeProofOk = rmp_serde::from_slice(&proof_bytes)?;
@@ -721,7 +726,7 @@ where
         .map_err(|e| ClientError::Transport(format!("send resume_init: {e}")))?;
 
     // ---- Read ResumeOk ----
-    let ok_bytes = read_frame(r, MAX_FRAME_SIZE_DEFAULT)
+    let ok_bytes = read_frame(r, MAX_PRE_AUTH_FRAME)
         .await
         .map_err(|e| ClientError::Transport(format!("read resume_ok: {e}")))?;
     let ok_wire: WireResumeOk = rmp_serde::from_slice(&ok_bytes)?;
