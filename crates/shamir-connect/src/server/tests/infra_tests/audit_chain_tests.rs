@@ -1,24 +1,251 @@
+use crate::common::crypto::hmac_sha256;
 use crate::server::audit_chain::{
-    canonical_bytes, AuditAppender, AuditChain, AuditChainWriter, AuditEntry, AuditError,
-    RETAINED_ENTRIES,
+    canonical_bytes, compute_entry_hmac, AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
+    AuditError, RETAINED_ENTRIES,
 };
 use std::sync::Arc;
 
+// CI fills these with independently derived HMAC-SHA256 outputs; never guess them.
+const RU4_V1_EXPECTED_HMAC: Option<&str> = None;
+const RU4_V2_EXPECTED_HMAC: Option<&str> = None;
+const RU4_KEY: [u8; 32] = [0x0b; 32];
+
+fn ru4_expected_hmac(value: Option<&str>, name: &str) -> [u8; 32] {
+    let hex = value.expect(match name {
+        "RU4_V1_EXPECTED_HMAC" => "CI must fill RU4_V1_EXPECTED_HMAC using the independent Python recipe in IMPLEMENTATION_GUIDE.md",
+        "RU4_V2_EXPECTED_HMAC" => "CI must fill RU4_V2_EXPECTED_HMAC using the independent Python recipe in IMPLEMENTATION_GUIDE.md",
+        _ => "CI must fill the named RU4 expected HMAC constant",
+    });
+    let bytes = hex::decode(hex).expect("RU4 expected HMAC must be valid hex");
+    bytes
+        .try_into()
+        .unwrap_or_else(|_| panic!("{name} must decode to 32 bytes"))
+}
+
+fn ru4_entries(v1_hmac: [u8; 32]) -> [AuditEntry; 2] {
+    [
+        AuditEntry {
+            seq: 1,
+            ts_ns: 0,
+            event: "e".into(),
+            transport: "t".into(),
+            user: "".into(),
+            ip_subnet: "".into(),
+            session_id_prefix: [0; 8],
+            result: "ok".into(),
+            details_canonical_msgpack: vec![],
+            prev_hmac: [0; 32],
+            hmac: [0; 32],
+        },
+        AuditEntry {
+            seq: 2,
+            ts_ns: 1,
+            event: "e".into(),
+            transport: "t".into(),
+            user: "é".into(),
+            ip_subnet: "".into(),
+            session_id_prefix: [1, 2, 3, 4, 5, 6, 7, 8],
+            result: "ok".into(),
+            details_canonical_msgpack: vec![0x80],
+            prev_hmac: v1_hmac,
+            hmac: [0; 32],
+        },
+    ]
+}
+
+#[test]
+fn rv_connect_7dbc7bdb_v1_canonical_bytes_are_pinned_independently() {
+    let entry = ru4_entries([0; 32])[0].clone();
+    let expected = hex::decode(concat!(
+        "0000000000000001",
+        "0000000000000000",
+        "0001",
+        "65",
+        "01",
+        "74",
+        "00",
+        "00",
+        "0000000000000000",
+        "02",
+        "6f6b",
+        "00000000",
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    ))
+    .unwrap();
+    assert_eq!(canonical_bytes(&entry).unwrap(), expected);
+}
+
+#[test]
+fn rv_connect_7dbc7bdb_ru4_v1_v2_hmac_vectors_and_rejections() {
+    let v1_hmac = ru4_expected_hmac(RU4_V1_EXPECTED_HMAC, "RU4_V1_EXPECTED_HMAC");
+    let v2_hmac = ru4_expected_hmac(RU4_V2_EXPECTED_HMAC, "RU4_V2_EXPECTED_HMAC");
+    let mut entries = ru4_entries(v1_hmac);
+    let v2_prefix = hex::decode(concat!(
+        "0000000000000002",
+        "0000000000000001",
+        "0001",
+        "65",
+        "01",
+        "74",
+        "02",
+        "c3a9",
+        "00",
+        "0102030405060708",
+        "02",
+        "6f6b",
+        "00000001",
+        "80"
+    ))
+    .unwrap();
+    let mut canonical_v2 = v2_prefix;
+    canonical_v2.extend_from_slice(&v1_hmac);
+    assert_eq!(canonical_bytes(&entries[1]).unwrap(), canonical_v2);
+    assert_eq!(compute_entry_hmac(&RU4_KEY, &entries[0]).unwrap(), v1_hmac);
+    assert_eq!(compute_entry_hmac(&RU4_KEY, &entries[1]).unwrap(), v2_hmac);
+    entries[0].hmac = v1_hmac;
+    entries[1].hmac = v2_hmac;
+    assert!(AuditChain::verify_chain(&RU4_KEY, &entries).is_ok());
+    let mut broken = entries.clone();
+    broken[1].prev_hmac[0] ^= 1;
+    assert!(matches!(
+        AuditChain::verify_chain(&RU4_KEY, &broken),
+        Err(AuditError::ChainBroken { at: 1 })
+    ));
+    assert!(matches!(
+        AuditChain::verify_chain(&[0x0c; 32], &entries),
+        Err(AuditError::HmacMismatch { .. })
+    ));
+    let mut payload = entries.clone();
+    payload[1].user.push('!');
+    assert!(AuditChain::verify_chain(&RU4_KEY, &payload).is_err());
+    let mut rejected_prefix = entries[0].prev_hmac.to_vec();
+    rejected_prefix.extend_from_slice(&canonical_bytes(&entries[0]).unwrap());
+    let prefixed = hmac_sha256(&RU4_KEY, &rejected_prefix);
+    assert_ne!(prefixed, v1_hmac);
+}
+
+#[test]
+fn rv_connect_7dbc7bdb_v2_canonical_layout_uses_eight_byte_session_prefix() {
+    let predecessor = [0x11; 32];
+    let entry = ru4_entries(predecessor)[1].clone();
+    let prefix = hex::decode(concat!(
+        "0000000000000002",
+        "0000000000000001",
+        "0001",
+        "65",
+        "01",
+        "74",
+        "02",
+        "c3a9",
+        "00",
+        "0102030405060708",
+        "02",
+        "6f6b",
+        "00000001",
+        "80"
+    ))
+    .unwrap();
+    let mut expected = prefix;
+    expected.extend_from_slice(&[0x11; 32]);
+    assert_eq!(entry.prev_hmac, predecessor);
+    assert_eq!(canonical_bytes(&entry).unwrap(), expected);
+}
+
+#[test]
+fn rv_connect_7dbc7bdb_literal_legacy_chain_resumes_and_extends() {
+    let v1_hmac = ru4_expected_hmac(RU4_V1_EXPECTED_HMAC, "RU4_V1_EXPECTED_HMAC");
+    let v2_hmac = ru4_expected_hmac(RU4_V2_EXPECTED_HMAC, "RU4_V2_EXPECTED_HMAC");
+    let mut legacy = ru4_entries(v1_hmac);
+    legacy[0].hmac = v1_hmac;
+    legacy[1].hmac = v2_hmac;
+    assert!(AuditChain::verify_chain(&RU4_KEY, &legacy).is_ok());
+
+    let resumed = AuditChain::from_checkpoint(RU4_KEY, 3, v2_hmac);
+    let third = resumed
+        .append("e", "t", "", "", [0; 8], "ok", vec![], 2)
+        .unwrap();
+    let mut combined = legacy.to_vec();
+    combined.push(third);
+    assert!(AuditChain::verify_chain(&RU4_KEY, &combined).is_ok());
+}
 fn key() -> [u8; 32] {
     [0xa1u8; 32]
 }
 
 fn append_event(chain: &AuditChain, idx: u64) -> AuditEntry {
-    chain.append(
-        "auth_success",
-        "tcp",
-        "alice",
-        "192.0.2.0/24",
-        [0u8; 8],
-        "ok",
-        vec![],
-        1_000_000 + idx,
-    )
+    chain
+        .append(
+            "auth_success",
+            "tcp",
+            "alice",
+            "192.0.2.0/24",
+            [0u8; 8],
+            "ok",
+            vec![],
+            1_000_000 + idx,
+        )
+        .expect("test audit fields fit canonical layout")
+}
+
+#[test]
+fn rv_connect_7dbc7bdb_rejects_unrepresentable_lengths_without_advancing_chain() {
+    let chain = AuditChain::new(key());
+    let invalid = chain.append("e".repeat(65_536), "tcp", "", "", [0; 8], "ok", vec![], 1);
+    assert!(matches!(
+        invalid,
+        Err(AuditError::FieldTooLong { field: "event" })
+    ));
+    assert_eq!(chain.checkpoint(), (1, [0; 32]));
+
+    for (field, transport, user, subnet, result) in [
+        (
+            "transport",
+            "x".repeat(256),
+            String::new(),
+            String::new(),
+            String::new(),
+        ),
+        (
+            "user",
+            String::new(),
+            "x".repeat(256),
+            String::new(),
+            String::new(),
+        ),
+        (
+            "ip_subnet",
+            String::new(),
+            String::new(),
+            "x".repeat(256),
+            String::new(),
+        ),
+        (
+            "result",
+            String::new(),
+            String::new(),
+            String::new(),
+            "x".repeat(256),
+        ),
+    ] {
+        let attempt = chain.append("ok", transport, user, subnet, [0; 8], result, vec![], 1);
+        assert!(
+            matches!(attempt, Err(AuditError::FieldTooLong { field: found }) if found == field)
+        );
+        assert_eq!(chain.checkpoint(), (1, [0; 32]));
+    }
+
+    assert!(chain
+        .append(
+            "x".repeat(u16::MAX as usize),
+            "x".repeat(255),
+            "x".repeat(255),
+            "x".repeat(255),
+            [0; 8],
+            "x".repeat(255),
+            vec![0; 255],
+            1
+        )
+        .is_ok());
 }
 
 #[test]
@@ -119,6 +346,117 @@ fn verify_chain_detects_wrong_key() {
 }
 
 #[test]
+fn rv_connect_48f29207_accepts_authenticated_stale_checkpoint_in_extended_chain() {
+    let chain = AuditChain::new(key());
+    for seq in 1..=150 {
+        append_event(&chain, seq);
+    }
+    let entries = chain.snapshot();
+    let checkpoint_hmac = entries[99].hmac;
+    assert!(AuditChain::verify_chain(&key(), &entries).is_ok());
+    assert!(AuditChain::verify_against_checkpoint(&entries, 101, &checkpoint_hmac).is_ok());
+}
+
+#[test]
+fn rv_connect_48f29207_rejects_unmatched_checkpoint_positions_and_digests() {
+    let chain = AuditChain::new(key());
+    for seq in 1..=4 {
+        append_event(&chain, seq);
+    }
+    let entries = chain.snapshot();
+    let zero = [0; 32];
+    assert!(matches!(
+        AuditChain::verify_against_checkpoint(&entries, 0, &zero),
+        Err(AuditError::TruncationDetected { .. })
+    ));
+    assert!(matches!(
+        AuditChain::verify_against_checkpoint(&entries, 6, &entries[3].hmac),
+        Err(AuditError::TruncationDetected { .. })
+    ));
+    assert!(matches!(
+        AuditChain::verify_against_checkpoint(&entries, 3, &entries[3].hmac),
+        Err(AuditError::TruncationDetected { .. })
+    ));
+    assert!(matches!(
+        AuditChain::verify_against_checkpoint(&entries, 4, &zero),
+        Err(AuditError::TruncationDetected { .. })
+    ));
+}
+
+#[test]
+fn rv_connect_48f29207_authenticates_genesis_and_empty_chain_checkpoint() {
+    let chain = AuditChain::new(key());
+    let first = append_event(&chain, 0);
+    let entries = chain.snapshot();
+    assert!(AuditChain::verify_against_checkpoint(&entries, 1, &[0; 32]).is_ok());
+    assert!(AuditChain::verify_against_checkpoint(&[], 1, &[0; 32]).is_ok());
+    assert!(matches!(
+        AuditChain::verify_against_checkpoint(&entries, 1, &first.hmac),
+        Err(AuditError::TruncationDetected { .. })
+    ));
+    assert!(matches!(
+        AuditChain::verify_against_checkpoint(&[], 2, &[0; 32]),
+        Err(AuditError::TruncationDetected { .. })
+    ));
+}
+
+#[test]
+fn rv_connect_7ffa5398_writer_latches_append_and_checkpoint_failures() {
+    struct FailingAppend;
+    impl AuditAppender for FailingAppend {
+        fn append_entry(&self, _: &AuditEntry) -> Result<(), std::io::Error> {
+            Err(std::io::Error::other("injected append failure"))
+        }
+        fn checkpoint(&self, _: u64, _: &[u8; 32]) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+    }
+    struct FailingCheckpoint;
+    impl AuditAppender for FailingCheckpoint {
+        fn append_entry(&self, _: &AuditEntry) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+        fn checkpoint(&self, _: u64, _: &[u8; 32]) -> Result<(), std::io::Error> {
+            Err(std::io::Error::other("injected checkpoint failure"))
+        }
+    }
+    let failed_append_chain = Arc::new(AuditChain::new(key()));
+    let writer =
+        AuditChainWriter::new_with_shared(failed_append_chain.clone(), Arc::new(FailingAppend));
+    assert!(matches!(
+        writer.append("e", "t", "u", "i", [0; 8], "r", vec![], 0),
+        Err(AuditError::Persistence(_))
+    ));
+    assert!(matches!(
+        writer.checkpoint_now(),
+        Err(AuditError::Persistence(_))
+    ));
+    let success = CountingAppender::default();
+    assert!(matches!(
+        failed_append_chain.checkpoint_with_appender(&success),
+        Err(AuditError::Persistence(_))
+    ));
+    assert!(success.checkpoints.lock().unwrap().is_empty());
+
+    let failed_checkpoint_chain = Arc::new(AuditChain::new(key()));
+    let appender = Arc::new(FailingCheckpoint);
+    let writer = AuditChainWriter::new_with_shared(failed_checkpoint_chain.clone(), appender);
+    writer
+        .append("e", "t", "u", "i", [0; 8], "r", vec![], 0)
+        .unwrap();
+    assert!(matches!(
+        writer.checkpoint_now(),
+        Err(AuditError::Persistence(_))
+    ));
+    let before = failed_checkpoint_chain.checkpoint();
+    assert!(matches!(
+        writer.append("e", "t", "u", "i", [0; 8], "r", vec![], 1),
+        Err(AuditError::Persistence(_))
+    ));
+    assert_eq!(failed_checkpoint_chain.checkpoint(), before);
+}
+
+#[test]
 fn truncation_defence_detects_missing_trailing_entries() {
     let c = AuditChain::new(key());
     for i in 0..10 {
@@ -174,14 +512,16 @@ struct CountingAppender {
     checkpoints: std::sync::Mutex<Vec<(u64, [u8; 32])>>,
 }
 impl AuditAppender for CountingAppender {
-    fn append_entry(&self, entry: &AuditEntry) {
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
         self.appends.lock().unwrap().push(entry.clone());
+        Ok(())
     }
-    fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) {
+    fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), std::io::Error> {
         self.checkpoints
             .lock()
             .unwrap()
             .push((next_seq, *prev_hmac));
+        Ok(())
     }
 }
 
@@ -193,16 +533,18 @@ fn audit_writer_and_checkpoint_share_chain_state() {
     let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
 
     // Append an event through the writer.
-    let entry = writer.append(
-        "auth_success",
-        "tcp",
-        "alice",
-        "192.0.2.0/24",
-        [0u8; 8],
-        "ok",
-        vec![],
-        42,
-    );
+    let entry = writer
+        .append(
+            "auth_success",
+            "tcp",
+            "alice",
+            "192.0.2.0/24",
+            [0u8; 8],
+            "ok",
+            vec![],
+            42,
+        )
+        .expect("valid test audit entry");
     assert_eq!(entry.seq, 1);
 
     // Snapshot/checkpoint via the *same* shared chain — must see
@@ -238,16 +580,18 @@ fn audit_writer_continues_seq_after_restart_checkpoint() {
     let appender = Arc::new(CountingAppender::default()) as Arc<dyn AuditAppender>;
     let writer = AuditChainWriter::new_with_shared(Arc::clone(&shared), appender);
 
-    let first_after_restart = writer.append(
-        "auth_success",
-        "tcp",
-        "alice",
-        "192.0.2.0/24",
-        [0u8; 8],
-        "ok",
-        vec![],
-        999,
-    );
+    let first_after_restart = writer
+        .append(
+            "auth_success",
+            "tcp",
+            "alice",
+            "192.0.2.0/24",
+            [0u8; 8],
+            "ok",
+            vec![],
+            999,
+        )
+        .expect("valid test audit entry");
     assert_eq!(
         first_after_restart.seq, 8,
         "writer must continue numbering at previous_last_seq + 1 = 8 after restart"
@@ -271,7 +615,7 @@ fn canonical_bytes_byte_exact_for_fixture() {
         prev_hmac: [0u8; 32],
         hmac: [0u8; 32], // not part of canonical
     };
-    let bytes = canonical_bytes(&entry);
+    let bytes = canonical_bytes(&entry).expect("fixture field lengths are valid");
 
     // Check leading bytes:
     // u64_be(1) = 00 00 00 00 00 00 00 01

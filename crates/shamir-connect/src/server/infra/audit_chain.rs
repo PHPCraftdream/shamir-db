@@ -6,12 +6,13 @@
 //!
 //! ## Chain construction
 //!
-//! ```text
-//! entry.hmac = HMAC-SHA256(
-//!     audit_chain_key,
-//!     prev_hmac || canonical_bytes(entry_without_hmac)
-//! )
 //! ```
+//! entry.hmac = HMAC-SHA256(audit_chain_key, canonical_bytes(entry_without_hmac))
+//! ```
+//!
+//! `canonical_bytes` ends with the 32-byte `prev_hmac`, so the previous link
+//! is authenticated as part of those bytes. Implementations MUST NOT prepend
+//! a second copy of `prev_hmac`.
 //!
 //! First entry uses `prev_hmac = bytes(32) zeros`, `seq = 1`. Each
 //! subsequent entry sets `prev_hmac = previous_entry.hmac` and
@@ -65,8 +66,7 @@ pub struct AuditEntry {
     pub session_id_prefix: [u8; 8],
     /// Outcome: "ok", "failed", "rate_limited", "lockout", etc.
     pub result: String,
-    /// Event-specific details — canonical msgpack-encoded (caller
-    /// supplies bytes; see [`encode_details`] for a default map encoder).
+    /// Event-specific details — caller supplies canonical MessagePack bytes.
     pub details_canonical_msgpack: Vec<u8>,
     /// HMAC of the previous entry (32 zeros for the first entry).
     pub prev_hmac: [u8; 32],
@@ -78,13 +78,27 @@ pub struct AuditEntry {
 ///
 /// Per spec §3.3 — deterministic concatenation that any conforming
 /// implementation (Rust, JS, Python) must reproduce byte-identically.
-pub fn canonical_bytes(entry: &AuditEntry) -> Vec<u8> {
+/// Returns an error when a field length cannot be represented by its prefix.
+pub fn canonical_bytes(entry: &AuditEntry) -> Result<Vec<u8>, AuditError> {
     let user_bytes = entry.user.as_bytes();
     let event_bytes = entry.event.as_bytes();
     let transport_bytes = entry.transport.as_bytes();
     let ip_bytes = entry.ip_subnet.as_bytes();
     let result_bytes = entry.result.as_bytes();
     let details = &entry.details_canonical_msgpack;
+
+    let event_len = u16::try_from(event_bytes.len())
+        .map_err(|_| AuditError::FieldTooLong { field: "event" })?;
+    let transport_len = u8::try_from(transport_bytes.len())
+        .map_err(|_| AuditError::FieldTooLong { field: "transport" })?;
+    let user_len =
+        u8::try_from(user_bytes.len()).map_err(|_| AuditError::FieldTooLong { field: "user" })?;
+    let ip_len = u8::try_from(ip_bytes.len())
+        .map_err(|_| AuditError::FieldTooLong { field: "ip_subnet" })?;
+    let result_len = u8::try_from(result_bytes.len())
+        .map_err(|_| AuditError::FieldTooLong { field: "result" })?;
+    let details_len =
+        u32::try_from(details.len()).map_err(|_| AuditError::FieldTooLong { field: "details" })?;
 
     let cap = 8                                   // seq
         + 8                                       // ts_ns
@@ -100,35 +114,47 @@ pub fn canonical_bytes(entry: &AuditEntry) -> Vec<u8> {
     let mut out = Vec::with_capacity(cap);
     out.extend_from_slice(&entry.seq.to_be_bytes());
     out.extend_from_slice(&entry.ts_ns.to_be_bytes());
-    out.extend_from_slice(&(event_bytes.len() as u16).to_be_bytes());
+    out.extend_from_slice(&event_len.to_be_bytes());
     out.extend_from_slice(event_bytes);
-    out.push(transport_bytes.len() as u8);
+    out.push(transport_len);
     out.extend_from_slice(transport_bytes);
-    out.push(user_bytes.len() as u8);
+    out.push(user_len);
     out.extend_from_slice(user_bytes);
-    out.push(ip_bytes.len() as u8);
+    out.push(ip_len);
     out.extend_from_slice(ip_bytes);
     out.extend_from_slice(&entry.session_id_prefix);
-    out.push(result_bytes.len() as u8);
+    out.push(result_len);
     out.extend_from_slice(result_bytes);
-    out.extend_from_slice(&(details.len() as u32).to_be_bytes());
+    out.extend_from_slice(&details_len.to_be_bytes());
     out.extend_from_slice(details);
     out.extend_from_slice(&entry.prev_hmac);
     debug_assert_eq!(out.len(), cap);
-    out
+    Ok(out)
 }
 
 /// Compute the HMAC for an entry given the chain key.
-pub fn compute_entry_hmac(audit_chain_key: &[u8; 32], entry: &AuditEntry) -> [u8; 32] {
-    hmac_sha256(audit_chain_key, &canonical_bytes(entry))
+pub fn compute_entry_hmac(
+    audit_chain_key: &[u8; 32],
+    entry: &AuditEntry,
+) -> Result<[u8; 32], AuditError> {
+    Ok(hmac_sha256(audit_chain_key, &canonical_bytes(entry)?))
 }
 
 /// HMAC chain state — append-only writer + tamper-detection verifier.
 ///
-/// Single-mutex inner state holds the next `seq`, the `prev_hmac`, and
-/// (optionally) a list of entries for in-memory deployments.
+/// Synchronous sequencing mutex protects sequence, predecessor and state
+/// publication. The shared durable gate additionally serializes append writes
+/// and checkpoints; gate-before-inner is the lock order. The durable writer
+/// holds that gate across input conversion, canonical allocation, retained
+/// cloning and persistence. Lock contention serializes each synchronous event;
+/// no await or fairness guarantee is involved.
 pub struct AuditChain {
     audit_chain_key: [u8; 32],
+    /// Synchronous durable gate serializes appends and checkpoints across every
+    /// writer sharing this chain. It is distinct from `inner`; lock order is
+    /// durable gate then inner, and no await occurs while either is held.
+    durable_gate: Mutex<()>,
+    persistence_failed: std::sync::atomic::AtomicBool,
     inner: Mutex<ChainInner>,
 }
 
@@ -165,6 +191,8 @@ impl AuditChain {
     pub fn new(audit_chain_key: [u8; 32]) -> Self {
         Self {
             audit_chain_key,
+            durable_gate: Mutex::new(()),
+            persistence_failed: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(ChainInner {
                 next_seq: 1,
                 prev_hmac: [0u8; 32],
@@ -178,6 +206,8 @@ impl AuditChain {
     pub fn from_checkpoint(audit_chain_key: [u8; 32], next_seq: u64, prev_hmac: [u8; 32]) -> Self {
         Self {
             audit_chain_key,
+            durable_gate: Mutex::new(()),
+            persistence_failed: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(ChainInner {
                 next_seq,
                 prev_hmac,
@@ -188,7 +218,7 @@ impl AuditChain {
 
     /// Append an event. Caller supplies the entry fields; this method
     /// fills in `seq`, `prev_hmac`, computes `hmac`, and updates state.
-    /// Returns the persisted [`AuditEntry`].
+    /// Returns the persisted [`AuditEntry`] or an error for oversized fields.
     #[allow(clippy::too_many_arguments)] // audit fields are per-spec, not groupable
     pub fn append(
         &self,
@@ -200,32 +230,65 @@ impl AuditChain {
         result: impl Into<String>,
         details_canonical_msgpack: Vec<u8>,
         ts_ns: u64,
-    ) -> AuditEntry {
-        let mut g = self.inner.lock();
+    ) -> Result<AuditEntry, AuditError> {
+        let event = event.into();
+        let transport = transport.into();
+        let user = user.into();
+        let ip_subnet = ip_subnet.into();
+        let result = result.into();
         let mut entry = AuditEntry {
-            seq: g.next_seq,
+            seq: 0,
             ts_ns,
-            event: event.into(),
-            transport: transport.into(),
-            user: user.into(),
-            ip_subnet: ip_subnet.into(),
+            event,
+            transport,
+            user,
+            ip_subnet,
             session_id_prefix,
-            result: result.into(),
+            result,
             details_canonical_msgpack,
-            prev_hmac: g.prev_hmac,
+            prev_hmac: [0u8; 32],
             hmac: [0u8; 32],
         };
-        entry.hmac = compute_entry_hmac(&self.audit_chain_key, &entry);
-
+        let mut retained = entry.clone();
+        let mut canonical = canonical_bytes(&entry)?;
+        let mut g = self.inner.lock();
+        entry.seq = g.next_seq;
+        entry.prev_hmac = g.prev_hmac;
+        canonical[..8].copy_from_slice(&entry.seq.to_be_bytes());
+        let prev_at = canonical.len() - 32;
+        canonical[prev_at..].copy_from_slice(&entry.prev_hmac);
+        entry.hmac = hmac_sha256(&self.audit_chain_key, &canonical);
+        retained.seq = entry.seq;
+        retained.prev_hmac = entry.prev_hmac;
+        retained.hmac = entry.hmac;
         g.prev_hmac = entry.hmac;
         g.next_seq = g.next_seq.saturating_add(1);
-        // Bounded retention, O(1) per append: drop the oldest at the cap
-        // (chain state is separate, so `checkpoint`/`verify_*` stay intact).
         if g.entries.len() >= RETAINED_ENTRIES {
             g.entries.pop_front();
         }
-        g.entries.push_back(entry.clone());
-        entry
+        g.entries.push_back(retained);
+        drop(g);
+        Ok(entry)
+    }
+
+    /// Checkpoint shared state through the same durable appender/gate.
+    pub fn checkpoint_with_appender(&self, appender: &dyn AuditAppender) -> Result<(), AuditError> {
+        let _gate = self.durable_gate.lock();
+        if self
+            .persistence_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(AuditError::Persistence(
+                "audit chain persistence failure latched".into(),
+            ));
+        }
+        let (next_seq, prev_hmac) = self.checkpoint();
+        if let Err(error) = appender.checkpoint(next_seq, &prev_hmac) {
+            self.persistence_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(AuditError::Persistence(error.to_string()));
+        }
+        Ok(())
     }
 
     /// Snapshot the current chain checkpoint: `(next_seq, prev_hmac)`.
@@ -264,7 +327,7 @@ impl AuditChain {
             if !constant_time_eq(&e.prev_hmac, &expected_prev) {
                 return Err(AuditError::ChainBroken { at: idx });
             }
-            let computed = compute_entry_hmac(audit_chain_key, e);
+            let computed = compute_entry_hmac(audit_chain_key, e)?;
             if !constant_time_eq(&e.hmac, &computed) {
                 return Err(AuditError::HmacMismatch { at: idx });
             }
@@ -274,28 +337,40 @@ impl AuditChain {
         Ok(())
     }
 
-    /// Truncation-defence verifier: after [`Self::verify_chain`] succeeds,
-    /// also check that the final entry's hmac matches the persisted
-    /// checkpoint. If checkpoint is ahead of the chain → trailing entries
-    /// were truncated.
+    /// Truncation-defence verifier: first verify the complete chain, then
+    /// authenticate the checkpoint at its recorded position. `checkpoint_seq`
+    /// is the next sequence number, so its authenticated digest is the
+    /// preceding entry's HMAC, not necessarily the current tail's HMAC.
     pub fn verify_against_checkpoint(
         entries: &[AuditEntry],
         checkpoint_seq: u64,
         checkpoint_hmac: &[u8; 32],
     ) -> Result<(), AuditError> {
-        let last = entries.last();
-        let (last_seq, last_hmac) = match last {
-            Some(e) => (e.seq, e.hmac),
-            None => (0, [0u8; 32]),
-        };
-        if checkpoint_seq != last_seq.saturating_add(1) && checkpoint_seq != last_seq {
+        if entries.is_empty() {
+            if checkpoint_seq == 1 && constant_time_eq(checkpoint_hmac, &[0u8; 32]) {
+                return Ok(());
+            }
+            return Err(AuditError::TruncationDetected {
+                checkpoint_seq,
+                final_seq: 0,
+            });
+        }
+        let last_seq = entries.last().map_or(0, |entry| entry.seq);
+        if checkpoint_seq == 0 {
             return Err(AuditError::TruncationDetected {
                 checkpoint_seq,
                 final_seq: last_seq,
             });
         }
-        if checkpoint_seq == last_seq.saturating_add(1)
-            && !constant_time_eq(&last_hmac, checkpoint_hmac)
+        let checkpoint_hmac_at_position = if checkpoint_seq == 1 {
+            Some([0u8; 32])
+        } else {
+            let index = usize::try_from(checkpoint_seq - 2).ok();
+            index.and_then(|i| entries.get(i)).map(|entry| entry.hmac)
+        };
+        if !checkpoint_hmac_at_position
+            .as_ref()
+            .is_some_and(|expected| constant_time_eq(expected, checkpoint_hmac))
         {
             return Err(AuditError::TruncationDetected {
                 checkpoint_seq,
@@ -323,6 +398,13 @@ pub enum AuditError {
     ChainBroken {
         /// Index where the chain link was found broken.
         at: usize,
+    },
+    /// Persistence failure (message preserved without requiring `Error: Clone`).
+    Persistence(String),
+    /// A field exceeds the maximum length representable by its canonical prefix.
+    FieldTooLong {
+        /// Name of the field whose encoded length exceeded its prefix.
+        field: &'static str,
     },
     /// Entry's `hmac` doesn't match its canonical bytes.
     HmacMismatch {
@@ -355,23 +437,11 @@ impl std::error::Error for AuditError {}
 pub trait AuditAppender: Send + Sync {
     /// Persist one entry. The implementation is free to batch BUT must
     /// fsync at least every 5 seconds (per spec §3.3 + IMPL §1.3).
-    fn append_entry(&self, entry: &AuditEntry);
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error>;
 
     /// Persist the (next_seq, hmac) checkpoint for truncation defence.
     /// Should be called at least every 60s OR every 1000 events.
-    fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]);
-}
-
-/// Convenience: encode a `BTreeMap<String, msgpack-Value>` as canonical
-/// msgpack (lex-sorted keys) for use as `details_canonical_msgpack`.
-///
-/// Caller can also supply hand-crafted bytes for tighter control.
-pub fn encode_details_canonical(
-    map: &std::collections::BTreeMap<String, rmp_serde::config::DefaultConfig>,
-) -> Vec<u8> {
-    // BTreeMap iterates lex-sorted, so msgpack encoding is canonical.
-    let _ = map; // placeholder until callers supply real msgpack values
-    Vec::new()
+    fn checkpoint(&self, next_seq: u64, prev_hmac: &[u8; 32]) -> Result<(), std::io::Error>;
 }
 
 /// Wrap an `AuditChain` so each `append` ALSO calls the appender.
@@ -427,7 +497,17 @@ impl AuditChainWriter {
         result: impl Into<String>,
         details_canonical_msgpack: Vec<u8>,
         ts_ns: u64,
-    ) -> AuditEntry {
+    ) -> Result<AuditEntry, AuditError> {
+        let _gate = self.chain.durable_gate.lock();
+        if self
+            .chain
+            .persistence_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(AuditError::Persistence(
+                "audit writer is fail-closed".into(),
+            ));
+        }
         let entry = self.chain.append(
             event,
             transport,
@@ -437,21 +517,51 @@ impl AuditChainWriter {
             result,
             details_canonical_msgpack,
             ts_ns,
-        );
-        self.appender.append_entry(&entry);
+        )?;
+        self.appender.append_entry(&entry).map_err(|error| {
+            self.chain
+                .persistence_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            AuditError::Persistence(error.to_string())
+        })?;
         // Checkpoint every 1000 entries (truncation defence).
         if entry.seq.is_multiple_of(1000) {
             let (next_seq, prev_hmac) = self.chain.checkpoint();
-            self.appender.checkpoint(next_seq, &prev_hmac);
+            self.appender
+                .checkpoint(next_seq, &prev_hmac)
+                .map_err(|error| {
+                    self.chain
+                        .persistence_failed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    AuditError::Persistence(error.to_string())
+                })?;
         }
-        entry
+        Ok(entry)
     }
 
     /// Force checkpoint NOW (caller schedules this every 60s for
     /// tighter truncation-detection bounds).
-    pub fn checkpoint_now(&self) {
+    pub fn checkpoint_now(&self) -> Result<(), AuditError> {
+        let _gate = self.chain.durable_gate.lock();
+        if self
+            .chain
+            .persistence_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(AuditError::Persistence(
+                "audit writer is fail-closed".into(),
+            ));
+        }
         let (next_seq, prev_hmac) = self.chain.checkpoint();
-        self.appender.checkpoint(next_seq, &prev_hmac);
+        self.appender
+            .checkpoint(next_seq, &prev_hmac)
+            .map_err(|error| {
+                self.chain
+                    .persistence_failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                AuditError::Persistence(error.to_string())
+            })?;
+        Ok(())
     }
 }
 
