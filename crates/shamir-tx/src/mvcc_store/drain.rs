@@ -1,8 +1,8 @@
 //! Synchronous overlay→history drain for one-shot admin operations.
 //!
 //! [`MvccStore::drain_to_history`] forces every committed overlay entry into the
-//! durable `history` version-log and advances the durable watermark, so a
-//! subsequent `copy_store` of `__history__<table>` captures all live data.
+//! durable `history` version-log. Repository-wide durability is advanced only
+//! by the repository drainer after all stores for a version are complete.
 //! This is the keystone of populated-table RENAME (Phase F.2).
 
 use std::collections::BTreeMap;
@@ -21,12 +21,8 @@ impl MvccStore {
     /// — exactly what the background [`Drainer`](shamir_engine::tx::drainer::Drainer)
     /// does, but synchronously and for a single table.
     ///
-    /// After every version is durable, marks each DRAINED version durable
-    /// via [`mark_durable`](crate::RepoTxGate::mark_durable) — CRIT-3
-    /// (#437): NOT the repo-global visibility watermark, since `self.gate`
-    /// is shared across every table in the repo but this call only drains
-    /// ONE table's overlay — and reclaims this table's own overlay via
-    /// [`gc_overlay_to`](Self::gc_overlay_to).
+    /// The repository-wide durable watermark is NOT advanced here: this call
+    /// owns only one table and cannot prove completion for a shared version.
     ///
     /// **Idempotent**: calling on an already-drained (empty-overlay) store is a
     /// no-op — `iter_all_le` returns an empty vec, no `history.transact` fires,
@@ -113,42 +109,13 @@ impl MvccStore {
                 "drain_to_history: write_committed_to_history version={commit_version} done"
             );
         }
-        log::debug!("drain_to_history: all versions written, marking durable");
+        log::debug!("drain_to_history: table-local history writes complete");
+        // Table-local draining cannot establish repository-wide completion of
+        // a shared version. The repository drainer owns that watermark.
 
-        // CRIT-3 (#437): mark durable ONLY the versions THIS call actually
-        // drained (the keys of `by_version`), NOT the repo-global
-        // `visibility`. `self.gate` is a single `Arc<RepoTxGate>` SHARED
-        // across every table in the repo (`mvcc_store/mod.rs`), while this
-        // function only drains ONE table's overlay. `visibility` may
-        // already include a NEWER commit on a DIFFERENT table that this
-        // call never touched (e.g. a RENAME on table A racing a fresh
-        // commit on table B) — marking that repo-wide version durable would
-        // falsely advance the shared watermark past B's still-undrained
-        // entry, letting the drainer's repo-wide `gc_overlay_to` erase B's
-        // sole RAM copy before it is ever written to history, and a later
-        // WAL truncation delete the only durable trace of it.
-        //
-        // `mark_durable` (via `CompletionTracker::mark`) is explicitly
-        // designed for sparse / out-of-order marking — it only advances the
-        // CONTIGUOUS watermark once a prefix is complete, so marking these
-        // non-contiguous per-table versions is safe by construction (see
-        // `repo_tx_gate.rs::mark_durable`'s own doc). Idempotent — a
-        // version already marked (by the non-tx path or a prior drain) is
-        // a no-op.
-        for version in by_version.keys() {
-            self.gate.mark_durable(*version);
-        }
-
-        // Reclaim overlay memory: drop every entry <= `visibility` FROM
-        // THIS TABLE'S OWN overlay. Unlike `mark_durable` above, this is
-        // NOT repo-wide — `gc_overlay_to` operates only on `self.overlay`,
-        // and `by_version` (built from `self.overlay.iter_all_le(visibility)`)
-        // is an EXHAUSTIVE list of every one of this table's own overlay
-        // entries up to `visibility`. Every one of them was just written to
-        // history above, so it is safe to reclaim this table's overlay up
-        // to `visibility` regardless of what any other table's watermark
-        // looks like — no cross-table state is touched here.
-        self.gc_overlay_to(visibility);
+        // Reclaim only entries already globally durable. This call must not
+        // discard this table's undrained overlay entries.
+        self.gc_overlay_to(self.gate.durable_watermark());
 
         Ok(())
     }

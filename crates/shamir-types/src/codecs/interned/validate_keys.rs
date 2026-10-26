@@ -96,6 +96,7 @@ fn collect_record_value_ids<S: std::hash::BuildHasher>(
         RecordValue::Null
         | RecordValue::Bool(_)
         | RecordValue::Int(_)
+        | RecordValue::Big(_)
         | RecordValue::F64(_)
         | RecordValue::Str(_)
         | RecordValue::Bin(_) => {}
@@ -150,6 +151,7 @@ fn check_record_value_keys(
         RecordValue::Null
         | RecordValue::Bool(_)
         | RecordValue::Int(_)
+        | RecordValue::Big(_)
         | RecordValue::F64(_)
         | RecordValue::Str(_)
         | RecordValue::Bin(_) => Ok(()),
