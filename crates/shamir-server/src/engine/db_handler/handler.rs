@@ -463,20 +463,15 @@ impl RequestHandler for ShamirDbHandler {
                 DbRequest::ChangePasswordChallenge { client_nonce_cp } => {
                     change_password_challenge(self.admin.as_ref(), session, client_nonce_cp).await
                 }
-                DbRequest::ChangePasswordVerify {
-                    client_proof_old,
-                    new_salt,
-                    new_stored_key,
-                    new_server_key,
-                } => {
+                DbRequest::ChangePasswordVerify(secrets) => {
                     change_password_verify(
                         self.admin.as_ref(),
                         self.session_store.as_ref(),
                         session,
-                        client_proof_old,
-                        new_salt,
-                        new_stored_key,
-                        new_server_key,
+                        secrets.client_proof_old,
+                        secrets.new_salt,
+                        secrets.new_stored_key,
+                        secrets.new_server_key,
                     )
                     .await
                 }

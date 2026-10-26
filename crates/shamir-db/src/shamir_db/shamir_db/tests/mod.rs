@@ -1,5 +1,5 @@
-mod bounded_journal_read_tests;
 mod cascade_drop_error_tests;
+mod catalogue_lifecycle_tests;
 mod catalogue_rename_order_tests;
 mod keyset_safe_write_barrier_tests;
 mod schema_parse_tests;

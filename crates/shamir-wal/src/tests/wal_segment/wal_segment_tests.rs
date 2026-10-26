@@ -451,6 +451,35 @@ async fn startup_replay_api_surface_exists() {
     assert_eq!(replayed_sealed.len(), 1);
 }
 
+#[tokio::test]
+async fn rv_wal_0375857f_sealed_startup_replay_rejects_persistent_permission_denial() {
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap();
+
+    // Arm the denial for BOTH callers below: the same injected
+    // PermissionDenied is classified by the production policy on each call.
+    seg.inject_startup_open_denial(2);
+
+    // Startup path (strict): persistent denial is a HARD error (audit §2.4),
+    // surfaced after the bounded retry loop.
+    let err = seg
+        .replay_sealed_at_startup()
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("PermissionDenied"), "unexpected error: {err}");
+
+    // The SAME denial through the tolerant live variant (`replay_sealed`):
+    // silently empty, no error — proving the test discriminates the
+    // `tolerate_permission_denied` argument (flipping either call's
+    // tolerance flips its outcome).
+    let tolerant = seg.replay_sealed().await.unwrap();
+    assert!(tolerant.is_empty());
+}
+
 /// Startup retry absorbs a transient denial, but persistent PermissionDenied
 /// remains an error for both startup and live replay callers.
 #[cfg(unix)]
@@ -501,4 +530,26 @@ async fn startup_replay_persistent_permission_denial_stays_a_hard_error() {
     let err = seg.replay_at_startup().await.unwrap_err().to_string();
     assert!(err.contains("PermissionDenied"), "unexpected error: {err}");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+// Red before the fix (RV-WAL-5839FF0D): the file-open error was stringified
+// into DbError::Storage, destroying the typed io::ErrorKind at the wrap
+// boundary.
+#[tokio::test]
+async fn rv_wal_5839ff0d_open_error_preserves_io_kind() {
+    let dir = TempDir::new().unwrap();
+    // Opening an existing DIRECTORY fails at File::open; the wrap boundary
+    // must surface DbError::Io with the OS ErrorKind intact.
+    let err = match WalSegment::open(dir.path().to_path_buf()).await {
+        Ok(_) => panic!("opening a directory must fail"),
+        Err(e) => e,
+    };
+    let kind = match &err {
+        shamir_storage::error::DbError::Io(e) => e.kind(),
+        other => panic!("expected DbError::Io, got: {other}"),
+    };
+    assert!(
+        kind == std::io::ErrorKind::IsADirectory || kind == std::io::ErrorKind::PermissionDenied,
+        "expected preserved ErrorKind, got: {err}"
+    );
 }

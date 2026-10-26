@@ -18,11 +18,14 @@ use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerCh
 use shamir_connect::common::crypto::{ed25519_verify_strict, sha256};
 use shamir_connect::common::identity::resume_proof_message;
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
-use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
-use shamir_transport_tcp::tls::{extract_tls_exporter, make_client_config_no_ca};
+use shamir_transport_tcp::framing::{read_frame, write_frame};
+use shamir_transport_tcp::tls::{
+    extract_tls_exporter, make_client_config_app_authenticated, AppLayerServerAuth,
+};
 
 use crate::client::options::{ConnectLocalOptions, ConnectOptions, ResumeOptions};
 use crate::client::transport::{
@@ -257,15 +260,16 @@ impl Client {
     ) -> Result<Self, ClientError> {
         // ---- TLS ----
         phase.store(PHASE_TCP, Ordering::Relaxed);
-        let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
+        let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
+            .map_err(|e| ClientError::tls("client config", e))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
-            .map_err(|e| ClientError::Tls(e.to_string()))?;
+            .map_err(|e| ClientError::tls("server name", e))?;
         let tcp = connect_tcp(opts.addr, opts.connect_timeout).await?;
         phase.store(PHASE_TLS, Ordering::Relaxed);
         let tls = connector.connect(server_name, tcp).await?;
         let exporter = extract_tls_exporter(&tls)
-            .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
+            .map_err(|e| ClientError::tls("TLS exporter unavailable", e))?;
 
         // ---- SCRAM ----
         phase.store(PHASE_SCRAM, Ordering::Relaxed);
@@ -277,7 +281,7 @@ impl Client {
         };
         let mut hs = hb
             .build()
-            .map_err(|e| ClientError::Handshake(e.to_string()))?;
+            .map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
 
         let (mut r, mut w) = split(tls);
 
@@ -291,12 +295,12 @@ impl Client {
         };
         write_frame(&mut w, &rmp_serde::to_vec(&init_wire)?)
             .await
-            .map_err(|e| ClientError::Transport(format!("send auth_init: {e}")))?;
+            .map_err(|e| ClientError::transport("send auth_init", e))?;
 
         // Step 2: challenge
-        let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ch_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
-            .map_err(|e| ClientError::Transport(format!("read challenge: {e}")))?;
+            .map_err(|e| ClientError::transport("read challenge", e))?;
         let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes)?;
         let salt: [u8; 16] = ch_wire
             .salt
@@ -330,13 +334,13 @@ impl Client {
             (hs, res)
         })
         .await
-        .map_err(|e| ClientError::Handshake(format!("Argon2 spawn_blocking: {e}")))?;
+        .map_err(|e| ClientError::handshake_with("Argon2 spawn_blocking", e))?;
         hs = hs_ret;
         // KDF is done: the remaining waits (proof write, `auth_ok` read) are
         // SCRAM I/O again — a timeout here must not be labelled `kdf`.
         phase.store(PHASE_SCRAM, Ordering::Relaxed);
         let (proof, derived, auth_message) =
-            result.map_err(|e| ClientError::Handshake(e.to_string()))?;
+            result.map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
 
         // Step 4: send proof
         let proof_wire = WireClientProof {
@@ -344,12 +348,12 @@ impl Client {
         };
         write_frame(&mut w, &rmp_serde::to_vec(&proof_wire)?)
             .await
-            .map_err(|e| ClientError::Transport(format!("send proof: {e}")))?;
+            .map_err(|e| ClientError::transport("send proof", e))?;
 
         // Step 5: auth_ok
-        let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ok_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
-            .map_err(|e| ClientError::Transport(format!("read auth_ok: {e}")))?;
+            .map_err(|e| ClientError::transport("read auth_ok", e))?;
         let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
 
         let server_signature: [u8; 32] = ok_wire
@@ -415,7 +419,7 @@ impl Client {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 *guard = Some(*pin);
             })
-            .map_err(|e| ClientError::Handshake(e.to_string()))?;
+            .map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
 
         let pinned_hash = pin_capture
             .lock()
@@ -461,7 +465,7 @@ impl Client {
         };
         let mut hs = hb
             .build()
-            .map_err(|e| ClientError::Handshake(e.to_string()))?;
+            .map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
 
         let (mut r, mut w) = split(stream);
 
@@ -475,12 +479,12 @@ impl Client {
         };
         write_frame(&mut w, &rmp_serde::to_vec(&init_wire)?)
             .await
-            .map_err(|e| ClientError::Transport(format!("send auth_init: {e}")))?;
+            .map_err(|e| ClientError::transport("send auth_init", e))?;
 
         // Step 2: challenge
-        let ch_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ch_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
-            .map_err(|e| ClientError::Transport(format!("read challenge: {e}")))?;
+            .map_err(|e| ClientError::transport("read challenge", e))?;
         let ch_wire: WireChallenge = rmp_serde::from_slice(&ch_bytes)?;
         let salt: [u8; 16] = ch_wire
             .salt
@@ -509,10 +513,10 @@ impl Client {
             (hs, res)
         })
         .await
-        .map_err(|e| ClientError::Handshake(format!("Argon2 spawn_blocking: {e}")))?;
+        .map_err(|e| ClientError::handshake_with("Argon2 spawn_blocking", e))?;
         hs = hs_ret;
         let (proof, derived, auth_message) =
-            result.map_err(|e| ClientError::Handshake(e.to_string()))?;
+            result.map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
 
         // Step 4: send proof
         let proof_wire = WireClientProof {
@@ -520,12 +524,12 @@ impl Client {
         };
         write_frame(&mut w, &rmp_serde::to_vec(&proof_wire)?)
             .await
-            .map_err(|e| ClientError::Transport(format!("send proof: {e}")))?;
+            .map_err(|e| ClientError::transport("send proof", e))?;
 
         // Step 5: auth_ok
-        let ok_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT)
+        let ok_bytes = read_frame(&mut r, MAX_PRE_AUTH_FRAME)
             .await
-            .map_err(|e| ClientError::Transport(format!("read auth_ok: {e}")))?;
+            .map_err(|e| ClientError::transport("read auth_ok", e))?;
         let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
 
         let server_signature: [u8; 32] = ok_wire
@@ -583,7 +587,7 @@ impl Client {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 *guard = Some(*pin);
             })
-            .map_err(|e| ClientError::Handshake(e.to_string()))?;
+            .map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
 
         let pinned_hash = pin_capture
             .lock()
@@ -620,10 +624,11 @@ impl Client {
         let _ = default_provider().install_default();
 
         // ---- TLS ----
-        let client_cfg = make_client_config_no_ca().map_err(|e| ClientError::Tls(e.to_string()))?;
+        let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
+            .map_err(|e| ClientError::tls("client config", e))?;
         let connector = TlsConnector::from(client_cfg);
         let server_name = ServerName::try_from(opts.server_name.clone())
-            .map_err(|e| ClientError::Tls(e.to_string()))?;
+            .map_err(|e| ClientError::tls("server name", e))?;
         // ResumeOptions carries no timeout knobs — resumption preserves the
         // prior unbounded-wait connect behaviour (None).
         let tcp = connect_tcp(opts.addr, None).await?;
@@ -632,7 +637,7 @@ impl Client {
         // exporter value will be used by the server to verify binding; the
         // client sends it implicitly via binding_mode in WireResumeInit.
         let tls_exporter = extract_tls_exporter(&tls)
-            .ok_or_else(|| ClientError::Handshake("TLS exporter unavailable".into()))?;
+            .map_err(|e| ClientError::tls("TLS exporter unavailable", e))?;
 
         let (mut r, mut w) = split(tls);
 
@@ -703,10 +708,10 @@ where
     };
     write_frame(w, &rmp_serde::to_vec(&proof_init)?)
         .await
-        .map_err(|e| ClientError::Transport(format!("send resume_proof: {e}")))?;
-    let proof_bytes = read_frame(r, MAX_FRAME_SIZE_DEFAULT)
+        .map_err(|e| ClientError::transport("send resume_proof", e))?;
+    let proof_bytes = read_frame(r, MAX_PRE_AUTH_FRAME)
         .await
-        .map_err(|e| ClientError::Transport(format!("read resume_proof_ok: {e}")))?;
+        .map_err(|e| ClientError::transport("read resume_proof_ok", e))?;
     let proof_ok: WireResumeProofOk = rmp_serde::from_slice(&proof_bytes)?;
     verify_resume_identity_proof(&proof_ok, &client_nonce, &tls_exporter, &pinned_hash)?;
 
@@ -718,12 +723,12 @@ where
     };
     write_frame(w, &rmp_serde::to_vec(&init_wire)?)
         .await
-        .map_err(|e| ClientError::Transport(format!("send resume_init: {e}")))?;
+        .map_err(|e| ClientError::transport("send resume_init", e))?;
 
     // ---- Read ResumeOk ----
-    let ok_bytes = read_frame(r, MAX_FRAME_SIZE_DEFAULT)
+    let ok_bytes = read_frame(r, MAX_PRE_AUTH_FRAME)
         .await
-        .map_err(|e| ClientError::Transport(format!("read resume_ok: {e}")))?;
+        .map_err(|e| ClientError::transport("read resume_ok", e))?;
     let ok_wire: WireResumeOk = rmp_serde::from_slice(&ok_bytes)?;
 
     let session_id: [u8; 32] = ok_wire
@@ -772,14 +777,14 @@ pub(crate) fn verify_resume_identity_proof(
         .try_into()
         .map_err(|_| ClientError::Protocol("resume proof: signature size".into()))?;
     if &sha256(&server_pub_key) != pinned_hash {
-        return Err(ClientError::Handshake(
-            "resume: server identity does not match pinned hash".into(),
+        return Err(ClientError::handshake(
+            "resume: server identity does not match pinned hash",
         ));
     }
     let msg = resume_proof_message(client_nonce, tls_exporter);
     if !ed25519_verify_strict(&server_pub_key, &msg, &signature) {
-        return Err(ClientError::Handshake(
-            "resume: server identity proof invalid".into(),
+        return Err(ClientError::handshake(
+            "resume: server identity proof invalid",
         ));
     }
     Ok(())

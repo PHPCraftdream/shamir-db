@@ -186,8 +186,13 @@ impl FunctionMeta {
 /// facade's `create_function_with_opts`.
 ///
 /// Default matches pre-slice-9 behaviour: replace=false, Private, Invoker,
-/// no secret grants, no net grants (empty `net_grants` = full DB-wide
-/// `net_allowlist`, see [`FunctionMeta::net_grants`]).
+/// no secret grants. For user-created functions an EMPTY/absent `net_grants`
+/// means NO egress for this function (fail-closed, like `secret_grants`);
+/// granting egress requires explicitly listing host patterns, which are then
+/// intersected with the DB-wide `net_allowlist` (a function can never exceed
+/// the DB ceiling). Builtin functions with no catalogue row are a separate
+/// code path and keep the full allowlist. See [`FunctionMeta::net_grants`]
+/// and `build_net_gateway`.
 #[derive(Debug, Clone)]
 pub struct CreateFunctionOptions {
     pub replace: bool,

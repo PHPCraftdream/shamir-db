@@ -157,7 +157,7 @@ fn make_backend(interner: &Interner, id: u32, dim: u32, metric: VectorMetric) ->
         },
     ));
     let embedding_key = intern(interner, "embedding");
-    VectorBackend::new(desc, vec![embedding_key], adapter)
+    VectorBackend::new(desc, vec![embedding_key], adapter, None)
 }
 
 /// Encode a vector as the `{embedding: [f64; dim]}` record shape that
