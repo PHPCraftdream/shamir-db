@@ -1,7 +1,10 @@
 //! Tests for `val` module — every constructor is verified against exact
 //! wire shape and round-tripped through msgpack.
 
-use shamir_query_types::filter::FilterValue;
+use shamir_query_types::batch::BatchOp;
+use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_query_types::read::ReadQuery;
+use shamir_query_types::wire::db_message::DbRequest;
 use shamir_types::mpack;
 
 use crate::val::*;
@@ -17,6 +20,99 @@ fn assert_wire(fv: FilterValue, expected: shamir_types::types::value::QueryValue
     assert_eq!(got, expected, "wire shape mismatch");
     let back: FilterValue = rmp_serde::from_slice(&bytes).expect("round-trip");
     assert_eq!(back, fv, "round-trip mismatch");
+}
+
+#[test]
+fn rv_types_18ac0cfc_filter_entrypoint_parity() {
+    fn assert_filter_value(filter: Filter, expected: &FilterValue) {
+        match filter {
+            Filter::Eq { value, .. } => assert_eq!(&value, expected),
+            other => panic!("expected Filter::Eq, got {other:?}"),
+        }
+    }
+
+    for value in [
+        i64::MAX as u64,
+        i64::MAX as u64 + 1,
+        i64::MAX as u64 + 3,
+        u64::MAX,
+    ] {
+        for is_array in [false, true] {
+            let raw_literal = if is_array {
+                serde_json::json!([value])
+            } else {
+                serde_json::json!(value)
+            };
+            let expected = if is_array {
+                FilterValue::Array(vec![crate::val::lit_u64(value)])
+            } else {
+                crate::val::lit_u64(value)
+            };
+            // Wire-test fixture exception: JSON values carry the exact raw u64 number.
+            let filter_json = serde_json::json!({
+                "op": "eq",
+                "field": ["n"],
+                "value": raw_literal
+            });
+            let query_json = serde_json::json!({
+                "from": "items",
+                "where": filter_json.clone()
+            });
+            let request_json = serde_json::json!({
+                "op": "create_cursor",
+                "query_version": 4,
+                "db": "app",
+                "query": query_json,
+                "page_size": 10
+            });
+
+            let msgpack_value = rmp_serde::from_slice::<FilterValue>(
+                &rmp_serde::to_vec_named(&filter_json["value"]).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(msgpack_value, expected);
+            assert_eq!(
+                serde_json::from_value::<FilterValue>(filter_json["value"].clone()).unwrap(),
+                expected
+            );
+
+            let query_msgpack =
+                rmp_serde::from_slice::<ReadQuery>(&rmp_serde::to_vec_named(&query_json).unwrap())
+                    .unwrap();
+            assert_filter_value(query_msgpack.r#where.unwrap(), &expected);
+            let query_json_decoded: ReadQuery = serde_json::from_value(query_json.clone()).unwrap();
+            assert_filter_value(query_json_decoded.r#where.unwrap(), &expected);
+
+            let batch_msgpack =
+                rmp_serde::from_slice::<BatchOp>(&rmp_serde::to_vec_named(&query_json).unwrap())
+                    .unwrap();
+            match batch_msgpack {
+                BatchOp::Read(query) => assert_filter_value(query.r#where.unwrap(), &expected),
+                other => panic!("expected BatchOp::Read, got {other:?}"),
+            }
+            let batch_json: BatchOp = serde_json::from_value(query_json.clone()).unwrap();
+            match batch_json {
+                BatchOp::Read(query) => assert_filter_value(query.r#where.unwrap(), &expected),
+                other => panic!("expected BatchOp::Read, got {other:?}"),
+            }
+
+            let request_msgpack: DbRequest =
+                rmp_serde::from_slice(&rmp_serde::to_vec_named(&request_json).unwrap()).unwrap();
+            match request_msgpack {
+                DbRequest::CreateCursor { query, .. } => {
+                    assert_filter_value(query.r#where.unwrap(), &expected)
+                }
+                other => panic!("expected CreateCursor, got {other:?}"),
+            }
+            let request_json_decoded: DbRequest = serde_json::from_value(request_json).unwrap();
+            match request_json_decoded {
+                DbRequest::CreateCursor { query, .. } => {
+                    assert_filter_value(query.r#where.unwrap(), &expected)
+                }
+                other => panic!("expected CreateCursor, got {other:?}"),
+            }
+        }
+    }
 }
 
 // ── lit / From impls ─────────────────────────────────────────────────
