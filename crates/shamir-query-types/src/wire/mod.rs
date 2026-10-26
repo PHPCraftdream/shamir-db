@@ -8,13 +8,16 @@
 //! and the client SDK (`shamir-client`) reference the same definitions
 //! without one depending on the other.
 
+pub mod change_password_secrets;
 pub mod cursor_id;
 pub mod db_message;
+pub mod record_id_string;
 pub mod repl;
 
 #[cfg(test)]
 mod tests;
 
+pub use change_password_secrets::ChangePasswordSecrets;
 pub use cursor_id::CursorId;
 pub use db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 pub use repl::{ReplRepoInfo, ReplRequest, ReplResponse};

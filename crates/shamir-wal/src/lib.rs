@@ -50,14 +50,12 @@ mod segment;
 pub mod segment_set;
 pub mod wal_group_commit;
 
-pub use entry::active_key;
 pub use entry::segment_meta;
 pub use entry::wal_entry_v2;
 pub use segment::wal_segment;
 pub use segment::wal_sink;
 pub use segment::wal_ticket;
 
-pub use active_key::WalActiveKey;
 pub use event_header::{WalEventHeader, WalExtraChange};
 pub use segment_set::SegmentSet;
 pub use wal_entry_v2::{WalEntryV2, WalOpV2, WAL_V2_MAGIC, WAL_V2_VERSION};

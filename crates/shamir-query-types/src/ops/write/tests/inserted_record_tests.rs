@@ -216,3 +216,22 @@ fn no_id_non_map_value_direct_serialization() {
         "no-id non-map value serializes directly"
     );
 }
+
+/// RV-QUERY-TYPES-2D9F22F0: a deserialized record has `id = None` and its
+/// `_id` lands in `fields`; `get_value_owned("_id")` must still return it
+/// (its doc promises the accessor works for every record).
+#[test]
+fn rv_query_types_2d9f22f0_decoded_id_reachable_via_get_value_owned() {
+    let id = RecordId::system("rt-2d9f22f0");
+    let rec = InsertedRecord {
+        id: Some(id),
+        fields: QueryValue::Map(make_base_map()),
+    };
+    let bytes = rmp_serde::to_vec_named(&rec).expect("serialize");
+    let back: InsertedRecord = rmp_serde::from_slice(&bytes).expect("deserialize");
+    let id_val = back.get_value_owned("_id").expect("_id must be reachable");
+    match id_val {
+        QueryValue::Str(s) => assert_eq!(s, rec.id.as_ref().unwrap().to_string()),
+        other => panic!("expected Str, got {other:?}"),
+    }
+}
