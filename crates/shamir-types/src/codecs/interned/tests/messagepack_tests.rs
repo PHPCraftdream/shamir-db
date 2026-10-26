@@ -3,6 +3,8 @@ use crate::codecs::interned::{inner_to_msgpack, msgpack_to_inner};
 use crate::core::interner::Interner;
 use crate::types::common::{new_map, new_set};
 use crate::types::value::InnerValue;
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
 use std::str::FromStr;
 
 #[test]
@@ -769,4 +771,119 @@ fn rv_types_bb78489c_container_prealloc_capped_by_remaining() {
     assert!(msgpack_to_inner(&interner, &[0xdf, 0xff, 0xff, 0xff, 0xff]).is_err());
     // Map16 header declaring u16::MAX entries with no body.
     assert!(msgpack_to_inner(&interner, &[0xde, 0xff, 0xff]).is_err());
+}
+
+// -------------------------------------------------------------------------
+// RV-TYPES-F28FAFBF — golden bytes for the v1 wire/storage projection:
+// `Dec`/`Big` are written as their decimal STRING (MessagePack str) and
+// `Set` as a MessagePack array in insertion order (IndexSet-backed
+// `TSet`); on decode they come back as `Str`/`List`. These tests pin the
+// BYTES, not just the round-trip, so a future wire change cannot pass
+// silently. Encoding per rmp/rmp-serde: fixstr `0xa0 | len` (len ≤ 31),
+// fixarray `0x90 | len`, positive fixint for small `i64`.
+// -------------------------------------------------------------------------
+
+#[test]
+fn f28fafbf_golden_dec_150_is_msgpack_str() {
+    let interner = Interner::new();
+    let v = InnerValue::Dec(Decimal::from_str("1.50").unwrap());
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixstr(len=4) "1.50"
+    assert_eq!(bytes, vec![0xa4, b'1', b'.', b'5', b'0']);
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::Str("1.50".into())
+    );
+}
+
+#[test]
+fn f28fafbf_golden_dec_negative_is_msgpack_str() {
+    let interner = Interner::new();
+    let v = InnerValue::Dec(Decimal::from_str("-2.25").unwrap());
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixstr(len=5) "-2.25"
+    assert_eq!(bytes, vec![0xa5, b'-', b'2', b'.', b'2', b'5']);
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::Str("-2.25".into())
+    );
+}
+
+#[test]
+fn f28fafbf_golden_dec_many_digits_is_msgpack_str() {
+    let interner = Interner::new();
+    let s = "1234567890.123456789"; // scale 3-style projection kept verbatim
+    let v = InnerValue::Dec(Decimal::from_str(s).unwrap());
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixstr(len=20): 0xa0 | 20 = 0xb4
+    let mut expected = vec![0xb4];
+    expected.extend_from_slice(b"1234567890.123456789");
+    assert_eq!(bytes, expected);
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::Str(s.into())
+    );
+}
+
+#[test]
+fn f28fafbf_golden_big_small_is_msgpack_str() {
+    let interner = Interner::new();
+    let v = InnerValue::Big(BigInt::from(999));
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixstr(len=3) "999"
+    assert_eq!(bytes, vec![0xa3, b'9', b'9', b'9']);
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::Str("999".into())
+    );
+}
+
+#[test]
+fn f28fafbf_golden_big_beyond_i64_is_msgpack_str() {
+    let interner = Interner::new();
+    let s = "123456789012345678901234567890"; // > i64::MAX, 30 digits
+    let v = InnerValue::Big(BigInt::from_str(s).unwrap());
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixstr(len=30): 0xa0 | 30 = 0xbe
+    let mut expected = vec![0xbe];
+    expected.extend_from_slice(b"123456789012345678901234567890");
+    assert_eq!(bytes, expected);
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::Str(s.into())
+    );
+}
+
+#[test]
+fn f28fafbf_golden_big_negative_is_msgpack_str() {
+    let interner = Interner::new();
+    let s = "-99999999999999999999999999"; // 26 chars incl. sign
+    let v = InnerValue::Big(BigInt::from_str(s).unwrap());
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixstr(len=26): 0xa0 | 26 = 0xba
+    let mut expected = vec![0xba];
+    expected.extend_from_slice(b"-99999999999999999999999999");
+    assert_eq!(bytes, expected);
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::Str(s.into())
+    );
+}
+
+#[test]
+fn f28fafbf_golden_set_is_msgpack_array_in_insertion_order() {
+    let interner = Interner::new();
+    // TSet is IndexSet-backed: wire order is INSERTION order.
+    let mut set = new_set();
+    set.insert(InnerValue::Int(1));
+    set.insert(InnerValue::Str("a".into()));
+    let v = InnerValue::Set(set);
+    let bytes = inner_to_msgpack(&interner, &v).unwrap();
+    // fixarray(len=2)=0x92; Int(1) → positive fixint 0x01; "a" → fixstr 0xa1 'a'
+    assert_eq!(bytes, vec![0x92, 0x01, 0xa1, b'a']);
+    // Decode: a Set comes back as a plain List (projection is lossy).
+    assert_eq!(
+        msgpack_to_inner(&interner, &bytes).unwrap(),
+        InnerValue::List(vec![InnerValue::Int(1), InnerValue::Str("a".into())]),
+    );
 }

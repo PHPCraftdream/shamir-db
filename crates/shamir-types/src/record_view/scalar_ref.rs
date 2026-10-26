@@ -214,8 +214,13 @@ pub fn scalar_ref_cmp_qv(a: ScalarRef<'_>, b: &QueryValue) -> Option<Ordering> {
 /// equal iff their canonical [`NumericKey`]s are equal and neither is NaN
 /// — NaN matches nothing, not even itself. Because a `ScalarRef` has no
 /// `Dec`/`Big` variants, a non-integral `Dec`/`Big` literal never equals
-/// any scalar field (e.g. `F64(0.5)` vs `Dec(0.5)` is FALSE — the lossy
-/// `F64` ↔ `Dec` ordering is ordering-only). `Str`/`Bin`/`Bool`/`Null`
+/// any numeric scalar field (e.g. `F64(0.5)` vs `Dec(0.5)` is FALSE — the
+/// lossy `F64` ↔ `Dec` ordering is ordering-only). One v1-wire exception
+/// (RV-TYPES-F28FAFBF): a stored `Dec`/`Big` projects to its decimal STRING
+/// (see `codecs::README`), so `ScalarRef::Str` is also compared against
+/// `QueryValue::Dec`/`Big` by parsing the string and applying the same
+/// canonical-`NumericKey` rule; an unparseable string is simply not equal.
+/// `Str`/`Bin`/`Bool`/`Null`
 /// compare as themselves; incomparable pairs are `false`, which preserves
 /// the old "incomparable → `Ne` true" behaviour at call sites.
 pub fn scalar_ref_numeric_eq(a: ScalarRef<'_>, b: &QueryValue) -> bool {
@@ -241,6 +246,27 @@ pub fn scalar_ref_numeric_eq(a: ScalarRef<'_>, b: &QueryValue) -> bool {
         (ScalarRef::Null, QueryValue::Null) => true,
         (ScalarRef::Bool(x), QueryValue::Bool(y)) => x == *y,
         (ScalarRef::Str(x), QueryValue::Str(y)) => x == y.as_str(),
+        // RV-TYPES-F28FAFBF: a stored Dec/Big projects to its decimal
+        // string on the v1 wire, so a typed literal must be able to match
+        // it. Same ONE RULE as above; exact parse only (a string that would need
+        // rounding is NOT equal to any typed value); parse failure ⇒ not equal.
+        (ScalarRef::Str(x), QueryValue::Dec(d)) => match Decimal::from_str_exact(x) {
+            Ok(parsed) => match (
+                NumericKey::from_decimal(&parsed),
+                NumericKey::from_decimal(d),
+            ) {
+                (Some(xk), Some(yk)) => xk == yk,
+                // Both non-integral: exact decimal value equality (the
+                // ONE RULE's decimal-representation class).
+                (None, None) => parsed == *d,
+                _ => false,
+            },
+            Err(_) => false,
+        },
+        (ScalarRef::Str(x), QueryValue::Big(bi)) => match BigInt::parse_bytes(x.as_bytes(), 10) {
+            Some(parsed) => NumericKey::from_bigint(&parsed) == NumericKey::from_bigint(bi),
+            None => false,
+        },
         (ScalarRef::Bin(x), QueryValue::Bin(y)) => x == y.as_slice(),
         _ => false,
     }

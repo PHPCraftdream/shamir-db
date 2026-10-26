@@ -3,3 +3,4 @@
 
 mod scalar_ref_cmp_qv_tests;
 mod scalar_ref_cmp_tests;
+mod scalar_ref_numeric_eq_f28fafbf_tests;
