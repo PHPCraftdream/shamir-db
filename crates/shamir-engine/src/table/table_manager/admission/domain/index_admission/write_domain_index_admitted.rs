@@ -344,9 +344,13 @@ impl TableManager {
                         quantization,
                     ),
                 );
-                let backend: Arc<dyn IndexBackend> = Arc::new(
-                    crate::index2::vector::VectorBackend::new(desc, first_path, adapter),
-                );
+                let backend: Arc<dyn IndexBackend> =
+                    Arc::new(crate::index2::vector::VectorBackend::new(
+                        desc,
+                        first_path,
+                        adapter,
+                        Some(Arc::clone(&self.info_store)),
+                    ));
                 (kind, backend)
             }
             _ => {
