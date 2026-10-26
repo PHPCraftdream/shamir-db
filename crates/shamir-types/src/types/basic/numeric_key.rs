@@ -18,11 +18,13 @@
 //!   comparison is ORDERING-only territory;
 //! - ordering (`<`, `>`, sort) keeps the lossy `f64` path, untouched.
 //!
-//! Stored-data note (wire projection unchanged until D2): records on disk
-//! serialise `Dec`/`Big` as their decimal STRING, so a GROUP BY / FK match
-//! over STORED bytes sees them as `Str` — they group/match as strings
-//! until D2 changes the wire/storage projection. The exact numeric classes
-//! above apply to the in-memory (type-preserving) path.
+//! Stored-data note (documented v1 projection, RV-TYPES-F28FAFBF): records
+//! on disk serialise `Dec`/`Big` as their decimal STRING, so a GROUP BY /
+//! DISTINCT over STORED bytes sees them as `Str` and groups them as strings.
+//! A filter / FK comparison of a stored string against a TYPED `Dec`/`Big`
+//! literal parses the string exactly and applies this rule. The exact
+//! numeric classes above apply to the in-memory (type-preserving) path; see
+//! the codecs README for the projection and the future typed encoding.
 
 use std::hash::Hash;
 

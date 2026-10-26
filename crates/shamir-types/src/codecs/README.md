@@ -340,8 +340,36 @@ pub fn inner_to_user(value: &InnerValue, interner: &Interner) -> UserValue
 | Str | string | string |
 | Bin | array `[1,2,3]` | binary |
 | List | array `[...]` | array `[...]` |
-| Set | array `[...]` | array `[...]` |
+| Set | array `[...]` | array `[...]` (insertion order) |
 | Map | object `{...}` | map `{...}` |
+| Dec | number | **string** (decimal text) — see projection below |
+| Big | number | **string** (decimal text) — see projection below |
+
+## v1 Wire/Storage Projection (Dec / Big / Set)
+
+On MessagePack encode, `Dec` and `Big` are written as their decimal
+string (`serialize_str(&d.to_string())` — a plain MessagePack `str`, e.g.
+`"1.50"` → `a4 31 2e 35 30`), and `Set` is written as a plain MessagePack
+array in the set's ITERATION order (the `TSet` storage is `IndexSet`-backed,
+i.e. insertion order). On decode there is no type tag, so a `Dec`/`Big`
+comes back as `Str` and a `Set` as `List`. This is the documented v1
+projection — it is intentional, NOT a protocol change, and the bytes stay
+as they are.
+
+Consequences (per the ONE RULE in `types::numeric_key`):
+
+- A stored `Dec`/`Big` groups and compares as a STRING over stored bytes
+  (DISTINCT / GROUP BY / index keys see the projected `Str`).
+- The in-memory canonical `NumericKey` classes apply only to the
+  type-preserving (in-memory) path.
+- Equality is: equal iff equal canonical `NumericKey` and not NaN. Typed
+  `Dec`/`Big` literals CAN match a stored decimal string
+  (`scalar_ref_numeric_eq` parses the string); the raw `Str` form groups
+  as a string.
+
+**Future typed encoding:** a true typed round trip (v2) would need an
+explicit MessagePack type tag (ext code or schema byte) plus a decoder
+version gate; it is NOT part of the current wire format.
 
 ## Performance Comparison
 
@@ -427,12 +455,15 @@ let result: i32 = from_bytes(&bytes)?;
 
 ### Basic Codec Tests
 - ✅ LegacyText roundtrip for all types (inactive — file orphaned)
-- ✅ MessagePack roundtrip for all types
+- ✅ MessagePack roundtrip for all types EXCEPT the documented v1
+  projection: `Dec`/`Big` round-trip as `Str` and `Set` as `List`
+  (see "v1 Wire/Storage Projection" above)
 - ✅ Bincode roundtrip for all types
 
 ### Interned Codec Tests
 - ✅ LegacyText ↔ InnerValue conversion with interning
-- ✅ MessagePack ↔ InnerValue conversion with interning
+- ✅ MessagePack ↔ InnerValue conversion with interning (note: `Dec`/
+  `Big` come back as `Str`, `Set` as `List` — see projection above)
 - ✅ Key interning on decode
 - ✅ Key de-interning on encode
 - ✅ Nested structures
