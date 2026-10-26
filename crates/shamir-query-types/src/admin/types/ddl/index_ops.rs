@@ -232,7 +232,11 @@ pub struct RenameIndexOp {
     /// Idempotent retry: if this field is set and a status record already
     /// exists for this `request_id`, the server short-circuits and returns
     /// the existing status instead of re-executing the mutation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::record_id_string::option"
+    )]
     pub request_id: Option<RecordId>,
 }
 
@@ -261,6 +265,10 @@ pub struct DropIndexOp {
     /// Idempotent retry: if this field is set and a status record already
     /// exists for this `request_id`, the server short-circuits and returns
     /// the existing status instead of re-executing the mutation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::record_id_string::option"
+    )]
     pub request_id: Option<RecordId>,
 }

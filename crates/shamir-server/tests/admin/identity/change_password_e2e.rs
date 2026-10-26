@@ -37,7 +37,7 @@ use shamir_connect::server::session::{Session, SessionPermissions, SessionStore}
 
 use shamir_db::ShamirDb;
 
-use shamir_query_types::wire::{DbRequest, DbResponse};
+use shamir_query_types::wire::{ChangePasswordSecrets, DbRequest, DbResponse};
 
 use shamir_server::db_handler::{AdminGlue, ShamirDbHandler};
 use shamir_server::user_directory::FjallUserDirectory;
@@ -283,12 +283,12 @@ async fn change_password_success_persists_revokes_and_kills_other_sessions() {
         &handler,
         &store,
         &sid_a,
-        &DbRequest::ChangePasswordVerify {
+        &DbRequest::ChangePasswordVerify(ChangePasswordSecrets {
             client_proof_old: client_proof_old.to_vec(),
             new_salt: new_salt.to_vec(),
             new_stored_key: new_derived.stored_key.0.to_vec(),
             new_server_key: new_derived.server_key.to_vec(),
-        },
+        }),
         0,
     )
     .await;
@@ -418,12 +418,12 @@ async fn change_password_wrong_old_proof_rejected_and_changes_nothing() {
         &handler,
         &store,
         &sid_a,
-        &DbRequest::ChangePasswordVerify {
+        &DbRequest::ChangePasswordVerify(ChangePasswordSecrets {
             client_proof_old: bad_proof.to_vec(),
             new_salt: new_salt.to_vec(),
             new_stored_key: new_derived.stored_key.0.to_vec(),
             new_server_key: new_derived.server_key.to_vec(),
-        },
+        }),
         0,
     )
     .await;

@@ -190,7 +190,11 @@ pub struct QueryResult {
     ///
     /// Backward-compatible: `#[serde(default, skip_serializing_if = "Option::is_none")]`
     /// → old peers never see this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::wire::record_id_string::option"
+    )]
     pub op_id: Option<RecordId>,
     /// DDL operation status (populated for the synchronous `Succeeded` case).
     ///

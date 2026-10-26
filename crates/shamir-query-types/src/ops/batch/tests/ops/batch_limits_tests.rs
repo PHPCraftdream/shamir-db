@@ -77,3 +77,20 @@ fn default_matches_serde_default() {
     let deserialized = to_batch_limits(&qv);
     assert_eq!(deserialized, BatchLimits::default());
 }
+
+/// RV-QUERY-TYPES-4BAE89B5: a time-only `limits` map (or any partial map of
+/// the ORIGINAL five fields) must deserialize — every field carries a
+/// `#[serde(default = ...)]` now, not just the post-#662 ones.
+#[test]
+fn rv_query_types_4bae89b5_time_only_limits_map_accepted() {
+    let qv = mpack!({ "max_execution_time_secs": 10 });
+    let limits = to_batch_limits(&qv);
+    assert_eq!(limits.max_execution_time_secs, 10);
+    assert_eq!(
+        limits,
+        BatchLimits {
+            max_execution_time_secs: 10,
+            ..BatchLimits::default()
+        }
+    );
+}

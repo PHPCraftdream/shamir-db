@@ -34,7 +34,7 @@ use shamir_connect::server::user_record::UserRecord;
 
 use shamir_db::ShamirDb;
 
-use shamir_query_types::wire::{DbRequest, DbResponse};
+use shamir_query_types::wire::{ChangePasswordSecrets, DbRequest, DbResponse};
 
 use zeroize::Zeroizing;
 
@@ -217,12 +217,12 @@ async fn change_password_still_works_after_bootstrap_rotation() {
         &handler,
         &store,
         &sid_a,
-        &DbRequest::ChangePasswordVerify {
+        &DbRequest::ChangePasswordVerify(ChangePasswordSecrets {
             client_proof_old: bad_proof.to_vec(),
             new_salt: new_salt.to_vec(),
             new_stored_key: new_derived.stored_key.0.to_vec(),
             new_server_key: new_derived.server_key.to_vec(),
-        },
+        }),
         0,
     )
     .await;
@@ -297,12 +297,12 @@ async fn change_password_still_works_after_bootstrap_rotation() {
         &handler,
         &store,
         &sid_a,
-        &DbRequest::ChangePasswordVerify {
+        &DbRequest::ChangePasswordVerify(ChangePasswordSecrets {
             client_proof_old: client_proof_old.to_vec(),
             new_salt: final_salt.to_vec(),
             new_stored_key: final_derived.stored_key.0.to_vec(),
             new_server_key: final_derived.server_key.to_vec(),
-        },
+        }),
         0,
     )
     .await;

@@ -11,6 +11,7 @@ use shamir_types::types::record_id::RecordId;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DdlOpStatus {
     /// The operation's stable identifier (minted by the server at dispatch).
+    #[serde(with = "crate::wire::record_id_string")]
     pub op_id: RecordId,
     /// Kind of DDL operation that was performed.
     pub kind: DdlOpKind,
