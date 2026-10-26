@@ -5,7 +5,7 @@ use shamir_connect::common::time::{ns, UnixNanos};
 use shamir_connect::common::types::BindingMode;
 use shamir_connect::server::resume::{
     issue_initial_ticket, new_user_state_map, process_resume, InMemoryConsumedCounters,
-    ResumeRequest,
+    ResumeConfig, ResumeRequest,
 };
 use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::SessionStore;
@@ -21,7 +21,7 @@ fn full_resume_round_trip() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, ticket_exp) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -110,7 +110,7 @@ fn rejects_expired_ticket() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -155,7 +155,7 @@ fn rejects_when_user_kicked_via_tickets_invalid_before() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -201,7 +201,7 @@ fn ticket_one_ns_after_kick_succeeds() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -245,7 +245,7 @@ fn rejects_anti_downgrade_tls_to_browser() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -289,7 +289,7 @@ fn allows_browser_to_native_upgrade_by_default() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsNoExport.as_u8(),
@@ -334,7 +334,7 @@ fn strict_mode_rejects_browser_to_native() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsNoExport.as_u8(),
@@ -376,7 +376,7 @@ fn rejects_when_user_unknown() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -410,7 +410,7 @@ fn rejects_when_user_unknown() {
 
 #[test]
 fn rejects_when_ticket_key_changed_no_overlap() {
-    let mut cfg = fixed_config();
+    let cfg = fixed_config();
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
@@ -419,7 +419,7 @@ fn rejects_when_ticket_key_changed_no_overlap() {
 
     let now = UnixNanos::now().as_u64();
     let (ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -431,9 +431,10 @@ fn rejects_when_ticket_key_changed_no_overlap() {
     )
     .unwrap();
 
-    // Server emergency-rotated ticket_key without overlap.
-    cfg.ticket_key = [0xcdu8; 32];
-    cfg.ticket_key_previous = None;
+    // Server emergency-rotated ticket_key without overlap. Keys are
+    // immutable after construction (RV-CONNECT-B11F48CA): build a fresh
+    // config carrying the new key.
+    let cfg = ResumeConfig::new([0xcdu8; 32], None, true, false);
 
     let req = ResumeRequest {
         ticket_wire_bytes: &ticket_bytes,
@@ -457,7 +458,7 @@ fn rejects_when_ticket_key_changed_no_overlap() {
 
 #[test]
 fn ticket_works_under_previous_key_during_overlap() {
-    let mut cfg = fixed_config();
+    let cfg = fixed_config();
     let counters = InMemoryConsumedCounters::new();
     let user_id = [0x11u8; 16];
     let users = new_user_state_map();
@@ -465,7 +466,7 @@ fn ticket_works_under_previous_key_during_overlap() {
     let store = SessionStore::new();
 
     let now = UnixNanos::now().as_u64();
-    let old_key = cfg.ticket_key;
+    let old_key = *cfg.ticket_key();
     let (ticket_bytes, _) = issue_initial_ticket(
         &old_key,
         user_id,
@@ -479,9 +480,9 @@ fn ticket_works_under_previous_key_during_overlap() {
     )
     .unwrap();
 
-    // Server rotated current → previous = old; current = new.
-    cfg.ticket_key = [0xcdu8; 32];
-    cfg.ticket_key_previous = Some(old_key);
+    // Server rotated current → previous = old; current = new (fresh
+    // immutable config, RV-CONNECT-B11F48CA).
+    let cfg = ResumeConfig::new([0xcdu8; 32], Some(old_key), true, false);
 
     let req = ResumeRequest {
         ticket_wire_bytes: &ticket_bytes,
@@ -514,7 +515,7 @@ fn rejects_aad_tampered_ticket() {
 
     let now = UnixNanos::now().as_u64();
     let (mut ticket_bytes, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -563,7 +564,7 @@ fn multi_device_family_isolation() {
 
     // Two independent initial tickets — server issues fresh family_id each time.
     let (ticket_a, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),
@@ -576,7 +577,7 @@ fn multi_device_family_isolation() {
     .unwrap();
 
     let (ticket_b, _) = issue_initial_ticket(
-        &cfg.ticket_key,
+        cfg.ticket_key(),
         user_id,
         "alice".into(),
         BindingMode::TlsExporter.as_u8(),

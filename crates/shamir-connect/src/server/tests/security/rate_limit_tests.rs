@@ -2,7 +2,8 @@ use crate::common::time::{ns, UnixNanos};
 use crate::server::lockout::Subnet;
 use crate::server::rate_limit::{
     BucketState, InMemoryRateLimiter, RateDecision, RateLimitSnapshot, RateLimitSnapshotError,
-    RateLimitSnapshotSink, RateLimiter, WARMUP_DIVISOR, WARMUP_WINDOW_NS,
+    RateLimitSnapshotSink, RateLimiter, RATE_LIMIT_AUTH_INIT_PER_SECOND, WARMUP_DIVISOR,
+    WARMUP_WINDOW_NS,
 };
 use std::sync::Arc;
 
@@ -384,4 +385,24 @@ fn rv_rate_06ab39cf_stale_timestamp_does_not_recredit_refilled_interval() {
         r.check(s(1), t1),
         RateDecision::RateLimited { .. }
     ));
+}
+
+#[test]
+fn rv_connect_064f9fe7_zero_rate_rejected() {
+    // RV-CONNECT-064F9FE7: `with_rate(_, 0)` used to construct a limiter
+    // with rate 0 — zero capacity, so the first `check` past warmup
+    // underflowed the full-bucket initializer (`capacity - cost`) and every
+    // subsequent request was throttled forever. Zero-rate construction is
+    // now explicitly defined as clamping to the default rate.
+    let r = InMemoryRateLimiter::with_rate(0, 0);
+    let now = WARMUP_WINDOW_NS + 1; // past warmup
+
+    assert_eq!(
+        r.effective_rate_per_sec(now),
+        RATE_LIMIT_AUTH_INIT_PER_SECOND,
+        "zero rate must be clamped to the default rate"
+    );
+    // Bucket math is well-defined: capacity > cost, first request allowed.
+    assert_eq!(r.check(s(9), now), RateDecision::Allowed);
+    assert_eq!(r.check(s(9), now), RateDecision::Allowed);
 }
