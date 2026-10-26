@@ -118,6 +118,11 @@ impl ShamirAdminExecutor {
             .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
+        self.shamir
+            .system_store()
+            .flush_system_repo_durable(&table)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "created_replication_profile": @(QueryValue::Str(name)),
         })))
@@ -148,6 +153,11 @@ impl ShamirAdminExecutor {
             expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
+        self.shamir
+            .system_store()
+            .flush_system_repo_durable(&table)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "dropped_replication_profile": @(QueryValue::Str(name)),
             "existed": @(QueryValue::Bool(result)),
@@ -231,6 +241,11 @@ impl ShamirAdminExecutor {
             .persist_table_interner(&table, None)
             .await
             .map_err(|e| err(e.to_string()))?;
+        self.shamir
+            .system_store()
+            .flush_system_repo_durable(&table)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "created_publication": @(QueryValue::Str(name)),
         })))
@@ -261,6 +276,11 @@ impl ShamirAdminExecutor {
             expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
+        self.shamir
+            .system_store()
+            .flush_system_repo_durable(&table)
+            .await
+            .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
             "dropped_publication": @(QueryValue::Str(name)),
             "existed": @(QueryValue::Bool(result)),
@@ -427,6 +447,11 @@ impl ShamirAdminExecutor {
             expected_version: None,
         };
         let result = self.delete_repl(&table, &del_op).await?;
+        self.shamir
+            .system_store()
+            .flush_system_repo_durable(&table)
+            .await
+            .map_err(|error| err(error.to_string()))?;
         if result {
             // PR8b: the delete can remove a non-quarantined row's cache
             // entry (boxed: Round-14).
@@ -688,6 +713,11 @@ impl ShamirAdminExecutor {
         self.shamir
             .system_store()
             .persist_table_interner(&table, None)
+            .await
+            .map_err(|e| err(e.to_string()))?;
+        self.shamir
+            .system_store()
+            .flush_system_repo_durable(&table)
             .await
             .map_err(|e| err(e.to_string()))?;
         Box::pin(self.shamir.flush_seed_catalogue()) // Round-12 stack pin

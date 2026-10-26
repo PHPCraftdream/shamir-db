@@ -131,7 +131,9 @@ impl ShamirDb {
             .await
     }
 
-    /// Like [`create_function_with_opts`] but with an explicit [`Actor`].
+    /// `replace` only replaces a persisted function after target Write authorization,
+    /// retaining its ResourceMeta. Live-only names (including builtins) cannot be
+    /// replaced through durable creation, which prevents restart divergence.
     pub async fn create_function_with_opts_as(
         &self,
         name: &str,
@@ -195,7 +197,10 @@ impl ShamirDb {
         wasm.hash(&mut hasher);
         let wasm_hash = format!("{:016x}", hasher.finish());
 
-        if !opts.replace && self.functions.contains(name) {
+        if !opts.replace
+            && (self.functions.contains(name)
+                || self.system_store.load_function(name).await?.is_some())
+        {
             return Err(DbError::Function(format!(
                 "function '{}' already exists",
                 name
@@ -248,10 +253,42 @@ impl ShamirDb {
             ArtifactKind::Wasm.as_query_value(),
         );
         let mut record = shamir_types::types::value::QueryValue::Map(m);
-        meta.inject_into(&mut record);
-        self.system_store
-            .save_function(name, &record, &ResourceMeta::owned_enforced(actor.clone()))
-            .await?;
+        // Namespace Create permits new names only. Replacing an existing
+        // persisted function requires Function Write and retains ACL metadata.
+        if opts.replace {
+            let existing_record = self.system_store.load_function(name).await?;
+            if self.functions.contains(name) && existing_record.is_none() {
+                return Err(DbError::Function(format!(
+                    "cannot replace live-only function '{}'",
+                    name
+                )));
+            }
+            if let Some(existing) = existing_record {
+                self.authorize_access(
+                    &actor,
+                    &ResourcePath::Function {
+                        name: name.to_string(),
+                    },
+                    Action::Write,
+                )
+                .await
+                .map_err(|e| DbError::Function(e.to_string()))?;
+                meta.inject_into(&mut record);
+                self.system_store
+                    .save_function(name, &record, &ResourceMeta::from_record(&existing))
+                    .await?;
+            } else {
+                meta.inject_into(&mut record);
+                self.system_store
+                    .save_function(name, &record, &ResourceMeta::owned_enforced(actor.clone()))
+                    .await?;
+            }
+        } else {
+            meta.inject_into(&mut record);
+            self.system_store
+                .save_function(name, &record, &ResourceMeta::owned_enforced(actor.clone()))
+                .await?;
+        }
 
         if opts.replace {
             self.functions.replace(name, Arc::new(wf));
@@ -295,10 +332,13 @@ impl ShamirDb {
         // restart-visibility guarantee is claimed for that case.) Builtins
         // have no durable row — the delete matches nothing and succeeds
         // idempotently.
+        // Durable catalogue-only entries count as existent even when no live
+        // artifact was materialized (for example persisted native functions).
+        let existed = self.system_store.load_function(name).await?.is_some();
         self.system_store.remove_function(name).await?;
-        let existed = self.functions.remove(name);
+        let live_existed = self.functions.remove(name);
         let _ = self.function_meta.remove(name);
-        Ok(existed)
+        Ok(existed || live_existed)
     }
 
     /// Rename a function. The underlying WASM module is not recompiled.

@@ -60,6 +60,10 @@ async fn write_row(shamir: &ShamirDb, name: &str, record: QueryValue) -> DbResul
         .system_store()
         .persist_table_interner(&table, None)
         .await?;
+    shamir
+        .system_store()
+        .flush_system_repo_durable(&table)
+        .await?;
     shamir.flush_seed_catalogue().await
 }
 

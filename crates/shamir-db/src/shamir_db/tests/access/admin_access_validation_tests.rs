@@ -42,6 +42,7 @@ use crate::shamir_db::{PrincipalInfo, PrincipalResolver, ShamirDb};
 use shamir_types::access::{
     principal64_from_username, Actor, ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
+use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 
 /// In-memory `ShamirDb` with `testdb` / `main` / `items` and NO
@@ -586,4 +587,187 @@ async fn remove_group_member_nonexistent_user_is_harmless_noop() {
 
     let members = shamir.group_members(gid).await.unwrap();
     assert!(!members.contains(&999_999));
+}
+
+// ============================================================================
+// access_tree — merged from access_tree_tests.rs (layout slot consolidation;
+// both modules exercise the access-control admin surface).
+// ============================================================================
+
+/// Test-only mock resolver: returns a single PrincipalInfo for "alice",
+/// mirroring the pre-#559 Store-B-backed principals listing. Task #559
+/// changed `access_tree`'s principals loop to read from the resolver.
+struct MockAliceResolver;
+
+impl PrincipalResolver for MockAliceResolver {
+    fn resolve(&self, p64: u64) -> Option<PrincipalInfo> {
+        let alice = principal64_from_username("alice");
+        if p64 == alice {
+            Some(PrincipalInfo {
+                principal64: alice,
+                name: "alice".to_string(),
+                user_id: [0u8; 16],
+                database: None,
+                superuser: false,
+            })
+        } else {
+            None
+        }
+    }
+    fn list(&self) -> Vec<PrincipalInfo> {
+        vec![PrincipalInfo {
+            principal64: principal64_from_username("alice"),
+            name: "alice".to_string(),
+            user_id: [0u8; 16],
+            database: None,
+            superuser: false,
+        }]
+    }
+}
+
+/// Find a child node by its `name`, panicking if absent. Children order
+/// is non-deterministic (dashmap iteration), so always look up by name.
+fn child<'a>(node: &'a QueryValue, name: &str) -> &'a QueryValue {
+    node["children"]
+        .as_array()
+        .expect("children array")
+        .iter()
+        .find(|c| c["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("child '{name}' not found"))
+}
+
+#[tokio::test]
+async fn access_tree_structure_meta_and_principals() {
+    let shamir = ShamirDb::init_memory()
+        .await
+        .unwrap()
+        .with_principal_resolver(Arc::new(MockAliceResolver));
+    shamir.create_db("testdb").await.expect("create_db");
+    let config =
+        RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
+    shamir.add_repo("testdb", config).await.unwrap();
+
+    let gid = shamir.create_group("devs").await.unwrap();
+    let alice = principal64_from_username("alice");
+    shamir.add_group_member(gid, alice).await.unwrap();
+
+    let meta = ResourceMeta {
+        owner: Actor::User(alice),
+        group: Some(gid),
+        mode: 0o750,
+    };
+    shamir
+        .set_resource_meta(&ResourcePath::table("testdb", "data", "users"), &meta)
+        .await
+        .unwrap();
+
+    let tree = shamir.access_tree(None, None).await.unwrap();
+
+    let root = &tree["resources"];
+    assert_eq!(root["kind"].as_str(), Some("root"));
+    let db = child(root, "testdb");
+    assert_eq!(db["kind"].as_str(), Some("database"));
+    let store = child(db, "data");
+    assert_eq!(store["kind"].as_str(), Some("store"));
+    let table = child(store, "users");
+    assert_eq!(table["kind"].as_str(), Some("table"));
+    assert_eq!(table["mode"].as_u64(), Some(0o750));
+    assert_eq!(table["owner"].as_u64(), Some(alice));
+    assert_eq!(table["owner_name"].as_str(), Some("alice"));
+    assert_eq!(table["group"].as_u64(), Some(gid));
+    assert_eq!(table["group_name"].as_str(), Some("devs"));
+
+    let users = tree["principals"]["users"].as_array().unwrap();
+    assert!(
+        users.iter().any(|u| u["name"].as_str() == Some("alice")),
+        "alice should appear in principals.users"
+    );
+    let groups = tree["principals"]["groups"].as_array().unwrap();
+    let devs = groups
+        .iter()
+        .find(|g| g["name"].as_str() == Some("devs"))
+        .expect("devs group present");
+    assert_eq!(devs["id"].as_u64(), Some(gid));
+    let members = devs["members"].as_array().unwrap();
+    assert!(
+        members
+            .iter()
+            .any(|m| m["id"].as_u64() == Some(alice) && m["name"].as_str() == Some("alice")),
+        "alice should be a resolved member of devs"
+    );
+}
+
+#[tokio::test]
+async fn access_tree_depth_caps_the_hierarchy() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.expect("create_db");
+    let config =
+        RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
+    shamir.add_repo("testdb", config).await.unwrap();
+
+    let t0 = shamir.access_tree(Some(0), None).await.unwrap();
+    assert!(t0["resources"]["children"].as_array().unwrap().is_empty());
+
+    let t1 = shamir.access_tree(Some(1), None).await.unwrap();
+    let db = child(&t1["resources"], "testdb");
+    assert!(db["children"].as_array().unwrap().is_empty());
+
+    let t2 = shamir.access_tree(Some(2), None).await.unwrap();
+    let store = child(child(&t2["resources"], "testdb"), "data");
+    assert!(store["children"].as_array().unwrap().is_empty());
+
+    let tf = shamir.access_tree(None, None).await.unwrap();
+    let table = child(child(child(&tf["resources"], "testdb"), "data"), "t");
+    assert_eq!(table["kind"].as_str(), Some("table"));
+}
+
+#[tokio::test]
+async fn access_tree_dispatch_admin_gate_denies_non_admin() {
+    use crate::query::batch::{BatchError, BatchRequest, BatchResponse};
+
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.expect("create_db");
+    let config =
+        RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
+    shamir.add_repo("testdb", config).await.unwrap();
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.access_tree("tree", ddl::access_tree());
+    let req: BatchRequest = b.to_request_via_msgpack();
+
+    let tree_present = |res: &Result<BatchResponse, BatchError>| -> bool {
+        matches!(res, Ok(r) if r
+            .results
+            .get("tree")
+            .and_then(|q| q.records.first())
+            .and_then(|rec| rec.get_value("access_tree"))
+            .and_then(|t| t.get("resources"))
+            .is_some())
+    };
+
+    let sys = shamir.execute_as(Actor::System, "testdb", &req).await;
+    assert!(tree_present(&sys), "System must receive the access tree");
+
+    let bob = principal64_from_username("bob");
+    let user = shamir.execute_as(Actor::User(bob), "testdb", &req).await;
+    assert!(
+        !tree_present(&user),
+        "a non-admin user must be denied the access tree"
+    );
+}
+
+#[tokio::test]
+async fn access_tree_db_filter_scopes_to_one_database() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("alpha").await.expect("create_db");
+    shamir.create_db("beta").await.expect("create_db");
+    let cfg_a =
+        RepoConfig::new("data", BoxRepoFactory::in_memory()).add_table(TableConfig::new("t"));
+    shamir.add_repo("alpha", cfg_a).await.unwrap();
+
+    let tree = shamir.access_tree(None, Some("alpha")).await.unwrap();
+    let dbs = tree["resources"]["children"].as_array().unwrap();
+    assert_eq!(dbs.len(), 1, "filter must yield exactly one database");
+    assert_eq!(dbs[0]["name"].as_str(), Some("alpha"));
 }

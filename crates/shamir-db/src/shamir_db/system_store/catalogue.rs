@@ -2,7 +2,7 @@ use shamir_types::access::ResourceMeta;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use crate::DbResult;
+use crate::{DbError, DbResult};
 
 use super::store::{qv_map1, qv_map2, TABLE_DATABASES, TABLE_REPOSITORIES, TABLE_TABLES};
 use super::SystemStore;
@@ -27,6 +27,8 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, Some(&rec)).await?;
+        // Durable DDL — sync_wal + flush via shared helper.
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -44,16 +46,24 @@ impl SystemStore {
             expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
+        // Durable DDL — sync_wal + flush via shared helper.
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
-    /// Load all database records.
+    /// Distinguishes genuine absence from corrupt or incomplete catalogue scans.
     pub async fn load_databases(&self) -> DbResult<Vec<QueryValue>> {
         let table = self.table(TABLE_DATABASES).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_DATABASES);
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt database catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -134,6 +144,12 @@ impl SystemStore {
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_REPOSITORIES);
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt repository catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -265,6 +281,12 @@ impl SystemStore {
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_TABLES);
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt table catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -290,6 +312,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt database catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -321,6 +349,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt repository catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -357,6 +391,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt table catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()

@@ -358,11 +358,15 @@ impl ShamirDb {
         // `table_by_token` resolves and Put/Delete/Index ops actually replay
         // for disk-backed repos.
         let table_records = shamir.system_store.load_tables().await?;
-        for record in &repo_records {
-            let db_name = record["db_name"].as_str().unwrap_or_default();
-            let repo_name = record["repo_name"].as_str().unwrap_or_default();
-            let engine = record["engine"].as_str().unwrap_or("in_memory");
-            let path = record["path"].as_str();
+        for rec in &repo_records {
+            let db_name = rec["db_name"].as_str().ok_or_else(|| {
+                DbError::Internal("repository catalogue row is missing db_name".to_string())
+            })?;
+            let repo_name = rec["repo_name"].as_str().ok_or_else(|| {
+                DbError::Internal("repository catalogue row is missing repo_name".to_string())
+            })?;
+            let engine = rec["engine"].as_str().unwrap_or("in_memory");
+            let path = rec["path"].as_str();
 
             // Clone the `DbInstance` out of the registry (cheap Arc) so we
             // do NOT hold the DashMap shard guard across the `add_repo` /
@@ -398,7 +402,7 @@ impl ShamirDb {
                     // override takes precedence over the server default at
                     // boot. A corrupt override fails init LOUDLY (fail
                     // closed) — it never silently degrades to the default.
-                    let policy = match durability_from_record(record)? {
+                    let policy = match durability_from_record(rec)? {
                         Some(over) => resolve(
                             &shamir.durability_policy,
                             Some(&over),
@@ -408,18 +412,28 @@ impl ShamirDb {
                     };
                     db.add_repo_with_durability(config, policy).await?;
                 }
+            } else {
+                return Err(DbError::Internal(format!(
+                    "repository '{}/{}' has no parent database",
+                    db_name, repo_name
+                )));
             }
         }
 
-        // Load persisted WASM functions from the function catalogue and
-        // register them. This proves a runner-without-cargo can still run
-        // functions — no toolchain needed, just `from_binary`.
+        // Load persisted functions; registry collisions are fatal so rejected
+        // catalogue artifacts cannot publish contradictory function metadata.
         let fn_records = shamir.system_store.load_functions().await?;
         for rec in &fn_records {
             let name = match rec["name"].as_str() {
                 Some(n) => n.to_string(),
                 None => continue,
             };
+            if shamir.functions.contains(&name) {
+                return Err(DbError::Function(format!(
+                    "catalogue function '{}' collides with a builtin or registered function",
+                    name
+                )));
+            }
             // Dispatch on artifact kind: Native rows have no WASM bytes —
             // skip materialisation. The embedder re-registers the native
             // artifact at startup; until then the function is absent and any
@@ -461,12 +475,12 @@ impl ShamirDb {
             {
                 Ok(wf) => {
                     if shamir.functions.register(&name, Arc::new(wf)).is_err() {
-                        log::warn!(
-                            "shamir_db::init: function '{}' already registered (builtin?), skipping catalogue load",
+                        return Err(DbError::Function(format!(
+                            "catalogue function '{}' collides with a builtin or registered function",
                             name
-                        );
+                        )));
                     }
-                    // Populate in-memory metadata from the persisted record.
+                    // Populate in-memory metadata only after artifact registration succeeds.
                     let meta = FunctionMeta::from_record(rec);
                     let _ = shamir.function_meta.insert(name.clone(), meta);
                 }
