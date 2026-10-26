@@ -134,8 +134,17 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
-        // if_exists early-exit: function not registered → no-op.
-        if op.if_exists && !self.shamir.functions().contains(&op.drop_function) {
+        // if_exists includes durable catalogue-only artifacts, not just live registrations.
+        if op.if_exists
+            && !self.shamir.functions().contains(&op.drop_function)
+            && self
+                .shamir
+                .system_store()
+                .load_function(&op.drop_function)
+                .await
+                .map_err(|e| err(e.to_string()))?
+                .is_none()
+        {
             return Ok(admin_result(mpack!({
                 "dropped_function": @(QueryValue::Str(op.drop_function.clone())),
                 "existed": false,

@@ -212,8 +212,9 @@ impl Scheduler {
                     let chain = chain.clone();
                     let appender = appender.clone();
                     safe_run("audit_checkpoint", move || {
-                        let (next_seq, prev_hmac) = chain.checkpoint();
-                        appender.checkpoint(next_seq, &prev_hmac);
+                        if let Err(error) = chain.checkpoint_with_appender(appender.as_ref()) {
+                            tracing::error!(%error, "audit checkpoint failed; writer is fail-closed");
+                        }
                     });
                 })
                 .await;

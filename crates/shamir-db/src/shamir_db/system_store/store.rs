@@ -184,6 +184,16 @@ impl SystemStore {
         self.db.get_table(SYSTEM_REPO, name).await
     }
 
+    /// Reference durable DDL tail for one system-catalogue table: fsync the
+    /// SYSTEM repo's file WAL first, THEN flush the table's data store. Every
+    /// DDL acknowledgement routes through this so the "Durable DDL" intent
+    /// has one implementation. sync_wal runs FIRST so the armed-flush fault
+    /// tests exercise exactly the final `flush()` line.
+    pub(crate) async fn flush_system_repo_durable(&self, table: &TableManager) -> DbResult<()> {
+        self.system_repo()?.sync_wal().await?;
+        table.data_store_read_view().flush().await
+    }
+
     /// Resolve the SYSTEM_REPO [`RepoInstance`].
     ///
     /// F5a: system-store DELETEs route through the repo's implicit-tx

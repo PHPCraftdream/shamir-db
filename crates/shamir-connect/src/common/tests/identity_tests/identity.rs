@@ -30,6 +30,54 @@ fn fixture_auth_message() -> AuthMessage {
 }
 
 #[test]
+fn rv_transport_tcp_1257db79_exporter_changes_identity_proof() {
+    let kp = Ed25519Keypair::generate();
+    let auth_message = fixture_auth_message();
+    let session_id = [0x31; 32];
+    let exporter_x = [0x41; 32];
+    let exporter_y = [0x42; 32];
+    let input_x = build_identity_input(
+        &kp.public_bytes(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &exporter_x,
+        &auth_message,
+        &session_id,
+        123,
+    );
+    let input_y = build_identity_input(
+        &kp.public_bytes(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &exporter_y,
+        &auth_message,
+        &session_id,
+        123,
+    );
+    let signature = sign_identity(&kp, &input_x);
+    assert!(verify_identity(&kp.public_bytes(), &input_x, &signature));
+    assert!(!verify_identity(&kp.public_bytes(), &input_y, &signature));
+}
+
+#[test]
+fn rv_transport_tcp_1257db79_ed25519_pin_mismatch_rejects_identity() {
+    let server = Ed25519Keypair::generate();
+    let other = Ed25519Keypair::generate();
+    let auth_message = fixture_auth_message();
+    let input = build_identity_input(
+        &server.public_bytes(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &[0x51; 32],
+        &auth_message,
+        &[0x61; 32],
+        123,
+    );
+    let signature = sign_identity(&server, &input);
+    assert!(!verify_identity(&other.public_bytes(), &input, &signature));
+}
+
+#[test]
 fn identity_input_starts_with_domain_tag() {
     let kp = Ed25519Keypair::generate();
     let am = fixture_auth_message();
