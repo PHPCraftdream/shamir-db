@@ -136,7 +136,7 @@ fn make_backend(interner: &Interner, id: u32, dim: u32, metric: VectorMetric) ->
             ..Default::default()
         },
     ));
-    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter)
+    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter, None)
 }
 
 fn build_adapter(dim: u32, metric: VectorMetric) -> HnswAdapter {

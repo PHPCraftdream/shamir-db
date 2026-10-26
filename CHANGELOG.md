@@ -16,6 +16,27 @@ This file follows [Keep a Changelog](https://keepachangelog.com) conventions loo
 
 ## [Unreleased]
 
+### P1 query-types remediation
+- `InsertedRecord::get_value_owned("_id")` now also finds a decoded `_id`
+  (previously `None` for every deserialized record).
+- `BatchOp` decode rejects only ambiguous discriminator sets (`update` +
+  `set` stays legal — `set` is a payload field of `UpdateOp`); non-
+  discriminator payload keys are validated by each typed op, not by the
+  `BatchOp` layer. The decode makes a single buffering pass.
+- `BatchLimits` accepts partial `limits` maps: every field now carries a
+  `#[serde(default)]` with the same value as `Default`.
+- `DbRequest`'s `Debug` no longer prints `ChangePasswordVerify` SCRAM
+  credential material (redacted; wire bytes unchanged).
+
+### RU6
+- `QueryResult::op_id`, `DdlOpStatus.op_id`, `DropIndexOp.request_id` and
+  `RenameIndexOp.request_id` now serialize on the wire as the canonical
+  base58 string (`RecordId::to_string()`), matching the string the
+  `GetDdlOpStatus` poll request takes; decode is strict-string only (old
+  raw-`bin` values are rejected). An old Rust client cannot decode a new
+  server's string `op_id` — acceptable pre-v1. The DDL op log's bincode disk
+  encoding is unchanged.
+
 ### RU7
 - Decode raw MessagePack `u64` values above `i64::MAX` as exact `Big` values across shamir-types codecs and RecordView lenses; the existing v1 decimal-text encoding projection is unchanged.
 

@@ -36,8 +36,11 @@ pub enum FrameError {
     /// from a graceful close and from a mid-body truncation (`Io`).
     #[error("peer eof")]
     PeerEof,
-    /// Empty payload — length 0 is reserved for the graceful-close
-    /// sentinel (spec §2), so writers refuse to emit it as a data frame.
+    /// Malformed caller buffer/prefix contract.
+    #[error("malformed preframed buffer: {0}")]
+    MalformedBuffer(&'static str),
+    /// Empty payload — length 0 is reserved for the graceful-close sentinel
+    /// (spec §2), so writers refuse to emit it as a data frame.
     #[error("empty payload: length 0 is the close sentinel")]
     EmptyPayload,
 }
@@ -64,13 +67,15 @@ async fn read_len_header<R: AsyncRead + Unpin>(reader: &mut R) -> Result<usize, 
 
 /// Read one frame: `[u32_be length][bytes]`.
 ///
-/// Returns `Ok(payload)` for normal frames, [`FrameError::PeerClose`] for
-/// length-zero frames, or [`FrameError::TooLarge`] if the declared length
-/// exceeds `max_frame_size`.
+/// Any framing error may leave the stream positioned partway through a frame
+/// (oversize errors consume the header but not its body). Discard the stream
+/// after an error; do not retry a frame read.
 ///
-/// **Allocates a fresh `Vec<u8>` per call.** For high-throughput callers
-/// (per-connection request loops) prefer [`read_frame_into`] which
-/// reuses a caller-supplied scratch buffer.
+/// Body accumulation only grows as bytes arrive; no allocation is made from
+/// the declared frame length. `read_frame` still allocates its result.
+/// `read_frame` and `read_frame_into` retain partial bytes locally while
+/// awaiting body progress; cancellation drops that progress. Treat cancellation
+/// as terminal and discard the stream rather than restarting the frame read.
 pub async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
     max_frame_size: usize,
@@ -87,19 +92,28 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
         });
     }
 
-    // `vec![0u8; len]` uses the `SpecFromElem` u8-specialization which
-    // compiles to one `write_bytes` (memset). Significantly faster than
-    // `Vec::with_capacity(len) + resize(len, 0)` which goes through the
-    // generic per-element loop.
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await?;
+    // Grow only as bytes arrive: the peer's declaration bounds total work but
+    // must not force an up-front allocation of that full size.
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while buf.len() < len {
+        let remaining = len - buf.len();
+        let chunk_len = remaining.min(chunk.len());
+        let n = reader.read(&mut chunk[..chunk_len]).await?;
+        if n == 0 {
+            return Err(FrameError::Io(std::io::ErrorKind::UnexpectedEof.into()));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
     Ok(buf)
 }
 
 /// Read one frame into a caller-supplied buffer, reusing existing capacity.
 ///
-/// On success the buffer is resized to the frame length and contains exactly
-/// the payload bytes. Previous contents are overwritten.
+/// On success the buffer contains exactly the payload bytes. Previous contents
+/// are overwritten. On error or cancellation the stream may be mid-frame;
+/// discard it rather than retrying. In particular, oversize errors consume
+/// the header but do not drain the body.
 ///
 /// This is the high-throughput variant of [`read_frame`]: it avoids the
 /// per-call heap allocation by reusing the buffer's existing capacity.
@@ -113,12 +127,10 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
 /// }
 /// ```
 ///
-/// The buffer's capacity grows monotonically to the high-water mark of
-/// frames seen so far. Use [`Vec::shrink_to_fit`] periodically if memory is
-/// a concern.
-///
-/// The buffer is zero-filled via `resize(_, 0)` before reading, so no
-/// uninitialized byte can ever enter its live length.
+/// The buffer capacity grows only as payload bytes arrive, not from the
+/// declared length. Use [`Vec::shrink_to_fit`] if memory is a concern.
+/// Cancellation also loses the partial frame progress; discard the stream
+/// rather than retrying after cancellation.
 pub async fn read_frame_into<R: AsyncRead + Unpin>(
     reader: &mut R,
     max_frame_size: usize,
@@ -136,13 +148,24 @@ pub async fn read_frame_into<R: AsyncRead + Unpin>(
         });
     }
 
+    // Keep only received bytes live; declared length never sets buffer length.
     buf.clear();
-    // Zero-fill the full frame length before reading: no uninitialized byte
-    // can enter the live length, even on error or cancellation.
-    buf.resize(len, 0);
-    if let Err(e) = reader.read_exact(buf).await {
-        buf.clear();
-        return Err(e.into());
+    let mut chunk = [0u8; 4096];
+    while buf.len() < len {
+        let remaining = len - buf.len();
+        let chunk_len = remaining.min(chunk.len());
+        let n = match reader.read(&mut chunk[..chunk_len]).await {
+            Ok(0) => {
+                buf.clear();
+                return Err(FrameError::Io(std::io::ErrorKind::UnexpectedEof.into()));
+            }
+            Ok(n) => n,
+            Err(e) => {
+                buf.clear();
+                return Err(e.into());
+            }
+        };
+        buf.extend_from_slice(&chunk[..n]);
     }
     Ok(())
 }
@@ -246,6 +269,10 @@ pub async fn write_close<W: AsyncWrite + Unpin>(writer: &mut W) -> Result<(), Fr
 ///
 /// The caller MUST ensure `buf[0..4]` is a valid BE `u32` equal to
 /// `buf.len() - 4`. Violating this produces a malformed frame on the wire.
+///
+/// Returns [`FrameError::MalformedBuffer`] for short buffers or a prefix/body
+/// mismatch, [`FrameError::TooLarge`] only when the valid declared payload
+/// exceeds the supported frame limit.
 pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
     writer: &mut W,
     buf: &[u8],
@@ -255,10 +282,7 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
     // The check is O(1) (two loads + one comparison) — negligible vs. the
     // I/O cost of the `write_all`.
     if buf.len() < 4 {
-        return Err(FrameError::TooLarge {
-            actual: 0,
-            max: MAX_FRAME_SIZE_DEFAULT,
-        });
+        return Err(FrameError::MalformedBuffer("prefix requires four bytes"));
     }
     let declared_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
     if declared_len == 0 {
@@ -266,11 +290,16 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
     }
     // The payload length on the wire must match what's in the buffer.
     let actual_payload = buf.len() - 4;
-    if declared_len != actual_payload || declared_len > MAX_FRAME_SIZE_DEFAULT {
+    if declared_len > MAX_FRAME_SIZE_DEFAULT {
         return Err(FrameError::TooLarge {
             actual: declared_len,
             max: MAX_FRAME_SIZE_DEFAULT,
         });
+    }
+    if declared_len != actual_payload {
+        return Err(FrameError::MalformedBuffer(
+            "declared length does not match payload length",
+        ));
     }
     writer.write_all(buf).await?;
     writer.flush().await?;

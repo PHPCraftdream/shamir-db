@@ -13,7 +13,7 @@
 
 use bytes::Bytes;
 use futures::StreamExt;
-use shamir_query_types::read::{DdlOpState, DdlOpStatus};
+use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 use shamir_storage::error::DbError;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
@@ -77,7 +77,51 @@ pub fn op_status_key(op_id: &RecordId) -> RecordKey {
 /// Strips the version envelope off a raw stored value and decodes the
 /// `DdlOpStatus` payload. Shared by `read_op_status` and the eviction sweep
 /// so the version-byte check lives in exactly one place.
-fn decode_op_status(bytes: &Bytes) -> Result<Option<DdlOpStatus>, DbError> {
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DiskDdlOpStatus {
+    op_id: RecordId,
+    kind: DdlOpKind,
+    state: DdlOpState,
+}
+
+impl From<&DdlOpStatus> for DiskDdlOpStatus {
+    fn from(status: &DdlOpStatus) -> Self {
+        Self {
+            op_id: status.op_id,
+            kind: status.kind.clone(),
+            state: status.state.clone(),
+        }
+    }
+}
+
+impl From<DiskDdlOpStatus> for DdlOpStatus {
+    fn from(status: DiskDdlOpStatus) -> Self {
+        Self {
+            op_id: status.op_id,
+            kind: status.kind,
+            state: status.state,
+        }
+    }
+}
+
+fn encode_status(status: &DdlOpStatus) -> Result<Vec<u8>, DbError> {
+    bincode::serialize(&DiskDdlOpStatus::from(status))
+        .map_err(|e| DbError::Codec(format!("DdlOpStatus encode failed: {e}")))
+}
+
+/// Produces the exact on-disk bytes for a status record — the single
+/// encode path: `[VERSION_BYTE | bincode(DiskDdlOpStatus)]`.
+/// `pub(crate)` so the `tests/` submodule can assert the disk format
+/// against a hand-derived fixture. `write_op_status_with_cap` and every
+/// golden test go through here (or `decode_op_status` for the inverse).
+pub(crate) fn encode_disk_status(status: &DdlOpStatus) -> Result<Vec<u8>, DbError> {
+    let mut bytes = Vec::with_capacity(1 + 64);
+    bytes.push(DDL_OP_LOG_VERSION);
+    bytes.extend_from_slice(&encode_status(status)?);
+    Ok(bytes)
+}
+
+pub(crate) fn decode_op_status(bytes: &Bytes) -> Result<Option<DdlOpStatus>, DbError> {
     if bytes.is_empty() {
         return Ok(None);
     }
@@ -88,8 +132,8 @@ fn decode_op_status(bytes: &Bytes) -> Result<Option<DdlOpStatus>, DbError> {
             DDL_OP_LOG_VERSION
         )));
     }
-    bincode::deserialize::<DdlOpStatus>(&bytes[1..])
-        .map(Some)
+    bincode::deserialize::<DiskDdlOpStatus>(&bytes[1..])
+        .map(|status| Some(status.into()))
         .map_err(|e| DbError::Codec(format!("DdlOpStatus decode failed: {e}")))
 }
 
@@ -128,13 +172,7 @@ pub(crate) async fn write_op_status_with_cap(
     cap: usize,
 ) -> Result<(), DbError> {
     let key = op_status_key(&status.op_id);
-    let status_bytes = bincode::serialize(status)
-        .map_err(|e| DbError::Codec(format!("DdlOpStatus encode failed: {e}")))?;
-
-    // Prepend version byte
-    let mut bytes = Vec::with_capacity(1 + status_bytes.len());
-    bytes.push(DDL_OP_LOG_VERSION);
-    bytes.extend_from_slice(&status_bytes);
+    let bytes = encode_disk_status(status)?;
 
     info_store.set(key, Bytes::from(bytes)).await?;
 

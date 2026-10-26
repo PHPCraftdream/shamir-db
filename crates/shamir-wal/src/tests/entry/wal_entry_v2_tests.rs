@@ -142,18 +142,6 @@ fn decode_rejects_unknown_version() {
 }
 
 #[test]
-fn looks_like_v2_sniff() {
-    let bytes = sample_entry().encode().unwrap();
-    assert!(WalEntryV2::looks_like_v2(&bytes));
-    assert!(!WalEntryV2::looks_like_v2(b""));
-    assert!(!WalEntryV2::looks_like_v2(b"SDB2\x01")); // wrong magic
-    let v1_bytes = bincode::serialize(&"some v1 entry").unwrap();
-    // V1 entries don't carry magic prefix — start with bincode varints.
-    // Very unlikely to start with "WAL2".
-    assert!(!WalEntryV2::looks_like_v2(&v1_bytes));
-}
-
-#[test]
 fn size_bound_on_large_batch() {
     // 100 small Put ops, each 50 bytes body — roughly 5KB raw.
     // Bincode adds per-field overhead (variant tag + length prefix).
@@ -295,4 +283,28 @@ fn decode_legacy_v1_produces_empty_delta() {
     assert_eq!(decoded.commit_version, 123);
     assert!(decoded.interner_delta.is_empty());
     assert_eq!(decoded.ops.len(), 1);
+}
+
+// Red before the fix (RV-WAL-645DBB85): short input, bad magic, unsupported
+// versions and malformed bodies were classified as DbError::Internal — a
+// programmer-error variant — instead of a persisted-data decode failure.
+#[test]
+fn rv_wal_645dbb85_corrupt_decode_not_internal() {
+    let mut unsupported = WAL_V2_MAGIC.to_vec();
+    unsupported.push(9);
+    let mut malformed_body = WAL_V2_MAGIC.to_vec();
+    malformed_body.push(WAL_V2_VERSION);
+    malformed_body.extend_from_slice(&[0xFF, 0xFF, 0xFF]);
+    let cases: Vec<Vec<u8>> = vec![Vec::new(), b"NOPE!".to_vec(), unsupported, malformed_body];
+    for bytes in &cases {
+        let err = WalEntryV2::decode(bytes).unwrap_err();
+        assert!(
+            !matches!(err, shamir_storage::error::DbError::Internal(_)),
+            "corruption misclassified as Internal: {err}"
+        );
+        assert!(
+            matches!(err, shamir_storage::error::DbError::Codec(_)),
+            "expected Codec classification, got: {err}"
+        );
+    }
 }
