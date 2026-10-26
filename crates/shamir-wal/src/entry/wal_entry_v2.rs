@@ -28,6 +28,7 @@
 //! cleaner than reverse-extracting MetaEnvelope into shamir-types.
 //! See architectural-decisions.md if we revisit.
 
+use bincode::Options;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
@@ -46,7 +47,8 @@ pub const WAL_V2_VERSION: u8 = 3;
 /// carries `interner_delta`, Stage A2).
 pub(crate) const WAL_V2_VERSION_PRE_EVENT: u8 = 2;
 
-/// Version 1 - decoded for backward compatibility (no `interner_delta`).
+/// Version 1 - decoded for backward compatibility in both historical layouts.
+/// Neither layout carries `interner_delta`.
 pub(crate) const WAL_V2_VERSION_LEGACY: u8 = 1;
 
 /// One mutating operation buffered inside a transactional WAL entry.
@@ -186,16 +188,57 @@ struct WalEntryV2PreEvent {
     pub interner_delta: Vec<(u64, String, u64)>,
 }
 
-/// Legacy shape (version 1) — no `interner_delta` field. Used only for
-/// decoding old WAL entries.
+/// Legacy v1 shape before HIGH-5 added commit_version.
 #[derive(Debug, Deserialize)]
-struct WalEntryV2Legacy {
+struct WalEntryV2LegacyPreHigh5 {
     pub txn_id: u64,
     pub repo_id_interned: u64,
     pub started_at_ns: u64,
-    #[serde(default)]
+    pub ops: Vec<WalOpV2>,
+}
+
+/// Legacy v1 shape after HIGH-5 and before interner_delta.
+#[derive(Debug, Deserialize)]
+struct WalEntryV2LegacyPostHigh5 {
+    pub txn_id: u64,
+    pub repo_id_interned: u64,
+    pub started_at_ns: u64,
     pub commit_version: u64,
     pub ops: Vec<WalOpV2>,
+}
+
+fn decode_legacy_v1(bytes: &[u8]) -> DbResult<WalEntryV2> {
+    let options = || {
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+    };
+    let pre = options().deserialize::<WalEntryV2LegacyPreHigh5>(bytes);
+    let post = options().deserialize::<WalEntryV2LegacyPostHigh5>(bytes);
+    match (pre, post) {
+        (Ok(old), Err(_)) => Ok(WalEntryV2 {
+            txn_id: old.txn_id,
+            repo_id_interned: old.repo_id_interned,
+            started_at_ns: old.started_at_ns,
+            commit_version: 0,
+            ops: old.ops,
+            interner_delta: vec![],
+            event: None,
+        }),
+        (Err(_), Ok(new)) => Ok(WalEntryV2 {
+            txn_id: new.txn_id,
+            repo_id_interned: new.repo_id_interned,
+            started_at_ns: new.started_at_ns,
+            commit_version: new.commit_version,
+            ops: new.ops,
+            interner_delta: vec![],
+            event: None,
+        }),
+        (Ok(_), Ok(_)) => Err(DbError::Internal(
+            "wal_v2 decode v1: ambiguous legacy shape".into(),
+        )),
+        (Err(old), Err(new)) => Err(DbError::Internal(format!("wal_v2 decode v1: {old}; {new}"))),
+    }
 }
 
 impl WalEntryV2 {
@@ -244,6 +287,7 @@ impl WalEntryV2 {
     /// Writes the 5-byte header then serialises directly into the same
     /// buffer via `bincode::serialize_into`, avoiding the intermediate
     /// `Vec` that `bincode::serialize` would allocate.
+    /// The output is a complete encoded entry; validating only its header does not validate its body.
     pub fn encode(&self) -> DbResult<Vec<u8>> {
         // 5-byte header + bincode body.  Start with a reasonable
         // capacity guess; bincode will grow if needed but one alloc
@@ -256,12 +300,31 @@ impl WalEntryV2 {
         Ok(out)
     }
 
+    /// Validate only `[magic][version]`; the body is not inspected.
+    pub fn validate_frame_header(bytes: &[u8]) -> DbResult<()> {
+        if bytes.len() < 5 {
+            return Err(DbError::Internal("wal_v2 header: too short".into()));
+        }
+        if bytes[..4] != WAL_V2_MAGIC {
+            return Err(DbError::Internal(format!(
+                "wal_v2 header: bad magic {:?}",
+                &bytes[..4]
+            )));
+        }
+        match bytes[4] {
+            WAL_V2_VERSION_LEGACY | WAL_V2_VERSION_PRE_EVENT | WAL_V2_VERSION => Ok(()),
+            version => Err(DbError::Internal(format!(
+                "wal_v2 header: unsupported version {version}"
+            ))),
+        }
+    }
+
     /// Decode from `[magic][version][bincode body]`.
     ///
-    /// Supports versions 1 (legacy, no interner_delta), 2 (no event
-    /// header) and 3 (current, with the journal-event header). Unknown
-    /// versions are rejected (fail-closed decode error, never a silent
-    /// skip).
+    /// Supports both historical version-1 layouts: pre-HIGH-5 (without
+    /// `commit_version`) and post-HIGH-5 (with it), plus version 2 and 3.
+    /// Trailing bytes are rejected for version 1; versions 2 and 3 retain
+    /// their historical trailing-byte behavior.
     pub fn decode(bytes: &[u8]) -> DbResult<Self> {
         if bytes.len() < 5 {
             return Err(DbError::Internal("wal_v2 decode: too short".into()));
@@ -274,19 +337,7 @@ impl WalEntryV2 {
         }
         let version = bytes[4];
         match version {
-            WAL_V2_VERSION_LEGACY => {
-                let legacy: WalEntryV2Legacy = bincode::deserialize(&bytes[5..])
-                    .map_err(|e| DbError::Internal(format!("wal_v2 decode v1: {e}")))?;
-                Ok(Self {
-                    txn_id: legacy.txn_id,
-                    repo_id_interned: legacy.repo_id_interned,
-                    started_at_ns: legacy.started_at_ns,
-                    commit_version: legacy.commit_version,
-                    ops: legacy.ops,
-                    interner_delta: vec![],
-                    event: None,
-                })
-            }
+            WAL_V2_VERSION_LEGACY => decode_legacy_v1(&bytes[5..]),
             WAL_V2_VERSION_PRE_EVENT => {
                 let pre: WalEntryV2PreEvent = bincode::deserialize(&bytes[5..])
                     .map_err(|e| DbError::Internal(format!("wal_v2 decode v2: {e}")))?;

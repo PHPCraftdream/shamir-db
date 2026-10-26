@@ -53,12 +53,10 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_wal::segment_set::SegmentSet;
+use shamir_wal::wal_entry_v2::WalEntryV2;
 
 /// Concurrency levels under test — same as `wal_append` for comparability.
 const CONCURRENCY: &[usize] = &[1, 4, 16, 64];
-
-/// Per-append payload size (bytes) — same as `wal_append` for fair comparison.
-const PAYLOAD_LEN: usize = 128;
 
 /// Large seal threshold so no segment rotation fires inside the timed window.
 /// Rotation is a rare path, not what we are measuring.
@@ -74,7 +72,9 @@ const SEG_MAX_BYTES: u64 = 1 << 30; // 1 GiB
 const APPENDS_PER_TASK: usize = 2_000;
 
 fn payload() -> Vec<u8> {
-    vec![0xABu8; PAYLOAD_LEN]
+    WalEntryV2::new(1, 0, Vec::new())
+        .encode()
+        .expect("benchmark entry encode")
 }
 
 /// Run `n` concurrent `append_batch` calls directly against `segset`, ONE
