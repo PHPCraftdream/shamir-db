@@ -46,7 +46,7 @@ fn make_backend(interner: &Interner) -> VectorBackend {
         })),
     );
     let adapter = Arc::new(BruteForceAdapter::new(3, VectorMetric::Cosine));
-    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter)
+    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter, None)
 }
 
 /// RV-TUNABLES-A3D3695D: PRODUCTION construction (`VectorBackend::new`) must
@@ -208,7 +208,7 @@ async fn lookup_tx_some_includes_staged_vector() {
             ..Default::default()
         },
     ));
-    let backend = VectorBackend::new(desc, vec![intern(&i, "embedding")], adapter);
+    let backend = VectorBackend::new(desc, vec![intern(&i, "embedding")], adapter, None);
 
     // Commit one vector via non-tx upsert.
     let committed_rid = RecordId::new();

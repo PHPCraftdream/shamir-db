@@ -119,6 +119,7 @@ async fn concurrent_upsert_with_tombstone_across_fit_does_not_hang_body() {
          `try_fit_and_rebuild`."
     );
 
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "adapter did not fit under load (test setup failure)"
@@ -223,6 +224,7 @@ async fn concurrent_same_rid_upsert_race_across_fit_no_double_count_body() {
          60s timeout"
     );
 
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "adapter did not fit under load (test setup failure)"
@@ -352,6 +354,7 @@ async fn concurrent_upsert_quantized_fastpath_converges_no_hang_body() {
          vectors_u8 insert without bumping migrated_pre_flip, so the \
          catch-up loop never converged. See `quantized_fastpath_publish`."
     );
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "adapter did not fit under load (test setup failure)"
@@ -459,6 +462,7 @@ async fn concurrent_upsert_batch_quantized_fastpath_converges_no_hang_body() {
          60s — the quantized batch fast-path published pre-flip internals \
          via raw vectors_u8 inserts without bumping migrated_pre_flip."
     );
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "adapter did not fit under load (test setup failure)"
@@ -570,6 +574,7 @@ async fn search_post_fit_returns_nonempty_via_u8_path_body() {
     for (i, v) in data.iter().enumerate() {
         adapter.upsert(rid(i as u64), v).await.expect("upsert");
     }
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "test setup: adapter should have fitted"
@@ -686,6 +691,7 @@ async fn search_cofilter_transient_none_retries_into_u8_path_body() {
             .expect("upsert to trigger fit");
     }
 
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "test setup: adapter should have fitted"
@@ -760,6 +766,7 @@ async fn f3_f7_quantized_bruteforce_exact_scored_output_body() {
             .await
             .expect("pre-populate upsert");
     }
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "test setup: adapter must have fitted (n > FIT_THRESHOLD)"
