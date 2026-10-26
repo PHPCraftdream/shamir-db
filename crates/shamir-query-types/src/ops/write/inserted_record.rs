@@ -113,7 +113,10 @@ impl InsertedRecord {
     /// `QueryValue::Str` from `id` when present.
     pub fn get_value_owned(&self, key: &str) -> Option<QueryValue> {
         if key == "_id" {
-            return self.id.as_ref().map(|r| QueryValue::Str(r.to_string()));
+            if let Some(id) = &self.id {
+                return Some(QueryValue::Str(id.to_string()));
+            }
+            return self.fields.get(key).cloned();
         }
         self.fields.get(key).cloned()
     }

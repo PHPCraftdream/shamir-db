@@ -31,20 +31,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchLimits {
     /// Maximum number of queries in batch.
+    #[serde(default = "default_max_queries")]
     pub max_queries: usize,
 
     /// Maximum dependency depth.
     ///
     /// A chain like a -> b -> c has depth 2.
+    #[serde(default = "default_max_dependency_depth")]
     pub max_dependency_depth: usize,
 
     /// Maximum total execution time (seconds).
+    #[serde(default = "default_max_execution_time_secs")]
     pub max_execution_time_secs: u64,
 
     /// Maximum result size (bytes).
+    #[serde(default = "default_max_result_size")]
     pub max_result_size: usize,
 
     /// Maximum sub-batch nesting depth. 0 = no nesting allowed.
+    #[serde(default = "default_max_nesting_depth")]
     pub max_nesting_depth: usize,
 
     /// Maximum `for_each` loop iterations (Epic04, #653).
@@ -82,6 +87,22 @@ pub struct BatchLimits {
     /// Maximum requested pagination offset.
     #[serde(default = "default_max_offset")]
     pub max_offset: u64,
+}
+
+fn default_max_queries() -> usize {
+    50
+}
+fn default_max_dependency_depth() -> usize {
+    10
+}
+fn default_max_execution_time_secs() -> u64 {
+    30
+}
+fn default_max_result_size() -> usize {
+    10 * 1024 * 1024
+}
+fn default_max_nesting_depth() -> usize {
+    4
 }
 
 fn default_max_iterations() -> usize {

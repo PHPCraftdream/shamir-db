@@ -95,7 +95,8 @@ async fn rv_db_c9444758_fetch_crlf_header_value_rejected_before_dns() {
     let err = CurlNetGateway::new(vec![])
         .fetch(req)
         .await
-        .expect_err("LF in header value must be rejected before any DNS work");
+        .expect_err("LF in header value must be rejected before any DNS work")
+        .to_string();
     assert!(
         err.contains("invalid control character") && err.contains("header value"),
         "expected step-0 validation error, got: {err}"
@@ -113,7 +114,8 @@ async fn rv_db_c9444758_fetch_crlf_method_rejected_before_dns() {
     let err = CurlNetGateway::new(vec![])
         .fetch(req)
         .await
-        .expect_err("LF in method must be rejected before any DNS work");
+        .expect_err("LF in method must be rejected before any DNS work")
+        .to_string();
     assert!(
         err.contains("invalid control character") && err.contains("request method"),
         "expected step-0 validation error, got: {err}"
@@ -131,7 +133,8 @@ async fn rv_db_c9444758_fetch_tab_header_passes_validation() {
     let err = CurlNetGateway::new(vec![])
         .fetch(req)
         .await
-        .expect_err("empty allowlist must deny before any network I/O");
+        .expect_err("empty allowlist must deny before any network I/O")
+        .to_string();
     assert!(
         !err.contains("invalid control character"),
         "tab must pass step-0 validation; fetch should have proceeded to the \

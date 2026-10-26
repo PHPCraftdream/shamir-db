@@ -98,7 +98,7 @@ fn make_backend(interner: &Interner, id: u32, dim: u32, metric: VectorMetric) ->
         })),
     );
     let adapter: Arc<dyn VectorAdapter> = Arc::new(build_adapter(dim, metric));
-    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter)
+    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter, None)
 }
 
 /// Top-k RecordId set from a backend search (scores dropped — the round-trip
@@ -305,8 +305,12 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
         &info_store,
         &keyspace,
         0,
-        manifest_before.graph_chunks,
-        manifest_before.data_chunks,
+        snapshot::OldGenerationChunks {
+            graph: manifest_before.graph_chunks,
+            data: manifest_before.data_chunks,
+            qgraph: manifest_before.qgraph_chunks,
+            qdata: manifest_before.qdata_chunks,
+        },
         final_manifest,
         3,
     )
@@ -535,8 +539,12 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         &info_store,
         &keyspace,
         1,
-        written.graph_chunks,
-        written.data_chunks,
+        snapshot::OldGenerationChunks {
+            graph: written.graph_chunks,
+            data: written.data_chunks,
+            qgraph: written.qgraph_chunks,
+            qdata: written.qdata_chunks,
+        },
         final_manifest,
         2,
     )

@@ -11,7 +11,45 @@ use shamir_connect::common::crypto::Ed25519Keypair;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use std::error::Error as _;
 use std::time::Duration;
-use tokio::io::{duplex, split, AsyncReadExt};
+use tokio::io::{duplex, split, AsyncReadExt, AsyncWriteExt};
+
+/// FAILS IF the client's pre-auth frame cap (MAX_PRE_AUTH_FRAME in
+/// connect.rs challenge/auth_ok/proof_ok/ok reads) is reverted to
+/// MAX_FRAME_SIZE_DEFAULT — the 4097-byte read then completes and the
+/// failure becomes a Protocol/handshake error instead of
+/// Transport("frame too large ...").
+#[tokio::test]
+async fn rv_transport_tcp_5940216b_oversized_preauth_frame_is_rejected() {
+    let (mut peer, client_side) = duplex(64 * 1024);
+    let fake_server = tokio::spawn(async move {
+        let mut hdr = [0u8; 4];
+        peer.read_exact(&mut hdr).await.expect("proof init header");
+        let body_len = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; body_len];
+        peer.read_exact(&mut body).await.expect("proof init body");
+        // Pre-auth reply declaring 4097 bytes — one over the 4 KiB cap.
+        peer.write_all(&4097u32.to_be_bytes())
+            .await
+            .expect("size header");
+        peer.write_all(&vec![0u8; 4097]).await.expect("size body");
+    });
+    let (mut r, mut w) = split(client_side);
+    let result = tokio::time::timeout(
+        SEND_BUDGET,
+        crate::client::resume_wire_exchange(&mut r, &mut w, vec![0xAA; 64], [0u8; 32], [0u8; 32]),
+    )
+    .await
+    .expect("oversized pre-auth read must not hang");
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected the pre-auth size cap to reject 4097 bytes"),
+    };
+    assert!(
+        matches!(err, ClientError::Transport { .. }) && err.to_string().contains("frame too large"),
+        "expected the pre-auth size cap to reject 4097 bytes, got {err}"
+    );
+    fake_server.await.unwrap();
+}
 
 /// No-hang revert oracle: every client-side exchange below is wrapped in this
 /// budget so a revert that makes the client await a reply forever fails the

@@ -40,6 +40,7 @@ async fn delete_unconditionally_evicts_u8_codes_post_fit_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "test setup: adapter must be fitted so codes are resident in vectors_u8"
@@ -232,6 +233,7 @@ async fn upsert_replace_on_quantized_index_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized());
 
     // Replace rid(10) with a new vector.
@@ -336,6 +338,7 @@ async fn f32_graph_dropped_after_fit_and_search_survives_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit");
     assert!(
         !adapter.f32_graph_present(),
@@ -433,6 +436,7 @@ async fn concurrent_upsert_across_fit_window_graph_path_no_loss_body() {
     }
 
     // The adapter MUST have fitted (600 > 256).
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit under load");
 
     // CRITICAL: confirm the test exercises the GRAPH path, not brute-force.
@@ -556,6 +560,7 @@ async fn concurrent_upsert_across_fit_no_f32_graph_absent_error_body() {
     }
 
     let errors = error_count.load(std::sync::atomic::Ordering::Relaxed);
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(
         adapter.is_quantized(),
         "adapter did not fit under load (test setup failure)"

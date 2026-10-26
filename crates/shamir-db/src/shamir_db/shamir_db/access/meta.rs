@@ -5,6 +5,18 @@ use crate::{DbError, DbResult};
 
 use super::super::ShamirDb;
 
+/// Second-layer guard: decode `ResourceMeta` only from a `Map` record; a
+/// non-map row reaching this point (catalogue corruption that slipped past
+/// the read-level guards) is an Internal error, never default-open meta.
+fn checked_meta(record: &QueryValue, kind: &str) -> DbResult<ResourceMeta> {
+    match record {
+        QueryValue::Map(_) => Ok(ResourceMeta::from_record(record)),
+        _ => Err(DbError::Internal(format!(
+            "corrupt {kind} catalogue record: not a map"
+        ))),
+    }
+}
+
 impl ShamirDb {
     // ========================================================================
     // Resource metadata resolver + groups (P3 metadata plates)
@@ -43,7 +55,7 @@ impl ShamirDb {
 
         match &table_path {
             ResourcePath::Database { db } => match self.system_store.load_database(db).await {
-                Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                Ok(Some(r)) => checked_meta(&r, "database"),
                 Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                 Err(e) => {
                     log::warn!("resource_meta: failed to load database '{}' meta: {e}", db);
@@ -52,7 +64,7 @@ impl ShamirDb {
             },
             ResourcePath::Store { db, store } => {
                 match self.system_store.load_repository(db, store).await {
-                    Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                    Ok(Some(r)) => checked_meta(&r, "repository"),
                     Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                     Err(e) => {
                         log::warn!(
@@ -66,7 +78,7 @@ impl ShamirDb {
             }
             ResourcePath::Table { db, store, table } => {
                 match self.system_store.load_table_record(db, store, table).await {
-                    Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                    Ok(Some(r)) => checked_meta(&r, "table"),
                     Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                     Err(e) => {
                         log::warn!(
@@ -80,7 +92,7 @@ impl ShamirDb {
                 }
             }
             ResourcePath::Function { name } => match self.system_store.load_function(name).await {
-                Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
+                Ok(Some(r)) => checked_meta(&r, "function"),
                 Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                 Err(e) => {
                     log::warn!(

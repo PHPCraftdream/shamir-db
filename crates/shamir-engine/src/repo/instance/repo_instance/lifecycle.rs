@@ -18,7 +18,24 @@ mod recovery;
 mod seed_backing_impl;
 mod seed_metadata_impl;
 
+/// Test seam: 1-indexed countdown — the next `sync_wal` call fails when the
+/// armed value reaches 1 (mirrors the catalogue `arm_catalogue_write_fault`
+/// pattern). `#[cfg(any(test, feature = "test-util"))]` so shamir-db's
+/// dev-dependency tests can arm it cross-crate; production never sees it.
+#[cfg(any(test, feature = "test-util"))]
+static SYNC_WAL_FAULT_COUNTDOWN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 impl RepoInstance {
+    /// Arm the sync_wal fault seam: the n-th subsequent `sync_wal` call
+    /// (1-indexed countdown, global across repos) fails with
+    /// `DbError::Storage`. Test-only.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn arm_sync_wal_fault(n: usize) {
+        SYNC_WAL_FAULT_COUNTDOWN.store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(crate) fn commit_tail(&self) -> &Arc<CommitTailBarrier> {
         &self.commit_tail
     }
@@ -325,6 +342,16 @@ impl RepoInstance {
     /// Force a durable `fsync` of this repo's file WAL (level 2 → level 3).
     /// In-memory repos have no file WAL — this is a no-op there.
     pub async fn sync_wal(&self) -> DbResult<()> {
+        #[cfg(any(test, feature = "test-util"))]
+        {
+            let remaining = SYNC_WAL_FAULT_COUNTDOWN.load(std::sync::atomic::Ordering::SeqCst);
+            if remaining > 0 {
+                SYNC_WAL_FAULT_COUNTDOWN.store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+                if remaining == 1 {
+                    return Err(DbError::Storage("injected sync_wal fault".to_string()));
+                }
+            }
+        }
         let wal = self.repo_wal().await?;
         if self.initialized_mem_wal() {
             return Ok(());
