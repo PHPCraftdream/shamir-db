@@ -366,7 +366,7 @@ async fn rv_transport_ws_b8ed1366_sixty_five_peer_pings_still_hit_control_budget
     let (server_io, client_io) = duplex(128 * 1024);
     let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
     let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
-    let state = shamir_transport_ws::heartbeat::HeartbeatState::default();
+    let state = shamir_transport_ws::HeartbeatState::default();
     let sender = tokio::spawn(async move {
         for _ in 0..65 {
             client.send(Message::Ping(vec![0x33].into())).await.unwrap();

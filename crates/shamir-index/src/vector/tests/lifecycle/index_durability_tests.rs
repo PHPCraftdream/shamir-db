@@ -86,7 +86,7 @@ fn make_backend(interner: &Interner, id: u32) -> VectorBackend {
             ..Default::default()
         },
     ));
-    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter)
+    VectorBackend::new(desc, vec![intern(interner, "embedding")], adapter, None)
 }
 
 /// `Store` wrapper that makes `scan_prefix_stream` fail deterministically on
@@ -382,8 +382,12 @@ async fn rv_index_2f3cbca3_reopen_reseed_respects_absorption_watermark() {
         &info_store,
         &keyspace,
         m0.gen,
-        m0.graph_chunks,
-        m0.data_chunks,
+        snapshot::OldGenerationChunks {
+            graph: m0.graph_chunks,
+            data: m0.data_chunks,
+            qgraph: m0.qgraph_chunks,
+            qdata: m0.qdata_chunks,
+        },
         final_manifest,
         3,
     )
@@ -521,8 +525,12 @@ async fn seed_pruned_boundary_3(info_store: &Arc<dyn Store>, keyspace: &str) -> 
         info_store,
         keyspace,
         m0.gen,
-        m0.graph_chunks,
-        m0.data_chunks,
+        snapshot::OldGenerationChunks {
+            graph: m0.graph_chunks,
+            data: m0.data_chunks,
+            qgraph: m0.qgraph_chunks,
+            qdata: m0.qdata_chunks,
+        },
         published.clone(),
         3,
     )

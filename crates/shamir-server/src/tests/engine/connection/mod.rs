@@ -3,6 +3,6 @@
 pub mod backoff_tests;
 pub mod bootstrap_gate_tests;
 pub mod budget_tests;
-pub mod framer_close_tests;
 pub mod handshake_e2e_tests;
-pub mod heartbeat_tests;
+pub mod query_version_tests;
+pub mod ws;

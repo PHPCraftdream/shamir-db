@@ -192,7 +192,7 @@ pub trait FrameWriter: Send {
         }
     }
     /// Return the shared heartbeat state when this writer supports it.
-    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::HeartbeatState> {
         None
     }
     /// Send a heartbeat Ping with its opaque payload.
@@ -289,7 +289,7 @@ pub trait Framer: Send {
         }
     }
     /// Return the shared heartbeat state when this writer supports it.
-    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::HeartbeatState> {
         None
     }
     /// Send a heartbeat Ping with its opaque payload.
@@ -425,7 +425,7 @@ fn map_tcp_err(e: shamir_transport_tcp::framing::FrameError) -> FramerError {
 /// Read half of a WS framer — wraps `SplitStream<WebSocketStream<S>>`.
 pub struct WsFrameReader<S>(
     SplitStream<WebSocketStream<S>>,
-    shamir_transport_ws::heartbeat::HeartbeatState,
+    shamir_transport_ws::HeartbeatState,
 );
 
 /// Write half of a WS framer — wraps `SplitSink<WebSocketStream<S>, Message>`.
@@ -435,7 +435,7 @@ pub struct WsFrameReader<S>(
 /// the sink before dropping it.
 pub struct WsFrameWriter<S>(
     SplitSink<WebSocketStream<S>, Message>,
-    shamir_transport_ws::heartbeat::HeartbeatState,
+    shamir_transport_ws::HeartbeatState,
 );
 
 impl<S> FrameReader for WsFrameReader<S>
@@ -473,7 +473,7 @@ where
             .await
             .map_err(map_ws_err)
     }
-    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::HeartbeatState> {
         Some(self.1.clone())
     }
     async fn send_heartbeat(&mut self, payload: [u8; 8]) -> Result<(), FramerError> {
@@ -503,7 +503,7 @@ where
 /// defence-in-depth.
 pub struct WsFramer<S> {
     ws: WebSocketStream<S>,
-    heartbeat: shamir_transport_ws::heartbeat::HeartbeatState,
+    heartbeat: shamir_transport_ws::HeartbeatState,
 }
 
 impl<S> WsFramer<S>
@@ -563,7 +563,7 @@ where
             .await
             .map_err(|e| FramerError::Io(e.to_string()))
     }
-    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::HeartbeatState> {
         Some(self.heartbeat.clone())
     }
     async fn close_with(&mut self, code: u16, reason: &str) {

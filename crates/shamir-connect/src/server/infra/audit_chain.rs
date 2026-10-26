@@ -155,6 +155,11 @@ pub struct AuditChain {
     /// durable gate then inner, and no await occurs while either is held.
     durable_gate: Mutex<()>,
     persistence_failed: std::sync::atomic::AtomicBool,
+    /// Sequencing state (seq/prev_hmac/retained window). Contention model
+    /// (RV-CONNECT-34144ECE): every audit append takes this lock briefly —
+    /// HMAC of a single canonical entry — while the durable gate above
+    /// serializes the expensive persistence phase; lock order is durable
+    /// gate then inner, and inner is never held across I/O.
     inner: Mutex<ChainInner>,
 }
 

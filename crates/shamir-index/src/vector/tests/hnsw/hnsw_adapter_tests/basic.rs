@@ -583,9 +583,10 @@ async fn upsert_same_rid_concurrent_no_duplicate() {
         //     NOT tombstoned). The old racy path leaves two.
         let mut live_internals = 0usize;
         adapter
+            .state
             .rid_map
             .iter_async(|internal, mapped_rid| {
-                if *mapped_rid == target && !adapter.deleted.contains_sync(internal) {
+                if *mapped_rid == target && !adapter.state.deleted.contains_sync(internal) {
                     live_internals += 1;
                 }
                 true
@@ -636,4 +637,52 @@ async fn non_tx_search_unchanged_after_refactor() {
         .unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0].0, rid(1));
+}
+
+// P1 — MAX_TOPK restore: a huge (untrusted) k on the graph path (300
+// vectors > BRUTE_FORCE_MAX 256) must clamp to MAX_TOPK instead of
+// allocating `overscan = 2*k` / `with_capacity(k)`. Regression for the
+// dropped master clamp in `vector_impl::search`.
+#[tokio::test]
+async fn huge_k_clamped_on_graph_path() {
+    let adapter = HnswAdapter::new(
+        2,
+        VectorMetric::L2,
+        HnswConfig {
+            max_elements: 4096,
+            ..Default::default()
+        },
+    );
+    let vec8 = |i: u32| {
+        let mut v = vec![0.0f32; 2];
+        v[(i % 2) as usize] = i as f32 / 16.0;
+        v
+    };
+    let rid_u32 = |n: u32| {
+        let mut a = [0u8; 16];
+        a[..4].copy_from_slice(&n.to_le_bytes());
+        RecordId(a)
+    };
+    for i in 0..300u32 {
+        adapter.upsert(rid_u32(i), &vec8(i)).await.unwrap();
+    }
+    let q = vec8(7);
+    let r1 = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        adapter.search(&q, 1_000_000_000, SearchOpts::default(), None),
+    )
+    .await
+    .expect("k=1e9 search must not hang")
+    .unwrap();
+    assert!(!r1.is_empty());
+    assert!(r1.len() <= 300);
+    let r2 = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        adapter.search(&q, u32::MAX, SearchOpts::default(), None),
+    )
+    .await
+    .expect("k=u32::MAX search must not hang")
+    .unwrap();
+    assert!(!r2.is_empty());
+    assert!(r2.len() <= 300);
 }

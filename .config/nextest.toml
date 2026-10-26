@@ -156,7 +156,7 @@ test-group = "wasm-heavy"
 
 # Serialise the disk-durable shamir-db tests (see the fsync-heavy group above).
 [[profile.default.overrides]]
-filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope_tests|quarantine_reads_tests|seed::tests::catalogue_tests|seed::tests::gate_tests|durability_policy_tests|access_meta_tests|core::execute_tests|user_scalar_tests|hybrid_repo_ddl_tests|clean_horizon_tests|durability_levels_tests|durable_repo_tests|flush_all_tests|shutdown_quiesce_tests|system_metadata_tests)::/)"
+filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope_tests|quarantine_reads_tests|seed::tests::catalogue_tests|seed::tests::gate_tests|durability_policy_tests|access_meta_tests|core::execute_tests|user_scalar_tests|hybrid_repo_ddl_tests|clean_horizon_tests|durability_levels_tests|durable_repo_tests|flush_all_tests|shutdown_quiesce_tests|system_metadata_tests|catalogue_lifecycle_tests)::/)"
 test-group = "fsync-heavy"
 
 [[profile.ci.overrides]]
@@ -164,7 +164,7 @@ filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
 
 [[profile.ci.overrides]]
-filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope_tests|quarantine_reads_tests|seed::tests::catalogue_tests|seed::tests::gate_tests|durability_policy_tests|access_meta_tests|core::execute_tests|user_scalar_tests|hybrid_repo_ddl_tests|clean_horizon_tests|durability_levels_tests|durable_repo_tests|flush_all_tests|shutdown_quiesce_tests|system_metadata_tests)::/)"
+filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope_tests|quarantine_reads_tests|seed::tests::catalogue_tests|seed::tests::gate_tests|durability_policy_tests|access_meta_tests|core::execute_tests|user_scalar_tests|hybrid_repo_ddl_tests|clean_horizon_tests|durability_levels_tests|durable_repo_tests|flush_all_tests|shutdown_quiesce_tests|system_metadata_tests|catalogue_lifecycle_tests)::/)"
 test-group = "fsync-heavy"
 
 # ============================================================================

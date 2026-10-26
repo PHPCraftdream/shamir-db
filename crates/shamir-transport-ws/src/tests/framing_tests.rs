@@ -20,7 +20,7 @@ async fn rv_transport_ws_b8ed1366_heartbeat_pong_does_not_consume_control_budget
     let (server_io, client_io) = duplex(64 * 1024);
     let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
     let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
-    let state = crate::heartbeat::HeartbeatState::default();
+    let state = crate::HeartbeatState::default();
     let (ping, _) = state.next_ping();
     let sender = tokio::spawn(async move {
         for _ in 0..64 {
@@ -48,29 +48,14 @@ async fn rv_transport_ws_b8ed1366_heartbeat_pong_does_not_consume_control_budget
 /// Matched heartbeat Pong frames are consumed before flood-budget accounting.
 #[test]
 fn rv_transport_ws_a3b8161a_matched_pong_correlates_only_latest_ping() {
-    let state = crate::heartbeat::HeartbeatState::default();
+    let state = crate::HeartbeatState::default();
     let (first, _) = state.next_ping();
-    assert!(crate::heartbeat::is_matched_heartbeat_pong(
-        Some(&state),
-        &first
-    ));
+    assert!(crate::is_matched_heartbeat_pong(Some(&state), &first));
     let (second, _) = state.next_ping();
-    assert!(!crate::heartbeat::is_matched_heartbeat_pong(
-        Some(&state),
-        &first
-    ));
-    assert!(crate::heartbeat::is_matched_heartbeat_pong(
-        Some(&state),
-        &second
-    ));
-    assert!(!crate::heartbeat::is_matched_heartbeat_pong(
-        Some(&state),
-        &second
-    ));
-    assert!(!crate::heartbeat::is_matched_heartbeat_pong(
-        Some(&state),
-        &[0; 7]
-    ));
+    assert!(!crate::is_matched_heartbeat_pong(Some(&state), &first));
+    assert!(crate::is_matched_heartbeat_pong(Some(&state), &second));
+    assert!(!crate::is_matched_heartbeat_pong(Some(&state), &second));
+    assert!(!crate::is_matched_heartbeat_pong(Some(&state), &[0; 7]));
 }
 
 impl Sink<Message> for PointerSink {
