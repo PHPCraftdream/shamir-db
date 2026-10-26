@@ -38,6 +38,11 @@ pub mod instance_defaults {
     /// non-blocking checks).
     pub const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+    /// Server WebSocket heartbeat cadence.
+    pub const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+    /// Deadline for the matching Pong after a heartbeat Ping is written.
+    pub const WS_PONG_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// Maximum number of requests in-flight concurrently per connection.
     ///
     /// Controls the size of the per-connection semaphore (reader back-pressure)
@@ -48,7 +53,7 @@ pub mod instance_defaults {
     pub const CONN_MAX_IN_FLIGHT: usize = 32;
 
     /// Maximum idle time on an authenticated connection before the server
-    /// closes it (task #616 pt.3). Resets on every frame received. A
+    /// closes it. WebSocket Pong control frames do not reset this timer.
     /// generous default — legitimate clients send SOMETHING (even a Ping)
     /// well within this window; a silent connection past it is either dead
     /// or abandoned and should not hold a session slot + socket forever.

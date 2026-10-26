@@ -8,6 +8,15 @@
 //! match the message body length minus 4 (defense-in-depth against
 //! length-prefix tampering vs WS frame boundary).
 //!
+//! # Zero-length frames (transport divergence from TCP)
+//!
+//! A four-zero-byte BINARY message (`[u32_be 0]`) is a LEGAL empty frame
+//! on WS and yields an empty payload. On the TCP sibling
+//! (`shamir-transport-tcp::framing`) a zero length prefix means graceful
+//! peer close (`PeerClose`). The wire bytes are identical; the close
+//! semantics are NOT. WS peers signal close with a WebSocket Close frame
+//! ([`WsFrameError::PeerClose`]) instead.
+//!
 //! # Split halves
 //!
 //! [`ws_recv_into_stream`] and [`ws_send_sink`] operate on the individual
@@ -54,6 +63,15 @@ pub enum WsFrameError {
     /// elsewhere; payload-bearing messages MUST be BINARY).
     #[error("expected binary message, got: {0}")]
     NonBinaryMessage(String),
+    /// RV-TRANSPORT-WS-B8ED1366: too many consecutive control frames
+    /// (ping flood) without any data frame.
+    #[error("control-frame flood: {count} frames, {bytes} bytes")]
+    ControlFlood {
+        /// Number of control frames skipped since the last data frame.
+        count: usize,
+        /// Total control-frame payload bytes consumed.
+        bytes: usize,
+    },
 }
 
 /// Send one frame as a WebSocket BINARY message.
@@ -115,10 +133,53 @@ pub async fn ws_send_sink<W>(sink: &mut W, payload: &[u8]) -> Result<(), WsFrame
 where
     W: Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
+    // Cap BEFORE narrowing to u32 or allocating: lengths ≥ 2^32 would
+    // wrap the prefix (RV-TRANSPORT-WS-624F81B1).
+    if payload.len() > MAX_WS_FRAME_SIZE {
+        return Err(WsFrameError::TooLarge {
+            actual: payload.len(),
+            max: MAX_WS_FRAME_SIZE,
+        });
+    }
     let len = payload.len() as u32;
     let mut buf = Vec::with_capacity(4 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(payload);
+    sink.send(Message::Binary(buf.into())).await?;
+    Ok(())
+}
+
+/// Send one frame from an OWNED, already length-prefixed buffer
+/// (`[u32_be length][payload]`) — RV-TRANSPORT-WS-B7D06174.
+///
+/// Ownership lets the buffer become the BINARY message body directly: no
+/// fresh allocation, no payload copy (the `ws_send_sink` path allocates and
+/// copies the whole payload per frame). Validates the prefix and the frame
+/// cap before handing the buffer to the sink.
+pub async fn ws_send_sink_prereserved<W>(sink: &mut W, buf: Vec<u8>) -> Result<(), WsFrameError>
+where
+    W: Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    if buf.len() < 4 {
+        return Err(WsFrameError::LengthMismatch {
+            declared: 0,
+            actual: buf.len(),
+        });
+    }
+    let declared = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let payload_len = buf.len() - 4;
+    if declared != payload_len {
+        return Err(WsFrameError::LengthMismatch {
+            declared,
+            actual: payload_len,
+        });
+    }
+    if payload_len > MAX_WS_FRAME_SIZE {
+        return Err(WsFrameError::TooLarge {
+            actual: payload_len,
+            max: MAX_WS_FRAME_SIZE,
+        });
+    }
     sink.send(Message::Binary(buf.into())).await?;
     Ok(())
 }
@@ -137,6 +198,34 @@ pub async fn ws_recv_into_stream<R>(
 where
     R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
+    ws_recv_into_stream_inner(stream, max_frame_size, buf, None).await
+}
+
+pub async fn ws_recv_into_stream_observing<R>(
+    stream: &mut R,
+    max_frame_size: usize,
+    buf: &mut Vec<u8>,
+    heartbeat: &crate::heartbeat::HeartbeatState,
+) -> Result<(), WsFrameError>
+where
+    R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    ws_recv_into_stream_inner(stream, max_frame_size, buf, Some(heartbeat)).await
+}
+
+async fn ws_recv_into_stream_inner<R>(
+    stream: &mut R,
+    max_frame_size: usize,
+    buf: &mut Vec<u8>,
+    heartbeat: Option<&crate::heartbeat::HeartbeatState>,
+) -> Result<(), WsFrameError>
+where
+    R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    // RV-TRANSPORT-WS-B8ED1366: bound control-only work so a peer can't
+    // keep the receive loop spinning forever with control frames.
+    let mut control_count: usize = 0;
+    let mut control_bytes: usize = 0;
     loop {
         let msg = match stream.next().await {
             Some(Ok(m)) => m,
@@ -173,14 +262,41 @@ where
             Message::Close(_) => return Err(WsFrameError::PeerClose),
             // Ping/Pong handled by tungstenite automatically; loop and
             // wait for next "real" message.
-            Message::Ping(_) | Message::Pong(_) => continue,
+            Message::Ping(p) => {
+                control_count += 1;
+                control_bytes += p.len();
+                check_control_budget(control_count, control_bytes)?;
+            }
+            Message::Pong(p) => {
+                if crate::heartbeat::is_matched_heartbeat_pong(heartbeat, &p) {
+                    continue;
+                }
+                control_count += 1;
+                control_bytes += p.len();
+                check_control_budget(control_count, control_bytes)?;
+            }
             Message::Text(t) => {
                 return Err(WsFrameError::NonBinaryMessage(format!(
                     "TEXT len={}",
                     t.len()
                 )))
             }
-            Message::Frame(_) => continue,
+            Message::Frame(_) => {
+                control_count += 1;
+                check_control_budget(control_count, control_bytes)?;
+            }
         }
     }
+}
+
+/// Control-frame loop budget (RV-TRANSPORT-WS-B8ED1366).
+const MAX_CONTROL_FRAMES: usize = 64;
+/// Control-payload byte budget across one receive call.
+const MAX_CONTROL_BYTES: usize = 8 * 1024;
+
+fn check_control_budget(count: usize, bytes: usize) -> Result<(), WsFrameError> {
+    if count > MAX_CONTROL_FRAMES || bytes > MAX_CONTROL_BYTES {
+        return Err(WsFrameError::ControlFlood { count, bytes });
+    }
+    Ok(())
 }

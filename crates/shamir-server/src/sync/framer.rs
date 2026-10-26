@@ -38,24 +38,25 @@
 //! `tokio::task::block_in_place` from `db_handler`, both of which keep the
 //! runtime responsive to other connections.
 
-use std::future::Future;
-use thiserror::Error;
-use tokio::io::{split, AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
-use tokio_tungstenite::WebSocketStream;
-
 use futures_util::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
-use tokio_tungstenite::tungstenite::Message;
-
 use shamir_transport_tcp::framing::{
     read_frame_into as tcp_read_frame_into, write_frame_into as tcp_write_frame_into,
     write_frame_prereserved as tcp_write_frame_prereserved,
 };
 use shamir_transport_ws::framing::{
-    ws_recv_into_stream, ws_send_sink, WsFrameError, MAX_WS_FRAME_SIZE,
+    ws_send_sink, ws_send_sink_prereserved, WsFrameError, MAX_WS_FRAME_SIZE,
 };
+use std::future::Future;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
+use tokio::io::{split, AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
 
 /// Unified error surface — collapses the per-transport error types into
 /// the shape `connection.rs` cares about.
@@ -74,6 +75,56 @@ pub enum FramerError {
     /// mismatch, unexpected message type).
     #[error("framer decode: {0}")]
     Decode(String),
+    /// The peer sent a data type unsupported by the framed protocol.
+    #[error("unsupported data: {0}")]
+    UnsupportedData(String),
+}
+
+impl FramerError {
+    /// Return the protocol close code and reason for a rejectable WS error.
+    pub fn ws_close_code(&self) -> Option<(u16, &'static str)> {
+        match self {
+            Self::TooLarge { .. } => Some((1009, "message too large")),
+            Self::Decode(_) => Some((1002, "protocol error")),
+            Self::UnsupportedData(_) => Some((1003, "unsupported data")),
+            Self::Io(_) | Self::PeerClose => None,
+        }
+    }
+}
+
+/// Return the standard reason phrase used for a WebSocket close code.
+pub fn close_reason(code: u16) -> &'static str {
+    match code {
+        1000 => "normal closure",
+        1002 => "protocol error",
+        1003 => "unsupported data",
+        1009 => "message too large",
+        4003 => "heartbeat_timeout",
+        _ => "",
+    }
+}
+
+/// Share a pending rejection close code between the reader and writer tasks.
+#[derive(Clone, Default)]
+pub struct CloseIntent(Arc<AtomicU16>);
+impl CloseIntent {
+    /// Create an empty close intent.
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Record the WebSocket close code associated with a framing error.
+    pub fn set(&self, error: &FramerError) {
+        if let Some((code, _)) = error.ws_close_code() {
+            self.0.store(code, Ordering::Relaxed);
+        }
+    }
+    /// Take and clear the pending WebSocket close code, if any.
+    pub fn take(&self) -> Option<u16> {
+        match self.0.swap(0, Ordering::Relaxed) {
+            0 => None,
+            code => Some(code),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,6 +141,8 @@ pub trait FrameReader: Send {
         max: usize,
         buf: &'a mut Vec<u8>,
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a;
+    /// Record whether the reader is parked and not polling the socket.
+    fn set_reader_parked(&mut self, _parked: bool) {}
 }
 
 /// Write half of a split framer.  Owns the write direction and the shutdown
@@ -109,23 +162,46 @@ pub trait FrameWriter: Send {
     /// [`Framer::write_frame_prereserved`] for the full contract.
     fn write_frame_prereserved<'a>(
         &'a mut self,
-        buf: &'a [u8],
+        buf: Vec<u8>,
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
         async move {
-            // Default: strip the 4-byte prefix and delegate to the normal
-            // path. Transports that can write the prereserved buffer directly
-            // (TCP) override this.
             if buf.len() < 4 {
                 return Err(FramerError::Decode(
                     "write_frame_prereserved: buffer shorter than 4-byte length prefix".into(),
                 ));
             }
-            let payload = &buf[4..];
-            let mut scratch = Vec::with_capacity(0);
-            self.write_frame_into(payload, &mut scratch).await
+            let declared = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            if declared != buf.len() - 4 {
+                return Err(FramerError::Decode(format!(
+                    "write_frame_prereserved: length prefix {declared} != payload {}",
+                    buf.len() - 4
+                )));
+            }
+            self.write_frame_into(&buf[4..], &mut Vec::new()).await
         }
     }
-
+    /// Send a Close frame with the provided status code and reason.
+    fn close_with<'a>(
+        &'a mut self,
+        code: u16,
+        reason: &'a str,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let _ = (code, reason);
+            self.shutdown().await
+        }
+    }
+    /// Return the shared heartbeat state when this writer supports it.
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+        None
+    }
+    /// Send a heartbeat Ping with its opaque payload.
+    fn send_heartbeat<'a>(
+        &'a mut self,
+        _payload: [u8; 8],
+    ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
+        async { Err(FramerError::Io("heartbeat unsupported".into())) }
+    }
     /// Half-close the write side; best-effort, no error reporting.
     fn shutdown<'a>(&'a mut self) -> impl Future<Output = ()> + Send + 'a;
 }
@@ -183,21 +259,46 @@ pub trait Framer: Send {
     /// `u32::from_be_bytes(buf[0..4]) == buf.len() - 4`.
     fn write_frame_prereserved<'a>(
         &'a mut self,
-        buf: &'a [u8],
+        buf: Vec<u8>,
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
         async move {
-            // Default: strip the 4-byte prefix and delegate.
             if buf.len() < 4 {
                 return Err(FramerError::Decode(
                     "write_frame_prereserved: buffer shorter than 4-byte length prefix".into(),
                 ));
             }
-            let payload = &buf[4..];
-            let mut scratch = Vec::with_capacity(0);
-            self.write_frame_into(payload, &mut scratch).await
+            let declared = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+            if declared != buf.len() - 4 {
+                return Err(FramerError::Decode(format!(
+                    "write_frame_prereserved: length prefix {declared} != payload {}",
+                    buf.len() - 4
+                )));
+            }
+            self.write_frame_into(&buf[4..], &mut Vec::new()).await
         }
     }
-
+    /// Send a Close frame with the provided status code and reason.
+    fn close_with<'a>(
+        &'a mut self,
+        code: u16,
+        reason: &'a str,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        async move {
+            let _ = (code, reason);
+            self.shutdown().await
+        }
+    }
+    /// Return the shared heartbeat state when this writer supports it.
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+        None
+    }
+    /// Send a heartbeat Ping with its opaque payload.
+    fn send_heartbeat<'a>(
+        &'a mut self,
+        _payload: [u8; 8],
+    ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
+        async { Err(FramerError::Io("heartbeat unsupported".into())) }
+    }
     /// Half-close the write side; best-effort, no error reporting.
     fn shutdown<'a>(&'a mut self) -> impl Future<Output = ()> + Send + 'a;
 
@@ -240,13 +341,11 @@ where
             .await
             .map_err(map_tcp_err)
     }
-
-    async fn write_frame_prereserved(&mut self, buf: &[u8]) -> Result<(), FramerError> {
-        tcp_write_frame_prereserved(&mut self.0, buf)
+    async fn write_frame_prereserved(&mut self, buf: Vec<u8>) -> Result<(), FramerError> {
+        tcp_write_frame_prereserved(&mut self.0, &buf)
             .await
             .map_err(map_tcp_err)
     }
-
     async fn shutdown(&mut self) {
         let _ = self.0.shutdown().await;
     }
@@ -294,18 +393,15 @@ where
             .await
             .map_err(map_tcp_err)
     }
-
-    async fn write_frame_prereserved(&mut self, buf: &[u8]) -> Result<(), FramerError> {
-        tcp_write_frame_prereserved(&mut self.w, buf)
+    async fn write_frame_prereserved(&mut self, buf: Vec<u8>) -> Result<(), FramerError> {
+        tcp_write_frame_prereserved(&mut self.w, &buf)
             .await
             .map_err(map_tcp_err)
     }
-
     async fn shutdown(&mut self) {
         let _ = self.w.shutdown().await;
     }
-
-    fn split(self) -> (TcpFrameReader<S>, TcpFrameWriter<S>) {
+    fn split(self) -> (Self::Reader, Self::Writer) {
         (TcpFrameReader(self.r), TcpFrameWriter(self.w))
     }
 }
@@ -327,24 +423,37 @@ fn map_tcp_err(e: shamir_transport_tcp::framing::FrameError) -> FramerError {
 // --------------------------------------------------------------------------
 
 /// Read half of a WS framer — wraps `SplitStream<WebSocketStream<S>>`.
-pub struct WsFrameReader<S>(SplitStream<WebSocketStream<S>>);
+pub struct WsFrameReader<S>(
+    SplitStream<WebSocketStream<S>>,
+    shamir_transport_ws::heartbeat::HeartbeatState,
+);
 
 /// Write half of a WS framer — wraps `SplitSink<WebSocketStream<S>, Message>`.
 ///
 /// Shutdown sends a WS `Close` frame via `SinkExt::close`, which is the
 /// idiomatic tungstenite way to initiate the WS closing handshake and flush
 /// the sink before dropping it.
-pub struct WsFrameWriter<S>(SplitSink<WebSocketStream<S>, Message>);
+pub struct WsFrameWriter<S>(
+    SplitSink<WebSocketStream<S>, Message>,
+    shamir_transport_ws::heartbeat::HeartbeatState,
+);
 
 impl<S> FrameReader for WsFrameReader<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     async fn read_frame_into(&mut self, max: usize, buf: &mut Vec<u8>) -> Result<(), FramerError> {
-        let effective_max = max.min(MAX_WS_FRAME_SIZE);
-        ws_recv_into_stream(&mut self.0, effective_max, buf)
-            .await
-            .map_err(map_ws_err)
+        shamir_transport_ws::framing::ws_recv_into_stream_observing(
+            &mut self.0,
+            max.min(MAX_WS_FRAME_SIZE),
+            buf,
+            &self.1,
+        )
+        .await
+        .map_err(map_ws_err)
+    }
+    fn set_reader_parked(&mut self, parked: bool) {
+        self.1.reader_parked(parked);
     }
 }
 
@@ -355,15 +464,36 @@ where
     async fn write_frame_into(
         &mut self,
         payload: &[u8],
-        _scratch: &mut Vec<u8>,
+        _: &mut Vec<u8>,
     ) -> Result<(), FramerError> {
         ws_send_sink(&mut self.0, payload).await.map_err(map_ws_err)
     }
-
-    async fn shutdown(&mut self) {
-        // SinkExt::close sends the WS Close frame and flushes — equivalent
-        // to the whole-stream `ws.close(None).await` used by WsFramer.
+    async fn write_frame_prereserved(&mut self, buf: Vec<u8>) -> Result<(), FramerError> {
+        ws_send_sink_prereserved(&mut self.0, buf)
+            .await
+            .map_err(map_ws_err)
+    }
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+        Some(self.1.clone())
+    }
+    async fn send_heartbeat(&mut self, payload: [u8; 8]) -> Result<(), FramerError> {
+        self.0
+            .send(Message::Ping(payload.to_vec().into()))
+            .await
+            .map_err(|e| FramerError::Io(e.to_string()))
+    }
+    async fn close_with(&mut self, code: u16, reason: &str) {
+        let _ = self
+            .0
+            .send(Message::Close(Some(CloseFrame {
+                code: code.into(),
+                reason: reason.into(),
+            })))
+            .await;
         let _ = self.0.close().await;
+    }
+    async fn shutdown(&mut self) {
+        self.close_with(1000, close_reason(1000)).await;
     }
 }
 
@@ -373,18 +503,21 @@ where
 /// defence-in-depth.
 pub struct WsFramer<S> {
     ws: WebSocketStream<S>,
+    heartbeat: shamir_transport_ws::heartbeat::HeartbeatState,
 }
 
 impl<S> WsFramer<S>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
-    /// Wrap an already-upgraded `WebSocketStream`. The TLS exporter (when
-    /// applicable) MUST be extracted from the underlying TLS stream
-    /// BEFORE the upgrade — once the WS owns it, it's no longer
-    /// accessible from outside.
+    /// Wrap an already-upgraded `WebSocketStream`. The TLS exporter is
+    /// deliberately extracted by its caller before upgrade, but the
+    /// underlying TLS stream remains reachable through the upgraded WS.
     pub fn new(ws: WebSocketStream<S>) -> Self {
-        Self { ws }
+        Self {
+            ws,
+            heartbeat: Default::default(),
+        }
     }
 }
 
@@ -399,16 +532,19 @@ where
         // WS framing has its own ceiling; clamp to the smaller of
         // caller-supplied `max` and the WS-layer max so accidental
         // mis-config can't bypass the WS limit.
-        let effective_max = max.min(MAX_WS_FRAME_SIZE);
-        ws_recv_into_stream(&mut self.ws, effective_max, buf)
-            .await
-            .map_err(map_ws_err)
+        shamir_transport_ws::framing::ws_recv_into_stream_observing(
+            &mut self.ws,
+            max.min(MAX_WS_FRAME_SIZE),
+            buf,
+            &self.heartbeat,
+        )
+        .await
+        .map_err(map_ws_err)
     }
-
     async fn write_frame_into(
         &mut self,
         payload: &[u8],
-        _scratch: &mut Vec<u8>,
+        _: &mut Vec<u8>,
     ) -> Result<(), FramerError> {
         // WS already builds its own send buffer (one allocation per
         // message); the scratch is redundant here.
@@ -416,27 +552,66 @@ where
             .await
             .map_err(map_ws_err)
     }
-
-    async fn shutdown(&mut self) {
+    async fn write_frame_prereserved(&mut self, buf: Vec<u8>) -> Result<(), FramerError> {
+        ws_send_sink_prereserved(&mut self.ws, buf)
+            .await
+            .map_err(map_ws_err)
+    }
+    async fn send_heartbeat(&mut self, payload: [u8; 8]) -> Result<(), FramerError> {
+        self.ws
+            .send(Message::Ping(payload.to_vec().into()))
+            .await
+            .map_err(|e| FramerError::Io(e.to_string()))
+    }
+    fn heartbeat_state(&self) -> Option<shamir_transport_ws::heartbeat::HeartbeatState> {
+        Some(self.heartbeat.clone())
+    }
+    async fn close_with(&mut self, code: u16, reason: &str) {
+        let _ = self
+            .ws
+            .send(Message::Close(Some(CloseFrame {
+                code: code.into(),
+                reason: reason.into(),
+            })))
+            .await;
         let _ = self.ws.close(None).await;
     }
-
-    fn split(self) -> (WsFrameReader<S>, WsFrameWriter<S>) {
+    async fn shutdown(&mut self) {
+        self.close_with(1000, close_reason(1000)).await;
+    }
+    fn split(self) -> (Self::Reader, Self::Writer) {
         let (w, r) = self.ws.split();
-        (WsFrameReader(r), WsFrameWriter(w))
+        (
+            WsFrameReader(r, self.heartbeat.clone()),
+            WsFrameWriter(w, self.heartbeat),
+        )
     }
 }
-
 fn map_ws_err(e: WsFrameError) -> FramerError {
     match e {
         WsFrameError::PeerClose => FramerError::PeerClose,
         WsFrameError::TooLarge { actual, max } => FramerError::TooLarge { actual, max },
-        WsFrameError::Io(io) => FramerError::Io(io.to_string()),
+        WsFrameError::Io(io) => match io {
+            tokio_tungstenite::tungstenite::Error::Capacity(
+                tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong {
+                    size,
+                    max_size,
+                },
+            ) => FramerError::TooLarge {
+                actual: size,
+                max: max_size,
+            },
+            tokio_tungstenite::tungstenite::Error::Protocol(_) => {
+                FramerError::Decode(io.to_string())
+            }
+            other => FramerError::Io(other.to_string()),
+        },
         WsFrameError::LengthMismatch { declared, actual } => FramerError::Decode(format!(
             "ws length mismatch: declared={declared}, actual={actual}"
         )),
-        WsFrameError::NonBinaryMessage(s) => {
-            FramerError::Decode(format!("ws non-binary message: {s}"))
-        }
+        WsFrameError::NonBinaryMessage(s) => FramerError::UnsupportedData(s),
+        WsFrameError::ControlFlood { count, bytes } => FramerError::Decode(format!(
+            "ws control-frame flood: {count} frames, {bytes} bytes"
+        )),
     }
 }

@@ -22,13 +22,15 @@
 
 pub mod browser;
 pub mod framing;
+pub mod heartbeat;
 pub mod listener;
 pub mod server;
 pub mod tls_exporter;
 
 pub use browser::{validate_origin, BrowserOriginPolicy, OriginRejected};
 pub use framing::{
-    ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, WsFrameError,
+    ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, ws_send_sink_prereserved,
+    WsFrameError,
 };
 pub use listener::{bind_validated, validate_addr, WsBindError, WsListenerProfile};
 pub use server::{
