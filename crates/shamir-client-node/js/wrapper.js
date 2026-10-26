@@ -91,6 +91,12 @@ function decodeOrThrow(buf) {
 // ---------------------------------------------------------------------------
 
 class ShamirClient extends native.ShamirClient {
+  static async connect(options) {
+    const client = await super.connect(options);
+    Object.setPrototypeOf(client, ShamirClient.prototype);
+    return client;
+  }
+
   /**
    * Execute a BatchRequest (plain JS object) and return the BatchResponse
    * as a plain JS object. Throws ShamirDbError on domain-level DB errors.
