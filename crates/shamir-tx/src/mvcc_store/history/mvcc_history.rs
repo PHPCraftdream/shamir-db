@@ -1,11 +1,15 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
-use shamir_storage::types::KvOp;
-use shamir_storage::types::RecordKey;
+use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tunables::store_defaults::HISTORY_SCAN_BATCH;
+#[cfg(test)]
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+#[cfg(test)]
+use super::super::store::TS_TAG;
 use super::super::{ts_key, MvccStore};
 use super::version_entry::{StreamingGroupByState, VersionEntry};
 use crate::version_codec::{decode_version_key, encode_version_key};
@@ -85,36 +89,22 @@ impl MvccStore {
     /// T4-asof: resolve a wall-clock timestamp to the largest committed
     /// version whose recorded commit timestamp is ≤ `ts_millis`.
     ///
-    /// Phase 3: uses the in-memory `ts_index` (reversed `TreeIndex`) for O(log N)
-    /// lookup. On first call after open (cold start), rebuilds the index from
-    /// the history store's ts-keys (one-time O(N) scan, then all subsequent
-    /// queries are O(log N)). Falls back to the full history scan only if the
-    /// index is empty after rebuild (no ts entries in history at all).
+    /// Phase 3: uses the in-memory `ts_index` for O(log N + K) lookup after lazy
+    /// rebuild. The first lookup scans history once; each rebuild and lookup
+    /// costs O(N) and O(log N + K), respectively. Rebuild failures are returned.
     ///
-    /// Read-only; no cell mutation; no locking. Best-effort: if a ts entry
-    /// was never recorded for a version (it was written before T1c landed)
-    /// that version is invisible to this scan — the conservative choice,
-    /// consistent with how `vacuum_key` treats unknown-age versions.
-    pub async fn version_at_or_before_ts(&self, ts_millis: u64) -> Option<u64> {
-        use std::sync::atomic::Ordering;
-
-        // Lazy rebuild: on first call, populate the ts-index from history.
+    /// Read-only; no cell mutation. A version without a recorded timestamp is
+    /// invisible, consistent with `vacuum_key` treating unknown-age versions conservatively.
+    pub async fn version_at_or_before_ts(&self, ts_millis: u64) -> DbResult<Option<u64>> {
         if !self.ts_index_ready.load(Ordering::Acquire) {
-            self.ts_index_rebuild().await;
+            self.ts_index_rebuild().await?;
         }
-
-        // O(log N) query via the reversed-key TreeIndex.
-        self.ts_index_query(ts_millis)
+        Ok(self.ts_index_query(ts_millis))
     }
-
     /// Legacy O(total) scan fallback — kept for reference and as a test oracle.
     /// Not used on the production hot path (replaced by ts_index_query).
     #[cfg(test)]
     pub(crate) async fn version_at_or_before_ts_scan(&self, ts_millis: u64) -> Option<u64> {
-        use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
-
-        use super::super::store::TS_TAG;
-
         let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
 

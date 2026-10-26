@@ -118,21 +118,17 @@ impl MvccStore {
                 || (mode == LockMode::Shared && state.mode == Some(LockMode::Shared));
 
             if compatible {
-                // Re-entrant re-acquire: if this tx already holds the key,
-                // do NOT push a duplicate holder (would violate the
-                // distinct-id invariant and skew mode recomputation). Just
-                // return Ok — the existing holder already grants access.
+                // Re-entrant re-acquire: retain the strongest held mode.
                 if !re_entrant {
                     state.holders.push(Holder {
                         tx_version,
                         wounded: Arc::clone(&wounded),
                         wound_notify: Arc::clone(&wound_notify),
                     });
+                    state.mode = Some(mode);
+                } else if mode == LockMode::Exclusive {
+                    state.mode = Some(LockMode::Exclusive);
                 }
-                // Set the mode. An Exclusive requester that re-enters a key
-                // it already holds Shared upgrades the recorded mode so a
-                // later third-tx Shared requester correctly sees conflict.
-                state.mode = Some(mode);
                 return Ok(());
             }
 

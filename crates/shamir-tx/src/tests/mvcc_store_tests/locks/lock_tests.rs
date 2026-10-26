@@ -202,6 +202,52 @@ async fn lock_key_deadlock_freedom_opposite_order() {
     let _ = r2; // T2 result (may be Ok or Err depending on interleaving)
 }
 
+#[tokio::test]
+async fn rv_tx_709d5f0d_shared_reacquire_preserves_exclusive() {
+    let mvcc = make_mvcc();
+    let key = RecordKey::from(Bytes::from_static(b"exclusive-reentrant"));
+    let owner = TxWound::new();
+    mvcc.lock_key(
+        key.clone(),
+        10,
+        owner.flag(),
+        owner.notify(),
+        LockMode::Exclusive,
+    )
+    .await
+    .unwrap();
+    mvcc.lock_key(
+        key.clone(),
+        10,
+        owner.flag(),
+        owner.notify(),
+        LockMode::Shared,
+    )
+    .await
+    .unwrap();
+
+    let lock = mvcc
+        .locks
+        .get_sync(&key)
+        .map(|entry| Arc::clone(entry.get()))
+        .unwrap();
+    assert_eq!(lock.state.lock().await.mode, Some(LockMode::Exclusive));
+
+    let younger = TxWound::new();
+    let mut future = Box::pin(mvcc.lock_key(
+        key.clone(),
+        20,
+        younger.flag(),
+        younger.notify(),
+        LockMode::Shared,
+    ));
+    assert!(futures::poll!(future.as_mut()).is_pending());
+
+    mvcc.release_locks(10, std::slice::from_ref(&key)).await;
+    future.await.unwrap();
+    mvcc.release_locks(20, std::slice::from_ref(&key)).await;
+}
+
 /// Re-entrant: the same tx_version acquiring the same key twice (e.g.
 /// read then write) does NOT self-deadlock. A Shared acquire followed
 /// by an Exclusive acquire for the same tx succeeds.

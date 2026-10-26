@@ -11,6 +11,7 @@ use shamir_storage::storage_in_memory::InMemoryStore;
 use crate::mvcc_store::MvccStore;
 use crate::repo_tx_gate::RepoTxGate;
 use crate::tests::mvcc_store_tests::gc::helpers::{make_gate, make_mvcc};
+use crate::tests::mvcc_store_tests::gc::test_stores::make_failing_history_mvcc;
 use shamir_storage::types::RecordKey;
 
 /// Basic: write N versions with distinct timestamps, query returns correct max version.
@@ -37,23 +38,22 @@ async fn ts_index_basic() {
         .unwrap();
 
     // Query at ts=2500 should return v2 (ts=2000 ≤ 2500, ts=3000 > 2500).
-    let result = mvcc.version_at_or_before_ts(2500).await;
+    let result = mvcc.version_at_or_before_ts(2500).await.unwrap();
     assert_eq!(result, Some(v2));
 
     // Query at ts=3000 should return v3.
-    let result = mvcc.version_at_or_before_ts(3000).await;
+    let result = mvcc.version_at_or_before_ts(3000).await.unwrap();
     assert_eq!(result, Some(v3));
 
     // Query at ts=999 should return None (all versions have ts >= 1000).
-    let result = mvcc.version_at_or_before_ts(999).await;
+    let result = mvcc.version_at_or_before_ts(999).await.unwrap();
     assert_eq!(result, None);
 
     // Query at ts=1000 should return v1.
-    let result = mvcc.version_at_or_before_ts(1000).await;
+    let result = mvcc.version_at_or_before_ts(1000).await.unwrap();
     assert_eq!(result, Some(v1));
 
-    // Query at ts=u64::MAX should return the latest version.
-    let result = mvcc.version_at_or_before_ts(u64::MAX).await;
+    let result = mvcc.version_at_or_before_ts(u64::MAX).await.unwrap();
     assert_eq!(result, Some(v3));
 }
 
@@ -103,7 +103,7 @@ async fn ts_index_byte_identical_to_scan() {
         u64::MAX,
     ];
     for &ts in &query_points {
-        let from_index = mvcc.version_at_or_before_ts(ts).await;
+        let from_index = mvcc.version_at_or_before_ts(ts).await.unwrap();
         let from_scan = mvcc.version_at_or_before_ts_scan(ts).await;
         assert_eq!(
             from_index, from_scan,
@@ -111,6 +111,56 @@ async fn ts_index_byte_identical_to_scan() {
             ts, from_index, from_scan
         );
     }
+}
+
+#[tokio::test]
+async fn rv_tx_b40374fd_index_selects_largest_version_with_decreasing_timestamps() {
+    let mvcc = make_mvcc();
+    mvcc.ts_index_insert(2_000, 1);
+    mvcc.ts_index_insert(1_000, 2);
+    mvcc.ts_index_insert(1_000, 3);
+    assert_eq!(mvcc.ts_index_query(2_500), Some(3));
+    assert_eq!(mvcc.ts_index_query(1_000), Some(3));
+    assert_eq!(mvcc.ts_index_query(999), None);
+}
+
+#[tokio::test]
+async fn rv_tx_e59fb9ac_rebuild_failure_leaves_index_unready_for_retry() {
+    let gate = make_gate();
+    let (writer, history) = make_failing_history_mvcc(Arc::clone(&gate));
+    writer.set_test_now(10);
+    let version = writer
+        .set_versioned(
+            RecordKey::from(Bytes::from_static(b"timestamp-history")),
+            Bytes::from_static(b"value"),
+        )
+        .await
+        .unwrap();
+    writer.drain_to_history().await.unwrap();
+
+    // A cold store shares persisted history and the gate, but starts with an empty index.
+    let mvcc = MvccStore::new(history.clone(), gate);
+    history
+        .fail_scan
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(mvcc.ts_index_rebuild().await.is_err());
+    assert!(!mvcc
+        .ts_index_ready
+        .load(std::sync::atomic::Ordering::Acquire));
+    history
+        .fail_scan
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(mvcc.version_at_or_before_ts(10).await.is_err());
+    assert!(!mvcc
+        .ts_index_ready
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        mvcc.version_at_or_before_ts(10).await.unwrap(),
+        Some(version)
+    );
+    assert!(mvcc
+        .ts_index_ready
+        .load(std::sync::atomic::Ordering::Acquire));
 }
 
 /// Rebuild on open: create MvccStore, write versions, create a NEW MvccStore
@@ -146,13 +196,13 @@ async fn ts_index_rebuilds_on_open() {
     let mvcc2 = MvccStore::new(Arc::clone(&history), gate2);
 
     // The new store has an empty ts_index — first query triggers rebuild.
-    let result = mvcc2.version_at_or_before_ts(2500).await;
+    let result = mvcc2.version_at_or_before_ts(2500).await.unwrap();
     assert_eq!(result, Some(v2));
 
-    let result = mvcc2.version_at_or_before_ts(3000).await;
+    let result = mvcc2.version_at_or_before_ts(3000).await.unwrap();
     assert_eq!(result, Some(v3));
 
-    let result = mvcc2.version_at_or_before_ts(999).await;
+    let result = mvcc2.version_at_or_before_ts(999).await.unwrap();
     assert_eq!(result, None);
 }
 
@@ -193,7 +243,7 @@ async fn ts_index_pruned_by_vacuum_fast_path() {
 
     // The as-of-ts query for the freshest ts still resolves to the current
     // version — pruning stale entries must not break live lookups.
-    let latest = mvcc.version_at_or_before_ts(u64::MAX).await;
+    let latest = mvcc.version_at_or_before_ts(u64::MAX).await.unwrap();
     assert_eq!(latest, Some(writes)); // monotonic version allocation
 }
 
@@ -233,7 +283,7 @@ async fn ts_index_concurrent_safe() {
         handles.push(tokio::spawn(async move {
             for ts in (0..8000).step_by(100) {
                 // Should not panic or produce incorrect results.
-                let _ = mvcc_clone.version_at_or_before_ts(ts).await;
+                let _ = mvcc_clone.version_at_or_before_ts(ts).await.unwrap();
             }
         }));
     }
@@ -244,7 +294,7 @@ async fn ts_index_concurrent_safe() {
     }
 
     // Final sanity: query at a high ts should return SOME version.
-    let result = mvcc.version_at_or_before_ts(u64::MAX).await;
+    let result = mvcc.version_at_or_before_ts(u64::MAX).await.unwrap();
     assert!(result.is_some());
 
     // Total versions written = num_writers * writes_per_writer.

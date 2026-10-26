@@ -16,7 +16,7 @@ pub(in crate::tests::mvcc_store_tests) mod failing_store {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use futures::stream::Stream;
+    use futures::stream::{self, Stream, StreamExt};
 
     /// A test double that wraps `InMemoryStore` and can be armed to
     /// inject I/O errors on `get` and/or `remove` calls. Used to
@@ -30,6 +30,7 @@ pub(in crate::tests::mvcc_store_tests) mod failing_store {
         pub fail_remove: AtomicBool,
         /// When `true`, the next `set` call returns a Storage error.
         pub fail_set: AtomicBool,
+        pub fail_scan: AtomicBool,
     }
 
     impl FailingStore {
@@ -39,6 +40,7 @@ pub(in crate::tests::mvcc_store_tests) mod failing_store {
                 fail_get: AtomicBool::new(false),
                 fail_remove: AtomicBool::new(false),
                 fail_set: AtomicBool::new(false),
+                fail_scan: AtomicBool::new(false),
             }
         }
 
@@ -78,7 +80,18 @@ pub(in crate::tests::mvcc_store_tests) mod failing_store {
             &self,
             batch_size: usize,
         ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-            self.inner.iter_stream(batch_size)
+            let fail = self.fail_scan.swap(false, Ordering::Relaxed);
+            let inner = self.inner.iter_stream(batch_size);
+            Box::pin(stream::unfold(
+                (fail, inner),
+                |(fail, mut inner)| async move {
+                    if fail {
+                        Some((Err(Self::injected_error()), (false, inner)))
+                    } else {
+                        inner.next().await.map(|item| (item, (false, inner)))
+                    }
+                },
+            ))
         }
 
         fn scan_prefix_stream(
@@ -86,7 +99,18 @@ pub(in crate::tests::mvcc_store_tests) mod failing_store {
             prefix: Bytes,
             batch_size: usize,
         ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-            self.inner.scan_prefix_stream(prefix, batch_size)
+            let fail = self.fail_scan.swap(false, Ordering::Relaxed);
+            let inner = self.inner.scan_prefix_stream(prefix, batch_size);
+            Box::pin(stream::unfold(
+                (fail, inner),
+                |(fail, mut inner)| async move {
+                    if fail {
+                        Some((Err(Self::injected_error()), (false, inner)))
+                    } else {
+                        inner.next().await.map(|item| (item, (false, inner)))
+                    }
+                },
+            ))
         }
 
         async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
