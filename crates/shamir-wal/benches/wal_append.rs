@@ -39,31 +39,29 @@
 //!
 //! Bench-only crate API used is fully public: `WalGroupCommit::new`,
 //! `WalGroupCommit::append`, `WalSink::mem`, `SegmentSet::open`. No prod-code
-//! visibility was widened. The payload is opaque bytes on the append path
-//! (only `replay` decodes), so a fixed filler buffer is a faithful frame.
+//! visibility was widened. Each append uses a decodable typed WAL entry.
 
 use std::cell::Cell;
 use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_wal::segment_set::SegmentSet;
+use shamir_wal::wal_entry_v2::WalEntryV2;
 use shamir_wal::wal_group_commit::{WalDurability, WalGroupCommit};
 use shamir_wal::wal_sink::WalSink;
-
-/// Concurrency levels under test.
-const CONCURRENCY: &[usize] = &[1, 4, 16, 64];
-
-/// Per-append payload size (bytes). Small but representative of an encoded
-/// MVCC WAL record header + a short field set. The append path treats this
-/// as opaque (CRC + frame), so the exact contents are immaterial.
-const PAYLOAD_LEN: usize = 128;
 
 /// Large seal threshold so no segment rotation fires inside the timed
 /// window (rotation is a rare path, not what we are measuring).
 const SEG_MAX_BYTES: u64 = 1 << 30; // 1 GiB
 
+/// Concurrency levels under test.
+const CONCURRENCY: &[usize] = &[1, 4, 16, 64];
+
+/// Fixed encoded entry used by append benchmarks.
 fn payload() -> Vec<u8> {
-    vec![0xABu8; PAYLOAD_LEN]
+    WalEntryV2::new(1, 0, Vec::new())
+        .encode()
+        .expect("benchmark entry encode")
 }
 
 /// Run `n` concurrent `append`s at the given tier against `gc`.
