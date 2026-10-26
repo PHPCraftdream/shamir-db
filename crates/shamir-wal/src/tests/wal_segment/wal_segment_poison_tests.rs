@@ -83,6 +83,79 @@ async fn repair_torn_tail_restores_last_good_boundary() {
     assert_eq!(replayed[1].txn_id, 2);
 }
 
+#[tokio::test]
+async fn rv_wal_99f291ce_file_partial_append_rolls_back_rotates_and_retries_once() {
+    // Part A: same-call rollback + rotate + retry-once via SegmentSet.
+    let dir = TempDir::new().unwrap();
+    let first_path = dir.path().join("00000000.wal");
+    let set = crate::segment_set::SegmentSet::open(dir.path().to_path_buf(), u64::MAX)
+        .await
+        .unwrap();
+    set.append_batch(vec![entry(1, 10).encode().unwrap()], 10)
+        .await
+        .unwrap();
+    let good_bytes = std::fs::read(&first_path).unwrap();
+    set.active_segment_for_test()
+        .inject_partial_write_failure(7);
+
+    // ONE call: the injected partial write poisons 00000000.wal, the leader
+    // rotates to 00000001.wal, and the SAME entry-2 batch is retried once on
+    // the fresh segment — so the call itself succeeds.
+    let last_seq = set
+        .append_batch(vec![entry(2, 20).encode().unwrap()], 20)
+        .await
+        .unwrap();
+    let _ = last_seq;
+
+    // The poisoned segment was rolled back to its last good boundary.
+    assert_eq!(
+        std::fs::read(&first_path).unwrap(),
+        good_bytes,
+        "partial prefix must be rolled back to the last good frame boundary"
+    );
+    // The SAME entry-2 batch was retried by the leader (not resubmitted):
+    // both durable entries replay exactly once.
+    assert_eq!(
+        set.replay()
+            .await
+            .unwrap()
+            .iter()
+            .map(|e| e.txn_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn rv_wal_99f291ce_rollback_failure_poisons_without_recovery() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = WalSegment::open(path.clone()).await.unwrap();
+    seg.append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap();
+    let good_bytes = std::fs::read(&path).unwrap();
+
+    // Partial write leaves a 7-byte torn prefix, AND the rollback itself
+    // fails (e.g. ENOSPC / denied write handle): the file is in an unknown
+    // state and the segment must poison without any recovery attempt.
+    seg.inject_partial_write_failure(7);
+    seg.inject_rollback_failure();
+    let res = seg
+        .append_batch(Arc::new(vec![entry(2, 20).encode().unwrap()]), 20)
+        .await;
+    assert!(res.is_err(), "append with failing rollback must error");
+    assert!(seg.is_poisoned(), "segment must be poisoned");
+
+    // No rollback happened: the 7-byte torn prefix is still on disk
+    // (unknown state) — nothing further is appended or replayed here.
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        (good_bytes.len() + 7) as u64,
+        "file must NOT have been rolled back"
+    );
+}
+
 /// Once a segment has seen a write/sync failure, further `append_batch` calls
 /// must refuse — the file is quarantined and the leader must rotate to a new
 /// segment instead of writing more data behind a potentially-torn tail.

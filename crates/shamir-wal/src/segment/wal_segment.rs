@@ -138,6 +138,17 @@ pub struct WalSegment {
     /// acked commits behind a torn tail. A poisoned segment is never un-poisoned
     /// in-process — recovery on next open rebuilds from disk state.
     poisoned: AtomicBool,
+    #[cfg(test)]
+    fail_next_write_after: AtomicU64,
+    /// Test-only fault seam: inject `PermissionDenied` at `File::open` for
+    /// the next N replay calls (flows through the real permission-policy
+    /// branch).
+    #[cfg(test)]
+    fail_startup_open_deny: std::sync::atomic::AtomicU32,
+    /// Test-only fault seam: fail the next post-partial-write rollback
+    /// (`set_len` back to the last good boundary).
+    #[cfg(test)]
+    fail_next_rollback: AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -189,6 +200,12 @@ impl WalSegment {
             max_committed: AtomicU64::new(0),
             bytes_written: AtomicU64::new(existing_len),
             poisoned: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_write_after: AtomicU64::new(u64::MAX),
+            #[cfg(test)]
+            fail_startup_open_deny: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            fail_next_rollback: AtomicBool::new(false),
         })
     }
 
@@ -243,6 +260,10 @@ impl WalSegment {
         let pre_batch_offset = self.bytes_written.load(Ordering::Acquire);
         let file = Arc::clone(&self.file);
         let path = self.path.clone();
+        #[cfg(test)]
+        let fail_after = self.fail_next_write_after.swap(u64::MAX, Ordering::AcqRel);
+        #[cfg(test)]
+        let fail_rollback = self.fail_next_rollback.swap(false, Ordering::AcqRel);
         let frame_bytes = spawn_blocking(move || -> DbResult<u64> {
             // Coalesce all frames into one buffer → a single write() syscall
             // instead of 3N (len header + payload + crc per entry).
@@ -256,7 +277,17 @@ impl WalSegment {
                 buf.extend_from_slice(&crc.to_le_bytes());
             }
             let mut f = file.lock().expect("WalSegment file mutex poisoned");
-            match f.write_all(&buf) {
+            #[cfg(test)]
+            let write_result = if fail_after != u64::MAX {
+                let prefix_len = (fail_after as usize).min(buf.len());
+                f.write_all(&buf[..prefix_len])
+                    .and_then(|()| Err(std::io::Error::other("injected partial WAL write failure")))
+            } else {
+                f.write_all(&buf)
+            };
+            #[cfg(not(test))]
+            let write_result = f.write_all(&buf);
+            match write_result {
                 Ok(()) => Ok(buf.len() as u64),
                 Err(e) => {
                     // Partial write — `write_all` may have written some bytes
@@ -269,10 +300,18 @@ impl WalSegment {
                     // an unknown state) — log loudly and surface it; the
                     // segment is poisoned below regardless.
                     drop(f);
-                    let trunc_res = (|| -> std::io::Result<()> {
+                    let do_trunc = || -> std::io::Result<()> {
                         let g = OpenOptions::new().write(true).open(&path)?;
                         g.set_len(pre_batch_offset)
-                    })();
+                    };
+                    #[cfg(test)]
+                    let trunc_res: std::io::Result<()> = if fail_rollback {
+                        Err(std::io::Error::other("injected rollback failure"))
+                    } else {
+                        do_trunc()
+                    };
+                    #[cfg(not(test))]
+                    let trunc_res = do_trunc();
                     if let Err(trunc_err) = trunc_res {
                         log::error!(
                             "WalSegment {path:?}: write_all failed ({e}) AND rollback \
@@ -306,6 +345,11 @@ impl WalSegment {
                 Err(e)
             }
         }
+    }
+
+    /// Update the reopened segment's watermark from retained frame contents.
+    pub(crate) fn restore_max_committed(&self, max_version: u64) {
+        self.max_committed.fetch_max(max_version, Ordering::AcqRel);
     }
 
     /// Highest `commit_version` ever appended to this segment.
@@ -364,6 +408,25 @@ impl WalSegment {
     /// a fault by setting the flag directly.
     pub fn mark_poisoned(&self) {
         self.poisoned.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_partial_write_failure(&self, bytes: u64) {
+        self.fail_next_write_after.store(bytes, Ordering::Release);
+    }
+
+    /// Inject a real `io::ErrorKind::PermissionDenied` at the `File::open`
+    /// site of `replay_inner` for the next `times` replay calls. The injected
+    /// error flows through the EXISTING `is_transient_open_denial` /
+    /// `tolerate_permission_denied` classification branch.
+    #[cfg(test)]
+    pub(crate) fn inject_startup_open_denial(&self, times: u32) {
+        self.fail_startup_open_deny.store(times, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_rollback_failure(&self) {
+        self.fail_next_rollback.store(true, Ordering::Release);
     }
 
     /// Repair incomplete trailing bytes left by a partial write. A CRC-bad final
@@ -445,13 +508,23 @@ impl WalSegment {
         path: PathBuf,
         sealed: bool,
         tolerate_permission_denied: bool,
+        fail_open: bool,
     ) -> DbResult<Vec<WalEntryV2>> {
-        Self::replay_inner(path, sealed, tolerate_permission_denied).await
+        Self::replay_inner(path, sealed, tolerate_permission_denied, fail_open).await
     }
 
     /// Replay the segment from the start. Active incomplete tails are tolerated.
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
-        Self::replay_path(self.path.clone(), false, true).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), false, true, fail_open).await
     }
 
     /// Replay a SEALED segment, treating a CRC mismatch as a LOUD recovery
@@ -468,7 +541,16 @@ impl WalSegment {
     /// `NotFound` and a concurrent-truncation `PermissionDenied` are tolerated;
     /// this policy is for live replay callers, not startup recovery.
     pub async fn replay_sealed(&self) -> DbResult<Vec<WalEntryV2>> {
-        Self::replay_path(self.path.clone(), true, true).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), true, true, fail_open).await
     }
 
     /// Replay a segment at STARTUP / open, where `PermissionDenied` must be
@@ -478,14 +560,32 @@ impl WalSegment {
     /// an empty WAL would skip durable records. `NotFound` is still tolerated
     /// (a sealed segment may have been truncated by a prior clean shutdown).
     pub async fn replay_at_startup(&self) -> DbResult<Vec<WalEntryV2>> {
-        Self::replay_path(self.path.clone(), false, false).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), false, false, fail_open).await
     }
 
     /// Like [`replay_sealed`](Self::replay_sealed) but for the startup path:
     /// `PermissionDenied` is a hard error (audit §2.4), and a CRC mismatch in
     /// a sealed segment is a loud corruption error (audit §1.8).
     pub async fn replay_sealed_at_startup(&self) -> DbResult<Vec<WalEntryV2>> {
-        Self::replay_path(self.path.clone(), true, false).await
+        #[cfg(test)]
+        let fail_open = self
+            .fail_startup_open_deny
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n != 0).then(|| n - 1)
+            })
+            .is_ok();
+        #[cfg(not(test))]
+        let fail_open = false;
+        Self::replay_path(self.path.clone(), true, false, fail_open).await
     }
 
     /// Shared replay core.
@@ -498,11 +598,22 @@ impl WalSegment {
         path: PathBuf,
         sealed: bool,
         tolerate_permission_denied: bool,
+        fail_open: bool,
     ) -> DbResult<Vec<WalEntryV2>> {
         spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
+            #[cfg(not(test))]
+            let _ = fail_open;
             let mut attempt = 0u32;
             let mut f = loop {
-                match File::open(&path) {
+                #[cfg(test)]
+                let opened = if fail_open {
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                } else {
+                    File::open(&path)
+                };
+                #[cfg(not(test))]
+                let opened = File::open(&path);
+                match opened {
                     Ok(f) => break f,
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         return Ok(Vec::new());
