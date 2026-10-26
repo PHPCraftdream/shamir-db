@@ -11,6 +11,11 @@ use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
+/// Same budget as production `COMMIT_QUIESCE_TIMEOUT`: these tests need the
+/// flush to complete, not to beat a deadline; 1 s lost to fsync on loaded
+/// Windows runners.
+const BOOT_TEST_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
 const TEST_WASM: &str = r#"
 (module
   (memory (export "memory") 2)
@@ -327,7 +332,7 @@ async fn rv_db_a7a29b02_boot_rejects_missing_parent_repository() {
         .await
         .unwrap();
     db.system_store()
-        .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(1))
+        .flush_buffers_with_quiesce_timeout(BOOT_TEST_FLUSH_BUDGET)
         .await
         .unwrap();
     drop(db);
@@ -362,7 +367,7 @@ async fn rv_db_d378c582_boot_rejects_builtin_name_collision() {
         .await
         .unwrap();
     db.system_store()
-        .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(1))
+        .flush_buffers_with_quiesce_timeout(BOOT_TEST_FLUSH_BUDGET)
         .await
         .unwrap();
     drop(db);
