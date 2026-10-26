@@ -51,6 +51,11 @@ wasm-heavy = { max-threads = 4 }
 # `system` repo). Serialising exactly these tests removes the cross-test
 # fsync contention at its source; the shutdown budget and the durability
 # semantics stay untouched.
+# The group must hold EVERY shamir-db lib test module that opens an on-disk
+# Fjall store (`SystemStoreConfig::Fjall` / `BoxRepoFactory::fjall`): the
+# first list named only four modules, and the next Windows failure (PR #308)
+# ran next to three unlisted ones (system_metadata_tests 22-23 s,
+# flush_all_tests 27 s). A new module that opens on-disk Fjall joins the list.
 fsync-heavy = { max-threads = 1 }
 
 [profile.default]
@@ -151,7 +156,7 @@ test-group = "wasm-heavy"
 
 # Serialise the disk-durable shamir-db tests (see the fsync-heavy group above).
 [[profile.default.overrides]]
-filter = "package(shamir-db) and test(/(durability_policy_tests|durability_levels_tests|durable_repo_tests|clean_horizon_tests)::/)"
+filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope_tests|quarantine_reads_tests|seed::tests::catalogue_tests|seed::tests::gate_tests|durability_policy_tests|access_meta_tests|core::execute_tests|user_scalar_tests|hybrid_repo_ddl_tests|clean_horizon_tests|durability_levels_tests|durable_repo_tests|flush_all_tests|shutdown_quiesce_tests|system_metadata_tests)::/)"
 test-group = "fsync-heavy"
 
 [[profile.ci.overrides]]
@@ -159,7 +164,7 @@ filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
 
 [[profile.ci.overrides]]
-filter = "package(shamir-db) and test(/(durability_policy_tests|durability_levels_tests|durable_repo_tests|clean_horizon_tests)::/)"
+filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope_tests|quarantine_reads_tests|seed::tests::catalogue_tests|seed::tests::gate_tests|durability_policy_tests|access_meta_tests|core::execute_tests|user_scalar_tests|hybrid_repo_ddl_tests|clean_horizon_tests|durability_levels_tests|durable_repo_tests|flush_all_tests|shutdown_quiesce_tests|system_metadata_tests)::/)"
 test-group = "fsync-heavy"
 
 # ============================================================================
