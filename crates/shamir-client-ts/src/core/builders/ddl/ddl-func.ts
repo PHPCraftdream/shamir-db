@@ -49,7 +49,7 @@ export function createFunction(
   if (opts?.wasm !== undefined) op.wasm = opts.wasm;
   if (opts?.visibility !== undefined) op.visibility = opts.visibility;
   if (opts?.security !== undefined) op.security = opts.security;
-  if (opts?.secret_grants !== undefined) op.secret_grants = opts.secret_grants;
+  if (opts?.secret_grants !== undefined && opts.secret_grants.length > 0) op.secret_grants = opts.secret_grants;
   if (opts?.net_grants !== undefined) op.net_grants = opts.net_grants;
   if (opts?.hmac !== undefined) op.hmac = opts.hmac;
   if ((opts?.security === 'definer' || (opts?.secret_grants?.length ?? 0) > 0 || opts?.replace === true) && !opts?.hmac) {

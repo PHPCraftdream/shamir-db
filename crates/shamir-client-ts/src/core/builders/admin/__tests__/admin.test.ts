@@ -170,11 +170,10 @@ describe('chown (HMAC)', () => {
     // a compile error — same pattern as batch.test.ts's records_idmsgpack
     // compile-fail guard.
     const resource = admin.refDatabase('mydb');
+    // At runtime the string fails closed: the canonical encoder needs a
+    // numeric principal, so no tag is ever signed for a wrong owner.
     // @ts-expect-error string username is no longer accepted; pass bigint|number
-    const op = admin.chown(fakeSigner, resource, 'alice');
-    // At runtime the string slips through (TS types are erased), but the
-    // owner field echoes it verbatim now — no silent hashing to a wrong id.
-    expect((op as { owner: unknown }).owner).toBe('alice');
+    expect(() => admin.chown(fakeSigner, resource, 'alice')).toThrow();
   });
 });
 
@@ -280,9 +279,10 @@ describe('addGroupMember', () => {
     // The string overload was removed: a username MUST be resolved to its
     // real principal64 first via `ShamirClient.resolvePrincipal(username)`.
     const ref = admin.groupName('devs');
+    // At runtime the string fails closed (the canonical encoder needs a
+    // numeric principal).
     // @ts-expect-error string username is no longer accepted; pass bigint|number
-    const op = admin.addGroupMember(fakeSigner, ref, 'bob');
-    expect((op as { user: unknown }).user).toBe('bob');
+    expect(() => admin.addGroupMember(fakeSigner, ref, 'bob')).toThrow();
   });
 });
 
@@ -463,9 +463,10 @@ describe('setSuperuser (HMAC)', () => {
   });
 
   it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
-    const grantTag = admin.setSuperuser(fakeSigner, 'frank', true).hmac;
-    const revokeTag = admin.setSuperuser(fakeSigner, 'frank', false).hmac;
-    expect(grantTag).not.toBe(revokeTag);
+    // fakeSigner only encodes the length, so compare the canonical bytes.
+    const grant = canonicalDbRequest({ op: 'set_superuser', user: 'frank', on: true });
+    const revoke = canonicalDbRequest({ op: 'set_superuser', user: 'frank', on: false });
+    expect(Array.from(grant)).not.toEqual(Array.from(revoke));
   });
 });
 
@@ -505,9 +506,10 @@ describe('setReplicator (HMAC)', () => {
   });
 
   it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
-    const grantTag = admin.setReplicator(fakeSigner, 'frank', true).hmac;
-    const revokeTag = admin.setReplicator(fakeSigner, 'frank', false).hmac;
-    expect(grantTag).not.toBe(revokeTag);
+    // fakeSigner only encodes the length, so compare the canonical bytes.
+    const grant = canonicalDbRequest({ op: 'set_replicator', user: 'frank', on: true });
+    const revoke = canonicalDbRequest({ op: 'set_replicator', user: 'frank', on: false });
+    expect(Array.from(grant)).not.toEqual(Array.from(revoke));
   });
 });
 
