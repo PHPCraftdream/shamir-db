@@ -345,14 +345,9 @@ fn staged_field_matches(
     let Some(staging) = tx.write_set.get(&target_token) else {
         return false;
     };
-    // P1 perf fix: called once PER RECORD in a batch FK on-update check —
-    // `iter_ops()` avoids materializing a fresh `Vec<KvOp>` on every call
-    // (`snapshot_ops()` would make this O(staged²) across the batch) and lets
-    // `.any()` short-circuit on the first match.
-    staging.iter_ops().any(|op| match op {
-        shamir_storage::types::KvOp::Set(_, ref bytes) => {
-            record_field_matches_by_id(bytes.as_ref(), field_id, value)
-        }
-        shamir_storage::types::KvOp::Remove(_) => false,
-    })
+    // The field index narrows staged candidates; exact recheck preserves semantics.
+    staging
+        .probe_field(field_id, value)
+        .iter()
+        .any(|(_, bytes)| record_field_matches_by_id(bytes.as_ref(), field_id, value))
 }

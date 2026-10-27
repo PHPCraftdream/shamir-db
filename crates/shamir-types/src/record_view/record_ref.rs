@@ -10,9 +10,9 @@
 
 use crate::codecs::interned::{inner_value_to_query_value, record_view_to_query_value};
 use crate::core::interner::{Interner, InternerKey};
-use crate::record_view::kind::Kind;
 use crate::record_view::record_value::RecordValue;
 use crate::record_view::scalar_ref::ScalarRef;
+use crate::record_view::Kind;
 use crate::record_view::RecordView;
 use crate::types::common::{new_map_wc, TMap};
 use crate::types::value::{InnerValue, QueryValue};

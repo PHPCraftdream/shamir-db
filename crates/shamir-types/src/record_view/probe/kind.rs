@@ -5,7 +5,7 @@
 
 /// Classifies the type of a value at a path within a record.
 ///
-/// Returned by [`RecordRef::present_kind_at`](super::RecordRef::present_kind_at)
+/// Returned by [`crate::record_view::RecordRef::present_kind_at`]
 /// to let callers branch on the value's category without extracting or
 /// materialising it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

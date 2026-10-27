@@ -86,6 +86,21 @@ fn record_field_matches(
     Ok(false)
 }
 
+#[cfg(test)]
+thread_local! {
+    static STAGED_RECHECKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_staged_rechecks() {
+    STAGED_RECHECKS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn staged_rechecks() -> u64 {
+    STAGED_RECHECKS.with(std::cell::Cell::get)
+}
+
 /// Check whether a decoded record's field (by pre-resolved `InternerKey`)
 /// matches `value`.
 ///
@@ -105,6 +120,8 @@ fn record_field_matches_by_id(
     field_id: &shamir_types::core::interner::InternerKey,
     value: &QueryValue,
 ) -> DbResult<bool> {
+    #[cfg(test)]
+    STAGED_RECHECKS.with(|count| count.set(count.get().saturating_add(1)));
     let path = std::slice::from_ref(field_id);
     // Try zero-copy RecordView lens first.
     if let Ok(view) = RecordView::new(record_bytes) {
@@ -371,18 +388,11 @@ impl<'a> ValidatorDb<'a> {
         let Some(staging) = self.tx.write_set.get(&target_token) else {
             return Ok(false);
         };
-        // P1 perf fix: this probe runs once PER RECORD validated (called from
-        // `exists_in_table`, itself invoked per row in a batch insert against a
-        // table with a unique/FK rule). `snapshot_ops()` would materialize a
-        // fresh `Vec<KvOp>` on every call, turning an O(staged) allocation into
-        // O(staged²) total work across the batch. `iter_ops()` scans the staging
-        // map lazily and lets the loop short-circuit on the first match without
-        // materializing the rest.
-        for op in staging.iter_ops() {
-            if let shamir_storage::types::KvOp::Set(_, ref bytes) = op {
-                if record_field_matches_by_id(bytes.as_ref(), field_id, value)? {
-                    return Ok(true);
-                }
+        // Staged candidates come from the lazy field index; exact matching below
+        // preserves predicate semantics while avoiding a full write-set scan.
+        for (_, bytes) in staging.probe_field(field_id, value) {
+            if record_field_matches_by_id(bytes.as_ref(), field_id, value)? {
+                return Ok(true);
             }
         }
         Ok(false)
@@ -495,21 +505,15 @@ impl<'a> ValidatorDb<'a> {
             // a single scc read — cheap and non-blocking.
             if let Some(field_id_raw) = layered.get_id(field).await {
                 let field_key = shamir_types::core::interner::InternerKey::new(field_id_raw);
-                // P1 perf fix: `exists_in_self` runs once per record validated in a
-                // batch insert — `iter_ops()` avoids materializing a fresh `Vec<KvOp>`
-                // on every call (see `staged_field_matches` above for the same fix).
-                for op in staging.iter_ops() {
-                    if let shamir_storage::types::KvOp::Set(ref key, ref bytes) = op {
-                        // Exclude the record being updated (by key, which
-                        // encodes the RecordId).
-                        if let Some(rid) = exclude_rid {
-                            if key.as_ref() == rid.as_bytes() {
-                                continue;
-                            }
+                // Probe indexed staged candidates and retain the exact field recheck.
+                for (key, bytes) in staging.probe_field(&field_key, value) {
+                    if let Some(rid) = exclude_rid {
+                        if key.as_ref() == rid.as_bytes() {
+                            continue;
                         }
-                        if record_field_matches_by_id(bytes.as_ref(), &field_key, value)? {
-                            return Ok(true);
-                        }
+                    }
+                    if record_field_matches_by_id(bytes.as_ref(), &field_key, value)? {
+                        return Ok(true);
                     }
                 }
             }
