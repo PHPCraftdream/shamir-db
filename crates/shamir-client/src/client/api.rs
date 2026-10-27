@@ -16,7 +16,6 @@ use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
-use crate::client::epoch_admission::should_advertise_interner_epochs;
 use crate::client::subscription::{SubscriptionHandle, CLIENT_SUB_CHANNEL_CAP};
 use crate::client::transport::{await_pending_response, Lifecycle};
 use crate::client::Client;
@@ -532,4 +531,9 @@ impl Drop for Client {
             handle.abort();
         }
     }
+}
+
+/// Version gate for ambient interner epoch work; smart pre-touch remains unconditional.
+pub(crate) fn should_advertise_interner_epochs(server_version: u8, has_epochs: bool) -> bool {
+    server_version >= 2 && !has_epochs
 }
