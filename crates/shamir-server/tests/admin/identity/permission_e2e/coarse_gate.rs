@@ -131,9 +131,16 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
 
     let alice_pw = b"alice-password".to_vec();
     let alice_roles2: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "alice".into(),
+        password: String::from_utf8(alice_pw.clone()).expect("utf8").into(),
+        roles: alice_roles2.clone(),
+        hmac: None,
+    };
     let alice_tag2 = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("alice", &alice_roles2),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
@@ -302,9 +309,16 @@ async fn coarse_gate_access_tree_and_list_semantics() {
 
     let bob_pw = b"bob-password".to_vec();
     let bob553c_roles: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "bob553c".into(),
+        password: String::from_utf8(bob_pw.clone()).expect("utf8").into(),
+        roles: bob553c_roles.clone(),
+        hmac: None,
+    };
     let bob553c_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("bob553c", &bob553c_roles),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
@@ -477,9 +491,16 @@ async fn coarse_gate_non_exempted_ops_stay_superuser_only() {
 
     let eve_pw = b"eve-password".to_vec();
     let eve553f_roles: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "eve553f".into(),
+        password: String::from_utf8(eve_pw.clone()).expect("utf8").into(),
+        roles: eve553f_roles.clone(),
+        hmac: None,
+    };
     let eve553f_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("eve553f", &eve553f_roles),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {

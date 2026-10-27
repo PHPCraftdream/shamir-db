@@ -170,20 +170,74 @@ async fn exec_batch(
 // port and actually persist to the REAL directory.
 // ---------------------------------------------------------------------------
 
-/// create_user through the BatchOp path persists to the directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_user_with_roles_changed_hmac_rejected_and_user_not_created() {
+    let (handler, user_dir, _db) = build_handler_with_ports().await;
+
+    let session = root_session();
+    let op = BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+        create_user: "bob".into(),
+        password: "s3cretpw".into(),
+        roles: vec!["reader".into()],
+        database: None,
+        hmac: None,
+    });
+    let tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_batch_op("scratch", &op).expect("create-user canonical form"),
+    );
+
+    let mut b = shamir_query_builder::batch::Batch::new();
+    b.id(1);
+    b.create_user(
+        "u",
+        shamir_query_builder::ddl::create_user("bob", "s3cretpw")
+            .roles(["admin"])
+            .hmac(&tag)
+            .build()
+            .expect("build create user"),
+    );
+    let response = exec_batch_raw(
+        &handler,
+        &session,
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
+    let (code, _) = expect_error(response);
+    assert_eq!(code, "hmac_mismatch");
+    assert!(
+        user_dir.user_id("bob").is_none(),
+        "bob must not be created when the roles differ from the authenticated operation"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_user_routes_through_port_to_real_directory() {
     let (handler, user_dir, _db) = build_handler_with_ports().await;
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_create_user("alice"));
+    let op =
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "alice".into(),
+            password: "s3cretpw".into(),
+            roles: Vec::new(),
+            database: None,
+            hmac: None,
+        });
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_batch_op("scratch", &op).expect("create-user canonical form"),
+    );
 
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
     b.create_user(
         "u",
-        shamir_query_builder::ddl::create_user("alice", "s3cretpw").hmac(&tag),
+        shamir_query_builder::ddl::create_user("alice", "s3cretpw")
+            .hmac(&tag)
+            .build()
+            .expect("build create user"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
@@ -212,11 +266,25 @@ async fn drop_user_routes_through_port_and_removes_from_directory() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_drop_user("bob"));
+    let op = shamir_query_types::batch::BatchOp::DropUser(shamir_query_types::auth::DropUserOp {
+        drop_user: "bob".into(),
+        hmac: None,
+        if_exists: false,
+    });
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_batch_op("scratch", &op).expect("drop-user canonical form"),
+    );
 
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
-    b.drop_user("d", shamir_query_builder::ddl::drop_user("bob").hmac(&tag));
+    b.drop_user(
+        "d",
+        shamir_query_builder::ddl::drop_user("bob")
+            .hmac(&tag)
+            .build()
+            .expect("build drop user"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
     assert!(resp.results.contains_key("d"));
@@ -226,6 +294,25 @@ async fn drop_user_routes_through_port_and_removes_from_directory() {
         user_dir.state_by_user_id(&uid).is_none(),
         "bob must be removed from the real directory"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rv_db_fa80a7b8_directory_adapter_classifies_missing_users() {
+    let temp = TempDir::new().unwrap();
+    let directory =
+        Arc::new(FjallUserDirectory::open(temp.path().join("adapter-users.db")).unwrap());
+    let ports = DirectoryPorts::new(directory.clone(), fast_kdf());
+
+    let original = directory.grant_role("absent", "analyst", 1).unwrap_err();
+    assert!(matches!(
+        original,
+        shamir_connect::common::error::Error::UserNotFound
+    ));
+    let typed = shamir_db::UserAdminPort::grant_role(&ports, "absent", "analyst")
+        .await
+        .unwrap_err();
+    assert_eq!(typed.kind(), shamir_db::PortErrorKind::UserNotFound);
+    assert_eq!(typed.to_string(), original.to_string());
 }
 
 /// grant_role through the BatchOp path persists to the real directory.
@@ -240,13 +327,24 @@ async fn grant_role_routes_through_port_to_real_directory() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_grant_role("analyst", "carol"));
+    let op = shamir_query_types::batch::BatchOp::GrantRole(shamir_query_types::auth::GrantRoleOp {
+        grant_role: "analyst".into(),
+        user: "carol".into(),
+        hmac: None,
+    });
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_batch_op("scratch", &op).expect("grant-role canonical form"),
+    );
 
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
     b.grant_role(
         "g",
-        shamir_query_builder::ddl::grant_role("analyst", "carol").hmac(&tag),
+        shamir_query_builder::ddl::grant_role("analyst", "carol")
+            .hmac(&tag)
+            .build()
+            .expect("build grant role"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
@@ -276,13 +374,25 @@ async fn revoke_role_routes_through_port_to_real_directory() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_revoke_role("analyst", "dave"));
+    let op =
+        shamir_query_types::batch::BatchOp::RevokeRole(shamir_query_types::auth::RevokeRoleOp {
+            revoke_role: "analyst".into(),
+            user: "dave".into(),
+            hmac: None,
+        });
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_batch_op("scratch", &op).expect("revoke-role canonical form"),
+    );
 
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
     b.revoke_role(
         "r",
-        shamir_query_builder::ddl::revoke_role("analyst", "dave").hmac(&tag),
+        shamir_query_builder::ddl::revoke_role("analyst", "dave")
+            .hmac(&tag)
+            .build()
+            .expect("build revoke role"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
@@ -657,7 +767,18 @@ async fn scoped_user_has_database_field_in_directory() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_create_user("scoped_erin"));
+    let op =
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "scoped_erin".into(),
+            password: "pw".into(),
+            roles: Vec::new(),
+            database: Some("mydb".into()),
+            hmac: None,
+        });
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_batch_op("scratch", &op).expect("create-user canonical form"),
+    );
 
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
@@ -665,7 +786,9 @@ async fn scoped_user_has_database_field_in_directory() {
         "u",
         shamir_query_builder::ddl::create_user("scoped_erin", "pw")
             .database("mydb")
-            .hmac(&tag),
+            .hmac(&tag)
+            .build()
+            .expect("build scoped create user"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
@@ -703,7 +826,18 @@ async fn create_user_with_reserved_superuser_role_leaves_no_orphan_account() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_create_user("frank"));
+    let op =
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "frank".into(),
+            password: "pw".into(),
+            roles: vec!["superuser".into()],
+            database: None,
+            hmac: None,
+        });
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_batch_op("scratch", &op).expect("create-user canonical form"),
+    );
 
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
@@ -711,7 +845,9 @@ async fn create_user_with_reserved_superuser_role_leaves_no_orphan_account() {
         "u",
         shamir_query_builder::ddl::create_user("frank", "pw")
             .roles(vec!["superuser".to_string()])
-            .hmac(&tag),
+            .hmac(&tag)
+            .build()
+            .expect("build create user with roles"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let res = exec_batch_raw(&handler, &session, &req).await;

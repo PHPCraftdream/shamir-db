@@ -45,35 +45,42 @@ impl ShamirDb {
                     super::super::helpers::to_qv(&identity.map(|record| RepoIdentity {
                         lineage_id: record.lineage_id,
                         history_epoch: record.history_epoch,
-                    })),
+                    }))
+                    .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 fields.insert(
                     "observed_identity".into(),
                     super::super::helpers::to_qv(
                         &identity.and_then(|record| record.observed_identity),
-                    ),
+                    )
+                    .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 let bookmark = repo.replication_bookmark().await?;
                 fields.insert(
                     "upstream_bookmark".into(),
-                    super::super::helpers::to_qv(&bookmark),
+                    super::super::helpers::to_qv(&bookmark)
+                        .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 fields.insert(
                     "next_pull_version".into(),
-                    super::super::helpers::to_qv(&bookmark.checked_add(1)),
+                    super::super::helpers::to_qv(&bookmark.checked_add(1))
+                        .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 fields.insert(
                     "local_consistent_version".into(),
-                    super::super::helpers::to_qv(&repo.consistent_version().await?),
+                    super::super::helpers::to_qv(&repo.consistent_version().await?)
+                        .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 let gap = repo.certified_gap_interval().await?;
                 fields.insert(
                     "certified_gap_first".into(),
-                    super::super::helpers::to_qv(&gap.map(|(first, _)| first)),
+                    super::super::helpers::to_qv(&gap.map(|(first, _)| first))
+                        .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 fields.insert(
                     "certified_gap_through".into(),
-                    super::super::helpers::to_qv(&gap.map(|(_, through)| through)),
+                    super::super::helpers::to_qv(&gap.map(|(_, through)| through))
+                        .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                 );
                 for key in [
                     "artifact_digest",
@@ -109,19 +116,23 @@ impl ShamirDb {
                     fields.insert("source_repo".into(), QueryValue::Str(receipt.source_repo));
                     fields.insert(
                         "source_lineage_id".into(),
-                        super::super::helpers::to_qv(&receipt.source_identity.lineage_id),
+                        super::super::helpers::to_qv(&receipt.source_identity.lineage_id)
+                            .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                     );
                     fields.insert(
                         "source_history_epoch".into(),
-                        super::super::helpers::to_qv(&receipt.source_identity.history_epoch),
+                        super::super::helpers::to_qv(&receipt.source_identity.history_epoch)
+                            .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                     );
                     fields.insert(
                         "seed_source_version".into(),
-                        super::super::helpers::to_qv(&receipt.source_version),
+                        super::super::helpers::to_qv(&receipt.source_version)
+                            .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                     );
                     fields.insert(
                         "local_baseline_version".into(),
-                        super::super::helpers::to_qv(&receipt.local_baseline),
+                        super::super::helpers::to_qv(&receipt.local_baseline)
+                            .map_err(|error| crate::DbError::Internal(error.to_string()))?,
                     );
                     fields.insert(
                         "schema_digest".into(),
