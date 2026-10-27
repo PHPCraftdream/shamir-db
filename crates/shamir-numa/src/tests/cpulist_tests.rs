@@ -53,3 +53,24 @@ fn reversed_range_is_skipped_not_panicked() {
 fn garbage_tokens_are_skipped() {
     assert_eq!(parse_cpulist("0,foo,2,-,3"), ids(&[0, 2, 3]));
 }
+
+#[test]
+fn rv_numa_cf3796d2_accepts_exact_expansion_boundary() {
+    let parsed = parse_cpulist("0-999999");
+    assert_eq!(parsed.len(), 1_000_000);
+    assert_eq!(parsed.first(), Some(&CpuId(0)));
+    assert_eq!(parsed.last(), Some(&CpuId(999_999)));
+}
+
+#[test]
+fn rv_numa_cf3796d2_cumulative_distinct_token_obeys_budget() {
+    let parsed = parse_cpulist("0-999999,1000000");
+    assert_eq!(parsed.len(), 1_000_000);
+    assert_eq!(parsed.last(), Some(&CpuId(999_999)));
+}
+
+#[test]
+fn rv_numa_cf3796d2_oversized_and_overflow_ranges_are_skipped() {
+    assert!(parse_cpulist("0-1000000").is_empty());
+    assert_eq!(parse_cpulist("0-18446744073709551615"), Vec::<CpuId>::new());
+}

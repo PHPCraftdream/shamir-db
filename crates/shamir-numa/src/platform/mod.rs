@@ -6,6 +6,8 @@ pub(crate) mod fallback;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
 pub(crate) mod mock;
+#[cfg(test)]
+mod tests;
 
 pub use cpulist::*;
 pub use detect::*;

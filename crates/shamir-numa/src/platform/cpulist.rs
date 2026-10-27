@@ -13,6 +13,8 @@
 
 use crate::core::node::CpuId;
 
+const MAX_EXPANDED_CPUS: usize = 1_000_000;
+
 /// Parse a Linux cpulist string into a sorted, de-duplicated list of CPUs.
 ///
 /// Accepts comma-separated tokens, each either a single decimal index (`5`) or
@@ -20,6 +22,10 @@ use crate::core::node::CpuId;
 /// tolerated. Malformed tokens and reversed ranges (`7-2`) are skipped rather
 /// than erroring — `/sys` never emits them, and a best-effort discovery should
 /// not abort on a single bad line.
+///
+/// Expansion is capped at 1,000,000 entries counted before de-duplication
+/// (repeated tokens consume the budget); a token that would exceed the
+/// remaining budget, or a range whose width overflows, is skipped whole.
 ///
 /// ```
 /// use shamir_numa::{parse_cpulist, CpuId};
@@ -37,13 +43,22 @@ pub fn parse_cpulist(s: &str) -> Vec<CpuId> {
             Some((lo, hi)) => {
                 if let (Ok(lo), Ok(hi)) = (lo.trim().parse::<usize>(), hi.trim().parse::<usize>()) {
                     if lo <= hi {
+                        let Some(span) = hi.checked_sub(lo).and_then(|width| width.checked_add(1))
+                        else {
+                            continue;
+                        };
+                        if span > MAX_EXPANDED_CPUS.saturating_sub(cpus.len()) {
+                            continue;
+                        }
                         cpus.extend(lo..=hi);
                     }
                 }
             }
             None => {
                 if let Ok(n) = token.parse::<usize>() {
-                    cpus.push(n);
+                    if cpus.len() < MAX_EXPANDED_CPUS {
+                        cpus.push(n);
+                    }
                 }
             }
         }
