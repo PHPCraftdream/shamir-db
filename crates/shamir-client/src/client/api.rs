@@ -4,11 +4,21 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+thread_local! {
+    static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
+}
+
+#[cfg(test)]
+pub(crate) fn request_scratch_len_for_test() -> usize {
+    REQ_BUF.with(|cell| cell.borrow().len())
+}
+
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use shamir_connect::common::envelope::RequestEnvelopeRef;
+use shamir_connect::common::wire::RotationInProgressPayload;
 
 use shamir_transport_tcp::framing::write_frame;
 
@@ -74,6 +84,11 @@ impl Drop for WriteCancelGuard {
 }
 
 impl Client {
+    #[cfg(test)]
+    pub(crate) fn request_scratch_len_for_test(&self) -> usize {
+        request_scratch_len_for_test()
+    }
+
     /// 32-byte session id assigned by the server.
     pub fn session_id(&self) -> [u8; 32] {
         self.session_id
@@ -110,6 +125,18 @@ impl Client {
     /// `server_query_version() >= 2`.
     pub fn server_query_version(&self) -> u8 {
         self.server_query_version.load(Ordering::Relaxed)
+    }
+
+    /// `auth_ok.rotation_in_progress` (spec §6.5), when the server sent one.
+    /// Surfaced as a hint only; no identity recovery is performed here.
+    pub fn rotation_in_progress(&self) -> Option<&RotationInProgressPayload> {
+        self.rotation_in_progress.as_ref()
+    }
+
+    /// `auth_ok.kdf_upgrade_required` (spec §13): server asks for a password
+    /// change to upgrade the KDF.
+    pub fn kdf_upgrade_required(&self) -> bool {
+        self.kdf_upgrade_required
     }
 
     /// Register a subscription and get a handle to receive push frames.
@@ -389,23 +416,27 @@ impl Client {
         // zero copies of `session_id` or the request body. The whole encode
         // happens inside the `with` closure so the `RefCell` borrow is
         // released before any `.await`.
-        thread_local! {
-            static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
-        }
         let rid = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let envelope_bytes: Vec<u8> = REQ_BUF.with(|cell| -> Result<Vec<u8>, ClientError> {
-            let mut buf = cell.borrow_mut();
-            buf.clear();
-            rmp_serde::encode::write_named(&mut *buf, req)?;
-            let envelope = RequestEnvelopeRef {
-                session_id: &self.session_id,
-                request_id: Some(rid),
-                req: &buf,
-            };
-            envelope
-                .to_msgpack()
-                .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")))
-        })?;
+        let envelope_bytes: Zeroizing<Vec<u8>> =
+            REQ_BUF.with(|cell| -> Result<Zeroizing<Vec<u8>>, ClientError> {
+                let mut buf = cell.borrow_mut();
+                buf.zeroize();
+                let serialized = rmp_serde::encode::write_named(&mut *buf, req);
+                if let Err(error) = serialized {
+                    buf.zeroize();
+                    return Err(ClientError::Encode(error));
+                }
+                let envelope = RequestEnvelopeRef {
+                    session_id: &self.session_id,
+                    request_id: Some(rid),
+                    req: &buf,
+                };
+                let encoded = envelope
+                    .to_msgpack()
+                    .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")));
+                buf.zeroize();
+                Ok(Zeroizing::new(encoded?))
+            })?;
 
         // Register BEFORE writing — avoid a race where the server sends the
         // response before we reach the oneshot registration. Close-vs-register

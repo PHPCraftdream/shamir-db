@@ -142,6 +142,44 @@ where
     handle.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_2d0142dd_denied_tofu_rejects_unpinned_connect() {
+    let temp = TempDir::new().expect("tempdir");
+    let password = b"correct horse battery staple".to_vec();
+    let launcher = ServerLauncher {
+        config: make_config(&temp),
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(password.clone()),
+        },
+    };
+    let handle = launcher.launch().await.expect("launcher boot");
+    let addr = handle.first_tls_exporter_addr().expect("bound");
+    let result = Client::connect(ConnectOptions {
+        addr,
+        server_name: "localhost".into(),
+        username: "admin".into(),
+        password: Zeroizing::new(password),
+        accept_new_host: false,
+        trusted_pin: None,
+        connect_timeout: None,
+        handshake_timeout: None,
+        request_timeout: None,
+    })
+    .await;
+    assert!(
+        matches!(
+            result,
+            Err(crate::ClientError::Handshake { ref source, .. })
+                if source.as_ref().is_some_and(|err| {
+                    err.to_string().contains("no pinned_hash AND --accept-new-host not set")
+                })
+        ),
+        "an unpinned connect without accept_new_host must be rejected"
+    );
+    handle.shutdown().await;
+}
+
 /// touch_fields(["age","name","42"]) → cache holds 3 distinct ids; the field
 /// literally named "42" resolves to its interner id, NOT the integer 42.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

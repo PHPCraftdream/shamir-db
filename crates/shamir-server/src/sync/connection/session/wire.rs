@@ -59,6 +59,11 @@ pub struct AuthOk {
     /// indices and breaks the client decode).
     #[serde(default)]
     pub server_query_version: u8,
+    /// Informational hints; clients must still verify identity pins strictly.
+    #[serde(default)]
+    pub rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    pub kdf_upgrade_required: Option<bool>,
 }
 
 /// Client → server first frame when attempting a session resume.

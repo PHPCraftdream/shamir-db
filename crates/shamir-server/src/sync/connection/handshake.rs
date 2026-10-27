@@ -12,6 +12,7 @@ use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
+use shamir_connect::common::wire::RotationInProgressWire;
 use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::admission::{Admission, AdmitReject};
 use shamir_connect::server::handshake::{
@@ -676,6 +677,11 @@ async fn run_handshake<F: Framer>(
         resumption_expires_at_ns: ticket_expires_at_ns,
         server_query_version: checked_query_version(CURRENT_QUERY_LANG_VERSION)
             .map_err(|_| HandshakeError::Io)?,
+        rotation_in_progress: auth_ok
+            .rotation_in_progress
+            .as_ref()
+            .map(RotationInProgressWire::from),
+        kdf_upgrade_required: auth_ok.kdf_upgrade_required,
     }) {
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),
