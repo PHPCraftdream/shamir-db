@@ -106,10 +106,14 @@ fn replication_profile_empty_streams() {
 
 #[test]
 fn drop_replication_profile_basic() {
-    let op = ddl::drop_replication_profile("cluster");
+    let op = ddl::drop_replication_profile("cluster")
+        .hmac("aa")
+        .build()
+        .unwrap();
     match op {
         BatchOp::DropReplicationProfile(d) => {
             assert_eq!(d.drop_replication_profile, "cluster");
+            assert_eq!(d.hmac.as_deref(), Some("aa"));
         }
         _ => panic!("expected DropReplicationProfile"),
     }
@@ -177,10 +181,11 @@ fn publication_scopes_iter() {
 
 #[test]
 fn drop_publication_basic() {
-    let op = ddl::drop_publication("pub_app");
+    let op = ddl::drop_publication("pub_app").hmac("aa").build().unwrap();
     match op {
         BatchOp::DropPublication(d) => {
             assert_eq!(d.drop_publication, "pub_app");
+            assert_eq!(d.hmac.as_deref(), Some("aa"));
         }
         _ => panic!("expected DropPublication"),
     }
@@ -211,10 +216,11 @@ fn subscription_basic() {
 
 #[test]
 fn drop_subscription_basic() {
-    let op = ddl::drop_subscription("sub1");
+    let op = ddl::drop_subscription("sub1").hmac("aa").build().unwrap();
     match op {
         BatchOp::DropSubscription(d) => {
             assert_eq!(d.drop_subscription, "sub1");
+            assert_eq!(d.hmac.as_deref(), Some("aa"));
         }
         _ => panic!("expected DropSubscription"),
     }

@@ -1,4 +1,4 @@
-use regex::Regex;
+use crate::query::filter::evaluation::semantics::pattern_guard::build_like_regex;
 
 /// Convert a SQL LIKE pattern to a regex pattern.
 /// `%` matches any sequence of characters, `_` matches a single character.
@@ -6,25 +6,8 @@ use regex::Regex;
 pub(in crate::query::filter) fn like_pattern_to_regex(
     pattern: &str,
     case_insensitive: bool,
-) -> Option<Regex> {
-    let mut regex_str = String::with_capacity(pattern.len() + 4);
-    if case_insensitive {
-        regex_str.push_str("(?i)");
-    }
-    regex_str.push('^');
-    for ch in pattern.chars() {
-        match ch {
-            '%' => regex_str.push_str(".*"),
-            '_' => regex_str.push('.'),
-            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' | '^' | '$' => {
-                regex_str.push('\\');
-                regex_str.push(ch);
-            }
-            _ => regex_str.push(ch),
-        }
-    }
-    regex_str.push('$');
-    Regex::new(&regex_str).ok()
+) -> Option<regex::Regex> {
+    build_like_regex(pattern, case_insensitive).ok()
 }
 
 /// Compare `word` (raw, possibly mixed-case) against the pre-lowercased

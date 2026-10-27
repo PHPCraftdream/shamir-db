@@ -221,9 +221,9 @@ export type HmacSigner = {
  * All-optional (skip-if-none). `max_count: 0` → CurrentOnly.
  */
 export interface Retention {
-  max_age_secs?: number;
-  max_count?: number;
-  min_count?: number;
+  max_age_secs?: number | bigint;
+  max_count?: number | bigint;
+  min_count?: number | bigint;
 }
 
 /**
@@ -259,8 +259,8 @@ export interface BufferConfigPatch {
  * `rename_all = "snake_case"`, externally tagged.
  */
 export type PurgeScope =
-  | { older_than: { timestamp: number } }
-  | { older_than_age: { age_secs: number } };
+  | { older_than: { timestamp: number | bigint } }
+  | { older_than_age: { age_secs: number | bigint } };
 
 /**
  * Write-operation kind for validator binding (admin/types.rs `WriteOp`).
@@ -371,17 +371,15 @@ export interface CreateFunctionOp {
    * AND server-side `Manage(Root)` authorization.
    */
   secret_grants?: string[];
-  /**
-   * Hex-encoded HMAC-SHA256 tag, required IFF `security === "definer"`
-   * or `secret_grants` is non-empty. Canonical input:
-   * `canonicalCreateFunction(name, security, secret_grants)`.
-   */
+  net_grants?: string[];
+  /** Hex-encoded HMAC-SHA256 tag for gated function creation. */
   hmac?: string;
 }
 
 export interface DropFunctionOp {
   drop_function: string;
   if_exists?: boolean;
+  hmac?: string;
 }
 
 export interface RenameFunctionOp {
@@ -394,11 +392,13 @@ export interface CreateValidatorOp {
   source?: string;
   wasm?: string;
   replace: boolean;
+  hmac?: string;
 }
 
 export interface DropValidatorOp {
   drop_validator: string;
   if_exists?: boolean;
+  hmac?: string;
 }
 
 export interface RenameValidatorOp {

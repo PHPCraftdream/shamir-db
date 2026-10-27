@@ -14,7 +14,7 @@ use shamir_query_types::admin::{
 use shamir_query_types::admin::{ReplDirection, ReplMode, ReplScope, ReplStream};
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::{IntoBatchOp, TryIntoBatchOp};
 use crate::write::BuilderError;
 
 // ============================================================================
@@ -122,11 +122,44 @@ impl IntoBatchOp for ReplicationProfileBuilder {
 // drop_replication_profile
 // ============================================================================
 
-/// Drop a named replication profile.
-pub fn drop_replication_profile(name: impl Into<String>) -> BatchOp {
-    BatchOp::DropReplicationProfile(DropReplicationProfileOp {
-        drop_replication_profile: name.into(),
-    })
+/// Drop a named replication profile. Returns a builder (HMAC-gated, see
+/// [`DropReplicationProfile::hmac`]).
+pub fn drop_replication_profile(name: impl Into<String>) -> DropReplicationProfile {
+    DropReplicationProfile {
+        name: name.into(),
+        hmac: None,
+    }
+}
+
+/// Builder for [`DropReplicationProfileOp`].
+pub struct DropReplicationProfile {
+    name: String,
+    hmac: Option<String>,
+}
+
+impl DropReplicationProfile {
+    /// Attach the hex-encoded HMAC tag. Required — the server rejects the
+    /// op with `hmac_required` otherwise.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropReplicationProfile(DropReplicationProfileOp {
+            drop_replication_profile: self.name,
+            hmac: Some(hmac),
+        }))
+    }
+}
+
+impl TryIntoBatchOp for DropReplicationProfile {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
+        self.build()
+    }
 }
 
 // ============================================================================
@@ -185,11 +218,44 @@ impl IntoBatchOp for PublicationBuilder {
 // drop_publication
 // ============================================================================
 
-/// Drop a publication by name.
-pub fn drop_publication(name: impl Into<String>) -> BatchOp {
-    BatchOp::DropPublication(DropPublicationOp {
-        drop_publication: name.into(),
-    })
+/// Drop a publication by name. Returns a builder (HMAC-gated, see
+/// [`DropPublication::hmac`]).
+pub fn drop_publication(name: impl Into<String>) -> DropPublication {
+    DropPublication {
+        name: name.into(),
+        hmac: None,
+    }
+}
+
+/// Builder for [`DropPublicationOp`].
+pub struct DropPublication {
+    name: String,
+    hmac: Option<String>,
+}
+
+impl DropPublication {
+    /// Attach the hex-encoded HMAC tag. Required — the server rejects the
+    /// op with `hmac_required` otherwise.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropPublication(DropPublicationOp {
+            drop_publication: self.name,
+            hmac: Some(hmac),
+        }))
+    }
+}
+
+impl TryIntoBatchOp for DropPublication {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
+        self.build()
+    }
 }
 
 // ============================================================================
@@ -235,11 +301,44 @@ pub fn paused_subscription(
     })
 }
 
-/// Drop a subscription by name.
-pub fn drop_subscription(name: impl Into<String>) -> BatchOp {
-    BatchOp::DropSubscription(DropSubscriptionOp {
-        drop_subscription: name.into(),
-    })
+/// Drop a subscription by name. Returns a builder (HMAC-gated, see
+/// [`DropSubscription::hmac`]).
+pub fn drop_subscription(name: impl Into<String>) -> DropSubscription {
+    DropSubscription {
+        name: name.into(),
+        hmac: None,
+    }
+}
+
+/// Builder for [`DropSubscriptionOp`].
+pub struct DropSubscription {
+    name: String,
+    hmac: Option<String>,
+}
+
+impl DropSubscription {
+    /// Attach the hex-encoded HMAC tag. Required — the server rejects the
+    /// op with `hmac_required` otherwise.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropSubscription(DropSubscriptionOp {
+            drop_subscription: self.name,
+            hmac: Some(hmac),
+        }))
+    }
+}
+
+impl TryIntoBatchOp for DropSubscription {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
+        self.build()
+    }
 }
 
 // ============================================================================

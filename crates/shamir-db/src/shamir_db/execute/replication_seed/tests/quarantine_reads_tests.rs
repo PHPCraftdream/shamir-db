@@ -204,7 +204,8 @@ async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     // COUNTERFACTUAL: `resync_required` is the stale round-5 oracle.
     let mut b = Batch::new();
     b.id(6);
-    b.op("drop", drop_subscription("sub"));
+    b.try_op("drop", drop_subscription("sub").hmac("test-hmac"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
@@ -291,7 +292,8 @@ async fn t6_quarantine_survives_restart() {
         // COUNTERFACTUAL: `resync_required` is the stale round-5 oracle.
         let mut b = Batch::new();
         b.id(3);
-        b.op("drop", drop_subscription("sub"));
+        b.try_op("drop", drop_subscription("sub").hmac("test-hmac"))
+            .unwrap();
         let err = shamir
             .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await
@@ -818,7 +820,8 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
         // subscription was created against.
         let mut b = Batch::new();
         b.id(7);
-        b.op("drp", drop_replication_profile("prof"));
+        b.try_op("drp", drop_replication_profile("prof").hmac("test-hmac"))
+            .unwrap();
         shamir
             .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await

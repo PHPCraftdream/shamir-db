@@ -98,7 +98,22 @@ async fn admin_batch_denied_for_non_superuser() {
 
     let mut b = Batch::new();
     b.id("ddl");
-    b.drop_table("drop", ddl::drop_table("items").repo("main"));
+    b.drop_table(
+        "drop",
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match ddl::drop_table("items")
+            .repo("main")
+            .hmac("unused")
+            .build()
+            .expect("build drop table")
+        {
+            shamir_query_types::batch::BatchOp::DropTable(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::DropTable(op)
+            }
+            other => other,
+        },
+    );
     let admin = execute_built("prod", b.build());
     let res = decode(
         &handler
