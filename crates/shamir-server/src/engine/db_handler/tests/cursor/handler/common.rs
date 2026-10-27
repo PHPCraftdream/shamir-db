@@ -162,7 +162,10 @@ pub(super) async fn open_app_main_items(handler: &ShamirDbHandler, mode: u16) {
                 database: "app".into(),
             },
             mode,
-        ),
+        )
+        .hmac("direct-db-test")
+        .build()
+        .expect("build chmod"),
     );
     batch.chmod(
         "store",
@@ -171,7 +174,10 @@ pub(super) async fn open_app_main_items(handler: &ShamirDbHandler, mode: u16) {
                 store: ["app".into(), "main".into()],
             },
             mode,
-        ),
+        )
+        .hmac("direct-db-test")
+        .build()
+        .expect("build chmod"),
     );
     batch.chmod(
         "table",
@@ -180,7 +186,10 @@ pub(super) async fn open_app_main_items(handler: &ShamirDbHandler, mode: u16) {
                 table: ["app".into(), "main".into(), "items".into()],
             },
             mode,
-        ),
+        )
+        .hmac("direct-db-test")
+        .build()
+        .expect("build chmod"),
     );
     handler
         .db()

@@ -74,9 +74,12 @@ impl TableManager {
                 Value::Map(map) => {
                     let mut fields = Vec::with_capacity(map.len());
                     for (k, v) in map {
-                        let key_id = layered.touch_sync(k.as_str());
+                        // RU8: propagate the typed quota error.
+                        let key_id = layered
+                            .try_touch_sync(k.as_str())
+                            .map_err(shamir_storage::error::DbError::from)?;
                         let inner_v = query_value_to_inner_with(v, &intern_fn)
-                            .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                            .map_err(shamir_storage::error::DbError::from)?;
                         fields.push((vec![key_id], inner_v));
                     }
                     fields
@@ -122,7 +125,7 @@ impl TableManager {
             let intern_fn = intern_via_layered(&layered);
 
             let new_inner = query_value_to_inner_with(&resolved_value, &intern_fn)
-                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                .map_err(shamir_storage::error::DbError::from)?;
             let set_map = match &new_inner {
                 InnerValue::Map(m) => m.clone(),
                 _ => {
@@ -133,7 +136,7 @@ impl TableManager {
             };
 
             let new_bytes_fresh = query_value_to_storage_bytes(&resolved_value, &intern_fn)
-                .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                .map_err(shamir_storage::error::DbError::from)?;
 
             (set_map, new_bytes_fresh, new_inner)
         };

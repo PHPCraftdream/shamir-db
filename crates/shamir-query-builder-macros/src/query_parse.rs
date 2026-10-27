@@ -62,11 +62,11 @@ mod kw {
 pub(crate) struct QueryMacro {
     pub(crate) table: TableArg,
     pub(crate) where_clause: Option<Expr>,
-    pub(crate) group_by_fields: Vec<Ident>,
+    pub(crate) group_by_fields: Vec<FieldPathAst>,
     pub(crate) having_clause: Option<Expr>,
     pub(crate) select_items: Vec<SelectItemAst>,
     pub(crate) select_distinct: bool,
-    pub(crate) order_by_items: Vec<(Ident, OrderDir)>,
+    pub(crate) order_by_items: Vec<(FieldPathAst, OrderDir)>,
     pub(crate) limit: Option<LitInt>,
     pub(crate) offset: Option<LitInt>,
 }
@@ -80,6 +80,11 @@ pub(crate) enum TableArg {
 
 pub(crate) enum TableName {
     Ident(Ident),
+    Lit(LitStr),
+}
+
+pub(crate) enum FieldPathAst {
+    Idents(Vec<Ident>),
     Lit(LitStr),
 }
 
@@ -221,9 +226,18 @@ impl Parse for QueryMacro {
         if input.peek(kw::group_by) {
             input.parse::<kw::group_by>()?;
             loop {
-                group_by_fields.push(input.parse::<Ident>()?);
-                if input.peek(Token![,]) && !peek_clause_keyword_after_comma(input) {
+                group_by_fields.push(parse_field_path(input)?);
+                if input.peek(Token![,]) {
                     input.parse::<Token![,]>()?;
+                    if input.is_empty()
+                        || input.peek(kw::having)
+                        || input.peek(kw::select)
+                        || input.peek(kw::order_by)
+                        || input.peek(kw::limit)
+                        || input.peek(kw::offset)
+                    {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -250,8 +264,15 @@ impl Parse for QueryMacro {
             }
             loop {
                 select_items.push(parse_select_item(input)?);
-                if input.peek(Token![,]) && !peek_clause_keyword_after_comma(input) {
+                if input.peek(Token![,]) {
                     input.parse::<Token![,]>()?;
+                    if input.is_empty()
+                        || input.peek(kw::order_by)
+                        || input.peek(kw::limit)
+                        || input.peek(kw::offset)
+                    {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -263,7 +284,7 @@ impl Parse for QueryMacro {
         if input.peek(kw::order_by) {
             input.parse::<kw::order_by>()?;
             loop {
-                let field = input.parse::<Ident>()?;
+                let field = parse_field_path(input)?;
                 let dir = if input.peek(kw::desc) {
                     input.parse::<kw::desc>()?;
                     OrderDir::Desc
@@ -274,8 +295,11 @@ impl Parse for QueryMacro {
                     return Err(input.error("order_by: expected `asc` or `desc` after field name"));
                 };
                 order_by_items.push((field, dir));
-                if input.peek(Token![,]) && !peek_clause_keyword_after_comma(input) {
+                if input.peek(Token![,]) {
                     input.parse::<Token![,]>()?;
+                    if input.is_empty() || input.peek(kw::limit) || input.peek(kw::offset) {
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -324,7 +348,28 @@ impl Parse for QueryMacro {
     }
 }
 
-/// Parse `from <table>` argument: ident, string literal, or repo.table.
+fn unraw_ident(ident: &Ident) -> String {
+    let value = ident.to_string();
+    value.strip_prefix("r#").unwrap_or(&value).to_owned()
+}
+
+fn parse_field_path(input: ParseStream) -> syn::Result<FieldPathAst> {
+    if input.peek(LitStr) {
+        return Ok(FieldPathAst::Lit(input.parse()?));
+    }
+    let mut segments = vec![input.parse::<Ident>()?];
+    while input.peek(Token![.]) {
+        let fork = input.fork();
+        fork.parse::<Token![.]>()?;
+        if !fork.peek(Ident) {
+            break;
+        }
+        input.parse::<Token![.]>()?;
+        segments.push(input.parse::<Ident>()?);
+    }
+    Ok(FieldPathAst::Idents(segments))
+}
+
 fn parse_table_arg(input: ParseStream) -> syn::Result<TableArg> {
     if input.peek(LitStr) {
         let lit = input.parse::<LitStr>()?;
@@ -342,9 +387,11 @@ fn parse_table_arg(input: ParseStream) -> syn::Result<TableArg> {
             // Consume from actual stream
             input.parse::<Token![.]>()?;
             let second = input.parse::<Ident>()?;
+            let repo = unraw_ident(&first);
+            let table = unraw_ident(&second);
             return Ok(TableArg::Repo {
-                repo: first,
-                table: second,
+                repo: Ident::new(&repo, first.span()),
+                table: Ident::new(&table, second.span()),
             });
         }
     }
@@ -357,20 +404,20 @@ fn select_item_key(item: &SelectItemAst) -> Option<String> {
     match item {
         SelectItemAst::All => None,
         SelectItemAst::Field { segments, alias } => Some(match alias {
-            Some(a) => a.to_string(),
+            Some(a) => unraw_ident(a),
             None => segments
                 .iter()
-                .map(|s| s.to_string())
+                .map(unraw_ident)
                 .collect::<Vec<_>>()
                 .join("."),
         }),
         SelectItemAst::CountAll { alias } => Some(match alias {
-            Some(a) => a.to_string(),
+            Some(a) => unraw_ident(a),
             None => "count".to_owned(),
         }),
         SelectItemAst::BuiltinAgg { alias, .. }
         | SelectItemAst::AggFn { alias, .. }
-        | SelectItemAst::Func { alias, .. } => Some(alias.to_string()),
+        | SelectItemAst::Func { alias, .. } => Some(unraw_ident(alias)),
     }
 }
 
@@ -630,19 +677,6 @@ fn is_clause_keyword(input: ParseStream) -> bool {
         || input.peek(kw::order_by)
         || input.peek(kw::limit)
         || input.peek(kw::offset)
-}
-
-/// After a comma in a field-list, check if the NEXT token after the comma
-/// would be a clause keyword (meaning the list is over and we should stop).
-///
-/// We can't lookahead past the comma with `syn::parse::ParseStream::peek`,
-/// so we use `fork()`.
-fn peek_clause_keyword_after_comma(input: ParseStream) -> bool {
-    let fork = input.fork();
-    if fork.parse::<Token![,]>().is_err() {
-        return false;
-    }
-    is_clause_keyword(&fork) || fork.is_empty() || fork.peek(kw::asc) || fork.peek(kw::desc)
 }
 
 // ── write statement parsers ────────────────────────────────────────

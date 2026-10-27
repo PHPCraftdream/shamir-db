@@ -5,7 +5,7 @@
  *   - `hmac_required` — destructive op missing the `hmac` field
  *   - `hmac_mismatch` — present but doesn't match canonical input
  *
- * Canonical inputs and the key derivation are defined in
+ * v2 canonical inputs and key derivation are defined in
  * `crates/shamir-query-types/src/hmac.rs` and mirrored by
  * `tests/e2e/helpers/hmac.js` (used here for the "happy path").
  */
@@ -82,8 +82,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
     // added in the replication campaign — see
     // `admin_db_repo.rs::handle_drop_db` /
     // `ddl_wire_e2e/error_codes.rs::error_code_still_referenced_drop_db`).
-    // The HMAC canonical input is `b"drop_db\0<db>"`; `cascade` is not part
-    // of the signed bytes, so the tag is the same.
+    // `cascade` is included in the versioned v2 confirmation bytes.
     const victim = await fixtures.setupDb(client, 'hmac_ok_db', []);
     const resp = await client.execute('default', {
       id: 1,
