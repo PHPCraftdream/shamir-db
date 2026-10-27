@@ -20,13 +20,16 @@ pub use evaluation::semantics::{fts, pattern_guard, resolve};
 pub(crate) use evaluation::semantics::numeric_cmp;
 
 // Re-export DTOs from the shared types crate.
-pub use compile::compile_filter;
+pub use compile::{compile_filter, try_compile_filter};
 pub use cond_cache::{cond_cache_get, prescan_cond_cache, CondCache};
 pub use eval_context::FilterContext;
 pub use field_path_cache::{prescan_field_path_cache, FieldPathCache};
 pub use filter_node::{CompareOp, FilterNode};
 pub use index_range::predicate_to_index_range;
-pub use pattern_guard::{check_filter_patterns, MAX_FILTER_PATTERN_LENGTH};
+pub use pattern_guard::{
+    check_filter_patterns, check_filter_value_patterns, check_select_expr_patterns,
+    MAX_FILTER_PATTERN_LENGTH,
+};
 pub use query_ref_cache::{prescan_query_ref_cache, QueryRefCache};
 pub use resolve::{
     compare_values, filter_value_to_inner, filter_value_to_query, intern_field_path, resolve_field,

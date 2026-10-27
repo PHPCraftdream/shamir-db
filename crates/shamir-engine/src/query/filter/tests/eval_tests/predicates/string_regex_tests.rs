@@ -3,6 +3,7 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use shamir_types::core::interner::Interner;
 
+use crate::query::filter::compile::try_compile_filter;
 use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record};
 
 // ============================================================================
@@ -192,4 +193,36 @@ fn test_regex_on_non_string_field() {
     };
     let cb = compile_filter(&filter, &interner);
     assert!(!cb.matches(&record, &ctx)); // age is Int, not Str
+}
+
+#[test]
+fn rv_engine_2a18b647_try_compile_rejects_nested_invalid_and_oversized_regex() {
+    let interner = Interner::new();
+    interner.touch_ind("name").unwrap();
+    let record = make_alice_record(&interner);
+    let oversized_name = "a".repeat(crate::query::filter::MAX_FILTER_PATTERN_LENGTH + 1);
+    let mut oversized_map = shamir_types::types::common::new_map();
+    oversized_map.insert(
+        interner.touch_ind("name").unwrap().into_key(),
+        shamir_types::types::value::InnerValue::Str(oversized_name.clone()),
+    );
+    let oversized_record = shamir_types::types::value::InnerValue::Map(oversized_map);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs);
+
+    let invalid = Filter::Not {
+        filter: Box::new(Filter::Regex {
+            field: vec!["name".to_string()],
+            pattern: "(unbalanced".to_string(),
+        }),
+    };
+    assert!(try_compile_filter(&invalid, &interner).is_err());
+    assert!(!compile_filter(&invalid, &interner).matches(&record, &ctx));
+
+    let oversized = Filter::Regex {
+        field: vec!["name".to_string()],
+        pattern: oversized_name,
+    };
+    assert!(try_compile_filter(&oversized, &interner).is_err());
+    assert!(!compile_filter(&oversized, &interner).matches(&oversized_record, &ctx));
 }
