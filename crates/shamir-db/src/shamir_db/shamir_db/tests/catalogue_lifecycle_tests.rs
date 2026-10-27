@@ -36,8 +36,8 @@ async fn boot_rejection(path: std::path::PathBuf) -> String {
     panic!("fjall lock was not released within the retry window");
 }
 
-/// Re-open the system store after a dropped instance, retrying while it still
-/// holds the fjall file lock (released lazily after the drop).
+/// Re-open the system store after a dropped instance, retrying while background
+/// repository handles (the drainer's clone) still hold the fjall file lock.
 async fn reopen(path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(path.clone())).await {
