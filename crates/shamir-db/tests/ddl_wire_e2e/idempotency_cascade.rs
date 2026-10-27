@@ -41,7 +41,7 @@ async fn create_table_then_insert_via_after_non_tx() {
             .row(shamir_query_builder::doc! { "name" => "Gadget", "qty" => 5 }),
     );
     b.after(&rows, &mk);
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = db
         .execute("testdb", &req)
@@ -62,7 +62,7 @@ async fn create_table_then_insert_via_after_non_tx() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("q", shamir_query_builder::q!(from items));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
     let read_resp = db.execute("testdb", &read_req).await.unwrap();
     let records = &read_resp.results["q"].records;
     assert_eq!(records.len(), 2, "should have 2 inserted records");
@@ -80,7 +80,7 @@ async fn create_table_duplicate_without_if_not_exists_fails() {
     let mut b = Batch::new();
     b.id("ct1");
     b.create_table("op", ddl::create_table("orders").repo("main"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("created"),
@@ -111,7 +111,7 @@ async fn create_table_with_if_not_exists_idempotent() {
         "op",
         ddl::create_table("orders").repo("main").if_not_exists(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("created"),
@@ -142,7 +142,7 @@ async fn create_db_with_if_not_exists_idempotent() {
     let mut b = Batch::new();
     b.id("cd");
     b.create_db("op", ddl::create_db("newdb").if_not_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("created"),
@@ -178,7 +178,7 @@ async fn create_repo_with_if_not_exists_idempotent() {
             .engine("in_memory")
             .if_not_exists(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("created"),
@@ -213,7 +213,7 @@ async fn drop_db_with_repos_no_cascade_fails() {
     let mut b = Batch::new();
     b.id("dd");
     b.drop_db("op", ddl::drop_db("testdb"));
-    let drop_req = b.to_request_via_msgpack();
+    let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -235,7 +235,7 @@ async fn drop_db_with_cascade_succeeds() {
     let mut b = Batch::new();
     b.id("dd");
     b.drop_db("op", ddl::drop_db("target_db").cascade());
-    let drop_req = b.to_request_via_msgpack();
+    let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("bootstrap", &drop_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -254,7 +254,7 @@ async fn drop_repo_with_tables_no_cascade_fails() {
     let mut b = Batch::new();
     b.id("dr");
     b.drop_repo("op", ddl::drop_repo("main"));
-    let drop_req = b.to_request_via_msgpack();
+    let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -271,7 +271,7 @@ async fn drop_repo_with_cascade_succeeds() {
     let mut b = Batch::new();
     b.id("dr");
     b.drop_repo("op", ddl::drop_repo("main").cascade());
-    let drop_req = b.to_request_via_msgpack();
+    let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -299,7 +299,7 @@ async fn drop_table_cleans_validator_bound_in() {
         "op",
         ddl::create_validator("v_cleanup").wasm(wasm_b64(&wasm)),
     );
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
@@ -311,14 +311,14 @@ async fn drop_table_cleans_validator_bound_in() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = b.to_request_via_msgpack();
+    let bind_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &bind_req).await.unwrap();
 
     // Step 2: drop the table -> should clean bound_in
     let mut b = Batch::new();
     b.id("dt");
     b.drop_table("op", ddl::drop_table("users").repo("main"));
-    let drop_req = b.to_request_via_msgpack();
+    let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -329,7 +329,7 @@ async fn drop_table_cleans_validator_bound_in() {
     let mut b = Batch::new();
     b.id("dv");
     b.drop_validator("op", ddl::drop_validator("v_cleanup"));
-    let drop_val_req = b.to_request_via_msgpack();
+    let drop_val_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_val_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -355,7 +355,7 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
         "op",
         ddl::create_index("idx_name", "users").fields([vec!["name".to_string()]]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // 2. Create a validator and bind it to "users".
@@ -366,7 +366,7 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
         "op",
         ddl::create_validator("v_cascade").wasm(wasm_b64(&wasm)),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -378,7 +378,7 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // 3. Set a schema on "users".
@@ -388,14 +388,14 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
         "op",
         ddl::set_table_schema("users").rules([ddl::field(["email"]).string().required().build()]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // 4. Drop with cascade — should succeed and clean everything.
     let mut b = Batch::new();
     b.id("dt");
     b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -414,7 +414,7 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
     let mut b = Batch::new();
     b.id("dv");
     b.drop_validator("op", ddl::drop_validator("v_cascade"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -436,14 +436,14 @@ async fn drop_table_without_cascade_still_works() {
         "op",
         ddl::create_index("idx_name", "users").fields([vec!["name".to_string()]]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Drop without cascade — should succeed (current behavior).
     let mut b = Batch::new();
     b.id("dt");
     b.drop_table("op", ddl::drop_table("users").repo("main"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -492,7 +492,7 @@ async fn drop_table_if_exists_nonexistent_is_noop() {
     let mut b = Batch::new();
     b.id("dt");
     b.drop_table("op", ddl::drop_table("no_such_table").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -507,7 +507,7 @@ async fn drop_table_without_if_exists_existing_succeeds() {
     let mut b = Batch::new();
     b.id("dt");
     b.drop_table("op", ddl::drop_table("users").repo("main").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -522,7 +522,7 @@ async fn drop_index_if_exists_nonexistent_is_noop() {
     let mut b = Batch::new();
     b.id("di");
     b.drop_index("op", ddl::drop_index("no_such_idx", "users").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -540,7 +540,7 @@ async fn drop_index_if_exists_missing_table_is_noop() {
         "op",
         ddl::drop_index("some_idx", "no_such_table").if_exists(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -556,7 +556,7 @@ async fn drop_db_if_exists_nonexistent_is_noop() {
     let mut b = Batch::new();
     b.id("dd");
     b.drop_db("op", ddl::drop_db("no_such_db").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -571,7 +571,7 @@ async fn drop_repo_if_exists_nonexistent_is_noop() {
     let mut b = Batch::new();
     b.id("dr");
     b.drop_repo("op", ddl::drop_repo("no_such_repo").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -586,7 +586,7 @@ async fn drop_function_if_exists_nonexistent_is_noop() {
     let mut b = Batch::new();
     b.id("df");
     b.drop_function("op", ddl::drop_function("no_such_fn").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -601,7 +601,7 @@ async fn drop_validator_if_exists_nonexistent_is_noop() {
     let mut b = Batch::new();
     b.id("dv");
     b.drop_validator("op", ddl::drop_validator("no_such_val").if_exists());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -637,7 +637,7 @@ async fn create_sorted_index_with_if_not_exists_idempotent() {
         "op",
         ddl::create_index("idx_age", "users").field("age").sorted(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Second CREATE SORTED INDEX with IF NOT EXISTS on the same name
@@ -651,7 +651,7 @@ async fn create_sorted_index_with_if_not_exists_idempotent() {
             .sorted()
             .if_not_exists(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db
         .execute("testdb", &req)
         .await
@@ -679,7 +679,7 @@ async fn create_fts_index_with_if_not_exists_idempotent() {
             .field("name")
             .index_type("fts"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Second CREATE INDEX (fts) with IF NOT EXISTS on the same name
@@ -693,7 +693,7 @@ async fn create_fts_index_with_if_not_exists_idempotent() {
             .index_type("fts")
             .if_not_exists(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db
         .execute("testdb", &req)
         .await
@@ -731,7 +731,7 @@ async fn create_sorted_index_duplicate_without_if_not_exists_now_errors() {
         "op",
         ddl::create_index("idx_age2", "users").field("age").sorted(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Second CREATE SORTED INDEX on the same name WITHOUT if_not_exists
@@ -742,7 +742,7 @@ async fn create_sorted_index_duplicate_without_if_not_exists_now_errors() {
         "op",
         ddl::create_index("idx_age2", "users").field("age").sorted(),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     let msg = err.to_string();
     assert!(

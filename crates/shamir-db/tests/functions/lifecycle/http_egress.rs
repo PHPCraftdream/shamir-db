@@ -299,7 +299,7 @@ async fn create_function_with_empty_net_grants_via_wire_gets_no_egress() {
             hmac: None,
         }),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     match db.execute("testdb", &req).await {
         Ok(_) => {}
         Err(e) if e.to_string().contains("toolchain unavailable") => {

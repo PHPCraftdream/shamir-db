@@ -165,7 +165,7 @@ pub(crate) async fn create_profile_and_subscription(follower: &ShamirDb) {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "prof_a"),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute("app", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("create profile+subscription");
 }
@@ -183,7 +183,7 @@ async fn create_profile_b(follower: &ShamirDb) {
         ),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute("app", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("create profile prof_b");
 }
@@ -197,7 +197,7 @@ async fn recreate_sub_a_over_prof_b(follower: &ShamirDb, id: u32) {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "prof_b"),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute("app", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("re-create sub_a over prof_b");
 }
@@ -208,7 +208,7 @@ pub(crate) async fn run_op(follower: &ShamirDb, op: BatchOp) {
     b.id(1);
     b.op("op", op);
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute("app", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("catalogue batch");
 }
@@ -219,7 +219,7 @@ fn op_future(follower: Arc<ShamirDb>, op: BatchOp) -> BoxedBatch {
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
-    let request = b.to_request_via_msgpack();
+    let request = b.to_request_via_msgpack().unwrap();
     Box::pin(async move { follower.execute("app", &request).await })
 }
 
@@ -947,7 +947,7 @@ async fn dropped_creation_pending_row_is_never_started_by_reconcile() {
         "cs",
         subscription("sub_b", "tcp://leader:9000", "pub_a", "prof_a"),
     );
-    let request = b.to_request_via_msgpack();
+    let request = b.to_request_via_msgpack().unwrap();
     let follower_for_create = follower.clone();
     let mut create = Box::pin(async move { follower_for_create.execute("app", &request).await });
     let mut wait = Box::pin(async { seam.arrived().notified().await });
