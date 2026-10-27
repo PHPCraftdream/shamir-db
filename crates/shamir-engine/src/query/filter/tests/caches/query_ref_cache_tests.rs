@@ -403,8 +403,8 @@ fn select_projection_wires_query_ref_cache_and_evaluates_per_record() {
 
     let rec_a = null_record();
     let rec_b = null_record();
-    let qval_a = proj.project_value(&rec_a, &interner).unwrap();
-    let qval_b = proj.project_value(&rec_b, &interner).unwrap();
+    let qval_a = proj.project_value(&rec_a, &interner);
+    let qval_b = proj.project_value(&rec_b, &interner);
 
     // Both rows must resolve the same execution-local query reference.
     match &qval_a {
@@ -433,7 +433,7 @@ fn select_projection_wires_query_ref_cache_and_evaluates_per_record() {
     let refs_next = refs_of("q", call_result(QueryValue::Str("next".into())));
     let ctx_next = FilterContext::new(&interner, &refs_next);
     let proj_next = proj.with_context(&ctx_next);
-    let QueryValue::Map(next) = proj_next.project_value(&rec_a, &interner).unwrap() else {
+    let QueryValue::Map(next) = proj_next.project_value(&rec_a, &interner) else {
         panic!("expected projected map");
     };
     assert_eq!(next.get("up"), Some(&QueryValue::Str("NEXT".into())));

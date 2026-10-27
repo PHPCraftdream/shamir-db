@@ -48,7 +48,6 @@ use shamir_query_types::filter::Filter;
 use shamir_query_types::read::DdlOpStatus;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::inner_value_to_query_value;
-use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::common::TMap;
@@ -297,20 +296,16 @@ impl InternerReadView {
     }
 
     /// Decode raw msgpack record bytes into a string-keyed `QueryValue` for
-    /// delivery: zero-copy `RecordView` lens first, full `InnerValue` decode
-    /// fallback for bare-scalar / non-map records. `Ok(None)` when the bytes
-    /// decode as neither shape; `Err` on a de-intern failure.
-    pub fn record_bytes_to_query_value(
-        &self,
-        bytes: &[u8],
-    ) -> Result<Option<QueryValue>, CodecError> {
+    /// delivery: zero-copy `RecordView` lens first (`QueryValue::Null` on a
+    /// de-intern error inside a valid map), full `InnerValue` decode
+    /// fallback for bare-scalar / non-map records. `None` when the bytes
+    /// decode as neither shape.
+    pub fn record_bytes_to_query_value(&self, bytes: &[u8]) -> Option<QueryValue> {
         if let Ok(view) = RecordView::new(bytes) {
-            return view.to_query_value(self.interner()).map(Some);
+            return Some(view.to_query_value(self.interner()));
         }
-        let Ok(inner) = InnerValue::from_bytes(bytes) else {
-            return Ok(None);
-        };
-        inner.to_query_value(self.interner()).map(Some)
+        let inner = InnerValue::from_bytes(bytes).ok()?;
+        Some(inner.to_query_value(self.interner()))
     }
 
     /// Minimal evaluation context (empty shared refs map — subscriptions

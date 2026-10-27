@@ -57,14 +57,8 @@ impl RecordValidator for WasmRecordValidator {
 
         // 2. Materialise the records into QueryValue (de-intern happens here;
         //    only WASM pays this cost).
-        let qv_new = match new.map(|f| f.to_query_value()).transpose() {
-            Ok(qv) => qv.unwrap_or(QueryValue::Null),
-            Err(e) => return wasm_invocation_error(e.to_string()),
-        };
-        let qv_old = match old.map(|f| f.to_query_value()).transpose() {
-            Ok(qv) => qv.unwrap_or(QueryValue::Null),
-            Err(e) => return wasm_invocation_error(e.to_string()),
-        };
+        let qv_new = new.map(|f| f.to_query_value()).unwrap_or(QueryValue::Null);
+        let qv_old = old.map(|f| f.to_query_value()).unwrap_or(QueryValue::Null);
 
         // 3. Build Params — mirrors table_manager_validators.rs:245-255.
         let mut params = Params::new();

@@ -188,7 +188,7 @@ impl TableManager {
                                 // `count_total` counter (independent of the
                                 // heap's K-row window).
                                 topk_total += 1;
-                                let qv = proj.as_ref().unwrap().project_value(&view, interner)?;
+                                let qv = proj.as_ref().unwrap().project_value(&view, interner);
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge(
                                         crate::query::batch::exec_scope::RowByteMeter::value_size(
@@ -210,7 +210,7 @@ impl TableManager {
                                 raw_acc.push((id, b));
                             } else {
                                 let row = QueryRecord::Direct(
-                                    proj.as_ref().unwrap().project_value(&view, interner)?,
+                                    proj.as_ref().unwrap().project_value(&view, interner),
                                 );
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge_record(&row)?;
@@ -232,7 +232,7 @@ impl TableManager {
                                 // F-53a (#874): inline bounded heap (Owned arm
                                 // — already-decoded InnerValue, e.g. from MVCC).
                                 topk_total += 1;
-                                let qv = proj.as_ref().unwrap().project_value(&record, interner)?;
+                                let qv = proj.as_ref().unwrap().project_value(&record, interner);
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge(
                                         crate::query::batch::exec_scope::RowByteMeter::value_size(
@@ -266,7 +266,7 @@ impl TableManager {
                                 }
                             } else {
                                 let row = QueryRecord::Direct(
-                                    proj.as_ref().unwrap().project_value(&record, interner)?,
+                                    proj.as_ref().unwrap().project_value(&record, interner),
                                 );
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge_record(&row)?;

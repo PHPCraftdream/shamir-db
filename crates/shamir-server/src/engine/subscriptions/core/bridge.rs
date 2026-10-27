@@ -70,13 +70,7 @@ impl Drop for SubscriptionSlotGuard {
 /// lens first; full `InnerValue` decode fallback for bare-scalar / non-map
 /// records).
 fn bytes_to_query_value(bytes: &[u8], interner: &InternerReadView) -> Option<QueryValue> {
-    match interner.record_bytes_to_query_value(bytes) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::warn!(%error, "subscription delivery: failed to de-intern record bytes");
-            None
-        }
-    }
+    interner.record_bytes_to_query_value(bytes)
 }
 
 /// Bridge task: subscribes to the changefeed broadcast for the relevant

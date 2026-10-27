@@ -187,7 +187,7 @@ async fn run_tree(tbl: &TableManager, query: &ReadQuery) -> QueryResult {
         SelectProjection::new(&query.select, interner, ScalarResolver::builtins_only()).unwrap();
     let records: Vec<QueryRecord> = matched
         .iter()
-        .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner).unwrap()))
+        .map(|(_, record)| QueryRecord::Direct(proj.project_value(record, interner)))
         .collect();
 
     let records_returned = records.len() as u64;

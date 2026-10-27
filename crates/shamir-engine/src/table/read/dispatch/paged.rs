@@ -97,7 +97,7 @@ impl TableManager {
                             if let Some(lim) = limit {
                                 if idx < skip + lim {
                                     let row =
-                                        QueryRecord::Direct(proj.project_value($rec, interner)?);
+                                        QueryRecord::Direct(proj.project_value($rec, interner));
                                     if let Some(meter) = ctx.row_byte_meter {
                                         meter.charge_record(&row)?;
                                     }
@@ -107,7 +107,7 @@ impl TableManager {
                                     result.push(row);
                                 }
                             } else {
-                                let row = QueryRecord::Direct(proj.project_value($rec, interner)?);
+                                let row = QueryRecord::Direct(proj.project_value($rec, interner));
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge_record(&row)?;
                                 }
@@ -300,7 +300,7 @@ impl TableManager {
                                         QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref()))
                                     }
                                     Err(_) => {
-                                        QueryRecord::Direct(proj.project_value(&view, interner)?)
+                                        QueryRecord::Direct(proj.project_value(&view, interner))
                                     }
                                 }
                             };
@@ -344,13 +344,11 @@ impl TableManager {
                                                 projected.as_ref(),
                                             )),
                                             Err(_) => QueryRecord::Direct(
-                                                proj.project_value(iv, interner)?,
+                                                proj.project_value(iv, interner),
                                             ),
                                         }
                                     }
-                                    Err(_) => {
-                                        QueryRecord::Direct(proj.project_value(iv, interner)?)
-                                    }
+                                    Err(_) => QueryRecord::Direct(proj.project_value(iv, interner)),
                                 }
                             };
                             if let Some(meter) = ctx.row_byte_meter {
@@ -386,7 +384,7 @@ impl TableManager {
                                 break;
                             }
                         }
-                        let row = QueryRecord::Direct(proj.project_value($rec, interner)?);
+                        let row = QueryRecord::Direct(proj.project_value($rec, interner));
                         if let Some(meter) = ctx.row_byte_meter {
                             meter.charge_record(&row)?;
                         }

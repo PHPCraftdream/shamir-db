@@ -18,7 +18,6 @@
 //!   lookup; no interner needed.
 
 use arc_swap::ArcSwapOption;
-use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{Kind, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
@@ -68,7 +67,7 @@ pub trait RecordFields: Send + Sync {
     /// `str` / `present` by name.
     ///
     /// [`WasmRecordValidator`]: crate::validator::WasmRecordValidator
-    fn to_query_value(&self) -> Result<QueryValue, CodecError>;
+    fn to_query_value(&self) -> QueryValue;
 }
 
 // ── ViewFields ────────────────────────────────────────────────────────────────
@@ -172,7 +171,7 @@ impl<'a> RecordFields for ViewFields<'a> {
         self.view.materialize_at(&ids)
     }
 
-    fn to_query_value(&self) -> Result<QueryValue, CodecError> {
+    fn to_query_value(&self) -> QueryValue {
         self.view.to_query_value(self.interner)
     }
 }
@@ -282,7 +281,7 @@ impl<'a> RecordFields for OwnedFields<'a> {
         qv_descend(self.qv, path).map(qv_to_inner)
     }
 
-    fn to_query_value(&self) -> Result<QueryValue, CodecError> {
-        Ok(self.qv.clone())
+    fn to_query_value(&self) -> QueryValue {
+        self.qv.clone()
     }
 }

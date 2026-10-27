@@ -48,7 +48,7 @@ fn project_value_select_all_returns_all_fields() {
 
     let select = Select::all();
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -88,7 +88,7 @@ fn project_value_field_projection_returns_named_fields_only() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -135,7 +135,7 @@ fn project_value_missing_field_is_null() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -160,7 +160,7 @@ fn project_value_empty_items_returns_all() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -227,8 +227,8 @@ fn project_value_cond_function_projection_caches_and_evaluates_per_record() {
     let record_low = make_record(&interner, vec![("score", InnerValue::Int(20))]);
 
     // SAME `proj` (SAME internal cond cache) serves both calls.
-    let qval_high = proj.project_value(&record_high, &interner).unwrap();
-    let qval_low = proj.project_value(&record_low, &interner).unwrap();
+    let qval_high = proj.project_value(&record_high, &interner);
+    let qval_low = proj.project_value(&record_low, &interner);
 
     match &qval_high {
         QueryValue::Map(m) => {
@@ -301,7 +301,7 @@ fn project_value_user_scalar_resolves_through_projection() {
     let proj = SelectProjection::new(&select, &interner, resolver).unwrap();
 
     let record = make_record(&interner, vec![("n", InnerValue::Int(21))]);
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -334,7 +334,7 @@ fn project_value_builtins_only_still_works() {
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
 
     let record = make_record(&interner, vec![("s", InnerValue::Str("hello".into()))]);
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -377,7 +377,7 @@ fn project_value_expression_arithmetic_over_field_data() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -414,7 +414,7 @@ fn project_value_expression_literal_only() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -441,7 +441,7 @@ fn project_value_expression_without_alias_defaults_to_expr_key() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
 
     match &qval {
         QueryValue::Map(m) => {
@@ -550,7 +550,7 @@ fn select_star_alone_still_works() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
     match &qval {
         QueryValue::Map(m) => assert_eq!(m.get("x"), Some(&QueryValue::Int(1))),
         _ => panic!("expected QueryValue::Map"),
@@ -649,7 +649,7 @@ fn two_expressions_with_distinct_aliases_both_survive() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
     match &qval {
         QueryValue::Map(m) => {
             assert_eq!(m.get("a"), Some(&QueryValue::Int(1)));
@@ -688,7 +688,7 @@ fn division_by_zero_in_select_expression_produces_documented_null() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
     match &qval {
         QueryValue::Map(m) => {
             assert_eq!(
@@ -719,7 +719,7 @@ fn unknown_scalar_function_in_select_produces_documented_null() {
         distinct: false,
     };
     let proj = SelectProjection::new(&select, &interner, ScalarResolver::builtins_only()).unwrap();
-    let qval = proj.project_value(&record, &interner).unwrap();
+    let qval = proj.project_value(&record, &interner);
     match &qval {
         QueryValue::Map(m) => {
             assert_eq!(m.get("result"), Some(&QueryValue::Null));

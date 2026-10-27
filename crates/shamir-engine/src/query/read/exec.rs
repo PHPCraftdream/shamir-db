@@ -134,10 +134,10 @@ pub(crate) fn apply_select_value_with_context(
     ctx: &FilterContext<'_>,
 ) -> DbResult<Vec<QueryValue>> {
     let proj = SelectProjection::new(select, interner, ctx.scalars.clone())?.with_context(ctx);
-    records
+    Ok(records
         .iter()
-        .map(|(_, record)| proj.project_value(record, interner).map_err(DbError::from))
-        .collect()
+        .map(|(_, record)| proj.project_value(record, interner))
+        .collect())
 }
 
 // ============================================================================
