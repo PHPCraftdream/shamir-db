@@ -570,3 +570,114 @@ fn distinct_wrapper_passes_null_through_to_inner() {
     // → [1, 3] → median (p=0.5) → nearest-rank ceil(0.5*2)=1 → idx 0 → 1.
     assert_eq!(a.finalize().unwrap(), int(1));
 }
+
+#[test]
+fn rv_funclib_a1b1a620_count_distinct_hash_equivalence() {
+    // The hash-based dedup must preserve `compare` equality exactly:
+    // Int(1)/Dec(1.0)/F64(1.0)/Dec(1.00) are one distinct value, Str("1")
+    // is another. 2^53 and 2^53+1 are distinct (exact Int↔Int compare),
+    // while F64(2^53) equals both via the lossy f64 path (first-match
+    // dedup keeps it collapsed).
+    let two_pow_53: i64 = 9_007_199_254_740_992;
+    let vals = [
+        int(1),
+        dec("1.0"),
+        f64v(1.0),
+        str_v("1"),
+        dec("1.00"),
+        int(two_pow_53),
+        int(two_pow_53 + 1),
+        f64v(two_pow_53 as f64),
+        QueryValue::Null,
+        QueryValue::Null,
+    ];
+    assert_eq!(run("count_distinct", &vals).unwrap(), int(4));
+}
+
+#[test]
+fn rv_funclib_b30dc9ac_distinct_wrapper_hash_order_preserved() {
+    // DISTINCT string_agg: duplicates removed, representatives forwarded in
+    // first-occurrence order (hash-based dedup must not reorder inputs).
+    let factory = agg::string_agg(",".to_owned());
+    let mut a = Box::new(agg::DistinctWrapper::new(factory()));
+    for v in [
+        str_v("b"),
+        str_v("a"),
+        str_v("b"),
+        str_v("c"),
+        str_v("a"),
+        QueryValue::Null,
+        str_v("b"),
+    ] {
+        a.accumulate(&v).unwrap();
+    }
+    assert_eq!(a.finalize().unwrap(), str_v("b,a,c"));
+}
+
+#[test]
+fn rv_funclib_676f82a9_variance_streams_without_column_buffer() {
+    // Streaming Welford keeps state bounded; repeated large constants yield zero.
+    let vals: Vec<QueryValue> = (0..20).map(|_| QueryValue::Dec(Decimal::MAX)).collect();
+    assert_eq!(run("variance", &vals).unwrap(), dec("0"));
+    assert_eq!(run("stddev", &vals).unwrap(), dec("0"));
+    assert_eq!(
+        run(
+            "variance",
+            &[QueryValue::Dec(Decimal::MAX), QueryValue::Dec(Decimal::MIN)]
+        )
+        .unwrap_err()
+        .code,
+        "out_of_range"
+    );
+}
+
+#[test]
+fn rv_funclib_0ceb1ab2_checked_decimal_aggregate_and_array_overflow() {
+    let top = QueryValue::Dec(Decimal::MAX);
+    assert_eq!(
+        run("sum", &[top.clone(), top.clone()]).unwrap_err().code,
+        "out_of_range"
+    );
+    assert_eq!(
+        run("avg", &[top.clone(), top.clone()]).unwrap_err().code,
+        "out_of_range"
+    );
+    let bottom = QueryValue::Dec(Decimal::MIN);
+    assert_eq!(
+        run("range", &[bottom, QueryValue::Dec(Decimal::MAX)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
+    );
+    let mut arrays = crate::registry::ScalarRegistry::new();
+    crate::arrays::register(&mut arrays);
+    let input = QueryValue::List(vec![top.clone(), top]);
+    let sum = arrays.get("sum").unwrap();
+    assert_eq!(
+        (sum.f)(std::slice::from_ref(&input)).unwrap_err().code,
+        "out_of_range"
+    );
+    let avg = arrays.get("avg").unwrap();
+    assert_eq!((avg.f)(&[input]).unwrap_err().code, "out_of_range");
+}
+
+#[test]
+fn welford_decimal_rounding_high_offset_and_order_are_documented() {
+    let normal = [int(1), int(2), int(3), int(4)];
+    assert_eq!(run("variance", &normal).unwrap(), dec("1.25"));
+    let high_offset = [
+        int(1_000_000_000_001),
+        int(1_000_000_000_002),
+        int(1_000_000_000_003),
+    ];
+    assert_eq!(
+        run("variance", &high_offset).unwrap(),
+        dec("0.6666666666666666666666666667")
+    );
+    let rounded = [
+        dec("0.0000000000000000000000000001"),
+        dec("0.0000000000000000000000000002"),
+        dec("0.0000000000000000000000000003"),
+    ];
+    assert!(run("variance", &rounded).is_ok());
+}
