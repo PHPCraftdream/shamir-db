@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-
 use shamir_sdk::prelude::*;
 
 #[shamir_sdk::function]

@@ -65,6 +65,8 @@ fn validate_method(method: &str) -> Result<()> {
 }
 
 /// Validate an HTTP URL as an absolute HTTP(S) URL without userinfo.
+// Hostnames are dot-separated non-empty labels; the absolute FQDN form with a
+// trailing dot (`example.com.`) is rejected.
 fn validate_url(url: &str) -> Result<()> {
     let Some((scheme, rest)) = url.split_once("://") else {
         return Err(Error::invalid_argument(
