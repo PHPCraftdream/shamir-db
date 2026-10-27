@@ -4,15 +4,6 @@ use std::cell::RefCell;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-thread_local! {
-    static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
-}
-
-#[cfg(test)]
-pub(crate) fn request_scratch_len_for_test() -> usize {
-    REQ_BUF.with(|cell| cell.borrow().len())
-}
-
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
@@ -30,6 +21,15 @@ use crate::client::subscription::{SubscriptionHandle, CLIENT_SUB_CHANNEL_CAP};
 use crate::client::transport::{await_pending_response, Lifecycle};
 use crate::client::Client;
 use crate::error::{ClientError, CloseCause};
+
+thread_local! {
+    static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
+}
+
+#[cfg(test)]
+pub(crate) fn request_scratch_len_for_test() -> usize {
+    REQ_BUF.with(|cell| cell.borrow().len())
+}
 
 /// Cancellation-safety guard for a registered pending entry (P0 write-phase):
 /// created right after the locked insert; its `Drop` removes the entry IF it
