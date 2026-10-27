@@ -213,7 +213,7 @@ fn rv_wasm_host_df4ad1da_batch_error_classification() {
         code: None,
     });
     assert!(
-        matches!(uncoded, DbGatewayError::ExecutionSource { ref message, .. } if message.starts_with("QueryError") && message.contains("boom"))
+        matches!(uncoded, DbGatewayError::ExecutionSource { ref message, .. } if message == "Query 'r' failed: boom")
     );
     let source = uncoded
         .source()
@@ -230,7 +230,7 @@ fn rv_wasm_host_df4ad1da_batch_error_classification() {
         code: Some("validation".into()),
     });
     assert!(
-        matches!(validation, DbGatewayError::ExecutionSource { ref message, .. } if message.starts_with("QueryError"))
+        matches!(validation, DbGatewayError::ExecutionSource { ref message, .. } if message == "Query 'r' failed [validation]: invalid value")
     );
     let source = validation
         .source()

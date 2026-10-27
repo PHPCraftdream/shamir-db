@@ -626,7 +626,7 @@ impl ShamirAdminExecutor {
         {
             // An existing status means this op_id was already processed.
             // Return a response with the existing op_id and let polling determine the outcome.
-            return Ok(admin_result_with_op_id(
+            return admin_result_with_op_id(
                 mpack!({
                     "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
                     "existed": @(QueryValue::Bool(matches!(existing_status.state,
@@ -634,7 +634,7 @@ impl ShamirAdminExecutor {
                         DdlOpState::SucceededViaCrashRecovery { .. }))),
                 }),
                 op_id,
-            ));
+            );
         }
 
         // Determine the operation kind for status logging.
@@ -742,13 +742,13 @@ impl ShamirAdminExecutor {
         // own tombstone clear, using the DropSortedIndex DdlOpKind classified
         // above (no more DropHashIndex fallback).
 
-        Ok(admin_result_with_op_id(
+        admin_result_with_op_id(
             mpack!({
                 "dropped_index": @(QueryValue::Str(op.drop_index.clone())),
                 "existed": @(QueryValue::Bool(removed)),
             }),
             op_id,
-        ))
+        )
     }
 
     pub(super) async fn handle_rename_index(
@@ -839,7 +839,7 @@ impl ShamirAdminExecutor {
         {
             // An existing status means this op_id was already processed.
             // Return a response with the existing op_id and let polling determine the outcome.
-            return Ok(admin_result_with_op_id(
+            return admin_result_with_op_id(
                 mpack!({
                     "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
                     "to": @(QueryValue::Str(op.to.clone())),
@@ -850,7 +850,7 @@ impl ShamirAdminExecutor {
                         DdlOpState::SucceededViaCrashRecovery { .. }))),
                 }),
                 op_id,
-            ));
+            );
         }
 
         // Determine the operation kind BEFORE the mutation.
@@ -953,7 +953,7 @@ impl ShamirAdminExecutor {
         // #1069 round 2: Terminal status is now written INSIDE TableManager::rename_index
         // BEFORE tombstone clear (clear_from_renaming). No redundant write needed here.
 
-        Ok(admin_result_with_op_id(
+        admin_result_with_op_id(
             mpack!({
                 "renamed_index": @(QueryValue::Str(op.rename_index.clone())),
                 "to": @(QueryValue::Str(op.to.clone())),
@@ -962,6 +962,6 @@ impl ShamirAdminExecutor {
                 "existed": @(QueryValue::Bool(true)),
             }),
             op_id,
-        ))
+        )
     }
 }
