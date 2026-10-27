@@ -39,7 +39,7 @@ pub use gateway::{
 };
 pub use runtime::{
     BatchContext, FnAdapter, FnBatch, FnCtx, FnResult, FunctionError, FunctionRegistry, GlobalVars,
-    Params, ShamirFunction,
+    GlobalsQuota, GlobalsQuotaError, Params, ShamirFunction,
 };
 pub use wasm::{verify_wasm_module, WasmEngine, WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS};
 

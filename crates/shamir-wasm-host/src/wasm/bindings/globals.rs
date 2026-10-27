@@ -1,4 +1,5 @@
 use super::super::wasm_function::{read_guest_mem, write_value_to_guest, HostState};
+use crate::runtime::{FunctionError, GlobalsQuotaError};
 use shamir_types::types::value::QueryValue;
 use std::future::Future;
 
@@ -35,6 +36,12 @@ pub(in crate::wasm) fn host_global_set(
         .and_then(|e| e.into_memory())
         .ok_or_else(|| wasmtime::Error::msg("missing export `memory`"))?;
 
+    let max = caller.data().globals.quota().max_value_bytes;
+    if let Ok(len) = usize::try_from(val_len) {
+        if len > max {
+            return Err(quota_trap(GlobalsQuotaError::ValueTooLarge { len, max }));
+        }
+    }
     let key_bytes = read_guest_mem(memory.data(&caller), key_ptr, key_len)?;
     let val_bytes = read_guest_mem(memory.data(&caller), val_ptr, val_len)?;
 
@@ -53,8 +60,16 @@ pub(in crate::wasm) fn host_global_set(
     let value = QueryValue::from_bytes(&val_bytes)
         .map_err(|e| wasmtime::Error::msg(format!("global_set: value decode error: {e}")))?;
 
-    caller.data().globals.set(key, value);
+    caller
+        .data()
+        .globals
+        .try_set(key, value, val_bytes.len())
+        .map_err(quota_trap)?;
     Ok(())
+}
+
+fn quota_trap(e: GlobalsQuotaError) -> wasmtime::Error {
+    wasmtime::Error::new(FunctionError::Compute(format!("global_set: {e}")))
 }
 
 /// Host implementation of `global_get(key_ptr, key_len) -> i64`.
