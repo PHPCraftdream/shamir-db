@@ -265,9 +265,10 @@ async fn prepare_event(
     let interner = interner_manager.get().await?;
     let mut remap = shamir_collections::TFxMap::default();
     for (id, name) in bindings {
+        // RU8: replication apply is counted but never quota-rejected.
         let local = interner
-            .touch_ind(name)
-            .map_err(|error| DbError::Codec(error.into()))?
+            .touch_ind_unmetered(name)
+            .map_err(shamir_storage::error::DbError::from)?
             .into_key()
             .id();
         remap.insert(id, local);

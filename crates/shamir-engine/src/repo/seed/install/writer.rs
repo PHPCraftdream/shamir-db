@@ -199,11 +199,12 @@ impl SeedImageWriter {
             ));
         }
         let manager = self.repo.repo_interner().await?;
+        // RU8: the seed writer is counted but never quota-rejected.
         let local = manager
             .get()
             .await?
-            .touch_ind(name)
-            .map_err(|e| DbError::Codec(e.into()))?
+            .touch_ind_unmetered(name)
+            .map_err(shamir_storage::error::DbError::from)?
             .into_key()
             .id();
         self.remap.insert(source_id, local);

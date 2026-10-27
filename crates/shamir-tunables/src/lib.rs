@@ -158,6 +158,33 @@ pub mod instance_defaults {
     /// indexes (< 1000 live) are not worth the rebuild cost.
     pub const VECTOR_COMPACTION_MIN_LIVE: usize = 1000;
 
+    /// Maximum number of distinct names admitted by each repository interner.
+    pub const INTERNER_MAX_NAMES: u64 = 1_048_576;
+    /// Maximum cumulative UTF-8 bytes admitted by each repository interner.
+    pub const INTERNER_MAX_NAME_BYTES: u64 = 64 * 1024 * 1024;
+    pub const INTERNER_MAX_NAMES_ENV: &str = "SHAMIR_INTERNER_MAX_NAMES";
+    pub const INTERNER_MAX_NAME_BYTES_ENV: &str = "SHAMIR_INTERNER_MAX_NAME_BYTES";
+
+    pub fn parse_interner_max_names(raw: Option<&str>) -> u64 {
+        raw.and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(INTERNER_MAX_NAMES)
+    }
+
+    pub fn parse_interner_max_name_bytes(raw: Option<&str>) -> u64 {
+        raw.and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(INTERNER_MAX_NAME_BYTES)
+    }
+
+    pub fn interner_max_names() -> u64 {
+        parse_interner_max_names(std::env::var(INTERNER_MAX_NAMES_ENV).ok().as_deref())
+    }
+
+    pub fn interner_max_name_bytes() -> u64 {
+        parse_interner_max_name_bytes(std::env::var(INTERNER_MAX_NAME_BYTES_ENV).ok().as_deref())
+    }
+
     /// Env var name honoured at startup for `VECTOR_SNAPSHOT_DELTA_THRESHOLD`.
     pub const VECTOR_SNAPSHOT_DELTA_THRESHOLD_ENV: &str = "SHAMIR_VECTOR_SNAPSHOT_DELTA_THRESHOLD";
 

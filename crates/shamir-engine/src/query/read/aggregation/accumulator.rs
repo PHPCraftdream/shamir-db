@@ -938,9 +938,11 @@ pub(super) fn step_aggregate_input(
         AggState::Count { .. } => {}
     }
     // RecordRef rejects empty paths: wrap the evaluated leaf in a one-field record.
+    // RU8: keep the typed quota error (wire code interner_quota_exceeded)
+    // instead of flattening it into a Validation string.
     let key = interner
         .touch_ind("agg_input")
-        .map_err(|error| DbError::Validation(error.into()))?
+        .map_err(shamir_storage::error::DbError::from)?
         .into_key();
     acc.field_path = Some(vec![key.clone()]);
     acc.all_field = false;

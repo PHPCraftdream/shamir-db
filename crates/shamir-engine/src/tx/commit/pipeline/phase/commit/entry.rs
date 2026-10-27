@@ -404,7 +404,10 @@ impl TxError {
                 return TransactionInfo::indeterminate(tx_id, snapshot_version, commit_version);
             }
             Self::WalRetentionExceeded => "wal_retention_exceeded".to_string(),
-            Self::Storage(e) => format!("storage: {}", e),
+            Self::Storage(e) => e
+                .code()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("storage: {}", e)),
             Self::Expired { elapsed, max } => {
                 format!("tx expired: elapsed {:?} > max {:?}", elapsed, max)
             }

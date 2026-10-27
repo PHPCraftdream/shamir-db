@@ -357,7 +357,9 @@ impl RequestHandler for ShamirDbHandler {
         conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         Box::pin(async move {
-            let request: DbRequest = match rmp_serde::from_slice(req) {
+            let request: DbRequest = match shamir_query_types::validate_request_alias_caps(req)
+                .and_then(|()| rmp_serde::from_slice(req))
+            {
                 Ok(request) => request,
                 Err(e) => {
                     let response = DbResponse::Error {

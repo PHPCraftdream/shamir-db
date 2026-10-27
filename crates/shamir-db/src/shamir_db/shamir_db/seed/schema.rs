@@ -41,9 +41,11 @@ impl ShamirDb {
                         let name = value.as_str().ok_or_else(|| {
                             DbError::Validation("seed schema path must contain names".into())
                         })?;
+                        // RU8: seed/schema install is counted but never
+                        // quota-rejected.
                         let id = interner
-                            .touch_ind(name)
-                            .map_err(|e| DbError::Codec(e.into()))?
+                            .touch_ind_unmetered(name)
+                            .map_err(shamir_storage::error::DbError::from)?
                             .into_key()
                             .id();
                         *value = QueryValue::Int(

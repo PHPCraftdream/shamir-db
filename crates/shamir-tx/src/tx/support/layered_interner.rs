@@ -6,7 +6,7 @@
 use scc::HashMap as SccHashMap;
 use shamir_collections::{TFxMap, THasher};
 use shamir_storage::error::DbResult;
-use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::core::interner::{Interner, InternerError, InternerKey};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Starting value for overlay ids. Any id >= this value is treated as an
@@ -31,7 +31,7 @@ pub enum LayeredInterner<'a> {
 }
 
 impl<'a> LayeredInterner<'a> {
-    /// cancel-safe: yes — delegates to the synchronous [`touch_sync`] (see
+    /// cancel-safe: yes — delegates to the synchronous `try_touch_sync` (see
     /// the DEADLOCK FIX note below); once polled it runs to `Ready` without
     /// suspending, so it cannot be dropped mid-execution.
     ///
@@ -43,10 +43,10 @@ impl<'a> LayeredInterner<'a> {
     ///
     /// DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
     /// H1+H2 commit `621776bd`, H3 commit `dcfaf825`, H4+H5 commit
-    /// `2d0f4115`): this fn now delegates to the SYNCHRONOUS [`touch_sync`]
+    /// `2d0f4115`): this fn now delegates to the SYNCHRONOUS `try_touch_sync`
     /// instead of acquiring the `overlay` map's bucket lock via
     /// `entry_async`'s lock-HANDOFF path. The `overlay` map is also touched
-    /// by the SYNCHRONOUS accessors `touch_sync` (`entry_sync`, every tx
+    /// by the SYNCHRONOUS accessors `try_touch_sync` (`entry_sync`, every tx
     /// write) and `get_str` (`iter_sync`, reverse lookups); mixing `_async`
     /// lock-handoff (saa grants the bucket lock to the suspended waiter
     /// TASK, which then holds it while unpolled in tokio's run queue) with
@@ -56,7 +56,7 @@ impl<'a> LayeredInterner<'a> {
     /// RISK FRAMING — hygiene, NOT an active hazard (read before
     /// "fixing"): unlike #589 / H1-H5, the `overlay` map is
     /// **per-`TxContext`** (`TxContext::interner_overlay`, one instance per
-    /// transaction), and a tx's operations — writes via `touch_sync`,
+    /// transaction), and a tx's operations — writes via `try_touch_sync`,
     /// validator reads via `get_id`, the Phase-1 merge via
     /// [`commit_interner_overlay`] — execute SEQUENTIALLY on that tx's
     /// single logical-task timeline. No current call path has two
@@ -69,36 +69,31 @@ impl<'a> LayeredInterner<'a> {
     /// ops sharing one `TxContext`). The fn stays `async` to keep its call
     /// sites / public signature unchanged (it is test-exercised as
     /// `touch(...).await`); it no longer suspends.
-    pub async fn touch(&self, key: &str) -> u64 {
-        self.touch_sync(key)
+    pub async fn touch(&self, key: &str) -> Result<u64, InternerError> {
+        self.try_touch_sync(key)
     }
 
-    /// Sync version of [`touch`] for use in sync code paths
-    /// (e.g., `msgpack_value_to_inner_layered`).
-    ///
-    /// Uses `scc::HashMap::entry` (sync) instead of `entry_async`.
-    pub fn touch_sync(&self, key: &str) -> u64 {
+    /// Fallible sync intern. `Direct` forwards the base interner's typed
+    /// quota error (RU8); `Layered` cannot fail on a base miss — new names
+    /// go to the per-tx overlay, so only a pre-existing base error surfaces.
+    pub fn try_touch_sync(&self, key: &str) -> Result<u64, InternerError> {
         match self {
-            Self::Direct(base) => base
-                .touch_ind(key)
-                .expect("Interner::touch_ind is infallible for valid input")
-                .key()
-                .id(),
+            Self::Direct(base) => base.touch_ind(key).map(|t| t.key().id()),
             Self::Layered {
                 base,
                 overlay,
                 next_overlay_id,
             } => {
                 if let Some(ik) = base.get_ind(key) {
-                    return ik.id();
+                    return Ok(ik.id());
                 }
                 let entry = overlay.entry_sync(key.to_string());
                 use scc::hash_map::Entry::{Occupied, Vacant};
                 match entry {
-                    Occupied(oe) => *oe.get(),
+                    Occupied(oe) => Ok(*oe.get()),
                     Vacant(ve) => {
                         let id = next_overlay_id.fetch_add(1, Ordering::SeqCst);
-                        *ve.insert_entry(id).get()
+                        Ok(*ve.insert_entry(id).get())
                     }
                 }
             }
@@ -117,7 +112,7 @@ impl<'a> LayeredInterner<'a> {
     ///
     /// DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`):
     /// `read_sync`, NOT `read_async`. The `overlay` map is also touched by
-    /// the SYNCHRONOUS accessors `touch_sync` (`entry_sync`, every tx
+    /// the SYNCHRONOUS accessors `try_touch_sync` (`entry_sync`, every tx
     /// write) and `get_str` (`iter_sync`, reverse lookups); `read_async`'s
     /// wait path is lock-HANDOFF — saa grants the shared bucket lock to the
     /// suspended reader TASK, which then holds it while unpolled in tokio's
@@ -214,6 +209,7 @@ impl<'a> LayeredInterner<'a> {
 /// referencing overlay ids before flush. Result of
 /// [`commit_interner_overlay`]: the id remap and the delta of
 /// genuinely new entries inserted into base during merge.
+#[derive(Debug)]
 pub struct OverlayCommitResult {
     /// `overlay_id → final_base_id` for every overlay entry.
     pub remap: TFxMap<u64, u64>,
@@ -231,7 +227,7 @@ pub async fn commit_interner_overlay(
     let mut pending: Vec<(String, u64)> = Vec::new();
     // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`):
     // `iter_sync`, NOT `iter_async`. The `overlay` map is also touched by
-    // the SYNCHRONOUS accessors `touch_sync` (`entry_sync`, every tx write)
+    // the SYNCHRONOUS accessors `try_touch_sync` (`entry_sync`, every tx write)
     // and `get_str` (`iter_sync`, reverse lookups); `iter_async`'s wait path
     // is lock-HANDOFF — saa grants each bucket lock to the suspended
     // iterator TASK, which then holds it while unpolled in tokio's run queue
@@ -256,9 +252,10 @@ pub async fn commit_interner_overlay(
         let (final_id, is_new) = match base.get_ind(&key) {
             Some(existing) => (existing.id(), false),
             None => {
+                // From<InternerError> keeps the typed wire code intact.
                 let ti = base
                     .touch_ind(&key)
-                    .map_err(|e| shamir_storage::error::DbError::Codec(e.to_string()))?;
+                    .map_err(shamir_storage::error::DbError::from)?;
                 (ti.key().id(), ti.is_new())
             }
         };

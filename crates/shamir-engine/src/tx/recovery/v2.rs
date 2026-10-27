@@ -312,7 +312,8 @@ async fn replay_v2_op_admitted_inner(
             let repo_interner = repo.repo_interner().await?;
             let interner = repo_interner.get().await?;
             for (_overlay_id, key_str) in entries {
-                interner.touch_ind(key_str).map_err(|e| {
+                // RU8: recovery replay is counted but never quota-rejected.
+                interner.touch_ind_unmetered(key_str).map_err(|e| {
                     DbError::Internal(format!(
                         "replay InternerOverlayMerge: touch_ind({key_str:?}) failed: {e}"
                     ))

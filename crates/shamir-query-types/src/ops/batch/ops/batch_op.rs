@@ -27,10 +27,14 @@ use crate::subscribe::{SubscribeOp, UnsubscribeOp};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 
 use crate::batch::for_each_op::ForEachOp;
+use crate::batch::req::options::assert_nested_batch_caps;
 use crate::batch::sub_batch_op::SubBatchOp;
 use crate::batch::tree_visitor::BatchTreeVisitor;
 
 /// Batch operation - can be a read or a write operation.
+///
+/// Untrusted request bytes must pass `validate_request_alias_caps` before typed
+/// decoding: nested batch aliases may collapse while buffering into QueryValue.
 ///
 /// Detected by unique key in the wire map:
 /// - `from` → Read
@@ -373,6 +377,7 @@ impl<'de> Deserialize<'de> for BatchOp {
                     qv_map.insert(k, v);
                 }
                 let qv = QueryValue::Map(qv_map);
+                assert_nested_batch_caps(&qv).map_err(DeError::custom)?;
 
                 let is_marker = |k: &str| DISCRIMINATORS.contains(&k);
                 let markers: Vec<&str> = {
