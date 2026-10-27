@@ -75,7 +75,14 @@ async fn drop_index_refuses_pre_existing_cross_family_collision() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_index("d", ddl::drop_index("shared_name", "items").repo("main"));
+    b.drop_index(
+        "d",
+        ddl::drop_index("shared_name", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir

@@ -196,7 +196,13 @@ async fn owner_on_create_function_user_actor() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id(1);
-    b.create_function("op", ddl::create_function("user_fn").wasm(wasm_b64(&wasm)));
+    b.create_function(
+        "op",
+        ddl::create_function("user_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_function"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
@@ -228,7 +234,13 @@ async fn owner_on_create_function_system_stays_system() {
     // Use default execute (System actor).
     let mut b = Batch::new();
     b.id(1);
-    b.create_function("op", ddl::create_function("sys_fn").wasm(wasm_b64(&wasm)));
+    b.create_function(
+        "op",
+        ddl::create_function("sys_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_function"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &req).await.unwrap();
 
