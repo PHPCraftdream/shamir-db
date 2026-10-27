@@ -23,6 +23,10 @@ const MAX_EXPANDED_CPUS: usize = 1_000_000;
 /// than erroring — `/sys` never emits them, and a best-effort discovery should
 /// not abort on a single bad line.
 ///
+/// Expansion is capped at 1,000,000 entries counted before de-duplication
+/// (repeated tokens consume the budget); a token that would exceed the
+/// remaining budget, or a range whose width overflows, is skipped whole.
+///
 /// ```
 /// use shamir_numa::{parse_cpulist, CpuId};
 /// assert_eq!(parse_cpulist("0-1,4"), vec![CpuId(0), CpuId(1), CpuId(4)]);
