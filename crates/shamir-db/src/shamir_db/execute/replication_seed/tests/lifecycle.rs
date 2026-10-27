@@ -153,6 +153,7 @@ async fn resume_refusal_does_not_mutate_and_recreate_still_checks_repository_rec
     executor
         .handle_drop_subscription(&shamir_query_types::admin::DropSubscriptionOp {
             drop_subscription: "sub".into(),
+            hmac: None,
         })
         .await
         .unwrap();

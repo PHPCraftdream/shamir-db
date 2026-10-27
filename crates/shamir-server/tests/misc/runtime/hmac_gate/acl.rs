@@ -37,9 +37,18 @@ async fn grant_role_without_hmac_rejected() {
     b.id(1);
     b.grant_role(
         "g",
-        ddl::grant_role("superuser", "alice")
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match ddl::grant_role("superuser", "alice")
+            .hmac("unused")
             .build()
-            .expect("build HMAC test op"),
+            .expect("build HMAC test op")
+        {
+            shamir_query_types::batch::BatchOp::GrantRole(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::GrantRole(op)
+            }
+            other => other,
+        },
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -103,9 +112,18 @@ async fn revoke_role_without_hmac_rejected() {
     b.id(1);
     b.revoke_role(
         "r",
-        ddl::revoke_role("superuser", "alice")
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match ddl::revoke_role("superuser", "alice")
+            .hmac("unused")
             .build()
-            .expect("build HMAC test op"),
+            .expect("build HMAC test op")
+        {
+            shamir_query_types::batch::BatchOp::RevokeRole(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::RevokeRole(op)
+            }
+            other => other,
+        },
     );
     let req = execute_built("scratch", b.build());
     let res = decode(

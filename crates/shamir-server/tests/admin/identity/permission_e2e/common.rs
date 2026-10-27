@@ -632,9 +632,18 @@ pub(crate) fn chmod_only_req(db_name: &str, store: &str, table: &str) -> DbReque
     b.id("cm2");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(resource, 0o777)
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match shamir_query_builder::ddl::chmod(resource, 0o777)
+            .hmac("unused")
             .build()
-            .expect("build unsigned chmod"),
+            .expect("build unsigned chmod")
+        {
+            shamir_query_types::batch::BatchOp::Chmod(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::Chmod(op)
+            }
+            other => other,
+        },
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
