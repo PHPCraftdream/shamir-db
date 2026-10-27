@@ -383,3 +383,73 @@ fn for_each_nesting_depth_exceeded_errors() {
         result
     );
 }
+
+#[test]
+fn rv_query_types_959ae4be_sibling_for_each_products_accumulate() {
+    // Two literal ForEach siblings: 3 iterations * 10 body queries = 30 units
+    // each. Each passes alone under max_queries(50); together they total 60.
+    let limits = BatchLimits {
+        max_queries: 50,
+        ..BatchLimits::default()
+    };
+    let make_loop = || {
+        let mut inner: TMap<String, QueryEntry> = new_map();
+        for i in 0..10 {
+            inner.insert(format!("q{i}"), read_entry("orders"));
+        }
+        for_each_entry(
+            FilterValue::Array((0..3).map(FilterValue::Int).collect()),
+            "elem",
+            batch_request_with_queries(inner),
+        )
+    };
+
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert("loop_a".to_string(), make_loop());
+    queries.insert("loop_b".to_string(), make_loop());
+
+    let result = BatchPlanner::plan(&queries, &limits);
+    assert!(
+        matches!(
+            result,
+            Err(BatchError::TooManyQueries { count: 60, max: 50 })
+        ),
+        "sibling ForEach products must accumulate: 30 + 30 = 60 > 50, got {:?}",
+        result
+    );
+}
+
+#[test]
+fn rv_query_types_959ae4be_plain_siblings_count_one_unit_each() {
+    // One literal ForEach (3 * 16 = 48 units) plus three plain reads (1 each) = 51 > 50.
+    let limits = BatchLimits {
+        max_queries: 50,
+        ..BatchLimits::default()
+    };
+    let mut inner: TMap<String, QueryEntry> = new_map();
+    for i in 0..16 {
+        inner.insert(format!("q{i}"), read_entry("orders"));
+    }
+    let mut queries: TMap<String, QueryEntry> = new_map();
+    queries.insert(
+        "loop".to_string(),
+        for_each_entry(
+            FilterValue::Array((0..3).map(FilterValue::Int).collect()),
+            "elem",
+            batch_request_with_queries(inner),
+        ),
+    );
+    for name in ["r0", "r1", "r2"] {
+        queries.insert(name.to_string(), read_entry("orders"));
+    }
+
+    let result = BatchPlanner::plan(&queries, &limits);
+    assert!(
+        matches!(
+            result,
+            Err(BatchError::TooManyQueries { count: 51, max: 50 })
+        ),
+        "plain siblings add one unit each: 48 + 3 = 51 > 50, got {:?}",
+        result
+    );
+}
