@@ -49,8 +49,12 @@ impl FunctionRegistry {
     /// new artifact; in-flight ones keep the `Arc` they captured.
     pub fn replace(&self, name: impl Into<String>, f: Arc<dyn ShamirFunction>) {
         let name = name.into();
-        let _ = self.functions.remove_sync(&name);
-        let _ = self.functions.insert_sync(name, f);
+        match self.functions.entry_sync(name) {
+            scc::hash_map::Entry::Occupied(mut occupied) => *occupied.get_mut() = f,
+            scc::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert_entry(f);
+            }
+        }
     }
 
     /// Look up a function by name.
