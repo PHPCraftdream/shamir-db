@@ -3,7 +3,9 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::Poll;
+use tempfile::TempDir;
 
+use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::WalEntryV2;
 use crate::wal_group_commit::{WalDurability, WalGroupCommit};
 use crate::wal_sink::WalSink;
@@ -261,4 +263,79 @@ async fn completion_wakes_every_awaiter_of_a_shared_ticket() {
         assert_eq!(error, WalAppendError::NotWritten);
     }
     assert_eq!(ticket.state(), WalTicketState::Failed);
+}
+
+// Red before the fix (RV-WAL-C55C2D47): append results were reduced through
+// `is_ok` and the ticket carried only the boolean outcome category — the
+// underlying sink error was unreachable for waiters.
+#[tokio::test]
+async fn rv_wal_c55c2d47_failed_write_ticket_preserves_sink_cause() {
+    let sink = Arc::new(WalSink::mem());
+    let group = WalGroupCommit::new(Arc::clone(&sink));
+    sink.arm_fail_next_append_for_test();
+    let (ticket, completion) = group.append_ticketed(payload(1), 1, WalDurability::Synced);
+    assert_eq!(completion.await, Err(WalAppendError::NotWritten));
+    let cause = ticket
+        .failure_cause()
+        .expect("failed write must preserve the underlying sink error");
+    assert!(cause
+        .to_string()
+        .contains("MemSink injected append_batch failure"));
+}
+
+// Sync-path counterpart: the fsync failure cause must survive into the
+// WrittenNotDurable ticket, not collapse into a context-free category.
+#[tokio::test]
+async fn rv_wal_c55c2d47_failed_sync_ticket_preserves_sink_cause() {
+    let sink = Arc::new(WalSink::mem());
+    let group = WalGroupCommit::new(Arc::clone(&sink));
+    sink.arm_pause_next_sync();
+    sink.arm_fail_next_sync();
+    let (ticket, completion) = group.append_ticketed(payload(1), 1, WalDurability::Synced);
+    tokio::pin!(completion);
+    assert!(poll_once(completion.as_mut()).await.is_pending());
+    sink.wait_sync_paused().await;
+    sink.resume_sync();
+    assert_eq!(
+        poll_once(completion.as_mut()).await,
+        Poll::Ready(Err(WalAppendError::WrittenNotDurable)),
+    );
+    let cause = ticket
+        .failure_cause()
+        .expect("failed sync must preserve the underlying sink error");
+    assert!(cause.to_string().contains("MemSink injected sync failure"));
+}
+
+// File-sink counterpart (RV-WAL-C55C2D47): the coalesced worker's real sink
+// error must survive through `demand()` into the ticket — not collapse into
+// the generic "coalesced WAL sync failed or worker stopped" text.
+#[tokio::test]
+async fn rv_wal_c55c2d47_failed_file_sync_ticket_preserves_sink_cause() {
+    let dir = TempDir::new().unwrap();
+    let segset = SegmentSet::open(dir.path().to_path_buf(), 64 * 1024 * 1024)
+        .await
+        .unwrap();
+    let sink = Arc::new(WalSink::File(segset));
+    let group = WalGroupCommit::new(Arc::clone(&sink));
+    sink.arm_fail_next_sync();
+    let (ticket, completion) = group.append_ticketed(payload(1), 1, WalDurability::Synced);
+    // The failing worker publishes the failure epoch and wakes the waiter,
+    // so this await always resolves.
+    assert_eq!(completion.await, Err(WalAppendError::WrittenNotDurable));
+    let cause = ticket
+        .failure_cause()
+        .expect("failed File sync must preserve the underlying sink error");
+    // Exact owned-error match: the ticket must hold the ORIGINAL sink error,
+    // not the legacy stringified "coalesced WAL sync failed: ..." wrapper.
+    // (The existing File fault seam injects DbError::Storage; matching the
+    // exact variant+payload is the strongest available oracle without adding
+    // a new seam.)
+    assert!(
+        matches!(
+            &*cause,
+            shamir_storage::error::DbError::Storage(s) if s == "File sink injected sync failure"
+        ),
+        "unexpected cause: {cause}"
+    );
+    assert!(!format!("{cause}").starts_with("coalesced WAL sync failed"));
 }

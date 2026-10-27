@@ -115,6 +115,7 @@ fn make_backend() -> (Arc<VectorBackend>, Arc<HnswAdapter>) {
         desc,
         vec![FIELD_KEY],
         adapter.clone() as Arc<dyn VectorAdapter>,
+        None,
     ));
     (backend, adapter)
 }

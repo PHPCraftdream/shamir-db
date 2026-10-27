@@ -33,6 +33,17 @@ async fn file_sync_pause_point() {
     }
 }
 
+/// Keep `slot` at the minimum of its current value and `v` (`0` = unset).
+fn min_positive_fetch_min(slot: &AtomicU64, v: u64) {
+    let mut cur = slot.load(Ordering::Acquire);
+    while cur == 0 || v < cur {
+        match slot.compare_exchange_weak(cur, v, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
 impl WalSink {
     /// Test-only: fail the next SEAL fsync inside `SegmentSet::seal_and_rotate`
     /// — the fsync fires AFTER the segment's frames were written, so the
@@ -94,6 +105,13 @@ pub struct MemSink {
     /// Mirrors [`WalSegment::max_committed`] so the in-RAM sink carries the
     /// same watermark for future frame-level GC (F6 truncation parity, I7).
     max_committed: AtomicU64,
+    /// O(1) truncation-eligibility mirror (RV-WAL-B8E9884C): the smallest
+    /// positive batch `max_version` among retained frames, or `0` when no
+    /// such frame exists. Updated under the `frames` mutex at every mutation
+    /// site (`append_batch`, `truncate_below`) so `has_truncatable` never
+    /// scans the collection. `0` also means "none": frame versions are
+    /// `u64 >= 0` and `0` pins a frame (never eligible).
+    min_truncatable: AtomicU64,
     /// Test-only fault-injection knob (audit §1.6 / task #531). When armed,
     /// the NEXT `append_batch` fails BEFORE any frame is pushed — a genuine
     /// failure of the real write path (not a simulated rollback), so the
@@ -125,6 +143,7 @@ impl MemSink {
             frames: Mutex::new(Vec::new()),
             next_seq: AtomicU64::new(0),
             max_committed: AtomicU64::new(0),
+            min_truncatable: AtomicU64::new(0),
             fail_next_append: AtomicBool::new(false),
             fail_next_sync: AtomicBool::new(false),
             #[cfg(test)]
@@ -155,6 +174,14 @@ impl MemSink {
     #[doc(hidden)]
     pub fn arm_fail_next_append(&self) {
         self.fail_next_append.store(true, Ordering::Release);
+    }
+
+    /// Test-only: direct access to the frames mutex (RV-WAL-B8E9884C
+    /// regression: `has_truncatable` must answer without taking this lock).
+    #[doc(hidden)]
+    #[cfg(test)]
+    pub(crate) fn frames_mutex_for_test(&self) -> &Mutex<Vec<(u64, Vec<u8>)>> {
+        &self.frames
     }
 }
 
@@ -279,6 +306,9 @@ impl WalSink {
                 // segment's per-segment max_version reclaim.
                 let mut frames = m.frames.lock().expect("MemSink frames mutex poisoned");
                 frames.extend(payloads.into_iter().map(|p| (max_version, p)));
+                if max_version > 0 {
+                    min_positive_fetch_min(&m.min_truncatable, max_version);
+                }
                 Ok(last_seq)
             }
         }
@@ -385,6 +415,15 @@ impl WalSink {
                 let mut frames = m.frames.lock().expect("MemSink frames mutex poisoned");
                 let before = frames.len();
                 frames.retain(|(v, _)| *v == 0 || *v > durable);
+                // Recompute the O(1) mirror from the retained set (we already
+                // hold the frames mutex, so no other writer can interleave).
+                let min = frames
+                    .iter()
+                    .filter(|(v, _)| *v > 0)
+                    .map(|(v, _)| *v)
+                    .min()
+                    .unwrap_or(0);
+                m.min_truncatable.store(min, Ordering::Release);
                 Ok(before - frames.len())
             }
         }
@@ -400,8 +439,8 @@ impl WalSink {
         match self {
             Self::File(segset) => segset.has_truncatable(durable),
             Self::Mem(m) => {
-                let frames = m.frames.lock().expect("MemSink frames mutex poisoned");
-                frames.iter().any(|(v, _)| *v > 0 && *v <= durable)
+                let min = m.min_truncatable.load(Ordering::Acquire);
+                min != 0 && min <= durable
             }
         }
     }

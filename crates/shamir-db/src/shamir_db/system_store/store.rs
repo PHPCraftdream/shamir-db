@@ -71,6 +71,8 @@ pub struct SystemStore {
     /// gated catalogue write fail (see `catalogue_write_fault_gate`); armed by
     /// catalogue fault-injection tests.
     catalogue_write_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    table_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Build a `QueryValue::Map` with a single string-keyed entry (for simple
@@ -128,6 +130,8 @@ impl SystemStore {
         Ok(Self {
             db,
             catalogue_write_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            table_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -145,6 +149,24 @@ impl SystemStore {
     pub fn arm_catalogue_write_fault(&self, n: usize) {
         self.catalogue_write_faults
             .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_table_catalogue_reads(&self) {
+        self.table_catalogue_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn table_catalogue_read_count(&self) -> usize {
+        self.table_catalogue_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_table_catalogue_read(&self) {
+        self.table_catalogue_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Consulted by every catalogue write below; the armed countdown reaches

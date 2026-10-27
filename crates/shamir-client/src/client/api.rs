@@ -8,7 +8,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-use shamir_connect::common::envelope::RequestEnvelope;
+use shamir_connect::common::envelope::RequestEnvelopeRef;
 
 use shamir_transport_tcp::framing::write_frame;
 
@@ -32,8 +32,7 @@ struct RegistrationGuard {
 
 impl Drop for RegistrationGuard {
     fn drop(&mut self) {
-        let mut reg = self.state.pending.lock().unwrap_or_else(|p| p.into_inner());
-        reg.map.remove(&self.rid);
+        self.state.pending.map.remove_sync(&self.rid);
     }
 }
 
@@ -125,37 +124,25 @@ impl Client {
         let (tx, rx) = tokio::sync::mpsc::channel(CLIENT_SUB_CHANNEL_CAP);
         let (term_tx, term_rx) = tokio::sync::oneshot::channel();
         {
-            // ONE subs lock: closed check, sender insert and early-buffer
-            // flush are atomic w.r.t. push routing and shutdown.
-            // §B2 audit: std::sync::Mutex, no .await while held — fine.
             let mut subs = self.state.subs.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(cause) = subs.closed.clone() {
-                // Closed client: return an already-ended handle (drop tx).
                 let _ = term_tx.send(cause);
             } else {
                 subs.live.insert(sub_id, tx.clone());
-                // The handle learns its typed termination cause from here.
                 subs.terminal.insert(sub_id, term_tx);
                 if let Some(buffered) = subs.early.remove(&sub_id) {
+                    subs.early_total -= buffered.len();
                     for envelope in buffered {
-                        match tx.try_send(envelope) {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
-                                tracing::warn!(
-                                    "client mpsc full for sub={} while flushing early buffer; dropping push",
-                                    env.sub
-                                );
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                // Receiver gone before we finished flushing — bail.
-                                break;
-                            }
-                        }
+                        let _ = tx.try_send(envelope);
                     }
                 }
+                debug_assert_eq!(
+                    subs.early_total,
+                    subs.early.values().map(Vec::len).sum::<usize>()
+                );
             }
         }
-        SubscriptionHandle::new(sub_id, rx, self.state.subs.clone(), term_rx)
+        SubscriptionHandle::new(sub_id, rx, tx.downgrade(), self.state.subs.clone(), term_rx)
     }
 
     /// Health check.
@@ -406,39 +393,52 @@ impl Client {
             hook.fire().await;
         }
 
-        // T-cl-1: thread-local scratch buffer for request serialisation.
-        // The buffer's capacity grows to the high-water mark and is reused
-        // across calls, avoiding repeated grow-from-0 allocations.
-        // The borrow is released before any `.await` — only a sized copy of
-        // the bytes is passed forward, keeping the thread_local exclusive.
+        // T-cl-1 + RV-CLIENT-E16A04E5: thread-local scratch buffer for
+        // request serialisation, reused across calls. The buffer's capacity
+        // grows to the high-water mark; the request bytes stay IN the
+        // thread-local (no per-call clone) and the borrowed
+        // `RequestEnvelopeRef` encodes the envelope directly against them —
+        // zero copies of `session_id` or the request body. The whole encode
+        // happens inside the `with` closure so the `RefCell` borrow is
+        // released before any `.await`.
         thread_local! {
             static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
         }
-        let req_bytes: Vec<u8> = REQ_BUF.with(|cell| {
+        let rid = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let envelope_bytes: Vec<u8> = REQ_BUF.with(|cell| -> Result<Vec<u8>, ClientError> {
             let mut buf = cell.borrow_mut();
             buf.clear();
             rmp_serde::encode::write_named(&mut *buf, req)?;
-            Ok::<Vec<u8>, rmp_serde::encode::Error>(buf.clone())
+            let envelope = RequestEnvelopeRef {
+                session_id: &self.session_id,
+                request_id: Some(rid),
+                req: &buf,
+            };
+            envelope
+                .to_msgpack()
+                .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")))
         })?;
 
-        let rid = self.next_request_id.fetch_add(1, Ordering::Relaxed);
-        let envelope = RequestEnvelope::new(self.session_id, Some(rid), req_bytes);
-        let envelope_bytes = envelope
-            .to_msgpack()
-            .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")))?;
-
         // Register BEFORE writing — avoid a race where the server sends the
-        // response before we reach the oneshot registration. The closed
-        // recheck and the insert happen ATOMICALLY under the same registry
-        // lock that publishes the close cause (P0 RV-CLIENT-B42B8576).
+        // response before we reach the oneshot registration. Close-vs-register
+        // without a client-side mutex (RV-CLIENT-B80C0D09): shutdown publishes the
+        // cause BEFORE draining, so an insert that landed before the drain
+        // is resolved by it; an insert that lands after the drain re-reads
+        // the cause and unwinds its own entry (P0 RV-CLIENT-B42B8576).
         let (tx, rx) = oneshot::channel();
         let registration_guard = {
-            // §B2 audit: std::sync::Mutex, no .await while held — fine.
-            let mut reg = self.state.pending.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(cause) = reg.closed.clone() {
+            let reg = &self.state.pending;
+            if let Some(cause) = reg.closed.cause() {
                 return Err(ClientError::ConnectionClosed(cause));
             }
-            reg.map.insert(rid, tx);
+            let _ = reg.map.insert_sync(rid, tx);
+            // Close-vs-register recheck: an insert that landed after
+            // shutdown's drain must not strand a waiter — remove our entry
+            // and fail with the published cause.
+            if let Some(cause) = reg.closed.cause() {
+                reg.map.remove_sync(&rid);
+                return Err(ClientError::ConnectionClosed(cause));
+            }
             RegistrationGuard {
                 state: self.state.clone(),
                 rid,
@@ -461,14 +461,7 @@ impl Client {
             };
             // Authoritative recheck AFTER acquiring the writer: the fast
             // path above is only a hint.
-            if let Some(cause) = self
-                .state
-                .pending
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .closed
-                .clone()
-            {
+            if let Some(cause) = self.state.pending.closed.cause() {
                 return Err(ClientError::ConnectionClosed(cause));
             }
             #[cfg(test)]
@@ -502,16 +495,13 @@ impl Client {
             // — surface the drained result; otherwise the transport error.
             let cause: Arc<str> = Arc::from(format!("send: {e}"));
             self.state.shutdown(CloseCause::Io(cause));
-            let removed = {
-                let mut reg = self.state.pending.lock().unwrap_or_else(|p| p.into_inner());
-                reg.map.remove(&rid)
-            };
+            let removed = self.state.pending.map.remove_sync(&rid).map(|(_, tx)| tx);
             if removed.is_none() {
                 let payload = await_pending_response(rx, None, &self.state, rid).await?;
                 let response: DbResponse = rmp_serde::from_slice(&payload)?;
                 return crate::visibility::map_response(response);
             }
-            return Err(ClientError::Transport(format!("send: {e}")));
+            return Err(ClientError::transport("send", e));
         }
 
         // Await our oneshot.  The reader task delivers Ok(payload) or Err.

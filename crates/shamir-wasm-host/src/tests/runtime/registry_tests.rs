@@ -1,7 +1,8 @@
 use crate::{FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 /// A trivial function that ignores its inputs and returns a constant.
 struct Const(i64);
@@ -16,6 +17,29 @@ impl ShamirFunction for Const {
     ) -> Result<QueryValue, FunctionError> {
         Ok(QueryValue::Int(self.0))
     }
+}
+
+#[test]
+fn rv_wasm_host_c51052df_replace_never_exposes_missing_name() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register("key", Arc::new(Const(0))).unwrap();
+    let start = Arc::new(Barrier::new(2));
+    let writer_registry = Arc::clone(&registry);
+    let writer_start = Arc::clone(&start);
+    let writer = thread::spawn(move || {
+        writer_start.wait();
+        for value in 1..=100_000 {
+            writer_registry.replace("key", Arc::new(Const(value)));
+        }
+    });
+    start.wait();
+    for _ in 0..100_000 {
+        assert!(
+            registry.get("key").is_some(),
+            "replace exposed a missing name"
+        );
+    }
+    writer.join().expect("writer thread panicked");
 }
 
 #[test]

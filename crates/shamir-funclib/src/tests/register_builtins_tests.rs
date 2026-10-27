@@ -4,6 +4,7 @@
 //! folder prefix, and that previously colliding names now coexist.
 
 use crate::register_builtins;
+use shamir_types::types::value::QueryValue;
 
 #[test]
 fn register_builtins_is_non_empty() {
@@ -75,5 +76,20 @@ fn previously_colliding_names_now_coexist() {
     assert!(
         reg.get("arrays/max").is_some(),
         "arrays/max missing — collision not resolved"
+    );
+}
+
+#[test]
+fn rv_funclib_1ef53ab4_arg_i64_f64_exclusive_upper_bound() {
+    // `arg_i64`'s F64 arm (registry.rs): 2^63 == i64::MAX as f64 must be
+    // rejected ("out_of_range") instead of being admitted and saturating
+    // in the `as i64` cast. Surfaced through `datetime/to_epoch_s`.
+    let reg = register_builtins();
+    let two_pow_63 = 9_223_372_036_854_775_808.0f64;
+    assert_eq!(
+        reg.call("datetime/to_epoch_s", &[QueryValue::F64(two_pow_63)])
+            .unwrap_err()
+            .code,
+        "out_of_range"
     );
 }

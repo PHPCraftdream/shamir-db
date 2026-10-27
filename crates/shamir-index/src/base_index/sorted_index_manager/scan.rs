@@ -4,7 +4,6 @@ use futures::StreamExt;
 use super::covering::{
     decode_record_id_suffix, extract_and_encode, key_value_slice, skip_boundary_row,
 };
-use crate::base_index::sorted_index_definition::SORTED_TAG;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::record_view::RecordRef;
@@ -607,8 +606,9 @@ impl super::inner::SortedIndexManager {
                 let mut k = Vec::with_capacity(prefix.len() + enc.len() + 16);
                 k.extend_from_slice(prefix);
                 k.extend_from_slice(enc);
-                // Cover all record_id tiebreakers at the upper value.
-                k.extend_from_slice(&[0xFFu8; 16]);
+                k.extend_from_slice(
+                    &shamir_types::core::sorted_index_layout::inclusive_hi_suffix(),
+                );
                 Bytes::from(k)
             }
             None => {
@@ -655,10 +655,9 @@ impl super::inner::SortedIndexManager {
 
     /// Prefix common to every entry of one sorted index.
     pub(super) fn entry_prefix(&self, name_interned: u64) -> Bytes {
-        let mut buf = Vec::with_capacity(9);
-        buf.push(SORTED_TAG);
-        buf.extend_from_slice(&name_interned.to_be_bytes());
-        Bytes::from(buf)
+        Bytes::copy_from_slice(&shamir_types::core::sorted_index_layout::sorted_prefix(
+            name_interned,
+        ))
     }
 
     /// Full entry key for one (value, record_id) pair.
@@ -668,11 +667,10 @@ impl super::inner::SortedIndexManager {
         encoded_value: &[u8],
         record_id: &RecordId,
     ) -> Bytes {
-        let mut buf = Vec::with_capacity(1 + 8 + encoded_value.len() + 16);
-        buf.push(SORTED_TAG);
-        buf.extend_from_slice(&name_interned.to_be_bytes());
-        buf.extend_from_slice(encoded_value);
-        buf.extend_from_slice(&record_id.to_bytes());
-        Bytes::from(buf)
+        Bytes::from(shamir_types::core::sorted_index_layout::sorted_posting_key(
+            name_interned,
+            encoded_value,
+            record_id.as_bytes(),
+        ))
     }
 }

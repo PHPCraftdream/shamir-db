@@ -17,7 +17,8 @@ use shamir_storage::storage_in_memory::{InMemoryRepo, InMemoryStore};
 use shamir_tx::changefeed::cold::encode_event;
 use shamir_tx::changefeed::version_key;
 use shamir_tx::{
-    ChangelogEvent, ChangelogStore, IsolationLevel, RepoChangefeed, JOURNAL_CHANNEL_CAPACITY,
+    ChangelogError, ChangelogEvent, ChangelogStore, IsolationLevel, RepoChangefeed,
+    JOURNAL_CHANNEL_CAPACITY,
 };
 use shamir_types::access::Actor;
 use shamir_types::types::value::InnerValue;
@@ -66,7 +67,7 @@ impl ParkStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for ParkStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         if key.len() == 8 {
             if key.as_ref() == MAX_KEY.to_be_bytes().as_slice()
                 && self.block_filler_once.swap(false, Ordering::AcqRel)
@@ -84,7 +85,7 @@ impl ChangelogStore for ParkStore {
         self.inner.put(key, value).await
     }
 
-    async fn range_from(&self, key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(&self, key: Bytes, limit: usize) -> Result<Vec<Bytes>, ChangelogError> {
         self.inner.range_from(key, limit).await
     }
 }

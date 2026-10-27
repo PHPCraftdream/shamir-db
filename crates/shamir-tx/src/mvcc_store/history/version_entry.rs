@@ -28,7 +28,8 @@ pub struct VersionEntry {
     /// `InnerValue` for record keys, raw user bytes otherwise).
     pub value: Bytes,
     /// Per-version commit timestamp in milliseconds since UNIX_EPOCH
-    /// (T1c, recorded via [`MvccStore::record_ts`] / `ts_key`). `None`
+    /// (T1c, stored as a `ts_key(version)` entry in the history store,
+    /// written alongside the history transact). `None`
     /// when no ts entry exists for this version.
     pub ts_millis: Option<u64>,
 }

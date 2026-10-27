@@ -107,6 +107,19 @@ pub enum Error {
 impl Error {
     /// Returns the wire-safe variant: any internal failure cause is collapsed
     /// to [`Self::AuthFailed`] for client-visible responses (spec §14.4).
+    ///
+    /// RV-CONNECT-94E37810 decision: this helper is the **normative §14
+    /// collapse-set oracle**, enforced by the exhaustive variant test in
+    /// `common/tests/types_tests/error_tests.rs` (a new variant that is not
+    /// explicitly classified there breaks the build). Production boundaries
+    /// (e.g. `server/state/resume.rs`) keep their explicit
+    /// `map_err(|_| Error::AuthFailed)` calls instead of routing through
+    /// this helper: most of those sites map from non-`Error` error types
+    /// (ticket/cipher/storage failures), so there is no `Error` value to
+    /// call `to_wire` on without adding an intermediate allocation. The
+    /// production match above is exhaustive over every variant, so a new
+    /// variant forces an explicit classification decision here at compile
+    /// time.
     pub fn to_wire(&self) -> Error {
         match self {
             Error::RateLimited { retry_after } => Error::RateLimited {
@@ -117,8 +130,22 @@ impl Error {
             },
             Error::UnsupportedVersion => Error::UnsupportedVersion,
             Error::BootstrapFailed => Error::BootstrapFailed,
-            // Everything else (incl. internal cause) → generic.
-            _ => Error::AuthFailed,
+            Error::AuthFailed => Error::AuthFailed,
+            // Internal failure causes: explicitly collapsed to the generic
+            // wire error (spec §14.4). Exhaustive — a new variant that is not
+            // classified here fails to compile.
+            Error::ServerAuthFailed => Error::AuthFailed,
+            Error::ServerSignatureInvalid => Error::AuthFailed,
+            Error::ServerIdentityChanged => Error::AuthFailed,
+            Error::KdfParamsRejected => Error::AuthFailed,
+            Error::KnownHostsIntegrityFailed => Error::AuthFailed,
+            Error::InvalidInput(_) => Error::AuthFailed,
+            Error::InvalidUsername(_) => Error::AuthFailed,
+            Error::InvalidPassword(_) => Error::AuthFailed,
+            Error::Crypto(_) => Error::AuthFailed,
+            Error::Encoding(_) => Error::AuthFailed,
+            Error::StorageFailed => Error::AuthFailed,
+            Error::AdmissionRejected { .. } => Error::AuthFailed,
         }
     }
 }
