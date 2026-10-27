@@ -5,6 +5,7 @@ use shamir_query_types::batch::{BatchResponse, TransactionInfo};
 use shamir_query_types::read::{QueryRecord, QueryResult};
 
 use crate::batch::Handle;
+use crate::wire::WireError;
 
 // ============================================================================
 // ResponseError
@@ -31,8 +32,8 @@ pub enum ResponseError {
     Deserialize {
         /// Alias whose record failed.
         alias: String,
-        /// The underlying rmp_serde decode error.
-        source: rmp_serde::decode::Error,
+        /// The source codec failure, retaining the encode/decode phase.
+        source: WireError,
     },
 }
 
@@ -91,24 +92,17 @@ fn deserialize_record<T: serde::de::DeserializeOwned>(
     alias: &str,
     record: &QueryRecord,
 ) -> Result<T, ResponseError> {
-    // Serializing a QueryValue to msgpack is infallible: no I/O, no
-    // non-finite floats, no unknown-length sequences. Propagate as Syntax
-    // to avoid unwrap in library code.
-    let bytes = rmp_serde::to_vec_named(record.as_value().as_ref()).map_err(|e| {
+    let bytes = rmp_serde::to_vec_named(record.as_value().as_ref()).map_err(|error| {
         ResponseError::Deserialize {
             alias: alias.to_owned(),
-            source: rmp_serde::decode::Error::Syntax(e.to_string()),
+            source: WireError::Encode(error),
         }
     })?;
-    rmp_serde::from_slice(&bytes).map_err(|e| ResponseError::Deserialize {
+    rmp_serde::from_slice(&bytes).map_err(|error| ResponseError::Deserialize {
         alias: alias.to_owned(),
-        source: e,
+        source: WireError::Decode(error),
     })
 }
-
-// ============================================================================
-// BatchResponseExt trait
-// ============================================================================
 
 /// Extension trait that adds typed extraction helpers to `BatchResponse`.
 pub trait BatchResponseExt {
@@ -183,10 +177,16 @@ impl BatchResponseExt for BatchResponse {
             .results
             .get(alias)
             .ok_or_else(|| ResponseError::MissingAlias(alias.to_owned()))?;
-        qr.records
-            .iter()
-            .map(|v| deserialize_record(alias, v))
-            .collect()
+        let values: Vec<_> = qr.records.iter().map(|record| record.as_value()).collect();
+        let bytes =
+            rmp_serde::to_vec_named(&values).map_err(|error| ResponseError::Deserialize {
+                alias: alias.to_owned(),
+                source: WireError::Encode(error),
+            })?;
+        rmp_serde::from_slice(&bytes).map_err(|error| ResponseError::Deserialize {
+            alias: alias.to_owned(),
+            source: WireError::Decode(error),
+        })
     }
 
     fn row_as<T: serde::de::DeserializeOwned>(

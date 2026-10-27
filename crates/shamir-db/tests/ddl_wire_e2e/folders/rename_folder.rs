@@ -22,16 +22,22 @@ async fn rename_function_folder_basic() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["a", "b"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Rename ["a","b"] → ["a","c"].
     let mut b = Batch::new();
     b.id("rff");
     b.rename_function_folder("op", ddl::rename_function_folder(["a", "b"], ["a", "c"]));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let rec = resp.results["op"].records[0].as_value().into_owned();
@@ -81,17 +87,23 @@ async fn rename_function_folder_nested_rekeys_descendants() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["a", "b", "c"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Rename ["a","b"] → ["a","x"].
     let mut b = Batch::new();
     b.id("rff");
     b.rename_function_folder("op", ddl::rename_function_folder(["a", "b"], ["a", "x"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // a/x and a/x/c present, all a/b* gone, a remains.
     let folders = db.list_function_folders().await.unwrap();
@@ -140,7 +152,11 @@ async fn rename_function_folder_preserves_resource_meta() {
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["meta", "src"]));
     shamir
-        .execute_as(user_actor.clone(), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            user_actor.clone(),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -152,7 +168,11 @@ async fn rename_function_folder_preserves_resource_meta() {
         ddl::rename_function_folder(["meta", "src"], ["meta", "dst"]),
     );
     shamir
-        .execute_as(user_actor.clone(), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            user_actor.clone(),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -182,7 +202,12 @@ async fn rename_function_folder_source_missing_errors() {
     let mut b = Batch::new();
     b.id("rff");
     b.rename_function_folder("op", ddl::rename_function_folder(["nope"], ["renamed"]));
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(resp.is_err(), "renaming a non-existent folder must error");
     let err = resp.unwrap_err().to_string();
     assert!(
@@ -201,16 +226,24 @@ async fn rename_function_folder_destination_occupied_errors() {
         let mut b = Batch::new();
         b.id("cff");
         b.create_function_folder("op", ddl::create_function_folder(path));
-        db.execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
     }
 
     // Rename ["a","b"] → ["a","c"] — destination is taken.
     let mut b = Batch::new();
     b.id("rff");
     b.rename_function_folder("op", ddl::rename_function_folder(["a", "b"], ["a", "c"]));
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         resp.is_err(),
         "renaming into an occupied destination must error"
@@ -232,16 +265,24 @@ async fn rename_function_folder_destination_descendant_occupied_errors() {
         let mut b = Batch::new();
         b.id("cff");
         b.create_function_folder("op", ddl::create_function_folder(path));
-        db.execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
     }
 
     // Rename ["a","b"] → ["a","x"]: destination ["a","x"] already exists.
     let mut b = Batch::new();
     b.id("rff");
     b.rename_function_folder("op", ddl::rename_function_folder(["a", "b"], ["a", "x"]));
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         resp.is_err(),
         "renaming into an occupied subtree must error"

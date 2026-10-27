@@ -44,7 +44,7 @@ fn one_op(op: impl shamir_query_builder::batch::IntoBatchOp) -> BatchRequest {
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 // ===========================================================================

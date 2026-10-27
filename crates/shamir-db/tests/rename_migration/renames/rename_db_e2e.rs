@@ -40,7 +40,10 @@ async fn setup_shamir() -> ShamirDb {
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").engine("in_memory"));
     let _ = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     shamir
@@ -76,7 +79,12 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("ct", ddl::create_table("events"));
-    let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Set a declarative schema with one required field.
     let mut b = Batch::new();
@@ -86,7 +94,12 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
         ddl::set_table_schema("events")
             .rules(vec![ddl::field(["name"]).string().required().build()]),
     );
-    let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Insert 3 rows.
     for name in ["Alice", "Bob", "Carol"] {
@@ -96,20 +109,35 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
             "ins",
             Insert::with_repo("main", "events").row(doc! { "name" => name }),
         );
-        let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+        let _ = exec(
+            &shamir,
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     }
 
     // Build a secondary index on `name`.
     let mut b = Batch::new();
     b.id(4);
     b.create_index("ix", ddl::create_index("idx_name", "events").field("name"));
-    let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Rename testdb → production.
     let mut b = Batch::new();
     b.id(5);
     b.rename_db("rn", ddl::rename_db("testdb", "production"));
-    let resp = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["rn"].records[0].get_value_str("renamed_db"),
         Some("testdb")
@@ -133,7 +161,12 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
     let mut b = Batch::new();
     b.id(6);
     b.query("all", Query::with_repo("main", "events"));
-    let resp = exec(&shamir, "production", &b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        "production",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 3, "table data must survive db rename");
 
@@ -142,7 +175,12 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
     let mut b = Batch::new();
     b.id(7);
     b.get_table_schema("gs", ddl::get_table_schema("events"));
-    let resp = exec(&shamir, "production", &b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        "production",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let schema_qv = resp.results["gs"].records[0]
         .as_value()
         .as_ref()
@@ -157,7 +195,12 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
     let mut b = Batch::new();
     b.id(8);
     b.list_indexes("ixs", ddl::list_indexes("events"));
-    let resp = exec(&shamir, "production", &b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        "production",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let rec = resp.results["ixs"]
         .records
         .first()
@@ -225,12 +268,22 @@ async fn rename_db_rekeys_all_catalogues_and_preserves_data() {
         "ins",
         Insert::with_repo("main", "events").row(doc! { "name" => "Dave" }),
     );
-    let _ = exec(&shamir, "production", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "production",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     let mut b = Batch::new();
     b.id(11);
     b.query("final", Query::with_repo("main", "events"));
-    let resp = exec(&shamir, "production", &b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        "production",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["final"].records;
     assert_eq!(records.len(), 4, "table must have 4 rows after append");
     assert!(
@@ -290,7 +343,12 @@ async fn rename_db_survives_durable_reopen() {
         b.id(1);
         // Default engine (fjall when data_root is set) so data survives reopen.
         b.create_repo("cr", ddl::create_repo("main").tables(["items"]));
-        let _ = shamir.execute("olddb", &b.to_request_via_msgpack()).await;
+        let _ = shamir
+            .execute(
+                "olddb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
+            .await;
 
         // Insert a row.
         let mut b = Batch::new();
@@ -299,12 +357,22 @@ async fn rename_db_survives_durable_reopen() {
             "ins",
             Insert::with_repo("main", "items").row(doc! { "sku" => "A-1" }),
         );
-        let _ = shamir.execute("olddb", &b.to_request_via_msgpack()).await;
+        let _ = shamir
+            .execute(
+                "olddb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
+            .await;
 
         let mut b = Batch::new();
         b.id(4);
         b.rename_db("rn", ddl::rename_db("olddb", "newdb"));
-        let _ = shamir.execute("olddb", &b.to_request_via_msgpack()).await;
+        let _ = shamir
+            .execute(
+                "olddb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
+            .await;
 
         // Flush MemBuffer-wrapped stores so the catalogue re-key is
         // durable before drop. The insert above already went through WAL
@@ -362,7 +430,10 @@ async fn rename_db_survives_durable_reopen() {
     b.id(10);
     b.query("all", Query::with_repo("main", "items"));
     let resp = shamir
-        .execute("newdb", &b.to_request_via_msgpack())
+        .execute(
+            "newdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let records = &resp.results["all"].records;
@@ -396,7 +467,12 @@ async fn rename_db_refuses_source_absent() {
     let mut b = Batch::new();
     b.id(1);
     b.rename_db("rn", ddl::rename_db("ghost", "phantom"));
-    let err = exec_err(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError for source-absent, got {:?}",
@@ -413,7 +489,12 @@ async fn rename_db_refuses_destination_exists() {
     let mut b = Batch::new();
     b.id(1);
     b.rename_db("rn", ddl::rename_db("testdb", "target"));
-    let err = exec_err(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError for destination-exists, got {:?}",
@@ -429,7 +510,12 @@ async fn rename_db_refuses_system_db() {
     let mut b = Batch::new();
     b.id(1);
     b.rename_db("rn", ddl::rename_db("__system__", "hacked"));
-    let err = exec_err(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError for SYSTEM_DB rename attempt, got {:?}",
@@ -457,7 +543,12 @@ async fn rename_db_preserves_table_data_on_same_handle() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("ct", ddl::create_table("records"));
-    let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Insert a row.
     let mut b = Batch::new();
@@ -466,19 +557,34 @@ async fn rename_db_preserves_table_data_on_same_handle() {
         "ins",
         Insert::with_repo("main", "records").row(doc! { "id" => 42i64, "label" => "hello" }),
     );
-    let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Rename.
     let mut b = Batch::new();
     b.id(3);
     b.rename_db("rn", ddl::rename_db("testdb", "renamed"));
-    let _ = exec(&shamir, "testdb", &b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Read under the new name.
     let mut b = Batch::new();
     b.id(4);
     b.query("q", Query::with_repo("main", "records"));
-    let resp = exec(&shamir, "renamed", &b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        "renamed",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["q"].records;
     assert_eq!(records.len(), 1, "row must be found under the new db name");
     assert_eq!(

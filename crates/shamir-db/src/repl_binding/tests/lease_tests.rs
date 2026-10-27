@@ -53,7 +53,10 @@ async fn create_profile_and_subscription(shamir: &ShamirDb) {
     );
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -119,7 +122,10 @@ async fn pause_flush_failure_leaves_live_row_paused_and_lease_invalid() {
     b.try_op("pause", alter_subscription("sub").pause())
         .unwrap();
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert!(

@@ -90,7 +90,10 @@ async fn setup_with_secrets() -> ShamirDb {
             .tables(["secrets"]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -116,7 +119,12 @@ async fn setup_with_secrets() -> ShamirDb {
         ]),
     );
     shamir
-        .execute("testdb", &seed.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &seed
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

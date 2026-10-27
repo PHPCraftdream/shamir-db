@@ -49,7 +49,7 @@ impl ShamirFunction for RunBatchProc {
         b.id("inner");
         b.query("rows", Query::from("items").where_gte("n", 2_i64));
 
-        let req: BatchRequest = b.to_request_via_msgpack();
+        let req: BatchRequest = b.to_request_via_msgpack().expect("batch request encoding");
         let bytes = rmp_serde::to_vec_named(&req)
             .map_err(|e| FunctionError::Compute(format!("encode BatchRequest: {e}")))?;
 
@@ -118,7 +118,12 @@ async fn db_gateway_execute_returns_correct_batch_response() {
             .tables(["items"]),
     );
     shamir
-        .execute("testdb", &setup.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &setup
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -130,7 +135,12 @@ async fn db_gateway_execute_returns_correct_batch_response() {
         insert("items").rows([doc! { "n" => 1 }, doc! { "n" => 2 }, doc! { "n" => 3 }]),
     );
     shamir
-        .execute("testdb", &seed.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &seed
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -146,7 +156,10 @@ async fn db_gateway_execute_returns_correct_batch_response() {
         [] as [shamir_query_types::filter::FilterValue; 0],
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

@@ -39,7 +39,10 @@ async fn setup() -> ShamirDb {
             .tables(["users"]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     shamir
@@ -57,7 +60,12 @@ async fn insert_alice(shamir: &ShamirDb) {
         }]),
     );
     shamir
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -76,7 +84,12 @@ async fn insert_user(shamir: &ShamirDb, name: &str) {
         }]),
     );
     shamir
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -127,7 +140,12 @@ async fn live_insert_update_delete_emit_expected_events() {
         )
         .unwrap();
     shamir
-        .execute("testdb", &ubatch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &ubatch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -152,7 +170,12 @@ async fn live_insert_update_delete_emit_expected_events() {
         .try_delete("d", delete("users").where_(eq("name", "alice")))
         .unwrap();
     shamir
-        .execute("testdb", &dbatch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &dbatch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -333,7 +356,12 @@ async fn nontx_insert_user(shamir: &ShamirDb, name: &str, age: i64) {
         }]),
     );
     shamir
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -375,7 +403,12 @@ async fn nontx_insert_update_delete_emit_expected_events() {
         )
         .unwrap();
     shamir
-        .execute("testdb", &ubatch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &ubatch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -399,7 +432,12 @@ async fn nontx_insert_update_delete_emit_expected_events() {
         .try_delete("d", delete("users").where_(eq("name", "alice")))
         .unwrap();
     shamir
-        .execute("testdb", &dbatch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &dbatch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -573,7 +611,12 @@ async fn nontx_update_batch_version_is_max_of_per_record_writes() {
         )
         .unwrap();
     shamir
-        .execute("testdb", &ubatch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &ubatch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

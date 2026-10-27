@@ -31,7 +31,7 @@ async fn commit_one(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> u64
         "ins",
         write::Insert::with_repo(repo, table).row(doc! { "name" => "widget" }),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute(db, &req).await.unwrap();
     resp.transaction
         .and_then(|t| t.commit_version)

@@ -68,7 +68,10 @@ async fn exec_set_schema(
     }
     b.set_table_schema(alias, builder);
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("set_table_schema should succeed");
     resp.results[alias].records[0].as_value().as_ref().clone()
@@ -92,10 +95,13 @@ async fn try_insert(
     let mut b = Batch::new();
     b.id(1);
     b.insert("ins", insert(table).row(record));
-    db.execute(db_name, &b.to_request_via_msgpack())
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    db.execute(
+        db_name,
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -116,9 +122,12 @@ async fn ddl_set_table_schema_persists_and_validates() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Set a schema: email required string, age int 0..=150.
     let result = exec_set_schema(
@@ -187,9 +196,12 @@ async fn ddl_schema_survives_reopen() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-        db.execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
 
         // Set schema: email required.
         let _ = exec_set_schema(
@@ -258,9 +270,12 @@ async fn ddl_expected_version_conflict() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // First set: version goes 0 → 1.
     let r1 = exec_set_schema(
@@ -283,7 +298,12 @@ async fn ddl_expected_version_conflict() {
             .rules(vec![ddl::field(["email"]).string().required().build()])
             .expected_version(0),
     );
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(resp.is_err(), "stale expected_version should error");
     let err = resp.unwrap_err().to_string();
     assert!(
@@ -324,9 +344,12 @@ async fn ddl_add_remove_get_schema() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Initial schema: email required.
     let _ = exec_set_schema(
@@ -348,7 +371,10 @@ async fn ddl_add_remove_get_schema() {
     )
     .unwrap();
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let result = resp.results["ar"].records[0].as_value().as_ref().clone();
@@ -377,7 +403,10 @@ async fn ddl_add_remove_get_schema() {
     b.id(3);
     b.remove_schema_rule("rr", ddl::remove_schema_rule("users", ["age"]));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let result = resp.results["rr"].records[0].as_value().as_ref().clone();
@@ -405,7 +434,10 @@ async fn ddl_add_remove_get_schema() {
     b.id(4);
     b.get_table_schema("gs", ddl::get_table_schema("users"));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let result = resp.results["gs"].records[0].as_value().as_ref().clone();
@@ -442,9 +474,12 @@ async fn ddl_phase_b_through_reopen() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-        db.execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
 
         // Schema: email format, start <= end (cross-field).
         let _ = exec_set_schema(

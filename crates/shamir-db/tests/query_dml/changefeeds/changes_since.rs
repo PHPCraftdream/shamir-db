@@ -46,7 +46,10 @@ async fn insert_user(shamir: &ShamirDb, name: &str) {
         }]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -58,7 +61,10 @@ async fn run_changes_since(shamir: &ShamirDb, cursor: u64) -> QueryValue {
     b.id(2);
     b.changes_since("cs", ddl::changes_since(cursor));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("ChangesSince execute");
     resp.results["cs"].records[0].as_value().into_owned()
@@ -215,7 +221,10 @@ async fn changes_since_denied_without_read() {
     let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
     b.after(&chmod_h, &chown_h);
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -224,7 +233,11 @@ async fn changes_since_denied_without_read() {
     b.id(2);
     b.changes_since("cs", ddl::changes_since(0));
     let err = shamir
-        .execute_as(Actor::User(999), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(999),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect_err("User(999) must be denied ChangesSince");
     assert_eq!(

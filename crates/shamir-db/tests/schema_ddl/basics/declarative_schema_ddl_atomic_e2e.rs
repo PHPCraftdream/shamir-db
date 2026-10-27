@@ -73,7 +73,10 @@ async fn exec_set_schema(
     }
     b.set_table_schema(alias, builder);
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("set_table_schema should succeed");
     resp.results[alias].records[0].as_value().as_ref().clone()
@@ -85,7 +88,10 @@ async fn read_schema(db: &ShamirDb, db_name: &str, table: &str) -> QueryValue {
     b.id(1);
     b.get_table_schema("gs", ddl::get_table_schema(table));
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("get_table_schema should succeed");
     resp.results["gs"].records[0].as_value().as_ref().clone()
@@ -96,9 +102,12 @@ async fn setup(db: &ShamirDb) {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -137,7 +146,12 @@ async fn bad_type_tag_set_table_schema_leaves_catalogue_unchanged() {
         ddl::set_table_schema("users")
             .rules(vec![ddl::field(["age"]).type_tag("bogus_type").build()]),
     );
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(resp.is_err(), "bad type tag should error");
     let err = resp.unwrap_err().to_string();
     assert!(
@@ -196,7 +210,12 @@ async fn bad_type_tag_add_schema_rule_leaves_catalogue_unchanged() {
         ddl::add_schema_rule("users").rule(ddl::field(["age"]).type_tag("bogus_type")),
     )
     .unwrap();
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(resp.is_err(), "bad type tag should error");
     let err = resp.unwrap_err().to_string();
     assert!(
@@ -261,7 +280,12 @@ async fn garbled_array_of_surfaces_as_ddl_error_and_leaves_catalogue_unchanged()
             .array_of("bogus_type")
             .build()]),
     );
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(resp.is_err(), "garbled array_of should error");
     let err = resp.unwrap_err().to_string();
     assert!(

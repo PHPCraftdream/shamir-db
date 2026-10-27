@@ -204,9 +204,14 @@ async fn paused_subscription_never_constructs_source_or_pulls() {
         ),
     );
     batch.op("sub", paused_subscription("sub", "peer", "pub", "prof"));
-    home.execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    home.execute(
+        "app",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     let calls = Arc::new(AtomicU64::new(0));
     let observed = calls.clone();
     let factory = Arc::new(move |_: &crate::replication::Subscription| {
@@ -257,7 +262,12 @@ async fn real_in_process_hello_advertises_schema_settled_position_and_named_publ
         shamir_query_builder::ddl::publication("pub").scope(repl_scope("app").repo("main").build()),
     );
     source
-        .execute("app", &batch.to_request_via_msgpack())
+        .execute(
+            "app",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let visible = super::super::advertisement::authorized_publications(
@@ -276,7 +286,12 @@ async fn real_in_process_hello_advertises_schema_settled_position_and_named_publ
             .scope(repl_scope("app").repo("main").table("rows").build()),
     );
     source
-        .execute("app", &wider.to_request_via_msgpack())
+        .execute(
+            "app",
+            &wider
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let visible = super::super::advertisement::authorized_publications(
@@ -332,9 +347,14 @@ async fn supervisor_preserves_typed_terminal_reason_without_advancing_bookmark()
         ),
     );
     batch.op("sub", paused_subscription("sub", "peer", "pub", "prof"));
-    home.execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    home.execute(
+        "app",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     home.mark_subscription_terminal("sub", "active", "test admission")
         .await
         .unwrap();

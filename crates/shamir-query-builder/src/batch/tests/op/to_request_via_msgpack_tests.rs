@@ -1,11 +1,19 @@
 use shamir_types::mpack;
 
-use crate::batch::Batch;
+use crate::batch::{Batch, BuildError};
 use crate::query::Query;
 
-// ============================================================================
-// to_request_via_msgpack round-trip equivalence
-// ============================================================================
+#[test]
+fn rv_query_builder_ee1751fb_returns_build_error_instead_of_panicking() {
+    let mut batch = Batch::new();
+    batch.query("duplicate", Query::from("first"));
+    batch.query("duplicate", Query::from("second"));
+
+    assert!(matches!(
+        batch.to_request_via_msgpack(),
+        Err(BuildError::DuplicateAlias { alias }) if alias == "duplicate"
+    ));
+}
 
 /// The round-tripped `BatchRequest` must equal the one from `build()`.
 #[test]
@@ -18,7 +26,7 @@ fn round_trip_matches_build() {
     );
 
     let via_build = b.build();
-    let via_msgpack = b.to_request_via_msgpack();
+    let via_msgpack = b.to_request_via_msgpack().unwrap();
     assert_eq!(via_build, via_msgpack);
 }
 
@@ -32,7 +40,7 @@ fn named_batch_with_options_survives_round_trip() {
     b.query("q", Query::from("items"));
 
     let via_build = b.build();
-    let via_msgpack = b.to_request_via_msgpack();
+    let via_msgpack = b.to_request_via_msgpack().unwrap();
     assert_eq!(via_build, via_msgpack);
 }
 
@@ -42,6 +50,6 @@ fn empty_batch_round_trips() {
     let b = Batch::new();
 
     let via_build = b.build();
-    let via_msgpack = b.to_request_via_msgpack();
+    let via_msgpack = b.to_request_via_msgpack().unwrap();
     assert_eq!(via_build, via_msgpack);
 }

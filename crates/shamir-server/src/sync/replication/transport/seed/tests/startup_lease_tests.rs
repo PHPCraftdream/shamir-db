@@ -78,7 +78,10 @@ async fn profile_resolution_failure_after_issuance_cleans_the_lease() {
         ),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("recreate prof_a");
     let sup3 = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);

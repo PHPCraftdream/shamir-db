@@ -69,7 +69,12 @@ async fn create_subscription_row(follower: &ShamirDb, name: &str) {
         subscription(name, "tcp://leader:9000", "pub", "stall_profile"),
     );
     follower
-        .execute("app", &batch.to_request_via_msgpack())
+        .execute(
+            "app",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect("create profile and subscription");
 }

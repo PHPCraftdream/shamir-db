@@ -37,7 +37,10 @@ async fn get_buffer_config_returns_null_when_unset() {
     b.id(1);
     b.get_buffer_config("cfg", ddl::get_buffer_config("users").repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -62,7 +65,10 @@ async fn set_then_get_buffer_config_via_ddl() {
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
     let set_resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -76,7 +82,10 @@ async fn set_then_get_buffer_config_via_ddl() {
     b.id(2);
     b.get_buffer_config("after", ddl::get_buffer_config("users").repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -102,7 +111,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -124,7 +136,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
     );
 
     let alter_resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let alter_row = alter_resp.results["alter"].records[0]
@@ -143,7 +158,10 @@ async fn alter_buffer_config_partial_update_via_ddl() {
     b.id(3);
     b.get_buffer_config("after", ddl::get_buffer_config("users").repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let got_row = resp.results["after"].records[0].as_value().into_owned();
@@ -166,7 +184,10 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -184,7 +205,10 @@ async fn alter_with_omitted_ttl_keeps_existing_ttl() {
         .repo("main"),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -213,7 +237,10 @@ async fn alter_starts_from_default_when_no_prior_config() {
         .repo("main"),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -239,7 +266,10 @@ async fn set_buffer_config_persists_into_info_store() {
         ddl::set_buffer_config("users", full_cfg()).repo("main"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -247,7 +277,10 @@ async fn set_buffer_config_persists_into_info_store() {
     b.id(2);
     b.get_buffer_config("get", ddl::get_buffer_config("users").repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -264,7 +297,12 @@ async fn get_unknown_table_errors_cleanly() {
     let mut b = Batch::new();
     b.id(1);
     b.get_buffer_config("get", ddl::get_buffer_config("nonexistent").repo("main"));
-    let resp = shamir.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = shamir
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
 
     // Resolver/executor error surfaces -- the batch as a whole
     // fails (no `_ignore` semantics yet). Either Err(_) or an

@@ -131,14 +131,22 @@ impl Query {
     // ── ORDER BY ────────────────────────────────────────────────
 
     /// Append an ascending order-by item.
-    pub fn order_by_asc(mut self, field: impl Into<String>) -> Self {
-        self.order_by_items.push(OrderByItem::asc(field));
+    pub fn order_by_asc(mut self, field: impl IntoFieldPath) -> Self {
+        self.order_by_items.push(OrderByItem {
+            field: field.into_field_path(),
+            direction: OrderDirection::Asc,
+            nulls: None,
+        });
         self
     }
 
     /// Append a descending order-by item.
-    pub fn order_by_desc(mut self, field: impl Into<String>) -> Self {
-        self.order_by_items.push(OrderByItem::desc(field));
+    pub fn order_by_desc(mut self, field: impl IntoFieldPath) -> Self {
+        self.order_by_items.push(OrderByItem {
+            field: field.into_field_path(),
+            direction: OrderDirection::Desc,
+            nulls: None,
+        });
         self
     }
 

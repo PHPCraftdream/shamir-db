@@ -48,7 +48,7 @@ async fn seed_row(shamir: &ShamirDb) {
         insert("users").row(doc! { "name" => "Alice", "age" => 30 }),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 }
@@ -58,7 +58,9 @@ async fn read_users(shamir: &ShamirDb, repo: &str) -> Result<BatchResponse, Batc
     let mut b = Batch::new();
     b.id(9);
     b.query("r", Query::with_repo(repo, "users"));
-    shamir.execute("testdb", &b.to_request_via_msgpack()).await
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
+        .await
 }
 
 /// Create a Pull profile + ACTIVE subscription covering the `testdb`
@@ -78,7 +80,7 @@ async fn quarantine_repos(shamir: &ShamirDb, sub: &str, profile: &str, repos: &[
     b.op("profile", builder);
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     shamir
@@ -101,7 +103,9 @@ async fn resume_subscription(
     let mut b = Batch::new();
     b.id(id);
     b.try_op("alt", alter_subscription(sub).resume()).unwrap();
-    shamir.execute("testdb", &b.to_request_via_msgpack()).await
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
+        .await
 }
 
 /// Admin `ALTER SUBSCRIPTION ... PAUSE` through the batch path.
@@ -113,7 +117,9 @@ async fn pause_subscription(
     let mut b = Batch::new();
     b.id(id);
     b.try_op("alt", alter_subscription(sub).pause()).unwrap();
-    shamir.execute("testdb", &b.to_request_via_msgpack()).await
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
+        .await
 }
 
 /// Reads succeed before quarantine; SELECT fails with "resync_required"
@@ -154,7 +160,7 @@ async fn t3_describe_and_status_stay_readable() {
     b.id(3);
     b.op("ls", list_subscriptions());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let val = resp.results["ls"].records[0].as_value().into_owned();
@@ -200,7 +206,7 @@ async fn t4_every_admin_action_including_drop_is_refused_while_quarantined() {
     b.id(6);
     b.op("drop", drop_subscription("sub"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(
@@ -237,7 +243,7 @@ async fn t5_healthy_and_non_replicated_repos_unaffected() {
         subscription("sub_side", "tcp://peer:9000", "pub", "prof_side"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     assert!(read_users(&shamir, "side").await.is_ok());
@@ -287,7 +293,7 @@ async fn t6_quarantine_survives_restart() {
         b.id(3);
         b.op("drop", drop_subscription("sub"));
         let err = shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await
             .unwrap_err();
         assert_eq!(
@@ -354,7 +360,10 @@ async fn t8_temporal_as_of_read_refused_while_quarantined() {
     let mut b = Batch::new();
     b.id(8);
     b.query("r", Query::with_repo("main", "users").as_of_version(1));
-    let Err(err) = shamir.execute("testdb", &b.to_request_via_msgpack()).await else {
+    let Err(err) = shamir
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
+        .await
+    else {
         panic!("temporal AsOf read of a quarantined repo must be refused");
     };
     assert!(matches!(err, BatchError::ResyncRequired { .. }));
@@ -431,7 +440,7 @@ async fn t10_tx_reads_refused_while_quarantined() {
     b.id(10);
     b.query("r", Query::with_repo("main", "users"));
     let Err(err) = shamir
-        .tx_execute("testdb", &b.to_request_via_msgpack(), &mut tx)
+        .tx_execute("testdb", &b.to_request_via_msgpack().unwrap(), &mut tx)
         .await
     else {
         panic!("tx_execute on a quarantined repo must be refused");
@@ -444,7 +453,13 @@ async fn t10_tx_reads_refused_while_quarantined() {
     b_side.id(11);
     b_side.query("r", Query::with_repo("side", "users"));
     shamir
-        .tx_execute("testdb", &b_side.to_request_via_msgpack(), &mut tx_side)
+        .tx_execute(
+            "testdb",
+            &b_side
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+            &mut tx_side,
+        )
         .await
         .unwrap();
 }
@@ -805,7 +820,7 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
         b.id(7);
         b.op("drp", drop_replication_profile("prof"));
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await
             .unwrap();
 

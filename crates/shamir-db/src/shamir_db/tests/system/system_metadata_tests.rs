@@ -126,7 +126,7 @@ async fn read_count(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> usi
     let mut b = Batch::new();
     b.id(1);
     b.query("q", Query::with_repo(repo, table));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute(db, &req).await.unwrap();
     resp.results["q"].records.len()
 }
@@ -191,7 +191,7 @@ async fn table_catalogue_survives_restart() {
                 "email" => "alice@example.com",
             }),
         );
-        let ins = b.to_request_via_msgpack();
+        let ins = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = shamir.execute("production", &ins).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
@@ -254,7 +254,7 @@ async fn table_added_after_repo_survives_restart() {
                 "kind" => "click",
             }),
         );
-        let ins = b.to_request_via_msgpack();
+        let ins = b.to_request_via_msgpack().expect("batch request encoding");
         shamir.execute("production", &ins).await.unwrap();
     }
 

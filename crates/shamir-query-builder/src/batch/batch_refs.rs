@@ -32,13 +32,13 @@ impl Batch {
     ///
     /// Round-trips the request through the wire codec (named msgpack) — the
     /// same path a real client/server uses — so callers (notably tests)
-    /// exercise the builder AND the codec in one step. Validates via
-    /// [`Batch::try_build`] (through [`Batch::to_msgpack`]) and PANICS on a
-    /// build/codec error (including deferred registration errors) — for
-    /// production paths use `try_build`/`to_msgpack` directly instead.
-    pub fn to_request_via_msgpack(&self) -> BatchRequest {
-        let bytes = self.to_msgpack().expect("msgpack encode");
-        rmp_serde::from_slice(&bytes).expect("msgpack decode")
+    /// exercise the builder AND the codec in one step.
+    pub fn to_request_via_msgpack(&self) -> Result<BatchRequest, BuildError> {
+        let bytes = self.to_msgpack()?;
+        rmp_serde::from_slice(&bytes).map_err(|e| BuildError::SerializationFailed {
+            alias: String::new(),
+            reason: e.to_string(),
+        })
     }
 
     // ── build ──────────────────────────────────────────────────────

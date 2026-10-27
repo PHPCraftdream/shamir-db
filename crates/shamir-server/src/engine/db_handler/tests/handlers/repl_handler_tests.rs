@@ -552,9 +552,12 @@ async fn pull_refused_with_downstream_resync_required() {
             "prof_resync",
         ),
     );
-    db.execute("app", &b.to_request_via_msgpack())
-        .await
-        .expect("create profile+subscription");
+    db.execute(
+        "app",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .expect("create profile+subscription");
     db.mark_subscription_resync_required("sub_resync", 100, 42)
         .await
         .unwrap();

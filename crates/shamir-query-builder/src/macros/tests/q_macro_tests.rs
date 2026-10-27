@@ -37,7 +37,45 @@ fn assert_same_wire_value<T: serde::Serialize + PartialEq + std::fmt::Debug>(a: 
     );
 }
 
-// ── from only ──────────────────────────────────────────────────────
+#[test]
+fn rv_query_builder_macros_3c03a7da_group_order_dotted_paths() {
+    let query = q!(from t group_by a.b, "odd field" order_by a.b desc, "odd field" asc);
+    let group_by = query.group_by.expect("group_by should be present");
+    let order_by = query.order_by.expect("order_by should be present");
+    assert_eq!(
+        group_by.fields,
+        vec![
+            vec!["a".to_owned(), "b".to_owned()],
+            vec!["odd field".to_owned()]
+        ]
+    );
+    assert_eq!(
+        order_by.items[0].field,
+        vec!["a".to_owned(), "b".to_owned()]
+    );
+    assert_eq!(order_by.items[1].field, vec!["odd field".to_owned()]);
+}
+
+#[test]
+fn rv_query_builder_macros_002c0148_raw_table_and_field_names_normalize() {
+    let query = q!(from r#users where r#type == 1);
+    assert_eq!(query.from.table, "users");
+    assert!(matches!(
+        query.r#where,
+        Some(shamir_query_types::filter::Filter::Eq { field, .. }) if field == vec!["type"]
+    ));
+}
+
+#[test]
+fn rv_query_builder_macros_03ba722d_trailing_commas_build_equivalent_query() {
+    let from_macro = q!(from t group_by a, select a, order_by a asc,);
+    let from_builder = Query::from("t")
+        .group_by("a")
+        .select([select::field("a")])
+        .order_by_asc("a")
+        .build();
+    assert_same_wire(&from_macro, &from_builder);
+}
 
 #[test]
 fn q_from_only() {

@@ -85,7 +85,10 @@ async fn create_profile(follower: &ShamirDb) {
         ),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("create profile");
 }
@@ -100,7 +103,12 @@ async fn execute_op(
     batch.id(id);
     batch.op("op", op);
     follower
-        .execute("app", &batch.to_request_via_msgpack())
+        .execute(
+            "app",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
 }
 

@@ -71,7 +71,10 @@ async fn rename_populated_survives_cold_restart() {
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -81,7 +84,10 @@ async fn rename_populated_survives_cold_restart() {
             b.id(2);
             b.insert("ins", insert("users").row(doc! { "name" => name }));
             shamir
-                .execute("appdb", &b.to_request_via_msgpack())
+                .execute(
+                    "appdb",
+                    &b.to_request_via_msgpack().expect("batch request encoding"),
+                )
                 .await
                 .unwrap();
         }
@@ -91,7 +97,10 @@ async fn rename_populated_survives_cold_restart() {
         b.id(3);
         b.rename_table("rn", ddl::rename_table("users", "people").repo("main"));
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -104,7 +113,10 @@ async fn rename_populated_survives_cold_restart() {
         b.id(4);
         b.query("all", Query::from("people"));
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -122,7 +134,10 @@ async fn rename_populated_survives_cold_restart() {
     b.id(1);
     b.query("all", Query::from("people"));
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let records = &resp.results["all"].records;
@@ -145,7 +160,12 @@ async fn rename_populated_survives_cold_restart() {
     let mut b = Batch::new();
     b.id(2);
     b.query("old", Query::from("users"));
-    let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+    let result = shamir
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         result.is_err(),
         "old table name must not resolve after restart"

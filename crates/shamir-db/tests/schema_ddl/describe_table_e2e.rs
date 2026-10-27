@@ -15,9 +15,14 @@ use shamir_types::types::value::QueryValue;
 
 /// Execute a batch and return the response.
 async fn exec(db: &ShamirDb, db_name: &str, batch: &Batch) -> shamir_db::query::BatchResponse {
-    db.execute(db_name, &batch.to_request_via_msgpack())
-        .await
-        .expect("batch should succeed")
+    db.execute(
+        db_name,
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .expect("batch should succeed")
 }
 
 fn result_map(resp: &shamir_db::query::BatchResponse, alias: &str) -> QueryValue {

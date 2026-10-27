@@ -92,7 +92,7 @@ fn call_round_trips_via_msgpack() {
     b.call("p", "daily_report", [lit(2024), lit("Q1")]);
 
     let via_build = b.build();
-    let via_msgpack = b.to_request_via_msgpack();
+    let via_msgpack = b.to_request_via_msgpack().unwrap();
     assert_eq!(via_build, via_msgpack);
 }
 

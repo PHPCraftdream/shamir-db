@@ -43,7 +43,11 @@ async fn create_table(shamir: &ShamirDb, name: &str) {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("ct", ddl::create_table(name).repo("main"));
-    let _ = exec(shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 }
 
 async fn exec(shamir: &ShamirDb, req: BatchRequest) -> BatchResponse {
@@ -66,7 +70,11 @@ async fn rename_table_migrates_empty_table() {
     let mut b = Batch::new();
     b.id(1);
     b.rename_table("rn", ddl::rename_table("users", "people").repo("main"));
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["rn"].records[0].get_value_str("renamed_table"),
         Some("users")
@@ -80,7 +88,11 @@ async fn rename_table_migrates_empty_table() {
     let mut b = Batch::new();
     b.id(2);
     b.insert("ins", insert("users").row(doc! { "name" => "Carol" }));
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError, got {:?}",
@@ -91,12 +103,20 @@ async fn rename_table_migrates_empty_table() {
     let mut b = Batch::new();
     b.id(3);
     b.insert("ins", insert("people").row(doc! { "name" => "Dave" }));
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     let mut b = Batch::new();
     b.id(4);
     b.query("all", Query::from("people"));
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get_value_str("name"), Some("Dave"));
@@ -105,7 +125,11 @@ async fn rename_table_migrates_empty_table() {
     let mut b = Batch::new();
     b.id(5);
     b.list_tables("tables", ddl::list_tables().repo("main"));
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let rec = resp.results["tables"].records[0].as_value().into_owned();
     let tables = rec["tables"].as_array().unwrap();
     assert!(tables.iter().any(|v| v == "people"));
@@ -122,13 +146,21 @@ async fn rename_table_refuses_destination_exists() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("ct", ddl::create_table("other").repo("main"));
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // users → other must fail.
     let mut b = Batch::new();
     b.id(2);
     b.rename_table("rn", ddl::rename_table("users", "other").repo("main"));
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError, got {:?}",
@@ -154,13 +186,21 @@ async fn rename_table_refuses_schema_bearing() {
             .repo("main")
             .rules(vec![ddl::field(["name"]).string().required().build()]),
     );
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // users → accounts must fail with a QueryError mentioning schema.
     let mut b = Batch::new();
     b.id(2);
     b.rename_table("rn", ddl::rename_table("users", "accounts").repo("main"));
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     match err {
         BatchError::QueryError { message, .. } => {
             assert!(
@@ -191,14 +231,22 @@ async fn rename_table_migrates_populated() {
         let mut b = Batch::new();
         b.id(1);
         b.insert("ins", insert("users").row(doc! { "name" => name }));
-        let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+        let _ = exec(
+            &shamir,
+            b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     }
 
     // Rename users → people (must succeed — F.2 force-drains the overlay).
     let mut b = Batch::new();
     b.id(2);
     b.rename_table("rn", ddl::rename_table("users", "people").repo("main"));
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["rn"].records[0].get_value_str("renamed_table"),
         Some("users")
@@ -208,7 +256,11 @@ async fn rename_table_migrates_populated() {
     let mut b = Batch::new();
     b.id(3);
     b.insert("ins", insert("users").row(doc! { "name" => "Ghost" }));
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError for old name, got {:?}",
@@ -219,7 +271,11 @@ async fn rename_table_migrates_populated() {
     let mut b = Batch::new();
     b.id(4);
     b.query("all", Query::from("people"));
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["all"].records;
     assert_eq!(
         records.len(),
@@ -238,12 +294,20 @@ async fn rename_table_migrates_populated() {
     let mut b = Batch::new();
     b.id(5);
     b.insert("ins", insert("people").row(doc! { "name" => "Dave" }));
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     let mut b = Batch::new();
     b.id(6);
     b.query("all2", Query::from("people"));
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["all2"].records;
     assert_eq!(
         records.len(),

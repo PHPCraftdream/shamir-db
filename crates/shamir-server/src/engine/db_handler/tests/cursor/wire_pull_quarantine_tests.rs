@@ -66,9 +66,14 @@ async fn pending_wire_long_poll_refuses_after_quarantine_flip() {
             "prof_retry",
         ),
     );
-    db.execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "app",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     db.mark_subscription_resync_required("sub_retry", 100, 42)
         .await
         .unwrap();

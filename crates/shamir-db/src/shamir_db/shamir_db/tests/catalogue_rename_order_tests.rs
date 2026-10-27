@@ -164,7 +164,12 @@ async fn rv_db_6540dc7b_rename_table_propagates_catalogue_save_failure() {
     batch.id(1);
     batch.create_repo("main", ddl::create_repo("main").tables(["alpha"]));
     shamir
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect("create_repo must succeed");
     assert!(
@@ -227,7 +232,12 @@ async fn rv_db_6540dc7b_rename_repo_propagates_catalogue_save_failure() {
     batch.id(1);
     batch.create_repo("main", ddl::create_repo("main").tables(["alpha"]));
     shamir
-        .execute("t", &batch.to_request_via_msgpack())
+        .execute(
+            "t",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect("create_repo must succeed");
     assert!(
@@ -322,7 +332,10 @@ async fn rv_db_6540dc7b_wire_create_db_reports_persist_failure() {
     b.id(1);
     b.create_db("cd", ddl::create_db("ghost"));
     let err = shamir
-        .execute("router", &b.to_request_via_msgpack())
+        .execute(
+            "router",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect_err(
             "RV-DB-6540DC7B: wire CREATE DATABASE must fail when the durable \

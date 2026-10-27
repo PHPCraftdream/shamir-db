@@ -47,6 +47,11 @@
 extern crate self as shamir_query_builder;
 
 pub mod batch;
+#[doc(hidden)]
+pub use shamir_collections;
+#[doc(hidden)]
+pub use shamir_query_types;
+
 pub mod ddl;
 #[macro_use]
 pub mod macros;
@@ -62,7 +67,7 @@ pub use wire::response;
 
 // Re-export the headline type for convenience.
 pub use query::{Conds, IntoSelectItem, Query};
-pub use wire::ToWire;
+pub use wire::{ToWire, WireError};
 
 // Re-export the batch request/response DTOs so a downstream guest (the SDK)
 // can name them without depending on shamir-query-types directly.

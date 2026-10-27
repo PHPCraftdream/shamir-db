@@ -43,7 +43,11 @@ async fn create_table(shamir: &ShamirDb, name: &str) {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("ct", ddl::create_table(name).repo("main"));
-    let _ = exec(shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 }
 
 /// Rename a regular hash index: the index data is preserved and query
@@ -62,7 +66,11 @@ async fn rename_index_preserves_data_and_lookup() {
             .field("email")
             .repo("main"),
     );
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Insert data.
     let mut b = Batch::new();
@@ -75,7 +83,11 @@ async fn rename_index_preserves_data_and_lookup() {
         "ins2",
         insert("users").row(doc! { "email" => "bob@example.com", "name" => "Bob" }),
     );
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Query by the indexed field before rename — should use the index.
     let mut b = Batch::new();
@@ -84,7 +96,11 @@ async fn rename_index_preserves_data_and_lookup() {
         "q",
         Query::from("users").where_eq("email", "alice@example.com"),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let stats = resp.results["q"].stats.as_ref().expect("stats present");
     assert_eq!(
         stats.index_used.as_deref(),
@@ -102,7 +118,11 @@ async fn rename_index_preserves_data_and_lookup() {
         "ri",
         ddl::rename_index("users", "idx_email", "idx_mail").repo("main"),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["ri"].records[0].get_value_str("renamed_index"),
         Some("idx_email")
@@ -125,7 +145,11 @@ async fn rename_index_preserves_data_and_lookup() {
         "q2",
         Query::from("users").where_eq("email", "alice@example.com"),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let stats = resp.results["q2"].stats.as_ref().expect("stats present");
     assert_eq!(
         stats.index_used.as_deref(),
@@ -143,7 +167,11 @@ async fn rename_index_preserves_data_and_lookup() {
         "q3",
         Query::from("users").where_eq("email", "bob@example.com"),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["q3"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get_value_str("name"), Some("Bob"));
@@ -170,7 +198,11 @@ async fn rename_index_refuses_destination_exists() {
             .field("name")
             .repo("main"),
     );
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // idx_a → idx_b must fail.
     let mut b = Batch::new();
@@ -179,7 +211,11 @@ async fn rename_index_refuses_destination_exists() {
         "ri",
         ddl::rename_index("users", "idx_a", "idx_b").repo("main"),
     );
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     match err {
         BatchError::QueryError { message, .. } => {
             assert!(
@@ -205,7 +241,11 @@ async fn rename_index_refuses_source_absent() {
         "ri",
         ddl::rename_index("users", "ghost", "real").repo("main"),
     );
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert!(
         matches!(err, BatchError::QueryError { .. }),
         "expected QueryError, got {:?}",
@@ -229,7 +269,11 @@ async fn rename_index_if_exists_nonexistent_source_is_noop() {
             .repo("main")
             .if_exists(),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["ri"].records[0].get_value_str("renamed_index"),
         Some("ghost"),
@@ -256,7 +300,11 @@ async fn rename_index_if_exists_missing_table_is_noop() {
             .repo("main")
             .if_exists(),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["ri"].records[0].get_value_bool("existed"),
         Some(false),
@@ -280,7 +328,11 @@ async fn rename_index_if_exists_existing_source_still_renames() {
             .field("email")
             .repo("main"),
     );
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Rename with if_exists — source exists, so the rename proceeds.
     let mut b = Batch::new();
@@ -291,7 +343,11 @@ async fn rename_index_if_exists_existing_source_still_renames() {
             .repo("main")
             .if_exists(),
     );
-    let resp = exec(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         resp.results["ri"].records[0].get_value_str("renamed_index"),
         Some("idx_email")
@@ -329,7 +385,11 @@ async fn rename_index_if_exists_destination_occupied_still_errors() {
             .field("name")
             .repo("main"),
     );
-    let _ = exec(&shamir, b.to_request_via_msgpack()).await;
+    let _ = exec(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // idx_a → idx_b with if_exists: still must fail (destination occupied).
     let mut b = Batch::new();
@@ -340,7 +400,11 @@ async fn rename_index_if_exists_destination_occupied_still_errors() {
             .repo("main")
             .if_exists(),
     );
-    let err = exec_err(&shamir, b.to_request_via_msgpack()).await;
+    let err = exec_err(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     match err {
         BatchError::QueryError { message, .. } => {
             assert!(

@@ -32,7 +32,7 @@ async fn run_one(
     let mut b = Batch::new();
     b.id(1);
     b.op("r", op);
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["r"].records[0].as_value().into_owned()
 }

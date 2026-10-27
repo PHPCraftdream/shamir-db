@@ -22,7 +22,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         "op",
         ddl::create_validator("v_reject").wasm(wasm_b64(&rejecting_wasm)),
     );
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &create_req).await.unwrap();
     let rec = &resp.results["op"].records[0];
     assert_eq!(rec.get_value_str("created_validator"), Some("v_reject"));
@@ -38,7 +38,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = b.to_request_via_msgpack();
+    let bind_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &bind_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("bound_validator"),
@@ -53,7 +53,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         shamir_query_builder::write::insert("users")
             .row(shamir_query_builder::doc! { "name" => "test" }),
     );
-    let insert_req = b.to_request_via_msgpack();
+    let insert_req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &insert_req).await.unwrap_err();
     let msg = err.to_string();
     assert!(
@@ -68,7 +68,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         "op",
         ddl::unbind_validator("v_reject", "users").db("testdb"),
     );
-    let unbind_req = b.to_request_via_msgpack();
+    let unbind_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &unbind_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("unbound_validator"),
@@ -83,7 +83,7 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
         shamir_query_builder::write::insert("users")
             .row(shamir_query_builder::doc! { "name" => "test" }),
     );
-    let insert_req = b.to_request_via_msgpack();
+    let insert_req = b.to_request_via_msgpack().expect("batch request encoding");
     assert!(
         db.execute("testdb", &insert_req).await.is_ok(),
         "insert should succeed after unbind"
@@ -102,7 +102,7 @@ async fn create_function_over_wire() {
     let mut b = Batch::new();
     b.id("cf");
     b.create_function("op", ddl::create_function("test_fn").wasm(wasm_b64(&wasm)));
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &create_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("created_function"),
@@ -132,7 +132,7 @@ async fn create_function_replace_over_wire() {
         "op",
         ddl::create_function("replaceable_fn").wasm(wasm_b64(&wasm)),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Replace with same name
@@ -144,7 +144,7 @@ async fn create_function_replace_over_wire() {
             .wasm(wasm_b64(&wasm))
             .replace(),
     );
-    let req2 = b.to_request_via_msgpack();
+    let req2 = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req2).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("created_function"),
@@ -163,7 +163,7 @@ async fn create_function_folder_over_wire() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     let result = resp.results["op"].records[0].as_value().into_owned();
     assert_eq!(
@@ -187,7 +187,7 @@ async fn create_validator_duplicate_rejected() {
     let mut b = Batch::new();
     b.id("cv1");
     b.create_validator("op", ddl::create_validator("v_dup").wasm(wasm_b64(&wasm)));
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     // Second create with replace=false → should fail
@@ -214,13 +214,13 @@ async fn drop_function_over_wire() {
         "op",
         ddl::create_function("fn_drop_test").wasm(wasm_b64(&wasm)),
     );
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("df");
     b.drop_function("op", ddl::drop_function("fn_drop_test"));
-    let drop_req = b.to_request_via_msgpack();
+    let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -247,13 +247,13 @@ async fn rename_function_over_wire() {
     let mut b = Batch::new();
     b.id("cf");
     b.create_function("op", ddl::create_function("fn_old").wasm(wasm_b64(&wasm)));
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("rf");
     b.rename_function("op", ddl::rename_function("fn_old", "fn_new"));
-    let rename_req = b.to_request_via_msgpack();
+    let rename_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("renamed_function"),
@@ -281,13 +281,13 @@ async fn rename_validator_over_wire() {
     let mut b = Batch::new();
     b.id("cv");
     b.create_validator("op", ddl::create_validator("v_old").wasm(wasm_b64(&wasm)));
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("rv");
     b.rename_validator("op", ddl::rename_validator("v_old", "v_new"));
-    let rename_req = b.to_request_via_msgpack();
+    let rename_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &rename_req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_str("renamed_validator"),
@@ -314,7 +314,7 @@ async fn list_validators_over_wire() {
         "op",
         ddl::create_validator("v_list_test").wasm(wasm_b64(&wasm)),
     );
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it
@@ -327,14 +327,14 @@ async fn list_validators_over_wire() {
             .ops([WriteOp::Insert, WriteOp::Update])
             .priority(2000),
     );
-    let bind_req = b.to_request_via_msgpack();
+    let bind_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &bind_req).await.unwrap();
 
     // List
     let mut b = Batch::new();
     b.id("lv");
     b.list_validators("op", ddl::list_validators("users").db("testdb"));
-    let list_req = b.to_request_via_msgpack();
+    let list_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = resp.results["op"].records[0].as_value().into_owned();
     let validators = result["validators"].as_array().unwrap();

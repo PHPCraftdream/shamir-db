@@ -732,7 +732,12 @@ async fn assert_supervisor_rejection_marks_resync(unknown_table: bool) {
         ),
     );
     follower
-        .execute("app", &batch.to_request_via_msgpack())
+        .execute(
+            "app",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect("create profile and subscription");
     let repo = follower.get_db("app").unwrap().get_repo("main").unwrap();

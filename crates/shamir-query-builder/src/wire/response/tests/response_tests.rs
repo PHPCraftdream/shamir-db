@@ -2,6 +2,7 @@ use serde::Deserialize;
 use shamir_collections::TMap;
 use shamir_query_types::batch::{BatchResponse, TransactionInfo};
 use shamir_query_types::read::{QueryRecord, QueryResult};
+use shamir_query_types::write::InsertedRecord;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -162,9 +163,30 @@ fn rows_as_deserialize_failure() {
     );
 }
 
-// ============================================================================
-// row_as — single record
-// ============================================================================
+#[test]
+fn rv_query_builder_028443e5_rows_as_preserves_inserted_projection() {
+    let row = InsertedRecord {
+        id: None,
+        fields: mpack!({
+            "id": 7,
+            "name": "Ada"
+        }),
+    };
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![QueryRecord::Inserted(row)]),
+    );
+    let response = batch_resp(results, vec![], None);
+    let users: Vec<User> = response.rows_as("users").unwrap();
+    assert_eq!(
+        users,
+        vec![User {
+            id: 7,
+            name: "Ada".into(),
+        }]
+    );
+}
 
 #[test]
 fn row_as_valid_index() {

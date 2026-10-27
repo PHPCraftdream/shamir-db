@@ -198,7 +198,10 @@ async fn call_returns_object() {
     // Exercises the q!(call ...) macro on the e2e path (object return).
     b.op("result", q!(call add(10_i64, 32)));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -234,7 +237,10 @@ async fn call_returns_array() {
         ],
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -261,7 +267,10 @@ async fn call_returns_scalar() {
     // Exercises the q!(call ...) macro on the e2e path (scalar return).
     b.op("result", q!(call forty_two()));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -279,7 +288,10 @@ async fn call_returns_null() {
     b.id("call_null");
     b.call("result", "null_fn", [] as [FilterValue; 0]);
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -313,7 +325,10 @@ async fn setup_with_secrets() -> ShamirDb {
             .tables(["secrets"]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -338,7 +353,12 @@ async fn setup_with_secrets() -> ShamirDb {
         ]),
     );
     shamir
-        .execute("testdb", &seed.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &seed
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -385,7 +405,11 @@ async fn setuid_call_lets_stranger_read_via_owner() {
     b.id("setuid_call");
     b.call("result", "read_secrets", [] as [FilterValue; 0]);
     let resp = shamir
-        .execute_as(user_b.clone(), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            user_b.clone(),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -422,7 +446,11 @@ async fn without_setuid_call_is_denied() {
     b.id("no_setuid_call");
     b.call("result", "read_secrets", [] as [FilterValue; 0]);
     let resp = shamir
-        .execute_as(user_b.clone(), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            user_b.clone(),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await;
 
     // The batch itself may succeed but the call entry should error.
@@ -516,7 +544,12 @@ async fn phase2_params_from_read_ref() {
             .tables(["items"]),
     );
     shamir
-        .execute("testdb", &setup.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &setup
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -530,7 +563,12 @@ async fn phase2_params_from_read_ref() {
         ]),
     );
     shamir
-        .execute("testdb", &seed.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &seed
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -548,7 +586,10 @@ async fn phase2_params_from_read_ref() {
     );
     b.call("p", "echo_first", [qref("q1", "[0].id")]);
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -609,7 +650,10 @@ async fn phase2_params_from_call_ref() {
     b.call("p1", "const_obj", [] as [FilterValue; 0]);
     b.call("p2", "echo_first", [qref("p1", ".id")]);
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -655,7 +699,12 @@ async fn phase2_call_result_as_read_filter_ref() {
             .tables(["items"]),
     );
     shamir
-        .execute("testdb", &setup.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &setup
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -670,7 +719,12 @@ async fn phase2_call_result_as_read_filter_ref() {
         ]),
     );
     shamir
-        .execute("testdb", &seed.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &seed
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -685,7 +739,10 @@ async fn phase2_call_result_as_read_filter_ref() {
         shamir_query_builder::query::Query::from("items").where_eq("id", qref("p", ".id")),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

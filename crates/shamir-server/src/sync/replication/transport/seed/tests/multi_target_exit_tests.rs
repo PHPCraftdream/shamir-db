@@ -50,7 +50,10 @@ async fn create_two_target_subscription(follower: &ShamirDb) {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "prof_ab"),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("create two-target subscription");
 }

@@ -38,7 +38,10 @@ async fn setup() -> ShamirDb {
             .tables(["users"]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     shamir
@@ -81,7 +84,9 @@ async fn seed_users(shamir: &ShamirDb) {
             },
         ]),
     );
-    let insert_batch = batch.to_request_via_msgpack();
+    let insert_batch = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     shamir.execute("testdb", &insert_batch).await.unwrap();
 }
 
@@ -95,7 +100,9 @@ async fn e2e_computed_value_persisted_on_insert() {
     let mut batch = Batch::new();
     batch.id("r");
     batch.query("all", Query::from("users").where_eq("name", "alice"));
-    let read = batch.to_request_via_msgpack();
+    let read = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["all"].records;
@@ -117,7 +124,9 @@ async fn e2e_filter_with_fn_call() {
         "match",
         Query::from("users").where_eq("name", func("strings/lower", [lit("ALICE")])),
     );
-    let read = batch.to_request_via_msgpack();
+    let read = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["match"].records;
@@ -143,7 +152,9 @@ async fn e2e_group_by_library_aggregate() {
             ])
             .group_by("city"),
     );
-    let read = batch.to_request_via_msgpack();
+    let read = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let groups = &resp.results["byCity"].records;
@@ -174,7 +185,9 @@ async fn e2e_select_scalar_function() {
             ])
             .where_eq("name", "alice"),
     );
-    let read = batch.to_request_via_msgpack();
+    let read = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &read).await.unwrap();
     let recs = &resp.results["rows"].records;

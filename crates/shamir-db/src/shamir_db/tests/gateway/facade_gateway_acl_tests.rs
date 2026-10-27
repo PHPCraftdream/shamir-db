@@ -67,7 +67,7 @@ async fn execute_as_user_denied_on_restricted_database() {
     let mut b = Batch::new();
     b.id("gw_read");
     b.query("r", Query::from("items"));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // System bypasses — must succeed.
     assert!(
@@ -122,7 +122,7 @@ async fn execute_as_user_denied_on_restricted_table() {
     let mut b = Batch::new();
     b.id("gw_read");
     b.query("r", Query::from("items"));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // System bypasses.
     assert!(

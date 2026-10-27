@@ -19,6 +19,22 @@ fn q_err(src: &str) -> String {
 }
 
 #[test]
+fn rv_query_builder_macros_002c0148_raw_identifier_normalizes_table() {
+    let rendered = crate::query_parse_lower::render(&parse_q("from r#users").unwrap()).unwrap();
+    assert!(rendered.contains("Query :: from (\"users\")"), "{rendered}");
+}
+
+#[test]
+fn rv_query_builder_macros_3c03a7da_group_and_order_lists_accept_paths_and_literals() {
+    assert!(parse_q("from t group_by a.b, \"literal.field\" order_by a.b desc").is_ok());
+}
+
+#[test]
+fn rv_query_builder_macros_03ba722d_lists_accept_trailing_commas() {
+    assert!(parse_q("from t group_by a, select a, order_by a asc,").is_ok());
+}
+
+#[test]
 fn rv_query_builder_macros_7e797992_empty_having_names_having() {
     let err = q_err("from t group_by g having");
     assert_eq!(

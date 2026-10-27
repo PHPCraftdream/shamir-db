@@ -26,7 +26,12 @@ async fn describe_repo(db: &ShamirDb, name: &str) -> QueryValue {
     batch.id("describe_repo");
     batch.describe_repo("describe", ddl::describe_repo(name).repo("testdb"));
     let response = db
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     response.results["describe"].records[0]
@@ -107,16 +112,26 @@ async fn create_with_override_describe_and_restart_reload() {
         "create_override",
         ddl::create_repo("dur").durability(override_policy),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut batch = Batch::new();
     batch.id(2);
     batch.create_repo("create_plain", ddl::create_repo("plain"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let described = describe_repo(&db, "dur").await;
     assert_eq!(
@@ -155,9 +170,14 @@ async fn alter_live_swaps_and_merges_open_repo_policy() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut batch = Batch::new();
     batch.id(2);
@@ -165,9 +185,14 @@ async fn alter_live_swaps_and_merges_open_repo_policy() {
         "alter",
         ddl::alter_repo("r1").durability(Some(synced_override())),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     assert_eq!(open_policy(&db, "testdb", "r1"), WalCommitTier::Synced);
     assert_eq!(db.durability_policy().wal_commit(), WalCommitTier::Buffered);
 
@@ -178,9 +203,14 @@ async fn alter_live_swaps_and_merges_open_repo_policy() {
     let mut batch = Batch::new();
     batch.id(3);
     batch.alter_repo("alter_patch", ddl::alter_repo("r1").durability(Some(patch)));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     let described = describe_repo(&db, "r1").await;
     assert_eq!(
         described["durability_override"]["wal_commit"].as_str(),
@@ -206,7 +236,12 @@ async fn invalid_create_overrides_leave_no_repo() {
         batch.id(id);
         batch.create_repo("create", ddl::create_repo(name).durability(over));
         let error = db
-            .execute("testdb", &batch.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &batch
+                    .to_request_via_msgpack()
+                    .expect("batch request encoding"),
+            )
             .await
             .unwrap_err();
         assert_eq!(err_code(&error), Some("invalid_request"));
@@ -221,9 +256,14 @@ async fn invalid_create_overrides_leave_no_repo() {
             ..Default::default()
         }),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     assert!(db.get_db("testdb").unwrap().has_repo("reseed"));
 }
 
@@ -234,9 +274,14 @@ async fn invalid_alter_has_no_effect_on_live_policy_or_record() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let invalid = DurabilityOverride {
         wal_retention_max_bytes: Some(NonZeroU64::new(1024).unwrap()),
@@ -246,7 +291,12 @@ async fn invalid_alter_has_no_effect_on_live_policy_or_record() {
     batch.id(2);
     batch.alter_repo("alter", ddl::alter_repo("r1").durability(Some(invalid)));
     let error = db
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(err_code(&error), Some("invalid_request"));
@@ -265,9 +315,14 @@ async fn alter_repo_requires_write_permission() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut batch = Batch::new();
     batch.id(2);
@@ -276,7 +331,13 @@ async fn alter_repo_requires_write_permission() {
         ddl::alter_repo("r1").durability(Some(synced_override())),
     );
     let error = db
-        .execute_as(Actor::User(999), "testdb", &batch.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(999),
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(err_code(&error), Some("access_denied"));
@@ -319,7 +380,12 @@ async fn alter_and_describe_missing_repo_refused() {
         ddl::alter_repo("ghost").durability(Some(synced_override())),
     );
     assert!(db
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding")
+        )
         .await
         .is_err());
 
@@ -327,7 +393,12 @@ async fn alter_and_describe_missing_repo_refused() {
     batch.id(2);
     batch.describe_repo("describe", ddl::describe_repo("ghost").repo("testdb"));
     assert!(db
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding")
+        )
         .await
         .is_err());
 }
@@ -345,9 +416,14 @@ async fn in_memory_override_is_stored_but_not_effective_for_wal() {
             .engine("in_memory")
             .durability(synced_override()),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     let repo = db.get_db("testdb").unwrap().get_repo("mem").unwrap();
     assert_eq!(repo.durability_policy().wal_commit(), WalCommitTier::Synced);
     assert_eq!(
@@ -382,9 +458,14 @@ async fn hybrid_repo_accepts_durability_override() {
             .engine("hybrid")
             .durability(synced_override()),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     let repo = db
         .get_db("testdb")
         .unwrap()
@@ -418,9 +499,14 @@ async fn alter_repo_synced_commit_has_recoverable_prefix_after_return() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1").engine("fjall"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut batch = Batch::new();
     batch.id(2);
@@ -428,16 +514,26 @@ async fn alter_repo_synced_commit_has_recoverable_prefix_after_return() {
         "alter",
         ddl::alter_repo("r1").durability(Some(synced_override())),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut create_items = Batch::new();
     create_items.id(3);
     create_items.create_table("create_items", ddl::create_table("items").repo("r1"));
-    db.execute("testdb", &create_items.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &create_items
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut batch = Batch::new();
     batch.id(4);
@@ -445,9 +541,14 @@ async fn alter_repo_synced_commit_has_recoverable_prefix_after_return() {
         "insert_item",
         Insert::with_repo("r1", "items").row(doc().set("value", 1).unwrap()),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     let committed = db
         .get_db("testdb")
         .unwrap()
@@ -481,9 +582,14 @@ async fn direct_record_only_update_does_not_live_swap_policy() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let record = db
         .system_store()
@@ -523,9 +629,14 @@ async fn concurrent_alters_preserve_both_patches() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("create", ddl::create_repo("r1"));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut tier_batch = Batch::new();
     tier_batch.id(2);
@@ -539,8 +650,12 @@ async fn concurrent_alters_preserve_both_patches() {
         "alter_retention",
         ddl::alter_repo("r1").durability(Some(big_retention_override())),
     );
-    let tier_request = tier_batch.to_request_via_msgpack();
-    let retention_request = retention_batch.to_request_via_msgpack();
+    let tier_request = tier_batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    let retention_request = retention_batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     let (tier_result, retention_result) = tokio::join!(
         db.execute("testdb", &tier_request),
         db.execute("testdb", &retention_request),

@@ -47,7 +47,7 @@ async fn seed_record(shamir: &ShamirDb) {
             "price" => 42
         }),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &req).await.unwrap();
 }
 
@@ -65,7 +65,7 @@ async fn default_mode_allows_all_users() {
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let denied = shamir
         .execute_as(Actor::User(99), "testdb", &read_req)
@@ -102,7 +102,7 @@ async fn default_mode_allows_all_users() {
             "price" => 7
         }),
     );
-    let ins_req = b.to_request_via_msgpack();
+    let ins_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute_as(Actor::User(99), "testdb", &ins_req).await;
     assert!(
@@ -134,7 +134,7 @@ async fn restricted_table_owner_allowed_stranger_denied_read() {
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // Owner User(1) reads successfully
     let resp = shamir.execute_as(Actor::User(1), "testdb", &read_req).await;
@@ -175,7 +175,7 @@ async fn restricted_table_stranger_denied_insert() {
             "price" => 7
         }),
     );
-    let ins_req = b.to_request_via_msgpack();
+    let ins_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // Owner can insert (0o750 → owner has rwx)
     let resp = shamir.execute_as(Actor::User(1), "testdb", &ins_req).await;
@@ -211,7 +211,7 @@ async fn restricted_table_stranger_denied_delete() {
     let mut b = Batch::new();
     b.id("d");
     b.delete("d", q!(delete from items where name == "widget").unwrap());
-    let del_req = b.to_request_via_msgpack();
+    let del_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // Stranger denied
     let err = shamir
@@ -248,7 +248,7 @@ async fn system_bypasses_restricted_table() {
     let mut b = Batch::new();
     b.id("r");
     b.query("r", q!(from items));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // System always passes
     let resp = shamir.execute_as(Actor::System, "testdb", &read_req).await;
@@ -282,7 +282,7 @@ async fn tx_execute_as_enforces_table_acl() {
     let mut b = Batch::new();
     b.id("txr");
     b.query("r", q!(from items));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // Open an interactive tx as User(1) (owner) — should succeed
     let (mut tx_ok, _guard_ok) = shamir
@@ -403,7 +403,9 @@ async fn execute_as_denies_forbidden_table_inside_top_level_for_each() {
     let mut outer = Batch::new();
     outer.id("bypass_foreach");
     outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert_access_denied(
@@ -428,7 +430,9 @@ async fn execute_as_denies_forbidden_table_insert_inside_top_level_for_each() {
     let mut outer = Batch::new();
     outer.id("bypass_foreach_insert");
     outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert_access_denied(
@@ -452,7 +456,9 @@ async fn execute_as_denies_forbidden_table_inside_top_level_batch() {
     let mut outer = Batch::new();
     outer.id("bypass_batch");
     outer.sub_batch_no_bind("sub", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert_access_denied(
@@ -490,7 +496,9 @@ async fn execute_as_denies_forbidden_table_nested_batch_foreach_batch() {
     let mut outer = Batch::new();
     outer.id("bypass_nested");
     outer.sub_batch_no_bind("outer_sub", outer_inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert_access_denied(
@@ -518,7 +526,9 @@ async fn execute_as_allows_permitted_table_inside_top_level_for_each() {
     let mut outer = Batch::new();
     outer.id("legit_foreach");
     outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert!(
@@ -539,7 +549,9 @@ async fn execute_as_allows_permitted_table_inside_top_level_batch() {
     let mut outer = Batch::new();
     outer.id("legit_batch");
     outer.sub_batch_no_bind("sub", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert!(
@@ -573,7 +585,9 @@ async fn execute_as_allows_permitted_table_nested_batch_foreach_batch() {
     let mut outer = Batch::new();
     outer.id("legit_nested");
     outer.sub_batch_no_bind("outer_sub", outer_inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::User(2), "testdb", &req).await;
     assert!(
@@ -605,7 +619,9 @@ async fn tx_execute_as_denies_forbidden_table_inside_top_level_for_each() {
     let mut outer = Batch::new();
     outer.id("tx_bypass_foreach");
     outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     // User(2) has no rights on `vault/secrets` (owner-only User(1)), but the
     // `vault` STORE itself is open (setup_with_secrets), so tx_begin_as
@@ -636,7 +652,9 @@ async fn tx_execute_as_denies_forbidden_table_inside_top_level_batch() {
     let mut outer = Batch::new();
     outer.id("tx_bypass_batch");
     outer.sub_batch_no_bind("sub", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let (mut tx, _guard) = shamir
         .tx_begin_as(Actor::User(2), "testdb", "vault", "snapshot")
@@ -676,7 +694,9 @@ async fn tx_execute_as_denies_forbidden_table_nested_batch_foreach_batch() {
     let mut outer = Batch::new();
     outer.id("tx_bypass_nested");
     outer.sub_batch_no_bind("outer_sub", outer_inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let (mut tx, _guard) = shamir
         .tx_begin_as(Actor::User(2), "testdb", "vault", "snapshot")
@@ -704,7 +724,9 @@ async fn tx_execute_as_allows_permitted_table_inside_top_level_for_each() {
     let mut outer = Batch::new();
     outer.id("tx_legit_foreach");
     outer.for_each("loop", vec![lit(1000_i64), lit(2000_i64)], "row", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let (mut tx, _guard) = shamir
         .tx_begin_as(Actor::User(2), "testdb", "main", "snapshot")
@@ -732,7 +754,9 @@ async fn tx_execute_as_allows_permitted_table_inside_top_level_batch() {
     let mut outer = Batch::new();
     outer.id("tx_legit_batch");
     outer.sub_batch_no_bind("sub", inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let (mut tx, _guard) = shamir
         .tx_begin_as(Actor::User(2), "testdb", "main", "snapshot")
@@ -773,7 +797,9 @@ async fn tx_execute_as_allows_permitted_table_nested_batch_foreach_batch() {
     let mut outer = Batch::new();
     outer.id("tx_legit_nested");
     outer.sub_batch_no_bind("outer_sub", outer_inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let (mut tx, _guard) = shamir
         .tx_begin_as(Actor::User(2), "testdb", "main", "snapshot")
@@ -819,7 +845,9 @@ async fn execute_as_system_bypasses_nested_batch_foreach_on_forbidden_table() {
     let mut outer = Batch::new();
     outer.id("system_nested");
     outer.sub_batch_no_bind("outer_sub", outer_inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let result = shamir.execute_as(Actor::System, "testdb", &req).await;
     assert!(
@@ -852,7 +880,9 @@ async fn tx_execute_as_system_bypasses_nested_batch_foreach_on_forbidden_table()
     let mut outer = Batch::new();
     outer.id("tx_system_nested");
     outer.sub_batch_no_bind("outer_sub", outer_inner_req);
-    let req = outer.to_request_via_msgpack();
+    let req = outer
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
 
     let (mut tx, _guard) = shamir
         .tx_begin_as(Actor::System, "testdb", "vault", "snapshot")
