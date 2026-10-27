@@ -51,8 +51,12 @@ impl BatchContext {
     /// Insert or replace a value.
     pub fn put(&self, key: impl Into<String>, value: QueryValue) {
         let key = key.into();
-        let _ = self.data.remove_sync(&key);
-        let _ = self.data.insert_sync(key, value);
+        match self.data.entry_sync(key) {
+            scc::hash_map::Entry::Occupied(mut occupied) => *occupied.get_mut() = value,
+            scc::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert_entry(value);
+            }
+        }
     }
 
     /// Read a value (cloned out). Returns `None` if absent.
@@ -165,8 +169,12 @@ impl GlobalVars {
     /// Insert or replace a global variable.
     pub fn set(&self, key: impl Into<String>, value: QueryValue) {
         let key = key.into();
-        let _ = self.data.remove_sync(&key);
-        let _ = self.data.insert_sync(key, value);
+        match self.data.entry_sync(key) {
+            scc::hash_map::Entry::Occupied(mut occupied) => *occupied.get_mut() = value,
+            scc::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert_entry(value);
+            }
+        }
     }
 
     /// Read a global variable (cloned out). Returns `None` if absent.
@@ -210,9 +218,12 @@ impl GlobalVars {
     /// For each `(name, value)` pair where `policy.includes(&name)`,
     /// inserts key `env.{name}` with value `QueryValue::Str(value)`.
     pub fn seed_env(&self, policy: &EnvPolicy) {
-        for (name, value) in std::env::vars() {
+        for (name, value) in std::env::vars_os() {
+            let (Ok(name), Ok(value)) = (name.into_string(), value.into_string()) else {
+                continue;
+            };
             if policy.includes(&name) {
-                self.set(format!("env.{}", name), QueryValue::Str(value));
+                self.set(format!("env.{name}"), QueryValue::Str(value));
             }
         }
     }
