@@ -7,8 +7,8 @@ use syn::Ident;
 
 use crate::filter_lower;
 use crate::query_parse::{
-    CallMacro, CallName, DeleteMacro, DocMapAst, InsertMacro, OrderDir, QMacro, QueryMacro,
-    SelectItemAst, TableArg, TableName, UpdateMacro, UpsertMacro,
+    CallMacro, CallName, DeleteMacro, DocMapAst, FieldPathAst, InsertMacro, OrderDir, QMacro,
+    QueryMacro, SelectItemAst, TableArg, TableName, UpdateMacro, UpsertMacro,
 };
 
 // ── code generation ────────────────────────────────────────────────
@@ -20,7 +20,7 @@ impl QueryMacro {
             TableArg::Simple(name) => {
                 let table_expr = match name {
                     TableName::Ident(id) => {
-                        let s = id.to_string();
+                        let s = unraw(id);
                         quote! { #s }
                     }
                     TableName::Lit(lit) => quote! { #lit },
@@ -30,8 +30,8 @@ impl QueryMacro {
                 }
             }
             TableArg::Repo { repo, table } => {
-                let r = repo.to_string();
-                let t = table.to_string();
+                let r = unraw(repo);
+                let t = unraw(table);
                 quote! {
                     ::shamir_query_builder::query::Query::with_repo(#r, #t)
                 }
@@ -46,10 +46,18 @@ impl QueryMacro {
 
         // -- group_by --
         if !self.group_by_fields.is_empty() {
-            let fields: Vec<String> = self
+            let fields: Vec<TokenStream2> = self
                 .group_by_fields
                 .iter()
-                .map(|id| id.to_string())
+                .map(|field| match field {
+                    FieldPathAst::Idents(names) => {
+                        let names: Vec<String> = names.iter().map(unraw).collect();
+                        quote! { vec![#(#names.to_owned()),*] }
+                    }
+                    FieldPathAst::Lit(lit) => quote! {
+                        vec![#lit.to_owned()]
+                    },
+                })
                 .collect();
             chain = quote! { #chain.group_by_many([#( #fields ),*]) };
         }
@@ -76,17 +84,15 @@ impl QueryMacro {
         }
 
         // -- order_by --
+        let mut order_by = Vec::with_capacity(self.order_by_items.len());
         for (field, dir) in &self.order_by_items {
-            let s = field.to_string();
-            match dir {
-                OrderDir::Asc => {
-                    chain = quote! { #chain.order_by_asc(#s) };
-                }
-                OrderDir::Desc => {
-                    chain = quote! { #chain.order_by_desc(#s) };
-                }
-            }
+            let path = field_path_tokens(field);
+            order_by.push(match dir {
+                OrderDir::Asc => quote! { .order_by_asc(#path) },
+                OrderDir::Desc => quote! { .order_by_desc(#path) },
+            });
         }
+        chain = quote! { #chain #(#order_by)* };
 
         // -- limit --
         if let Some(lit) = &self.limit {
@@ -116,15 +122,18 @@ impl QueryMacro {
 /// **Note:** over-deep literal values (nesting beyond `MAX_FILTER_DEPTH`)
 /// therefore PANIC at macro construction.
 fn lower_doc_map(doc: &DocMapAst) -> TokenStream2 {
-    let mut chain = quote! { ::shamir_query_builder::write::doc() };
-    for (key, val) in &doc.pairs {
-        chain = quote! {
-            #chain.set(#key, #val).unwrap_or_else(|e| {
-                ::core::panic!("q! doc construction failed: {e}")
-            })
-        };
-    }
-    chain
+    let entries: Vec<TokenStream2> = doc
+        .pairs
+        .iter()
+        .map(|(key, val)| {
+            quote! {
+                .set(#key, #val).unwrap_or_else(|e| {
+                    ::core::panic!("q! doc construction failed: {e}")
+                })
+            }
+        })
+        .collect();
+    quote! { ::shamir_query_builder::write::doc() #(#entries)* }
 }
 
 /// Emit a table constructor prefix for write builders.
@@ -137,7 +146,7 @@ fn write_table_tokens(
         TableArg::Simple(name) => {
             let table_expr = match name {
                 TableName::Ident(id) => {
-                    let s = id.to_string();
+                    let s = unraw(id);
                     quote! { #s }
                 }
                 TableName::Lit(lit) => quote! { #lit },
@@ -145,8 +154,8 @@ fn write_table_tokens(
             quote! { #builder_path::#simple_fn(#table_expr) }
         }
         TableArg::Repo { repo, table } => {
-            let r = repo.to_string();
-            let t = table.to_string();
+            let r = unraw(repo);
+            let t = unraw(table);
             quote! { #builder_path::with_repo(#r, #t) }
         }
     }
@@ -215,7 +224,7 @@ impl CallMacro {
     pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
         let name_expr = match &self.name {
             CallName::Ident(id) => {
-                let s = id.to_string();
+                let s = unraw(id);
                 quote! { #s }
             }
             CallName::Lit(lit) => quote! { #lit },
@@ -224,7 +233,7 @@ impl CallMacro {
         let args = &self.args;
         let repo_expr = match &self.repo {
             Some(id) => {
-                let r = id.to_string();
+                let r = unraw(id);
                 quote! { #r }
             }
             None => quote! { "main" },
@@ -258,7 +267,25 @@ impl QMacro {
     }
 }
 
-/// Lower a single `SelectItemAst` node into a token stream.
+fn field_path_tokens(field: &FieldPathAst) -> TokenStream2 {
+    match field {
+        FieldPathAst::Lit(lit) => quote! { #lit },
+        FieldPathAst::Idents(segments) if segments.len() == 1 => {
+            let name = unraw(&segments[0]);
+            quote! { #name }
+        }
+        FieldPathAst::Idents(segments) => {
+            let names: Vec<String> = segments.iter().map(unraw).collect();
+            quote! { [#( #names ),*] }
+        }
+    }
+}
+
+fn unraw(ident: &Ident) -> String {
+    let value = ident.to_string();
+    value.strip_prefix("r#").unwrap_or(&value).to_owned()
+}
+
 fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
     match item {
         SelectItemAst::All => Ok(quote! {
@@ -269,7 +296,7 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
             let field = segments_to_field_path(segments);
             match alias {
                 Some(a) => {
-                    let alias_str = a.to_string();
+                    let alias_str = unraw(a);
                     Ok(quote! {
                         ::shamir_query_builder::select::field_as(#field, #alias_str)
                     })
@@ -283,7 +310,7 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
         SelectItemAst::CountAll { alias } => {
             let alias_str = alias
                 .as_ref()
-                .map(|a| a.to_string())
+                .map(unraw)
                 .unwrap_or_else(|| "count".to_owned());
             Ok(quote! {
                 ::shamir_query_builder::select::count_all(#alias_str)
@@ -296,7 +323,7 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
             alias,
         } => {
             let field = segments_to_field_path(field_segments);
-            let alias_str = alias.to_string();
+            let alias_str = unraw(alias);
             let func_ident = syn::Ident::new(func, proc_macro2::Span::call_site());
             Ok(quote! {
                 ::shamir_query_builder::select::#func_ident(#field, #alias_str)
@@ -309,14 +336,14 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
             alias,
         } => {
             let field = segments_to_field_path(field_segments);
-            let alias_str = alias.to_string();
+            let alias_str = unraw(alias);
             Ok(quote! {
                 ::shamir_query_builder::select::agg_fn(#name, #field, #alias_str)
             })
         }
 
         SelectItemAst::Func { name, args, alias } => {
-            let alias_str = alias.to_string();
+            let alias_str = unraw(alias);
             Ok(quote! {
                 ::shamir_query_builder::select::func(#alias_str, #name, #args)
             })
@@ -327,10 +354,10 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
 /// Convert a vector of ident segments into a field path token stream.
 fn segments_to_field_path(segments: &[Ident]) -> TokenStream2 {
     if segments.len() == 1 {
-        let s = segments[0].to_string();
+        let s = unraw(&segments[0]);
         quote! { #s }
     } else {
-        let strings: Vec<String> = segments.iter().map(|id| id.to_string()).collect();
+        let strings: Vec<String> = segments.iter().map(unraw).collect();
         quote! { [#( #strings ),*] }
     }
 }

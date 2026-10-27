@@ -71,13 +71,16 @@ macro_rules! vals {
 #[macro_export]
 macro_rules! bind {
     ($($key:expr => $val:expr),* $(,)?) => {{
-        let mut map = shamir_collections::new_map();
+        let mut map: $crate::shamir_collections::TMap<
+            ::std::string::String,
+            $crate::shamir_query_types::filter::FilterValue,
+        > = $crate::shamir_collections::new_map();
         $(map.insert($key.into(), $val);)*
         map
     }};
 }
 
-/// Build a [`SubscribeOp`](shamir_query_types::subscribe::SubscribeOp) declaratively.
+/// Build a [`SubscribeOp`] declaratively.
 ///
 /// # Example
 ///
@@ -94,9 +97,9 @@ macro_rules! bind {
 #[macro_export]
 macro_rules! subscribe {
     // Internal: event mask mapping
-    (@event any) => { shamir_query_types::subscribe::EventMask::All };
-    (@event put) => { shamir_query_types::subscribe::EventMask::Put };
-    (@event delete) => { shamir_query_types::subscribe::EventMask::Delete };
+    (@event any) => { $crate::shamir_query_types::subscribe::EventMask::All };
+    (@event put) => { $crate::shamir_query_types::subscribe::EventMask::Put };
+    (@event delete) => { $crate::shamir_query_types::subscribe::EventMask::Delete };
 
     (
         source: ($repo:expr, $table:expr),
@@ -108,7 +111,7 @@ macro_rules! subscribe {
         $(,)?
     ) => {{
         let __src = $crate::batch::subscribe::SourceBuilder::table(
-            shamir_query_types::TableRef::with_repo($repo, $table)
+            $crate::shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
         $(.events($crate::subscribe!(@event $event)))?
@@ -131,7 +134,7 @@ macro_rules! subscribe {
         $(,)?
     ) => {{
         let __src = $crate::batch::subscribe::SourceBuilder::table(
-            shamir_query_types::TableRef::with_repo($repo, $table)
+            $crate::shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
         $(.events($crate::subscribe!(@event $event)))?
@@ -155,7 +158,7 @@ macro_rules! subscribe {
         $(,)?
     ) => {{
         let __src = $crate::batch::subscribe::SourceBuilder::table(
-            shamir_query_types::TableRef::with_repo($repo, $table)
+            $crate::shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
         $(.events($crate::subscribe!(@event $event)))?
@@ -163,7 +166,7 @@ macro_rules! subscribe {
 
         #[allow(unused_mut)]
         let mut __sub = $crate::batch::subscribe::Subscribe::source(__src)
-            .deliver_batch(shamir_query_types::batch::SubBatchOp {
+            .deliver_batch($crate::shamir_query_types::batch::SubBatchOp {
                 batch: $batch,
                 bind: $bind,
             });
@@ -182,7 +185,7 @@ macro_rules! subscribe {
         $(,)?
     ) => {{
         let __src = $crate::batch::subscribe::SourceBuilder::table(
-            shamir_query_types::TableRef::with_repo($repo, $table)
+            $crate::shamir_query_types::TableRef::with_repo($repo, $table)
         )
         .filter($filter)
         $(.events($crate::subscribe!(@event $event)))?

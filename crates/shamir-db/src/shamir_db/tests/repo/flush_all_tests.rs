@@ -58,12 +58,12 @@ async fn buffered_commit_survives_graceful_flush_all() {
                 "qty" => 42,
             }),
         );
-        let insert = b.to_request_via_msgpack();
+        let insert = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
 
         // Flush all buffers to durable backing — the shutdown drain path.
-        shamir.flush_all().await.unwrap();
+        shamir.flush_all_for_test().await.unwrap();
     }
 
     // === Session 2: reopen on the SAME meta path, read back ===
@@ -77,7 +77,7 @@ async fn buffered_commit_survives_graceful_flush_all() {
     let mut b = Batch::new();
     b.id(2);
     b.query("r", Query::with_repo("data", "items"));
-    let read = b.to_request_via_msgpack();
+    let read = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(
@@ -110,10 +110,10 @@ async fn flush_all_is_safe_on_in_memory_home() {
             "val" => "hello",
         }),
     );
-    let insert = b.to_request_via_msgpack();
+    let insert = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &insert).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 1);
 
     // flush_all must succeed — no panic, no error.
-    shamir.flush_all().await.unwrap();
+    shamir.flush_all_for_test().await.unwrap();
 }

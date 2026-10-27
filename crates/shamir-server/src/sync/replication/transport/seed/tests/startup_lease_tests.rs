@@ -47,7 +47,14 @@ async fn profile_resolution_failure_after_issuance_cleans_the_lease() {
 
     // Delete the profile row: reconcile#2's `resolve_profile_streams` now
     // fails AFTER its lease was issued (the start returns Err).
-    run_op(&follower, drop_replication_profile("prof_a")).await;
+    run_op(
+        &follower,
+        drop_replication_profile("prof_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop replication profile"),
+    )
+    .await;
     let sup2 = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);
     sup2.reconcile().await; // start fails; nothing spawns
 
@@ -78,7 +85,10 @@ async fn profile_resolution_failure_after_issuance_cleans_the_lease() {
         ),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("recreate prof_a");
     let sup3 = supervisor(follower.clone(), leader.clone()).with_max_iterations(1);

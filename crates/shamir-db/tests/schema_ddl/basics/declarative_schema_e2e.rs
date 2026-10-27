@@ -65,14 +65,14 @@ fn insert_request(id: &str, table: &str, record: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert(table).row(record));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 fn read_all_request(id: &str, table: &str) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.query("all", Query::from(table));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 /// Synchronous schema check — mirrors [`SchemaValidator::validate`] logic

@@ -34,9 +34,15 @@ async fn create_scram_user_denied_without_admin_glue() {
     // Correct hmac so this test exercises the `not_supported` path (AdminGlue
     // missing), not the HMAC gate that now runs first (task #604).
     let roles = vec!["user".to_string()];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: roles.clone(),
+        hmac: None,
+    };
     let tag = canon::compute_tag_hex(
         &canon::derive_session_hmac_key(&session.session_id),
-        &canon::canonical_create_scram_user("bob", &roles),
+        &canon::canonical_db_request(&unsigned).expect("create-scram canonical form"),
     );
     let req = DbRequest::CreateScramUser {
         name: "bob".into(),
@@ -115,9 +121,15 @@ async fn create_scram_user_success_then_duplicate() {
     let session = root_session();
 
     let roles = vec!["read_write".to_string()];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "correct horse battery staple".into(),
+        roles: roles.clone(),
+        hmac: None,
+    };
     let tag = canon::compute_tag_hex(
         &canon::derive_session_hmac_key(&session.session_id),
-        &canon::canonical_create_scram_user("bob", &roles),
+        &canon::canonical_db_request(&unsigned).expect("create-scram canonical form"),
     );
     let req = DbRequest::CreateScramUser {
         name: "bob".into(),
@@ -153,9 +165,15 @@ async fn create_scram_user_success_then_duplicate() {
 
     // Second insert with same name -> typed user_exists error.
     let roles2: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "bob".into(),
+        password: "another password".into(),
+        roles: roles2.clone(),
+        hmac: None,
+    };
     let tag2 = canon::compute_tag_hex(
         &canon::derive_session_hmac_key(&session.session_id),
-        &canon::canonical_create_scram_user("bob", &roles2),
+        &canon::canonical_db_request(&unsigned).expect("create-scram canonical form"),
     );
     let req2 = DbRequest::CreateScramUser {
         name: "bob".into(),
@@ -199,9 +217,15 @@ async fn create_scram_user_with_reserved_superuser_role_leaves_no_orphan_account
     let session = root_session();
 
     let roles = vec!["superuser".to_string()];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "frank".into(),
+        password: "correct horse battery staple".into(),
+        roles: roles.clone(),
+        hmac: None,
+    };
     let tag = canon::compute_tag_hex(
         &canon::derive_session_hmac_key(&session.session_id),
-        &canon::canonical_create_scram_user("frank", &roles),
+        &canon::canonical_db_request(&unsigned).expect("create-scram canonical form"),
     );
     let req = DbRequest::CreateScramUser {
         name: "frank".into(),
