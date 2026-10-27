@@ -279,6 +279,7 @@ async fn binding_cancellation_dropped_at_final_write_boundary_leaves_pending_dur
         "the pending barrier carries its binding generation"
     );
     // The catalogue stays valid.
+    shamir.refresh_resync_quarantine_cache().await.unwrap();
     crate::repl_binding::validate::validate_subscription_catalogue(&shamir)
         .await
         .unwrap();

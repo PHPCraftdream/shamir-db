@@ -1,4 +1,7 @@
-//! S5c-X PR8b-2 evidence: durable binding authority across profile changes, same-name recreation, flush failures, and guarded destination DROP/RENAME.
+//! S5c-X PR8b-2 evidence rows 3 (in-process leg), 5, 6, 8 — the binding is
+//! the durable authority through profile drops, SetProfile, profile
+//! replacement, same-name recreation, terminal flush failures, and
+//! DROP/RENAME of bound destinations (facade-level guards).
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
