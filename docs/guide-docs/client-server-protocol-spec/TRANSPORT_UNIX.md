@@ -128,16 +128,30 @@ Response:
 }
 ```
 
+
+## 5.1 Unix socket directory ownership
+
+The parent directory of a Unix socket endpoint must already exist. The
+operator owns and must restrict that directory; the server neither creates
+nor chmods it. The socket itself is restricted to owner-only permissions.
+
 ## 9. Endpoint addressing
 
-Нет host:port — путь к сокету (Unix) или имя pipe (Windows). Единый URI
-вид, платформа резолвится клиентом:
-```
-shamir+unix://alice@/run/shamir/db.sock       # Unix — абсолютный путь
-shamir+unix://alice@shamir-db                 # любая ОС — логическое имя;
-                                               # Windows клиент маппит его
-                                               # в \\.\pipe\shamir-db
-```
+An IPC endpoint is a **raw platform address**; there are no logical names,
+resolution rules, or automatic prefixing. An address valid on one operating
+system may be invalid on another.
+
+- Unix: absolute filesystem path; no `..` component or NUL; encoded byte
+  length below the platform `sockaddr_un.sun_path` bound (108 bytes on
+  Linux/Android, 104 bytes on Apple/BSD/DragonFly systems).
+- Windows: `\\.\pipe\` prefix (ASCII case-insensitive), followed by one
+  non-empty pipe-name component, no NUL, and at most 256 UTF-16 code units.
+
+`shamir+unix://user@<addr>` is notation only. The address is passed unchanged
+to the platform IPC implementation; `shamir+unix` is not a supported scheme
+or a name-resolution service. A relative Unix path or a bare Windows name is
+rejected as invalid input.
+
 
 ## 10. Bootstrap / first-admin provisioning
 
@@ -160,8 +174,9 @@ no new provisioning code was needed for this transport.
 
 ## 11. Test Checklist
 
-- Round-trip auth через Unix socket, через Named Pipe
-- Frame too large → close без reply
+- Endpoint-validation tests for each platform's raw-address rules and boundaries
+- Windows owner-DACL and competing first-instance bind tests
+- Round-trip auth через Unix socket, через Named Pipe Frame too large → close без reply
 - Empty frame → graceful close
 - Повторный auth_init → close
 - Socket file создаётся с правами `0600` (Unix); DACL ограничен SID

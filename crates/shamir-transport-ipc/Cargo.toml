@@ -13,9 +13,6 @@ repository = "https://github.com/PHPCraftdream/shamir-db"
 # already used by `shamir-transport-tcp`.
 tokio = { version = "1", features = ["full"] }
 
-# Errors
-thiserror = "2.0"
-
 [target.'cfg(windows)'.dependencies]
 # Shared owner-only security-descriptor primitive (DEC-3 Q5-c): the
 # `unsafe` Win32 SDDL/SID code lives in `shamir-private-dir`; this crate
@@ -24,6 +21,16 @@ shamir-private-dir = { path = "../shamir-private-dir" }
 
 [dev-dependencies]
 tempfile = "3"
+
+# Test-only pipe DACL inspection (tests/windows_dacl.rs).
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
 
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples

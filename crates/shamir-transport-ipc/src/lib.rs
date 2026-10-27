@@ -21,10 +21,13 @@
 //! listeners rely on. [`IpcListener::bind`] enforces this boundary itself;
 //! it is not an opt-in the caller can forget.
 
+mod endpoint;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 mod windows;
+
+pub use endpoint::validate_endpoint;
 
 #[cfg(unix)]
 pub use unix::{connect, IpcClientStream, IpcListener, IpcStream};

@@ -117,10 +117,7 @@ pub struct ResumeOptions {
 /// TOFU-pin dance still applies exactly as it does for [`ConnectOptions`],
 /// since that is layered on SCRAM, not on TLS.
 pub struct ConnectLocalOptions {
-    /// Local endpoint — a filesystem path (Unix) or a Named Pipe name
-    /// (Windows, e.g. `\\.\pipe\shamir-db`). Callers don't branch on OS:
-    /// `shamir_transport_ipc::connect` resolves the same string
-    /// platform-appropriately.
+    /// Raw platform endpoint: an absolute Unix socket path or a `\\.\pipe\name` Windows pipe. Validity is platform-specific; no logical-name resolution or prefixing occurs.
     pub addr: String,
     /// Username (raw — will be NFC + UsernameCaseMapped normalised).
     pub username: String,

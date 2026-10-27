@@ -888,22 +888,21 @@ impl Config {
 
 /// Validate a single [`ListenerConfig`] against its profile's invariants.
 fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> {
-    // 1. `kind: unix` addresses a filesystem path / pipe name, not a
-    //    `SocketAddr` — validated on its own branch, entirely separate
-    //    from the TCP/WS `SocketAddr` + loopback/origin checks below.
     if l.kind == ListenerKind::Unix {
         if l.addr.trim().is_empty() {
             return Err(ConfigError::Validation(format!(
-                "listeners[{idx}] kind=unix requires a non-empty `addr` \
-                 (filesystem path on Unix, pipe name on Windows)"
+                "listeners[{idx}] kind=unix requires a non-empty `addr`"
             )));
         }
         if l.profile != ProfileKind::Plain {
             return Err(ConfigError::Validation(format!(
-                "listeners[{idx}] kind=unix requires profile=plain (spec TRANSPORT_UNIX.md — no TLS distinction for local IPC); got {:?}",
+                "listeners[{idx}] kind=unix requires profile=plain; got {:?}",
                 l.profile
             )));
         }
+        shamir_transport_ipc::validate_endpoint(&l.addr).map_err(|error| {
+            ConfigError::Validation(format!("listeners[{idx}].addr violates IPC rules: {error}"))
+        })?;
         return Ok(());
     }
 
@@ -988,10 +987,7 @@ fn validate_kdf(kdf: &KdfConfig) -> Result<(), String> {
     Ok(())
 }
 
-/// Loopback predicate matching TRANSPORT_TCP §2.2 (127.0.0.0/8 + ::1).
-/// Inlined rather than calling `shamir_transport_tcp::listener::validate_addr`
-/// because that function takes a `ListenerProfile` enum we'd otherwise have
-/// to translate from `ProfileKind`; the loopback check itself is a one-liner.
+/// Loopback predicate.
 fn is_loopback_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
