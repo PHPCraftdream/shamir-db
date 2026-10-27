@@ -73,19 +73,19 @@ impl ShamirDb {
             .await?
             .with_policy(policy);
         let ambient_actor = auth.actor().clone();
+        let mut authorized_interner_repos = Vec::new();
         for repo_name in request.interner_epochs.keys() {
             // Boxed: keeps this rarely-taken await out of the batch future's inline state.
-            Box::pin(self.authorize_access(
+            if Box::pin(self.authorize_access(
                 &ambient_actor,
                 &crate::access::ResourcePath::store(db_name, repo_name),
                 crate::access::Action::Read,
             ))
             .await
-            .map_err(|error| BatchError::QueryError {
-                alias: String::new(),
-                message: error.to_string(),
-                code: Some("access_denied".to_string()),
-            })?;
+            .is_ok()
+            {
+                authorized_interner_repos.push(repo_name.clone());
+            }
         }
 
         // S5c-X PR8b: ordinary READS of a quarantined (`resync_required`)
@@ -132,7 +132,13 @@ impl ShamirDb {
         // Interner access has already been pre-authorized; deltas attach only
         // after execution, so a denied repository cannot cause batch side effects.
         if !request.interner_epochs.is_empty() {
-            Box::pin(attach_interner_delta(&mut response, request, &db)).await?;
+            Box::pin(attach_interner_delta(
+                &mut response,
+                &authorized_interner_repos,
+                request,
+                &db,
+            ))
+            .await;
         }
 
         Ok(response)

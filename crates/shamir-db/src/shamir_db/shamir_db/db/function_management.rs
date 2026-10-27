@@ -429,7 +429,9 @@ impl ShamirDb {
         let mut kinds = shamir_types::types::common::new_map();
         for record in &catalogue {
             if let Some(name) = record.get("name").and_then(|value| value.as_str()) {
-                kinds.insert(name.to_string(), ArtifactKind::from_record(record));
+                kinds
+                    .entry(name.to_string())
+                    .or_insert_with(|| ArtifactKind::from_record(record));
             }
         }
         let mut out = Vec::with_capacity(names.len());

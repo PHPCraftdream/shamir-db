@@ -491,7 +491,7 @@ impl FjallUserDirectory {
 
         let blob = match self.read_blob(username)? {
             Some(b) => b,
-            None => return Err(Error::InvalidInput("user not found")),
+            None => return Err(Error::UserNotFound),
         };
         let mut user: PersistedUser = rmp_serde::from_slice(&blob)
             .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
@@ -545,7 +545,7 @@ impl FjallUserDirectory {
 
         let blob = match self.read_blob(username)? {
             Some(b) => b,
-            None => return Err(Error::InvalidInput("user not found")),
+            None => return Err(Error::UserNotFound),
         };
         let mut user: PersistedUser = rmp_serde::from_slice(&blob)
             .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
@@ -796,13 +796,9 @@ impl FjallUserDirectory {
 
 impl UserDirectory for FjallUserDirectory {
     fn lookup_by_name(&self, username: &str) -> Option<UserRecord> {
-        match self.read_blob(username) {
-            Ok(Some(blob)) => rmp_serde::from_slice::<PersistedUser>(&blob)
-                .ok()
-                .and_then(|user| user.to_record()),
-            Ok(None) => None,
-            Err(_) => None,
-        }
+        let blob = self.read_blob(username).ok().flatten()?;
+        let user: PersistedUser = rmp_serde::from_slice(&blob).ok()?;
+        user.to_record()
     }
 
     fn insert(&self, username: String, record: UserRecord) -> Result<[u8; 16]> {

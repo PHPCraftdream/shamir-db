@@ -67,14 +67,9 @@ async fn rv_db_4d93f623_ambient_access_denied_before_empty_batch() {
         )
         .await
         .unwrap();
-    let result = shamir
+    let response = shamir
         .execute_as(Actor::User(2), "ambient_test", &request)
-        .await;
-    assert!(matches!(
-        result,
-        Err(crate::query::batch::BatchError::QueryError {
-            code: Some(code),
-            ..
-        }) if code == "access_denied"
-    ));
+        .await
+        .expect("denied ambient repositories are skipped");
+    assert!(!response.interner_delta.contains_key("secret"));
 }

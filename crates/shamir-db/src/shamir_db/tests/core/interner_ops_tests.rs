@@ -82,17 +82,11 @@ async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
         .expect("batch request encoding");
     request.interner_epochs.insert("main".into(), 0);
 
-    let error = shamir
+    let response = shamir
         .execute_as(crate::access::Actor::User(99), "testdb", &request)
         .await
-        .expect_err("ambient interner data must require Store Read");
-    assert!(matches!(
-        error,
-        crate::query::batch::BatchError::QueryError {
-            code: Some(ref code),
-            ..
-        } if code == "access_denied"
-    ));
+        .expect("denied ambient repositories are skipped");
+    assert!(!response.interner_delta.contains_key("main"));
 }
 
 #[tokio::test]

@@ -407,7 +407,7 @@ async fn rv_db_fa80a7b8_typed_not_found_classification_ignores_message_text() {
 }
 
 #[tokio::test]
-async fn rv_db_fa80a7b8_real_directory_missing_user_is_typed_not_found() {
+async fn rv_db_fa80a7b8_fake_port_missing_user_is_typed_not_found() {
     let shamir = setup().await;
     let port = Arc::new(FailingRolePort {
         message: "native directory missing-user diagnostic".to_string(),
