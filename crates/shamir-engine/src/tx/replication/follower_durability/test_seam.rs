@@ -11,6 +11,19 @@ pub(crate) enum Phase {
     Checkpointed,
 }
 
+#[cfg(test)]
+fn maybe_panic_after(hook: &Hook, phase: Phase) {
+    if *hook
+        .panic_after
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        == Some(phase)
+    {
+        hook.reached.notify_waiters();
+        panic!("injected receipt panic after {phase:?}");
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Hook {
     pub park_at: Mutex<Option<Phase>>,
@@ -41,12 +54,18 @@ fn hooks() -> &'static Mutex<TFxMap<String, Arc<Hook>>> {
 
 #[cfg(feature = "fjall")]
 pub(crate) fn install(repo_name: &str, hook: Arc<Hook>) {
-    hooks().lock().unwrap().insert(repo_name.to_owned(), hook);
+    hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(repo_name.to_owned(), hook);
 }
 
 #[cfg(feature = "fjall")]
 pub(crate) fn remove(repo_name: &str) {
-    hooks().lock().unwrap().remove(repo_name);
+    hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(repo_name);
 }
 
 /// Consume the one-shot post-`phase` failure flag for `repo_name` (armed
@@ -54,11 +73,16 @@ pub(crate) fn remove(repo_name: &str) {
 /// caller must return the injected `DbError::Storage("injected")`. Sticky
 /// mode leaves the flag armed so every retry attempt fails too.
 pub(crate) fn take_fail_after(repo_name: &str, phase: Phase) -> bool {
-    let hooks = hooks().lock().unwrap();
+    let hooks = hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(hook) = hooks.get(repo_name) else {
         return false;
     };
-    let mut slot = hook.fail_after.lock().unwrap();
+    let mut slot = hook
+        .fail_after
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if *slot != Some(phase) {
         return false;
     }
@@ -74,15 +98,23 @@ pub(crate) fn take_fail_after(repo_name: &str, phase: Phase) -> bool {
 pub(crate) fn fail_after_reopen(repo_name: &str) -> bool {
     hooks()
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(repo_name)
         .is_some_and(|hook| hook.fail_after_reopen.load(Ordering::Acquire))
 }
 
 pub(crate) async fn phase(repo_name: &str, phase: Phase) {
-    let hook = hooks().lock().unwrap().get(repo_name).cloned();
+    let hook = hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(repo_name)
+        .cloned();
     if let Some(hook) = hook {
-        let park = *hook.park_at.lock().unwrap() == Some(phase);
+        let park = *hook
+            .park_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == Some(phase);
         if park {
             let resumed = hook.resume.notified();
             tokio::pin!(resumed);
@@ -91,11 +123,13 @@ pub(crate) async fn phase(repo_name: &str, phase: Phase) {
             resumed.await;
         }
         #[cfg(test)]
-        if *hook.panic_after.lock().unwrap() == Some(phase) {
-            hook.reached.notify_waiters();
-            panic!("injected receipt panic after {phase:?}");
-        }
-        if *hook.abort_at.lock().unwrap() == Some(phase) {
+        maybe_panic_after(&hook, phase);
+        if *hook
+            .abort_at
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            == Some(phase)
+        {
             // The notify lets an in-process observer proceed before the
             // abort (kill without graceful shutdown, for the crash harness).
             hook.reached.notify_waiters();

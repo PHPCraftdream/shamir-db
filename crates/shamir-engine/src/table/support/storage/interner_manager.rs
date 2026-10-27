@@ -151,7 +151,13 @@ impl InternerManager {
     /// treating it as fatal does not interact badly with those invariants.
     pub async fn get(&self) -> DbResult<&Interner> {
         if self.interner.get().is_some() {
-            return Ok(self.interner.get().unwrap());
+            return Ok({
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "guard: the preceding get().is_some() check proves the OnceCell is initialized"
+                )]
+                self.interner.get().unwrap()
+            });
         }
 
         let info_store = Arc::clone(&self.info_store);
@@ -226,7 +232,13 @@ impl InternerManager {
             })
             .await?;
 
-        Ok(self.interner.get().unwrap())
+        Ok({
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: get_or_try_init completed successfully and initialized the OnceCell"
+            )]
+            self.interner.get().unwrap()
+        })
     }
 
     /// Save new interned keys to storage as a single delta chunk.
