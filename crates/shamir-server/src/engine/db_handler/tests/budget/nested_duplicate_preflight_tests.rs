@@ -68,7 +68,9 @@ async fn rv_collections_da7d2cd3_builder_insert_cap_is_validated_before_decode()
     }
     let insert = write::insert("t").row(row).build();
     batch.op("insert", insert);
-    let batch_request = batch.to_request_via_msgpack();
+    let batch_request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     #[derive(Serialize)]
     struct BuilderExecute<'a> {
         op: &'static str,

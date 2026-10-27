@@ -77,7 +77,9 @@ async fn rv_types_2eb39dfd_touch_quota_persists_prefix_without_rejected_id() {
         "touch",
         ddl::interner_touch(["accepted_prefix", "rejected_suffix"]),
     );
-    let request = batch.to_request_via_msgpack();
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     let error = shamir
         .execute("testdb", &request)
         .await
