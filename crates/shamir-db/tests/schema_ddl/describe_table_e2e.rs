@@ -48,7 +48,13 @@ async fn describe_table_returns_all_sections() {
     // 2. Set retention to "keep all" (default Retention = Forever = all None).
     let mut b = Batch::new();
     b.id(2);
-    b.set_retention("ret", ddl::set_retention("users", Retention::default()));
+    b.set_retention(
+        "ret",
+        ddl::set_retention("users", Retention::default())
+            .hmac("direct-db-test")
+            .build()
+            .unwrap(),
+    );
     let resp = exec(&db, "testdb", &b).await;
     let r = result_map(&resp, "ret");
     assert_eq!(r.get("ok").and_then(|v| v.as_bool()), Some(true));

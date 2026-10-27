@@ -185,10 +185,11 @@ resp.transaction; // undefined
 
 ### Как работает
 
-1. Ключ = `SHA256("shamir-db hmac key v1\0" || session_id)`.
-2. Канонический вход — null-byte-separated байты, например:
-   `drop_table\0<db>\0<repo>\0<table>`.
+1. Ключ = `SHA256("shamir-db hmac key v1\0" || session_id)` (без изменений).
+2. Канонический вход: `b"shamir-db hmac canonical v2\0" || op_tag:u16be || fields`; строки — `u32be` длина UTF-8 в байтах и байты (без нормализации), `u64`/`u16` — big-endian, `bool` — `00`/`01`, `Option<T>` — `00` для None или `01 || T` для Some, списки — `u32be` count и элементы в wire order, enum — `u8` variant index и payload. Digest-поля — SHA-256 точных wire-string bytes. Порядок и схема полей определены для каждого op tag; теги v1 на null-separated bytes не принимаются.
 3. HMAC-SHA256 → hex-тег → поле `"hmac"` в операции.
+
+Изменение касается только ephemeral HMAC tags: на диске ничего не меняется. В Batch ForEach подписывается сама операция с неразрешёнными template-значениями; после разрешения на каждую итерацию новая подпись не создаётся. Отдельного template signing API нет.
 
 TS-клиент скрывает механику — передай подключённый `client` как `signer`:
 
