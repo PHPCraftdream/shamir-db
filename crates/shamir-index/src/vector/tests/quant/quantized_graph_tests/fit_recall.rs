@@ -86,10 +86,12 @@ async fn fit_transition_at_threshold_body() {
     );
 
     // Cross the threshold — the 256th upsert triggers fit.
+    let fit_wait = adapter.clone_for_fit();
     adapter.upsert(rid(255), &data[255]).await.unwrap();
+    super::super::super::super::hnsw_adapter::wait_for_fit(&fit_wait).await;
     assert!(adapter.is_quantized(), "adapter did not fit at threshold");
-    assert!(adapter.quantizer().is_some());
     assert!(adapter.hnsw_u8_handle().is_some());
+    assert!(adapter.quantizer().is_some());
     // #418 — post-fit, the f32 graph is DROPPED (the whole point of SQ8:
     // freeing the 4·dim·N bytes the f32 graph retains). This is the
     // deterministic memory-regression check — stronger than a flaky RSS
@@ -161,6 +163,9 @@ async fn recall_sq8_vs_f32_within_two_percent_body() {
     f32_adapter.upsert_batch(&items).await.unwrap();
     phase("recall_sq8_vs_f32", "sq8 upsert_batch");
     sq8_adapter.upsert_batch(&items).await.unwrap();
+    // The fit is scheduled, not awaited, by the batch path — wait for it
+    // deterministically before asserting publication.
+    crate::vector::hnsw_adapter::wait_for_fit(&sq8_adapter).await;
     assert!(sq8_adapter.is_quantized(), "SQ8 adapter did not fit");
     phase("recall_sq8_vs_f32", "queries");
 
@@ -258,6 +263,7 @@ async fn concurrent_upsert_across_threshold_no_loss_body() {
     phase("concurrent_upsert_no_loss", "tasks joined");
 
     // The adapter MUST have fitted (400 > 256).
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit under load");
 
     // Every upserted rid must be RETRIEVABLE — this test verifies no vector
@@ -342,6 +348,7 @@ async fn concurrent_upsert_across_threshold_no_duplicate_rids_body() {
         h.await.unwrap();
     }
 
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit under load");
 
     // Search with large k — if a rid appears twice, it means a duplicate
@@ -396,6 +403,7 @@ async fn cosine_quantized_graph_no_panic_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized(), "adapter did not fit");
 
     // Search must not panic (the clamp prevents negative distances).
@@ -441,6 +449,7 @@ async fn delete_on_quantized_index_body() {
         .map(|(i, v)| (rid(i as u64), v.clone()))
         .collect();
     adapter.upsert_batch(&items).await.unwrap();
+    crate::vector::hnsw_adapter::await_fitted(&adapter).await;
     assert!(adapter.is_quantized());
 
     // Delete rid(5).

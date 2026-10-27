@@ -11,6 +11,31 @@ use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
+/// Not a latency assertion: these tests need the clean shutdown to finish.
+/// Windows CI runners stall every process's fsync for 10+ s at times, so any
+/// wall-clock budget here is a false failure; nextest's per-test timeout is
+/// the hang detector and names the test.
+const BOOT_TEST_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Re-open the system store expecting a boot rejection, retrying while the
+/// dropped instance still holds the fjall file lock (released lazily after
+/// the drop). Returns the rejection's message.
+async fn boot_rejection(path: std::path::PathBuf) -> String {
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(path.clone())).await {
+            Ok(_) => panic!("boot must be rejected"),
+            Err(e) => {
+                let message = e.to_string();
+                if !message.contains("Locked") {
+                    return message;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
+}
+
 const TEST_WASM: &str = r#"
 (module
   (memory (export "memory") 2)
@@ -327,15 +352,15 @@ async fn rv_db_a7a29b02_boot_rejects_missing_parent_repository() {
         .await
         .unwrap();
     db.system_store()
-        .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(1))
+        .flush_buffers_with_quiesce_timeout(BOOT_TEST_FLUSH_BUDGET)
         .await
         .unwrap();
     drop(db);
-    let result = ShamirDb::init(SystemStoreConfig::Fjall(path)).await;
-    let Err(error) = result else {
-        panic!("missing-parent repository must reject boot");
-    };
-    assert!(error.to_string().contains("missing_parent/orphan_repo"));
+    let error = boot_rejection(path).await;
+    assert!(
+        error.contains("missing_parent/orphan_repo"),
+        "unexpected boot error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -362,15 +387,15 @@ async fn rv_db_d378c582_boot_rejects_builtin_name_collision() {
         .await
         .unwrap();
     db.system_store()
-        .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(1))
+        .flush_buffers_with_quiesce_timeout(BOOT_TEST_FLUSH_BUDGET)
         .await
         .unwrap();
     drop(db);
-    let result = ShamirDb::init(SystemStoreConfig::Fjall(path)).await;
-    let Err(error) = result else {
-        panic!("persisted builtin collision must reject boot");
-    };
-    assert!(error.to_string().contains("collides with a builtin"));
+    let error = boot_rejection(path).await;
+    assert!(
+        error.contains("collides with a builtin"),
+        "unexpected boot error: {error}"
+    );
 }
 
 #[tokio::test]
