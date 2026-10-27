@@ -15,10 +15,18 @@ use crate::builtin::Argon2idFunction;
 use shamir_collections::THasher;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::OnceLock;
+
+/// Test-only hook run between rename's install and retire steps.
+#[cfg(test)]
+type InterleaveHook = Box<dyn Fn(&FunctionRegistry) + Send + Sync>;
 
 /// Maps an invocation name to a compiled [`ShamirFunction`].
 pub struct FunctionRegistry {
     functions: scc::HashMap<String, Arc<dyn ShamirFunction>, THasher>,
+    #[cfg(test)]
+    pub(crate) interleave: OnceLock<InterleaveHook>,
 }
 
 impl FunctionRegistry {
@@ -26,6 +34,8 @@ impl FunctionRegistry {
     pub fn new() -> Self {
         Self {
             functions: scc::HashMap::with_hasher(THasher::default()),
+            #[cfg(test)]
+            interleave: OnceLock::new(),
         }
     }
 
@@ -74,22 +84,35 @@ impl FunctionRegistry {
 
     /// Rename `from` → `to` (pure re-key, no recompile). Errors if `from` is
     /// missing or `to` is already taken.
+    ///
+    /// The target is installed before retiring the source, so concurrent
+    /// readers never see an absence caused by the rename itself.
     pub fn rename(&self, from: &str, to: &str) -> FnResult<()> {
-        if self.functions.contains_sync(to) {
-            return Err(FunctionError::AlreadyExists(to.to_string()));
-        }
-        let (_, f) = self
-            .functions
-            .remove_sync(from)
+        let function = self
+            .get(from)
             .ok_or_else(|| FunctionError::NotFound(from.to_string()))?;
-        // `to` was free a moment ago; if a racing register grabbed it, put
-        // `from` back and report the collision.
         self.functions
-            .insert_sync(to.to_string(), f)
-            .map_err(|(_, f)| {
-                let _ = self.functions.insert_sync(from.to_string(), f);
-                FunctionError::AlreadyExists(to.to_string())
-            })
+            .insert_sync(to.to_string(), function.clone())
+            .map_err(|_| FunctionError::AlreadyExists(to.to_string()))?;
+
+        let same = |candidate: &Arc<dyn ShamirFunction>| {
+            std::ptr::addr_eq(Arc::as_ptr(candidate), Arc::as_ptr(&function))
+        };
+        #[cfg(test)]
+        if let Some(interleave) = self.interleave.get() {
+            interleave(self);
+        }
+        if self
+            .functions
+            .remove_if_sync(from, |candidate| same(candidate))
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        self.functions
+            .remove_if_sync(to, |candidate| same(candidate));
+        Err(FunctionError::NotFound(from.to_string()))
     }
 
     /// Snapshot of registered names.
