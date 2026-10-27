@@ -449,7 +449,7 @@ async fn rv_db_b26124d9_rename_preserves_schema_catalogue_fields() {
             .await
             .unwrap();
 
-        db.flush_all().await.unwrap();
+        db.flush_all_for_test().await.unwrap();
     }
     let db = ShamirDb::init(SystemStoreConfig::Fjall(path))
         .await
