@@ -3,8 +3,8 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use shamir_types::core::interner::Interner;
 
-use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record};
 use crate::query::filter::compile::try_compile_filter;
+use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record};
 
 // ============================================================================
 // Like / ILike
