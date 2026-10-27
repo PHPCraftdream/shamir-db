@@ -339,6 +339,62 @@ async fn wasm_aggregate_fuel_default_single_call_still_succeeds() {
     assert_eq!(result, expected);
 }
 
+const GLOBAL_SET_FAILURE_WAT: &str = r#"
+(module
+  (import "shamir_host" "global_set" (func $set (param i32 i32 i32 i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 1024) "env.x")
+  (func (export "shamir_alloc") (param i32) (result i32) (i32.const 2048))
+  (func (export "shamir_call") (param i32 i32) (result i64)
+    (call $set (i32.const 1024) (i32.const 5) (i32.const 1029) (i32.const 1))
+    (i64.const 0))
+)
+"#;
+
+const BATCH_PUT_OOB_WAT: &str = r#"
+(module
+  (import "shamir_host" "batch_put" (func $put (param i32 i32 i32 i32)))
+  (memory (export "memory") 1)
+  (func (export "shamir_alloc") (param i32) (result i32) (i32.const 1024))
+  (func (export "shamir_call") (param i32 i32) (result i64)
+    (call $put (i32.const 65535) (i32.const 2) (i32.const 0) (i32.const 1))
+    (i64.const 0))
+)
+"#;
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_global_set_env_namespace_traps() {
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let function =
+        WasmFunction::from_wat(engine, GLOBAL_SET_FAILURE_WAT, WasmLimits::default()).unwrap();
+    let error = function
+        .call(&FnCtx::new(), &FnBatch::new(), &Params::new())
+        .await
+        .expect_err("guest env write must trap");
+    match error {
+        FunctionError::Compute(message) => {
+            assert!(message.contains("shamir_call trap"), "{message}");
+        }
+        other => panic!("expected host-import trap, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_batch_put_out_of_bounds_traps() {
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let function =
+        WasmFunction::from_wat(engine, BATCH_PUT_OOB_WAT, WasmLimits::default()).unwrap();
+    let error = function
+        .call(&FnCtx::new(), &FnBatch::new(), &Params::new())
+        .await
+        .expect_err("out-of-bounds import input must trap");
+    match error {
+        FunctionError::Compute(message) => {
+            assert!(message.contains("shamir_call trap"), "{message}");
+        }
+        other => panic!("expected host-import trap, got {other:?}"),
+    }
+}
 #[test]
 fn rv_wasm_host_b1a78b5b_guest_params_colon_key_round_trips() {
     // RV-WASM-HOST-B1A78B5B: the `call` host import's guest-parameter decode
