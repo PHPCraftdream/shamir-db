@@ -214,7 +214,12 @@ async fn rv_db_0486e3f9_replication_profile_create_flush_failure_propagates() {
             ReplMode::ReadOnly,
         ),
     );
-    let result = shamir.execute("testdb", &b.to_request_via_msgpack()).await;
+    let result = shamir
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         result.is_err(),
         "create-replication-profile must surface the flush failure"
@@ -423,9 +428,12 @@ async fn rv_db_b26124d9_rename_preserves_schema_catalogue_fields() {
             "ss",
             ddl::set_table_schema("items").repo("old").rules(rules),
         );
-        db.execute("before", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "before",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
 
         let before = db
             .system_store()
@@ -496,9 +504,21 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
         .unwrap();
     let mut first = Batch::new();
     first.id(1);
-    first.op("drop", ddl::drop_function("orphan").if_exists());
+    first.op(
+        "drop",
+        ddl::drop_function("orphan")
+            .hmac("test-hmac")
+            .if_exists()
+            .build()
+            .expect("build DropFunction"),
+    );
     let resp = db
-        .execute("testdb", &first.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &first
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let dropped = resp.results["drop"].records[0].as_value().into_owned();
@@ -506,9 +526,21 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
 
     let mut second = Batch::new();
     second.id(2);
-    second.op("drop", ddl::drop_function("orphan").if_exists());
+    second.op(
+        "drop",
+        ddl::drop_function("orphan")
+            .hmac("test-hmac")
+            .if_exists()
+            .build()
+            .expect("build DropFunction"),
+    );
     let resp = db
-        .execute("testdb", &second.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &second
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let dropped = resp.results["drop"].records[0].as_value().into_owned();

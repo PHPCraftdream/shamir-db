@@ -61,7 +61,10 @@ async fn exec_set_schema(db: &ShamirDb) -> QueryValue {
     b.id(1);
     b.set_table_schema("ss", ddl::set_table_schema("users").rules(rules));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("set_table_schema should succeed");
     resp.results["ss"].records[0].as_value().as_ref().clone()
@@ -73,7 +76,10 @@ async fn read_schema(db: &ShamirDb) -> QueryValue {
     b.id(1);
     b.get_table_schema("gs", ddl::get_table_schema("users"));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("get_table_schema should succeed");
     resp.results["gs"].records[0].as_value().as_ref().clone()
@@ -93,7 +99,7 @@ fn set_schema_request() -> BatchRequest {
     let mut b = Batch::new();
     b.id(1);
     b.set_table_schema("ss", ddl::set_table_schema("users").rules(rules));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -142,9 +148,12 @@ async fn keyset_safe_true_for_empty_table_after_add_schema_rule() {
     b.id(1);
     b.try_add_schema_rule("asr", ddl::add_schema_rule("users").rule(rule))
         .unwrap();
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .expect("add_schema_rule should succeed");
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .expect("add_schema_rule should succeed");
 
     let schema = read_schema(&db).await;
     assert_eq!(

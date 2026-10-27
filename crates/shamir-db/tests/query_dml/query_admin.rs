@@ -41,7 +41,10 @@ async fn test_list_databases() {
     b.id(1);
     b.list_databases("dbs", ddl::list_databases());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -58,7 +61,10 @@ async fn test_list_repos() {
     b.id(1);
     b.list_repos("repos", ddl::list_repos());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -75,7 +81,10 @@ async fn test_list_tables() {
     b.id(1);
     b.list_tables("tables", ddl::list_tables().repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -101,7 +110,10 @@ async fn test_create_repo() {
             .tables(["sessions", "tokens"]),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -114,7 +126,10 @@ async fn test_create_repo() {
     b.id(2);
     b.list_repos("repos", ddl::list_repos());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let rec_val = resp.results["repos"].records[0].as_value().into_owned();
@@ -130,9 +145,18 @@ async fn test_drop_repo() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("create", ddl::create_repo("temp").engine("in_memory"));
-    b.drop_repo("drop", ddl::drop_repo("temp"));
+    b.drop_repo(
+        "drop",
+        ddl::drop_repo("temp")
+            .hmac("dummy")
+            .build()
+            .expect("build DropRepo"),
+    );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -159,7 +183,11 @@ async fn test_create_index_via_query() {
             doc! { "name" => "Bob", "email" => "bob@test.com" },
         ]),
     );
-    exec_built(&shamir, b.to_request_via_msgpack()).await;
+    exec_built(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
 
     // Create index
     let mut b = Batch::new();
@@ -171,7 +199,10 @@ async fn test_create_index_via_query() {
             .unique(),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -190,7 +221,11 @@ async fn test_create_index_via_query() {
         "find",
         Query::from("users").where_eq("email", "alice@test.com"),
     );
-    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec_built(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(resp.results["find"].records.len(), 1);
     assert_eq!(
         resp.results["find"].records[0].get_value_str("name"),
@@ -209,9 +244,18 @@ async fn test_drop_index_via_query() {
         "create",
         ddl::create_index("name_idx", "users").fields(vec![vec!["name".to_owned()]]),
     );
-    b.drop_index("drop", ddl::drop_index("name_idx", "users"));
+    b.drop_index(
+        "drop",
+        ddl::drop_index("name_idx", "users")
+            .hmac("dummy")
+            .build()
+            .expect("build DropIndex"),
+    );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -239,7 +283,10 @@ async fn test_ddl_then_dml_pipeline() {
             .tables(["products", "orders"]),
     );
     shamir
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -259,7 +306,10 @@ async fn test_ddl_then_dml_pipeline() {
         ddl::create_index("price_idx", "products").fields(vec![vec!["price".to_owned()]]),
     );
     let resp = shamir
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(resp.results["products"].records.len(), 3);
@@ -269,7 +319,10 @@ async fn test_ddl_then_dml_pipeline() {
     b.id("query");
     b.query("cheap", Query::from("products").where_eq("price", 10));
     let resp = shamir
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(resp.results["cheap"].records.len(), 1);
@@ -305,7 +358,10 @@ async fn test_list_indexes() {
             .unique(),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -314,7 +370,10 @@ async fn test_list_indexes() {
     b.id(2);
     b.list_indexes("idxs", ddl::list_indexes("users"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -350,7 +409,10 @@ async fn test_create_table_then_use_it() {
     b.id(1);
     b.create_table("ct", ddl::create_table("products").repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -363,7 +425,10 @@ async fn test_create_table_then_use_it() {
     b.id(2);
     b.list_tables("tables", ddl::list_tables().repo("main"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let rec = resp.results["tables"].records[0].as_value().into_owned();
@@ -380,14 +445,22 @@ async fn test_create_table_then_use_it() {
             doc! { "name" => "Gadget", "price" => 25 },
         ]),
     );
-    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec_built(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(resp.results["ins"].records.len(), 2);
 
     // Read back
     let mut b = Batch::new();
     b.id(4);
     b.query("all", Query::from("products"));
-    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec_built(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(resp.results["all"].records.len(), 2);
 }
 
@@ -398,9 +471,19 @@ async fn test_drop_table() {
     // Drop existing table
     let mut b = Batch::new();
     b.id(1);
-    b.drop_table("dt", ddl::drop_table("users").repo("main"));
+    b.drop_table(
+        "dt",
+        ddl::drop_table("users")
+            .repo("main")
+            .hmac("dummy")
+            .build()
+            .expect("build DropTable"),
+    );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -413,7 +496,10 @@ async fn test_drop_table() {
     b.id(2);
     b.insert("ins", insert("users").row(doc! { "name" => "Alice" }));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -428,9 +514,19 @@ async fn test_drop_nonexistent_table() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_table("dt", ddl::drop_table("nonexistent").repo("main"));
+    b.drop_table(
+        "dt",
+        ddl::drop_table("nonexistent")
+            .repo("main")
+            .hmac("dummy")
+            .build()
+            .expect("build DropTable"),
+    );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -451,7 +547,10 @@ async fn test_admin_unknown_repo_error() {
     b.id(1);
     b.list_tables("tables", ddl::list_tables().repo("nonexistent"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(

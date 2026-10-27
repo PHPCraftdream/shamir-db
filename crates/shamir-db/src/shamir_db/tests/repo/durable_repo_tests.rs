@@ -48,7 +48,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
-        let create = b.to_request_via_msgpack();
+        let create = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = shamir.execute("appdb", &create).await.unwrap();
         assert_eq!(
             resp.results["cr"].records[0].get_value_str("created_repo"),
@@ -64,7 +64,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
                 "qty" => 42,
             }),
         );
-        let insert = b.to_request_via_msgpack();
+        let insert = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
     }
@@ -80,7 +80,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
     let mut b = Batch::new();
     b.id(3);
     b.query("r", Query::with_repo("data", "items"));
-    let read = b.to_request_via_msgpack();
+    let read = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("appdb", &read).await.unwrap();
     let records = &resp.results["r"].records;
     assert_eq!(
@@ -116,7 +116,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
                 .engine("in_memory")
                 .tables(["tmp"]),
         );
-        let create = b.to_request_via_msgpack();
+        let create = b.to_request_via_msgpack().expect("batch request encoding");
         shamir.execute("appdb", &create).await.unwrap();
 
         let mut b = Batch::new();
@@ -127,7 +127,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
                 "val" => "gone",
             }),
         );
-        let insert = b.to_request_via_msgpack();
+        let insert = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = shamir.execute("appdb", &insert).await.unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
     }
@@ -143,7 +143,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
     let mut b = Batch::new();
     b.id(3);
     b.query("r", Query::with_repo("scratch", "tmp"));
-    let read = b.to_request_via_msgpack();
+    let read = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("appdb", &read).await.unwrap();
     assert_eq!(
         resp.results["r"].records.len(),
@@ -168,7 +168,7 @@ async fn durable_repo_file_mirrors_db_repo_tree() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("data").tables(["items"]));
-    let create = b.to_request_via_msgpack();
+    let create = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("appdb", &create).await.unwrap();
 
     let expected = dir.path().join("appdb").join("data");
