@@ -317,7 +317,8 @@ impl PaginationInfo {
                 let total_pages = total.div_ceil(page_size);
                 let has_next = skip.saturating_add(page_size) < total;
                 let current_page = match pagination {
-                    Pagination::Page { page, .. } => Some(*page),
+                    // page 0 resolves as page 1 (see `resolve`)
+                    Pagination::Page { page, .. } => Some((*page).max(1)),
                     _ => Option::None,
                 };
                 PaginationInfo {
@@ -333,7 +334,8 @@ impl PaginationInfo {
                 // No total count — we can't compute total_pages, but can still
                 // provide page_size and current_page
                 let current_page = match pagination {
-                    Pagination::Page { page, .. } => Some(*page),
+                    // page 0 resolves as page 1 (see `resolve`)
+                    Pagination::Page { page, .. } => Some((*page).max(1)),
                     _ => Option::None,
                 };
                 PaginationInfo {

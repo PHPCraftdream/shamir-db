@@ -27,11 +27,14 @@ fn fts_serde_round_trip() {
 
 #[test]
 fn fts_default_mode_is_and() {
-    let f = Filter::Fts {
-        field: vec!["body".to_string()],
-        query: "test".to_string(),
-        mode: "and".to_string(),
-    };
+    let f: Filter = serde_json::from_str(
+        r#"{
+            "op": "fts",
+            "field": "body",
+            "query": "test"
+        }"#,
+    )
+    .unwrap();
     match &f {
         Filter::Fts { mode, .. } => assert_eq!(mode, "and"),
         _ => panic!("expected Fts"),
@@ -184,17 +187,19 @@ fn existing_eq_still_works() {
 
 #[test]
 fn field_accepts_bare_string_as_single_segment() {
-    // A single-segment field must round-trip identically.
-    let f = Filter::Eq {
-        field: vec!["id".to_string()],
-        value: FilterValue::String("user:42".into()),
-    };
+    // A bare JSON string `"field": "id"` must decode to a one-segment path.
+    let f: Filter = serde_json::from_str(
+        r#"{
+            "op": "eq",
+            "field": "id",
+            "value": "user:42"
+        }"#,
+    )
+    .unwrap();
     match &f {
         Filter::Eq { field, .. } => assert_eq!(field, &["id"]),
         _ => panic!("expected Eq"),
     }
-    let f2 = roundtrip_filter(&f);
-    assert_eq!(f, f2);
 }
 
 #[test]
@@ -207,6 +212,30 @@ fn field_accepts_nested_path_array() {
         Filter::Eq { field, .. } => assert_eq!(field, &["address", "city"]),
         _ => panic!("expected Eq"),
     }
+}
+
+/// `levels` filters deep: `levels - 1` `Not` wrappers around an `IsNull` leaf.
+/// The leaf sits at depth `levels` (the root is depth 1).
+fn not_chain(levels: usize) -> Filter {
+    let mut f = Filter::IsNull {
+        field: vec!["id".to_string()],
+    };
+    for _ in 1..levels {
+        f = Filter::Not {
+            filter: Box::new(f),
+        };
+    }
+    f
+}
+
+#[test]
+fn rv_query_types_3bfd1858_depth_cap_accepts_exactly_max() {
+    assert!(check_filter_depth(&not_chain(MAX_FILTER_DEPTH)).is_ok());
+}
+
+#[test]
+fn rv_query_types_3bfd1858_depth_cap_rejects_max_plus_one() {
+    assert!(check_filter_depth(&not_chain(MAX_FILTER_DEPTH + 1)).is_err());
 }
 
 #[test]
