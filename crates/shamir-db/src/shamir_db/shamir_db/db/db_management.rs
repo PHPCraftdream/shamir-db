@@ -115,6 +115,7 @@ impl ShamirDb {
         // Round 2 (A6) lifecycle interlock: ONE lock shared with the
         // subscription catalogue writers, taken here so every existing
         // caller keeps the interlock without changes.
+        let _create_guard = self.db_create_lock().lock().await;
         let _control = self.lock_replication_control().await;
         self.remove_db_locked(name, &_control).await
     }
@@ -185,10 +186,8 @@ impl ShamirDb {
     /// - The source database must exist (in-memory OR persisted).
     /// - The destination must NOT exist (in-memory AND persisted).
     pub async fn rename_db_as(&self, from: &str, to: &str, _actor: Actor) -> DbResult<()> {
-        // ── Guards ────────────────────────────────────────────────────
-        // Round 2 (A6) lifecycle interlock: taken BEFORE the binding guard
-        // — ONE lock shared with the subscription catalogue writers, so the
-        // check-then-act below cannot race a concurrent catalogue write.
+        // Hold database-create admission through namespace publication.
+        let _create_guard = self.db_create_lock().lock().await;
         let _control = self.lock_replication_control().await;
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation
@@ -400,8 +399,25 @@ impl ShamirDb {
         actor: Actor,
         durability: Option<&DurabilityOverride>,
     ) -> DbResult<()> {
-        // Owned clone (cheap Arc) — never hold the DashMap shard guard
-        // across the `add_repo` / recovery awaits below.
+        let repo_lock = self
+            .repo_create_locks()
+            .entry(db_name.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _create_guard = repo_lock.lock().await;
+        let _control = self.lock_replication_control().await;
+        self.add_repo_as_with_durability_locked(db_name, config, actor, durability, &_control)
+            .await
+    }
+
+    pub(crate) async fn add_repo_as_with_durability_locked(
+        &self,
+        db_name: &str,
+        config: RepoConfig,
+        actor: Actor,
+        durability: Option<&DurabilityOverride>,
+        _control: &ReplicationControlGuard<'_>,
+    ) -> DbResult<()> {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
@@ -509,9 +525,12 @@ impl ShamirDb {
     }
 
     pub async fn remove_repo(&self, db_name: &str, repo_name: &str) -> DbResult<bool> {
-        // Round 2 (A6) lifecycle interlock: ONE lock shared with the
-        // subscription catalogue writers, taken here so every existing
-        // caller keeps the interlock without changes.
+        let repo_lock = self
+            .repo_create_locks()
+            .entry(db_name.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _create_guard = repo_lock.lock().await;
         let _control = self.lock_replication_control().await;
         self.remove_repo_locked(db_name, repo_name, &_control).await
     }
@@ -571,9 +590,12 @@ impl ShamirDb {
         to: &str,
         _actor: Actor,
     ) -> DbResult<()> {
-        // Round 2 (A6) lifecycle interlock: taken BEFORE the binding guard
-        // — ONE lock shared with the subscription catalogue writers, so the
-        // check-then-act below cannot race a concurrent catalogue write.
+        let repo_lock = self
+            .repo_create_locks()
+            .entry(db_name.to_string())
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _create_guard = repo_lock.lock().await;
         let _control = self.lock_replication_control().await;
         // S5c-X PR8b-2: refuse RENAME of a destination referenced by a
         // durable subscription binding BEFORE any live or durable mutation.

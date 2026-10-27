@@ -276,6 +276,8 @@ impl SystemStore {
     /// Load every persisted table-catalogue record (across all repos). The
     /// caller filters by `db_name` / `repo_name`.
     pub async fn load_tables(&self) -> DbResult<Vec<QueryValue>> {
+        #[cfg(test)]
+        self.count_table_catalogue_read();
         let table = self.table(TABLE_TABLES).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -369,6 +371,8 @@ impl SystemStore {
         repo_name: &str,
         table_name: &str,
     ) -> DbResult<Option<QueryValue>> {
+        #[cfg(test)]
+        self.count_table_catalogue_read();
         let table = self.table(TABLE_TABLES).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
