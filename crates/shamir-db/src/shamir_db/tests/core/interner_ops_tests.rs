@@ -23,6 +23,22 @@ async fn setup_shamir() -> ShamirDb {
     shamir
 }
 
+/// Like [`setup_shamir`], but registers the repo through `ShamirDb::add_repo`
+/// so its Store catalogue row (and therefore its ACL meta) exists.
+async fn setup_catalogued_shamir() -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.expect("create_db");
+    shamir
+        .add_repo(
+            "testdb",
+            RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    shamir
+}
+
 /// Run a single admin op through the real pipeline, returning the first
 /// result record (the QueryValue the handler wrapped via admin_result).
 async fn run_one(
@@ -39,7 +55,7 @@ async fn run_one(
 
 #[tokio::test]
 async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
-    let shamir = setup_shamir().await;
+    let shamir = setup_catalogued_shamir().await;
     shamir
         .set_resource_meta(
             &crate::access::ResourcePath::database("testdb"),
@@ -79,7 +95,7 @@ async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
 
 #[tokio::test]
 async fn rv_db_4d93f623_ambient_delta_succeeds_with_store_read() {
-    let shamir = setup_shamir().await;
+    let shamir = setup_catalogued_shamir().await;
     shamir
         .set_resource_meta(
             &crate::access::ResourcePath::database("testdb"),
