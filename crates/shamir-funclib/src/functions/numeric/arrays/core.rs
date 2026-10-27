@@ -271,12 +271,18 @@ fn reduce(args: &[QueryValue], kind: Reduce) -> crate::registry::ScalarResult {
             Ok(acc)
         }
         Reduce::Sum | Reduce::Avg => {
+            // Checked accumulation: Decimal overflow -> "out_of_range",
+            // never a panic (RV-FUNCLIB-0CEB1AB2).
             let mut acc: Decimal = arg_dec(arr, 0)?;
             for i in 1..arr.len() {
-                acc += arg_dec(arr, i)?;
+                acc = acc
+                    .checked_add(arg_dec(arr, i)?)
+                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
             }
             if let Reduce::Avg = kind {
-                acc /= Decimal::from(arr.len());
+                acc = acc
+                    .checked_div(Decimal::from(arr.len()))
+                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
             }
             Ok(v_dec(acc))
         }

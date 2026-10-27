@@ -6,6 +6,7 @@
 use crate::storage_fjall::FjallRepo;
 use crate::types::{RecordKey, Repo, Store};
 use bytes::Bytes;
+use futures::StreamExt;
 use std::fs;
 
 fn fresh_path(tag: &str) -> String {
@@ -14,6 +15,39 @@ fn fresh_path(tag: &str) -> String {
         fs::remove_dir_all(&path).unwrap();
     }
     path
+}
+
+#[tokio::test]
+async fn rv_storage_5e99bede_fjall_zero_batch_is_empty() {
+    let path = fresh_path("5e99bede");
+    let repo = FjallRepo::new(&path).unwrap();
+    let store = repo.store_get("zero-batch").await.unwrap();
+    store
+        .set(
+            RecordKey::from(Bytes::from_static(b"present")),
+            Bytes::from_static(b"v"),
+        )
+        .await
+        .unwrap();
+    assert!(store.iter_stream(0).next().await.is_none());
+    assert!(store
+        .scan_prefix_stream(Bytes::from_static(b"p"), 0)
+        .next()
+        .await
+        .is_none());
+    assert!(store
+        .iter_range_stream(None, None, 0)
+        .next()
+        .await
+        .is_none());
+    assert!(store
+        .iter_range_stream_reverse(None, None, 0)
+        .next()
+        .await
+        .is_none());
+    drop(store);
+    drop(repo);
+    fs::remove_dir_all(path).ok();
 }
 
 /// RV-STORAGE-CC8D9EB5: the pinned fjall 3.1.6 `WriteBatch::commit` applies

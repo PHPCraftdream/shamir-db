@@ -4,6 +4,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::oneshot;
 
+use super::ChangelogError;
 use super::{version_key, ChangelogStore, JournalMsg, RepoChangefeed};
 
 impl RepoChangefeed {
@@ -16,14 +17,14 @@ impl RepoChangefeed {
     pub async fn install_durable_events(
         self: &Arc<Self>,
         records: Vec<(u64, Bytes)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ChangelogError> {
         let (ack, rx) = oneshot::channel();
         self.journal_tx
             .send(JournalMsg::InstallRecords { records, ack })
             .await
-            .map_err(|_| "journal writer is stopped".to_string())?;
+            .map_err(|_| ChangelogError::Journal("journal writer is stopped".into()))?;
         rx.await
-            .map_err(|_| "journal writer dropped the install ack".to_string())?
+            .map_err(|_| ChangelogError::Journal("journal writer dropped the install ack".into()))?
     }
 }
 
@@ -31,7 +32,7 @@ pub(super) async fn process_install(
     store: &Arc<dyn ChangelogStore>,
     records: Vec<(u64, Bytes)>,
     last_persisted_version: &Arc<AtomicU64>,
-    ack: oneshot::Sender<Result<(), String>>,
+    ack: oneshot::Sender<Result<(), ChangelogError>>,
 ) {
     for (version, bytes) in records {
         if let Err(e) = store.put(version_key(version), bytes).await {
@@ -39,7 +40,10 @@ pub(super) async fn process_install(
             // identical install; a failed put leaves the journal
             // byte-absent and the receipt's read-back validation never
             // certifies it, so a retry can never create a gap.
-            let _ = ack.send(Err(format!("journal install put v{version}: {e}")));
+            let _ = ack.send(Err(ChangelogError::Install {
+                version,
+                message: e.to_string(),
+            }));
             return;
         }
         last_persisted_version.fetch_max(version, Ordering::Release);

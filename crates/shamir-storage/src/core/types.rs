@@ -457,11 +457,13 @@ pub trait Store: Send + Sync {
     /// # Returns
     /// Stream that yields DbResult<Vec<(RecordKey, Bytes)>> - each batch has exactly batch_size items
     /// (except possibly the last batch which may be smaller)
+    /// `batch_size == 0` yields an empty stream.
     fn iter_stream(&self, batch_size: usize) -> RecordStream;
 
     /// Returns an async stream that yields batches of records with keys starting with the given prefix.
     ///
     /// Like `iter_stream()` but filtered by prefix. More efficient than loading all results into memory.
+    /// A zero batch size yields an empty stream.
     ///
     /// # Ordering guarantee
     ///
@@ -479,7 +481,7 @@ pub trait Store: Send + Sync {
     ///
     /// # Arguments
     /// * `prefix` - The prefix to search for
-    /// * `batch_size` - Number of records per batch
+    /// * `batch_size` - Number of records per batch; zero yields an empty stream
     ///
     /// # Returns
     /// Stream that yields batches of matching records
@@ -500,13 +502,16 @@ pub trait Store: Send + Sync {
     /// # Arguments
     /// * `start_inclusive` — lower bound. `None` = scan from the start.
     /// * `end_inclusive` — upper bound. `None` = scan to the end.
-    /// * `batch_size` — number of records per yielded batch.
+    /// * `batch_size` — number of records per yielded batch; zero yields an empty stream.
     fn iter_range_stream(
         &self,
         start_inclusive: Option<Bytes>,
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> RecordStream {
+        if batch_size == 0 {
+            return Box::pin(futures::stream::empty());
+        }
         // Default impl: full scan + in-stream filter. Correct for
         // any backend that has `iter_stream`. Native impls below
         // make it O(log N + K) by seeking into the B-tree.
@@ -519,6 +524,7 @@ pub trait Store: Send + Sync {
     /// sorted-index reads: `lookup_last_k`, `lookup_max`, and
     /// `ORDER BY field DESC LIMIT K`.
     ///
+    /// `batch_size == 0` yields an empty stream.
     /// Default impl: collect the forward-range stream and reverse
     /// it in memory. Correct for any backend, but O(N) memory.
     /// Disk B-tree backends (sled, redb, …) override with a true
@@ -529,6 +535,9 @@ pub trait Store: Send + Sync {
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> RecordStream {
+        if batch_size == 0 {
+            return Box::pin(futures::stream::empty());
+        }
         let inner = self.iter_range_stream(start_inclusive, end_inclusive, batch_size);
         Box::pin(default_reverse(inner, batch_size))
     }

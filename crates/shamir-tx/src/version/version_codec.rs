@@ -7,27 +7,26 @@
 //! gives all versions visible at `snapshot`, with the highest one
 //! at the end of the scan.
 //!
-//! The separator `0xFF` is chosen because:
-//! - It cannot appear in a `RecordId` (16 random bytes that the
-//!   producer guarantees never include `0xFF` as the *first* byte
-//!   after the original key — see invariant below).
-//! - It sorts higher than any normal byte, so `key + 0xFF + version`
-//!   sits at the end of the lexicographic range that starts with
-//!   `key`, never interleaved with sibling keys.
+//! The separator `0xFF` is chosen because it sorts higher than any
+//! normal byte, so `key + 0xFF + version` sorts after the bare `key`
+//! and keeps all versions of a key contiguous in the lexicographic
+//! range that starts with `key`.
 //!
-//! ## Invariant
+//! ## Grammar, not an exclusion invariant
 //!
-//! Callers must guarantee that the original `key` does NOT contain
-//! the byte `0xFF` followed by 8 more bytes that could be mistaken
-//! for a version suffix. In practice:
-//! - User `RecordId` is 16 bytes, the producer is uniformly random,
-//!   so the chance of a tail `0xFF + 8 bytes` is negligible (and
-//!   we don't decode user keys with `decode_version_key` anyway).
-//! - System keys (`SysKey::*`) are produced by the engine and use
-//!   their own typed encoding — they never end in `0xFF` + 8 bytes.
-//!
-//! This is verified by [`decode_version_key`]'s round-trip property
-//! tests below.
+//! The encoding is a fixed-length grammar: `decode_version_key` splits
+//! off the LAST 9 bytes (`0xFF` + big-endian `u64`) and returns the
+//! leading bytes as the original key. There is NO guarantee that an
+//! original key excludes `0xFF` — user `RecordId`s are 16 arbitrary
+//! bytes and may contain it. Two consequences:
+//! - A physical key is only ever fed to `decode_version_key` if it was
+//!   produced by [`encode_version_key`] (or recovered from the same
+//!   log), so the grammar round-trips exactly. This is verified by the
+//!   round-trip property tests below.
+//! - A key whose own bytes contain `key || 0xFF` prefix-collides with
+//!   a shorter key's scan prefix. Prefix scans over version-keys MUST
+//!   therefore filter on the decoded original key, not on the scan's
+//!   requested key.
 
 use bytes::{BufMut, Bytes, BytesMut};
 

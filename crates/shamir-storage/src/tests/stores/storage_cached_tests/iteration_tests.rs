@@ -388,3 +388,58 @@ async fn test_async_mode_many_writes_same_key_land_in_order() {
 // silently lost — the caller had no way to distinguish a failed background
 // write from a successful one, since flush() always returned Ok(())).
 // ============================================================================
+
+#[tokio::test]
+async fn rv_storage_d00d27de_cached_reverse_stream_is_lazy() {
+    let cached = CachedStore::new_sync(Arc::new(InMemoryStore::new()))
+        .await
+        .unwrap();
+    for key in ["a", "b", "c", "d"] {
+        cached
+            .set(RecordKey::from(key.as_bytes().to_vec()), Bytes::from(key))
+            .await
+            .unwrap();
+    }
+    let mut stream = cached.iter_range_stream_reverse(None, None, 1);
+    assert_eq!(stream.next().await.unwrap().unwrap()[0].0.as_ref(), b"d");
+    cached
+        .set(
+            RecordKey::from(b"c".to_vec()),
+            Bytes::from_static(b"fresh-c"),
+        )
+        .await
+        .unwrap();
+    let next = stream.next().await.unwrap().unwrap();
+    assert_eq!(next[0].0.as_ref(), b"c");
+    assert_eq!(next[0].1, Bytes::from_static(b"fresh-c"));
+}
+
+#[tokio::test]
+async fn rv_storage_5e99bede_cached_zero_batch_is_empty() {
+    let cached = CachedStore::new_sync(Arc::new(InMemoryStore::new()))
+        .await
+        .unwrap();
+    cached
+        .set(
+            RecordKey::from(b"present".to_vec()),
+            Bytes::from_static(b"v"),
+        )
+        .await
+        .unwrap();
+    assert!(cached.iter_stream(0).next().await.is_none());
+    assert!(cached
+        .scan_prefix_stream(Bytes::from_static(b"p"), 0)
+        .next()
+        .await
+        .is_none());
+    assert!(cached
+        .iter_range_stream(None, None, 0)
+        .next()
+        .await
+        .is_none());
+    assert!(cached
+        .iter_range_stream_reverse(None, None, 0)
+        .next()
+        .await
+        .is_none());
+}

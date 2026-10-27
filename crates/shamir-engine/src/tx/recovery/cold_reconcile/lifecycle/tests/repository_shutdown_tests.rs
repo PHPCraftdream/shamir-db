@@ -20,6 +20,7 @@ use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::interner_manager::InternerManager;
 use crate::table::TableConfig;
 use crate::tx::IsolationLevel;
+use shamir_tx::ChangelogError;
 
 type StoreStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 
@@ -203,12 +204,16 @@ async fn shutdown_checkpoint_timeout_quarantines_foreground_repo() {
     }
     #[async_trait]
     impl ChangelogStore for ParkJournal {
-        async fn put(&self, _key: Bytes, _value: Bytes) -> Result<(), String> {
+        async fn put(&self, _key: Bytes, _value: Bytes) -> Result<(), ChangelogError> {
             self.entered.notify_one();
             self.release.notified().await;
             Ok(())
         }
-        async fn range_from(&self, _key: Bytes, _limit: usize) -> Result<Vec<Bytes>, String> {
+        async fn range_from(
+            &self,
+            _key: Bytes,
+            _limit: usize,
+        ) -> Result<Vec<Bytes>, ChangelogError> {
             Ok(Vec::new())
         }
     }

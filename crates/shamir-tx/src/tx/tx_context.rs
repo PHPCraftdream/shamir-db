@@ -825,9 +825,9 @@ impl TxContext {
     where
         F: FnMut(u64, &Bytes) -> Option<u64>,
     {
-        // `scc::HashMap::scan` is a synchronous visitor `FnMut(&K, &V)` that
-        // cannot early-return; capture the first conflict and report it after
-        // the scan. Iteration order is unspecified (it was already with
+        // `iter_sync` short-circuits: the visitor returns `false` once the
+        // first conflict is recorded, so at most one conflict is captured.
+        // Iteration order is unspecified (it was already with
         // `std::HashMap`), so which key surfaces on a multi-key conflict is
         // not contractual — callers test single-key scenarios.
         let mut conflict: Option<(u64, Bytes)> = None;

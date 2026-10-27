@@ -16,6 +16,7 @@ use tokio::sync::Notify;
 use crate::repo::changelog_store::StoreChangelog;
 use crate::repo::repo_instance::ChangefeedHandle;
 use crate::repo::{BoxRepo, RepoInstance};
+use shamir_tx::ChangelogError;
 
 // Uses the real ordered, byte-budgeted adapter; only write admission and
 // explicit range failure are injected. No clock-based scheduling assumptions.
@@ -29,7 +30,7 @@ struct JournalFixture {
 
 #[async_trait::async_trait]
 impl ChangelogStore for JournalFixture {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         if self.block_put.swap(false, Ordering::AcqRel) {
             self.reached.notify_one();
             self.resume.notified().await;
@@ -37,9 +38,15 @@ impl ChangelogStore for JournalFixture {
         self.inner.put(key, value).await
     }
 
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(
+        &self,
+        from_key: Bytes,
+        limit: usize,
+    ) -> Result<Vec<Bytes>, ChangelogError> {
         if self.fail_read.load(Ordering::Acquire) {
-            return Err("injected journal range failure".into());
+            return Err(ChangelogError::Journal(
+                "injected journal range failure".into(),
+            ));
         }
         self.inner.range_from(from_key, limit).await
     }
@@ -254,7 +261,9 @@ async fn real_range_failure_is_error_but_legacy_read_still_returns_gap() {
     store.fail_read.store(true, Ordering::Release);
     let result = repo.read_changelog_bounded(7, 10).await;
     match result {
-        Err(DbError::Storage(error)) => assert_eq!(error, "injected journal range failure"),
+        Err(DbError::Storage(error)) => {
+            assert_eq!(error, "changelog journal: injected journal range failure")
+        }
         _ => panic!("real range failure must remain a storage error"),
     }
     let legacy = repo.read_changelog_from(7, 10).await.unwrap();

@@ -286,3 +286,23 @@ fn cast_big_to_float_is_dec() {
         dec("42")
     );
 }
+
+#[test]
+fn rv_funclib_1ef53ab4_f64_to_i64_exclusive_upper_bound() {
+    let r = reg();
+    // 2^63 is representable exactly as f64 (i64::MAX as f64 rounds up to
+    // it). The old inclusive bound admitted it and the cast saturated to
+    // i64::MAX; the contract is a "cast_failed" error. -2^63 stays valid.
+    let two_pow_63 = 9_223_372_036_854_775_808.0f64;
+    assert_eq!(
+        r.call("to_int", &[QueryValue::F64(two_pow_63)])
+            .unwrap_err()
+            .code,
+        "cast_failed"
+    );
+    assert_eq!(
+        r.call("to_int", &[QueryValue::F64(-9_223_372_036_854_775_808.0)])
+            .unwrap(),
+        v_int(i64::MIN)
+    );
+}

@@ -7,7 +7,7 @@
 //!
 //! ## Status
 //!
-//! **Stage 2 (in progress).** Landed primitives:
+//! **Stage 2 (complete).** Landed primitives:
 //!
 //! - [`version_codec`] — `encode_version_key` / `decode_version_key` for
 //!   `<key>::<version_be>` physical key layout.
@@ -61,8 +61,9 @@ pub use version::versioned_overlay;
 
 pub use cell_reservation_guard::CellReservationGuard;
 pub use changefeed::{
-    nontx_event, project_event, version_key, ChangeOp, ChangelogEvent, ChangelogStore, JournalRead,
-    RecordChange, RepoChangefeed, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
+    nontx_event, project_event, version_key, ChangeOp, ChangelogError, ChangelogEvent,
+    ChangelogResult, ChangelogStore, JournalRead, RecordChange, RepoChangefeed, BROADCAST_CAPACITY,
+    JOURNAL_CHANNEL_CAPACITY,
 };
 pub use completion_tracker::{CompletionTracker, State as CompletionState};
 pub use gate_diagnostics::{GateBlocker, GateBlockerClass, GateDiagnostics};
@@ -75,7 +76,8 @@ pub use metrics::{TxMetrics, TxMetricsSnapshot};
 pub use mvcc_store::{KeyLock, LockMode, MvccStore, Retention, VersionEntry};
 pub use pending_commit::PendingCommit;
 pub use predicate_set::{
-    key_in_interval, PredicateDep, PredicateSet, SORTED_PREFIX_LEN, SORTED_TAG,
+    index_range_overlaps_sorted, key_in_interval, PredicateDep, PredicateSet, SORTED_PREFIX_LEN,
+    SORTED_TAG,
 };
 pub use repo_tx_gate::{
     build_footprint_from_tx, record_conflicts, CommitWriteRecord, RepoTxGate, SnapshotGuard,

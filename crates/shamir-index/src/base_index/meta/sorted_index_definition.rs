@@ -26,7 +26,7 @@ use shamir_tx::{IndexFamily, Provenance};
 /// RecordId byte pattern. RecordId::system uses a 4-byte zero prefix
 /// followed by name bytes — first byte is 0x00. Hash-index keys
 /// start with the unique flag (0 or 1). So 0x80 is a safe pick.
-pub(crate) const SORTED_TAG: u8 = 0x80;
+pub(crate) use shamir_types::core::sorted_index_layout::SORTED_TAG;
 
 /// Definition of a sorted index — minimal, since we only support
 /// single-field for now.

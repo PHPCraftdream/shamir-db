@@ -194,6 +194,9 @@ impl Store for MemBufferStore {
     }
 
     fn iter_stream(&self, batch_size: usize) -> RecordStream {
+        if batch_size == 0 {
+            return Box::pin(futures::stream::empty());
+        }
         // Audit finding 2.3 (task #530): DON'T drain-before-scan (read-
         // triggered write amplification that defeats the 500ms fsync-batching
         // interval on EVERY scan). Instead snapshot the SMALL dirty overlay
@@ -208,6 +211,9 @@ impl Store for MemBufferStore {
     }
 
     fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RecordStream {
+        if batch_size == 0 {
+            return Box::pin(futures::stream::empty());
+        }
         // Merge-overlay scan (task #530) — see `iter_stream`. The overlay is
         // filtered to keys under `prefix` so the overlay-only tail can't emit
         // out-of-prefix keys, and the ascending order is preserved (callers of
@@ -226,6 +232,9 @@ impl Store for MemBufferStore {
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> RecordStream {
+        if batch_size == 0 {
+            return Box::pin(futures::stream::empty());
+        }
         // Merge-overlay scan (task #530) — see `iter_stream`. The overlay is
         // filtered to `[start_inclusive ..= end_inclusive]` and sorted
         // ascending, then merged with the sorted `inner` range stream so the
@@ -258,6 +267,9 @@ impl Store for MemBufferStore {
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> RecordStream {
+        if batch_size == 0 {
+            return Box::pin(futures::stream::empty());
+        }
         // Merge-overlay scan (task #530) — reverse variant. The overlay is
         // filtered to the same `[start ..= end]` range but sorted DESCENDING
         // to match the reverse `inner` stream, so the merge preserves the

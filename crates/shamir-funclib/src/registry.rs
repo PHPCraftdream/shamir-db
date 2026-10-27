@@ -215,7 +215,10 @@ pub fn arg_i64(args: &[QueryValue], i: usize) -> Result<i64, ScalarError> {
             }
         }
         QueryValue::F64(f) => {
-            if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+            // Upper bound is EXCLUSIVE: `i64::MAX as f64` rounds up to 2^63,
+            // which would saturate in the cast (RV-FUNCLIB-1EF53AB4).
+            // `i64::MIN as f64` (-2^63) is exact, so it stays inclusive.
+            if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
                 Ok(*f as i64)
             } else {
                 Err(ScalarError::new("out_of_range"))
