@@ -658,9 +658,18 @@ pub(crate) fn create_user_only_req(db_name: &str, new_user: &str) -> DbRequest {
     b.id("mkuser2");
     b.create_user(
         "cu",
-        shamir_query_builder::ddl::create_user(new_user, "irrelevant-pw")
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match shamir_query_builder::ddl::create_user(new_user, "irrelevant-pw")
+            .hmac("unused")
             .build()
-            .expect("build unsigned create user"),
+            .expect("build unsigned create user")
+        {
+            shamir_query_types::batch::BatchOp::CreateUser(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::CreateUser(op)
+            }
+            other => other,
+        },
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,

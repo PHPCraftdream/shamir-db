@@ -63,10 +63,19 @@ fn destructive(tag: Option<&str>) -> BatchRequest {
             .build()
             .expect("build drop table")
     } else {
-        drop_table("items")
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match drop_table("items")
             .repo("main")
+            .hmac("unused")
             .build()
             .expect("build drop table")
+        {
+            shamir_query_types::batch::BatchOp::DropTable(mut unsigned) => {
+                unsigned.hmac = None;
+                shamir_query_types::batch::BatchOp::DropTable(unsigned)
+            }
+            other => other,
+        }
     };
     batch.drop_table("destroy", op);
     batch.build()
