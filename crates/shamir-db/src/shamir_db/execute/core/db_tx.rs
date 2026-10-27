@@ -18,7 +18,7 @@ use shamir_query_types::batch::{ExecPolicy, ResyncRequiredDetail, VisibilityWait
 
 use crate::access::{Action, Actor, ResourcePath};
 use crate::query::batch::{
-    execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchRequest, BatchResponse,
+    execute_in_open_tx, open_interactive_tx, BatchError, BatchRequest, BatchResponse,
     TransactionInfo,
 };
 use crate::shamir_db::execute::skip_read_quarantine_for_test;
@@ -269,7 +269,8 @@ impl ShamirDb {
     ) -> Result<BatchResponse, BatchError> {
         // Authorization must consume, not renew, the caller's remaining budget.
         let started = Instant::now();
-        let mut auth = Authorized::authorize(request, actor, db_name, self)
+        let mut auth = self
+            .authorize_batch(request, actor, db_name)
             .await?
             .with_policy(policy);
         if let Some(cap) = deadline_cap {

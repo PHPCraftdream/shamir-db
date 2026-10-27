@@ -35,6 +35,16 @@ impl ShamirDb {
         path: &ResourcePath,
         action: Action,
     ) -> Result<(), AccessError> {
+        self.authorize_access_in(actor, path, action, None).await
+    }
+
+    pub(super) async fn authorize_access_in(
+        &self,
+        actor: &Actor,
+        path: &ResourcePath,
+        action: Action,
+        memo: Option<&super::batch_gate::AclMemo>,
+    ) -> Result<(), AccessError> {
         // Engine-level observability trace (R2) — always emitted, always Ok.
         // NOT the enforcement gate; see `trace_access`'s doc comment.
         trace_access(actor, path, action)?;
@@ -54,7 +64,7 @@ impl ShamirDb {
 
         // Traversal: each ancestor needs Execute.
         for anc in path.ancestors() {
-            let anc_meta = match self.resource_meta(&anc).await {
+            let anc_meta = match Self::meta_memo(self, &anc, memo).await {
                 Ok(m) => m,
                 Err(e) => {
                     // Fail-closed: a real catalogue-read error on an
@@ -73,7 +83,7 @@ impl ShamirDb {
                     });
                 }
             };
-            let in_group = self.resolve_in_group(user_id, &anc_meta).await;
+            let in_group = self.resolve_in_group(user_id, &anc_meta, memo).await;
             if !permits(actor, &anc_meta, Action::Execute, in_group) {
                 return Err(AccessError {
                     actor: actor.clone(),
@@ -84,7 +94,7 @@ impl ShamirDb {
         }
 
         // Target check.
-        let meta = match self.resource_meta(path).await {
+        let meta = match Self::meta_memo(self, path, memo).await {
             Ok(m) => m,
             Err(e) => {
                 // Fail-closed: a real catalogue-read error on the target
@@ -102,7 +112,7 @@ impl ShamirDb {
                 });
             }
         };
-        let in_group = self.resolve_in_group(user_id, &meta).await;
+        let in_group = self.resolve_in_group(user_id, &meta, memo).await;
         if permits(actor, &meta, action, in_group) {
             Ok(())
         } else {
@@ -114,12 +124,49 @@ impl ShamirDb {
         }
     }
 
+    async fn meta_memo(
+        &self,
+        path: &ResourcePath,
+        memo: Option<&super::batch_gate::AclMemo>,
+    ) -> DbResult<ResourceMeta> {
+        if let Some(memo) = memo {
+            if let Some(meta) = memo.metas.get(path).map(|entry| entry.clone()) {
+                return Ok(meta);
+            }
+        }
+        let meta = self.resource_meta(path).await?;
+        if let Some(memo) = memo {
+            memo.metas.insert(path.clone(), meta.clone());
+        }
+        Ok(meta)
+    }
+
     /// Resolve whether the user belongs to the group specified in `meta`.
     ///
     /// Returns `false` if the meta has no group or the lookup fails.
-    async fn resolve_in_group(&self, user_id: u64, meta: &ResourceMeta) -> bool {
+    async fn resolve_in_group(
+        &self,
+        user_id: u64,
+        meta: &ResourceMeta,
+        memo: Option<&super::batch_gate::AclMemo>,
+    ) -> bool {
         match meta.group {
-            Some(gid) => self.user_in_group(user_id, gid).await.unwrap_or(false),
+            Some(gid) => {
+                if let Some(memo) = memo {
+                    if let Some(value) = memo.membership.get(&(user_id, gid)).map(|entry| *entry) {
+                        return value;
+                    }
+                }
+                match self.user_in_group(user_id, gid).await {
+                    Ok(value) => {
+                        if let Some(memo) = memo {
+                            memo.membership.insert((user_id, gid), value);
+                        }
+                        value
+                    }
+                    Err(_) => false,
+                }
+            }
             None => false,
         }
     }

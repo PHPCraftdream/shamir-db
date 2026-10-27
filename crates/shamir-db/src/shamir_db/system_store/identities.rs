@@ -132,6 +132,12 @@ impl SystemStore {
         members: &[u64],
         owner: u64,
     ) -> DbResult<()> {
+        let _guard = self.group_names_rebuild.lock().await;
+        let previous = self.group_names.swap(None);
+        let name_unchanged = previous
+            .as_ref()
+            .and_then(|snapshot| snapshot.by_id.get(&group_id))
+            .is_some_and(|old_name| old_name == name);
         self.catalogue_write_fault_gate()?;
         let members_list: Vec<QueryValue> =
             members.iter().map(|&m| QueryValue::Int(m as i64)).collect();
@@ -150,11 +156,18 @@ impl SystemStore {
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
         table.data_store_read_view().flush().await?;
+        if name_unchanged {
+            self.group_names.store(previous);
+        } else {
+            self.rebuild_group_names_locked().await;
+        }
         Ok(())
     }
 
     /// Load all group records.
     pub async fn load_groups(&self) -> DbResult<Vec<QueryValue>> {
+        #[cfg(test)]
+        self.count_full_catalogue_load();
         let table = self.table(TABLE_GROUPS).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -260,6 +273,8 @@ impl SystemStore {
 
     /// Remove a group record by id.
     pub async fn remove_group(&self, group_id: u64) -> DbResult<()> {
+        let _guard = self.group_names_rebuild.lock().await;
+        self.group_names.store(None);
         let table = self.table(TABLE_GROUPS).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_GROUPS),
@@ -272,6 +287,7 @@ impl SystemStore {
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         table.data_store_read_view().flush().await?;
+        self.rebuild_group_names_locked().await;
         Ok(())
     }
 

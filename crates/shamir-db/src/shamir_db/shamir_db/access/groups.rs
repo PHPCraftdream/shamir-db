@@ -382,6 +382,13 @@ impl ShamirDb {
                 Ok(*id)
             }
             crate::query::admin::GroupRef::Name { name } => {
+                // A complete snapshot can answer positively in O(1), but an
+                // absent name is not proof of absence: a replaced/mutated
+                // catalogue table or a failed snapshot rebuild must be read
+                // through the live catalogue so storage errors propagate.
+                if let Some(Some(id)) = self.system_store.group_id_by_name(name) {
+                    return Ok(id);
+                }
                 let groups = self.system_store.load_groups().await?;
                 let id = groups
                     .iter()
