@@ -22,8 +22,8 @@ use shamir_types::access::Actor;
 use crate::table::table_manager::TableManager;
 use crate::table::write::set::execute::{build_insert_result_records, project_query_value};
 use crate::table::write::write_helpers::{
-    apply_defaults, apply_transforms, intern_via_layered, make_layered_interner,
-    resolve_computed_record, validator_failure_to_db_error,
+    apply_defaults, apply_transforms, make_layered_interner, resolve_computed_record,
+    validator_failure_to_db_error,
 };
 
 impl TableManager {
@@ -181,7 +181,19 @@ impl TableManager {
         // encoder `query_value_to_storage_bytes` (no InnerValue tree).
         let staged: Vec<bytes::Bytes> = {
             let layered = make_layered_interner(interner, tx);
-            let base_intern_fn = intern_via_layered(&layered);
+            let layered_failure = RefCell::new(None);
+            let base_intern_fn = |key: &str| {
+                layered
+                    .try_touch_sync(key)
+                    .map(shamir_types::core::interner::InternerKey::new)
+                    .map_err(|error| {
+                        *layered_failure.borrow_mut() = Some(error);
+                        shamir_types::codecs::CodecError::Encode(
+                            "layered interner failure".to_string(),
+                        )
+                    })
+            };
+            let direct_failure = RefCell::new(None);
             // RefCell lets the closure capture and mutate the cache while
             // satisfying the `Fn` (not `FnMut`) bound on
             // `query_value_to_storage_bytes`.
@@ -202,9 +214,12 @@ impl TableManager {
                     // quota error (wire code interner_quota_exceeded)
                     // survives into DbError; Err here precedes any staging,
                     // so no WAL record or visible row is produced.
-                    let ti = interner
-                        .touch_ind(key)
-                        .map_err(shamir_types::codecs::CodecError::from)?;
+                    let ti = interner.touch_ind(key).map_err(|error| {
+                        *direct_failure.borrow_mut() = Some(error);
+                        shamir_types::codecs::CodecError::Encode(
+                            "base interner failure".to_string(),
+                        )
+                    })?;
                     if ti.is_new() {
                         new_base_keys
                             .borrow_mut()
@@ -245,9 +260,19 @@ impl TableManager {
                     );
                 }
                 let bytes = query_value_to_storage_bytes_into(&resolved, &intern_fn, &mut scratch)
-                    // From<CodecError> preserves CodecError::Interner as the
-                    // typed DbError::InternerQuotaExceeded (with wire code).
-                    .map_err(shamir_storage::error::DbError::from)?;
+                    .map_err(|error| {
+                        if let Some(typed) = direct_failure.borrow_mut().take() {
+                            shamir_storage::error::DbError::from(
+                                shamir_types::codecs::CodecError::Interner(typed),
+                            )
+                        } else if let Some(typed) = layered_failure.borrow_mut().take() {
+                            shamir_storage::error::DbError::from(
+                                shamir_types::codecs::CodecError::Interner(typed),
+                            )
+                        } else {
+                            shamir_storage::error::DbError::from(error)
+                        }
+                    })?;
                 out.push(bytes);
                 resolved_values.push(resolved);
             }
