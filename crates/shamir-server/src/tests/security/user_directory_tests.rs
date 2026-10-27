@@ -28,6 +28,19 @@ use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use crate::user_directory::{project_user_ids_to_principal64, FjallUserDirectory, PersistedUser};
+#[tokio::test]
+async fn rv_db_fa80a7b8_real_directory_missing_user_is_typed_not_found() {
+    let temp = TempDir::new().unwrap();
+    let directory = FjallUserDirectory::open(temp.path()).unwrap();
+    assert!(matches!(
+        directory.set_superuser("missing", true, 0),
+        Err(shamir_connect::common::error::Error::UserNotFound)
+    ));
+    assert!(matches!(
+        directory.set_replicator("missing", true, 0),
+        Err(shamir_connect::common::error::Error::UserNotFound)
+    ));
+}
 
 /// `principal64` takes the first 8 bytes big-endian and clears the high bit
 /// (`& i64::MAX`). Two user ids differing ONLY in that high bit therefore
@@ -195,10 +208,10 @@ fn sample_record() -> UserRecord {
     }
 }
 
-/// Sanity: `state_by_user_id` returns `None` for a user_id that was never
-/// inserted (the directory-level primitive the resume adapter relies on).
 /// This duplicates the public-API test but lives next to the projection
 /// tests so a regression in the reverse-index read is caught here too.
+/// Sanity: `state_by_user_id` returns `None` for a user_id that was never
+/// inserted (the directory-level primitive the resume adapter relies on).
 #[test]
 fn state_by_user_id_unknown_after_fresh_open() {
     let dir = TempDir::new().expect("tempdir");

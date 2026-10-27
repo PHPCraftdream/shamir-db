@@ -23,6 +23,22 @@ async fn setup_shamir() -> ShamirDb {
     shamir
 }
 
+/// Like [`setup_shamir`], but registers the repo through `ShamirDb::add_repo`
+/// so its Store catalogue row (and therefore its ACL meta) exists.
+async fn setup_catalogued_shamir() -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.expect("create_db");
+    shamir
+        .add_repo(
+            "testdb",
+            RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    shamir
+}
+
 async fn setup_shamir_with_quota(quota: InternerQuota) -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
@@ -52,6 +68,72 @@ async fn run_one(
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["r"].records[0].as_value().into_owned()
+}
+
+#[tokio::test]
+async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
+    let shamir = setup_catalogued_shamir().await;
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::database("testdb"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let denied_meta = crate::access::ResourceMeta {
+        owner: crate::access::Actor::User(1),
+        group: None,
+        mode: 0o700,
+    };
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::store("testdb", "main"),
+            &denied_meta,
+        )
+        .await
+        .unwrap();
+    let mut request = shamir_query_builder::batch::Batch::new();
+    request.id("ambient-denied");
+    let mut request = request
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    request.interner_epochs.insert("main".into(), 0);
+
+    let response = shamir
+        .execute_as(crate::access::Actor::User(99), "testdb", &request)
+        .await
+        .expect("denied ambient repositories are skipped");
+    assert!(!response.interner_delta.contains_key("main"));
+}
+
+#[tokio::test]
+async fn rv_db_4d93f623_ambient_delta_succeeds_with_store_read() {
+    let shamir = setup_catalogued_shamir().await;
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::database("testdb"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::store("testdb", "main"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let mut batch = shamir_query_builder::batch::Batch::new();
+    batch.id("ambient-allowed");
+    let mut request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    request.interner_epochs.insert("main".into(), 0);
+    let response = shamir
+        .execute_as(crate::access::Actor::User(99), "testdb", &request)
+        .await
+        .unwrap();
+    assert!(response.interner_delta.contains_key("main"));
 }
 
 #[tokio::test]
