@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { canonicalBatchOp, canonicalDbRequest, deriveSessionHmacKey, signCanonical } from '../hmac.js';
 import { ddl } from '../../builders/index.js';
-import { NodePlatform } from '../../../../platform/node.js';
+import { NodePlatform } from '../../../platform/node.js';
 const bytes = (value: Uint8Array) => Array.from(value);
 const vectorFixture = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../../../shamir-query-types/test-vectors/admin_hmac_v2.json'), 'utf8')) as {
   session_id_hex: string;

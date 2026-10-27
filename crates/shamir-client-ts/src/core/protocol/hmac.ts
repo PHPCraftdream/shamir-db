@@ -12,7 +12,9 @@ function hexEncode(bytes:Uint8Array):string { return Array.from(bytes,b=>b.toStr
 export function deriveSessionHmacKey(platform:Platform,sessionId:Uint8Array):Uint8Array{return platform.sha256(concatBytes([KEY_DOMAIN,sessionId]));}
 export function computeTagHex(platform:Platform,key:Uint8Array,canonical:Uint8Array):string{return hexEncode(platform.hmacSha256(key,canonical));}
 export function signCanonical(platform:Platform,sessionId:Uint8Array,canonical:Uint8Array):string{return computeTagHex(platform,deriveSessionHmacKey(platform,sessionId),canonical);}
-type BatchCanonicalOp =DropDbOp|DropRepoOp|DropTableOp|DropIndexOp|DropUserOp|StartMigrationOp|CommitMigrationOp|RollbackMigrationOp|GrantRoleOp|RevokeRoleOp|ChmodOp|ChownOp|ChgrpOp|CreateUserOp|SetRetentionOp|PurgeHistoryOp|CreateGroupOp|DropGroupOp|RenameGroupOp|AddGroupMemberOp|RemoveGroupMemberOp|CreateFunctionOp|DropFunctionOp|DropValidatorOp|CreateValidatorOp|{drop_replication_profile:string;hmac?:string}|{drop_publication:string;hmac?:string}|{drop_subscription:string;hmac?:string};
+/** Canonical DTO shape: unsigned (no required tag) and `cascade` as a plain flag. */
+type CanonOf<T> = T extends unknown ? Omit<T, 'hmac' | 'cascade'> & { hmac?: string; cascade?: boolean } : never;
+type BatchCanonicalOp = CanonOf<DropDbOp|DropRepoOp|DropTableOp|DropIndexOp|DropUserOp|StartMigrationOp|CommitMigrationOp|RollbackMigrationOp|GrantRoleOp|RevokeRoleOp|ChmodOp|ChownOp|ChgrpOp|CreateUserOp|SetRetentionOp|PurgeHistoryOp|CreateGroupOp|DropGroupOp|RenameGroupOp|AddGroupMemberOp|RemoveGroupMemberOp|CreateFunctionOp|DropFunctionOp|DropValidatorOp|CreateValidatorOp|{drop_replication_profile:string>;hmac?:string}|{drop_publication:string;hmac?:string}|{drop_subscription:string;hmac?:string};
 export type DbCanonicalOp={op:'create_scram_user';name:string;password?:string;roles?:string[];hmac?:string}|(Omit<SetSuperuserOp,'hmac'>&{hmac?:string})|(Omit<SetReplicatorOp,'hmac'>&{hmac?:string});
 class Encoder {
   private readonly chunks:Uint8Array[]=[PREFIX]; constructor(tag:number){this.raw(new Uint8Array([tag>>8,tag&255]));}
