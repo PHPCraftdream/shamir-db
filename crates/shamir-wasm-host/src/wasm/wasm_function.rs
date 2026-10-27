@@ -204,13 +204,13 @@ pub(crate) fn build_linker(engine: &WasmEngine) -> FnResult<Linker<HostState>> {
         .func_wrap("shamir_host", "batch_put", host_batch_put)
         .map_err(|e| FunctionError::Compute(format!("linker batch_put: {e}")))?;
     linker
-        .func_wrap("shamir_host", "batch_get", host_batch_get)
+        .func_wrap_async("shamir_host", "batch_get", host_batch_get)
         .map_err(|e| FunctionError::Compute(format!("linker batch_get: {e}")))?;
     linker
         .func_wrap("shamir_host", "global_set", host_global_set)
         .map_err(|e| FunctionError::Compute(format!("linker global_set: {e}")))?;
     linker
-        .func_wrap("shamir_host", "global_get", host_global_get)
+        .func_wrap_async("shamir_host", "global_get", host_global_get)
         .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
 
     // Async host imports.
