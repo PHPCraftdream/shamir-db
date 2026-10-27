@@ -85,13 +85,11 @@
 //! `Cargo.toml`/dependencies).
 
 use crate::runtime::error::{FnResult, FunctionError};
+use shamir_proc_tree::{supervise, ProcessTree, TeardownFaults};
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
-// CRIT-6 part A: `ChildExt::wait_timeout` powers the wall-clock compile
-// timeout below.
-use wait_timeout::ChildExt;
 
 /// Maximum wall-clock time a guest `cargo build` may take before it is
 /// killed and reported as a compile timeout.
@@ -691,6 +689,9 @@ strip = true
     // [build] target-dir is configured.
     let target_dir = tmpdir.path().join("target");
     let mut cmd = Command::new("cargo");
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     cmd.args([
         "build",
         "--target",
@@ -711,66 +712,13 @@ strip = true
         cmd.env(k, v);
     }
 
-    // Pipe stdout/stderr so a build failure can still report cargo's
-    // diagnostic output (a plain `.spawn()` with inherited stdio would
-    // print to the host's own console but lose the text for the caller).
-    // Drain both pipes on dedicated threads WHILE waiting for the child —
-    // reading only after `wait_timeout` returns would risk a classic
-    // pipe-buffer deadlock if cargo's output exceeds the OS pipe capacity
-    // before the process exits.
-    let mut child = cmd
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
+    let (mut child, tree) = ProcessTree::spawn(&mut cmd)
         .map_err(|e| FunctionError::Compute(format!("cargo invocation: {e}")))?;
-
-    let mut child_stdout = child.stdout.take();
-    let mut child_stderr = child.stderr.take();
-    let stdout_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = child_stdout.take() {
-            use std::io::Read;
-            let _ = s.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let stderr_reader = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut s) = child_stderr.take() {
-            use std::io::Read;
-            let _ = s.read_to_end(&mut buf);
-        }
-        buf
-    });
-
-    // 2. Wall-clock timeout — wait up to `timeout`, then kill. Some status
-    // (exit / signal) is guaranteed available once `wait_timeout` returns
-    // `Ok(Some(_))`; the `None` arm is the timed-out path where we kill
-    // and reap.
-    let status = match child.wait_timeout(timeout) {
-        Ok(Some(status)) => status,
-        Ok(None) => {
-            // Timed out: kill and reap to avoid orphaned cargo/rustc.
-            // Killing the child closes its stdout/stderr pipes, which
-            // unblocks the reader threads' `read_to_end`.
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(FunctionError::Compute(format!(
-                "compilation timed out after {}s",
-                timeout.as_secs()
-            )));
-        }
-        Err(e) => {
-            let _ = stdout_reader.join();
-            let _ = stderr_reader.join();
-            return Err(FunctionError::Compute(format!("cargo wait failed: {e}")));
-        }
-    };
-
-    let stderr = stderr_reader.join().unwrap_or_default();
-    let _stdout = stdout_reader.join().unwrap_or_default();
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let output = supervise(child, tree, out, err, timeout, TeardownFaults::default())
+        .map_err(FunctionError::Compute)?;
+    let status = output.status;
+    let stderr = output.stderr;
 
     if !status.success() {
         let stderr_text = String::from_utf8_lossy(&stderr);
