@@ -67,7 +67,10 @@ async fn exec_set_schema(
     }
     b.set_table_schema(alias, builder);
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(resp.results[alias].records[0].as_value().as_ref().clone())
@@ -83,9 +86,12 @@ async fn try_insert_autocommit(
     let mut b = Batch::new();
     b.id(1);
     b.insert("ins", insert(table).row(record));
-    db.execute(db_name, &b.to_request_via_msgpack())
-        .await
-        .map_err(|e| e.to_string())?;
+    db.execute(
+        db_name,
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -95,7 +101,10 @@ async fn read_all(db: &ShamirDb, db_name: &str, table: &str) -> Vec<QueryValue> 
     b.id(1);
     b.query("all", Query::from(table));
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())
         .unwrap();
@@ -120,9 +129,12 @@ async fn setup() -> ShamirDb {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     std::mem::forget(dir);
     db
 }
@@ -343,9 +355,12 @@ async fn default_stamp_survives_durable_reopen() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-        db.execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
 
         let result = exec_set_schema(
             &db,

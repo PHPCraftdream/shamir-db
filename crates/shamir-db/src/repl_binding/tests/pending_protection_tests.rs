@@ -40,7 +40,10 @@ async fn read_users(shamir: &ShamirDb, repo: &str) -> Result<(), BatchError> {
     b.id(9);
     b.query("r", Query::with_repo(repo, "users"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map(|_| ())
 }
@@ -61,7 +64,10 @@ async fn create_subscription(shamir: &ShamirDb, sub: &str, profile: &str, repo: 
     );
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -108,7 +114,10 @@ async fn pending_protection_survives_another_subscription_resume() {
     b.try_op("pause", alter_subscription("sub_b").pause())
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -133,7 +142,10 @@ async fn pending_protection_survives_another_subscription_resume() {
     b.id(3);
     b.op("drop", drop_subscription("sub_a"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -165,7 +177,10 @@ async fn pending_protection_survives_another_subscription_resume() {
     b.try_op("resume", alter_subscription("sub_b").resume())
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let err = read_users(&shamir, "main")
@@ -177,7 +192,10 @@ async fn pending_protection_survives_another_subscription_resume() {
     b.id(7);
     b.op("drop", drop_subscription("sub_a"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -206,7 +224,10 @@ async fn pending_protection_survives_another_subscription_resume() {
     b.id(6);
     b.op("drop", drop_subscription("sub_c"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let err = read_users(&shamir, "main")
