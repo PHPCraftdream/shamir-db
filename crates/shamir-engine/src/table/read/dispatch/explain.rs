@@ -244,7 +244,7 @@ pub(in crate::table::read) fn try_project_page_only(
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
-            proj.project_value(record, interner),
+            proj.project_value(record, interner)?,
         ));
     }
 
@@ -322,9 +322,9 @@ pub(in crate::table::read) fn try_project_page_only_bytes(
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (rid, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
-            Ok(view) => proj.project_value(&view, interner),
+            Ok(view) => proj.project_value(&view, interner)?,
             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                Ok(iv) => proj.project_value(&iv, interner),
+                Ok(iv) => proj.project_value(&iv, interner)?,
                 Err(_) => {
                     corrupt.push(CorruptRecordRef {
                         table: table.to_string(),
@@ -380,24 +380,24 @@ pub(in crate::table::read) fn apply_select_value_bytes(
 ) -> DbResult<Vec<QueryValue>> {
     let proj =
         exec::SelectProjection::new(select, interner, ctx.scalars.clone())?.with_context(ctx);
-    Ok(matched
+    matched
         .iter()
         .map(
             |(rid, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
-                Ok(view) => proj.project_value(&view, interner),
+                Ok(view) => Ok(proj.project_value(&view, interner)?),
                 Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                    Ok(iv) => proj.project_value(&iv, interner),
+                    Ok(iv) => Ok(proj.project_value(&iv, interner)?),
                     Err(_) => {
                         corrupt.push(CorruptRecordRef {
                             table: table.to_string(),
                             id: *rid,
                         });
-                        QueryValue::Null
+                        Ok(QueryValue::Null)
                     }
                 },
             },
         )
-        .collect())
+        .collect()
 }
 
 /// Vector predicates have no row-level full-scan representation.

@@ -65,6 +65,8 @@ pub struct InternerManager {
     /// Also identifies the "lower bound" of the delta to write on the
     /// next persist.
     last_persisted_len: Arc<AtomicUsize>,
+    /// O(1) publication generation snapshot, kept separate from the ID cursor.
+    last_persisted_generation: Arc<AtomicUsize>,
     /// Index of the next chunk record to write. Initialised from
     /// `scan_prefix_stream` at boot (= number of existing chunks). Only
     /// touched under `persist_lock` so the increment-and-write pair is
@@ -118,6 +120,7 @@ impl Clone for InternerManager {
             info_store: Arc::clone(&self.info_store),
             interner: Arc::clone(&self.interner),
             last_persisted_len: Arc::clone(&self.last_persisted_len),
+            last_persisted_generation: Arc::clone(&self.last_persisted_generation),
             next_chunk_idx: Arc::clone(&self.next_chunk_idx),
             persist_lock: Arc::clone(&self.persist_lock),
             label: self.label.clone(),
@@ -140,6 +143,7 @@ impl InternerManager {
             info_store,
             interner: Arc::new(OnceCell::new()),
             last_persisted_len: Arc::new(AtomicUsize::new(0)),
+            last_persisted_generation: Arc::new(AtomicUsize::new(0)),
             next_chunk_idx: Arc::new(AtomicUsize::new(0)),
             persist_lock: Arc::new(Mutex::new(())),
             label,
@@ -190,6 +194,7 @@ impl InternerManager {
 
         let info_store = Arc::clone(&self.info_store);
         let last_persisted_len = Arc::clone(&self.last_persisted_len);
+        let last_persisted_generation = Arc::clone(&self.last_persisted_generation);
         let next_chunk_idx = Arc::clone(&self.next_chunk_idx);
         let label = self.label.clone();
         #[cfg(any(test, feature = "test-util"))]
@@ -246,16 +251,22 @@ impl InternerManager {
                     }
                 }
 
-                // Seed the persistence cursor from the highest hydrated
-                // ID, not the hydrated tuple count: chunks may contain
-                // duplicate recaptures and the id space may hold
-                // permanent gaps (leaked raced touch_ind reservations),
-                // so `entries.len()` can exceed the real id high-water
-                // mark and would make the first `persist()` after boot
-                // skip a newly allocated mapping above the cursor
-                // (RV-TYPES-2A1AB215).
-                let high_water =
-                    entries.iter().map(|(key, _)| key.id()).max().unwrap_or(0) as usize;
+                // Seed the cursor from the end of the contiguous hydrated ID prefix
+                // (largest k with 1..=k all present). Do not use the tuple count,
+                // which duplicate recaptures inflate. Do not use the max ID: an ID
+                // later filled into a gap below max would be skipped. Persist rescans
+                // already-known IDs above the cursor.
+                let mut ordered_ids: Vec<usize> =
+                    entries.iter().map(|(key, _)| key.id() as usize).collect();
+                ordered_ids.sort_unstable();
+                ordered_ids.dedup();
+                let mut high_water = 0usize;
+                for id in ordered_ids {
+                    if id != high_water.saturating_add(1) {
+                        break;
+                    }
+                    high_water = id;
+                }
                 last_persisted_len.store(high_water, Ordering::Release);
                 next_chunk_idx.store(chunk_count, Ordering::Release);
 
@@ -273,6 +284,7 @@ impl InternerManager {
                     quota = q;
                 }
                 let interner = Interner::with_labeled_quota(entries, quota, label);
+                last_persisted_generation.store(interner.generation() as usize, Ordering::Release);
                 // Acceptance 9: warn once at load when at/above 80% of
                 // either limit (new names will be refused soon).
                 let (used_names, used_bytes) = interner.quota_usage();
@@ -374,16 +386,10 @@ impl InternerManager {
     /// that cost is O(delta), not O(total dictionary size).
     pub async fn persist(&self) -> DbResult<()> {
         let interner = self.get().await?;
-        // Compare against the interner's ID high-water (highest
-        // allocated id), not `len()`: with permanent gaps or
-        // duplicate-recapture history the distinct-name count can
-        // equal the id cursor while a genuinely new mapping is still
-        // pending, and the equality would skip persisting it
-        // (RV-TYPES-2A1AB215).
-        let cur_hwm = interner.generation() as usize;
-        let last = self.last_persisted_len.load(Ordering::Acquire);
-        if cur_hwm == last {
-            // No id above the cursor — disk copy is already current.
+        // Compare with the persisted publication generation, not the ID
+        // cursor; sparse IDs and a filled hole need not align numerically.
+        let generation = interner.generation() as usize;
+        if generation == self.last_persisted_generation.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -394,8 +400,8 @@ impl InternerManager {
         let guard = self.persist_lock.lock().await;
         // Re-check under the lock — another persist may have raced us
         // and already written the same delta.
-        let last = self.last_persisted_len.load(Ordering::Acquire);
-        if interner.generation() as usize == last {
+        let generation = interner.generation() as usize;
+        if generation == self.last_persisted_generation.load(Ordering::Acquire) {
             drop(guard);
             return Ok(());
         }
@@ -407,6 +413,7 @@ impl InternerManager {
         // the reverse vec by a window). We advance `last_persisted_len`
         // to exactly `new_high` so the very next persist picks up
         // anything that was mid-insert here.
+        let last = self.last_persisted_len.load(Ordering::Acquire);
         let (delta, new_high) = interner.entries_after(last);
         if delta.is_empty() {
             drop(guard);
@@ -441,6 +448,11 @@ impl InternerManager {
         self.info_store.flush().await?;
         self.next_chunk_idx.store(idx + 1, Ordering::Release);
         self.last_persisted_len.store(new_high, Ordering::Release);
+        // Store only the generation captured before entries_after(). A name
+        // published during capture/write has a newer generation and forces a
+        // subsequent persist; if it was already included, that retry is safe.
+        self.last_persisted_generation
+            .store(generation, Ordering::Release);
         drop(guard);
         Ok(())
     }

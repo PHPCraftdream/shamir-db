@@ -205,13 +205,18 @@ pub(in crate::query::read) fn build_aggregate_object(
                             agg.accumulate(&value)
                                 .map_err(aggregate_accumulation_error)?;
                         }
-                    } else if let Some(value) =
-                        view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner))
-                    {
-                        // Preserve legacy field-input error handling.
-                        if let Err(error) = agg.accumulate(&value) {
-                            if error.code.starts_with("result_too_large: ResultBytes ") {
-                                return Err(aggregate_accumulation_error(error));
+                    } else {
+                        let value = if *all_field {
+                            Some(view.with_ref(|r| r.to_query_value(interner))?)
+                        } else {
+                            view.with_ref(|r| fn_value_for_aggregator(r, path, interner))
+                        };
+                        if let Some(value) = value {
+                            // Preserve legacy field-input error handling.
+                            if let Err(error) = agg.accumulate(&value) {
+                                if error.code.starts_with("result_too_large: ResultBytes ") {
+                                    return Err(aggregate_accumulation_error(error));
+                                }
                             }
                         }
                     }
@@ -348,14 +353,8 @@ impl<'a> RowView<'a> {
 fn fn_value_for_aggregator(
     record: &dyn RecordRef,
     path: &Option<Vec<InternerKey>>,
-    all_field: bool,
     interner: &Interner,
 ) -> Option<QueryValue> {
-    if all_field {
-        // AggregateField::All: the whole record is the value. Build the
-        // QueryValue via the lens's `to_query_value` (single boundary).
-        return Some(record.to_query_value(interner));
-    }
     let path = path.as_deref()?;
     // Try scalar first (the hot case): no Value materialisation.
     if let Some(s) = record.scalar_at(path) {
