@@ -44,7 +44,7 @@ use shamir_types::types::record_id::RecordId;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
 use super::schema_codec::{
-    dto_list_from_catalogue, map_insert, serialise_rules, serialise_rules_flat,
+    dto_list_from_catalogue, map_insert, schema_version_of, serialise_rules, serialise_rules_flat,
 };
 
 #[path = "../repo_admin/admin_schema_admission.rs"]
@@ -842,13 +842,9 @@ impl ShamirAdminExecutor {
         rules.retain(|r| r.path != op.path);
         let removed = rules.len() < before;
         if !removed {
-            let current_version = rec
-                .get(SCHEMA_VERSION_FIELD)
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0);
             return Ok(admin_result(mpack!({
                 "removed": false,
-                "schema_version": @(QueryValue::Int(current_version)),
+                "schema_version": @(QueryValue::Int(schema_version_of(&rec) as i64)),
             })));
         }
 
@@ -862,11 +858,7 @@ impl ShamirAdminExecutor {
                 .unwrap_or_else(|_| RecordId::new()),
             None => RecordId::new(),
         };
-        let current_version = rec
-            .get(SCHEMA_VERSION_FIELD)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as u64;
-        let new_version = current_version + 1;
+        let new_version = schema_version_of(&rec) + 1;
 
         // Recompile (even if empty — an empty schema validator accepts all).
         // F-4 — precompile gate BEFORE we touch the catalogue (see
