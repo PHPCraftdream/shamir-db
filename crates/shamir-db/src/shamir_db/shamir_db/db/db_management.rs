@@ -697,6 +697,16 @@ impl ShamirDb {
             .await
     }
 
+    /// Test-only [`flush_all`](Self::flush_all) that waits for completion:
+    /// Windows CI runners stall every process's fsync for 10+ s at times, so
+    /// a wall-clock budget is a false failure here; nextest's per-test
+    /// timeout stays the hang detector.
+    #[cfg(test)]
+    pub(crate) async fn flush_all_for_test(&self) -> DbResult<()> {
+        self.flush_all_with_quiesce_timeout(Duration::from_secs(3600))
+            .await
+    }
+
     pub fn shutdown_report(&self) -> ShutdownReport {
         let mut names = Vec::new();
         for db_name in self.list_dbs() {
