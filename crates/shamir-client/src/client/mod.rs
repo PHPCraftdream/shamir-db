@@ -11,6 +11,7 @@
 
 mod api;
 mod connect;
+pub(crate) mod epoch_admission;
 mod options;
 pub(crate) mod transport;
 

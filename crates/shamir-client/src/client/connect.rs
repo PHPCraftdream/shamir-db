@@ -834,4 +834,8 @@ impl Client {
     pub(crate) fn set_server_query_version_for_test(&self, v: u8) {
         self.server_query_version.store(v, Ordering::SeqCst);
     }
+
+    pub(crate) fn server_query_version_for_test(&self) -> u8 {
+        self.server_query_version()
+    }
 }

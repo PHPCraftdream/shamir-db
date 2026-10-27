@@ -16,6 +16,7 @@ use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
+use crate::client::epoch_admission::should_advertise_interner_epochs;
 use crate::client::subscription::{SubscriptionHandle, CLIENT_SUB_CHANNEL_CAP};
 use crate::client::transport::{await_pending_response, Lifecycle};
 use crate::client::Client;
@@ -168,11 +169,11 @@ impl Client {
         db: &str,
         mut batch: BatchRequest,
     ) -> Result<BatchResponse, ClientError> {
-        // BEFORE send: populate interner_epochs from the per-(db,repo) cache.
-        // `distinct_repos` walks the batch's data ops' table-refs; admin ops
-        // (no table_ref) are skipped. For each repo with a FieldMap, advertise
-        // its current epoch so the server can attach a delta.
-        if batch.interner_epochs.is_empty() {
+        // Synthesize absent completeness cursors only for v2 peers.
+        if should_advertise_interner_epochs(
+            self.server_query_version(),
+            !batch.interner_epochs.is_empty(),
+        ) {
             for repo in shamir_query_types::batch::distinct_repos(&batch.queries) {
                 let epoch = self.interner_cache().get_or_create(db, &repo).epoch();
                 batch.interner_epochs.insert(repo, epoch);

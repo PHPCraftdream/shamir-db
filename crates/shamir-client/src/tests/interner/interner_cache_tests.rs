@@ -360,6 +360,286 @@ async fn execute_with_touch_warms_cache() {
     .await;
 }
 
+#[tokio::test]
+async fn rv_client_4beb304c_real_dump_retry_after_protocol_error() {
+    let (c2s_client, mut c2s_server) = duplex(64 * 1024);
+    let (mut s2c_server, c2s_client_reader) = duplex(64 * 1024);
+    let (client_reader, _server_write) = split(c2s_client_reader);
+    let (_client_read, client_writer) = split(c2s_client);
+    let client = Client::for_test(client_reader, client_writer, LifecycleHooks::default());
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let frame = read_frame(&mut c2s_server, MAX_FRAME_SIZE_DEFAULT)
+                .await
+                .unwrap();
+            let env = RequestEnvelope::from_msgpack(&frame).unwrap();
+            let req: DbRequest = rmp_serde::from_slice(&env.req).unwrap();
+            let DbRequest::Execute { batch, .. } = req else {
+                panic!("expected Execute")
+            };
+            let alias = batch.queries.keys().next().unwrap().clone();
+            let mut result = QueryResult::default();
+            if attempt == 1 {
+                let mut fields = new_map();
+                fields.insert("epoch".to_string(), Value::Int(1));
+                fields.insert("entries".to_string(), Value::List(vec![]));
+                result.records.push(QueryRecord::Direct(Value::Map(fields)));
+            }
+            let mut results = new_map();
+            results.insert(alias, result);
+            let response = BatchResponse {
+                id: Value::Null,
+                results,
+                execution_plan: Vec::new(),
+                edge_provenance: new_map(),
+                execution_time_us: 0,
+                transaction: None,
+                interner_delta: new_map(),
+            };
+            let payload = rmp_serde::to_vec_named(&DbResponse::Batch { response }).unwrap();
+            let bytes = ResponseEnvelope::ok(env.request_id, payload)
+                .to_msgpack()
+                .unwrap();
+            write_frame(&mut s2c_server, &bytes).await.unwrap();
+        }
+    });
+    assert!(client.dump_repo("ic", "main").await.is_err());
+    client
+        .dump_repo("ic", "main")
+        .await
+        .expect("retry dump succeeds");
+    assert!(client
+        .interner_cache()
+        .get_or_create("ic", "main")
+        .is_populated());
+    drop(client);
+    drop(_client_read);
+    drop(_server_write);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn rv_client_2b10814d_real_touch_rejects_omitted_name() {
+    let (c2s_client, mut c2s_server) = duplex(64 * 1024);
+    let (mut s2c_server, c2s_client_reader) = duplex(64 * 1024);
+    let (client_reader, _server_write) = split(c2s_client_reader);
+    let (_client_read, client_writer) = split(c2s_client);
+    let client = Client::for_test(client_reader, client_writer, LifecycleHooks::default());
+    let server = tokio::spawn(async move {
+        let frame = read_frame(&mut c2s_server, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .unwrap();
+        let env = RequestEnvelope::from_msgpack(&frame).unwrap();
+        let mut fields = new_map();
+        fields.insert("epoch".to_string(), Value::Int(1));
+        fields.insert(
+            "mappings".to_string(),
+            Value::List(vec![Value::List(vec![
+                Value::Str("other".into()),
+                Value::Int(9),
+            ])]),
+        );
+        let mut result = QueryResult::default();
+        result.records.push(QueryRecord::Direct(Value::Map(fields)));
+        let mut results = new_map();
+        results.insert("_ic_touch".to_string(), result);
+        let response = BatchResponse {
+            id: Value::Null,
+            results,
+            execution_plan: Vec::new(),
+            edge_provenance: new_map(),
+            execution_time_us: 0,
+            transaction: None,
+            interner_delta: new_map(),
+        };
+        let payload = rmp_serde::to_vec_named(&DbResponse::Batch { response }).unwrap();
+        let bytes = ResponseEnvelope::ok(env.request_id, payload)
+            .to_msgpack()
+            .unwrap();
+        write_frame(&mut s2c_server, &bytes).await.unwrap();
+    });
+    let result = client.touch_fields("ic", "main", &["wanted"]).await;
+    assert!(matches!(
+        result,
+        Err(crate::error::ClientError::Protocol(message)) if message.contains("wanted")
+    ));
+    assert!(client.resolve_field("ic", "main", "other").is_some());
+    assert!(client.resolve_field("ic", "main", "wanted").is_none());
+    drop(client);
+    drop(_client_read);
+    drop(_server_write);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn rv_client_3594376f_real_sparse_touch_does_not_advance_refresh_cursor() {
+    let (c2s_client, mut c2s_server) = duplex(64 * 1024);
+    let (mut s2c_server, c2s_client_reader) = duplex(64 * 1024);
+    let (client_reader, _server_write) = split(c2s_client_reader);
+    let (_client_read, client_writer) = split(c2s_client);
+    let client = Client::for_test(client_reader, client_writer, LifecycleHooks::default());
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let frame = read_frame(&mut c2s_server, MAX_FRAME_SIZE_DEFAULT)
+                .await
+                .unwrap();
+            let env = RequestEnvelope::from_msgpack(&frame).unwrap();
+            let req: DbRequest = rmp_serde::from_slice(&env.req).unwrap();
+            let DbRequest::Execute { batch, .. } = req else {
+                panic!("expected Execute")
+            };
+            if attempt == 1 {
+                let BatchOp::InternerDump(op) = &batch.queries.values().next().unwrap().op else {
+                    panic!("refresh should send InternerDump")
+                };
+                assert_eq!(op.since, Some(0), "refresh uses complete cursor 0");
+            }
+            let alias = batch.queries.keys().next().unwrap().clone();
+            let mut fields = new_map();
+            fields.insert("epoch".to_string(), Value::Int(8));
+            if attempt == 0 {
+                fields.insert(
+                    "mappings".to_string(),
+                    Value::List(vec![Value::List(vec![
+                        Value::Str("sparse".into()),
+                        Value::Int(8),
+                    ])]),
+                );
+            } else {
+                fields.insert(
+                    "entries".to_string(),
+                    Value::List(vec![
+                        Value::List(vec![Value::Int(1), Value::Str("older".into())]),
+                        Value::List(vec![Value::Int(8), Value::Str("sparse".into())]),
+                    ]),
+                );
+            }
+            let mut result = QueryResult::default();
+            result.records.push(QueryRecord::Direct(Value::Map(fields)));
+            let mut results = new_map();
+            results.insert(alias, result);
+            let response = BatchResponse {
+                id: Value::Null,
+                results,
+                execution_plan: Vec::new(),
+                edge_provenance: new_map(),
+                execution_time_us: 0,
+                transaction: None,
+                interner_delta: new_map(),
+            };
+            let payload = rmp_serde::to_vec_named(&DbResponse::Batch { response }).unwrap();
+            let bytes = ResponseEnvelope::ok(env.request_id, payload)
+                .to_msgpack()
+                .unwrap();
+            write_frame(&mut s2c_server, &bytes).await.unwrap();
+        }
+    });
+    client
+        .touch_fields("ic", "main", &["sparse"])
+        .await
+        .unwrap();
+    let fm = client.interner_cache().get_or_create("ic", "main");
+    assert_eq!(fm.epoch(), 0);
+    assert_eq!(fm.observed_epoch(), 8);
+    client.refresh_repo("ic", "main").await.unwrap();
+    assert_eq!(fm.epoch(), 8);
+    assert_eq!(client.resolve_field("ic", "main", "older"), Some(1));
+    drop(client);
+    drop(_client_read);
+    drop(_server_write);
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn rv_client_f2bd01c0_real_execute_with_touch_deinterns_by_repo() {
+    let (c2s_client, mut c2s_server) = duplex(64 * 1024);
+    let (mut s2c_server, c2s_client_reader) = duplex(64 * 1024);
+    let (client_reader, _server_write) = split(c2s_client_reader);
+    let (_client_read, client_writer) = split(c2s_client);
+    let client = Client::for_test(client_reader, client_writer, LifecycleHooks::default());
+    client
+        .interner_cache()
+        .get_or_create("ic", "repo_a")
+        .insert_entry("alpha", 7);
+    client
+        .interner_cache()
+        .get_or_create("ic", "repo_b")
+        .insert_entry("beta", 7);
+    client.set_server_query_version_for_test(2);
+    let server = tokio::spawn(async move {
+        let frame = read_frame(&mut c2s_server, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .unwrap();
+        let env = RequestEnvelope::from_msgpack(&frame).unwrap();
+        let req: DbRequest = rmp_serde::from_slice(&env.req).unwrap();
+        let DbRequest::Execute { batch, .. } = req else {
+            panic!("expected Execute")
+        };
+        assert_eq!(
+            batch.result_encoding,
+            shamir_query_types::batch::ResultEncoding::Id
+        );
+        let mut results = new_map();
+        for (alias, id_value) in [("a", 1), ("b", 2)] {
+            let bytes = shamir_types::codecs::interned::query_value_to_storage_bytes(
+                &mpack!({ "7": @(Value::Int(id_value)) }),
+                &|name| {
+                    if name == "7" {
+                        Ok(shamir_types::core::interner::InternerKey::new(7))
+                    } else {
+                        Err(shamir_types::codecs::CodecError::Encode(
+                            "unexpected key".into(),
+                        ))
+                    }
+                },
+            )
+            .unwrap();
+            let mut result = QueryResult::default();
+            result
+                .records
+                .push(shamir_query_types::read::QueryRecord::IdBytes(
+                    serde_bytes::ByteBuf::from(bytes.to_vec()),
+                ));
+            results.insert(alias.to_string(), result);
+        }
+        let response = BatchResponse {
+            id: Value::Null,
+            results,
+            execution_plan: Vec::new(),
+            edge_provenance: new_map(),
+            execution_time_us: 0,
+            transaction: None,
+            interner_delta: new_map(),
+        };
+        let payload = rmp_serde::to_vec_named(&DbResponse::Batch { response }).unwrap();
+        let bytes = ResponseEnvelope::ok(env.request_id, payload)
+            .to_msgpack()
+            .unwrap();
+        write_frame(&mut s2c_server, &bytes).await.unwrap();
+    });
+    let mut batch = Batch::new();
+    batch.insert(
+        "a",
+        shamir_query_builder::write::Insert::with_repo("repo_a", "items").row(mpack!({"alpha": 1})),
+    );
+    batch.insert(
+        "b",
+        shamir_query_builder::write::Insert::with_repo("repo_b", "items").row(mpack!({"beta": 2})),
+    );
+    let response = client
+        .execute_with_touch("ic", batch.build())
+        .await
+        .unwrap();
+    let row_a = response.results.get("a").unwrap().records[0].as_value();
+    let row_b = response.results.get("b").unwrap().records[0].as_value();
+    assert_eq!(row_a.get("alpha"), Some(&Value::Int(1)));
+    assert_eq!(row_b.get("beta"), Some(&Value::Int(2)));
+    drop(client);
+    drop(_client_read);
+    drop(_server_write);
+    server.await.unwrap();
+}
+
 /// RV-CLIENT-47644B74 (drain/stampede portion): 8 concurrent COLD `dump_repo`
 /// callers on a never-dumped repo must coalesce onto the per-`FieldMap`
 /// `OnceCell` stampede guard. REAL frame-count oracle: the client runs over

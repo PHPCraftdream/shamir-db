@@ -17,6 +17,10 @@ use zeroize::Zeroizing;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 
+use shamir_connect::common::envelope::RequestEnvelope;
+use shamir_query_types::wire::DbRequest;
+use tokio::io::AsyncReadExt;
+
 use crate::{Client, ConnectOptions};
 
 use shamir_server::config::{
@@ -138,6 +142,93 @@ where
     client_b.close().await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn rv_client_1c219006_default_client_version_is_legacy() {
+    let (s2c, _unused) = tokio::io::duplex(1024);
+    let (reader, _write) = tokio::io::split(s2c);
+    let (_read, writer) = tokio::io::split(tokio::io::duplex(1024).0);
+    let client = Client::for_test(reader, writer, crate::client::LifecycleHooks::default());
+    assert_eq!(client.server_query_version_for_test(), 0, "legacy default");
+    drop(client);
+}
+
+#[tokio::test]
+async fn rv_client_1c219006_v1_execution_does_not_create_cache_keys() {
+    // Check the encoded request, not only the admission predicate.
+    let (client_to_server, mut server_reader) = tokio::io::duplex(64 * 1024);
+    let (_server_to_client, client_reader) = tokio::io::duplex(64 * 1024);
+    let mut batch = Batch::new();
+    batch.query("read", shamir_query_builder::Query::from("items"));
+    let client = Client::for_test(
+        client_reader,
+        client_to_server,
+        crate::client::LifecycleHooks::default(),
+    );
+    let execute = tokio::spawn(async move { client.execute("ic", batch.build()).await });
+    let mut prefix = [0u8; 4];
+    server_reader
+        .read_exact(&mut prefix)
+        .await
+        .expect("frame prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    assert!(len <= 64 * 1024, "bounded test frame");
+    let mut frame = vec![0; len];
+    server_reader
+        .read_exact(&mut frame)
+        .await
+        .expect("frame body");
+    let envelope = RequestEnvelope::from_msgpack(&frame).expect("request envelope");
+    let DbRequest::Execute { batch, .. } =
+        rmp_serde::from_slice(&envelope.req).expect("execute request")
+    else {
+        panic!("expected Execute");
+    };
+    assert!(
+        batch.interner_epochs.is_empty(),
+        "legacy execution sends no cursor"
+    );
+    execute.abort();
+    let _ = execute.await;
+}
+
+#[tokio::test]
+async fn rv_client_1c219006_v2_execution_advertises_cold_epoch() {
+    // Decode the actual outbound frame to protect cold-v2 synchronization.
+    let (client_to_server, mut server_reader) = tokio::io::duplex(64 * 1024);
+    let (_server_to_client, client_reader) = tokio::io::duplex(64 * 1024);
+    let mut batch = Batch::new();
+    batch.query("read", shamir_query_builder::Query::from("items"));
+    let client = Client::for_test(
+        client_reader,
+        client_to_server,
+        crate::client::LifecycleHooks::default(),
+    );
+    client.set_server_query_version_for_test(2);
+    let execute = tokio::spawn(async move { client.execute("ic", batch.build()).await });
+    let mut prefix = [0u8; 4];
+    server_reader
+        .read_exact(&mut prefix)
+        .await
+        .expect("frame prefix");
+    let len = u32::from_be_bytes(prefix) as usize;
+    assert!(len <= 64 * 1024, "bounded frame from client-under-test");
+    let mut frame = vec![0; len];
+    server_reader
+        .read_exact(&mut frame)
+        .await
+        .expect("frame body");
+    let envelope = RequestEnvelope::from_msgpack(&frame).expect("request envelope");
+    let DbRequest::Execute { batch, .. } =
+        rmp_serde::from_slice(&envelope.req).expect("execute request")
+    else {
+        panic!("expected Execute");
+    };
+    assert_eq!(batch.interner_epochs.len(), 1, "one distinct repo cursor");
+    assert_eq!(batch.interner_epochs.values().next(), Some(&0));
+    execute.abort();
+    let _ = execute.await;
 }
 
 /// Core ambient sync test: A touches a new field → B learns from its next
