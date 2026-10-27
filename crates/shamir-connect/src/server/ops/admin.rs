@@ -162,7 +162,7 @@ pub fn kick_session<D: UserDirectory, A: AuditSink>(
 
     let target_uid = directory
         .user_id(target_username)
-        .ok_or(Error::InvalidInput("user not found"))?;
+        .ok_or(Error::UserNotFound)?;
 
     // Step 1: bump tickets_invalid_before_ns first (persist barrier).
     // Ok-value (bool) intentionally discarded; ? propagates errors.
@@ -217,7 +217,7 @@ pub fn update_user<D: UserDirectory, A: AuditSink>(
 
     let target_uid = directory
         .user_id(target_username)
-        .ok_or(Error::InvalidInput("user not found"))?;
+        .ok_or(Error::UserNotFound)?;
 
     let new_roles = match new_roles {
         Some(r) => r,
@@ -359,7 +359,7 @@ impl UserDirectory for InMemoryUserDirectory {
             record.tickets_invalid_before_ns = now_ns;
             Ok(true)
         } else {
-            Err(Error::InvalidInput("user not found"))
+            Err(Error::UserNotFound)
         }
     }
 
@@ -387,7 +387,7 @@ impl UserDirectory for InMemoryUserDirectory {
             }
             Ok(true)
         } else {
-            Err(Error::InvalidInput("user not found"))
+            Err(Error::UserNotFound)
         }
     }
 }

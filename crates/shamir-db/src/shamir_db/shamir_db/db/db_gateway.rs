@@ -107,7 +107,7 @@ pub(crate) fn classify_batch_error(e: BatchError) -> DbGatewayError {
             source: Box::new(e),
         },
         _ => DbGatewayError::ExecutionSource {
-            message: format!("{e:?}"),
+            message: e.to_string(),
             source: Box::new(e),
         },
     }

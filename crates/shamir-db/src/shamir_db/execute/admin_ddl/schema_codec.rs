@@ -17,6 +17,15 @@ use crate::types::value::QueryValue;
 use shamir_storage::error::DbError;
 use shamir_types::core::interner::{Interner, InternerKey};
 
+use crate::shamir_db::shamir_db::schema_management::SCHEMA_VERSION_FIELD;
+
+/// The table record's schema version; absent or non-integer reads as 0.
+pub(super) fn schema_version_of(rec: &QueryValue) -> u64 {
+    rec.get(SCHEMA_VERSION_FIELD)
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0) as u64
+}
+
 /// Insert a `(key, value)` pair into a `QueryValue::Map` in place.
 ///
 /// `QueryValue` exposes `as_object` (immutable) but no `as_object_mut`;

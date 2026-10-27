@@ -67,6 +67,9 @@ pub enum Error {
     #[error("invalid input: {0}")]
     InvalidInput(&'static str),
 
+    /// The named user does not exist (internal admin-operation classification).
+    #[error("user not found")]
+    UserNotFound,
     /// Username failed PRECIS UsernameCaseMapped + NFC validation (spec §15.3).
     #[error("invalid username: {0}")]
     InvalidUsername(&'static str),
@@ -140,6 +143,7 @@ impl Error {
             Error::KdfParamsRejected => Error::AuthFailed,
             Error::KnownHostsIntegrityFailed => Error::AuthFailed,
             Error::InvalidInput(_) => Error::AuthFailed,
+            Error::UserNotFound => Error::AuthFailed,
             Error::InvalidUsername(_) => Error::AuthFailed,
             Error::InvalidPassword(_) => Error::AuthFailed,
             Error::Crypto(_) => Error::AuthFailed,

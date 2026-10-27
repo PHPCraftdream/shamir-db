@@ -161,7 +161,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?
         {
-            Some(c) => to_qv(&dto_from_storage(&c)),
+            Some(c) => to_qv(&dto_from_storage(&c))?,
             None => QueryValue::Null,
         };
 

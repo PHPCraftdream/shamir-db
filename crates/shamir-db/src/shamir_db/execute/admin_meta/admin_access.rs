@@ -79,7 +79,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
-            "chmod": @(to_qv(&op.chmod)),
+            "chmod": @(to_qv(&op.chmod)?),
             "mode": @(QueryValue::Int(op.mode as i64)),
         })))
     }
@@ -161,7 +161,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
-            "chown": @(to_qv(&op.chown)),
+            "chown": @(to_qv(&op.chown)?),
             "owner": @(QueryValue::Int(op.owner as i64)),
         })))
     }
@@ -219,7 +219,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
-            "chgrp": @(to_qv(&op.chgrp)),
+            "chgrp": @(to_qv(&op.chgrp)?),
             "group": @(match op.group { Some(g) => QueryValue::Int(g as i64), None => QueryValue::Null }),
         })))
     }

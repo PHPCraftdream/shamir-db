@@ -94,7 +94,7 @@ impl ShamirAdminExecutor {
 
         let mut m = crate::types::common::new_map();
         m.insert("name".to_string(), QueryValue::Str(name.clone()));
-        m.insert("streams".to_string(), to_qv(&op.streams));
+        m.insert("streams".to_string(), to_qv(&op.streams)?);
         let record = QueryValue::Map(m);
 
         let table = self
@@ -217,7 +217,7 @@ impl ShamirAdminExecutor {
 
         let mut m = crate::types::common::new_map();
         m.insert("name".to_string(), QueryValue::Str(name.clone()));
-        m.insert("scopes".to_string(), to_qv(&op.scopes));
+        m.insert("scopes".to_string(), to_qv(&op.scopes)?);
         let record = QueryValue::Map(m);
 
         let table = self

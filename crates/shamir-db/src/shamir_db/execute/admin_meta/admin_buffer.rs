@@ -55,7 +55,7 @@ impl ShamirAdminExecutor {
             Some(c) => mpack!({
                 "table": @(QueryValue::Str(op.get_buffer_config.clone())),
                 "repo": @(QueryValue::Str(op.repo.clone())),
-                "config": @(to_qv(&dto_from_storage(&c))),
+                "config": @(to_qv(&dto_from_storage(&c))?),
             }),
             None => mpack!({
                 "table": @(QueryValue::Str(op.get_buffer_config.clone())),
@@ -111,7 +111,7 @@ impl ShamirAdminExecutor {
         Ok(admin_result(mpack!({
             "set_buffer_config": @(QueryValue::Str(op.set_buffer_config.clone())),
             "repo": @(QueryValue::Str(op.repo.clone())),
-            "config": @(to_qv(&dto_from_storage(&storage_cfg))),
+            "config": @(to_qv(&dto_from_storage(&storage_cfg))?),
         })))
     }
 
@@ -160,7 +160,7 @@ impl ShamirAdminExecutor {
         Ok(admin_result(mpack!({
             "alter_buffer_config": @(QueryValue::Str(op.alter_buffer_config.clone())),
             "repo": @(QueryValue::Str(op.repo.clone())),
-            "config": @(to_qv(&dto_from_storage(&updated))),
+            "config": @(to_qv(&dto_from_storage(&updated))?),
         })))
     }
 }

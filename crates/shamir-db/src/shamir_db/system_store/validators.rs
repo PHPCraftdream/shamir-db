@@ -52,6 +52,8 @@ impl SystemStore {
 
     /// Load every persisted validator catalogue record.
     pub async fn load_validators(&self) -> DbResult<Vec<QueryValue>> {
+        #[cfg(test)]
+        self.count_validator_catalogue_read();
         let table = self.table(TABLE_VALIDATORS).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -66,6 +68,8 @@ impl SystemStore {
 
     /// Load a single validator catalogue record by name.
     pub async fn load_validator(&self, name: &str) -> DbResult<Option<QueryValue>> {
+        #[cfg(test)]
+        self.count_validator_catalogue_read();
         let table = self.table(TABLE_VALIDATORS).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;

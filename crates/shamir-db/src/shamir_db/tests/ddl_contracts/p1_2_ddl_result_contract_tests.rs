@@ -162,6 +162,16 @@ async fn poll_finds_correct_op_status_record() {
     }
 }
 
+#[tokio::test]
+async fn rv_db_48da8907_malformed_operation_id_is_validation_error() {
+    let shamir = setup_with_index().await;
+    let error = shamir
+        .get_ddl_op_status("testdb", "main", "items", "invalid-op-id")
+        .await
+        .expect_err("malformed operation id must be rejected");
+    assert!(matches!(error, crate::DbError::Validation(_)));
+}
+
 /// Polling unknown op_id returns None.
 #[tokio::test]
 async fn poll_unknown_op_id_returns_none() {

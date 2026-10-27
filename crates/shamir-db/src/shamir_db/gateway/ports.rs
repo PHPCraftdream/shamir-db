@@ -3,9 +3,9 @@
 //!
 //! shamir-db consumes opaque `principal64` ids in `Actor`/owner/group-member
 //! positions and never authenticates anyone itself. The two traits here are
-//! the narrow injected surface lets the engine (a) resolve/enumerate
+//! the narrow injected surface that lets the engine resolve and enumerate
 //! principals for introspection (`access_tree`, `List`, owner-delegation
-//! scope lookup) and (b) drive user-administration writes through the real
+//! scope lookup) and drive user-administration writes through the real
 //! durable directory instead of its own historically-ineffective Store B.
 //!
 //! Both are `Option<Arc<dyn ...>>` fields on [`crate::shamir_db::ShamirDb`],
@@ -26,14 +26,63 @@ use async_trait::async_trait;
 mod repo_admin_observer;
 pub use repo_admin_observer::RepoAdminObserver;
 
-/// Boxed error type for the write port. Chosen over a concrete enum because
-/// the implementing layer (`shamir-server`) returns its own directory error
-/// type (`shamir_connect::common::error::Error`) that `shamir-db` cannot
-/// name without inverting the dependency — and the brief explicitly forbids
-/// inventing a new error type. Every consumer of the port stringifies the
-/// error into a `BatchError::QueryError` message, so the dynamic-dispatch
-/// cost is irrelevant (these are admin-frequency ops).
-pub type PortError = Box<dyn std::error::Error + Send + Sync>;
+use std::fmt;
+
+/// Stable, port-level classification for user administration failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortErrorKind {
+    /// The named principal does not exist.
+    UserNotFound,
+    /// Any other failure.
+    Other,
+}
+
+/// Typed user administration error.
+#[derive(Debug)]
+pub struct PortError {
+    kind: PortErrorKind,
+    message: String,
+}
+
+impl PortError {
+    pub fn user_not_found(message: impl Into<String>) -> Self {
+        Self {
+            kind: PortErrorKind::UserNotFound,
+            message: message.into(),
+        }
+    }
+
+    pub fn other(message: impl Into<String>) -> Self {
+        Self {
+            kind: PortErrorKind::Other,
+            message: message.into(),
+        }
+    }
+
+    pub fn kind(&self) -> PortErrorKind {
+        self.kind
+    }
+}
+
+impl From<String> for PortError {
+    fn from(message: String) -> Self {
+        Self::other(message)
+    }
+}
+
+impl From<&str> for PortError {
+    fn from(message: &str) -> Self {
+        Self::other(message)
+    }
+}
+
+impl fmt::Display for PortError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PortError {}
 
 /// Read-only projection of one principal, as seen by the embedding layer's
 /// directory. Carries the projection key (`principal64`) alongside the

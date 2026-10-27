@@ -148,8 +148,10 @@ pub(super) async fn check_owners(
                 // resolved) turns the still-refused shared-destination
                 // assertions in `binding_scope_overlap_clearing_through_
                 // real_reseed_resume` and `t15` red.
+                let expected_receipt = super::super::helpers::to_qv(receipt)
+                    .map_err(|_| SeedRefusal::ConflictingBinding)?;
                 if crate::repl_binding::row_is_quarantined(&row)
-                    && row.get("seed_receipt") == Some(&super::super::helpers::to_qv(receipt))
+                    && row.get("seed_receipt") == Some(&expected_receipt)
                 {
                     continue;
                 }
@@ -245,7 +247,7 @@ impl ShamirDb {
                         return Err(SeedRefusal::ConflictingBinding);
                     }
                     check_owners(self, &op.create_subscription, &receipt).await?;
-                    binding(record, &receipt);
+                    binding(record, &receipt).map_err(|_| SeedRefusal::ConflictingBinding)?;
                 }
             }
         }

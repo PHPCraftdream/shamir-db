@@ -371,7 +371,7 @@ impl FjallUserDirectory {
             .map_err(|e| Error::Encoding(format!("fjall: get: {e}")))?;
         let blob: Vec<u8> = match prior {
             Some(v) => v.as_ref().to_vec(),
-            None => return Err(Error::InvalidInput("user not found")),
+            None => return Err(Error::UserNotFound),
         };
         let mut user: PersistedUser = rmp_serde::from_slice(&blob)
             .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
@@ -491,7 +491,7 @@ impl FjallUserDirectory {
 
         let blob = match self.read_blob(username)? {
             Some(b) => b,
-            None => return Err(Error::InvalidInput("user not found")),
+            None => return Err(Error::UserNotFound),
         };
         let mut user: PersistedUser = rmp_serde::from_slice(&blob)
             .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;
@@ -545,7 +545,7 @@ impl FjallUserDirectory {
 
         let blob = match self.read_blob(username)? {
             Some(b) => b,
-            None => return Err(Error::InvalidInput("user not found")),
+            None => return Err(Error::UserNotFound),
         };
         let mut user: PersistedUser = rmp_serde::from_slice(&blob)
             .map_err(|e| Error::Encoding(format!("rmp decode: {e}")))?;

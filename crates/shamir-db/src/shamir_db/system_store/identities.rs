@@ -68,6 +68,8 @@ impl SystemStore {
 
     /// Load every persisted function catalogue record.
     pub async fn load_functions(&self) -> DbResult<Vec<QueryValue>> {
+        #[cfg(test)]
+        self.count_function_catalogue_read();
         let table = self.table(TABLE_FUNCTIONS).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -88,6 +90,8 @@ impl SystemStore {
 
     /// Load a single function catalogue record by name.
     pub async fn load_function(&self, name: &str) -> DbResult<Option<QueryValue>> {
+        #[cfg(test)]
+        self.count_function_catalogue_read();
         let table = self.table(TABLE_FUNCTIONS).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;

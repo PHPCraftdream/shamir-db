@@ -237,7 +237,7 @@ impl ShamirAdminExecutor {
         };
         // Serialize the events via msgpack round-trip (ChangelogEvent is Serialize).
         // gap_at is surfaced verbatim (null when no gap).
-        let events_qv: Vec<QueryValue> = jr.events.iter().map(to_qv).collect();
+        let events_qv: Vec<QueryValue> = jr.events.iter().map(to_qv).collect::<Result<_, _>>()?;
         let gap_at_qv = match jr.gap_at {
             Some(v) => QueryValue::Int(v as i64),
             None => QueryValue::Null,

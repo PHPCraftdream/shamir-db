@@ -11,6 +11,18 @@ use tempfile::TempDir;
 // ----------------------------------------------------------------------------
 
 #[test]
+fn read_modify_write_missing_user_returns_user_not_found() {
+    let (_tmp, store) = fresh_dir();
+    let err = store
+        .update_roles("missing-card", vec!["admin".to_string()], 1_000)
+        .expect_err("updating an unknown user must fail");
+    assert!(matches!(
+        err,
+        shamir_connect::common::error::Error::UserNotFound
+    ));
+}
+
+#[test]
 fn roundtrip_insert_lookup() {
     let (_tmp, store) = fresh_dir();
     let record = fixture_record();
