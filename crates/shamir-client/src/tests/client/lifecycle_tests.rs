@@ -650,7 +650,7 @@ async fn rv_client_b42b8576_no_write_midframe_after_close() {
 fn rv_client_e16a04e5_roundtrip_serialize_uses_borrowed_request_bytes() {
     let source = include_str!("../../client/api.rs");
     let start = source
-        .find("thread_local! {")
+        .find("REQ_BUF.with(|cell| -> Result")
         .expect("scratch serializer exists");
     let end = source[start..]
         .find("let (tx, rx)")

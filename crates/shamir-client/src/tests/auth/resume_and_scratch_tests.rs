@@ -114,14 +114,28 @@ async fn rv_client_2d08f353_public_resume_after_rejected_pin() {
             if context.contains("identity does not match pinned hash")
     ));
 
-    let resumed = Client::resume(ResumeOptions {
-        addr,
-        server_name: "localhost".into(),
-        ticket,
-        pinned_hash: pin,
-    })
-    .await
-    .expect("resume with trusted pin");
+    // Three connects right after boot exceed the warm-up per-subnet accept
+    // budget; a rate-limited connection is dropped before the proof frame, so
+    // the ticket is never disclosed and a retry is safe.
+    let mut attempts = 0;
+    let resumed = loop {
+        attempts += 1;
+        match Client::resume(ResumeOptions {
+            addr,
+            server_name: "localhost".into(),
+            ticket: ticket.clone(),
+            pinned_hash: pin,
+        })
+        .await
+        {
+            Err(crate::ClientError::Transport { context, .. })
+                if context == "read resume_proof_ok" && attempts < 20 =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            other => break other.expect("resume with trusted pin"),
+        }
+    };
     assert_ne!(resumed.session_id(), session_id);
     assert_eq!(resumed.server_pub_key_pin(), pin);
     assert_eq!(
