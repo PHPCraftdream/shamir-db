@@ -15,9 +15,14 @@ use shamir_types::types::value::QueryValue;
 
 /// Execute a batch and return the response.
 async fn exec(db: &ShamirDb, db_name: &str, batch: &Batch) -> shamir_db::query::BatchResponse {
-    db.execute(db_name, &batch.to_request_via_msgpack())
-        .await
-        .expect("batch should succeed")
+    db.execute(
+        db_name,
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .expect("batch should succeed")
 }
 
 fn result_map(resp: &shamir_db::query::BatchResponse, alias: &str) -> QueryValue {
@@ -43,7 +48,13 @@ async fn describe_table_returns_all_sections() {
     // 2. Set retention to "keep all" (default Retention = Forever = all None).
     let mut b = Batch::new();
     b.id(2);
-    b.set_retention("ret", ddl::set_retention("users", Retention::default()));
+    b.set_retention(
+        "ret",
+        ddl::set_retention("users", Retention::default())
+            .hmac("direct-db-test")
+            .build()
+            .unwrap(),
+    );
     let resp = exec(&db, "testdb", &b).await;
     let r = result_map(&resp, "ret");
     assert_eq!(r.get("ok").and_then(|v| v.as_bool()), Some(true));

@@ -24,7 +24,7 @@ async fn create_function_folder_persists_mkdir_p() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     let result = resp.results["op"].records[0].as_value().into_owned();
     assert_eq!(
@@ -55,7 +55,7 @@ async fn create_function_folder_idempotent() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["utils"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // First create
     let resp = db.execute("testdb", &req).await.unwrap();
@@ -95,7 +95,7 @@ async fn create_function_folder_meta_owner_is_actor() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["owned_folder"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -130,7 +130,7 @@ async fn function_folder_meta_survives_reopen() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["persist_test"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &req).await.unwrap();
 
     // Confirm meta is persisted (reads from catalogue).
@@ -157,8 +157,14 @@ async fn slash_named_function_works_without_explicit_folder() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cf");
-    b.create_function("op", ddl::create_function("math/abs").wasm(wasm_b64(&wasm)));
-    let create_req = b.to_request_via_msgpack();
+    b.create_function(
+        "op",
+        ddl::create_function("math/abs")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_function"),
+    );
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     // The implicit folder "math" should return open meta (not error).
@@ -195,15 +201,21 @@ async fn list_functions_over_wire() {
     for name in ["fn_alpha", "fn_beta"] {
         let mut b = Batch::new();
         b.id("cf");
-        b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
-        let req = b.to_request_via_msgpack();
+        b.create_function(
+            "op",
+            ddl::create_function(name)
+                .wasm(wasm_b64(&wasm))
+                .build()
+                .expect("build create_function"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.unwrap();
     }
 
     let mut b = Batch::new();
     b.id("lf");
     b.list_functions("op", ddl::list_functions());
-    let list_req = b.to_request_via_msgpack();
+    let list_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let result = resp.results["op"].records[0].as_value().into_owned();
     let fns = result["functions"].as_array().unwrap();
@@ -229,15 +241,21 @@ async fn list_functions_filtered_by_folder() {
     for name in ["math/add", "math/sub", "str/upper"] {
         let mut b = Batch::new();
         b.id("cf");
-        b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
-        let req = b.to_request_via_msgpack();
+        b.create_function(
+            "op",
+            ddl::create_function(name)
+                .wasm(wasm_b64(&wasm))
+                .build()
+                .expect("build create_function"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.unwrap();
     }
 
     let mut b = Batch::new();
     b.id("lf");
     b.list_functions("op", ddl::list_functions().folder("math"));
-    let list_req = b.to_request_via_msgpack();
+    let list_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let rec = resp.results["op"].records[0].as_value().into_owned();
     let fns = rec["functions"].as_array().unwrap();
@@ -262,9 +280,12 @@ async fn list_validators_all_over_wire() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("v_list_all").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("v_list_all")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_validator"),
     );
-    let create_req = b.to_request_via_msgpack();
+    let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
     // Bind it to a table so we can verify bound_in.
@@ -277,13 +298,13 @@ async fn list_validators_all_over_wire() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let bind_req = b.to_request_via_msgpack();
+    let bind_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &bind_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("lv");
     b.list_all_validators("op", ddl::list_all_validators());
-    let list_req = b.to_request_via_msgpack();
+    let list_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let rec = resp.results["op"].records[0].as_value().into_owned();
     let items = rec["validators"].as_array().unwrap();
@@ -311,13 +332,13 @@ async fn list_function_folders_over_wire() {
     let mut b = Batch::new();
     b.id("cff");
     b.create_function_folder("op", ddl::create_function_folder(["reports", "daily"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("lff");
     b.list_function_folders("op", ddl::list_function_folders());
-    let list_req = b.to_request_via_msgpack();
+    let list_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let rec = resp.results["op"].records[0].as_value().into_owned();
     let folders = rec["function_folders"].as_array().unwrap();
@@ -344,14 +365,14 @@ async fn list_function_folders_filtered_by_parent() {
         let mut b = Batch::new();
         b.id("cff");
         b.create_function_folder("op", ddl::create_function_folder(path));
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.unwrap();
     }
 
     let mut b = Batch::new();
     b.id("lff");
     b.list_function_folders("op", ddl::list_function_folders().parent("alpha"));
-    let list_req = b.to_request_via_msgpack();
+    let list_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &list_req).await.unwrap();
     let rec = resp.results["op"].records[0].as_value().into_owned();
     let folders = rec["function_folders"].as_array().unwrap();

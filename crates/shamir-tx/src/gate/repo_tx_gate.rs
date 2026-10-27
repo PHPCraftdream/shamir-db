@@ -104,6 +104,11 @@ pub struct RepoTxGate {
     /// the entry is removed only when the count reaches zero).
     active_snapshots: Arc<scc::HashMap<u64, u64, THasher>>,
 
+    /// Ordered index over the DISTINCT pinned snapshot versions (refcount > 0
+    /// in `active_snapshots`). `min_alive` reads its first key as a bounded
+    /// O(log n) lookup instead of scanning the whole refcount map.
+    snapshot_versions: Arc<scc::TreeIndex<u64, ()>>,
+
     /// Count of currently-open Serializable snapshots. Incremented when
     /// a Serializable tx opens a snapshot; decremented when its
     /// `SnapshotGuard` drops. Non-tx writes check this atomically:
@@ -225,7 +230,16 @@ pub struct RepoTxGate {
     durable_progress: Arc<tokio::sync::Notify>,
 }
 
-/// RAII guard that removes a snapshot from `active_snapshots` on drop.
+#[cfg(test)]
+thread_local! {
+    static MIN_ALIVE_PROBE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn min_alive_probe() -> u64 {
+    MIN_ALIVE_PROBE.with(std::cell::Cell::get)
+}
+
 /// If the snapshot was opened for a Serializable transaction, also
 /// decrements `active_serializable_count` so non-tx writes stop paying
 /// the SSI-footprint overhead once no Serializable tx is watching.
@@ -240,6 +254,17 @@ pub struct SnapshotGuard {
     /// window for a concurrently-racing vacuum.
     registered: Vec<u64>,
     snapshots: Arc<scc::HashMap<u64, u64, THasher>>,
+    /// Mirror of `snapshots` keys, maintained for `min_alive`'s bounded
+    /// minimum lookup; entries removed exactly when the refcount hits zero.
+    ///
+    /// LOCK ORDER (map+tree atomicity): the hash-map bucket entry lock is
+    /// held across the tree-index update for the same version; the tree is
+    /// NEVER touched for a version whose map entry is not currently locked —
+    /// this makes map+tree mutations atomic per version and closes the
+    /// drop/open handoff race.
+    versions: Arc<scc::TreeIndex<u64, ()>>,
+    #[cfg(test)]
+    drop_hook: Option<Box<dyn FnOnce(bool) + Send>>,
     /// Non-None iff this guard was opened for a Serializable tx.
     /// Holds the shared counter so Drop can decrement it without
     /// holding a reference back to the `RepoTxGate`.
@@ -268,6 +293,21 @@ impl Drop for SnapshotGuard {
                 scc::hash_map::Entry::Occupied(mut e) => {
                     let count = e.get_mut();
                     if *count <= 1 {
+                        // LOCK ORDER: remove from the tree FIRST, while the
+                        // OccupiedEntry `e` still holds the hash-map bucket
+                        // entry lock; only then consume the map entry. The
+                        // bucket lock is held across the tree-index update
+                        // for the same version — the tree is NEVER touched
+                        // for a version whose map entry is not currently
+                        // locked — making map+tree mutations atomic per
+                        // version and closing the drop/open handoff race
+                        // (a new opener of the same version can never find
+                        // the tree key deleted out from under its live pin).
+                        let _ = self.versions.remove_sync(&v);
+                        #[cfg(test)]
+                        if let Some(hook) = self.drop_hook.take() {
+                            hook(self.versions.contains(&v));
+                        }
                         let _ = e.remove_entry();
                     } else {
                         *count -= 1;
@@ -329,6 +369,7 @@ impl RepoTxGate {
             receipt_native: AtomicBool::new(false),
             next_tx_id: AtomicU64::new(next_tx_id_seed),
             active_snapshots: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            snapshot_versions: Arc::new(scc::TreeIndex::new()),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
             active_snapshots_opening: AtomicU64::new(0),
             commit_write_log: scc::TreeIndex::new(),
@@ -426,6 +467,9 @@ impl RepoTxGate {
         SnapshotGuard {
             registered,
             snapshots: Arc::clone(&self.active_snapshots),
+            versions: Arc::clone(&self.snapshot_versions),
+            #[cfg(test)]
+            drop_hook: None,
             serializable_count: None,
         }
     }
@@ -453,6 +497,9 @@ impl RepoTxGate {
         SnapshotGuard {
             registered,
             snapshots: Arc::clone(&self.active_snapshots),
+            versions: Arc::clone(&self.snapshot_versions),
+            #[cfg(test)]
+            drop_hook: None,
             serializable_count: None,
         }
     }
@@ -479,6 +526,9 @@ impl RepoTxGate {
         SnapshotGuard {
             registered,
             snapshots: Arc::clone(&self.active_snapshots),
+            versions: Arc::clone(&self.snapshot_versions),
+            #[cfg(test)]
+            drop_hook: None,
             serializable_count: Some(Arc::clone(&self.active_serializable_count)),
         }
     }
@@ -561,15 +611,42 @@ impl RepoTxGate {
     /// construction, not papered over with a longer timeout. The fn stays
     /// `async` to keep its call sites / public shape unchanged; it no
     /// longer suspends.
+    /// LOCK ORDER: the hash-map bucket entry lock is held across the
+    /// tree-index update for the same version; the tree is NEVER touched
+    /// for a version whose map entry is not currently locked — this makes
+    /// map+tree mutations atomic per version and closes the drop/open
+    /// handoff race.
     async fn bump_refcount(&self, version: u64) {
         match self.active_snapshots.entry_sync(version) {
             scc::hash_map::Entry::Occupied(mut e) => {
                 *e.get_mut() = e.get().saturating_add(1);
             }
             scc::hash_map::Entry::Vacant(e) => {
-                e.insert_entry(1u64);
+                // LOCK ORDER: hold the newly-inserted entry's bucket lock
+                // (via `occ`) across the tree-index insert for the same
+                // version; the tree is NEVER touched for a version whose
+                // map entry is not currently locked — map+tree mutations
+                // are atomic per version, closing the drop/open handoff race.
+                let occ = e.insert_entry(1u64);
+                let _ = self.snapshot_versions.insert_sync(version, ());
+                drop(occ);
             }
         }
+    }
+
+    /// Test-only: install a callback at the actual last-ref drop interlock.
+    #[cfg(test)]
+    pub(crate) fn test_set_drop_hook(
+        &self,
+        guard: &mut SnapshotGuard,
+        hook: impl FnOnce(bool) + Send + 'static,
+    ) {
+        guard.drop_hook = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_min_index_contains(&self, v: u64) -> bool {
+        self.snapshot_versions.contains(&v)
     }
 
     /// cancel-safe: yes — single `tokio::sync::Mutex::lock().await`,
@@ -823,12 +900,14 @@ impl RepoTxGate {
             return 0;
         }
         let mut min = self.completion().watermark();
-        self.active_snapshots.iter_sync(|k, _| {
-            if *k < min {
-                min = *k;
-            }
-            true
-        });
+        // Bounded lookup: first key of the ordered distinct-version index is
+        // the minimum pinned snapshot — no full-map iteration.
+        let guard = scc::Guard::new();
+        if let Some((k, _)) = self.snapshot_versions.range(0u64.., &guard).next() {
+            #[cfg(test)]
+            MIN_ALIVE_PROBE.with(|probe| probe.set(probe.get() + 1));
+            min = min.min(*k);
+        }
         min
     }
 

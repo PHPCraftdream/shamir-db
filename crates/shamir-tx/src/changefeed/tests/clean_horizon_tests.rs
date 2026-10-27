@@ -10,7 +10,7 @@ use tokio::sync::Notify;
 
 use crate::changefeed::{
     clean_horizon_key, decode_clean_horizon, decode_gap_marker, encode_clean_horizon,
-    gap_marker_key, ChangelogStore, RepoChangefeed,
+    gap_marker_key, ChangelogError, ChangelogStore, RepoChangefeed,
 };
 
 #[derive(Default)]
@@ -26,30 +26,36 @@ struct CheckpointStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for CheckpointStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         if key == gap_marker_key() {
             if self.park_gap.swap(false, Ordering::AcqRel) {
                 self.reached.notify_one();
                 self.resume.notified().await;
             }
             if self.fail_gap.load(Ordering::Acquire) {
-                return Err("gap failed".into());
+                return Err(ChangelogError::Journal("gap failed".into()));
             }
-            self.gap
-                .store(decode_gap_marker(&value)?.1, Ordering::Release);
+            self.gap.store(
+                decode_gap_marker(&value)
+                    .map_err(ChangelogError::Journal)?
+                    .1,
+                Ordering::Release,
+            );
         } else if key == clean_horizon_key() {
             if self.fail_j.load(Ordering::Acquire) {
-                return Err("J failed".into());
+                return Err(ChangelogError::Journal("J failed".into()));
             }
-            self.j
-                .store(decode_clean_horizon(&value)?, Ordering::Release);
+            self.j.store(
+                decode_clean_horizon(&value).map_err(ChangelogError::Journal)?,
+                Ordering::Release,
+            );
         } else {
-            return Err("unexpected event".into());
+            return Err(ChangelogError::Journal("unexpected event".into()));
         }
         Ok(())
     }
 
-    async fn range_from(&self, _: Bytes, _: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(&self, _: Bytes, _: usize) -> Result<Vec<Bytes>, ChangelogError> {
         Ok(vec![])
     }
 }

@@ -202,7 +202,14 @@ impl MvccStore {
         let mut entries: Vec<(u64, Bytes)> = Vec::new();
         while let Some(batch) = stream.next().await {
             for (phys_key, _val) in batch? {
-                if let Some((_, version)) = crate::version_codec::decode_version_key(&phys_key) {
+                // RV-TX-1480F306: select by the entry's OWN decoded original
+                // key. A sibling key containing `key || 0xFF` prefix-collides;
+                // such entries must not be ranked against this key's cur_v
+                // and retention guards.
+                if let Some((orig, version)) = crate::version_codec::decode_version_key(&phys_key) {
+                    if orig != key {
+                        continue;
+                    }
                     // Boundary: store keys are `RecordKey`; this local entries
                     // vec is `Bytes` (byte-identical conversion).
                     entries.push((version, phys_key.into()));

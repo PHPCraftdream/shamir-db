@@ -1,7 +1,9 @@
 use super::helpers::{count_history_entries, make_gate, make_mvcc_with_gate};
 use super::test_stores::counting_store::CountingStore;
 use crate::mvcc_store::{MvccStore, Retention};
+use crate::version_codec::encode_version_key;
 use bytes::Bytes;
+use shamir_storage::error::DbError;
 use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
 use std::sync::atomic::Ordering;
@@ -190,6 +192,70 @@ async fn append_only_no_vacuum_scan() {
     // All 5 entries present.
     let hist = count_history_entries(&mvcc).await;
     assert_eq!(hist, 5, "5 distinct keys → 5 history entries");
+}
+
+/// RV-TX-1480F306: the scan-path vacuum must select versions by the
+/// entry's OWN decoded original key, not the scan's requested key.
+/// `p\xFFchild`'s physical keys prefix-collide with `p`'s scan prefix.
+/// PRE-FIX (filter reverted): the parent's scan collects the child's
+/// entries into the parent's ranked list; with max_count=1 only the newest
+/// entry overall is kept, so BOTH child versions plus parent v1 are
+/// reclaimed → child_v2 missing → this test fails. POST-FIX: only the
+/// parent's own entries are ranked — parent v1 is reclaimed and the child
+/// is untouched by the parent's vacuum; child_v1 is gone only via the
+/// child's OWN second-write vacuum (max_count=1, no snapshot), which is
+/// legitimate.
+#[tokio::test]
+async fn rv_mvcc_gc_1480f306_scan_vacuum_selects_by_original_key() {
+    let gate = make_gate();
+    let mvcc = make_mvcc_with_gate(gate);
+    mvcc.set_retention(Retention {
+        max_count: Some(1),
+        max_age_secs: None,
+        min_count: None,
+    })
+    .unwrap();
+
+    let parent = Bytes::from_static(b"p");
+    // The child's encoded physical key `p || 0xFF || child || 0xFF || v`
+    // starts with the parent's scan prefix `p || 0xFF`.
+    let child = Bytes::from_static(b"p\xFFchild");
+
+    // Child: two versions; the child's own second-write vacuum (max_count=1,
+    // no snapshot) legitimately reclaims child_v1.
+    mvcc.set_versioned(RecordKey::from(child.clone()), Bytes::from("c1"))
+        .await
+        .unwrap();
+    let child_v1 = mvcc.version_of(&child);
+    mvcc.set_versioned(RecordKey::from(child.clone()), Bytes::from("c2"))
+        .await
+        .unwrap();
+    let child_v2 = mvcc.version_of(&child);
+
+    // Parent: two writes; the second triggers the parent's scan-path vacuum
+    // (keep_history retention, no live snapshots).
+    mvcc.set_versioned(RecordKey::from(parent.clone()), Bytes::from("pa"))
+        .await
+        .unwrap();
+    mvcc.set_versioned(RecordKey::from(parent.clone()), Bytes::from("pb"))
+        .await
+        .unwrap();
+
+    let child_v2_key = encode_version_key(&child, child_v2);
+    let child_v2_physical = mvcc.history_store().get(child_v2_key.into()).await.unwrap();
+    assert!(
+        !child_v2_physical.is_empty(),
+        "child_v2 physical history key must survive the parent's vacuum scan"
+    );
+    let child_v1_key = encode_version_key(&child, child_v1);
+    // A reclaimed physical key reads back as NotFound.
+    assert!(
+        matches!(
+            mvcc.history_store().get(child_v1_key.into()).await,
+            Err(DbError::NotFound(_))
+        ),
+        "child_v1 physical history key must be reclaimed by its own vacuum"
+    );
 }
 
 /// delete_versioned + CurrentOnly: the tombstone for the new version is

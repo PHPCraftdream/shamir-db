@@ -25,6 +25,22 @@ fn render_q(src: &str) -> String {
 }
 
 #[test]
+fn rv_query_builder_macros_002c0148_raw_filter_identifier_normalizes() {
+    let ts: TokenStream2 = "r#type == 1".parse().unwrap();
+    let expr: syn::Expr = parse2(ts).unwrap();
+    let rendered = filter_lower::lower_expr(&expr).unwrap().to_string();
+    assert!(rendered.contains("\"type\""));
+    assert!(!rendered.contains("r#type"));
+}
+
+#[test]
+fn rv_query_builder_macros_eee42189_generated_chain_retains_sequence() {
+    let rendered = render_q("from t order_by a asc, b.c desc");
+    assert!(rendered.contains("order_by_asc"));
+    assert!(rendered.contains("order_by_desc"));
+}
+
+#[test]
 fn rv_query_builder_macros_36328515_expansion_has_no_query_types_paths() {
     let forms = [
         "from t where x == 1 select count(*) as n order_by x asc limit 5 offset 1",

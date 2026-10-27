@@ -164,6 +164,23 @@ fn truncation_detected_after_restart() {
     );
 }
 
+/// Re-read the log until it holds `want` entries or a generous deadline
+/// passes. A fixed wall-clock sleep raced the flusher's fsync on loaded CI
+/// runners; this waits for the flush itself. A dead flusher still fails.
+async fn wait_for_flushed(dir: &std::path::Path, want: usize) -> Vec<AuditEntry> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        // A read racing a half-written flush may fail; retry until the deadline.
+        match FjallAuditAppender::read_log_for_verify(dir) {
+            Ok(read) if read.len() >= want => return read,
+            _ if tokio::time::Instant::now() >= deadline => {
+                return FjallAuditAppender::read_log_for_verify(dir).unwrap();
+            }
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn batched_mode_flushes_on_interval() {
     let dir = TempDir::new().unwrap();
@@ -177,10 +194,8 @@ async fn batched_mode_flushes_on_interval() {
         appender.append_entry(&e).expect("append succeeds");
     }
 
-    // Allow the background task to fire its 100ms timer.
-    tokio::time::sleep(Duration::from_millis(250)).await;
-
-    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    // Wait for the background 100ms timer to drain the buffer.
+    let read = wait_for_flushed(dir.path(), 3).await;
     assert_eq!(read.len(), 3, "background flusher must drain buffer");
 
     appender.shutdown().await;
@@ -204,9 +219,7 @@ async fn batched_mode_flushes_on_interval_current_thread() {
         appender.append_entry(&e).expect("append succeeds");
     }
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
-
-    let read = FjallAuditAppender::read_log_for_verify(dir.path()).unwrap();
+    let read = wait_for_flushed(dir.path(), 3).await;
     assert_eq!(
         read.len(),
         3,

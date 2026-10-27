@@ -401,6 +401,15 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Fallible table-drop insertion; requires a valid HMAC-gated builder.
+    pub fn try_drop_table(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
+    }
+
     /// Rename a table.
     pub fn rename_table(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
@@ -418,6 +427,15 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Fallible index-drop insertion; requires a valid HMAC-gated builder.
+    pub fn try_drop_index(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
+    }
+
     /// Rename an index on a table (in-place rekey, no data loss).
     pub fn rename_index(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
@@ -428,6 +446,15 @@ impl Batch {
     /// Create (or replace) a stored function.
     pub fn create_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Insert a gated operation after validating its HMAC tag.
+    pub fn try_create_function(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
     }
 
     /// Drop a stored function.
@@ -495,6 +522,15 @@ impl Batch {
     /// Create a user.
     pub fn create_user(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Fallible insertion for any gated builder.
+    pub fn try_create_user(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
     }
 
     /// Drop a user.
@@ -624,6 +660,15 @@ impl Batch {
     /// Change a live table's history-retention policy.
     pub fn set_retention(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
         self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Fallible set-retention insertion.
+    pub fn try_set_retention(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
     }
 
     /// Imperative one-shot history purge (temporal T4).

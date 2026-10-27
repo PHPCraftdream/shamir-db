@@ -196,6 +196,95 @@ fn key_in_interval_prefix_tag_matches_engine_constant() {
     assert_eq!(SORTED_TAG, 0x80);
 }
 
+// RV-TX-52FB938F: tx-side sort_codec ordering and interval membership oracle.
+// Cross-crate layout contract lives in the manager-backed engine oracle
+// `rv_predicate_range_52fb938f_manager_posting_matches_shared_layout_and_tx_consumer`.
+// This test does not invoke the index producer.
+
+#[test]
+fn rv_predicate_set_52fb938f_posting_layout_round_trips_through_sort_codec() {
+    // (1) sort_codec's encodings are order-preserving under plain lexicographic compare.
+    let ints = [-9223372036854775808i64, -1, 0, 1, 42, 9223372036854775807];
+    let encoded: Vec<Vec<u8>> = ints.iter().map(|v| enc_i(*v)).collect();
+    for w in encoded.windows(2) {
+        assert!(
+            w[0] < w[1],
+            "sort_codec i64 encodings must be lexicographically ascending"
+        );
+    }
+    let strs = ["bo", "bob", "boby"];
+    let s_encoded: Vec<Vec<u8>> = strs.iter().map(|s| enc_s(s)).collect();
+    for w in s_encoded.windows(2) {
+        assert!(w[0] < w[1], "sort_codec str encodings must ascend");
+    }
+
+    // (2) Membership agrees with value-space comparison for both key kinds.
+    for (i, &v) in ints.iter().enumerate() {
+        for lo in ints {
+            for hi in ints {
+                if lo > hi {
+                    continue;
+                }
+                let want = v >= lo && v <= hi;
+                let got = key_in_interval(
+                    &posting(7, &encoded[i], 0x42),
+                    7,
+                    &Included(Bytes::from(bound(7, &enc_i(lo)))),
+                    &Included(Bytes::from(bound_hi_inclusive(7, &enc_i(hi)))),
+                );
+                assert_eq!(got, want, "i64 {v} in [{lo},{hi}]");
+            }
+        }
+    }
+    for (i, s) in strs.iter().enumerate() {
+        for lo in strs {
+            for hi in strs {
+                if lo > hi {
+                    continue;
+                }
+                let want = *s >= lo && *s <= hi;
+                let got = key_in_interval(
+                    &posting(7, &s_encoded[i], 0x42),
+                    7,
+                    &Included(Bytes::from(bound(7, &enc_s(lo)))),
+                    &Included(Bytes::from(bound_hi_inclusive(7, &enc_s(hi)))),
+                );
+                assert_eq!(got, want, "str {s} in [{lo},{hi}]");
+            }
+        }
+    }
+
+    // (3) The full posting layout (tag || index_id BE8 || value || rid 16)
+    // sorts identically to (value, rid) — the scan order range pulls rely on.
+    let mut keys: Vec<(i64, u8, Vec<u8>)> = [(5i64, 2u8), (5, 1), (4, 9), (6, 0)]
+        .into_iter()
+        .map(|(v, rid)| (v, rid, posting(7, &enc_i(v), rid)))
+        .collect();
+    keys.sort_by(|a, b| a.2.cmp(&b.2));
+    let mut expected: Vec<(i64, u8)> = keys.iter().map(|(v, r, _)| (*v, *r)).collect();
+    expected.sort_unstable();
+    let actual: Vec<(i64, u8)> = keys.iter().map(|(v, r, _)| (*v, *r)).collect();
+    assert_eq!(actual, expected, "byte order must equal (value, rid) order");
+}
+
+fn bound(index_id: u64, tail: &[u8]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(SORTED_PREFIX_LEN + tail.len());
+    b.push(SORTED_TAG);
+    b.extend_from_slice(&index_id.to_be_bytes());
+    b.extend_from_slice(tail);
+    b
+}
+
+/// Inclusive upper bound in the producer's convention: `prefix || value ||
+/// 0xFF × 16` — mirrors `SortedIndexManager::range_bounds` (shamir-index
+/// scan.rs), which appends the 16-byte 0xFF rid suffix so that a posting
+/// whose value equals the hi value still compares <= the bound.
+fn bound_hi_inclusive(index_id: u64, tail: &[u8]) -> Vec<u8> {
+    let mut b = bound(index_id, tail);
+    b.extend_from_slice(&shamir_types::core::sorted_index_layout::inclusive_hi_suffix());
+    b
+}
+
 // ---- PredicateSet tests (pre-existing) --------------------------------
 
 #[test]
