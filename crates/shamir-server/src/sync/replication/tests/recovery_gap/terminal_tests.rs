@@ -516,7 +516,10 @@ async fn replacement_generation_blocks_old_task_callback() {
     b.id(1);
     b.op("drop", drop_subscription("sub_a"));
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("drop active subscription");
     assert_eq!(
@@ -533,7 +536,10 @@ async fn replacement_generation_blocks_old_task_callback() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "prof_a"),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("re-create subscription");
     let gen_after = sub_binding_generation(&follower, "sub_a")
