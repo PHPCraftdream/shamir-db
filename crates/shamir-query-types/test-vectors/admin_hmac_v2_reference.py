@@ -77,7 +77,7 @@ def fields(vector):
 
 
 def main():
-    fixture = pathlib.Path(__file__).resolve().parents[1] / "crates/shamir-query-types/test-vectors/admin_hmac_v2.json"
+    fixture = pathlib.Path(__file__).resolve().parent / "admin_hmac_v2.json"
     data = json.loads(fixture.read_text(encoding="utf-8"))
     session_id = bytes.fromhex(data["session_id_hex"])
     key = hashlib.sha256(KEY_PREFIX + session_id).digest()
