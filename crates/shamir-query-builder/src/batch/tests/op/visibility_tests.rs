@@ -11,7 +11,7 @@ fn visibility_override_survives_builder_and_named_msgpack() {
     ] {
         let mut batch = Batch::new();
         batch.visibility_wait(wait);
-        let request = batch.to_request_via_msgpack();
+        let request = batch.to_request_via_msgpack().unwrap();
         assert_eq!(request.visibility_wait, Some(wait));
         assert_eq!(request, batch.build());
     }

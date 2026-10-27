@@ -55,7 +55,7 @@ async fn user_db_write_does_not_pollute_system_journal() {
         "ins",
         insert("users").row(doc().set("name", "Alice").unwrap().set("age", 30).unwrap()),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &req).await.unwrap();
 
     let repo = shamir
