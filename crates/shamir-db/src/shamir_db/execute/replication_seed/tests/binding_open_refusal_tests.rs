@@ -11,12 +11,15 @@
 
 use shamir_types::mpack;
 
+use super::binding_lifecycle_tests::{create_profile, seed_row, setup, subscription_row_opt};
 use crate::query::write::SetOp;
 use crate::query::TableRef;
 use crate::shamir_db::SystemStoreConfig;
 use crate::types::common::new_map;
 use crate::types::value::QueryValue;
 use crate::{DbError, ShamirDb};
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl::subscription;
 
 /// Build a minimal subscription row with the legacy (binding-less) shape.
 fn legacy_row(name: &str, state: &str) -> QueryValue {
@@ -226,4 +229,57 @@ async fn binding_open_refusal_valid_row_reopens() {
         .has_resync_required_subscription_covering("testdb", "main")
         .await
         .unwrap());
+}
+
+/// S5c-X round 4 (T7, deterministic — no sleeps): the creation future is
+/// DROPPED (never aborted) exactly at the final-write Notify seam — the
+/// pending barrier row is durable, the final flip NEVER starts, and the row
+/// can never be startable (reconcile's start gate requires `active`). The
+/// catalogue stays valid throughout.
+#[tokio::test]
+async fn binding_cancellation_dropped_at_final_write_boundary_leaves_pending_durable() {
+    let shamir = setup().await;
+    seed_row(&shamir, "main").await;
+    create_profile(&shamir, "prof", "main").await;
+
+    shamir
+        .final_write_pause
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut b = Batch::new();
+    b.id(2);
+    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
+    let request = b.to_request_via_msgpack().unwrap();
+    let mut create = Box::pin(shamir.execute("testdb", &request));
+    let mut wait = Box::pin(shamir.final_write_arrived.notified());
+    // Biased order polls `wait` first, so the seam's notify_one cannot be
+    // missed once `wait` is registered.
+    tokio::select! {
+        biased;
+        _ = &mut wait => {}
+        res = create.as_mut() => panic!("creation ran past the final-write seam: {res:?}"),
+    }
+    drop(create); // DROP the parked future — never abort
+    shamir
+        .final_write_pause
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+
+    // The dropped-at-the-boundary creation left the durable pending barrier.
+    let row = subscription_row_opt(&shamir, "sub")
+        .await
+        .expect("the pending barrier row must be durable");
+    assert_eq!(
+        row.get("state").and_then(|v| v.as_str()),
+        Some(crate::repl_binding::pending::PENDING_STATE),
+        "the final write must never have started"
+    );
+    assert!(
+        row.get("binding_generation")
+            .and_then(|v| v.as_u64())
+            .is_some(),
+        "the pending barrier carries its binding generation"
+    );
+    // The catalogue stays valid.
+    crate::repl_binding::validate::validate_subscription_catalogue(&shamir)
+        .await
+        .unwrap();
 }
