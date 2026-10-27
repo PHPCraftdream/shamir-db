@@ -5,14 +5,44 @@
 //! dispatch, and exposes the value-extraction/-construction helpers that all
 //! category modules share so argument handling stays uniform.
 //!
-//! Errors are **machine-readable codes only** — no human text. The frontend
-//! localises by code (e.g. `"type_mismatch"`, `"arity"`, `"unknown_function"`).
+//! Errors are **machine-readable codes only** — no human text. `ScalarError`
+//! uses the stable catalogue [`SCALAR_ERROR_CODES`]; existing output codes are
+//! retained, including category-specific codes.
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shamir_collections::TFxMap;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
+
+/// Stable code catalogue for built-in scalar outputs. `ScalarError::new` keeps
+/// accepting arbitrary custom codes for backward compatibility, so catalogue
+/// enforcement is provided by the built-in constructor below.
+pub const SCALAR_ERROR_CODES: &[&str] = &[
+    "arity",
+    "unknown_function",
+    "missing_arg",
+    "type_mismatch",
+    "out_of_range",
+    "cast_failed",
+    "unknown_type",
+    "decode_failed",
+    "encode_failed",
+    "bad_pattern",
+    "bad_regex",
+    "bad_bounds",
+    "domain",
+    "div_by_zero",
+    "empty",
+    "no_match",
+    "bad_pad",
+    "missing_key",
+    "bad_key",
+    "bad_params",
+    "bad_unit",
+    "compute",
+    "parse",
+];
 
 /// Machine-readable scalar-error. Carries a stable `code`; the frontend maps the
 /// code to a localised human message. No human-facing text lives here.
@@ -22,9 +52,19 @@ pub struct ScalarError {
 }
 
 impl ScalarError {
-    /// Construct an error from a stable machine code (e.g. `"type_mismatch"`).
+    /// Construct an error from a custom machine-readable code. This intentionally
+    /// remains open for downstream/embedder-defined scalar functions.
     pub fn new(code: impl Into<String>) -> Self {
         Self { code: code.into() }
+    }
+
+    pub fn builtin(code: &'static str) -> Self {
+        if !SCALAR_ERROR_CODES.contains(&code) {
+            panic!("unknown built-in scalar error code");
+        }
+        Self {
+            code: code.to_owned(),
+        }
     }
 }
 
@@ -159,13 +199,13 @@ impl ScalarRegistry {
         let entry = self
             .fns
             .get(name)
-            .ok_or_else(|| ScalarError::new("unknown_function"))?;
+            .ok_or_else(|| ScalarError::builtin("unknown_function"))?;
         if args.len() < entry.min_args {
-            return Err(ScalarError::new("arity"));
+            return Err(ScalarError::builtin("arity"));
         }
         if let Some(max) = entry.max_args {
             if args.len() > max {
-                return Err(ScalarError::new("arity"));
+                return Err(ScalarError::builtin("arity"));
             }
         }
         (entry.f)(args)
@@ -198,7 +238,8 @@ impl ScalarRegistry {
 
 /// Fetch the `i`-th argument or `ScalarError("missing_arg")`.
 fn at(args: &[QueryValue], i: usize) -> Result<&QueryValue, ScalarError> {
-    args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))
+    args.get(i)
+        .ok_or_else(|| ScalarError::builtin("missing_arg"))
 }
 
 /// Extract an `i64`. Accepts `Int`, `Bool` (0/1), and integral `Dec`/`F64`
@@ -209,9 +250,10 @@ pub fn arg_i64(args: &[QueryValue], i: usize) -> Result<i64, ScalarError> {
         QueryValue::Bool(b) => Ok(*b as i64),
         QueryValue::Dec(d) => {
             if d.fract().is_zero() {
-                d.to_i64().ok_or_else(|| ScalarError::new("out_of_range"))
+                d.to_i64()
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))
             } else {
-                Err(ScalarError::new("out_of_range"))
+                Err(ScalarError::builtin("out_of_range"))
             }
         }
         QueryValue::F64(f) => {
@@ -221,10 +263,10 @@ pub fn arg_i64(args: &[QueryValue], i: usize) -> Result<i64, ScalarError> {
             if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
                 Ok(*f as i64)
             } else {
-                Err(ScalarError::new("out_of_range"))
+                Err(ScalarError::builtin("out_of_range"))
             }
         }
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -232,7 +274,7 @@ pub fn arg_i64(args: &[QueryValue], i: usize) -> Result<i64, ScalarError> {
 pub fn arg_str(args: &[QueryValue], i: usize) -> Result<&str, ScalarError> {
     match at(args, i)? {
         QueryValue::Str(s) => Ok(s.as_str()),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -242,8 +284,10 @@ pub fn arg_f64(args: &[QueryValue], i: usize) -> Result<f64, ScalarError> {
         QueryValue::F64(f) => Ok(*f),
         QueryValue::Int(n) => Ok(*n as f64),
         QueryValue::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-        QueryValue::Dec(d) => d.to_f64().ok_or_else(|| ScalarError::new("out_of_range")),
-        _ => Err(ScalarError::new("type_mismatch")),
+        QueryValue::Dec(d) => d
+            .to_f64()
+            .ok_or_else(|| ScalarError::builtin("out_of_range")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -254,9 +298,9 @@ pub fn arg_dec(args: &[QueryValue], i: usize) -> Result<Decimal, ScalarError> {
         QueryValue::Int(n) => Ok(Decimal::from(*n)),
         QueryValue::Bool(b) => Ok(Decimal::from(*b as i64)),
         QueryValue::F64(f) => {
-            Decimal::from_f64_retain(*f).ok_or_else(|| ScalarError::new("out_of_range"))
+            Decimal::from_f64_retain(*f).ok_or_else(|| ScalarError::builtin("out_of_range"))
         }
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -264,7 +308,7 @@ pub fn arg_dec(args: &[QueryValue], i: usize) -> Result<Decimal, ScalarError> {
 pub fn arg_bool(args: &[QueryValue], i: usize) -> Result<bool, ScalarError> {
     match at(args, i)? {
         QueryValue::Bool(b) => Ok(*b),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -272,7 +316,7 @@ pub fn arg_bool(args: &[QueryValue], i: usize) -> Result<bool, ScalarError> {
 pub fn arg_list(args: &[QueryValue], i: usize) -> Result<&[QueryValue], ScalarError> {
     match at(args, i)? {
         QueryValue::List(l) => Ok(l.as_slice()),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -280,7 +324,7 @@ pub fn arg_list(args: &[QueryValue], i: usize) -> Result<&[QueryValue], ScalarEr
 pub fn arg_bytes(args: &[QueryValue], i: usize) -> Result<&[u8], ScalarError> {
     match at(args, i)? {
         QueryValue::Bin(b) => Ok(b.as_slice()),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -309,7 +353,7 @@ pub fn v_bool(b: bool) -> QueryValue {
 pub fn v_f64(f: f64) -> ScalarResult {
     Decimal::from_f64_retain(f)
         .map(QueryValue::Dec)
-        .ok_or_else(|| ScalarError::new("out_of_range"))
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))
 }
 
 /// Construct a `Dec`.

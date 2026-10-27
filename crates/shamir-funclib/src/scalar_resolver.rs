@@ -124,7 +124,7 @@ impl ScalarResolver {
         dispatch_entry(
             self.builtin
                 .get(name)
-                .ok_or_else(|| ScalarError::new("unknown_function"))?,
+                .ok_or_else(|| ScalarError::builtin("unknown_function"))?,
             args,
         )
     }
@@ -142,11 +142,11 @@ impl ScalarResolver {
 #[inline]
 fn dispatch_entry(entry: &FnEntry, args: &[QueryValue]) -> ScalarResult {
     if args.len() < entry.min_args {
-        return Err(ScalarError::new("arity"));
+        return Err(ScalarError::builtin("arity"));
     }
     if let Some(max) = entry.max_args {
         if args.len() > max {
-            return Err(ScalarError::new("arity"));
+            return Err(ScalarError::builtin("arity"));
         }
     }
     (entry.f)(args)
