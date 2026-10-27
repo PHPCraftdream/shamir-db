@@ -415,3 +415,15 @@ fn format_parse_roundtrip() {
         .unwrap();
     assert_eq!(reparsed, v_int(WED_MS));
 }
+
+#[test]
+fn rv_funclib_d45cf639_age_checked_subtraction() {
+    let r = reg();
+    // now (positive epoch millis) - i64::MIN overflows i64: the old
+    // unchecked subtraction panicked (debug) / wrapped (release). The
+    // contract is a defined "out_of_range" error instead.
+    assert_eq!(
+        r.call("age", &[ts(i64::MIN)]).unwrap_err().code,
+        "out_of_range"
+    );
+}

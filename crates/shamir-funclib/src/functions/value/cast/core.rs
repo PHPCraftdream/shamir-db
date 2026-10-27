@@ -118,7 +118,10 @@ fn cast_to_int(v: &QueryValue) -> Result<QueryValue, ScalarError> {
             }
         }
         QueryValue::F64(f) => {
-            if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
+            // Upper bound is EXCLUSIVE: `i64::MAX as f64` rounds up to 2^63,
+            // which would saturate in the cast (RV-FUNCLIB-1EF53AB4).
+            // `i64::MIN as f64` (-2^63) is exact, so it stays inclusive.
+            if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
                 Ok(v_int(*f as i64))
             } else {
                 Err(ScalarError::new("cast_failed"))

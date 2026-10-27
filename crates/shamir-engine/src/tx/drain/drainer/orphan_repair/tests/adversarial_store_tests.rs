@@ -15,6 +15,7 @@ use crate::table::TableConfig;
 use crate::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
 use crate::tx::drainer::orphan_repair::repair_event;
 use crate::tx::tests::drain::orphans::post_wal_orphan_ordering_tests::panic_post_wal;
+use shamir_tx::ChangelogError;
 
 struct CountingStore {
     inner: StoreChangelog,
@@ -31,13 +32,15 @@ struct CountingStore {
 
 #[async_trait::async_trait]
 impl ChangelogStore for CountingStore {
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String> {
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError> {
         if key == shamir_tx::changefeed::clean_horizon_key() {
             let ordinal = self.horizon_puts.fetch_add(1, Ordering::AcqRel) + 1;
             if self.fail_horizon_at.load(Ordering::Acquire) == ordinal
                 && self.fail_horizon_at.swap(0, Ordering::AcqRel) == ordinal
             {
-                return Err("injected horizon checkpoint failure".into());
+                return Err(ChangelogError::Journal(
+                    "injected horizon checkpoint failure".into(),
+                ));
             }
         }
         if key.len() == 8 {
@@ -52,7 +55,7 @@ impl ChangelogStore for CountingStore {
         self.inner.put(key, value).await
     }
 
-    async fn range_from(&self, key: Bytes, limit: usize) -> Result<Vec<Bytes>, String> {
+    async fn range_from(&self, key: Bytes, limit: usize) -> Result<Vec<Bytes>, ChangelogError> {
         if self.block_lookup_once.swap(false, Ordering::AcqRel) {
             self.lookup_entered.notify_one();
             self.release_lookup.notified().await;
