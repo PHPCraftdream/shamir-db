@@ -81,6 +81,26 @@ const EMPTY_SLICE: &[QueryRecord] = &[];
 // Internal deserialization helper
 // ============================================================================
 
+#[cfg(test)]
+thread_local! {
+    static CODEC_SETUP_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn codec_setup() {
+    #[cfg(test)]
+    CODEC_SETUP_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(super) fn reset_codec_setup_count() {
+    CODEC_SETUP_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn codec_setup_count() -> usize {
+    CODEC_SETUP_COUNT.with(std::cell::Cell::get)
+}
+
 /// Deserialize a single `QueryRecord` into `T` via a msgpack round-trip
 /// through its `QueryValue` representation.
 ///
@@ -92,15 +112,16 @@ fn deserialize_record<T: serde::de::DeserializeOwned>(
     alias: &str,
     record: &QueryRecord,
 ) -> Result<T, ResponseError> {
+    codec_setup();
     let bytes = rmp_serde::to_vec_named(record.as_value().as_ref()).map_err(|error| {
         ResponseError::Deserialize {
             alias: alias.to_owned(),
-            source: WireError::Encode(error),
+            source: WireError::Encode(error.to_string()),
         }
     })?;
     rmp_serde::from_slice(&bytes).map_err(|error| ResponseError::Deserialize {
         alias: alias.to_owned(),
-        source: WireError::Decode(error),
+        source: WireError::Decode(error.to_string()),
     })
 }
 
@@ -177,15 +198,16 @@ impl BatchResponseExt for BatchResponse {
             .results
             .get(alias)
             .ok_or_else(|| ResponseError::MissingAlias(alias.to_owned()))?;
-        let values: Vec<_> = qr.records.iter().map(|record| record.as_value()).collect();
+        codec_setup();
+        let records: Vec<_> = qr.records.iter().map(|record| record.as_value()).collect();
         let bytes =
-            rmp_serde::to_vec_named(&values).map_err(|error| ResponseError::Deserialize {
+            rmp_serde::to_vec_named(&records).map_err(|error| ResponseError::Deserialize {
                 alias: alias.to_owned(),
-                source: WireError::Encode(error),
+                source: WireError::Encode(error.to_string()),
             })?;
         rmp_serde::from_slice(&bytes).map_err(|error| ResponseError::Deserialize {
             alias: alias.to_owned(),
-            source: WireError::Decode(error),
+            source: WireError::Decode(error.to_string()),
         })
     }
 
