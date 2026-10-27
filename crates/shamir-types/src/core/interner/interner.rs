@@ -244,9 +244,8 @@ impl Interner {
         }
 
         let bytes = u64::try_from(s.len()).unwrap_or(u64::MAX);
-        // Quota check runs only after the fast-path miss, before the id is
-        // reserved: a rejected touch consumes no id and leaves generation().
-        // untouched. Losing the forward-map race refunds below.
+        // Reserve quota before allocating the key/value, and roll back that
+        // reservation on every failure before the forward entry is inserted.
         if enforce_quota {
             if let Some(quota) = self.quota {
                 self.counters
@@ -539,7 +538,6 @@ impl Interner {
             }
         }
 
-        let name_bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
         let arc: Arc<str> = Arc::from(name);
         // CAS into forward map — another thread may have raced us.
         match self.map_user_to_interned.entry(key) {
@@ -556,9 +554,8 @@ impl Interner {
                 }
             }
             Entry::Vacant(vacant) => {
+                let name_bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
                 let new_key = InternerKey::new(id);
-                // Reverse publication precedes the forward entry: a reader
-                // that observes the forward mapping can always resolve it.
                 if !self.set_reverse_slot_locked(idx, arc) {
                     return Err(InternerError::IdCollision { id });
                 }

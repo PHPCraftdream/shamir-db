@@ -220,11 +220,26 @@ async fn mid_pagination_error_best_effort_cancels_the_cursor() {
     // (there is no ambient "auto-attach HMAC" path for a raw `execute()`
     // call built through the query builder).
     let hmac_key = shamir_connect::common::crypto::derive_session_hmac_key(&client.session_id());
-    let canonical = shamir_query_types::hmac::canonical_drop_table("prod", "main", "items");
+    let op =
+        shamir_query_types::batch::BatchOp::DropTable(shamir_query_types::admin::DropTableOp {
+            drop_table: "items".into(),
+            repo: "main".into(),
+            hmac: None,
+            if_exists: false,
+            cascade: false,
+        });
+    let canonical = shamir_query_types::hmac::canonical_batch_op("prod", &op)
+        .expect("drop-table canonical form");
     let tag = shamir_query_types::hmac::compute_tag_hex(&hmac_key, &canonical);
 
     let mut drop_batch = Batch::new();
-    drop_batch.drop_table("dt", drop_table("items").hmac(&tag));
+    drop_batch.drop_table(
+        "dt",
+        drop_table("items")
+            .hmac(&tag)
+            .build()
+            .expect("drop-table op"),
+    );
     client
         .execute("prod", drop_batch.build())
         .await

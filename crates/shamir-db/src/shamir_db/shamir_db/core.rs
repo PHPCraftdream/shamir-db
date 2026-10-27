@@ -676,6 +676,11 @@ impl ShamirDb {
         &self.db_create_lock
     }
 
+    /// Namespace lifecycle lock. Lock order for DDL and namespace mutations:
+    /// optional database/repository create lock → this lock → repository write
+    /// admission → schema RMW lock → table write barrier. Never acquire an
+    /// earlier lock while holding a later one.
+    ///
     /// ONE lifecycle interlock shared by replication catalogue writers
     /// (admin subscription/profile handlers, terminal marking, the pending
     /// creation barrier, seed install, and the supervisor's reconcile read

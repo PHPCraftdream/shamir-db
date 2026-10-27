@@ -4,4 +4,5 @@ pub mod hmac;
 pub mod validator;
 
 #[cfg(test)]
+#[cfg(feature = "crypto")]
 mod tests;

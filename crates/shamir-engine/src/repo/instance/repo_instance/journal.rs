@@ -123,7 +123,7 @@ impl RepoInstance {
                                 shamir_tx::changefeed::encode_gap_marker(interval),
                             )
                             .await
-                            .map_err(DbError::Storage)?;
+                            .map_err(|e| DbError::Storage(e.to_string()))?;
                     }
                 }
                 let feed = shamir_tx::RepoChangefeed::new_with_metadata(

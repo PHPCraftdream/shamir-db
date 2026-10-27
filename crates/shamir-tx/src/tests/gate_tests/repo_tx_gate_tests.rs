@@ -1,5 +1,7 @@
 use crate::completion_tracker::State;
-use crate::predicate_set::{PredicateDep, SORTED_PREFIX_LEN, SORTED_TAG};
+use crate::predicate_set::{
+    index_range_overlaps_sorted, index_range_probe, PredicateDep, SORTED_PREFIX_LEN, SORTED_TAG,
+};
 use crate::repo_tx_gate::{
     build_footprint_from_tx, record_conflicts, CommitWriteRecord, RepoTxGate, TableWriteFootprint,
 };
@@ -7,6 +9,7 @@ use crate::types::{IsolationLevel, TxId};
 use crate::IndexWriteOp;
 use bytes::Bytes;
 use shamir_collections::{TFxMap, TFxSet};
+use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -613,4 +616,140 @@ async fn record_commit_writes_concurrent_no_loss() {
         h.await.unwrap();
     }
     assert_eq!(gate.commit_log_len(), n as usize);
+}
+
+// ---- RV-TX-3095C5C9 / RV-TX-06ED4CDB regression pins ---------------------
+
+#[tokio::test]
+async fn rv_repo_tx_gate_3095c5c9_min_alive_is_bounded_lookup() {
+    let gate = RepoTxGate::new(100, 1);
+    let mut guards = Vec::new();
+    for pin in 0..64u64 {
+        guards.push(gate.open_snapshot_at(pin).await);
+    }
+    let before = crate::repo_tx_gate::min_alive_probe();
+    assert_eq!(gate.min_alive(), 0);
+    let examined = crate::repo_tx_gate::min_alive_probe() - before;
+    assert_eq!(
+        examined, 1,
+        "min_alive examined {examined} entries for 64 registered snapshots — full-map iteration"
+    );
+    // Dropping the minimum pin moves the floor to the next pinned version.
+    drop(guards.remove(0));
+    assert_eq!(gate.min_alive(), 1);
+}
+
+#[test]
+fn rv_progress_06ed4cdb_record_conflicts_bounded_interval() {
+    // Sorted posting vector whose target index's keys are interleaved with
+    // two other indexes' keys: the bounded search must skip foreign-prefix
+    // runs without changing the verdict.
+    let mk = |index_id: u64, v: u64| {
+        let mut k = vec![SORTED_TAG];
+        k.extend_from_slice(&index_id.to_be_bytes());
+        k.extend_from_slice(&v.to_be_bytes());
+        Bytes::from(k)
+    };
+    let mut keys: Vec<Bytes> = Vec::new();
+    for v in 0..16u64 {
+        keys.push(mk(1, v));
+        keys.push(mk(2, v));
+        keys.push(mk(3, v));
+    }
+    keys.sort();
+    // Probe instrumentation: bounded walk for an INCLUDED lower bound.
+    let probe_before = index_range_probe();
+    assert!(index_range_overlaps_sorted(
+        &keys,
+        2,
+        &Bound::Included(mk(2, 8)),
+        &Bound::Included(mk(2, 9))
+    ));
+    let probe_first = index_range_probe() - probe_before;
+    assert_eq!(
+        probe_first, 1,
+        "Included-lo walk examined {probe_first} keys — start-at-0 linear scan"
+    );
+    // Probe instrumentation: bounded walk for an UNBOUNDED lower bound —
+    // the walk must start inside index 2's prefix run, not at key 0.
+    let probe_before = index_range_probe();
+    assert!(index_range_overlaps_sorted(
+        &keys,
+        2,
+        &Bound::Unbounded,
+        &Bound::Included(mk(2, 9))
+    ));
+    let probe_unbounded = index_range_probe() - probe_before;
+    assert_eq!(
+        probe_unbounded, 1,
+        "Unbounded-lo walk examined {probe_unbounded} keys — binary-search prefix jump missing"
+    );
+    assert!(index_range_overlaps_sorted(
+        &keys,
+        2,
+        &Bound::Included(mk(2, 8)),
+        &Bound::Included(mk(2, 9))
+    ));
+    // Interval strictly before the first index-2 key.
+    assert!(!index_range_overlaps_sorted(
+        &keys,
+        2,
+        &Bound::Included(mk(2, 0)),
+        &Bound::Excluded(mk(2, 0))
+    ));
+    // Interval strictly after the last index-2 key.
+    assert!(!index_range_overlaps_sorted(
+        &keys,
+        2,
+        &Bound::Excluded(mk(2, 15)),
+        &Bound::Included(mk(2, 99))
+    ));
+    // Bounded interval search through record_conflicts.
+    let rec = CommitWriteRecord {
+        commit_version: 1,
+        per_table: TFxMap::from_iter([(
+            7u64,
+            TableWriteFootprint {
+                touched: true,
+                inserted_index_keys: keys,
+            },
+        )]),
+    };
+    let dep = PredicateDep::IndexRange {
+        table_token: 7,
+        index_id: 2,
+        lo: Bound::Included(mk(2, 8)),
+        hi: Bound::Included(mk(2, 9)),
+    };
+    assert!(record_conflicts(&rec, &dep));
+    let miss = PredicateDep::IndexRange {
+        table_token: 7,
+        index_id: 2,
+        lo: Bound::Excluded(mk(2, 15)),
+        hi: Bound::Included(mk(2, 99)),
+    };
+    assert!(!record_conflicts(&rec, &miss));
+}
+
+// ---- RV-TX-3095C5C9 (round 2): snapshot-minimum index handoff atomicity ---
+
+#[tokio::test]
+async fn rv_repo_tx_gate_3095c5c9_snapshot_min_index_handoff_is_atomic() {
+    let gate = RepoTxGate::new(100, 1);
+    let mut guard = gate.open_snapshot_at(9).await;
+    assert_eq!(guard.version(), 9);
+    gate.test_set_drop_hook(&mut guard, |tree_present| {
+        assert!(
+            !tree_present,
+            "tree key must already be removed between the production mutations"
+        );
+    });
+    drop(guard);
+
+    // Reopen the same pin after dropping the real guard; the live pin must
+    // still constrain the floor and be removed by its own real drop.
+    let reopened = gate.open_snapshot_at(9).await;
+    assert_eq!(gate.min_alive(), 9);
+    drop(reopened);
+    assert!(!gate.snapshot_min_index_contains(9));
 }

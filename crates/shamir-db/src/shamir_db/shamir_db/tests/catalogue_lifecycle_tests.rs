@@ -17,6 +17,25 @@ use shamir_types::types::value::QueryValue;
 /// the hang detector and names the test.
 const BOOT_TEST_FLUSH_BUDGET: std::time::Duration = std::time::Duration::from_secs(3600);
 
+/// Re-open the system store expecting a boot rejection, retrying while the
+/// dropped instance still holds the fjall file lock (released lazily after
+/// the drop). Returns the rejection's message.
+async fn boot_rejection(path: std::path::PathBuf) -> String {
+    for _ in 0..100 {
+        match ShamirDb::init(SystemStoreConfig::Fjall(path.clone())).await {
+            Ok(_) => panic!("boot must be rejected"),
+            Err(e) => {
+                let message = e.to_string();
+                if !message.contains("Locked") {
+                    return message;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
+}
+
 const TEST_WASM: &str = r#"
 (module
   (memory (export "memory") 2)
@@ -195,7 +214,12 @@ async fn rv_db_0486e3f9_replication_profile_create_flush_failure_propagates() {
             ReplMode::ReadOnly,
         ),
     );
-    let result = shamir.execute("testdb", &b.to_request_via_msgpack()).await;
+    let result = shamir
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         result.is_err(),
         "create-replication-profile must surface the flush failure"
@@ -337,11 +361,11 @@ async fn rv_db_a7a29b02_boot_rejects_missing_parent_repository() {
         .await
         .unwrap();
     drop(db);
-    let result = ShamirDb::init(SystemStoreConfig::Fjall(path)).await;
-    let Err(error) = result else {
-        panic!("missing-parent repository must reject boot");
-    };
-    assert!(error.to_string().contains("missing_parent/orphan_repo"));
+    let error = boot_rejection(path).await;
+    assert!(
+        error.contains("missing_parent/orphan_repo"),
+        "unexpected boot error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -372,11 +396,11 @@ async fn rv_db_d378c582_boot_rejects_builtin_name_collision() {
         .await
         .unwrap();
     drop(db);
-    let result = ShamirDb::init(SystemStoreConfig::Fjall(path)).await;
-    let Err(error) = result else {
-        panic!("persisted builtin collision must reject boot");
-    };
-    assert!(error.to_string().contains("collides with a builtin"));
+    let error = boot_rejection(path).await;
+    assert!(
+        error.contains("collides with a builtin"),
+        "unexpected boot error: {error}"
+    );
 }
 
 #[tokio::test]
@@ -404,9 +428,12 @@ async fn rv_db_b26124d9_rename_preserves_schema_catalogue_fields() {
             "ss",
             ddl::set_table_schema("items").repo("old").rules(rules),
         );
-        db.execute("before", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "before",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
 
         let before = db
             .system_store()
@@ -422,7 +449,7 @@ async fn rv_db_b26124d9_rename_preserves_schema_catalogue_fields() {
             .await
             .unwrap();
 
-        db.flush_all().await.unwrap();
+        db.flush_all_for_test().await.unwrap();
     }
     let db = ShamirDb::init(SystemStoreConfig::Fjall(path))
         .await
@@ -477,9 +504,21 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
         .unwrap();
     let mut first = Batch::new();
     first.id(1);
-    first.op("drop", ddl::drop_function("orphan").if_exists());
+    first.op(
+        "drop",
+        ddl::drop_function("orphan")
+            .hmac("test-hmac")
+            .if_exists()
+            .build()
+            .expect("build DropFunction"),
+    );
     let resp = db
-        .execute("testdb", &first.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &first
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let dropped = resp.results["drop"].records[0].as_value().into_owned();
@@ -487,9 +526,21 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
 
     let mut second = Batch::new();
     second.id(2);
-    second.op("drop", ddl::drop_function("orphan").if_exists());
+    second.op(
+        "drop",
+        ddl::drop_function("orphan")
+            .hmac("test-hmac")
+            .if_exists()
+            .build()
+            .expect("build DropFunction"),
+    );
     let resp = db
-        .execute("testdb", &second.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &second
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let dropped = resp.results["drop"].records[0].as_value().into_owned();
