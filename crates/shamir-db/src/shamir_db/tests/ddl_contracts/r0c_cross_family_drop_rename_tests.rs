@@ -184,7 +184,9 @@ async fn rv_db_9257b8e1_removing_missing_rule_keeps_schema_version() {
         "remove",
         ddl::remove_schema_rule("items", ["does_not_exist"]).repo("main"),
     );
-    let request = batch.to_request_via_msgpack();
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     let response = shamir.execute("testdb", &request).await.unwrap();
     let result = &response.results["remove"];
     let record = &result.records[0];

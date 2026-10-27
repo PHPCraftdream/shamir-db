@@ -77,7 +77,9 @@ async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
         .unwrap();
     let mut request = shamir_query_builder::batch::Batch::new();
     request.id("ambient-denied");
-    let mut request = request.to_request_via_msgpack();
+    let mut request = request
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     request.interner_epochs.insert("main".into(), 0);
 
     let error = shamir
@@ -112,7 +114,9 @@ async fn rv_db_4d93f623_ambient_delta_succeeds_with_store_read() {
         .unwrap();
     let mut batch = shamir_query_builder::batch::Batch::new();
     batch.id("ambient-allowed");
-    let mut request = batch.to_request_via_msgpack();
+    let mut request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     request.interner_epochs.insert("main".into(), 0);
     let response = shamir
         .execute_as(crate::access::Actor::User(99), "testdb", &request)

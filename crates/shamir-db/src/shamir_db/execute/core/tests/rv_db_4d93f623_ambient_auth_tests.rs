@@ -37,7 +37,9 @@ async fn rv_db_4d93f623_ambient_access_denied_before_empty_batch() {
 
     let mut batch = Batch::new();
     batch.id("empty");
-    let mut request = batch.to_request_via_msgpack();
+    let mut request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     request.interner_epochs.insert("secret".into(), 0);
 
     // Positive control: database and store both permit this actor.
