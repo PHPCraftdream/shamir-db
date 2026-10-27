@@ -126,5 +126,5 @@ async fn buffered_batch_executes_successfully() {
         Some(42)
     );
 
-    shamir.flush_all().await.unwrap();
+    shamir.flush_all_for_test().await.unwrap();
 }
