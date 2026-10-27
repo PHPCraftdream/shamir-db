@@ -3,11 +3,11 @@ use shamir_collections::TSet;
 use crate::index2::expr::IndexExpr;
 use crate::query::filter::evaluation::filter_node::{CompactPath, CompareOp, FilterNode};
 use crate::query::filter::evaluation::semantics::fts::like_pattern_to_regex;
+use crate::query::filter::evaluation::semantics::pattern_guard::{build_like_regex, build_regex};
 use crate::query::filter::evaluation::semantics::resolve::{
     filter_value_to_query, intern_field_path, intern_field_path_compact,
 };
 use crate::query::filter::{Filter, FilterValue};
-use regex::Regex;
 use shamir_query_types::filter::ValueCompareOp;
 use shamir_types::core::interner::Interner;
 
@@ -26,10 +26,53 @@ fn value_compare_op_to_compare_op(op: ValueCompareOp) -> CompareOp {
 }
 
 /// Compile a Filter AST into a tree of `FilterNode` (static dispatch).
-///
-/// Field paths are resolved via the interner at compile time. If a field path
-/// cannot be interned (field doesn't exist), the node folds to True/False.
 pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
+    try_compile_filter(filter, interner).unwrap_or(FilterNode::False)
+}
+
+pub fn try_compile_filter(filter: &Filter, interner: &Interner) -> Result<FilterNode, String> {
+    match filter {
+        Filter::And { filters } => Ok(FilterNode::And(
+            filters
+                .iter()
+                .map(|f| try_compile_filter(f, interner))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Filter::Or { filters } => Ok(FilterNode::Or(
+            filters
+                .iter()
+                .map(|f| try_compile_filter(f, interner))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Filter::Not { filter } => Ok(FilterNode::Not(Box::new(try_compile_filter(
+            filter, interner,
+        )?))),
+        Filter::Regex { field, pattern } => match intern_field_path_compact(field, interner) {
+            Some(path) => Ok(FilterNode::Regex {
+                field_path: path,
+                regex: build_regex(pattern)?,
+            }),
+            None => Ok(FilterNode::False),
+        },
+        Filter::Like { field, pattern } => match intern_field_path_compact(field, interner) {
+            Some(path) => Ok(FilterNode::Like {
+                field_path: path,
+                regex: build_like_regex(pattern, false)?,
+            }),
+            None => Ok(FilterNode::False),
+        },
+        Filter::ILike { field, pattern } => match intern_field_path_compact(field, interner) {
+            Some(path) => Ok(FilterNode::Like {
+                field_path: path,
+                regex: build_like_regex(pattern, true)?,
+            }),
+            None => Ok(FilterNode::False),
+        },
+        _ => Ok(compile_non_pattern(filter, interner)),
+    }
+}
+
+fn compile_non_pattern(filter: &Filter, interner: &Interner) -> FilterNode {
     match filter {
         Filter::Eq { field, value } => compile_compare(field, value, CompareOp::Eq, interner),
         Filter::Ne { field, value } => compile_compare(field, value, CompareOp::Ne, interner),
@@ -62,7 +105,6 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
                 .collect(),
         ),
         Filter::Not { filter } => FilterNode::Not(Box::new(compile_filter(filter, interner))),
-
         Filter::IsNull { field } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::IsNull { field_path: path },
             None => FilterNode::True,
@@ -102,7 +144,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
             None => FilterNode::False,
         },
         Filter::Regex { field, pattern } => match intern_field_path_compact(field, interner) {
-            Some(path) => match Regex::new(pattern) {
+            Some(path) => match build_regex(pattern) {
                 Ok(regex) => FilterNode::Regex {
                     field_path: path,
                     regex,

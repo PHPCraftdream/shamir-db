@@ -23,21 +23,66 @@
 //! since a `Like`/`Regex` node can be nested inside a `$cond`'s embedded
 //! `condition: Filter`.
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
-use crate::query::filter::evaluation::semantics::fts::like_pattern_to_regex;
 use crate::query::filter::{Filter, FilterValue};
 
+/// Build a regex after enforcing the shared pattern-size cap.
+pub(crate) fn build_regex(pattern: &str) -> Result<Regex, String> {
+    if pattern.len() > MAX_FILTER_PATTERN_LENGTH {
+        return Err(format!(
+            "regex pattern length {} exceeds the {} byte cap",
+            pattern.len(),
+            MAX_FILTER_PATTERN_LENGTH
+        ));
+    }
+    RegexBuilder::new(pattern)
+        .size_limit(10 * 1024 * 1024)
+        .build()
+        .map_err(|e| format!("invalid regex pattern: {e}"))
+}
+
+/// Build a LIKE/ILIKE regex after enforcing the shared pattern-size cap.
+pub(crate) fn build_like_regex(pattern: &str, case_insensitive: bool) -> Result<Regex, String> {
+    if pattern.len() > MAX_FILTER_PATTERN_LENGTH {
+        return Err(format!(
+            "LIKE/ILIKE pattern length {} exceeds the {} byte cap",
+            pattern.len(),
+            MAX_FILTER_PATTERN_LENGTH
+        ));
+    }
+    let mut regex_str = String::with_capacity(pattern.len() + 4);
+    if case_insensitive {
+        regex_str.push_str("(?i)");
+    }
+    regex_str.push('^');
+    for ch in pattern.chars() {
+        match ch {
+            '%' => regex_str.push_str(".*"),
+            '_' => regex_str.push('.'),
+            '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' | '|' | '^' | '$' => {
+                regex_str.push('\\');
+                regex_str.push(ch);
+            }
+            _ => regex_str.push(ch),
+        }
+    }
+    regex_str.push('$');
+    RegexBuilder::new(&regex_str)
+        .size_limit(10 * 1024 * 1024)
+        .build()
+        .map_err(|e| format!("invalid LIKE/ILIKE pattern: {e}"))
+}
+
 /// Maximum byte length for a `Regex`/`Like`/`ILike` pattern. Patterns
-/// beyond this are rejected before ever reaching `Regex::new` /
-/// `like_pattern_to_regex`, which could otherwise be handed a
-/// pathologically large regex program to compile.
+/// beyond this are rejected before ever reaching a regex builder.
 pub const MAX_FILTER_PATTERN_LENGTH: usize = 64 * 1024;
 
 /// One entry of the combined `Filter`/`FilterValue` pattern-walk stack.
 enum PatternNode<'a> {
     Filter(&'a Filter),
     Value(&'a FilterValue),
+    SelectExpr(&'a shamir_query_types::read::SelectExpr),
 }
 
 /// Validate every `Regex`/`Like`/`ILike` pattern reachable from `filter`
@@ -49,17 +94,33 @@ enum PatternNode<'a> {
 /// checker cannot itself stack-overflow on a pathologically deep tree.
 pub fn check_filter_patterns(filter: &Filter) -> Result<(), String> {
     let mut stack: Vec<PatternNode<'_>> = vec![PatternNode::Filter(filter)];
+    walk_patterns(&mut stack)
+}
+
+pub fn check_filter_value_patterns(value: &FilterValue) -> Result<(), String> {
+    let mut stack = vec![PatternNode::Value(value)];
+    walk_patterns(&mut stack)
+}
+
+pub fn check_select_expr_patterns(
+    expr: &shamir_query_types::read::SelectExpr,
+) -> Result<(), String> {
+    let mut stack = vec![PatternNode::SelectExpr(expr)];
+    walk_patterns(&mut stack)
+}
+
+fn walk_patterns(stack: &mut Vec<PatternNode<'_>>) -> Result<(), String> {
     while let Some(node) = stack.pop() {
         match node {
-            PatternNode::Filter(f) => check_and_push_filter(f, &mut stack)?,
-            PatternNode::Value(v) => push_value_children(v, &mut stack),
+            PatternNode::Filter(filter) => check_and_push_filter(filter, stack)?,
+            PatternNode::Value(value) => push_value_children(value, stack),
+            PatternNode::SelectExpr(expr) => push_select_expr_children(expr, stack),
         }
     }
     Ok(())
 }
 
-/// Check `filter`'s own pattern (if it has one) and push its
-/// `Filter`/`FilterValue` children onto the pattern-walk stack.
+/// Inspect a filter's pattern, if any, and enqueue its nested surfaces.
 fn check_and_push_filter<'a>(
     filter: &'a Filter,
     stack: &mut Vec<PatternNode<'a>>,
@@ -155,36 +216,32 @@ fn push_value_children<'a>(value: &'a FilterValue, stack: &mut Vec<PatternNode<'
     }
 }
 
-/// Validate a `LIKE`/`ILIKE` pattern: length cap, then actual compile via
+fn push_select_expr_children<'a>(
+    expr: &'a shamir_query_types::read::SelectExpr,
+    stack: &mut Vec<PatternNode<'a>>,
+) {
+    use shamir_query_types::read::SelectExpr;
+    match expr {
+        SelectExpr::Add { left, right }
+        | SelectExpr::Sub { left, right }
+        | SelectExpr::Mul { left, right }
+        | SelectExpr::Div { left, right } => {
+            stack.push(PatternNode::SelectExpr(left));
+            stack.push(PatternNode::SelectExpr(right));
+        }
+        SelectExpr::Field { .. } | SelectExpr::Literal { .. } => {}
+    }
+}
+
 /// the SAME conversion `compile_filter` uses (`like_pattern_to_regex`), so
 /// "validates" and "will actually compile at execution time" can never
 /// drift apart.
 fn check_like_pattern(pattern: &str, case_insensitive: bool) -> Result<(), String> {
-    if pattern.len() > MAX_FILTER_PATTERN_LENGTH {
-        return Err(format!(
-            "LIKE/ILIKE pattern length {} exceeds the {} byte cap",
-            pattern.len(),
-            MAX_FILTER_PATTERN_LENGTH
-        ));
-    }
-    if like_pattern_to_regex(pattern, case_insensitive).is_none() {
-        return Err(format!("invalid LIKE/ILIKE pattern: {:?}", pattern));
-    }
-    Ok(())
+    build_like_regex(pattern, case_insensitive).map(|_| ())
 }
 
 /// Validate a `Regex` pattern: length cap, then `Regex::new` — the SAME
 /// call `compile_filter` makes.
 fn check_regex_pattern(pattern: &str) -> Result<(), String> {
-    if pattern.len() > MAX_FILTER_PATTERN_LENGTH {
-        return Err(format!(
-            "regex pattern length {} exceeds the {} byte cap",
-            pattern.len(),
-            MAX_FILTER_PATTERN_LENGTH
-        ));
-    }
-    if let Err(e) = Regex::new(pattern) {
-        return Err(format!("invalid regex pattern: {}", e));
-    }
-    Ok(())
+    build_regex(pattern).map(|_| ())
 }

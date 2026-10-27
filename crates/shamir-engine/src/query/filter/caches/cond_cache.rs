@@ -23,8 +23,7 @@ use shamir_types::core::interner::Interner;
 use shamir_types::types::common::{THasher, TMap};
 
 use crate::query::filter::evaluation::filter_node::FilterNode;
-use crate::query::filter::evaluation::planning::compile::compile_filter;
-use crate::query::filter::{Filter, FilterValue};
+use crate::query::filter::{try_compile_filter, Filter, FilterValue};
 
 /// Content-keyed cache mapping a `$cond`'s `condition: Box<Filter>` to its
 /// pre-compiled `FilterNode`.
@@ -95,14 +94,14 @@ pub(crate) fn compile_cond_cached(
     local_cache: &LocalCondCache,
     condition: &Filter,
     interner: &Interner,
-) -> Arc<FilterNode> {
+) -> Option<Arc<FilterNode>> {
     let key = cond_key(condition);
     if let Some(node) = local_cache.read_sync(&key, |_, v| Arc::clone(v)) {
-        return node;
+        return Some(node);
     }
-    let node = Arc::new(compile_filter(condition, interner));
+    let node = Arc::new(try_compile_filter(condition, interner).ok()?);
     match local_cache.insert_sync(key, Arc::clone(&node)) {
-        Ok(()) => node,
+        Ok(()) => Some(node),
         // Lost a race with a concurrent insert for the SAME key (defensive
         // only — a `FilterContext` is built fresh per query/op and never
         // shared across concurrently-executing threads in practice, see
@@ -111,7 +110,7 @@ pub(crate) fn compile_cond_cached(
         // distinct `Arc` allocations.
         Err((key, _attempted)) => local_cache
             .read_sync(&key, |_, v| Arc::clone(v))
-            .unwrap_or(node),
+            .or(Some(node)),
     }
 }
 
@@ -151,10 +150,11 @@ pub fn prescan_cond_cache(fv: &FilterValue, interner: &Interner, cache: &mut Con
             }
         }
         FilterValue::Cond { cond } => {
-            let key = cond_key(&cond.condition);
-            cache
-                .entry(key)
-                .or_insert_with(|| Arc::new(compile_filter(&cond.condition, interner)));
+            if let Ok(node) = try_compile_filter(&cond.condition, interner) {
+                cache
+                    .entry(cond_key(&cond.condition))
+                    .or_insert_with(|| Arc::new(node));
+            }
             // The condition's `Filter` tree may itself embed `FilterValue`s
             // (e.g. `Filter::Eq { value, .. }`) that contain further nested
             // `$cond`s — walk it too so those get cached.
