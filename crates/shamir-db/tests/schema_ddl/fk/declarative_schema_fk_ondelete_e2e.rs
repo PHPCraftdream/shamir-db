@@ -302,7 +302,13 @@ async fn drop_guard_refuses_referenced_parent() {
 
     let mut b = Batch::new();
     b.id(50);
-    b.drop_table("dt", ddl::drop_table("departments"));
+    b.drop_table(
+        "dt",
+        ddl::drop_table("departments")
+            .hmac("direct-db-test")
+            .build()
+            .unwrap(),
+    );
     // The drop must be refused with drop_refused_fk. The refusal surfaces as a
     // top-level Err from `execute` (a coded BatchError).
     let resp = db

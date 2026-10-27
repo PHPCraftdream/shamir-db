@@ -137,19 +137,19 @@ async fn handle(handler: &ShamirDbHandler, session: &Session, req: &DbRequest) -
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_visibility_public_no_hmac_succeeds() {
+async fn create_function_visibility_public_no_hmac_succeeds_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir.clone());
     let session = root_session();
 
+    let op = ddl::create_function("vis_pub")
+        .wasm(echo_wasm_b64())
+        .visibility("public")
+        .build()
+        .expect("ungated create-function builder");
     let mut b = Batch::new();
     b.id(1);
-    b.create_function(
-        "f",
-        ddl::create_function("vis_pub")
-            .wasm(echo_wasm_b64())
-            .visibility("public"),
-    );
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let resp = expect_batch_ok(res);
     let rec = &resp.results["f"].records[0];
@@ -167,19 +167,27 @@ async fn create_function_visibility_public_no_hmac_succeeds() {
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_security_definer_without_hmac_rejected() {
+async fn create_function_security_definer_without_hmac_rejected_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
+    let op = shamir_query_types::batch::BatchOp::CreateFunction(
+        shamir_query_types::admin::CreateFunctionOp {
+            create_function: "sec_def_no_hmac".into(),
+            source: None,
+            wasm: Some(echo_wasm_b64()),
+            replace: false,
+            visibility: None,
+            security: Some("definer".into()),
+            secret_grants: Vec::new(),
+            net_grants: Vec::new(),
+            hmac: None,
+        },
+    );
     let mut b = Batch::new();
     b.id(1);
-    b.create_function(
-        "f",
-        ddl::create_function("sec_def_no_hmac")
-            .wasm(echo_wasm_b64())
-            .security("definer"),
-    );
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -190,24 +198,38 @@ async fn create_function_security_definer_without_hmac_rejected() {
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_security_definer_with_correct_hmac_succeeds() {
+async fn create_function_security_definer_with_correct_hmac_succeeds_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir.clone());
     let session = root_session();
 
+    let wasm = echo_wasm_b64();
+    let op = shamir_query_types::batch::BatchOp::CreateFunction(
+        shamir_query_types::admin::CreateFunctionOp {
+            create_function: "sec_def_ok".into(),
+            source: None,
+            wasm: Some(wasm.clone()),
+            replace: false,
+            visibility: None,
+            security: Some("definer".into()),
+            secret_grants: Vec::new(),
+            net_grants: Vec::new(),
+            hmac: None,
+        },
+    );
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_create_function("sec_def_ok", "definer", &[]),
+        &canon::canonical_batch_op("scratch", &op).expect("create-function canonical form"),
     );
+    let op = ddl::create_function("sec_def_ok")
+        .wasm(wasm.clone())
+        .security("definer")
+        .hmac(&tag)
+        .build()
+        .expect("gated create-function builder with HMAC");
     let mut b = Batch::new();
     b.id(1);
-    b.create_function(
-        "f",
-        ddl::create_function("sec_def_ok")
-            .wasm(echo_wasm_b64())
-            .security("definer")
-            .hmac(&tag),
-    );
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let resp = expect_batch_ok(res);
     let rec = &resp.results["f"].records[0];
@@ -222,20 +244,27 @@ async fn create_function_security_definer_with_correct_hmac_succeeds() {
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_security_definer_with_wrong_hmac_rejected() {
+async fn create_function_security_definer_with_wrong_hmac_rejected_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
+    let op = shamir_query_types::batch::BatchOp::CreateFunction(
+        shamir_query_types::admin::CreateFunctionOp {
+            create_function: "sec_def_bad".into(),
+            source: None,
+            wasm: Some(echo_wasm_b64()),
+            replace: false,
+            visibility: None,
+            security: Some("definer".into()),
+            secret_grants: Vec::new(),
+            net_grants: Vec::new(),
+            hmac: Some("deadbeef".repeat(8)), // 64 hex chars but bogus
+        },
+    );
     let mut b = Batch::new();
     b.id(1);
-    b.create_function(
-        "f",
-        ddl::create_function("sec_def_bad")
-            .wasm(echo_wasm_b64())
-            .security("definer")
-            .hmac("deadbeef".repeat(8)), // 64 hex chars but bogus
-    );
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_mismatch");
@@ -250,19 +279,27 @@ async fn create_function_security_definer_with_wrong_hmac_rejected() {
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_secret_grants_without_hmac_rejected() {
+async fn create_function_secret_grants_without_hmac_rejected_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir);
     let session = root_session();
 
+    let op = shamir_query_types::batch::BatchOp::CreateFunction(
+        shamir_query_types::admin::CreateFunctionOp {
+            create_function: "grants_no_hmac".into(),
+            source: None,
+            wasm: Some(echo_wasm_b64()),
+            replace: false,
+            visibility: None,
+            security: None,
+            secret_grants: vec!["ADMIN_DB_PASSWORD".into()],
+            net_grants: Vec::new(),
+            hmac: None,
+        },
+    );
     let mut b = Batch::new();
     b.id(1);
-    b.create_function(
-        "f",
-        ddl::create_function("grants_no_hmac")
-            .wasm(echo_wasm_b64())
-            .secret_grants(["ADMIN_DB_PASSWORD"]),
-    );
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let (code, _) = expect_error(res);
     assert_eq!(code, "hmac_required");
@@ -274,25 +311,39 @@ async fn create_function_secret_grants_without_hmac_rejected() {
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_secret_grants_with_correct_hmac_succeeds() {
+async fn create_function_secret_grants_with_correct_hmac_succeeds_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir.clone());
     let session = root_session();
 
     let grants = vec!["FOO".to_string(), "BAR".to_string()];
+    let wasm = echo_wasm_b64();
+    let op = shamir_query_types::batch::BatchOp::CreateFunction(
+        shamir_query_types::admin::CreateFunctionOp {
+            create_function: "grants_ok".into(),
+            source: None,
+            wasm: Some(wasm.clone()),
+            replace: false,
+            visibility: None,
+            security: None,
+            secret_grants: grants.clone(),
+            net_grants: Vec::new(),
+            hmac: None,
+        },
+    );
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_create_function("grants_ok", "invoker", &grants),
+        &canon::canonical_batch_op("scratch", &op).expect("create-function canonical form"),
     );
+    let op = ddl::create_function("grants_ok")
+        .wasm(wasm.clone())
+        .secret_grants(grants.clone())
+        .hmac(&tag)
+        .build()
+        .expect("gated create-function builder with HMAC");
     let mut b = Batch::new();
     b.id(1);
-    b.create_function(
-        "f",
-        ddl::create_function("grants_ok")
-            .wasm(echo_wasm_b64())
-            .secret_grants(grants.clone())
-            .hmac(&tag),
-    );
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let resp = expect_batch_ok(res);
     let rec = &resp.results["f"].records[0];
@@ -308,14 +359,18 @@ async fn create_function_secret_grants_with_correct_hmac_succeeds() {
 // --------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_function_plain_no_hmac_required() {
+async fn create_function_plain_no_hmac_required_a3d93402() {
     let shamir = make_db("scratch").await;
     let handler = ShamirDbHandler::new(shamir.clone());
     let session = root_session();
 
+    let op = ddl::create_function("plain_fn")
+        .wasm(echo_wasm_b64())
+        .build()
+        .expect("ungated create-function builder");
     let mut b = Batch::new();
     b.id(1);
-    b.create_function("f", ddl::create_function("plain_fn").wasm(echo_wasm_b64()));
+    b.create_function("f", op);
     let res = handle(&handler, &session, &execute_built("scratch", b.build())).await;
     let resp = expect_batch_ok(res);
     let rec = &resp.results["f"].records[0];

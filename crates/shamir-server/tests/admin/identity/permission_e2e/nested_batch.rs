@@ -60,9 +60,16 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
 
     let carol_pw = b"carol-password".to_vec();
     let carol553e_roles: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "carol553e".into(),
+        password: String::from_utf8(carol_pw.clone()).expect("utf8").into(),
+        roles: carol553e_roles.clone(),
+        hmac: None,
+    };
     let carol553e_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("carol553e", &carol553e_roles),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {

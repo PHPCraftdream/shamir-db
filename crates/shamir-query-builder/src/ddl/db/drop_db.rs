@@ -1,7 +1,8 @@
 use shamir_query_types::admin::DropDbOp;
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Drop a database. Optionally attach an HMAC tag.
 pub fn drop_db(name: impl Into<String>) -> DropDb {
@@ -41,25 +42,21 @@ impl DropDb {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropDb(DropDbOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropDb(DropDbOp {
             drop_db: self.name,
-            hmac: self.hmac,
+            hmac: Some(hmac),
             cascade: self.cascade,
             if_exists: self.if_exists,
-        })
+        }))
     }
 }
 
-impl From<DropDb> for BatchOp {
-    fn from(b: DropDb) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropDb {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropDb {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

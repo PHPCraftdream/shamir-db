@@ -305,7 +305,7 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
 
     const dropResp = await client.execute(db, {
       id: 'lifecycle-drop-publication',
-      queries: { d: replication.dropPublication(pubName) },
+      queries: { d: replication.dropPublication(hmac.signerFor(client), pubName) },
     });
     assertEq(
       dropResp.results.d.records[0].dropped_publication,
@@ -331,7 +331,7 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     // Dropping again is a no-op (not an error) — `existed` flips to false.
     const dropAgainResp = await client.execute(db, {
       id: 'lifecycle-drop-publication-again',
-      queries: { d: replication.dropPublication(pubName) },
+      queries: { d: replication.dropPublication(hmac.signerFor(client), pubName) },
     });
     assertEq(
       dropAgainResp.results.d.records[0].existed,
@@ -359,7 +359,7 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
 
     const dropResp = await client.execute(db, {
       id: 'lifecycle-drop-profile',
-      queries: { dp: replication.dropReplicationProfile(profileName) },
+      queries: { dp: replication.dropReplicationProfile(hmac.signerFor(client), profileName) },
     });
     assertEq(
       dropResp.results.dp.records[0].dropped_replication_profile,
@@ -377,7 +377,7 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     // reports `existed: false`.
     const dropAgainResp = await client.execute(db, {
       id: 'lifecycle-drop-profile-again',
-      queries: { dp: replication.dropReplicationProfile(profileName) },
+      queries: { dp: replication.dropReplicationProfile(hmac.signerFor(client), profileName) },
     });
     assertEq(
       dropAgainResp.results.dp.records[0].dropped_replication_profile,
@@ -549,7 +549,7 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     // drop_subscription: removed from a subsequent list_subscriptions.
     const dropResp = await client.execute(db, {
       id: 'lifecycle-drop-subscription',
-      queries: { d: replication.dropSubscription(subName) },
+      queries: { d: replication.dropSubscription(hmac.signerFor(client), subName) },
     });
     assertEq(
       dropResp.results.d.records[0].dropped_subscription,
@@ -578,8 +578,8 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
     await client.execute(db, {
       id: 'lifecycle-sub-cleanup-profiles',
       queries: {
-        dpa: replication.dropReplicationProfile(profileA),
-        dpb: replication.dropReplicationProfile(profileB),
+        dpa: replication.dropReplicationProfile(hmac.signerFor(client), profileA),
+        dpb: replication.dropReplicationProfile(hmac.signerFor(client), profileB),
       },
     });
   });

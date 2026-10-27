@@ -77,7 +77,13 @@ async fn error_code_still_referenced_drop_db() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_db("op", ddl::drop_db("testdb"));
+    b.drop_db(
+        "op",
+        ddl::drop_db("testdb")
+            .hmac("dummy")
+            .build()
+            .expect("build drop_db"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
@@ -96,7 +102,13 @@ async fn error_code_still_referenced_drop_repo() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_repo("op", ddl::drop_repo("main"));
+    b.drop_repo(
+        "op",
+        ddl::drop_repo("main")
+            .hmac("dummy")
+            .build()
+            .expect("build drop_repo"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
@@ -116,8 +128,20 @@ async fn error_code_access_denied_ddl() {
     // Restrict the database to owner-only.
     let mut b = Batch::new();
     b.id(1);
-    let chown_h = b.chown("chown", ddl::chown(ddl::res::database("testdb"), 1));
-    let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
+    let chown_h = b.chown(
+        "chown",
+        ddl::chown(ddl::res::database("testdb"), 1)
+            .hmac("dummy")
+            .build()
+            .expect("build chown"),
+    );
+    let chmod_h = b.chmod(
+        "chmod",
+        ddl::chmod(ddl::res::database("testdb"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build chmod"),
+    );
     b.after(&chmod_h, &chown_h);
     let chmod_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &chmod_req).await.unwrap();
@@ -151,7 +175,13 @@ async fn error_code_not_found_grant_role_user() {
     // Manage(Root) authorization gate passes for Actor::System.
     let mut b = Batch::new();
     b.id(1);
-    b.grant_role("op", ddl::grant_role("testrole", "ghost_user"));
+    b.grant_role(
+        "op",
+        ddl::grant_role("testrole", "ghost_user")
+            .hmac("dummy")
+            .build()
+            .expect("build grant_role"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(

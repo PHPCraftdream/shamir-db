@@ -134,7 +134,10 @@ async fn chown_to_nonexistent_user_succeeds_without_resolver() {
     b.id(1);
     b.chown(
         "co",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), 999_999),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), 999_999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -161,7 +164,10 @@ async fn chown_to_nonexistent_user_rejected_with_resolver() {
     b.id(1);
     b.chown(
         "co",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), 999_999),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), 999_999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -182,7 +188,10 @@ async fn chown_to_existing_user_succeeds_with_resolver() {
     b.id(1);
     b.chown(
         "co",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), alice),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), alice)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -235,7 +244,10 @@ async fn chown_to_system_by_non_system_actor_is_rejected() {
     b.id(1);
     b.chown(
         "co",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -278,7 +290,10 @@ async fn chown_to_system_by_system_actor_succeeds() {
     b.id(1);
     b.chown(
         "co",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -322,7 +337,10 @@ async fn chown_to_system_by_admin_actor_succeeds() {
     b.id(1);
     b.chown(
         "co",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER_SYSTEM)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -354,7 +372,10 @@ async fn chgrp_to_nonexistent_group_is_rejected() {
     b.id(1);
     b.chgrp(
         "cg",
-        ddl::chgrp(ddl::res::table("testdb", "main", "items"), Some(999_999)),
+        ddl::chgrp(ddl::res::table("testdb", "main", "items"), Some(999_999))
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -394,7 +415,10 @@ async fn chgrp_to_none_clears_unconditionally() {
     b.id(1);
     b.chgrp(
         "cg",
-        ddl::chgrp(ddl::res::table("testdb", "main", "items"), None),
+        ddl::chgrp(ddl::res::table("testdb", "main", "items"), None)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -421,7 +445,10 @@ async fn chgrp_to_existing_group_succeeds() {
     b.id(1);
     b.chgrp(
         "cg",
-        ddl::chgrp(ddl::res::table("testdb", "main", "items"), Some(gid)),
+        ddl::chgrp(ddl::res::table("testdb", "main", "items"), Some(gid))
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -457,7 +484,10 @@ async fn add_group_member_nonexistent_group_id_is_rejected() {
     b.id(1);
     b.add_group_member(
         "agm",
-        ddl::add_group_member(ddl::GroupRef::Id { id: 999_999 }, alice),
+        ddl::add_group_member(ddl::GroupRef::Id { id: 999_999 }, alice)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -489,7 +519,10 @@ async fn add_group_member_nonexistent_user_succeeds_without_resolver() {
     b.id(1);
     b.add_group_member(
         "agm",
-        ddl::add_group_member(ddl::GroupRef::Id { id: gid }, 999_999),
+        ddl::add_group_member(ddl::GroupRef::Id { id: gid }, 999_999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -514,7 +547,10 @@ async fn add_group_member_nonexistent_user_rejected_with_resolver() {
     b.id(1);
     b.add_group_member(
         "agm",
-        ddl::add_group_member(ddl::GroupRef::Id { id: gid }, 999_999),
+        ddl::add_group_member(ddl::GroupRef::Id { id: gid }, 999_999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -546,7 +582,10 @@ async fn add_group_member_existing_user_succeeds_with_resolver() {
     b.id(1);
     b.add_group_member(
         "agm",
-        ddl::add_group_member(ddl::GroupRef::Id { id: gid }, alice),
+        ddl::add_group_member(ddl::GroupRef::Id { id: gid }, alice)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
@@ -576,7 +615,10 @@ async fn remove_group_member_nonexistent_user_is_harmless_noop() {
     b.id(1);
     b.remove_group_member(
         "rgm",
-        ddl::remove_group_member(ddl::GroupRef::Id { id: gid }, 999_999),
+        ddl::remove_group_member(ddl::GroupRef::Id { id: gid }, 999_999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 

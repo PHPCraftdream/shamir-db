@@ -787,7 +787,13 @@ async fn fetch_next_denies_after_permission_revoked_mid_scroll() {
         table: ["app".into(), "main".into(), "items".into()],
     };
     let mut close_batch = Batch::new();
-    close_batch.chmod("close", chmod(resource, 0o700));
+    close_batch.chmod(
+        "close",
+        chmod(resource, 0o700)
+            .hmac("direct-db-test")
+            .build()
+            .expect("build chmod"),
+    );
     handler
         .db()
         .execute_as(alice_owner, "app", &close_batch.build())
@@ -850,7 +856,13 @@ async fn fetch_next_after_db_dropped_mid_scroll_surfaces_access_denied_not_unkno
         table: ["app".into(), "main".into(), "items".into()],
     };
     let mut close_batch = Batch::new();
-    close_batch.chmod("close", chmod(resource, 0o700));
+    close_batch.chmod(
+        "close",
+        chmod(resource, 0o700)
+            .hmac("direct-db-test")
+            .build()
+            .expect("build chmod"),
+    );
     handler
         .db()
         .execute_as(alice_owner, "app", &close_batch.build())

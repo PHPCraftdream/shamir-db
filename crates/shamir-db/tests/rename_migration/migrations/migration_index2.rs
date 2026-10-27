@@ -125,7 +125,11 @@ async fn migration_preserves_fts_index() {
     b.id(4);
     b.start_migration(
         "m",
-        ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
+        ddl::start_migration("docs", "dst_repo", "in_memory")
+            .repo("src_repo")
+            .hmac("dummy")
+            .build()
+            .expect("build StartMigration"),
     );
     let mig = exec_built(
         &shamir,
@@ -139,7 +143,13 @@ async fn migration_preserves_fts_index() {
 
     let mut b = Batch::new();
     b.id(5);
-    b.commit_migration("c", ddl::commit_migration(&migration_id));
+    b.commit_migration(
+        "c",
+        ddl::commit_migration(&migration_id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     exec_built(
         &shamir,
         b.to_request_via_msgpack().expect("batch request encoding"),
@@ -238,7 +248,11 @@ async fn migration_preserves_functional_index() {
     b.id(4);
     b.start_migration(
         "m",
-        ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
+        ddl::start_migration("docs", "dst_repo", "in_memory")
+            .repo("src_repo")
+            .hmac("dummy")
+            .build()
+            .expect("build StartMigration"),
     );
     let mig = exec_built(
         &shamir,
@@ -252,7 +266,13 @@ async fn migration_preserves_functional_index() {
 
     let mut b = Batch::new();
     b.id(5);
-    b.commit_migration("c", ddl::commit_migration(&migration_id));
+    b.commit_migration(
+        "c",
+        ddl::commit_migration(&migration_id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     exec_built(
         &shamir,
         b.to_request_via_msgpack().expect("batch request encoding"),
@@ -356,7 +376,11 @@ async fn migration_preserves_vector_index() {
     b.id(4);
     b.start_migration(
         "m",
-        ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
+        ddl::start_migration("docs", "dst_repo", "in_memory")
+            .repo("src_repo")
+            .hmac("dummy")
+            .build()
+            .expect("build StartMigration"),
     );
     let mig = exec_built(
         &shamir,
@@ -370,7 +394,13 @@ async fn migration_preserves_vector_index() {
 
     let mut b = Batch::new();
     b.id(5);
-    b.commit_migration("c", ddl::commit_migration(&migration_id));
+    b.commit_migration(
+        "c",
+        ddl::commit_migration(&migration_id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     exec_built(
         &shamir,
         b.to_request_via_msgpack().expect("batch request encoding"),
@@ -453,7 +483,11 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
     let mut batch = Batch::new();
     batch.start_migration(
         "migration",
-        ddl::start_migration("docs", "dst_repo", "in_memory").repo("src_repo"),
+        ddl::start_migration("docs", "dst_repo", "in_memory")
+            .repo("src_repo")
+            .hmac("dummy")
+            .build()
+            .expect("build StartMigration"),
     );
     let response = exec_built(
         &shamir,
@@ -535,7 +569,13 @@ async fn assert_committed_crash_retry(seed_marker: bool) {
         .active_migrations()
         .insert(id.clone(), rebuilt.clone());
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     exec_built(
         &shamir,
         batch

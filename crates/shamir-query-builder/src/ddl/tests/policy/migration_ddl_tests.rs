@@ -15,7 +15,8 @@ fn start_migration_wire() {
     let op = ddl::start_migration("users", "cold", "redb")
         .dst_path("/data/cold")
         .hmac("deadbeef")
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -33,19 +34,25 @@ fn start_migration_wire() {
 
 #[test]
 fn start_migration_minimal() {
-    let op = ddl::start_migration("logs", "archive", "fjall").build();
+    let op = ddl::start_migration("logs", "archive", "fjall")
+        .hmac("cafe")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["start_migration"], "logs");
     assert_eq!(j["repo"], "main");
     assert_eq!(j["dst_repo"], "archive");
     assert_eq!(j["dst_engine"], "fjall");
     assert!(j.get("dst_path").is_none());
-    assert!(j.get("hmac").is_none());
+    assert_eq!(j["hmac"], "cafe");
 }
 
 #[test]
 fn commit_migration_wire() {
-    let op = ddl::commit_migration("mig-001").hmac("abcd1234").build();
+    let op = ddl::commit_migration("mig-001")
+        .hmac("abcd1234")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -58,7 +65,10 @@ fn commit_migration_wire() {
 
 #[test]
 fn rollback_migration_wire() {
-    let op = ddl::rollback_migration("mig-001").hmac("ff00").build();
+    let op = ddl::rollback_migration("mig-001")
+        .hmac("ff00")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,

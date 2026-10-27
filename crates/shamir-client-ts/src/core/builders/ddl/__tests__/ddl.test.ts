@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { ddl } from '../index.js';
-import { canonicalSetRetention, canonicalPurgeHistory } from '../../../protocol/hmac.js';
+import { canonicalBatchOp } from '../../../protocol/hmac.js';
 
 /** Fake signer that returns a predictable tag based on canonical length. */
 const fakeSigner = {
@@ -388,7 +388,7 @@ describe('purge scope', () => {
 describe('purgeHistory (HMAC)', () => {
   it('emits {purge_history, repo, scope, hmac}', () => {
     const scope = ddl.olderThanAge(86400);
-    const canonical = canonicalPurgeHistory('mydb', 'main', 'users', scope);
+    const canonical = canonicalBatchOp('mydb', { purge_history: 'users', repo: 'main', scope });
     const op = ddl.purgeHistory(fakeSigner, 'mydb', 'users', scope);
     expect(op).toEqual({
       purge_history: 'users',
@@ -402,7 +402,7 @@ describe('purgeHistory (HMAC)', () => {
 describe('setRetention (HMAC)', () => {
   it('emits {set_retention, repo, retention, hmac}', () => {
     const retention = ddl.currentOnly();
-    const canonical = canonicalSetRetention('mydb', 'main', 'users', retention);
+    const canonical = canonicalBatchOp('mydb', { set_retention: 'users', repo: 'main', retention });
     const op = ddl.setRetention(fakeSigner, 'mydb', 'users', retention);
     expect(op).toEqual({
       set_retention: 'users',
@@ -453,7 +453,8 @@ describe('function DDL', () => {
   });
 
   it('createFunction — replace=true, wasm variant', () => {
-    const op = ddl.createFunction('my_fn', { wasm: '<base64>', replace: true });
+    expect(() => ddl.createFunction('my_fn', { wasm: '<base64>', replace: true })).toThrow(/HMAC required/);
+    const op = ddl.createFunction('my_fn', { wasm: '<base64>', replace: true, hmac: 'tag' });
     expect(op.replace).toBe(true);
     expect(op.wasm).toBe('<base64>');
     expect(op).not.toHaveProperty('source');
@@ -489,8 +490,16 @@ describe('function DDL', () => {
     expect(op).not.toHaveProperty('secret_grants');
   });
 
-  it('dropFunction emits {drop_function}', () => {
-    expect(ddl.dropFunction('my_fn')).toEqual({ drop_function: 'my_fn' });
+  it('createFunction replacement requires HMAC (rv-query-builder-e6f53e38)', () => {
+    expect(() => ddl.createFunction('fn', { replace: true })).toThrow(/HMAC required/);
+  });
+  it('createFunction rejects definer and secret grants without HMAC (rv-query-builder-e6f53e38)', () => {
+    expect(() => ddl.createFunction('fn', { security: 'definer' })).toThrow(/HMAC required/);
+    expect(() => ddl.createFunction('fn', { secret_grants: ['TOKEN'] })).toThrow(/HMAC required/);
+  });
+  it('dropFunction accepts optional hmac and existence flag', () => {
+    expect(() => ddl.dropFunction('my_fn')).toThrow(/HMAC required/);
+    expect(ddl.dropFunction('my_fn', { if_exists: true, hmac: 'tag' })).toEqual({ drop_function: 'my_fn', if_exists: true, hmac: 'tag' });
   });
 
   it('renameFunction emits {rename_function, to}', () => {
@@ -513,8 +522,14 @@ describe('validator DDL', () => {
     });
   });
 
-  it('dropValidator emits {drop_validator}', () => {
-    expect(ddl.dropValidator('v')).toEqual({ drop_validator: 'v' });
+  it('createValidator replacement requires and carries hmac', () => {
+    expect(() => ddl.createValidator('v', { replace: true })).toThrow(/HMAC required/);
+    expect(ddl.createValidator('v', { replace: true, hmac: 'tag' }).hmac).toBe('tag');
+  });
+
+  it('dropValidator accepts optional hmac', () => {
+    expect(() => ddl.dropValidator('v')).toThrow(/HMAC required/);
+    expect(ddl.dropValidator('v', { hmac: 'tag' })).toEqual({ drop_validator: 'v', hmac: 'tag' });
   });
 
   it('renameValidator emits {rename_validator, to}', () => {

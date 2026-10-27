@@ -4,7 +4,8 @@ use shamir_query_types::admin::{
 };
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::{IntoBatchOp, TryIntoBatchOp};
+use crate::write::BuilderError;
 
 // ============================================================================
 // Access-tree introspection
@@ -88,24 +89,20 @@ impl Chmod {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::Chmod(ChmodOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::Chmod(ChmodOp {
             chmod: self.resource,
             mode: self.mode,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<Chmod> for BatchOp {
-    fn from(b: Chmod) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for Chmod {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for Chmod {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -135,24 +132,20 @@ impl Chown {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::Chown(ChownOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::Chown(ChownOp {
             chown: self.resource,
             owner: self.owner,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<Chown> for BatchOp {
-    fn from(b: Chown) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for Chown {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for Chown {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -182,24 +175,20 @@ impl ChgrpBuilder {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::Chgrp(ChgrpOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::Chgrp(ChgrpOp {
             chgrp: self.resource,
             group: self.group,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<ChgrpBuilder> for BatchOp {
-    fn from(b: ChgrpBuilder) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for ChgrpBuilder {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for ChgrpBuilder {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -231,23 +220,19 @@ impl CreateGroup {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::CreateGroup(CreateGroupOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::CreateGroup(CreateGroupOp {
             create_group: self.name,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<CreateGroup> for BatchOp {
-    fn from(b: CreateGroup) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for CreateGroup {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for CreateGroup {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -284,24 +269,20 @@ impl DropGroup {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropGroup(DropGroupOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropGroup(DropGroupOp {
             drop_group: self.group,
             if_exists: self.if_exists,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<DropGroup> for BatchOp {
-    fn from(b: DropGroup) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropGroup {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropGroup {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -333,24 +314,20 @@ impl RenameGroup {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::RenameGroup(RenameGroupOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::RenameGroup(RenameGroupOp {
             rename_group: self.group,
             to: self.to,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<RenameGroup> for BatchOp {
-    fn from(b: RenameGroup) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for RenameGroup {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for RenameGroup {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -380,24 +357,20 @@ impl AddGroupMember {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::AddGroupMember(AddGroupMemberOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::AddGroupMember(AddGroupMemberOp {
             add_group_member: self.group,
             user: self.user,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<AddGroupMember> for BatchOp {
-    fn from(b: AddGroupMember) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for AddGroupMember {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for AddGroupMember {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -427,24 +400,20 @@ impl RemoveGroupMember {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::RemoveGroupMember(RemoveGroupMemberOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::RemoveGroupMember(RemoveGroupMemberOp {
             remove_group_member: self.group,
             user: self.user,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<RemoveGroupMember> for BatchOp {
-    fn from(b: RemoveGroupMember) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for RemoveGroupMember {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for RemoveGroupMember {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

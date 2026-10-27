@@ -212,7 +212,7 @@ async fn drop_db_with_repos_no_cascade_fails() {
     // testdb has "main" repo -> drop without cascade should fail
     let mut b = Batch::new();
     b.id("dd");
-    b.drop_db("op", ddl::drop_db("testdb"));
+    b.drop_db("op", ddl::drop_db("testdb").hmac("dummy").build().unwrap());
     let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
@@ -234,7 +234,14 @@ async fn drop_db_with_cascade_succeeds() {
     // Drop with cascade
     let mut b = Batch::new();
     b.id("dd");
-    b.drop_db("op", ddl::drop_db("target_db").cascade());
+    b.drop_db(
+        "op",
+        ddl::drop_db("target_db")
+            .cascade()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("bootstrap", &drop_req).await.unwrap();
     assert_eq!(
@@ -253,7 +260,7 @@ async fn drop_repo_with_tables_no_cascade_fails() {
     // "main" repo has "users" table -> drop without cascade should fail
     let mut b = Batch::new();
     b.id("dr");
-    b.drop_repo("op", ddl::drop_repo("main"));
+    b.drop_repo("op", ddl::drop_repo("main").hmac("dummy").build().unwrap());
     let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &drop_req).await.unwrap_err();
     let msg = err.to_string();
@@ -270,7 +277,14 @@ async fn drop_repo_with_cascade_succeeds() {
     // Drop "main" with cascade (it has "users" table)
     let mut b = Batch::new();
     b.id("dr");
-    b.drop_repo("op", ddl::drop_repo("main").cascade());
+    b.drop_repo(
+        "op",
+        ddl::drop_repo("main")
+            .cascade()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(
@@ -297,7 +311,11 @@ async fn drop_table_cleans_validator_bound_in() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("v_cleanup").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("v_cleanup")
+            .wasm(wasm_b64(&wasm))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
     );
     let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
@@ -317,7 +335,14 @@ async fn drop_table_cleans_validator_bound_in() {
     // Step 2: drop the table -> should clean bound_in
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main"));
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(
@@ -328,7 +353,13 @@ async fn drop_table_cleans_validator_bound_in() {
     // Step 3: now drop_validator should succeed (bound_in was cleaned)
     let mut b = Batch::new();
     b.id("dv");
-    b.drop_validator("op", ddl::drop_validator("v_cleanup"));
+    b.drop_validator(
+        "op",
+        ddl::drop_validator("v_cleanup")
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let drop_val_req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &drop_val_req).await.unwrap();
     assert_eq!(
@@ -364,7 +395,11 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("v_cascade").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("v_cascade")
+            .wasm(wasm_b64(&wasm))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -394,7 +429,15 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
     // 4. Drop with cascade — should succeed and clean everything.
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .cascade()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -413,7 +456,13 @@ async fn drop_table_cascade_cleans_index_validator_schema() {
     // 6. Verify the validator binding was cleaned (drop_validator succeeds).
     let mut b = Batch::new();
     b.id("dv");
-    b.drop_validator("op", ddl::drop_validator("v_cascade"));
+    b.drop_validator(
+        "op",
+        ddl::drop_validator("v_cascade")
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -442,7 +491,14 @@ async fn drop_table_without_cascade_still_works() {
     // Drop without cascade — should succeed (current behavior).
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main"));
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -491,7 +547,14 @@ async fn drop_table_if_exists_nonexistent_is_noop() {
 
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("no_such_table").if_exists());
+    b.drop_table(
+        "op",
+        ddl::drop_table("no_such_table")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -506,7 +569,15 @@ async fn drop_table_without_if_exists_existing_succeeds() {
 
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main").if_exists());
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -521,7 +592,14 @@ async fn drop_index_if_exists_nonexistent_is_noop() {
 
     let mut b = Batch::new();
     b.id("di");
-    b.drop_index("op", ddl::drop_index("no_such_idx", "users").if_exists());
+    b.drop_index(
+        "op",
+        ddl::drop_index("no_such_idx", "users")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -538,7 +616,11 @@ async fn drop_index_if_exists_missing_table_is_noop() {
     b.id("di");
     b.drop_index(
         "op",
-        ddl::drop_index("some_idx", "no_such_table").if_exists(),
+        ddl::drop_index("some_idx", "no_such_table")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
@@ -555,7 +637,14 @@ async fn drop_db_if_exists_nonexistent_is_noop() {
 
     let mut b = Batch::new();
     b.id("dd");
-    b.drop_db("op", ddl::drop_db("no_such_db").if_exists());
+    b.drop_db(
+        "op",
+        ddl::drop_db("no_such_db")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("bootstrap", &req).await.unwrap();
     assert_eq!(
@@ -570,7 +659,14 @@ async fn drop_repo_if_exists_nonexistent_is_noop() {
 
     let mut b = Batch::new();
     b.id("dr");
-    b.drop_repo("op", ddl::drop_repo("no_such_repo").if_exists());
+    b.drop_repo(
+        "op",
+        ddl::drop_repo("no_such_repo")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -585,7 +681,14 @@ async fn drop_function_if_exists_nonexistent_is_noop() {
 
     let mut b = Batch::new();
     b.id("df");
-    b.drop_function("op", ddl::drop_function("no_such_fn").if_exists());
+    b.drop_function(
+        "op",
+        ddl::drop_function("no_such_fn")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -600,7 +703,14 @@ async fn drop_validator_if_exists_nonexistent_is_noop() {
 
     let mut b = Batch::new();
     b.id("dv");
-    b.drop_validator("op", ddl::drop_validator("no_such_val").if_exists());
+    b.drop_validator(
+        "op",
+        ddl::drop_validator("no_such_val")
+            .if_exists()
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(

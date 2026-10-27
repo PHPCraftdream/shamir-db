@@ -123,7 +123,14 @@ async fn drop_db_cascade_from_session_db_spares_session_db() {
     // No subscription bindings: the cascade must run — against DESTDB.
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_db("destdb").cascade());
+    b.op(
+        "drop",
+        drop_db("destdb")
+            .cascade()
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     shamir
         .execute(
             "sessdb",
@@ -157,7 +164,10 @@ async fn drop_repo_over_bound_destination_refused_with_typed_code() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_repo("main"));
+    b.op(
+        "drop",
+        drop_repo("main").hmac("test").build().expect("build op"),
+    );
     let err = shamir
         .execute(
             "testdb",
@@ -224,7 +234,13 @@ async fn drop_quarantined_subscription_refused_with_typed_code() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_subscription("sub"));
+    b.op(
+        "drop",
+        drop_subscription("sub")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let err = shamir
         .execute(
             "testdb",
@@ -268,7 +284,13 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
     // DROP SUBSCRIPTION → quarantined.
     let mut b = Batch::new();
     b.id(3);
-    b.op("dropsub", drop_subscription("sub"));
+    b.op(
+        "dropsub",
+        drop_subscription("sub")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let err = shamir
         .execute(
             "testdb",
@@ -285,7 +307,10 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
     // DROP REPO → bound.
     let mut b = Batch::new();
     b.id(4);
-    b.op("droprepo", drop_repo("main"));
+    b.op(
+        "droprepo",
+        drop_repo("main").hmac("test").build().expect("build op"),
+    );
     let err = shamir
         .execute(
             "testdb",
@@ -298,7 +323,14 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
     // DROP REPO CASCADE → bound.
     let mut b = Batch::new();
     b.id(5);
-    b.op("dropcasc", drop_repo("main").cascade());
+    b.op(
+        "dropcasc",
+        drop_repo("main")
+            .cascade()
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let err = shamir
         .execute(
             "testdb",
@@ -390,7 +422,13 @@ async fn drop_subscription_refused_when_any_bound_destination_is_quarantined() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_subscription("sub"));
+    b.op(
+        "drop",
+        drop_subscription("sub")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let err = shamir
         .execute(
             "testdb",

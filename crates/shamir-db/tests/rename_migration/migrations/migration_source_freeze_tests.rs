@@ -52,7 +52,11 @@ fn start_request() -> BatchRequest {
     let mut batch = Batch::new();
     batch.start_migration(
         "migration",
-        ddl::start_migration("docs", "dst", "in_memory").repo("src"),
+        ddl::start_migration("docs", "dst", "in_memory")
+            .repo("src")
+            .hmac("dummy")
+            .build()
+            .expect("build StartMigration"),
     );
     batch
         .to_request_via_msgpack()
@@ -68,7 +72,13 @@ async fn start(db: &ShamirDb) -> String {
 
 async fn commit(db: &ShamirDb, id: &str) {
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(id));
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     let response = exec(
         db,
         batch
@@ -196,7 +206,13 @@ async fn r4_rollback_releases_source_freeze() {
     let id = start(&db).await;
     assert_frozen(&db, insert("during migration")).await;
     let mut batch = Batch::new();
-    batch.rollback_migration("rollback", ddl::rollback_migration(&id));
+    batch.rollback_migration(
+        "rollback",
+        ddl::rollback_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build RollbackMigration"),
+    );
     exec(
         &db,
         batch
@@ -291,7 +307,13 @@ async fn r5_commit_error_after_final_drain_releases_source_freeze() {
         .unwrap();
     let coord = db.active_migrations().get(&id).unwrap().value().clone();
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     let error = db
         .execute(
             "testdb",
@@ -337,7 +359,13 @@ async fn concurrent_commit_waiters_share_serialized_freeze_and_receipt() {
     let coord = db.active_migrations().get(&id).unwrap().value().clone();
     let held = coord.lock_finalisation().await;
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     let request = batch
         .to_request_via_msgpack()
         .expect("batch request encoding");
@@ -371,7 +399,13 @@ async fn cancelled_commit_waiter_does_not_steal_successors_freeze() {
     let coord = db.active_migrations().get(&id).unwrap().value().clone();
     let held = coord.lock_finalisation().await;
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     let request = batch
         .to_request_via_msgpack()
         .expect("batch request encoding");

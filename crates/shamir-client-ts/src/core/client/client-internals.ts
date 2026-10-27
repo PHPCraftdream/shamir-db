@@ -10,7 +10,7 @@ import {
   TRANSPORT_KIND_WS,
   BINDING_MODE_TLS_NO_EXPORT,
 } from '../protocol/scram.js';
-import { canonicalCreateScramUser } from '../protocol/hmac.js';
+import { canonicalDbRequest } from '../protocol/hmac.js';
 import {
   setSuperuser as buildSetSuperuserOp,
   setReplicator as buildSetReplicatorOp,
@@ -167,7 +167,7 @@ export async function createScramUser(
   sendDbRequest: (req: object) => Promise<Record<string, unknown>>,
   hmacTagHex: (canonical: Uint8Array) => string,
 ): Promise<ScramUserCreated> {
-  const canonical = canonicalCreateScramUser(name, roles);
+  const canonical = canonicalDbRequest({ op: 'create_scram_user', name, password, roles });
   const r = await sendDbRequest({
     op: 'create_scram_user',
     name,

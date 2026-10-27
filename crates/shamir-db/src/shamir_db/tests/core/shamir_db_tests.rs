@@ -1,6 +1,77 @@
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::ddl;
+
+/// Deterministic proof that `db_create_lock` actually brackets
+/// `handle_create_db`'s exists-check -> authorize -> create sequence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_db_lock_actually_serialises_concurrent_callers() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("router").await.expect("create_db");
+    let held_guard = shamir.db_create_lock().lock().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_db("cd", ddl::create_db("lockedb"));
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let shamir2 = shamir.clone();
+    let spawned = tokio::spawn(async move { shamir2.execute("router", &req).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!spawned.is_finished());
+    assert!(!shamir.has_db("lockedb"));
+
+    drop(held_guard);
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+        .await
+        .expect("spawned create_db must complete promptly after lock release")
+        .expect("task must not panic")
+        .expect("create_db must succeed once the lock is free");
+    assert_eq!(
+        resp.results["cd"].records[0].get_value_bool("created"),
+        Some(true)
+    );
+    assert!(shamir.has_db("lockedb"));
+}
+
+/// Same deterministic proof for `repo_create_locks` (per-db keyed lock).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_repo_lock_actually_serialises_concurrent_callers() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.expect("create_db");
+    let repo_lock = shamir
+        .repo_create_locks()
+        .entry("testdb".to_string())
+        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let held_guard = repo_lock.lock().await;
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_repo("cr", ddl::create_repo("lockedrepo").engine("in_memory"));
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let shamir2 = shamir.clone();
+    let spawned = tokio::spawn(async move { shamir2.execute("testdb", &req).await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!spawned.is_finished());
+    let db = shamir.get_db("testdb").unwrap();
+    assert!(!db.has_repo("lockedrepo"));
+
+    drop(held_guard);
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
+        .await
+        .expect("spawned create_repo must complete promptly after lock release")
+        .expect("task must not panic")
+        .expect("create_repo must succeed once the lock is free");
+    assert_eq!(
+        resp.results["cr"].records[0].get_value_bool("created"),
+        Some(true)
+    );
+    assert!(db.has_repo("lockedrepo"));
+}
 
 #[tokio::test]
 async fn test_shamir_db_creation() {

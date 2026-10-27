@@ -23,6 +23,8 @@ pub struct CreateValidatorOp {
     pub wasm: Option<String>,
     #[serde(default)]
     pub replace: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Drop a validator by name.
@@ -38,6 +40,8 @@ pub struct DropValidatorOp {
     /// returning `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Rename a validator.

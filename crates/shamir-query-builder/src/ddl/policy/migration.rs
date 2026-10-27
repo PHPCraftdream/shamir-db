@@ -3,7 +3,8 @@ use shamir_query_types::admin::{
 };
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Start an online table migration. Returns a builder for optional fields.
 pub fn start_migration(
@@ -50,27 +51,23 @@ impl StartMigration {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::StartMigration(StartMigrationOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::StartMigration(StartMigrationOp {
             start_migration: self.table,
             repo: self.repo,
             dst_repo: self.dst_repo,
             dst_engine: self.dst_engine,
             dst_path: self.dst_path,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<StartMigration> for BatchOp {
-    fn from(b: StartMigration) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for StartMigration {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for StartMigration {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -96,23 +93,19 @@ impl CommitMig {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::CommitMigration(CommitMigrationOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::CommitMigration(CommitMigrationOp {
             commit_migration: self.id,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<CommitMig> for BatchOp {
-    fn from(b: CommitMig) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for CommitMig {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for CommitMig {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -138,23 +131,19 @@ impl RollbackMig {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::RollbackMigration(RollbackMigrationOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::RollbackMigration(RollbackMigrationOp {
             rollback_migration: self.id,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<RollbackMig> for BatchOp {
-    fn from(b: RollbackMig) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for RollbackMig {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for RollbackMig {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

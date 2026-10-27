@@ -32,7 +32,10 @@ async fn drop_function_refused_when_validator_bound() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_function("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create function builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -43,7 +46,10 @@ async fn drop_function_refused_when_validator_bound() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create validator builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -64,7 +70,13 @@ async fn drop_function_refused_when_validator_bound() {
     // 4. Drop the FUNCTION → must be refused with drop_refused_bound.
     let mut b = Batch::new();
     b.id("df");
-    b.drop_function("op", ddl::drop_function("shared_name"));
+    b.drop_function(
+        "op",
+        ddl::drop_function("shared_name")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop function builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
@@ -107,7 +119,10 @@ async fn drop_function_succeeds_after_unbind() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_function("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create function builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -116,7 +131,10 @@ async fn drop_function_succeeds_after_unbind() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create validator builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -136,7 +154,13 @@ async fn drop_function_succeeds_after_unbind() {
     // Drop while bound → refused.
     let mut b = Batch::new();
     b.id("df1");
-    b.drop_function("op", ddl::drop_function("shared_name"));
+    b.drop_function(
+        "op",
+        ddl::drop_function("shared_name")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop function builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(err.code(), Some("drop_refused_bound"));
@@ -154,7 +178,13 @@ async fn drop_function_succeeds_after_unbind() {
     // Now the function drop must succeed with existed: true.
     let mut b = Batch::new();
     b.id("df2");
-    b.drop_function("op", ddl::drop_function("shared_name"));
+    b.drop_function(
+        "op",
+        ddl::drop_function("shared_name")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop function builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -186,7 +216,10 @@ async fn drop_function_succeeds_after_drop_validator() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_function("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create function builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -195,7 +228,10 @@ async fn drop_function_succeeds_after_drop_validator() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create validator builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -225,7 +261,13 @@ async fn drop_function_succeeds_after_drop_validator() {
     // Drop the validator entirely.
     let mut b = Batch::new();
     b.id("dv");
-    b.drop_validator("op", ddl::drop_validator("shared_name"));
+    b.drop_validator(
+        "op",
+        ddl::drop_validator("shared_name")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -236,7 +278,13 @@ async fn drop_function_succeeds_after_drop_validator() {
     // Now the function drop must succeed.
     let mut b = Batch::new();
     b.id("df");
-    b.drop_function("op", ddl::drop_function("shared_name"));
+    b.drop_function(
+        "op",
+        ddl::drop_function("shared_name")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop function builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
@@ -261,7 +309,10 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_function("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create function builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -270,7 +321,10 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("shared_name").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("shared_name")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create validator builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -291,7 +345,14 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
     // guard must still refuse (if_exists only short-circuits non-existence).
     let mut b = Batch::new();
     b.id("df");
-    b.drop_function("op", ddl::drop_function("shared_name").if_exists());
+    b.drop_function(
+        "op",
+        ddl::drop_function("shared_name")
+            .if_exists()
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop function builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
@@ -316,7 +377,10 @@ async fn drop_function_unbound_succeeds() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("lonely_fn").wasm(wasm_b64(&wasm)),
+        ddl::create_function("lonely_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("create function builder should succeed"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
@@ -324,7 +388,13 @@ async fn drop_function_unbound_succeeds() {
     // No validator named "lonely_fn" exists → guard is a no-op.
     let mut b = Batch::new();
     b.id("df");
-    b.drop_function("op", ddl::drop_function("lonely_fn"));
+    b.drop_function(
+        "op",
+        ddl::drop_function("lonely_fn")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop function builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(

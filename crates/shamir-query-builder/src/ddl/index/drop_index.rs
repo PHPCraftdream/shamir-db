@@ -2,7 +2,8 @@ use shamir_query_types::admin::DropIndexOp;
 use shamir_query_types::batch::BatchOp;
 use shamir_types::types::record_id::RecordId;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Drop an index from a table. Returns a builder for optional fields.
 pub fn drop_index(name: impl Into<String>, table: impl Into<String>) -> DropIndex {
@@ -59,27 +60,23 @@ impl DropIndex {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropIndex(DropIndexOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropIndex(DropIndexOp {
             drop_index: self.name,
             table: self.table,
             repo: self.repo,
-            hmac: self.hmac,
+            hmac: Some(hmac),
             if_exists: self.if_exists,
             request_id: self.request_id,
-        })
+        }))
     }
 }
 
-impl From<DropIndex> for BatchOp {
-    fn from(b: DropIndex) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropIndex {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropIndex {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

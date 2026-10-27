@@ -5,15 +5,18 @@ use shamir_query_types::admin::{
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::WriteOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::{IntoBatchOp, TryIntoBatchOp};
+use crate::write::BuilderError;
 
 /// Create (or replace) a validator. Returns a builder for source/wasm.
+/// Conditionally HMAC-gated: `.replace()` requires `.hmac(tag)`.
 pub fn create_validator(name: impl Into<String>) -> CreateValidator {
     CreateValidator {
         name: name.into(),
         source: None,
         wasm: None,
         replace: false,
+        hmac: None,
     }
 }
 
@@ -23,6 +26,7 @@ pub struct CreateValidator {
     source: Option<String>,
     wasm: Option<String>,
     replace: bool,
+    hmac: Option<String>,
 }
 
 impl CreateValidator {
@@ -38,40 +42,47 @@ impl CreateValidator {
         self
     }
 
-    /// Enable replace-if-exists semantics.
+    /// Enable replace-if-exists semantics. Requires an `hmac` tag.
     pub fn replace(mut self) -> Self {
         self.replace = true;
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::CreateValidator(CreateValidatorOp {
+    /// Attach the hex-encoded HMAC tag. Required iff `replace` is set.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when `replace` is set without `.hmac(tag)`.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        if self.replace && self.hmac.is_none() {
+            return Err(BuilderError::MissingHmac);
+        }
+        Ok(BatchOp::CreateValidator(CreateValidatorOp {
             create_validator: self.name,
             source: self.source,
             wasm: self.wasm,
             replace: self.replace,
-        })
+            hmac: self.hmac,
+        }))
     }
 }
 
-impl From<CreateValidator> for BatchOp {
-    fn from(b: CreateValidator) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for CreateValidator {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for CreateValidator {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
 
 /// Drop a validator by name. Returns a builder for optional flags.
+/// HMAC-gated (see [`DropValidator_::hmac`]).
 pub fn drop_validator(name: impl Into<String>) -> DropValidator_ {
     DropValidator_ {
         name: name.into(),
         if_exists: false,
+        hmac: None,
     }
 }
 
@@ -79,6 +90,7 @@ pub fn drop_validator(name: impl Into<String>) -> DropValidator_ {
 pub struct DropValidator_ {
     name: String,
     if_exists: bool,
+    hmac: Option<String>,
 }
 
 impl DropValidator_ {
@@ -89,23 +101,27 @@ impl DropValidator_ {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropValidator(DropValidatorOp {
+    /// Attach the hex-encoded HMAC tag. Required — the server rejects the
+    /// op with `hmac_required` otherwise.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropValidator(DropValidatorOp {
             drop_validator: self.name,
             if_exists: self.if_exists,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<DropValidator_> for BatchOp {
-    fn from(b: DropValidator_) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropValidator_ {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropValidator_ {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

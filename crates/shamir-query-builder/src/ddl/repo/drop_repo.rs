@@ -1,7 +1,8 @@
 use shamir_query_types::admin::DropRepoOp;
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Drop a repository. Returns a builder for optional HMAC.
 pub fn drop_repo(name: impl Into<String>) -> DropRepo {
@@ -41,25 +42,21 @@ impl DropRepo {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropRepo(DropRepoOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropRepo(DropRepoOp {
             drop_repo: self.name,
-            hmac: self.hmac,
+            hmac: Some(hmac),
             cascade: self.cascade,
             if_exists: self.if_exists,
-        })
+        }))
     }
 }
 
-impl From<DropRepo> for BatchOp {
-    fn from(b: DropRepo) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropRepo {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropRepo {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

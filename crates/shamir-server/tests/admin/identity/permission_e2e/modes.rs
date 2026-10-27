@@ -76,9 +76,16 @@ async fn permission_deny_allow_by_mode() {
     // --- Create a non-admin user ---
     let user_pw = b"user-password".to_vec();
     let create_alice_roles: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "alice".into(),
+        password: String::from_utf8(user_pw.clone()).expect("utf8").into(),
+        roles: create_alice_roles.clone(),
+        hmac: None,
+    };
     let create_alice_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("alice", &create_alice_roles),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
@@ -248,9 +255,16 @@ async fn permission_group_grant() {
 
     for (name, pw) in [("bob", &bob_pw), ("carol", &carol_pw)] {
         let loop_roles: Vec<String> = vec![];
+        let unsigned = DbRequest::CreateScramUser {
+            name: name.into(),
+            password: String::from_utf8(pw.clone()).expect("utf8").into(),
+            roles: loop_roles.clone(),
+            hmac: None,
+        };
         let loop_tag = shamir_query_types::hmac::compute_tag_hex(
             &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-            &shamir_query_types::hmac::canonical_create_scram_user(name, &loop_roles),
+            &shamir_query_types::hmac::canonical_db_request(&unsigned)
+                .expect("create-scram canonical form"),
         );
         let resp = roundtrip(
             &DbRequest::CreateScramUser {
@@ -465,9 +479,16 @@ async fn permission_open_default_allows_any_user() {
     // Create a regular user
     let dave_pw = b"dave-password".to_vec();
     let dave_roles: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "dave".into(),
+        password: String::from_utf8(dave_pw.clone()).expect("utf8").into(),
+        roles: dave_roles.clone(),
+        hmac: None,
+    };
     let dave_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("dave", &dave_roles),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {

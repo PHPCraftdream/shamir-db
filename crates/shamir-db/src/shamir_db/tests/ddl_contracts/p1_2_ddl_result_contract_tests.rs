@@ -43,7 +43,14 @@ async fn drop_index_returns_op_id_and_status() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_index("d", ddl::drop_index("idx_city", "items").repo("main"));
+    b.drop_index(
+        "d",
+        ddl::drop_index("idx_city", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
@@ -120,7 +127,14 @@ async fn poll_finds_correct_op_status_record() {
     // Execute DROP INDEX
     let mut b = Batch::new();
     b.id(1);
-    b.drop_index("d", ddl::drop_index("idx_city", "items").repo("main"));
+    b.drop_index(
+        "d",
+        ddl::drop_index("idx_city", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
@@ -186,7 +200,14 @@ async fn poll_right_op_id_wrong_table_returns_none() {
     // Execute DROP INDEX on items table
     let mut b = Batch::new();
     b.id(1);
-    b.drop_index("d", ddl::drop_index("idx_items", "items").repo("main"));
+    b.drop_index(
+        "d",
+        ddl::drop_index("idx_items", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
@@ -241,7 +262,14 @@ async fn two_drop_index_dispatches_on_one_table_mint_distinct_pollable_op_ids() 
 
     let mut b1 = Batch::new();
     b1.id(1);
-    b1.drop_index("d", ddl::drop_index("idx_city", "items").repo("main"));
+    b1.drop_index(
+        "d",
+        ddl::drop_index("idx_city", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
     let resp1 = shamir
         .execute(
             "testdb",
@@ -256,7 +284,14 @@ async fn two_drop_index_dispatches_on_one_table_mint_distinct_pollable_op_ids() 
 
     let mut b2 = Batch::new();
     b2.id(1);
-    b2.drop_index("d", ddl::drop_index("idx_zip", "items").repo("main"));
+    b2.drop_index(
+        "d",
+        ddl::drop_index("idx_zip", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
     let resp2 = shamir
         .execute(
             "testdb",

@@ -12,7 +12,7 @@ import type {
   RenameIndexOp,
 } from '../../types/schema/ddl.js';
 import { repoOrDefault } from './ddl-schema.js';
-import { canonicalDropIndex } from '../../protocol/hmac.js';
+import { canonicalBatchOp } from '../../protocol/hmac.js';
 
 
 /**
@@ -515,7 +515,7 @@ export function dropIndex(
   index: string,
   opts?: { if_exists?: boolean },
 ): DropIndexOp {
-  const canonical = canonicalDropIndex(dbInUse, repo, table, index);
+  const canonical = canonicalBatchOp(dbInUse, { drop_index: index, repo, table, if_exists: opts?.if_exists ?? false });
   const op: DropIndexOp = {
     drop_index: index,
     table,

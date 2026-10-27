@@ -290,15 +290,23 @@ pub(crate) fn chmod_batch(
 ) -> DbRequest {
     let resource = shamir_query_builder::ddl::res::table(db, store, table);
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op = shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+        chmod: resource.clone(),
+        mode,
+        hmac: None,
+    });
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_chmod(&resource, mode),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op).expect("chmod canonical form"),
     );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(resource, mode).hmac(tag),
+        shamir_query_builder::ddl::chmod(resource, mode)
+            .hmac(tag)
+            .build()
+            .expect("build chmod"),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -312,15 +320,23 @@ pub(crate) fn chmod_batch(
 pub(crate) fn chmod_db_batch(session_id: [u8; 32], db: &str, mode: u16) -> DbRequest {
     let resource = shamir_query_builder::ddl::res::database(db);
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op = shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+        chmod: resource.clone(),
+        mode,
+        hmac: None,
+    });
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_chmod(&resource, mode),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op).expect("chmod canonical form"),
     );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod_db");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(resource, mode).hmac(tag),
+        shamir_query_builder::ddl::chmod(resource, mode)
+            .hmac(tag)
+            .build()
+            .expect("build chmod"),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -339,15 +355,23 @@ pub(crate) fn chmod_store_batch(
 ) -> DbRequest {
     let resource = shamir_query_builder::ddl::res::store(db, store);
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op = shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+        chmod: resource.clone(),
+        mode,
+        hmac: None,
+    });
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_chmod(&resource, mode),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op).expect("chmod canonical form"),
     );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chmod_store");
     b.chmod(
         "cm",
-        shamir_query_builder::ddl::chmod(resource, mode).hmac(tag),
+        shamir_query_builder::ddl::chmod(resource, mode)
+            .hmac(tag)
+            .build()
+            .expect("build chmod"),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -367,15 +391,23 @@ pub(crate) fn chgrp_batch(
 ) -> DbRequest {
     let resource = shamir_query_builder::ddl::res::table(db, store, table);
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op = shamir_query_types::batch::BatchOp::Chgrp(shamir_query_types::admin::ChgrpOp {
+        chgrp: resource.clone(),
+        group: Some(group),
+        hmac: None,
+    });
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_chgrp(&resource, Some(group)),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op).expect("chgrp canonical form"),
     );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("chgrp");
     b.chgrp(
         "cg",
-        shamir_query_builder::ddl::chgrp(resource, Some(group)).hmac(tag),
+        shamir_query_builder::ddl::chgrp(resource, Some(group))
+            .hmac(tag)
+            .build()
+            .expect("build chgrp"),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -388,15 +420,24 @@ pub(crate) fn chgrp_batch(
 /// bearer token — create_group is HMAC-gated (task #551).
 pub(crate) fn create_group_req(session_id: [u8; 32], db: &str, name: &str) -> DbRequest {
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op =
+        shamir_query_types::batch::BatchOp::CreateGroup(shamir_query_types::admin::CreateGroupOp {
+            create_group: name.into(),
+            hmac: None,
+        });
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_create_group(name),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op)
+            .expect("create-group canonical form"),
     );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("mkgrp");
     b.create_group(
         "mk",
-        shamir_query_builder::ddl::create_group(name).hmac(tag),
+        shamir_query_builder::ddl::create_group(name)
+            .hmac(tag)
+            .build()
+            .expect("build create group"),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -417,15 +458,26 @@ pub(crate) fn add_group_member_req(
         name: group_name.to_string(),
     };
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op = shamir_query_types::batch::BatchOp::AddGroupMember(
+        shamir_query_types::admin::AddGroupMemberOp {
+            add_group_member: group.clone(),
+            user: user_id,
+            hmac: None,
+        },
+    );
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_add_group_member(&group, user_id),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op)
+            .expect("add-group-member canonical form"),
     );
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("addmember");
     b.add_group_member(
         "am",
-        shamir_query_builder::ddl::add_group_member(group, user_id).hmac(tag),
+        shamir_query_builder::ddl::add_group_member(group, user_id)
+            .hmac(tag)
+            .build()
+            .expect("build add group member"),
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
@@ -578,7 +630,21 @@ pub(crate) fn chmod_only_req(db_name: &str, store: &str, table: &str) -> DbReque
     let resource = shamir_query_builder::ddl::res::table(db_name, store, table);
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id("cm2");
-    b.chmod("cm", shamir_query_builder::ddl::chmod(resource, 0o777));
+    b.chmod(
+        "cm",
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match shamir_query_builder::ddl::chmod(resource, 0o777)
+            .hmac("unused")
+            .build()
+            .expect("build unsigned chmod")
+        {
+            shamir_query_types::batch::BatchOp::Chmod(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::Chmod(op)
+            }
+            other => other,
+        },
+    );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db_name.into(),
@@ -592,7 +658,18 @@ pub(crate) fn create_user_only_req(db_name: &str, new_user: &str) -> DbRequest {
     b.id("mkuser2");
     b.create_user(
         "cu",
-        shamir_query_builder::ddl::create_user(new_user, "irrelevant-pw"),
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match shamir_query_builder::ddl::create_user(new_user, "irrelevant-pw")
+            .hmac("unused")
+            .build()
+            .expect("build unsigned create user")
+        {
+            shamir_query_types::batch::BatchOp::CreateUser(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::CreateUser(op)
+            }
+            other => other,
+        },
     );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,

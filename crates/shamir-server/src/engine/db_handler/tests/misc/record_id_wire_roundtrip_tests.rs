@@ -61,7 +61,14 @@ async fn mint_dropped_index_op_id() -> (ShamirDbHandler, String) {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_index("d", ddl::drop_index("idx_city", "items").repo("main"));
+    b.drop_index(
+        "d",
+        ddl::drop_index("idx_city", "items")
+            .repo("main")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop index"),
+    );
     let batch = b.build();
     let resp = shamir
         .execute_as(owner, "app", &batch)

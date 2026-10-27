@@ -26,7 +26,16 @@ async fn create_user_without_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.create_user("u", ddl::create_user("bob", "s3cretpw"));
+    b.create_user(
+        "u",
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "bob".into(),
+            password: "s3cretpw".into(),
+            roles: Vec::new(),
+            database: None,
+            hmac: None,
+        }),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -53,7 +62,57 @@ async fn create_user_with_wrong_hmac_rejected() {
     b.id(1);
     b.create_user(
         "u",
-        ddl::create_user("bob", "s3cretpw").hmac("deadbeef".repeat(8)),
+        ddl::create_user("bob", "s3cretpw")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
+    );
+    let req = execute_built("scratch", b.build());
+    let res = decode(
+        &handler
+            .handle(
+                &session,
+                &encode(&req),
+                &ConnectionServices::without_push(0),
+            )
+            .await
+            .unwrap(),
+    );
+    let (code, _) = expect_error(res);
+    assert_eq!(code, "hmac_mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn create_user_with_roles_changed_hmac_rejected() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("scratch").await.expect("create_db");
+    let handler = ShamirDbHandler::new(Arc::new(shamir));
+    let session = root_session();
+
+    let op =
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "bob".into(),
+            password: "s3cretpw".into(),
+            roles: vec!["reader".into()],
+            database: None,
+            hmac: None,
+        });
+    let tag = canon::compute_tag_hex(
+        &session_key(&session),
+        &canon::canonical_batch_op("scratch", &op).expect("create-user canonical form"),
+    );
+
+    let mut b = Batch::new();
+    b.id(1);
+    b.create_user(
+        "u",
+        shamir_query_types::batch::BatchOp::CreateUser(shamir_query_types::auth::CreateUserOp {
+            create_user: "bob".into(),
+            password: "s3cretpw".into(),
+            roles: vec!["admin".into()],
+            database: None,
+            hmac: Some(tag),
+        }),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -92,7 +151,14 @@ async fn set_retention_without_hmac_rejected() {
     b.id(1);
     b.set_retention(
         "s",
-        ddl::set_retention("items", ddl::Retention::current_only()).repo("main"),
+        shamir_query_types::batch::BatchOp::SetRetention(
+            shamir_query_types::admin::SetRetentionOp {
+                set_retention: "items".into(),
+                repo: "main".into(),
+                retention: ddl::Retention::current_only(),
+                hmac: None,
+            },
+        ),
     );
     let req = execute_built("prod", b.build());
     let res = decode(
@@ -121,7 +187,9 @@ async fn set_retention_with_wrong_hmac_rejected() {
         "s",
         ddl::set_retention("items", ddl::Retention::current_only())
             .repo("main")
-            .hmac("deadbeef".repeat(8)),
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("prod", b.build());
     let res = decode(
@@ -145,9 +213,17 @@ async fn set_retention_with_correct_hmac_accepted() {
     let session = root_session();
 
     let retention = ddl::Retention::current_only();
+    let op = shamir_query_types::batch::BatchOp::SetRetention(
+        shamir_query_types::admin::SetRetentionOp {
+            set_retention: "items".into(),
+            repo: "main".into(),
+            retention: retention.clone(),
+            hmac: None,
+        },
+    );
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_set_retention("prod", "main", "items", &retention),
+        &canon::canonical_batch_op("prod", &op).expect("set-retention canonical form"),
     );
     let mut b = Batch::new();
     b.id(1);
@@ -155,7 +231,9 @@ async fn set_retention_with_correct_hmac_accepted() {
         "s",
         ddl::set_retention("items", retention)
             .repo("main")
-            .hmac(&tag),
+            .hmac(&tag)
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("prod", b.build());
     let res = decode(
@@ -183,7 +261,14 @@ async fn purge_history_without_hmac_rejected() {
     b.id(1);
     b.purge_history(
         "p",
-        ddl::purge_history("items", PurgeScope::OlderThanAge { age_secs: 0 }).repo("main"),
+        shamir_query_types::batch::BatchOp::PurgeHistory(
+            shamir_query_types::admin::PurgeHistoryOp {
+                purge_history: "items".into(),
+                repo: "main".into(),
+                scope: PurgeScope::OlderThanAge { age_secs: 0 },
+                hmac: None,
+            },
+        ),
     );
     let req = execute_built("prod", b.build());
     let res = decode(
@@ -212,7 +297,9 @@ async fn purge_history_with_wrong_hmac_rejected() {
         "p",
         ddl::purge_history("items", PurgeScope::OlderThanAge { age_secs: 0 })
             .repo("main")
-            .hmac("deadbeef".repeat(8)),
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("prod", b.build());
     let res = decode(
@@ -236,15 +323,27 @@ async fn purge_history_with_correct_hmac_accepted() {
     let session = root_session();
 
     let scope = PurgeScope::OlderThanAge { age_secs: 0 };
+    let op = shamir_query_types::batch::BatchOp::PurgeHistory(
+        shamir_query_types::admin::PurgeHistoryOp {
+            purge_history: "items".into(),
+            repo: "main".into(),
+            scope: scope.clone(),
+            hmac: None,
+        },
+    );
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_purge_history("prod", "main", "items", &scope),
+        &canon::canonical_batch_op("prod", &op).expect("purge-history canonical form"),
     );
     let mut b = Batch::new();
     b.id(1);
     b.purge_history(
         "p",
-        ddl::purge_history("items", scope).repo("main").hmac(&tag),
+        ddl::purge_history("items", scope)
+            .repo("main")
+            .hmac(&tag)
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("prod", b.build());
     let res = decode(

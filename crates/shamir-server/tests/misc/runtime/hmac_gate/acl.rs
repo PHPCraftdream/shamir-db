@@ -35,7 +35,21 @@ async fn grant_role_without_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.grant_role("g", ddl::grant_role("superuser", "alice"));
+    b.grant_role(
+        "g",
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match ddl::grant_role("superuser", "alice")
+            .hmac("unused")
+            .build()
+            .expect("build HMAC test op")
+        {
+            shamir_query_types::batch::BatchOp::GrantRole(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::GrantRole(op)
+            }
+            other => other,
+        },
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -61,7 +75,10 @@ async fn grant_role_with_wrong_hmac_rejected() {
     b.id(1);
     b.grant_role(
         "g",
-        ddl::grant_role("superuser", "alice").hmac("deadbeef".repeat(8)),
+        ddl::grant_role("superuser", "alice")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -93,7 +110,21 @@ async fn revoke_role_without_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.revoke_role("r", ddl::revoke_role("superuser", "alice"));
+    b.revoke_role(
+        "r",
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match ddl::revoke_role("superuser", "alice")
+            .hmac("unused")
+            .build()
+            .expect("build HMAC test op")
+        {
+            shamir_query_types::batch::BatchOp::RevokeRole(mut op) => {
+                op.hmac = None;
+                shamir_query_types::batch::BatchOp::RevokeRole(op)
+            }
+            other => other,
+        },
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -119,7 +150,10 @@ async fn revoke_role_with_wrong_hmac_rejected() {
     b.id(1);
     b.revoke_role(
         "r",
-        ddl::revoke_role("superuser", "alice").hmac("deadbeef".repeat(8)),
+        ddl::revoke_role("superuser", "alice")
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -149,7 +183,14 @@ async fn chmod_without_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.chmod("c", ddl::chmod(ddl::res::database("scratch"), 0o700));
+    b.chmod(
+        "c",
+        shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+            chmod: ddl::res::database("scratch"),
+            mode: 0o700,
+            hmac: None,
+        }),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -176,7 +217,10 @@ async fn chmod_with_wrong_hmac_rejected() {
     b.id(1);
     b.chmod(
         "c",
-        ddl::chmod(ddl::res::database("scratch"), 0o700).hmac("deadbeef".repeat(8)),
+        ddl::chmod(ddl::res::database("scratch"), 0o700)
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -201,13 +245,24 @@ async fn chmod_with_correct_hmac_accepted() {
     let session = root_session();
 
     let resource = ddl::res::database("scratch");
+    let op = shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+        chmod: resource.clone(),
+        mode: 0o700,
+        hmac: None,
+    });
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_chmod(&resource, 0o700),
+        &canon::canonical_batch_op("scratch", &op).expect("chmod canonical form"),
     );
     let mut b = Batch::new();
     b.id(1);
-    b.chmod("c", ddl::chmod(resource, 0o700).hmac(&tag));
+    b.chmod(
+        "c",
+        ddl::chmod(resource, 0o700)
+            .hmac(&tag)
+            .build()
+            .expect("build HMAC test op"),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -233,7 +288,14 @@ async fn chown_without_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.chown("c", ddl::chown(ddl::res::database("scratch"), 7));
+    b.chown(
+        "c",
+        shamir_query_types::batch::BatchOp::Chown(shamir_query_types::admin::ChownOp {
+            chown: ddl::res::database("scratch"),
+            owner: 7,
+            hmac: None,
+        }),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -260,7 +322,10 @@ async fn chown_with_wrong_hmac_rejected() {
     b.id(1);
     b.chown(
         "c",
-        ddl::chown(ddl::res::database("scratch"), 7).hmac("deadbeef".repeat(8)),
+        ddl::chown(ddl::res::database("scratch"), 7)
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -285,13 +350,24 @@ async fn chown_with_correct_hmac_accepted() {
     let session = root_session();
 
     let resource = ddl::res::database("scratch");
+    let op = shamir_query_types::batch::BatchOp::Chown(shamir_query_types::admin::ChownOp {
+        chown: resource.clone(),
+        owner: 7,
+        hmac: None,
+    });
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_chown(&resource, 7),
+        &canon::canonical_batch_op("scratch", &op).expect("chown canonical form"),
     );
     let mut b = Batch::new();
     b.id(1);
-    b.chown("c", ddl::chown(resource, 7).hmac(&tag));
+    b.chown(
+        "c",
+        ddl::chown(resource, 7)
+            .hmac(&tag)
+            .build()
+            .expect("build HMAC test op"),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -320,7 +396,14 @@ async fn chgrp_without_hmac_rejected() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.chgrp("c", ddl::chgrp(ddl::res::database("scratch"), Some(gid)));
+    b.chgrp(
+        "c",
+        shamir_query_types::batch::BatchOp::Chgrp(shamir_query_types::admin::ChgrpOp {
+            chgrp: ddl::res::database("scratch"),
+            group: Some(gid),
+            hmac: None,
+        }),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler
@@ -351,7 +434,10 @@ async fn chgrp_with_wrong_hmac_rejected() {
     b.id(1);
     b.chgrp(
         "c",
-        ddl::chgrp(ddl::res::database("scratch"), Some(gid)).hmac("deadbeef".repeat(8)),
+        ddl::chgrp(ddl::res::database("scratch"), Some(gid))
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("build HMAC test op"),
     );
     let req = execute_built("scratch", b.build());
     let res = decode(
@@ -380,13 +466,24 @@ async fn chgrp_with_correct_hmac_accepted() {
     let session = root_session();
 
     let resource = ddl::res::database("scratch");
+    let op = shamir_query_types::batch::BatchOp::Chgrp(shamir_query_types::admin::ChgrpOp {
+        chgrp: resource.clone(),
+        group: Some(gid),
+        hmac: None,
+    });
     let tag = canon::compute_tag_hex(
         &session_key(&session),
-        &canon::canonical_chgrp(&resource, Some(gid)),
+        &canon::canonical_batch_op("scratch", &op).expect("chgrp canonical form"),
     );
     let mut b = Batch::new();
     b.id(1);
-    b.chgrp("c", ddl::chgrp(resource, Some(gid)).hmac(&tag));
+    b.chgrp(
+        "c",
+        ddl::chgrp(resource, Some(gid))
+            .hmac(&tag)
+            .build()
+            .expect("build HMAC test op"),
+    );
     let req = execute_built("scratch", b.build());
     let res = decode(
         &handler

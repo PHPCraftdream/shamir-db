@@ -6,16 +6,19 @@ use crate::write::BuilderError;
 /// returning a typed [`BuilderError`] when a required builder field was never
 /// set, instead of panicking.
 ///
-/// Implemented for exactly the five write/DDL builder types whose `build()`
-/// methods return `Result<_, BuilderError>`:
+/// Implemented for the five write/DDL builder types whose `build()` methods
+/// return `Result<_, BuilderError>` because a required field was never set:
 /// - [`crate::write::Update`]
 /// - [`crate::write::Upsert`]
 /// - [`crate::write::Delete`]
 /// - [`crate::ddl::AddSchemaRuleBuilder`]
 /// - [`crate::ddl::AlterSubscriptionBuilder`]
 ///
-/// Every other `IntoBatchOp` impl wraps an already-fully-specified DTO whose
-/// `build()` is infallible, so it has no fallible counterpart here.
+/// and for every HMAC-gated builder (RV-QUERY-BUILDER-E6F53E38), whose
+/// `build()` is fallible for the same reason: a required `.hmac(tag)` was
+/// never attached. Those impls live next to their builders in `crate::ddl`.
+/// They intentionally have NO `IntoBatchOp` impl — gating must not be
+/// bypassable via `Batch::op`.
 ///
 /// Use this via [`crate::batch::Batch::try_op`] (the fallible mirror of
 /// [`crate::batch::Batch::op`]) or the named `try_*` convenience methods

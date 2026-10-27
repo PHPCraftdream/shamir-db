@@ -174,6 +174,7 @@ fn create_replication_profile_op_from_msgpack() {
 fn drop_replication_profile_op_roundtrip() {
     let op = DropReplicationProfileOp {
         drop_replication_profile: "cluster".to_string(),
+        hmac: None,
     };
     let back: DropReplicationProfileOp = from_qv(to_qv(&op));
     assert_eq!(back, op);
@@ -208,6 +209,7 @@ fn create_publication_op_roundtrip() {
 fn drop_publication_op_roundtrip() {
     let op = DropPublicationOp {
         drop_publication: "pub_app".to_string(),
+        hmac: None,
     };
     let back: DropPublicationOp = from_qv(to_qv(&op));
     assert_eq!(back, op);
@@ -234,6 +236,7 @@ fn create_subscription_op_roundtrip() {
 fn drop_subscription_op_roundtrip() {
     let op = DropSubscriptionOp {
         drop_subscription: "sub1".to_string(),
+        hmac: None,
     };
     let back: DropSubscriptionOp = from_qv(to_qv(&op));
     assert_eq!(back, op);

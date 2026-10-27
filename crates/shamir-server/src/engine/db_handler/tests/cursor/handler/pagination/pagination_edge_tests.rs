@@ -389,7 +389,13 @@ async fn mid_scroll_drop_table_produces_clean_error_not_stale_reads() {
     // real DDL batch (not a fixture-level shortcut) -- exercises the actual
     // concurrent-schema-change path.
     let mut drop_batch = Batch::new();
-    drop_batch.drop_table("dt", drop_table("items"));
+    drop_batch.drop_table(
+        "dt",
+        drop_table("items")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop table"),
+    );
     handler
         .db()
         .execute_as(owner, "app", &drop_batch.build())

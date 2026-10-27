@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ddl } from '../index.js';
-import { canonicalDropDb, canonicalDropRepo, canonicalDropTable, canonicalDropIndex, canonicalStartMigration, canonicalCommitMigration, canonicalRollbackMigration, canonicalSetRetention, canonicalPurgeHistory } from '../../../protocol/hmac.js';
+import { canonicalBatchOp } from '../../../protocol/hmac.js';
 
 const fakeSigner = { hmacTagHex: (c: Uint8Array): string => 'tag:' + c.length };
 
@@ -486,8 +486,8 @@ describe('createTable with schema', () => {
 // ── HMAC-gated ops ──────────────────────────────────────────────────
 
 describe('HMAC-gated ops', () => {
-  it('dropDb — hmac from canonicalDropDb(db)', () => {
-    const canonical = canonicalDropDb('testdb');
+  it('dropDb — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('', { drop_db: 'testdb', cascade: false, if_exists: false });
     const op = ddl.dropDb(fakeSigner, 'testdb');
     expect(op).toEqual({
       drop_db: 'testdb',
@@ -506,8 +506,8 @@ describe('HMAC-gated ops', () => {
     expect(op).not.toHaveProperty('cascade');
   });
 
-  it('dropRepo — hmac from canonicalDropRepo(dbInUse, repo)', () => {
-    const canonical = canonicalDropRepo('mydb', 'main');
+  it('dropRepo — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('mydb', { drop_repo: 'main', cascade: false, if_exists: false });
     const op = ddl.dropRepo(fakeSigner, 'mydb', 'main');
     expect(op).toEqual({
       drop_repo: 'main',
@@ -520,8 +520,8 @@ describe('HMAC-gated ops', () => {
     expect(op.cascade).toBe(true);
   });
 
-  it('dropTable — hmac from canonicalDropTable', () => {
-    const canonical = canonicalDropTable('mydb', 'main', 'users');
+  it('dropTable — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('mydb', { drop_table: 'users', repo: 'main', cascade: false, if_exists: false });
     const op = ddl.dropTable(fakeSigner, 'mydb', 'main', 'users');
     expect(op).toEqual({
       drop_table: 'users',
@@ -530,8 +530,8 @@ describe('HMAC-gated ops', () => {
     });
   });
 
-  it('dropIndex — hmac from canonicalDropIndex', () => {
-    const canonical = canonicalDropIndex('mydb', 'main', 'users', 'idx_email');
+  it('dropIndex — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('mydb', { drop_index: 'idx_email', repo: 'main', table: 'users', if_exists: false });
     const op = ddl.dropIndex(fakeSigner, 'mydb', 'main', 'users', 'idx_email');
     expect(op).toEqual({
       drop_index: 'idx_email',
@@ -541,10 +541,8 @@ describe('HMAC-gated ops', () => {
     });
   });
 
-  it('startMigration — hmac from canonicalStartMigration', () => {
-    const canonical = canonicalStartMigration(
-      'mydb', 'main', 'users', 'archive', 'log',
-    );
+  it('startMigration — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('mydb', { start_migration: 'users', repo: 'main', dst_repo: 'archive', dst_engine: 'log' });
     const op = ddl.startMigration(
       fakeSigner, 'mydb', 'main', 'users', 'archive', 'log',
     );
@@ -566,8 +564,8 @@ describe('HMAC-gated ops', () => {
     expect(op.dst_path).toBe('/data/archive');
   });
 
-  it('commitMigration — hmac from canonicalCommitMigration', () => {
-    const canonical = canonicalCommitMigration('mydb', 'm123');
+  it('commitMigration — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('mydb', { commit_migration: 'm123' });
     const op = ddl.commitMigration(fakeSigner, 'mydb', 'm123');
     expect(op).toEqual({
       commit_migration: 'm123',
@@ -575,8 +573,8 @@ describe('HMAC-gated ops', () => {
     });
   });
 
-  it('rollbackMigration — hmac from canonicalRollbackMigration', () => {
-    const canonical = canonicalRollbackMigration('mydb', 'm123');
+  it('rollbackMigration — hmac from canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('mydb', { rollback_migration: 'm123' });
     const op = ddl.rollbackMigration(fakeSigner, 'mydb', 'm123');
     expect(op).toEqual({
       rollback_migration: 'm123',
@@ -586,25 +584,31 @@ describe('HMAC-gated ops', () => {
 });
 
 // ── if_exists on drop ops ──────────────────────────────────────────
-
 describe('if_exists on drop ops', () => {
+  it('dropFunction rejects missing hmac', () => {
+    expect(() => ddl.dropFunction('my_fn')).toThrow(/HMAC required/);
+  });
+  it('dropValidator rejects missing hmac', () => {
+    expect(() => ddl.dropValidator('v')).toThrow(/HMAC required/);
+  });
+
   it('dropFunction omits if_exists when not set', () => {
-    const op = ddl.dropFunction('my_fn');
+    const op = ddl.dropFunction('my_fn', { hmac: 'tag' });
     expect(op).not.toHaveProperty('if_exists');
   });
 
   it('dropFunction emits if_exists when true', () => {
-    const op = ddl.dropFunction('my_fn', { if_exists: true });
+    const op = ddl.dropFunction('my_fn', { if_exists: true, hmac: 'tag' });
     expect(op.if_exists).toBe(true);
   });
 
   it('dropValidator omits if_exists when not set', () => {
-    const op = ddl.dropValidator('v');
+    const op = ddl.dropValidator('v', { hmac: 'tag' });
     expect(op).not.toHaveProperty('if_exists');
   });
 
   it('dropValidator emits if_exists when true', () => {
-    const op = ddl.dropValidator('v', { if_exists: true });
+    const op = ddl.dropValidator('v', { if_exists: true, hmac: 'tag' });
     expect(op.if_exists).toBe(true);
   });
 

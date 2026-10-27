@@ -143,6 +143,8 @@ pub struct CreateReplicationProfileOp {
 pub struct DropReplicationProfileOp {
     /// Profile name (discriminator key).
     pub drop_replication_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Declare what the leader publishes: a set of [`ReplScope`]s that
@@ -162,6 +164,8 @@ pub struct CreatePublicationOp {
 pub struct DropPublicationOp {
     /// Publication name (discriminator key).
     pub drop_publication: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Subscribe this node to a remote publication, bound to a local
@@ -190,6 +194,8 @@ pub struct CreateSubscriptionOp {
 pub struct DropSubscriptionOp {
     /// Subscription name (discriminator key).
     pub drop_subscription: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Action taken by [`AlterSubscriptionOp`] on an existing subscription.

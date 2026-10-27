@@ -157,7 +157,13 @@ async fn slash_named_function_works_without_explicit_folder() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cf");
-    b.create_function("op", ddl::create_function("math/abs").wasm(wasm_b64(&wasm)));
+    b.create_function(
+        "op",
+        ddl::create_function("math/abs")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_function"),
+    );
     let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();
 
@@ -195,7 +201,13 @@ async fn list_functions_over_wire() {
     for name in ["fn_alpha", "fn_beta"] {
         let mut b = Batch::new();
         b.id("cf");
-        b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
+        b.create_function(
+            "op",
+            ddl::create_function(name)
+                .wasm(wasm_b64(&wasm))
+                .build()
+                .expect("build create_function"),
+        );
         let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.unwrap();
     }
@@ -229,7 +241,13 @@ async fn list_functions_filtered_by_folder() {
     for name in ["math/add", "math/sub", "str/upper"] {
         let mut b = Batch::new();
         b.id("cf");
-        b.create_function("op", ddl::create_function(name).wasm(wasm_b64(&wasm)));
+        b.create_function(
+            "op",
+            ddl::create_function(name)
+                .wasm(wasm_b64(&wasm))
+                .build()
+                .expect("build create_function"),
+        );
         let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.unwrap();
     }
@@ -262,7 +280,10 @@ async fn list_validators_all_over_wire() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("v_list_all").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("v_list_all")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_validator"),
     );
     let create_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &create_req).await.unwrap();

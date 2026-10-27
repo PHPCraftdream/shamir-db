@@ -156,8 +156,15 @@ async fn set_superuser_with_correct_hmac_grants() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_set_superuser("bob", true));
-
+    let req = DbRequest::SetSuperuser {
+        user: "bob".into(),
+        on: true,
+        hmac: None,
+    };
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&req).expect("set-superuser canonical form"),
+    );
     let req = DbRequest::SetSuperuser {
         user: "bob".into(),
         on: true,
@@ -287,7 +294,15 @@ async fn set_superuser_revoke_last_refused() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_set_superuser("root", false));
+    let req = DbRequest::SetSuperuser {
+        user: "root".into(),
+        on: false,
+        hmac: None,
+    };
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&req).expect("set-superuser canonical form"),
+    );
 
     let req = DbRequest::SetSuperuser {
         user: "root".into(),
@@ -341,7 +356,15 @@ async fn set_superuser_revoke_last_uses_invalid_owner_code() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_set_superuser("root", false));
+    let req = DbRequest::SetSuperuser {
+        user: "root".into(),
+        on: false,
+        hmac: None,
+    };
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&req).expect("set-superuser canonical form"),
+    );
 
     let req = DbRequest::SetSuperuser {
         user: "root".into(),
@@ -375,7 +398,15 @@ async fn set_superuser_unknown_user_returns_not_found() {
     let (handler, _user_dir) = build_handler().await;
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_set_superuser("ghost", true));
+    let req = DbRequest::SetSuperuser {
+        user: "ghost".into(),
+        on: true,
+        hmac: None,
+    };
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&req).expect("set-superuser canonical form"),
+    );
 
     let req = DbRequest::SetSuperuser {
         user: "ghost".into(),

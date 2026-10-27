@@ -4,7 +4,8 @@ use shamir_query_types::admin::{
 };
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Create (or replace) a stored function. Returns a builder for source/wasm.
 pub fn create_function(name: impl Into<String>) -> CreateFunction {
@@ -84,16 +85,26 @@ impl CreateFunction {
     }
 
     /// Attach the hex-encoded HMAC tag.
-    /// canonical = `canonical_create_function(name, security, secret_grants)`.
-    /// Required IFF `security == "definer"` or `secret_grants` is non-empty.
+    /// canonical = the complete CreateFunctionOp v2 DTO except `hmac`.
+    /// Required iff `security == "definer"`, `replace` is true, or `secret_grants` is non-empty.
     pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
         self.hmac = Some(hmac.into());
         self
     }
 
     /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::CreateFunction(CreateFunctionOp {
+    ///
+    /// Fails with [`BuilderError::MissingHmac`] when the op is conditionally
+    /// gated (`security == "definer"`, `replace`, or non-empty
+    /// `secret_grants`) and no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let gated = self.security.as_deref() == Some("definer")
+            || self.replace
+            || !self.secret_grants.is_empty();
+        if gated && self.hmac.is_none() {
+            return Err(BuilderError::MissingHmac);
+        }
+        Ok(BatchOp::CreateFunction(CreateFunctionOp {
             create_function: self.name,
             source: self.source,
             wasm: self.wasm,
@@ -103,27 +114,23 @@ impl CreateFunction {
             secret_grants: self.secret_grants,
             net_grants: self.net_grants,
             hmac: self.hmac,
-        })
+        }))
     }
 }
 
-impl From<CreateFunction> for BatchOp {
-    fn from(b: CreateFunction) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for CreateFunction {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for CreateFunction {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
 
 /// Drop a stored function by name. Returns a builder for optional flags.
+/// HMAC-gated (see [`DropFunction::hmac`]).
 pub fn drop_function(name: impl Into<String>) -> DropFunction {
     DropFunction {
         name: name.into(),
         if_exists: false,
+        hmac: None,
     }
 }
 
@@ -131,6 +138,7 @@ pub fn drop_function(name: impl Into<String>) -> DropFunction {
 pub struct DropFunction {
     name: String,
     if_exists: bool,
+    hmac: Option<String>,
 }
 
 impl DropFunction {
@@ -141,23 +149,27 @@ impl DropFunction {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropFunction(DropFunctionOp {
+    /// Attach the hex-encoded HMAC tag. Required — the server rejects the
+    /// op with `hmac_required` otherwise.
+    pub fn hmac(mut self, hmac: impl Into<String>) -> Self {
+        self.hmac = Some(hmac.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropFunction(DropFunctionOp {
             drop_function: self.name,
             if_exists: self.if_exists,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<DropFunction> for BatchOp {
-    fn from(b: DropFunction) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropFunction {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropFunction {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

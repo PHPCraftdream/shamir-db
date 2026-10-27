@@ -76,6 +76,8 @@ pub struct DropFunctionOp {
     /// returning `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hmac: Option<String>,
 }
 
 /// Rename a stored function.

@@ -24,7 +24,9 @@ fn create_function_serde_roundtrip() {
     let op = ddl::create_function("my_fn")
         .wasm("AAAA")
         .replace()
-        .into_batch_op();
+        .hmac("test")
+        .build()
+        .expect("build op");
     assert!(op.is_admin());
     assert!(op.table_ref().is_none());
     let op2 = msgpack_roundtrip(op.clone());
@@ -33,7 +35,10 @@ fn create_function_serde_roundtrip() {
 
 #[test]
 fn create_validator_serde_roundtrip() {
-    let op = ddl::create_validator("v_age").wasm("BBBB").into_batch_op();
+    let op = ddl::create_validator("v_age")
+        .wasm("BBBB")
+        .build()
+        .expect("build op");
     assert!(op.is_admin());
     let op2 = msgpack_roundtrip(op.clone());
     assert_eq!(op, op2);
@@ -74,7 +79,10 @@ fn rename_function_folder_serde_roundtrip() {
 
 #[test]
 fn drop_function_serde_roundtrip() {
-    let op = ddl::drop_function("my_fn").into_batch_op();
+    let op = ddl::drop_function("my_fn")
+        .hmac("test")
+        .build()
+        .expect("build op");
     assert!(op.is_admin());
     let op2 = msgpack_roundtrip(op.clone());
     assert_eq!(op, op2);
@@ -128,7 +136,11 @@ fn serde_create_table_if_not_exists_round_trip() {
 #[test]
 fn serde_drop_db_cascade_round_trip() {
     // With cascade
-    let op_with = ddl::drop_db("testdb").cascade().into_batch_op();
+    let op_with = ddl::drop_db("testdb")
+        .cascade()
+        .hmac("test")
+        .build()
+        .expect("build op");
     let op_with2 = msgpack_roundtrip(op_with.clone());
     assert_eq!(op_with, op_with2);
     if let BatchOp::DropDb(inner) = &op_with2 {
@@ -138,7 +150,10 @@ fn serde_drop_db_cascade_round_trip() {
     }
 
     // Without cascade — must NOT be set after roundtrip.
-    let op_without = ddl::drop_db("testdb").into_batch_op();
+    let op_without = ddl::drop_db("testdb")
+        .hmac("test")
+        .build()
+        .expect("build op");
     let op_without2 = msgpack_roundtrip(op_without.clone());
     assert_eq!(op_without, op_without2);
     if let BatchOp::DropDb(inner) = &op_without2 {
@@ -150,7 +165,11 @@ fn serde_drop_db_cascade_round_trip() {
 
 #[test]
 fn serde_drop_repo_cascade_round_trip() {
-    let op = ddl::drop_repo("archive").cascade().into_batch_op();
+    let op = ddl::drop_repo("archive")
+        .cascade()
+        .hmac("test")
+        .build()
+        .expect("build op");
     let op2 = msgpack_roundtrip(op.clone());
     assert_eq!(op, op2);
     if let BatchOp::DropRepo(inner) = &op2 {

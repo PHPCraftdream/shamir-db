@@ -22,7 +22,7 @@ import type {
   ListOp,
 } from '../../types/schema/ddl.js';
 import { repoOrDefault } from './ddl-schema.js';
-import { canonicalSetRetention, canonicalPurgeHistory } from '../../protocol/hmac.js';
+import { canonicalBatchOp } from '../../protocol/hmac.js';
 
 
 /** Retention helper: CurrentOnly — no history retained. */
@@ -88,7 +88,7 @@ export function migrationStatus(
 
 /**
  * Change a live table's history-retention policy (HMAC-gated).
- * canonical = `canonicalSetRetention(dbInUse, repo, table, retention)`.
+ * canonical v2 encodes the complete operation DTO.
  */
 export function setRetention(
   signer: HmacSigner,
@@ -98,7 +98,7 @@ export function setRetention(
   opts?: { repo?: string },
 ): SetRetentionOp {
   const repo = repoOrDefault(opts?.repo);
-  const canonical = canonicalSetRetention(dbInUse, repo, table, retention);
+  const canonical = canonicalBatchOp(dbInUse, { set_retention: table, repo, retention });
   return {
     set_retention: table,
     repo,
@@ -109,7 +109,7 @@ export function setRetention(
 
 /**
  * Imperative history purge for a table (HMAC-gated) — irreversible
- * audit-trail loss. canonical = `canonicalPurgeHistory(dbInUse, repo, table, scope)`.
+ * audit-trail loss. Canonical v2 encodes the complete operation DTO.
  */
 export function purgeHistory(
   signer: HmacSigner,
@@ -119,7 +119,7 @@ export function purgeHistory(
   opts?: { repo?: string },
 ): PurgeHistoryOp {
   const repo = repoOrDefault(opts?.repo);
-  const canonical = canonicalPurgeHistory(dbInUse, repo, table, scope);
+  const canonical = canonicalBatchOp(dbInUse, { purge_history: table, repo, scope });
   return {
     purge_history: table,
     repo,
