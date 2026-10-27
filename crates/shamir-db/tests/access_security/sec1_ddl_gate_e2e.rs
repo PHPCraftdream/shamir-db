@@ -60,11 +60,17 @@ async fn restrict_table(shamir: &ShamirDb) {
     b.id("acl");
     b.op(
         "chown",
-        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER),
+        ddl::chown(ddl::res::table("testdb", "main", "items"), OWNER)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
     );
     b.op(
         "chmod",
-        ddl::chmod(ddl::res::table("testdb", "main", "items"), 0o700),
+        ddl::chmod(ddl::res::table("testdb", "main", "items"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -78,11 +84,17 @@ async fn restrict_repo(shamir: &ShamirDb) {
     b.id("acl");
     b.op(
         "chown",
-        ddl::chown(ddl::res::store("testdb", "main"), OWNER),
+        ddl::chown(ddl::res::store("testdb", "main"), OWNER)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
     );
     b.op(
         "chmod",
-        ddl::chmod(ddl::res::store("testdb", "main"), 0o700),
+        ddl::chmod(ddl::res::store("testdb", "main"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -94,8 +106,20 @@ async fn restrict_repo(shamir: &ShamirDb) {
 async fn restrict_db(shamir: &ShamirDb) {
     let mut b = Batch::new();
     b.id("acl");
-    b.op("chown", ddl::chown(ddl::res::database("testdb"), OWNER));
-    b.op("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
+    b.op(
+        "chown",
+        ddl::chown(ddl::res::database("testdb"), OWNER)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
+    );
+    b.op(
+        "chmod",
+        ddl::chmod(ddl::res::database("testdb"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -153,7 +177,11 @@ async fn drop_table_gated_by_table_delete() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_table("items").repo("main")
+        ddl::drop_table("items")
+            .repo("main")
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 
     // Owner succeeds (mode 0o700 → owner class → rwx → Delete allowed).
@@ -161,7 +189,11 @@ async fn drop_table_gated_by_table_delete() {
         shamir,
         Actor::User(OWNER),
         "op",
-        ddl::drop_table("items").repo("main")
+        ddl::drop_table("items")
+            .repo("main")
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -222,7 +254,11 @@ async fn drop_index_gated_by_table_write() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_index("idx_x", "items").repo("main")
+        ddl::drop_index("idx_x", "items")
+            .repo("main")
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -250,7 +286,12 @@ async fn drop_index_if_exists_denies_unauthorized_on_missing_index() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_index("ghost", "items").repo("main").if_exists()
+        ddl::drop_index("ghost", "items")
+            .repo("main")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -282,7 +323,12 @@ async fn drop_index_if_exists_denies_unauthorized_on_existing_index() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_index("idx_x", "items").repo("main").if_exists()
+        ddl::drop_index("idx_x", "items")
+            .repo("main")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -344,13 +390,28 @@ async fn drop_repo_gated_by_store_delete() {
     let shamir = setup().await;
     restrict_repo(&shamir).await;
 
-    assert_access_denied!(shamir, Actor::User(OTHER), "op", ddl::drop_repo("main"));
+    assert_access_denied!(
+        shamir,
+        Actor::User(OTHER),
+        "op",
+        ddl::drop_repo("main")
+            .hmac("test")
+            .build()
+            .expect("build op")
+    );
 
     // Owner passes the ACL gate (still_referenced is a business error, not access_denied).
     {
         let mut b = Batch::new();
         b.id("t");
-        b.op("op", ddl::drop_repo("main").cascade());
+        b.op(
+            "op",
+            ddl::drop_repo("main")
+                .cascade()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let result = shamir
             .execute_as(Actor::User(OWNER), "testdb", &b.to_request_via_msgpack())
             .await;
@@ -374,8 +435,20 @@ async fn drop_db_gated_by_database_delete() {
     // Restrict database "dropme".
     let mut b = Batch::new();
     b.id("acl");
-    b.op("chown", ddl::chown(ddl::res::database("dropme"), OWNER));
-    b.op("chmod", ddl::chmod(ddl::res::database("dropme"), 0o700));
+    b.op(
+        "chown",
+        ddl::chown(ddl::res::database("dropme"), OWNER)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
+    );
+    b.op(
+        "chmod",
+        ddl::chmod(ddl::res::database("dropme"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
+    );
     shamir
         .execute("dropme", &b.to_request_via_msgpack())
         .await
@@ -385,7 +458,13 @@ async fn drop_db_gated_by_database_delete() {
     {
         let mut b2 = Batch::new();
         b2.id("t");
-        b2.op("op", ddl::drop_db("dropme"));
+        b2.op(
+            "op",
+            ddl::drop_db("dropme")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let err = shamir
             .execute_as(Actor::User(OTHER), "dropme", &b2.to_request_via_msgpack())
             .await
@@ -403,7 +482,13 @@ async fn drop_db_gated_by_database_delete() {
     {
         let mut b3 = Batch::new();
         b3.id("t2");
-        b3.op("op", ddl::drop_db("dropme"));
+        b3.op(
+            "op",
+            ddl::drop_db("dropme")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let result = shamir
             .execute_as(Actor::User(OWNER), "dropme", &b3.to_request_via_msgpack())
             .await;
@@ -588,8 +673,20 @@ async fn restrict_function(shamir: &ShamirDb, name: &str) {
 async fn restrict_db_create_only(shamir: &ShamirDb) {
     let mut b = Batch::new();
     b.id("acl");
-    b.op("chown", ddl::chown(ddl::res::database("testdb"), OWNER));
-    b.op("chmod", ddl::chmod(ddl::res::database("testdb"), 0o744));
+    b.op(
+        "chown",
+        ddl::chown(ddl::res::database("testdb"), OWNER)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
+    );
+    b.op(
+        "chmod",
+        ddl::chmod(ddl::res::database("testdb"), 0o744)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -731,7 +828,12 @@ async fn drop_table_if_exists_denies_unauthorized_on_existing_table() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_table("items").repo("main").if_exists()
+        ddl::drop_table("items")
+            .repo("main")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -751,8 +853,20 @@ async fn drop_db_if_exists_denies_unauthorized_on_existing_db() {
     // Restrict "victim" to OWNER / 0o700.
     let mut b = Batch::new();
     b.id("acl");
-    b.op("chown", ddl::chown(ddl::res::database("victim"), OWNER));
-    b.op("chmod", ddl::chmod(ddl::res::database("victim"), 0o700));
+    b.op(
+        "chown",
+        ddl::chown(ddl::res::database("victim"), OWNER)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
+    );
+    b.op(
+        "chmod",
+        ddl::chmod(ddl::res::database("victim"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -765,7 +879,11 @@ async fn drop_db_if_exists_denies_unauthorized_on_existing_db() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_db("victim").if_exists()
+        ddl::drop_db("victim")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -787,7 +905,11 @@ async fn drop_repo_if_exists_denies_unauthorized_on_existing_repo() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_repo("main").if_exists()
+        ddl::drop_repo("main")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -815,7 +937,11 @@ async fn drop_function_if_exists_denies_unauthorized_on_existing_function() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_function("myfunc").if_exists()
+        ddl::drop_function("myfunc")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -838,7 +964,11 @@ async fn drop_validator_if_exists_denies_unauthorized_on_missing_validator() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_validator("ghost").if_exists()
+        ddl::drop_validator("ghost")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }
 
@@ -860,6 +990,10 @@ async fn drop_validator_if_exists_denies_unauthorized_on_existing_validator() {
         shamir,
         Actor::User(OTHER),
         "op",
-        ddl::drop_validator("myval").if_exists()
+        ddl::drop_validator("myval")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op")
     );
 }

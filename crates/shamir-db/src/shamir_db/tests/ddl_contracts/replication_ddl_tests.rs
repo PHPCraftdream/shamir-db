@@ -210,8 +210,20 @@ async fn drop_publication_and_subscription_remove_from_list() {
 
     let mut b = Batch::new();
     b.id(2);
-    b.op("dp", drop_publication("pub_a"));
-    b.op("ds", drop_subscription("sub_a"));
+    b.op(
+        "dp",
+        drop_publication("pub_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop publication builder"),
+    );
+    b.op(
+        "ds",
+        drop_subscription("sub_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop subscription builder"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -397,7 +409,13 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
     // COUNTERFACTUAL: `resync_required` here is the stale round-5 oracle.
     let mut b = Batch::new();
     b.id(5);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop subscription builder"),
+    );
     let error = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -505,7 +523,13 @@ async fn resync_marking_keeps_bound_destinations_blocked_without_profile() {
     // DELETE the profile: the binding, not the profile, is the authority.
     let mut b = Batch::new();
     b.id(2);
-    b.op("drp", drop_replication_profile("profile_a"));
+    b.op(
+        "drp",
+        drop_replication_profile("profile_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop replication profile builder"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -806,7 +830,13 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
     // recreating it with DIFFERENT scopes SUCCEEDS now.
     let mut b = Batch::new();
     b.id(2);
-    b.op("drp", drop_replication_profile("profile_a"));
+    b.op(
+        "drp",
+        drop_replication_profile("profile_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop replication profile builder"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -878,7 +908,13 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
     // STILL holds (same-scopes recreation never lifts a quarantine).
     let mut b = Batch::new();
     b.id(6);
-    b.op("drp2", drop_replication_profile("profile_a"));
+    b.op(
+        "drp2",
+        drop_replication_profile("profile_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop replication profile builder"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await

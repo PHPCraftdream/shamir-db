@@ -130,7 +130,13 @@ async fn test_drop_repo() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("create", ddl::create_repo("temp").engine("in_memory"));
-    b.drop_repo("drop", ddl::drop_repo("temp"));
+    b.drop_repo(
+        "drop",
+        ddl::drop_repo("temp")
+            .hmac("dummy")
+            .build()
+            .expect("build DropRepo"),
+    );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -209,7 +215,13 @@ async fn test_drop_index_via_query() {
         "create",
         ddl::create_index("name_idx", "users").fields(vec![vec!["name".to_owned()]]),
     );
-    b.drop_index("drop", ddl::drop_index("name_idx", "users"));
+    b.drop_index(
+        "drop",
+        ddl::drop_index("name_idx", "users")
+            .hmac("dummy")
+            .build()
+            .expect("build DropIndex"),
+    );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -398,7 +410,14 @@ async fn test_drop_table() {
     // Drop existing table
     let mut b = Batch::new();
     b.id(1);
-    b.drop_table("dt", ddl::drop_table("users").repo("main"));
+    b.drop_table(
+        "dt",
+        ddl::drop_table("users")
+            .repo("main")
+            .hmac("dummy")
+            .build()
+            .expect("build DropTable"),
+    );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -428,7 +447,14 @@ async fn test_drop_nonexistent_table() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_table("dt", ddl::drop_table("nonexistent").repo("main"));
+    b.drop_table(
+        "dt",
+        ddl::drop_table("nonexistent")
+            .repo("main")
+            .hmac("dummy")
+            .build()
+            .expect("build DropTable"),
+    );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await

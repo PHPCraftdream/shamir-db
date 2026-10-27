@@ -211,8 +211,20 @@ async fn changes_since_denied_without_read() {
     // User(999) falls into "other" → no access bits → Read denied.
     let mut b = Batch::new();
     b.id(1);
-    let chown_h = b.chown("chown", ddl::chown(ddl::res::database("testdb"), 1));
-    let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
+    let chown_h = b.chown(
+        "chown",
+        ddl::chown(ddl::res::database("testdb"), 1)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
+    );
+    let chmod_h = b.chmod(
+        "chmod",
+        ddl::chmod(ddl::res::database("testdb"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
+    );
     b.after(&chmod_h, &chown_h);
     shamir
         .execute("testdb", &b.to_request_via_msgpack())

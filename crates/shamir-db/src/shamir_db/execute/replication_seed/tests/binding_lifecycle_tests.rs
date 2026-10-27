@@ -1,7 +1,4 @@
-//! S5c-X PR8b-2 evidence rows 3 (in-process leg), 5, 6, 8 — the binding is
-//! the durable authority through profile drops, SetProfile, profile
-//! replacement, same-name recreation, terminal flush failures, and
-//! DROP/RENAME of bound destinations (facade-level guards).
+//! S5c-X PR8b-2 evidence: durable binding authority across profile changes, same-name recreation, flush failures, and guarded destination DROP/RENAME.
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl::{
@@ -138,7 +135,7 @@ async fn set_profile(
     let mut b = Batch::new();
     b.id(id);
     b.try_op("alt", alter_subscription(sub).set_profile(profile))
-        .unwrap();
+        .expect("build op");
     shamir.execute("testdb", &b.to_request_via_msgpack()).await
 }
 
@@ -154,7 +151,8 @@ async fn binding_profile_drop_keeps_bound_destination_blocked() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drp", drop_replication_profile("prof"));
+    b.try_op("drp", drop_replication_profile("prof").hmac("x"))
+        .unwrap();
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -364,7 +362,8 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
     // row is still present afterwards.
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_subscription("sub"));
+    b.try_op("drop", drop_subscription("sub").hmac("x"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -449,7 +448,8 @@ async fn binding_cascade_drop_repo_over_bound_destination_refused_and_intact() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_repo("main").cascade());
+    b.try_op("drop", drop_repo("main").cascade().hmac("x"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -492,7 +492,8 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_db("testdb").cascade());
+    b.try_op("drop", drop_db("testdb").cascade().hmac("x"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -756,7 +757,8 @@ async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
     // Batch 1: DROP REPO main CASCADE.
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_repo("main").cascade());
+    b.try_op("drop", drop_repo("main").cascade().hmac("x"))
+        .unwrap();
     let request = b.to_request_via_msgpack();
     let cascade_shamir = shamir.clone();
     let mut cascade = Box::pin(async move { cascade_shamir.execute("testdb", &request).await });
@@ -992,7 +994,6 @@ async fn binding_cancellation_dropped_at_final_write_boundary_leaves_pending_dur
         "the pending barrier carries its binding generation"
     );
     // The catalogue stays valid.
-    shamir.refresh_resync_quarantine_cache().await.unwrap();
     crate::repl_binding::validate::validate_subscription_catalogue(&shamir)
         .await
         .unwrap();

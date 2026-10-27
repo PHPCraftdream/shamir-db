@@ -35,7 +35,9 @@ export function createFunction(
     security?: string;
     /** OS-seeded env-var secret grants. Non-empty requires `hmac`. */
     secret_grants?: string[];
-    /** Hex HMAC tag, required IFF `security === "definer"` or non-empty `secret_grants`. */
+    /** Network grants included in canonical confirmation; alone does not require HMAC. */
+    net_grants?: string[];
+    /** Hex HMAC tag; required when definer, grants, or replace is set. */
     hmac?: string;
   },
 ): CreateFunctionOp {
@@ -47,20 +49,24 @@ export function createFunction(
   if (opts?.wasm !== undefined) op.wasm = opts.wasm;
   if (opts?.visibility !== undefined) op.visibility = opts.visibility;
   if (opts?.security !== undefined) op.security = opts.security;
-  if (opts?.secret_grants !== undefined && opts.secret_grants.length > 0) {
-    op.secret_grants = opts.secret_grants;
-  }
+  if (opts?.secret_grants !== undefined) op.secret_grants = opts.secret_grants;
+  if (opts?.net_grants !== undefined) op.net_grants = opts.net_grants;
   if (opts?.hmac !== undefined) op.hmac = opts.hmac;
+  if ((opts?.security === 'definer' || (opts?.secret_grants?.length ?? 0) > 0 || opts?.replace === true) && !opts?.hmac) {
+    throw new TypeError('HMAC required for gated function creation');
+  }
   return op;
 }
 
-/** Drop a stored function. */
+/** Drop a stored function (HMAC-gated); caller supplies the signed tag. */
 export function dropFunction(
   name: string,
-  opts?: { if_exists?: boolean },
+  opts?: { if_exists?: boolean; hmac?: string },
 ): DropFunctionOp {
   const op: DropFunctionOp = { drop_function: name };
+  if (opts?.hmac !== undefined) op.hmac = opts.hmac;
   if (opts?.if_exists) op.if_exists = true;
+  if (!opts?.hmac) throw new TypeError('HMAC required for drop_function');
   return op;
 }
 
@@ -79,6 +85,7 @@ export function createValidator(
     source?: string;
     wasm?: string;
     replace?: boolean;
+    hmac?: string;
   },
 ): CreateValidatorOp {
   const op: CreateValidatorOp = {
@@ -87,16 +94,20 @@ export function createValidator(
   };
   if (opts?.source !== undefined) op.source = opts.source;
   if (opts?.wasm !== undefined) op.wasm = opts.wasm;
+  if (opts?.hmac !== undefined) op.hmac = opts.hmac;
+  if (opts?.replace && !opts.hmac) throw new TypeError('HMAC required for validator replacement');
   return op;
 }
 
-/** Drop a validator. */
+/** Drop a validator (HMAC-gated); caller supplies the signed tag. */
 export function dropValidator(
   name: string,
-  opts?: { if_exists?: boolean },
+  opts?: { if_exists?: boolean; hmac?: string },
 ): DropValidatorOp {
   const op: DropValidatorOp = { drop_validator: name };
+  if (opts?.hmac !== undefined) op.hmac = opts.hmac;
   if (opts?.if_exists) op.if_exists = true;
+  if (!opts?.hmac) throw new TypeError('HMAC required for drop_validator');
   return op;
 }
 

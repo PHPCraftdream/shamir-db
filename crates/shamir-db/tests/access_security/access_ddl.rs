@@ -62,7 +62,10 @@ async fn chmod_then_enforced() {
     // Step 1: chown the table to User(7) via DDL
     let result = exec_op(
         &shamir,
-        ddl::chown(ddl::res::table("testdb", "main", "users"), 7),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 7)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
     assert_eq!(result.records[0].get_value_i64("owner"), Some(7));
@@ -70,7 +73,10 @@ async fn chmod_then_enforced() {
     // Step 2: chmod the table to 0o700 (owner rwx only) via DDL
     let result = exec_op(
         &shamir,
-        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o700),
+        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o700)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
     assert_eq!(result.records[0].get_value_i64("mode"), Some(448));
@@ -112,12 +118,22 @@ async fn group_grant_via_ddl() {
     // Step 1: chown table to User(10)
     exec_op(
         &shamir,
-        ddl::chown(ddl::res::table("testdb", "main", "users"), 10),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 10)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
     // Step 2: create group "devs"
-    let result = exec_op(&shamir, ddl::create_group("devs")).await;
+    let result = exec_op(
+        &shamir,
+        ddl::create_group("devs")
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
     let group_id = result.records[0].get_value_u64("group_id").unwrap();
 
     // Step 3: add User(8) to the group
@@ -128,21 +144,30 @@ async fn group_grant_via_ddl() {
                 name: "devs".into(),
             },
             8,
-        ),
+        )
+        .hmac("test")
+        .build()
+        .expect("build operation"),
     )
     .await;
 
     // Step 4: chgrp the table to that group
     exec_op(
         &shamir,
-        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(group_id)),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(group_id))
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
     // Step 5: chmod to 0o750 (owner rwx, group r-x, other ---)
     exec_op(
         &shamir,
-        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o750),
+        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o750)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
@@ -205,7 +230,10 @@ async fn chown_changes_owner() {
     // chown to User(42)
     exec_op(
         &shamir,
-        ddl::chown(ddl::res::table("testdb", "main", "users"), 42),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 42)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
@@ -215,7 +243,10 @@ async fn chown_changes_owner() {
     // chown again to User(99)
     exec_op(
         &shamir,
-        ddl::chown(ddl::res::table("testdb", "main", "users"), 99),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 99)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
@@ -233,12 +264,22 @@ async fn chgrp_clears_group() {
     let table_path = ResourcePath::table("testdb", "main", "users");
 
     // Create a group and chgrp to it
-    let result = exec_op(&shamir, ddl::create_group("testers")).await;
+    let result = exec_op(
+        &shamir,
+        ddl::create_group("testers")
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
     let gid = result.records[0].get_value_u64("group_id").unwrap();
 
     exec_op(
         &shamir,
-        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(gid)),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(gid))
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
@@ -248,7 +289,10 @@ async fn chgrp_clears_group() {
     // Clear the group
     exec_op(
         &shamir,
-        ddl::chgrp(ddl::res::table("testdb", "main", "users"), None),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), None)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
@@ -269,12 +313,22 @@ async fn drop_group_removes_access() {
     // chown to User(10)
     exec_op(
         &shamir,
-        ddl::chown(ddl::res::table("testdb", "main", "users"), 10),
+        ddl::chown(ddl::res::table("testdb", "main", "users"), 10)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
     // Create group, add User(20)
-    let result = exec_op(&shamir, ddl::create_group("temp")).await;
+    let result = exec_op(
+        &shamir,
+        ddl::create_group("temp")
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
     let gid = result.records[0].get_value_u64("group_id").unwrap();
 
     exec_op(
@@ -284,20 +338,29 @@ async fn drop_group_removes_access() {
                 name: "temp".into(),
             },
             20,
-        ),
+        )
+        .hmac("test")
+        .build()
+        .expect("build operation"),
     )
     .await;
 
     // chgrp + chmod group-readable
     exec_op(
         &shamir,
-        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(gid)),
+        ddl::chgrp(ddl::res::table("testdb", "main", "users"), Some(gid))
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
     exec_op(
         &shamir,
-        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o770),
+        ddl::chmod(ddl::res::table("testdb", "main", "users"), 0o770)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
     )
     .await;
 
@@ -315,7 +378,10 @@ async fn drop_group_removes_access() {
                 name: "temp".into(),
             },
             20,
-        ),
+        )
+        .hmac("test")
+        .build()
+        .expect("build operation"),
     )
     .await;
 
@@ -339,9 +405,23 @@ async fn chmod_database_resource() {
     let db_path = ResourcePath::database("testdb");
 
     // Restrict the database to 0o700, owner User(1)
-    exec_op(&shamir, ddl::chown(ddl::res::database("testdb"), 1)).await;
+    exec_op(
+        &shamir,
+        ddl::chown(ddl::res::database("testdb"), 1)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
 
-    exec_op(&shamir, ddl::chmod(ddl::res::database("testdb"), 0o700)).await;
+    exec_op(
+        &shamir,
+        ddl::chmod(ddl::res::database("testdb"), 0o700)
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
 
     let meta = shamir.resource_meta(&db_path).await.unwrap();
     assert_eq!(meta.owner, Actor::User(1));
@@ -400,7 +480,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.create_group("op", ddl::create_group("wire-devs"));
+    b.create_group(
+        "op",
+        ddl::create_group("wire-devs")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     let resp = shamir
         .execute_as(creator.clone(), "testdb", &req)
@@ -430,7 +516,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     };
     let mut b = Batch::new();
     b.id(1);
-    b.rename_group("op", ddl::rename_group(group_ref.clone(), "wire-devs-2"));
+    b.rename_group(
+        "op",
+        ddl::rename_group(group_ref.clone(), "wire-devs-2")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     shamir
         .execute_as(creator.clone(), "testdb", &req)
@@ -442,7 +534,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     };
     let mut b = Batch::new();
     b.id(1);
-    b.add_group_member("op", ddl::add_group_member(group_ref.clone(), 999));
+    b.add_group_member(
+        "op",
+        ddl::add_group_member(group_ref.clone(), 999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     shamir
         .execute_as(creator.clone(), "testdb", &req)
@@ -453,7 +551,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.remove_group_member("op", ddl::remove_group_member(group_ref.clone(), 999));
+    b.remove_group_member(
+        "op",
+        ddl::remove_group_member(group_ref.clone(), 999)
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     shamir
         .execute_as(creator.clone(), "testdb", &req)
@@ -464,7 +568,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_group("op", ddl::drop_group(ddl::GroupRef::Id { id: gid }));
+    b.drop_group(
+        "op",
+        ddl::drop_group(ddl::GroupRef::Id { id: gid })
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     shamir
         .execute_as(creator, "testdb", &req)
@@ -485,7 +595,14 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
         )
         .await
         .unwrap();
-    let result = exec_op(&shamir, ddl::create_group("wire-devs-owned")).await;
+    let result = exec_op(
+        &shamir,
+        ddl::create_group("wire-devs-owned")
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
     let gid2 = result.records[0].get_value_u64("group_id").unwrap();
     // Stamp a real owner (not the stranger) directly, simulating a group
     // created by someone else.
@@ -504,7 +621,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let group_ref = ddl::GroupRef::Id { id: gid2 };
     let mut b = Batch::new();
     b.id(1);
-    b.rename_group("op", ddl::rename_group(group_ref.clone(), "should-fail"));
+    b.rename_group(
+        "op",
+        ddl::rename_group(group_ref.clone(), "should-fail")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     let err = shamir
         .execute_as(stranger.clone(), "testdb", &req)
@@ -518,7 +641,13 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_group("op", ddl::drop_group(group_ref));
+    b.drop_group(
+        "op",
+        ddl::drop_group(group_ref)
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     let err = shamir
         .execute_as(stranger, "testdb", &req)
@@ -555,13 +684,26 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
 async fn add_group_member_rejects_out_of_range_user_id_via_wire() {
     let shamir = setup().await;
 
-    let result = exec_op(&shamir, ddl::create_group("devs")).await;
+    let result = exec_op(
+        &shamir,
+        ddl::create_group("devs")
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
     let group_id = result.records[0].get_value_u64("group_id").unwrap();
     let group_ref = ddl::GroupRef::Id { id: group_id };
 
     let mut b = Batch::new();
     b.id(1);
-    b.add_group_member("op", ddl::add_group_member(group_ref, u64::MAX));
+    b.add_group_member(
+        "op",
+        ddl::add_group_member(group_ref, u64::MAX)
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.build();
     let err = shamir
         .execute("testdb", &req)
@@ -581,13 +723,26 @@ async fn add_group_member_rejects_out_of_range_user_id_via_wire() {
 async fn remove_group_member_rejects_out_of_range_user_id_via_wire() {
     let shamir = setup().await;
 
-    let result = exec_op(&shamir, ddl::create_group("devs")).await;
+    let result = exec_op(
+        &shamir,
+        ddl::create_group("devs")
+            .hmac("test")
+            .build()
+            .expect("build operation"),
+    )
+    .await;
     let group_id = result.records[0].get_value_u64("group_id").unwrap();
     let group_ref = ddl::GroupRef::Id { id: group_id };
 
     let mut b = Batch::new();
     b.id(1);
-    b.remove_group_member("op", ddl::remove_group_member(group_ref, u64::MAX));
+    b.remove_group_member(
+        "op",
+        ddl::remove_group_member(group_ref, u64::MAX)
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.build();
     let err = shamir
         .execute("testdb", &req)
@@ -610,7 +765,13 @@ async fn drop_group_rejects_out_of_range_group_id_via_wire() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_group("op", ddl::drop_group(ddl::GroupRef::Id { id: u64::MAX }));
+    b.drop_group(
+        "op",
+        ddl::drop_group(ddl::GroupRef::Id { id: u64::MAX })
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.build();
     let err = shamir
         .execute("testdb", &req)

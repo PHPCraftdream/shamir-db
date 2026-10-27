@@ -98,7 +98,13 @@ async fn admin_batch_denied_for_non_superuser() {
 
     let mut b = Batch::new();
     b.id("ddl");
-    b.drop_table("drop", ddl::drop_table("items").repo("main"));
+    b.drop_table(
+        "drop",
+        ddl::drop_table("items")
+            .repo("main")
+            .build()
+            .expect("build drop table"),
+    );
     let admin = execute_built("prod", b.build());
     let res = decode(
         &handler

@@ -345,7 +345,10 @@ async fn temporal_lifecycle_e2e() {
     b.id(5);
     b.purge_history(
         "ph",
-        ddl::purge_history("users", PurgeScope::OlderThan { timestamp: 25_000 }),
+        ddl::purge_history("users", PurgeScope::OlderThan { timestamp: 25_000 })
+            .hmac("dummy")
+            .build()
+            .expect("build PurgeHistory"),
     );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -414,7 +417,10 @@ async fn temporal_lifecycle_e2e() {
                 ..Default::default()
             },
         )
-        .repo("main"),
+        .repo("main")
+        .hmac("dummy")
+        .build()
+        .expect("build SetRetention"),
     );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())

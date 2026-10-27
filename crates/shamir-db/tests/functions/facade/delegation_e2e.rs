@@ -96,7 +96,12 @@ async fn non_admin_cannot_create_user() {
 
     // Database is open (0o777) so `execute_as` Read-gate on the db passes,
     // proving the denial comes from the user-lifecycle check, not traversal.
-    let req = one_op(ddl::create_user("mallory", "pw"));
+    let req = one_op(
+        ddl::create_user("mallory", "pw")
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -108,7 +113,7 @@ async fn non_admin_cannot_create_user() {
 async fn non_admin_cannot_create_group() {
     let shamir = setup().await;
 
-    let req = one_op(ddl::create_group("devs"));
+    let req = one_op((ddl::create_group("devs")).hmac("dummy").build().unwrap());
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -122,7 +127,12 @@ async fn non_admin_cannot_create_group() {
 async fn non_admin_cannot_grant_role() {
     let shamir = setup().await;
 
-    let req = one_op(ddl::grant_role("analyst", "some_user"));
+    let req = one_op(
+        (ddl::grant_role("analyst", "some_user"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(Actor::User(7), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -137,7 +147,7 @@ async fn non_admin_cannot_grant_role() {
 async fn system_can_create_group() {
     let shamir = setup().await;
 
-    let cg = one_op(ddl::create_group("devs"));
+    let cg = one_op((ddl::create_group("devs")).hmac("dummy").build().unwrap());
     assert!(
         shamir.execute("testdb", &cg).await.is_ok(),
         "System should create a group"
@@ -174,7 +184,12 @@ async fn db_owner_cannot_create_unscoped_user() {
     make_db_owner(&shamir, owner.clone()).await;
 
     // No `database` scope → only a global admin may create → denied.
-    let req = one_op(ddl::create_user("global_user", "pw"));
+    let req = one_op(
+        (ddl::create_user("global_user", "pw"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -190,7 +205,12 @@ async fn db_owner_cannot_create_user_scoped_to_other_db() {
     make_db_owner(&shamir, owner.clone()).await;
 
     // Scope points at a database the actor does not own → denied.
-    let req = one_op(ddl::create_user("intruder", "pw").database("otherdb"));
+    let req = one_op(
+        (ddl::create_user("intruder", "pw").database("otherdb"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -205,7 +225,12 @@ async fn non_owner_with_db_read_still_cannot_create_scoped_user() {
     let shamir = setup().await;
     make_db_owner(&shamir, Actor::User(1001)).await;
 
-    let req = one_op(ddl::create_user("x", "pw").database("testdb"));
+    let req = one_op(
+        (ddl::create_user("x", "pw").database("testdb"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(Actor::User(2002), "testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -220,7 +245,12 @@ async fn non_owner_with_db_read_still_cannot_create_scoped_user() {
 async fn create_user_without_port_returns_not_supported() {
     let shamir = setup().await;
 
-    let req = one_op(ddl::create_user("alice", "pw"));
+    let req = one_op(
+        (ddl::create_user("alice", "pw"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute("testdb", &req).await;
     assert!(
         resp.is_err(),
@@ -240,7 +270,7 @@ async fn create_user_without_port_returns_not_supported() {
 async fn drop_user_without_port_returns_not_supported() {
     let shamir = setup().await;
 
-    let req = one_op(ddl::drop_user("ghost"));
+    let req = one_op((ddl::drop_user("ghost")).hmac("dummy").build().unwrap());
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err());
     assert_eq!(resp.unwrap_err().code(), Some("not_supported"));
@@ -252,7 +282,12 @@ async fn drop_user_without_port_returns_not_supported() {
 async fn grant_role_without_port_returns_not_supported() {
     let shamir = setup().await;
 
-    let req = one_op(ddl::grant_role("admin", "somebody"));
+    let req = one_op(
+        (ddl::grant_role("admin", "somebody"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err());
     assert_eq!(resp.unwrap_err().code(), Some("not_supported"));
@@ -321,7 +356,12 @@ async fn db_owner_creates_scoped_user_through_port() {
     let port = Arc::new(RecordingPort::default());
     let shamir = shamir.with_user_admin_port(port.clone() as Arc<dyn UserAdminPort>);
 
-    let req = one_op(ddl::create_user("scoped_erin", "pw").database("testdb"));
+    let req = one_op(
+        (ddl::create_user("scoped_erin", "pw").database("testdb"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_ok(),
@@ -385,7 +425,12 @@ async fn grant_role_user_not_found_maps_to_not_found_code() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
-    let req = one_op(ddl::grant_role("analyst", "ghost"));
+    let req = one_op(
+        (ddl::grant_role("analyst", "ghost"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err(), "expected an error: {resp:?}");
     assert_eq!(resp.unwrap_err().code(), Some("not_found"));
@@ -399,7 +444,12 @@ async fn grant_role_other_error_maps_to_query_code() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
-    let req = one_op(ddl::grant_role("analyst", "bob"));
+    let req = one_op(
+        (ddl::grant_role("analyst", "bob"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err(), "expected an error: {resp:?}");
     assert_eq!(resp.unwrap_err().code(), Some("query"));
@@ -413,7 +463,12 @@ async fn revoke_role_user_not_found_maps_to_not_found_code() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
-    let req = one_op(ddl::revoke_role("analyst", "ghost"));
+    let req = one_op(
+        (ddl::revoke_role("analyst", "ghost"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err(), "expected an error: {resp:?}");
     assert_eq!(resp.unwrap_err().code(), Some("not_found"));
@@ -427,7 +482,12 @@ async fn revoke_role_other_error_maps_to_query_code() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
-    let req = one_op(ddl::revoke_role("analyst", "bob"));
+    let req = one_op(
+        (ddl::revoke_role("analyst", "bob"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute("testdb", &req).await;
     assert!(resp.is_err(), "expected an error: {resp:?}");
     assert_eq!(resp.unwrap_err().code(), Some("query"));
@@ -458,7 +518,12 @@ async fn drop_user_without_resolver_degrades_to_global_admin_only() {
     let port = Arc::new(RecordingPort::default());
     let shamir = shamir.with_user_admin_port(port.clone() as Arc<dyn UserAdminPort>);
 
-    let req = one_op(ddl::drop_user("scoped_user"));
+    let req = one_op(
+        (ddl::drop_user("scoped_user"))
+            .hmac("dummy")
+            .build()
+            .unwrap(),
+    );
     let resp = shamir.execute_as(owner.clone(), "testdb", &req).await;
     assert!(
         resp.is_err(),

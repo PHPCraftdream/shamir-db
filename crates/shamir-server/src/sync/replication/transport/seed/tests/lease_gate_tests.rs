@@ -1,39 +1,19 @@
-//! S5c-X round 5 — supervisor lease/barrier tests (W3); round-6 item 7
-//! test-oracle fixes.
-//! Fixtures replicate `supervisor_tests.rs` locally (leader/follower
-//! `build_db`, builder-batch catalogue writes, a supervisor factory) —
-//! nothing is imported from that module. All synchronisation is Notify-,
-//! join-, gate- and bounded-yield-based: `wait_for_subscription` joins the
-//! loop tasks, the applied-oracle is the FOLLOWER's bookmark reaching the
-//! captured leader version (`await_journal_progress` is COMPLETION progress,
-//! NOT journal persistence — `repo_instance.rs::await_journal_progress`),
-//! real catalogue seams (`SeedCatalogueFlushFaultForTest`, the lease
-//! `apply_gate`, the final-write seam) block real mutators, and
-//! `tokio::time::pause` advances the B3 retry sleeps. NO sleeps and NO
-//! unbounded waits anywhere in this file. Scenarios:
-//!   * T1 — create → reconcile starts a fresh subscription.
-//!   * T2 — a REAL catalogue-flush fault at the start barrier defers the
-//!     start (nothing spawned, nothing marked, lease invalidated); the
-//!     retrying reconcile starts it.
-//!   * T3 — a REAL flush fault fails the PAUSE of a LIVE follower: the row
-//!     reads `paused`, the lease is invalid, the loop is stopped by the
-//!     system (SYSTEM-driven deregistration, item-4 teardown), and reconcile
-//!     never restarts a paused row.
-//!   * T4 — an obsolete G1 loop parked mid-Pull applies nothing after the
-//!     binding was replaced by a strictly-greater G2 (incl. REAL DROP quiesce).
-//!   * T5 — the start-race hook replaces the row between lease-take and
-//!     spawn: the start is dropped, nothing spawns, nothing is marked.
-//!   * A1 — pause/resume back-to-back restarts and applies new events; a
-//!     CANCELLED quiesce (dropped pause future) leaves an active row
-//!     recoverable via the stale-handle sweep.
-//!   * A2 — a second supervisor defers while the first follower's lease is
-//!     valid and takes over only after invalidation.
-//!   * T7r — a CREATE dropped at the final-write boundary leaves a
-//!     `pending_durable` row that reconcile never starts.
-//!
-//!   (Round 6: the B3 terminal-retry test moved to `terminal_retry_tests.rs`;
-//!   item-3/item-4 counterfactuals live in `startup_lease_tests.rs` and
-//!   `multi_target_exit_tests.rs`.)
+//! S5c-X round-5 supervisor lease/barrier tests (W3), with round-6 oracle fixes.
+//! Local fixtures mirror supervisor_tests.rs: leader/follower DBs, builder-batch
+//! catalogue writes, and supervisor factory. Synchronization uses Notify/join,
+//! gates, and bounded yields; applied progress is the follower bookmark reaching
+//! the captured leader version (completion, not journal persistence).
+//! Real catalogue flush faults, apply/final-write gates exercise mutators;
+//! paused Tokio time advances B3 retry sleeps. No sleeps or unbounded waits.
+//! T1 fresh subscription; T2 start-barrier flush fault and retry; T3 live-pause
+//! flush fault, invalid lease/system deregistration, and no paused-row restart.
+//! T4 obsolete G1 Pull cannot apply after G2 replacement/real DROP quiesce.
+//! T5 replacement at start-race boundary prevents spawn/marking. A1 back-to-back
+//! pause/resume applies new events; cancelled quiesce remains sweep-recoverable.
+//! A2 second supervisor defers on valid lease, takes over after invalidation.
+//! T7r dropped final-write CREATE leaves pending_durable, never started by
+//! reconcile. B3 terminal retry moved to terminal_retry_tests.rs; item-3/4
+//! counterfactuals are in startup_lease_tests.rs and multi_target_exit_tests.rs.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -804,7 +784,13 @@ async fn obsolete_follower_parked_in_pull_applies_nothing_after_replacement() {
         .subscription_lease("sub_a")
         .expect("the G1 loop is live, its lease must exist");
     let g = lease.apply_gate.read().await;
-    let mut drop_future = op_future(follower.clone(), drop_subscription("sub_a"));
+    let mut drop_future = op_future(
+        follower.clone(),
+        drop_subscription("sub_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop subscription"),
+    );
     assert!(
         matches!(poll!(drop_future.as_mut()), std::task::Poll::Pending),
         "the REAL DROP's quiesce must be blocked by the held read guard"
@@ -900,7 +886,14 @@ async fn start_race_hook_replacement_prevents_spawn() {
         .with_start_race_hook(Arc::new(move || {
             let follower = hook_follower.clone();
             Box::pin(async move {
-                run_op(&follower, drop_subscription("sub_a")).await;
+                run_op(
+                    &follower,
+                    drop_subscription("sub_a")
+                        .hmac("direct-db-test")
+                        .build()
+                        .expect("build drop subscription"),
+                )
+                .await;
                 create_profile_b(&follower).await;
                 recreate_sub_a_over_prof_b(&follower, 2).await;
             })

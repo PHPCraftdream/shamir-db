@@ -514,7 +514,13 @@ async fn replacement_generation_blocks_old_task_callback() {
     // 2. DROP while the subscription is active — must succeed.
     let mut b = Batch::new();
     b.id(1);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop subscription"),
+    );
     follower
         .execute("app", &b.to_request_via_msgpack())
         .await

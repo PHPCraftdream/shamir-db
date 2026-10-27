@@ -47,7 +47,15 @@ async fn drop_table_cascade_acquires_write_barrier() {
 
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .cascade()
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop table builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack();
 
     let db_drop = db.clone();
@@ -97,7 +105,15 @@ async fn drop_table_cascade_completes_without_external_contention() {
 
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .cascade()
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop table builder requires HMAC"),
+    );
     let req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(

@@ -105,7 +105,13 @@ async fn drop_index2_backend_by_name_via_ddl() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("func_idx", "users"));
+        b.drop_index(
+            "op",
+            ddl::drop_index("func_idx", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let req = b.to_request_via_msgpack();
         let resp = db.execute("testdb", &req).await.expect("drop index");
         resp.results["op"].records[0].get_value_bool("existed")
@@ -195,7 +201,13 @@ async fn drop_sorted_index_by_name_via_ddl() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("score_sorted", "users"));
+        b.drop_index(
+            "op",
+            ddl::drop_index("score_sorted", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let req = b.to_request_via_msgpack();
         let resp = db.execute("testdb", &req).await.expect("drop sorted index");
         resp.results["op"].records[0].get_value_bool("existed")
@@ -260,7 +272,14 @@ async fn drop_index_if_exists_reports_existed_true_for_index2_and_sorted() {
     let removed_index2 = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("func_idx", "users").if_exists());
+        b.drop_index(
+            "op",
+            ddl::drop_index("func_idx", "users")
+                .if_exists()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let req = b.to_request_via_msgpack();
         let resp = db.execute("testdb", &req).await.expect("drop index2");
         resp.results["op"].records[0].get_value_bool("existed")
@@ -275,7 +294,14 @@ async fn drop_index_if_exists_reports_existed_true_for_index2_and_sorted() {
     let removed_sorted = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("score_sorted", "users").if_exists());
+        b.drop_index(
+            "op",
+            ddl::drop_index("score_sorted", "users")
+                .if_exists()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
         let req = b.to_request_via_msgpack();
         let resp = db.execute("testdb", &req).await.expect("drop sorted");
         resp.results["op"].records[0].get_value_bool("existed")
@@ -309,7 +335,13 @@ async fn drop_index_nonexistent_without_if_exists_returns_error() {
     b.id("di");
     // No if_exists → must error (new semantics: if_exists:false on missing index
     // is a hard error, mirroring DROP TABLE).
-    b.drop_index("op", ddl::drop_index("no_such_idx", "users"));
+    b.drop_index(
+        "op",
+        ddl::drop_index("no_such_idx", "users")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let req = b.to_request_via_msgpack();
     let err = db
         .execute("testdb", &req)

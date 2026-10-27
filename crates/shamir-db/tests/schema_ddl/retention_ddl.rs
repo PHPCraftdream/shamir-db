@@ -136,7 +136,10 @@ async fn set_retention_changes_live_table_policy() {
                 ..Default::default()
             },
         )
-        .repo("main"),
+        .repo("main")
+        .hmac("direct-db-test")
+        .build()
+        .unwrap(),
     );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -182,7 +185,10 @@ async fn set_retention_waits_for_repository_write_admission() {
                 ..Default::default()
             },
         )
-        .repo("main"),
+        .repo("main")
+        .hmac("direct-db-test")
+        .build()
+        .unwrap(),
     );
     let request = batch.to_request_via_msgpack();
     let mut execution = Box::pin(shamir.execute("testdb", &request));
@@ -231,7 +237,10 @@ async fn set_retention_full_policy() {
                 min_count: Some(10),
             },
         )
-        .repo("main"),
+        .repo("main")
+        .hmac("direct-db-test")
+        .build()
+        .unwrap(),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -257,8 +266,20 @@ async fn set_retention_denied_without_manage() {
     // is the system; User(999) falls into "other" → no access bits.
     let mut b = Batch::new();
     b.id(1);
-    let chown_h = b.chown("chown", ddl::chown(ddl::res::database("testdb"), 1));
-    let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
+    let chown_h = b.chown(
+        "chown",
+        ddl::chown(ddl::res::database("testdb"), 1)
+            .hmac("direct-db-test")
+            .build()
+            .unwrap(),
+    );
+    let chmod_h = b.chmod(
+        "chmod",
+        ddl::chmod(ddl::res::database("testdb"), 0o700)
+            .hmac("direct-db-test")
+            .build()
+            .unwrap(),
+    );
     b.after(&chmod_h, &chown_h);
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -277,7 +298,10 @@ async fn set_retention_denied_without_manage() {
                 ..Default::default()
             },
         )
-        .repo("main"),
+        .repo("main")
+        .hmac("direct-db-test")
+        .build()
+        .unwrap(),
     );
     let err = shamir
         .execute_as(Actor::User(999), "testdb", &b.to_request_via_msgpack())

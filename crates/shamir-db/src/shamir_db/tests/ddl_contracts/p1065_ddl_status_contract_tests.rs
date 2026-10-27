@@ -97,7 +97,10 @@ async fn p1065_inprogress_written_before_mutation() {
         "d",
         ddl::drop_index("idx_city", "items")
             .repo("main")
-            .request_id(known_op_id),
+            .request_id(known_op_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack();
 
@@ -175,7 +178,10 @@ async fn p1065_terminal_status_durable_before_tombstone_clear_inline() {
         "d",
         ddl::drop_index("idx_city", "items")
             .repo("main")
-            .request_id(op_id),
+            .request_id(op_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack();
 
@@ -386,7 +392,10 @@ async fn p1065_client_supplied_correlation_id_round_trips() {
         "d",
         ddl::drop_index("idx_city", "items")
             .repo("main")
-            .request_id(client_supplied_id),
+            .request_id(client_supplied_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req = b.to_request_via_msgpack();
 
@@ -441,7 +450,10 @@ async fn p1065_idempotent_retry_does_not_reexecute() {
         "d",
         ddl::drop_index("idx_city", "items")
             .repo("main")
-            .request_id(client_supplied_id),
+            .request_id(client_supplied_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req1 = b1.to_request_via_msgpack();
     let resp1 = shamir.execute("testdb", &req1).await.unwrap();
@@ -461,7 +473,10 @@ async fn p1065_idempotent_retry_does_not_reexecute() {
         "d",
         ddl::drop_index("idx_city", "items")
             .repo("main")
-            .request_id(client_supplied_id),
+            .request_id(client_supplied_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let req2 = b2.to_request_via_msgpack();
     let resp2 = shamir.execute("testdb", &req2).await.unwrap();

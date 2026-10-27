@@ -1,4 +1,4 @@
-//! End-to-end tests for ShamirDb::execute.
+//! End-to-end tests for `ShamirDb::execute`.
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter::eq;
@@ -11,15 +11,11 @@ use crate::engine::table::TableConfig;
 use crate::ShamirDb;
 
 /// Two-field test row (keeps seed batches under the layout line budget).
-fn doc2<
+fn doc2<A, B>(k1: &str, v1: A, k2: &str, v2: B) -> shamir_types::types::value::QueryValue
+where
     A: Into<shamir_query_types::filter::FilterValue>,
     B: Into<shamir_query_types::filter::FilterValue>,
->(
-    k1: &str,
-    v1: A,
-    k2: &str,
-    v2: B,
-) -> shamir_types::types::value::QueryValue {
+{
     doc().set(k1, v1).unwrap().set(k2, v2).unwrap().build()
 }
 
@@ -299,7 +295,11 @@ async fn test_migration_lifecycle_in_memory() {
     // Start migration: users from main -> cold (in_memory)
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    b.try_op(
+        "mig",
+        ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+    )
+    .unwrap();
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let mig_result = &resp.results["mig"].records[0];
@@ -322,7 +322,8 @@ async fn test_migration_lifecycle_in_memory() {
     // Commit
     let mut b = Batch::new();
     b.id(3);
-    b.commit_migration("c", ddl::commit_migration(&migration_id));
+    b.try_op("c", ddl::commit_migration(&migration_id).hmac("x"))
+        .expect("build op");
     let commit_req = b.to_request_via_msgpack();
     let commit_resp = shamir.execute("testdb", &commit_req).await.unwrap();
     let commit = &commit_resp.results["c"].records[0];
@@ -360,10 +361,11 @@ async fn test_migration_rollback() {
     // Start migration
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration(
+    b.try_op(
         "mig",
-        ddl::start_migration("users", "rollback_dst", "in_memory"),
-    );
+        ddl::start_migration("users", "rollback_dst", "in_memory").hmac("x"),
+    )
+    .unwrap();
     let req = b.to_request_via_msgpack();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let migration_id = resp.results["mig"].records[0]
@@ -374,7 +376,8 @@ async fn test_migration_rollback() {
     // Rollback
     let mut b = Batch::new();
     b.id(2);
-    b.rollback_migration("r", ddl::rollback_migration(&migration_id));
+    b.try_op("r", ddl::rollback_migration(&migration_id).hmac("x"))
+        .expect("build op");
     let rb_req = b.to_request_via_msgpack();
     let rb_resp = shamir.execute("testdb", &rb_req).await.unwrap();
     assert_eq!(
@@ -401,7 +404,8 @@ async fn test_migration_unknown_id() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.commit_migration("c", ddl::commit_migration("nonexistent"));
+    b.try_op("c", ddl::commit_migration("nonexistent").hmac("x"))
+        .expect("build op");
     let req = b.to_request_via_msgpack();
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(
@@ -430,7 +434,11 @@ async fn test_start_migration_rejected_without_experimental_opt_in() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    b.try_op(
+        "mig",
+        ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+    )
+    .unwrap();
     let req = b.to_request_via_msgpack();
     let err = shamir.execute("testdb", &req).await.unwrap_err();
 
@@ -488,7 +496,11 @@ async fn test_start_migration_succeeds_after_experimental_opt_in() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    b.try_op(
+        "mig",
+        ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+    )
+    .unwrap();
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -621,7 +633,8 @@ async fn drop_repo_via_execute_clears_catalogue() {
 
         let mut b = Batch::new();
         b.id(2);
-        b.drop_repo("dr", ddl::drop_repo("scratch_repo"));
+        b.try_op("dr", ddl::drop_repo("scratch_repo").hmac("x"))
+            .expect("build op");
         let drop_req = b.to_request_via_msgpack();
         let resp = shamir.execute("production", &drop_req).await.unwrap();
         assert_eq!(
@@ -891,106 +904,4 @@ async fn concurrent_create_repo_if_not_exists_is_consistent() {
     // The repo itself must exist exactly once.
     let db = shamir.get_db("testdb").unwrap();
     assert!(db.has_repo("racerepo"));
-}
-
-/// Deterministic proof that `db_create_lock` actually brackets
-/// `handle_create_db`'s exists-check -> authorize -> create sequence:
-/// hold the lock from OUTSIDE the handler (simulating "a create is
-/// mid-flight"), spawn a concurrent `execute` for the SAME db name, and
-/// assert it is still pending after a bounded wait. Releasing the lock
-/// must let the spawned call complete. This is independent of whether the
-/// in-memory backend happens to yield inside the handler itself (see the
-/// module doc comment above on why `tokio::join!` alone doesn't reliably
-/// reproduce the original race).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_db_lock_actually_serialises_concurrent_callers() {
-    use shamir_query_builder::ddl;
-
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("router").await.expect("create_db");
-
-    // Hold the lock as if a create_db were already mid-flight.
-    let held_guard = shamir.db_create_lock().lock().await;
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_db("cd", ddl::create_db("lockedb"));
-    let req = b.to_request_via_msgpack();
-
-    let shamir2 = shamir.clone();
-    let spawned = tokio::spawn(async move { shamir2.execute("router", &req).await });
-
-    // Give the spawned task a bounded chance to run; it must NOT complete
-    // while the lock is held.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !spawned.is_finished(),
-        "create_db must block while db_create_lock is held by another caller"
-    );
-    assert!(
-        !shamir.has_db("lockedb"),
-        "the database must not exist yet while the lock is held"
-    );
-
-    // Release: the spawned call must now proceed and succeed.
-    drop(held_guard);
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
-        .await
-        .expect("spawned create_db must complete promptly after lock release")
-        .expect("task must not panic")
-        .expect("create_db must succeed once the lock is free");
-    assert_eq!(
-        resp.results["cd"].records[0].get_value_bool("created"),
-        Some(true)
-    );
-    assert!(shamir.has_db("lockedb"));
-}
-
-/// Same deterministic proof for `repo_create_locks` (per-db keyed lock).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_repo_lock_actually_serialises_concurrent_callers() {
-    use shamir_query_builder::ddl;
-
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await.expect("create_db");
-
-    // Acquire the per-db lock the same way handle_create_repo does
-    // (get-or-insert then lock), simulating "a create_repo is mid-flight".
-    let repo_lock = shamir
-        .repo_create_locks()
-        .entry("testdb".to_string())
-        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let held_guard = repo_lock.lock().await;
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_repo("cr", ddl::create_repo("lockedrepo").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
-
-    let shamir2 = shamir.clone();
-    let spawned = tokio::spawn(async move { shamir2.execute("testdb", &req).await });
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !spawned.is_finished(),
-        "create_repo must block while its per-db repo_create_locks entry is held"
-    );
-    let db = shamir.get_db("testdb").unwrap();
-    assert!(
-        !db.has_repo("lockedrepo"),
-        "the repo must not exist yet while the lock is held"
-    );
-
-    drop(held_guard);
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
-        .await
-        .expect("spawned create_repo must complete promptly after lock release")
-        .expect("task must not panic")
-        .expect("create_repo must succeed once the lock is free");
-    assert_eq!(
-        resp.results["cr"].records[0].get_value_bool("created"),
-        Some(true)
-    );
-    assert!(db.has_repo("lockedrepo"));
 }

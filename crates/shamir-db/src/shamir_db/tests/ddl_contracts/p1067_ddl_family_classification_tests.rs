@@ -89,7 +89,10 @@ async fn p1067_drop_regular_classified_as_drop_hash_index() {
         "d",
         ddl::drop_index("idx_regular", "items")
             .repo("main")
-            .request_id(op_id),
+            .request_id(op_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -124,7 +127,10 @@ async fn p1067_drop_unique_classified_as_drop_unique_hash_index() {
         "d",
         ddl::drop_index("idx_unique", "items")
             .repo("main")
-            .request_id(op_id),
+            .request_id(op_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -161,7 +167,10 @@ async fn p1067_drop_sorted_classified_as_drop_sorted_index() {
         "d",
         ddl::drop_index("idx_sorted", "items")
             .repo("main")
-            .request_id(op_id),
+            .request_id(op_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -197,7 +206,10 @@ async fn p1067_drop_index2_classified_as_drop_index2() {
         "d",
         ddl::drop_index("idx_index2", "items")
             .repo("main")
-            .request_id(op_id),
+            .request_id(op_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
@@ -400,7 +412,10 @@ async fn p1067_sorted_drop_op_id_round_trips() {
         "d",
         ddl::drop_index("idx_sorted", "items")
             .repo("main")
-            .request_id(client_supplied_id),
+            .request_id(client_supplied_id)
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
     let resp = shamir
         .execute("testdb", &b.to_request_via_msgpack())

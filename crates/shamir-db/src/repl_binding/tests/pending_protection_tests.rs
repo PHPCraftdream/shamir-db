@@ -131,7 +131,13 @@ async fn pending_protection_survives_another_subscription_resume() {
     // … DROP SUBSCRIPTION refused (all bound destinations are consulted) …
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -175,7 +181,13 @@ async fn pending_protection_survives_another_subscription_resume() {
     // The guards stay closed too: DROP of `sub_a` and destination RENAME.
     let mut b = Batch::new();
     b.id(7);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await
@@ -204,7 +216,13 @@ async fn pending_protection_survives_another_subscription_resume() {
     // successful DROP runs refresh without touching main's sub_a/sub_b rows.
     let mut b = Batch::new();
     b.id(6);
-    b.op("drop", drop_subscription("sub_c"));
+    b.op(
+        "drop",
+        drop_subscription("sub_c")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
     shamir
         .execute("testdb", &b.to_request_via_msgpack())
         .await

@@ -333,7 +333,14 @@ async fn drop_stops_and_deregisters() {
     assert!(sup.is_running("sub_a"));
 
     // Drop → reconcile stops + removes from registry.
-    alter(&follower, drop_subscription("sub_a")).await;
+    alter(
+        &follower,
+        drop_subscription("sub_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop subscription"),
+    )
+    .await;
     sup.notify_changed().await;
     assert!(!sup.is_running("sub_a"), "dropped loop must be gone");
     assert_eq!(sup.active_count(), 0);

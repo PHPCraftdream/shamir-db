@@ -20,7 +20,11 @@ async fn create_validator_bind_reject_unbind_roundtrip() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("v_reject").wasm(wasm_b64(&rejecting_wasm)),
+        ddl::create_validator("v_reject")
+            .wasm(wasm_b64(&rejecting_wasm))
+            .hmac("dummy-tag")
+            .build()
+            .expect("valid create validator"),
     );
     let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
@@ -101,7 +105,13 @@ async fn create_function_over_wire() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cf");
-    b.create_function("op", ddl::create_function("test_fn").wasm(wasm_b64(&wasm)));
+    b.create_function(
+        "op",
+        ddl::create_function("test_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("valid create function"),
+    );
     let create_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &create_req).await.unwrap();
     assert_eq!(
@@ -130,7 +140,10 @@ async fn create_function_replace_over_wire() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("replaceable_fn").wasm(wasm_b64(&wasm)),
+        ddl::create_function("replaceable_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("valid create function"),
     );
     let req = b.to_request_via_msgpack();
     db.execute("testdb", &req).await.unwrap();
@@ -142,7 +155,10 @@ async fn create_function_replace_over_wire() {
         "op",
         ddl::create_function("replaceable_fn")
             .wasm(wasm_b64(&wasm))
-            .replace(),
+            .hmac("dummy-tag")
+            .replace()
+            .build()
+            .expect("valid replacement function"),
     );
     let req2 = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &req2).await.unwrap();
@@ -186,7 +202,14 @@ async fn create_validator_duplicate_rejected() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cv1");
-    b.create_validator("op", ddl::create_validator("v_dup").wasm(wasm_b64(&wasm)));
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_dup")
+            .wasm(wasm_b64(&wasm))
+            .hmac("dummy-tag")
+            .build()
+            .expect("valid create validator"),
+    );
     let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
@@ -212,14 +235,23 @@ async fn drop_function_over_wire() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("fn_drop_test").wasm(wasm_b64(&wasm)),
+        ddl::create_function("fn_drop_test")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("valid create function"),
     );
     let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("df");
-    b.drop_function("op", ddl::drop_function("fn_drop_test"));
+    b.drop_function(
+        "op",
+        ddl::drop_function("fn_drop_test")
+            .hmac("dummy-tag")
+            .build()
+            .expect("valid drop function"),
+    );
     let drop_req = b.to_request_via_msgpack();
     let resp = db.execute("testdb", &drop_req).await.unwrap();
     assert_eq!(
@@ -246,7 +278,13 @@ async fn rename_function_over_wire() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cf");
-    b.create_function("op", ddl::create_function("fn_old").wasm(wasm_b64(&wasm)));
+    b.create_function(
+        "op",
+        ddl::create_function("fn_old")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("valid create function"),
+    );
     let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
@@ -280,7 +318,14 @@ async fn rename_validator_over_wire() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cv");
-    b.create_validator("op", ddl::create_validator("v_old").wasm(wasm_b64(&wasm)));
+    b.create_validator(
+        "op",
+        ddl::create_validator("v_old")
+            .wasm(wasm_b64(&wasm))
+            .hmac("dummy-tag")
+            .build()
+            .expect("valid create validator"),
+    );
     let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();
 
@@ -312,7 +357,11 @@ async fn list_validators_over_wire() {
     b.id("cv");
     b.create_validator(
         "op",
-        ddl::create_validator("v_list_test").wasm(wasm_b64(&wasm)),
+        ddl::create_validator("v_list_test")
+            .wasm(wasm_b64(&wasm))
+            .hmac("dummy-tag")
+            .build()
+            .expect("valid create validator"),
     );
     let create_req = b.to_request_via_msgpack();
     db.execute("testdb", &create_req).await.unwrap();

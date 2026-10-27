@@ -232,10 +232,12 @@ async fn marking_after_profile_removal_quarantines_exactly_bound_destination() {
     // must still succeed.
     let mut drop_batch = shamir_query_builder::batch::Batch::new();
     drop_batch.id(2);
-    drop_batch.op(
-        "profile",
-        shamir_query_builder::ddl::drop_replication_profile("prof"),
-    );
+    drop_batch
+        .try_op(
+            "profile",
+            shamir_query_builder::ddl::drop_replication_profile("prof").hmac("test-hmac"),
+        )
+        .unwrap();
     db.execute("testdb", &drop_batch.to_request_via_msgpack())
         .await
         .unwrap();

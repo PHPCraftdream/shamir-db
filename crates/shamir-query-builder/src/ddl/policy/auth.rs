@@ -1,7 +1,8 @@
 use shamir_query_types::auth::{CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp, SecretString};
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Create a user with a plaintext password. Returns a builder for optional
 /// roles/database-scope. HMAC-gated (see [`CreateUser::hmac`]).
@@ -45,26 +46,22 @@ impl CreateUser {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::CreateUser(CreateUserOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached (the op is HMAC-gated server-side).
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::CreateUser(CreateUserOp {
             create_user: self.name,
             password: SecretString::from(self.password),
             roles: self.roles,
             database: self.database,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<CreateUser> for BatchOp {
-    fn from(b: CreateUser) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for CreateUser {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for CreateUser {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -99,24 +96,20 @@ impl DropUser {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropUser(DropUserOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropUser(DropUserOp {
             drop_user: self.name,
-            hmac: self.hmac,
+            hmac: Some(hmac),
             if_exists: self.if_exists,
-        })
+        }))
     }
 }
 
-impl From<DropUser> for BatchOp {
-    fn from(b: DropUser) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropUser {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropUser {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -147,24 +140,20 @@ impl GrantRole {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::GrantRole(GrantRoleOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::GrantRole(GrantRoleOp {
             grant_role: self.role,
             user: self.user,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<GrantRole> for BatchOp {
-    fn from(b: GrantRole) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for GrantRole {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for GrantRole {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -194,24 +183,20 @@ impl RevokeRole {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::RevokeRole(RevokeRoleOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::RevokeRole(RevokeRoleOp {
             revoke_role: self.role,
             user: self.user,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<RevokeRole> for BatchOp {
-    fn from(b: RevokeRole) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for RevokeRole {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for RevokeRole {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
