@@ -2,18 +2,20 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::changefeed::{ChangelogStore, RepoChangefeed};
+use crate::changefeed::{ChangelogError, ChangelogStore, RepoChangefeed};
 
 struct FailingJournal;
 
 #[async_trait::async_trait]
 impl ChangelogStore for FailingJournal {
-    async fn put(&self, _key: Bytes, _value: Bytes) -> Result<(), String> {
+    async fn put(&self, _key: Bytes, _value: Bytes) -> Result<(), ChangelogError> {
         Ok(())
     }
 
-    async fn range_from(&self, _key: Bytes, _limit: usize) -> Result<Vec<Bytes>, String> {
-        Err("changelog event exceeds byte budget".into())
+    async fn range_from(&self, _key: Bytes, _limit: usize) -> Result<Vec<Bytes>, ChangelogError> {
+        Err(ChangelogError::Journal(
+            "changelog event exceeds byte budget".into(),
+        ))
     }
 }
 
