@@ -485,7 +485,9 @@ impl ShamirAdminExecutor {
         .await?;
 
         // Serialise the DTO rules into the catalogue form (interning paths).
-        let schema_qv = serialise_rules(&stamped_rules, interner);
+        // RU8: propagate the typed quota code from a base-intern over cap.
+        let schema_qv = serialise_rules(&stamped_rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
 
         // schema_validator_id: reuse if present (ALTER), else mint a new one.
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
@@ -697,8 +699,9 @@ impl ShamirAdminExecutor {
         )
         .await?;
 
-        // Re-serialise + persist.
-        let schema_qv = serialise_rules(&rules, interner);
+        // Re-serialise + persist. RU8: propagate the typed quota code.
+        let schema_qv = serialise_rules(&rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
             Some(id_str) => id_str
@@ -849,7 +852,9 @@ impl ShamirAdminExecutor {
             })));
         }
 
-        let schema_qv = serialise_rules(&rules, interner);
+        // RU8: propagate the typed quota code.
+        let schema_qv = serialise_rules(&rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
             Some(id_str) => id_str

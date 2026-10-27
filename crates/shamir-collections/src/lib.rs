@@ -18,6 +18,33 @@ use std::cmp::Eq;
 use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hash};
 
+/// Workspace-wide hasher: unseeded `FxHasher` (`BuildHasherDefault`).
+///
+/// # HashDoS threat model (binding ruling RU8 / @oh)
+///
+/// `THasher` is deterministic and unseeded, so an adversary who can feed
+/// string keys into an Fx-backed collection could in principle precompute a
+/// colliding UTF-8 key family. The peer-keyed surfaces that accept
+/// client-controlled string keys today:
+///
+/// - client aliases in `BatchRequest.queries` (`TMap<String, QueryEntry>`)
+///   and `BatchRequest.interner_epochs` (`TMap<String, u64>`), including the
+///   same maps inside nested `SubBatchOp.batch` payloads;
+/// - the `return_only` alias list;
+/// - layered-interner overlay keys;
+/// - `QueryValue::Map` — the Fx `TMap` inside the core value type itself,
+///   which is why seeding individual maps does not hang together (RU8).
+///
+/// Bounds that keep the attack impractical today: wire frame size limits,
+/// the session rate limit, the post-auth rate limit, the 1000-entry
+/// decode-time cap on alias-keyed request collections (shamir-query-types
+/// `decode_caps`), and the per-repo interner quota
+/// (`interner_quota_exceeded`).
+///
+/// Reopen trigger (RU8, final): a DEMONSTRATED colliding UTF-8 key family
+/// within those bounds means swapping `THasher` globally (one type alias),
+/// with the impact measured using the existing bench harness. Do NOT
+/// re-litigate by seeding individual maps.
 pub type THasher = BuildHasherDefault<FxHasher>;
 
 /// Ordered map that maintains insertion order for predictable iteration.
