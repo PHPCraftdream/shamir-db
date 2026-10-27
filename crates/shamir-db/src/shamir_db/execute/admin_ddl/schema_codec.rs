@@ -14,6 +14,7 @@ use crate::query::filter::{
 };
 use crate::types::common::{new_map, TMap};
 use crate::types::value::QueryValue;
+use shamir_storage::error::DbError;
 use shamir_types::core::interner::{Interner, InternerKey};
 
 /// Insert a `(key, value)` pair into a `QueryValue::Map` in place.
@@ -29,16 +30,24 @@ pub(super) fn map_insert(qv: &mut QueryValue, key: &str, value: QueryValue) {
 
 /// Serialise a list of DTO rules into the **catalogue form** (paths as
 /// interned-id `List[Int]`, exactly the shape `parse_schema` reads).
-pub(super) fn serialise_rules(rules: &[FieldRuleDto], interner: &Interner) -> QueryValue {
+/// Fallible: a base-intern over the per-repo quota surfaces the typed
+/// `interner_quota_exceeded` error (RU8 acceptance 8 — no panics).
+pub(super) fn serialise_rules(
+    rules: &[FieldRuleDto],
+    interner: &Interner,
+) -> Result<QueryValue, DbError> {
     let items: Vec<QueryValue> = rules
         .iter()
         .map(|r| serialise_one_rule_catalogue(r, interner))
-        .collect();
-    QueryValue::List(items)
+        .collect::<Result<_, DbError>>()?;
+    Ok(QueryValue::List(items))
 }
 
 /// Serialise one rule into the catalogue Map form (interned path ids).
-fn serialise_one_rule_catalogue(rule: &FieldRuleDto, interner: &Interner) -> QueryValue {
+fn serialise_one_rule_catalogue(
+    rule: &FieldRuleDto,
+    interner: &Interner,
+) -> Result<QueryValue, DbError> {
     let mut m = new_map();
 
     // path: List[Int] (interned ids).
@@ -46,10 +55,12 @@ fn serialise_one_rule_catalogue(rule: &FieldRuleDto, interner: &Interner) -> Que
         .path
         .iter()
         .map(|seg| {
-            let touch = interner.touch_ind(seg).expect("interner touch_ind");
-            QueryValue::Int(touch.into_key().id() as i64)
+            let touch = interner
+                .touch_ind(seg)
+                .map_err(shamir_storage::error::DbError::from)?;
+            Ok(QueryValue::Int(touch.into_key().id() as i64))
         })
-        .collect();
+        .collect::<Result<Vec<_>, DbError>>()?;
     m.insert("path".to_string(), QueryValue::List(path_ids));
 
     // type: Str.
@@ -64,7 +75,7 @@ fn serialise_one_rule_catalogue(rule: &FieldRuleDto, interner: &Interner) -> Que
         m.insert("keyset_safe".to_string(), QueryValue::Bool(true));
     }
 
-    QueryValue::Map(m)
+    Ok(QueryValue::Map(m))
 }
 
 /// Serialise a list of DTO rules into the **flat (de-interned) wire form**

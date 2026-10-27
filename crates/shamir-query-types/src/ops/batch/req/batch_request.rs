@@ -6,12 +6,17 @@ use shamir_types::types::value::QueryValue;
 
 use crate::batch::batch_limits::BatchLimits;
 use crate::batch::options::{
-    deserialize_optional_field, IndexVisibility, IsolationLevel, RequestDurability,
+    capped_string_map, capped_string_vec_opt, deserialize_optional_field, IndexVisibility,
+    IsolationLevel, RequestDurability,
 };
 use crate::batch::query_entry::QueryEntry;
 use crate::batch::result_encoding::ResultEncoding;
 
 /// Batch request containing multiple queries.
+///
+/// Untrusted wire bytes MUST pass `validate_request_alias_caps` before typed
+/// `BatchRequest` decoding. Typed capped visitors do not detect duplicate
+/// aliases collapsed while `BatchOp` buffers nested sub-batches.
 ///
 /// # Wire Format
 ///
@@ -122,6 +127,11 @@ pub struct BatchRequest {
     /// The value can be just a `Query` or a `QueryEntry` with options.
     /// Duplicate aliases on the wire keep the first position with the last
     /// value winning (IndexMap insert semantics — see `shamir_collections::TMap`).
+    ///
+    /// Decode-capped: deserialization rejects the 1001st alias entry (see
+    /// `options::decode_caps`), including nested `SubBatchOp.batch` maps,
+    /// which decode through this same impl.
+    #[serde(deserialize_with = "capped_string_map")]
     pub queries: TMap<String, QueryEntry>,
 
     /// Return all results (default: true).
@@ -129,7 +139,11 @@ pub struct BatchRequest {
     pub return_all: bool,
 
     /// Specific aliases to return (overrides return_all).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "capped_string_vec_opt"
+    )]
     pub return_only: Option<Vec<String>>,
 
     /// Execution limits (security).
@@ -143,7 +157,11 @@ pub struct BatchRequest {
     /// [`InternerDelta`](super::interner_delta::InternerDelta) to the response
     /// for every entry here. Backward-compatible: `#[serde(default)]` → old
     /// clients / servers that don't know the field leave it empty.
-    #[serde(default, skip_serializing_if = "TMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "TMap::is_empty",
+        deserialize_with = "capped_string_map"
+    )]
     pub interner_epochs: TMap<String, u64>,
 
     /// Encoding for result rows returned in the response.
