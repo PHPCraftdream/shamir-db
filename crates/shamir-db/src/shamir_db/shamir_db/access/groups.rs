@@ -382,6 +382,10 @@ impl ShamirDb {
                 Ok(*id)
             }
             crate::query::admin::GroupRef::Name { name } => {
+                if let Some(snapshot_result) = self.system_store.group_id_by_name(name) {
+                    return snapshot_result
+                        .ok_or_else(|| DbError::NotFound(format!("group '{}' not found", name)));
+                }
                 let groups = self.system_store.load_groups().await?;
                 let id = groups
                     .iter()
