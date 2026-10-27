@@ -424,8 +424,7 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{db_name}' not found")))?;
-        let live_names = db
-            .list_tables(repo_name)
+        db.list_tables(repo_name)
             .map_err(|e| DbError::Internal(e.to_string()))?;
         let records = self.system_store.load_tables().await?;
         let mut snapshot = shamir_collections::TFxMap::default();
@@ -452,13 +451,6 @@ impl ShamirDb {
             {
                 return Err(DbError::Internal(format!(
                     "duplicate table catalogue record '{db}/{repo}/{table}'"
-                )));
-            }
-        }
-        for name in live_names {
-            if !snapshot.contains_key(&name) {
-                return Err(DbError::NotFound(format!(
-                    "table catalogue record for '{db_name}/{repo_name}/{name}' not found"
                 )));
             }
         }
