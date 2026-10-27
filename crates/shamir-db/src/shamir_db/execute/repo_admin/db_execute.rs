@@ -4,7 +4,7 @@ use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use shamir_query_types::batch::{BatchOp, ExecPolicy};
 
 use crate::access::Actor;
-use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
+use crate::query::batch::{execute_batch, BatchError, BatchRequest, BatchResponse};
 use crate::shamir_db::ports::RepoAdminObserver;
 
 use super::super::shamir_db::ShamirDb;
@@ -69,7 +69,8 @@ impl ShamirDb {
         policy: ExecPolicy,
         repo_admin_observer: Option<std::sync::Arc<dyn RepoAdminObserver>>,
     ) -> Result<BatchResponse, BatchError> {
-        let auth = Authorized::authorize(request, actor, db_name, self)
+        let auth = self
+            .authorize_batch(request, actor, db_name)
             .await?
             .with_policy(policy);
         let ambient_actor = auth.actor().clone();
