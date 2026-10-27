@@ -67,7 +67,10 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
                 .tables(["items"]),
         );
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -85,7 +88,10 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
                 .field("name"),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -99,7 +105,10 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
                 .rules([ddl::field(["name"]).string().required().build()]),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -113,7 +122,10 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
             }),
         );
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(resp.results["ins"].records.len(), 1);
@@ -137,7 +149,10 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
     b.id(5);
     b.describe_table("desc", ddl::describe_table("items").repo("hyrepo"));
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let d = resp.results["desc"].records[0].as_value().as_ref().clone();
@@ -167,7 +182,10 @@ async fn hybrid_repo_config_survives_restart_but_data_is_ephemeral() {
     b.id(6);
     b.query("r", Query::with_repo("hyrepo", "items"));
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -192,7 +210,12 @@ async fn hybrid_repo_without_data_root_errors_clearly() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("hyrepo").engine("hybrid"));
-    let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+    let result = shamir
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
 
     assert!(
         result.is_err(),
@@ -232,7 +255,10 @@ async fn hybrid_repo_persists_engine_and_path_in_system_store() {
     b.id(1);
     b.create_repo("cr", ddl::create_repo("hyrepo").engine("hybrid"));
     shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -289,7 +315,10 @@ async fn hybrid_repo_validator_genuinely_enforces_post_restart() {
                 .tables(["items"]),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -302,7 +331,10 @@ async fn hybrid_repo_validator_genuinely_enforces_post_restart() {
                 .rules([ddl::field(["name"]).string().required().build()]),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
     }
@@ -321,7 +353,12 @@ async fn hybrid_repo_validator_genuinely_enforces_post_restart() {
             "other" => "value",
         }),
     );
-    let bad_result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+    let bad_result = shamir
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         bad_result.is_err(),
         "insert missing the required field must be rejected post-restart"
@@ -343,7 +380,10 @@ async fn hybrid_repo_validator_genuinely_enforces_post_restart() {
         }),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -381,7 +421,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
                 .tables(["items"]),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -394,7 +437,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
                 .field("name"),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -407,7 +453,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
             }),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -419,7 +468,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
             Query::with_repo("hyrepo", "items").where_eq("name", "old-widget"),
         );
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -442,7 +494,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
         }),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(resp.results["ins2"].records.len(), 1);
@@ -457,7 +512,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
         Query::with_repo("hyrepo", "items").where_eq("name", "new-widget"),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -477,7 +535,10 @@ async fn hybrid_repo_index_genuinely_usable_post_restart() {
         Query::with_repo("hyrepo", "items").where_eq("name", "old-widget"),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -514,7 +575,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
                 .tables(["items"]),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -527,7 +591,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
                 .field("name"),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -540,7 +607,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
             }),
         );
         shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
     }
@@ -559,7 +629,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
             }),
         );
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(resp.results["ins2"].records.len(), 1);
@@ -571,7 +644,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
             Query::with_repo("hyrepo", "items").where_eq("name", "gen2"),
         );
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -587,7 +663,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
             Query::with_repo("hyrepo", "items").where_eq("name", "gen1"),
         );
         let resp = shamir
-            .execute("appdb", &b.to_request_via_msgpack())
+            .execute(
+                "appdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -606,7 +685,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
     b.id(7);
     b.describe_table("desc", ddl::describe_table("items").repo("hyrepo"));
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let d = resp.results["desc"].records[0].as_value().as_ref().clone();
@@ -634,7 +716,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
         }),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(resp.results["ins3"].records.len(), 1);
@@ -646,7 +731,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
         Query::with_repo("hyrepo", "items").where_eq("name", "gen3"),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -664,7 +752,10 @@ async fn hybrid_repo_index_stays_usable_across_two_restarts() {
         Query::with_repo("hyrepo", "items").where_eq("name", "gen2"),
     );
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -684,7 +775,12 @@ async fn unsupported_engine_error_mentions_hybrid() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("badrepo").engine("bogus_engine"));
-    let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+    let result = shamir
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
 
     assert!(result.is_err(), "unknown engine must be rejected");
     let err = result.unwrap_err().to_string();
@@ -724,7 +820,12 @@ async fn create_repo_with_explicit_path_is_rejected_not_silently_ignored() {
         durability: None,
     });
     b.create_repo("cr", op);
-    let result = shamir.execute("appdb", &b.to_request_via_msgpack()).await;
+    let result = shamir
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
 
     let err = result.expect_err(
         "CREATE REPO with an explicit .path(...) must be rejected, not silently applied",
@@ -761,7 +862,10 @@ async fn create_repo_without_path_still_succeeds() {
     b.id(1);
     b.create_repo("cr", ddl::create_repo("goodrepo").engine("in_memory"));
     let resp = shamir
-        .execute("appdb", &b.to_request_via_msgpack())
+        .execute(
+            "appdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("CREATE REPO without .path(...) must still succeed");
 

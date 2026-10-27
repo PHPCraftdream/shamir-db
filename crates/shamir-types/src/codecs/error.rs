@@ -1,9 +1,11 @@
-use thiserror::Error;
+use crate::core::interner::InternerError;
 
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum CodecError {
     #[error("Failed to encode data: {0}")]
     Encode(String),
     #[error("Failed to decode data: {0}")]
     Decode(String),
+    #[error(transparent)]
+    Interner(#[from] InternerError),
 }

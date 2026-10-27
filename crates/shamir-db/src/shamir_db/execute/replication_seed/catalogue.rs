@@ -96,17 +96,21 @@ pub(super) async fn persist(home: &ShamirDb, record: QueryValue) -> DbResult<()>
     home.flush_seed_catalogue().await
 }
 
-pub(super) fn binding(record: &mut QueryValue, receipt: &SeedReceipt) {
+pub(super) fn binding(record: &mut QueryValue, receipt: &SeedReceipt) -> DbResult<()> {
     if let QueryValue::Map(fields) = record {
-        fields.insert("seed_receipt".into(), super::super::helpers::to_qv(receipt));
+        let receipt = super::super::helpers::to_qv(receipt)
+            .map_err(|error| crate::DbError::Internal(error.to_string()))?;
+        fields.insert("seed_receipt".into(), receipt);
     }
+    Ok(())
 }
 
 impl ShamirDb {
     /// Offline filesystem-authorized profile step of a seed install. An existing
     /// profile is accepted only when its streams are exactly `streams`.
     pub async fn install_seed_profile(&self, name: &str, streams: &[ReplStream]) -> DbResult<()> {
-        let wanted = super::super::helpers::to_qv(&streams);
+        let wanted = super::super::helpers::to_qv(&streams)
+            .map_err(|error| crate::DbError::Internal(error.to_string()))?;
         let records = rows(self, "replication_profiles").await?;
         if let Some(existing) = records
             .iter()
@@ -201,9 +205,11 @@ impl ShamirDb {
             // are compared, NOT full binding equality — generations change
             // across replacement rebinds and a legitimate retry must still
             // match.
+            let expected_receipt = super::super::helpers::to_qv(expected)
+                .map_err(|_| SeedRefusal::ConflictingBinding)?;
             if scope_matches
                 && existing_binding.destinations() == destinations
-                && existing.get("seed_receipt") == Some(&super::super::helpers::to_qv(expected))
+                && existing.get("seed_receipt") == Some(&expected_receipt)
             {
                 return self
                     .flush_seed_catalogue()
@@ -240,7 +246,7 @@ impl ShamirDb {
                 )
                 .map_err(|_| SeedRefusal::ConflictingBinding)?;
                 let mut record = existing.clone();
-                binding(&mut record, expected);
+                binding(&mut record, expected).map_err(|_| SeedRefusal::ConflictingBinding)?;
                 // Replacement-seed rebind: invalidate the old generation's
                 // lease (quiesce) before the row changes.
                 self.quiesce_subscription_lease_locked(&op.create_subscription, &_control)
@@ -277,7 +283,7 @@ impl ShamirDb {
         fields.insert("profile".into(), QueryValue::Str(op.profile.clone()));
         fields.insert("state".into(), QueryValue::Str("paused".into()));
         let mut record = QueryValue::Map(fields);
-        binding(&mut record, expected);
+        binding(&mut record, expected).map_err(|_| SeedRefusal::ConflictingBinding)?;
         new_binding.write_to_row(&mut record);
         persist(self, record)
             .await

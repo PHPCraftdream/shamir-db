@@ -49,7 +49,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
                 .index_type("functional")
                 .functional_op("lower"),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create functional index");
@@ -66,7 +66,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
                 .row(shamir_query_builder::doc! { "name" => "Bob" })
                 .row(shamir_query_builder::doc! { "name" => "Charlie" }),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.expect("insert rows");
     }
 
@@ -105,8 +105,14 @@ async fn drop_index2_backend_by_name_via_ddl() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("func_idx", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("func_idx", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop index");
         resp.results["op"].records[0].get_value_bool("existed")
     };
@@ -162,7 +168,7 @@ async fn drop_sorted_index_by_name_via_ddl() {
                 .field("score")
                 .sorted(),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create sorted index");
@@ -178,7 +184,7 @@ async fn drop_sorted_index_by_name_via_ddl() {
                 .row(shamir_query_builder::doc! { "score" => 10 })
                 .row(shamir_query_builder::doc! { "score" => 20 }),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.expect("insert rows");
     }
 
@@ -195,8 +201,14 @@ async fn drop_sorted_index_by_name_via_ddl() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("score_sorted", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("score_sorted", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop sorted index");
         resp.results["op"].records[0].get_value_bool("existed")
     };
@@ -252,7 +264,7 @@ async fn drop_index_if_exists_reports_existed_true_for_index2_and_sorted() {
                 .field("score")
                 .sorted(),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req).await.expect("create indexes");
     }
 
@@ -260,8 +272,15 @@ async fn drop_index_if_exists_reports_existed_true_for_index2_and_sorted() {
     let removed_index2 = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("func_idx", "users").if_exists());
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("func_idx", "users")
+                .if_exists()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop index2");
         resp.results["op"].records[0].get_value_bool("existed")
     };
@@ -275,8 +294,15 @@ async fn drop_index_if_exists_reports_existed_true_for_index2_and_sorted() {
     let removed_sorted = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("score_sorted", "users").if_exists());
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("score_sorted", "users")
+                .if_exists()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop sorted");
         resp.results["op"].records[0].get_value_bool("existed")
     };
@@ -309,8 +335,14 @@ async fn drop_index_nonexistent_without_if_exists_returns_error() {
     b.id("di");
     // No if_exists → must error (new semantics: if_exists:false on missing index
     // is a hard error, mirroring DROP TABLE).
-    b.drop_index("op", ddl::drop_index("no_such_idx", "users"));
-    let req = b.to_request_via_msgpack();
+    b.drop_index(
+        "op",
+        ddl::drop_index("no_such_idx", "users")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db
         .execute("testdb", &req)
         .await

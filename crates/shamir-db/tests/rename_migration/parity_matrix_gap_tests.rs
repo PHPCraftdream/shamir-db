@@ -115,14 +115,14 @@ fn insert_request(id: &str, record: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert("users").row(record));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 fn read_all_request(id: &str) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.query("all", Query::from("users"));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 // ============================================================================
@@ -607,7 +607,10 @@ async fn three_planes_native_function_validator_scalar_independent() {
     b.id("q");
     b.query("result", query);
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     // The query executed successfully — the scalar dispatched through the

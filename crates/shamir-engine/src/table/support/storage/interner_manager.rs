@@ -8,9 +8,10 @@ use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{RecordKey, Store};
+use shamir_tunables::instance_defaults;
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::codecs::basic::bincode;
-use shamir_types::core::interner::{Interner, InternerKey, UserKey};
+use shamir_types::core::interner::{Interner, InternerKey, InternerQuota, UserKey};
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -74,6 +75,14 @@ pub struct InternerManager {
     /// acquired when there's a real delta to write; read-only callers
     /// never touch it.
     persist_lock: Arc<Mutex<()>>,
+    /// Repo label embedded in interner quota errors (set via
+    /// `new_labeled`).
+    label: String,
+    /// Test-only quota override: when set, hydration attaches this quota
+    /// instead of reading the process-global env tunables (which tests
+    /// must not mutate).
+    #[cfg(any(test, feature = "test-util"))]
+    test_quota: Option<InternerQuota>,
 }
 
 /// System-record-name prefix for an incremental delta chunk. Combined
@@ -111,6 +120,9 @@ impl Clone for InternerManager {
             last_persisted_len: Arc::clone(&self.last_persisted_len),
             next_chunk_idx: Arc::clone(&self.next_chunk_idx),
             persist_lock: Arc::clone(&self.persist_lock),
+            label: self.label.clone(),
+            #[cfg(any(test, feature = "test-util"))]
+            test_quota: self.test_quota,
         }
     }
 }
@@ -118,13 +130,35 @@ impl Clone for InternerManager {
 impl InternerManager {
     /// Create a new interner manager
     pub fn new(info_store: Arc<dyn Store>) -> Self {
+        Self::new_labeled(info_store, String::new())
+    }
+
+    /// [`InternerManager::new`] with a repo label embedded in interner
+    /// quota errors.
+    pub fn new_labeled(info_store: Arc<dyn Store>, label: String) -> Self {
         Self {
             info_store,
             interner: Arc::new(OnceCell::new()),
             last_persisted_len: Arc::new(AtomicUsize::new(0)),
             next_chunk_idx: Arc::new(AtomicUsize::new(0)),
             persist_lock: Arc::new(Mutex::new(())),
+            label,
+            #[cfg(any(test, feature = "test-util"))]
+            test_quota: None,
         }
+    }
+
+    /// Test-only quota injection: hydration attaches `q` instead of the
+    /// env-derived defaults, so tests never mutate process-global env.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn with_quota_for_test(mut self, q: InternerQuota) -> Self {
+        self.test_quota = Some(q);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_quota_for_test(&mut self, q: InternerQuota) {
+        self.test_quota = Some(q);
     }
 
     /// Return a cloned `Arc` to the underlying `OnceCell<Interner>`.
@@ -163,6 +197,9 @@ impl InternerManager {
         let info_store = Arc::clone(&self.info_store);
         let last_persisted_len = Arc::clone(&self.last_persisted_len);
         let next_chunk_idx = Arc::clone(&self.next_chunk_idx);
+        let label = self.label.clone();
+        #[cfg(any(test, feature = "test-util"))]
+        let test_quota = self.test_quota;
 
         self.interner
             .get_or_try_init(|| async move {
@@ -228,7 +265,35 @@ impl InternerManager {
                 last_persisted_len.store(high_water, Ordering::Release);
                 next_chunk_idx.store(chunk_count, Ordering::Release);
 
-                Ok(Interner::with_state(entries))
+                // RU8: attach the per-repo admission quota at load, counters
+                // seeded from the hydrated entries (never persisted; env-
+                // overridable via SHAMIR_INTERNER_MAX_NAMES / _BYTES).
+                // Tests inject a quota directly so they never mutate env.
+                #[allow(unused_mut)]
+                let mut quota = InternerQuota {
+                    max_names: instance_defaults::interner_max_names(),
+                    max_bytes: instance_defaults::interner_max_name_bytes(),
+                };
+                #[cfg(any(test, feature = "test-util"))]
+                if let Some(q) = test_quota {
+                    quota = q;
+                }
+                let interner = Interner::with_labeled_quota(entries, quota, label);
+                // Acceptance 9: warn once at load when at/above 80% of
+                // either limit (new names will be refused soon).
+                let (used_names, used_bytes) = interner.quota_usage();
+                if quota.max_names.saturating_mul(100) <= used_names.saturating_mul(125)
+                    || quota.max_bytes.saturating_mul(100) <= used_bytes.saturating_mul(125)
+                {
+                    log::warn!(
+                        "repo interner at/above 80% quota: {used_names}/{} names, \
+                         {used_bytes}/{} bytes (SHAMIR_INTERNER_MAX_NAMES / \
+                         SHAMIR_INTERNER_MAX_NAME_BYTES raise the limits)",
+                        quota.max_names,
+                        quota.max_bytes
+                    );
+                }
+                Ok(interner)
             })
             .await?;
 

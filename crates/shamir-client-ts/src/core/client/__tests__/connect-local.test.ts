@@ -17,8 +17,22 @@ import { ShamirClient } from '../client.js';
 import type { ConnectLocalOptions } from '../../types/index.js';
 import { ARGON2_VERSION_13, TRANSPORT_KIND_UNIX, BINDING_MODE_NONE } from '../../protocol/scram.js';
 import { buildAuthMessage } from '../../protocol/scram.js';
+import { openIpcSocket } from '../../../platform/node.js';
 
 const openedClients: ShamirClient[] = [];
+
+describe('openIpcSocket endpoint validation', () => {
+  it('rejects invalid platform addresses before attempting I/O', async () => {
+    const addresses = process.platform === 'win32'
+      ? ['shamir-db', '\\\\.\\pipe\\nested\\component', '\\\\.\\pipe\\bad\0name']
+      : ['relative.sock', '/tmp/with\0nul'];
+    for (const address of addresses) {
+      await expect(openIpcSocket(address)).rejects.toThrow('Invalid IPC endpoint');
+    }
+  });
+});
+
+
 afterEach(async () => {
   while (openedClients.length > 0) {
     const c = openedClients.pop()!;

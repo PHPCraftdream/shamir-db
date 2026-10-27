@@ -83,9 +83,9 @@ export interface ConnectOptions {
  */
 export interface ConnectLocalOptions {
   /**
-   * Local endpoint — a filesystem path (Unix) or a Named Pipe name
-   * (Windows, e.g. `\\.\pipe\shamir-db`). Same string works cross-platform;
-   * callers don't branch on OS.
+   * Raw platform endpoint: an absolute Unix socket path or a `\\.\pipe\name`
+   * Windows pipe. Validity is platform-specific; no logical-name resolution
+   * or prefixing occurs.
    */
   addr: string;
   username: string;

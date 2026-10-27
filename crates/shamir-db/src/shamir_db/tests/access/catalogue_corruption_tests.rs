@@ -69,6 +69,42 @@ async fn assert_corrupt_record_reported(table: &TableManager, table_name: &str) 
 }
 
 #[tokio::test]
+async fn rv_db_23a03103_corrupt_repository_row_still_fails_closed() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("db").await.unwrap();
+    shamir
+        .add_repo(
+            "db",
+            crate::engine::repo::RepoConfig::new(
+                "repo",
+                crate::engine::repo::BoxRepoFactory::in_memory(),
+            ),
+        )
+        .await
+        .unwrap();
+    let store = shamir.system_store();
+    let meta = ResourceMeta::open();
+    store
+        .save_repository("db", "repo", "memory", None, &meta, None)
+        .await
+        .unwrap();
+    let table = stage_corrupt_row(&shamir, "repositories").await;
+    assert_corrupt_record_reported(&table, "repositories").await;
+    assert!(shamir
+        .system_store()
+        .load_repository_record("db", "repo")
+        .await
+        .is_err());
+    let rename_error = shamir
+        .rename_repo_as("db", "repo", "renamed", Actor::System)
+        .await
+        .unwrap_err();
+    assert!(rename_error
+        .to_string()
+        .contains("corrupt repository catalogue"));
+}
+
+#[tokio::test]
 async fn rv_db_dec185c5_corrupt_function_metadata_fails_closed() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let record = QueryValue::Map({

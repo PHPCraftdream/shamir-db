@@ -120,9 +120,14 @@ async fn compile_table_schema_waits_for_repository_write_admission() {
     let mut batch = Batch::new();
     batch.id(1);
     batch.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .expect("create_repo must succeed");
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .expect("create_repo must succeed");
 
     let repo = db
         .get_db("testdb")
@@ -275,9 +280,12 @@ async fn retry_after_failed_first_schema_activates_cleanly() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .expect("create_repo must succeed");
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .expect("create_repo must succeed");
 
     // ── Retry: the DDL path mints a FRESH id (the rolled-back catalogue has
     //    no `schema_validator_id`), distinct from id1.
@@ -511,9 +519,12 @@ async fn alter_replace_artifact_keeps_new_artifact_on_success() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .expect("create_repo must succeed");
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .expect("create_repo must succeed");
 
     // Full happy-path ALTER: replace_artifact swaps in "new", and activation
     // (get_table + add_validator_binding + add_binding) succeeds.
@@ -567,9 +578,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
         "cr",
         ddl::create_repo("main").tables(["departments", "employees"]),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let fk_id = RecordId::system("f28s4_fk");
     let rules = vec![shamir_engine::validator::schema::FieldRule {
@@ -601,9 +615,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
         shamir_query_builder::write::insert("departments")
             .row(mpack!({ "dept_id": 100, "name": "Engineering" })),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let mut b = Batch::new();
     b.id(3);
@@ -612,9 +629,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
         shamir_query_builder::write::insert("employees")
             .row(mpack!({ "name": "Alice", "dept_id": 100 })),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Warm the cache: deleting the department must be REJECTED (RESTRICT) —
     // this is a real cache-aside miss+rebuild via the production delete path.
@@ -626,7 +646,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
             .where_(shamir_query_builder::filter::eq("dept_id", 100)),
     )
     .unwrap();
-    let pre = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let pre = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         pre.is_err(),
         "precondition: delete must be RESTRICTed while the FK is live: {pre:?}"
@@ -667,7 +692,12 @@ async fn fk_cache_reflects_restored_state_after_rolled_back_alter_elsewhere_in_r
             .where_(shamir_query_builder::filter::eq("dept_id", 100)),
     )
     .unwrap();
-    let post = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let post = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         post.is_err(),
         "F-28 Step 4: delete must STILL be RESTRICTed after the unrelated \

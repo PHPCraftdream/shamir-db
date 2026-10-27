@@ -15,7 +15,8 @@ use crate::ddl::tests::helpers::roundtrip;
 fn create_function_from_source_wire() {
     let op = ddl::create_function("my_fn")
         .source("pub fn main() {}")
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -33,7 +34,9 @@ fn create_function_from_wasm_with_replace() {
     let op = ddl::create_function("my_fn")
         .wasm("AQIDBA==")
         .replace()
-        .build();
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["create_function"], "my_fn");
     assert_eq!(j["wasm"], "AQIDBA==");
@@ -43,12 +46,13 @@ fn create_function_from_wasm_with_replace() {
 
 #[test]
 fn drop_function_wire() {
-    let op = ddl::drop_function("my_fn").build();
+    let op = ddl::drop_function("my_fn").hmac("abc").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
-            "drop_function": "my_fn"
+            "drop_function": "my_fn",
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -76,7 +80,8 @@ fn rename_function_wire() {
 fn create_validator_from_source_wire() {
     let op = ddl::create_validator("v_age")
         .source("pub fn validate() {}")
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -94,7 +99,9 @@ fn create_validator_from_wasm_replace() {
     let op = ddl::create_validator("v_age")
         .wasm("AQIDBA==")
         .replace()
-        .build();
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["create_validator"], "v_age");
     assert_eq!(j["wasm"], "AQIDBA==");
@@ -103,12 +110,13 @@ fn create_validator_from_wasm_replace() {
 
 #[test]
 fn drop_validator_wire() {
-    let op = ddl::drop_validator("v_age").build();
+    let op = ddl::drop_validator("v_age").hmac("abc").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
-            "drop_validator": "v_age"
+            "drop_validator": "v_age",
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());

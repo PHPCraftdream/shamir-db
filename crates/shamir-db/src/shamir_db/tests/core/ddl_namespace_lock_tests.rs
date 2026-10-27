@@ -40,7 +40,7 @@ fn schema_request(kind: &str) -> BatchRequest {
         ),
         _ => batch.remove_schema_rule("schema", ddl::remove_schema_rule("users", ["email"])),
     };
-    batch.to_request_via_msgpack()
+    batch.to_request_via_msgpack().expect("build request")
 }
 
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn concurrent_create_table_serializes_duplicate_and_if_not_exists() {
             ddl::create_table(name).repo("main").build()
         };
         batch.create_table("create", op);
-        batch.to_request_via_msgpack()
+        batch.to_request_via_msgpack().expect("build request")
     };
     let request = create_request(false);
     let namespace_guard = db.lock_replication_control().await;

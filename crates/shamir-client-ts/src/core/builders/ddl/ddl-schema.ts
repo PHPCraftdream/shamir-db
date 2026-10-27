@@ -26,14 +26,7 @@ import type {
   RollbackMigrationOp,
 } from '../../types/schema/ddl.js';
 import { assertSafeVersion } from '../write/write.js';
-import {
-  canonicalDropDb,
-  canonicalDropRepo,
-  canonicalDropTable,
-  canonicalStartMigration,
-  canonicalCommitMigration,
-  canonicalRollbackMigration,
-} from '../../protocol/hmac.js';
+import { canonicalBatchOp } from '../../protocol/hmac.js';
 
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -85,7 +78,7 @@ export function dropDb(
   db: string,
   opts?: { cascade?: boolean; if_exists?: boolean },
 ): DropDbOp {
-  const canonical = canonicalDropDb(db);
+  const canonical = canonicalBatchOp('', { drop_db: db, cascade: opts?.cascade ?? false, if_exists: opts?.if_exists ?? false });
   const op: DropDbOp = {
     drop_db: db,
     hmac: signer.hmacTagHex(canonical),
@@ -102,7 +95,7 @@ export function dropRepo(
   repo: string,
   opts?: { cascade?: boolean; if_exists?: boolean },
 ): DropRepoOp {
-  const canonical = canonicalDropRepo(dbInUse, repo);
+  const canonical = canonicalBatchOp(dbInUse, { drop_repo: repo, cascade: opts?.cascade ?? false, if_exists: opts?.if_exists ?? false });
   const op: DropRepoOp = {
     drop_repo: repo,
     hmac: signer.hmacTagHex(canonical),
@@ -120,7 +113,7 @@ export function dropTable(
   table: string,
   opts?: { if_exists?: boolean; cascade?: boolean },
 ): DropTableOp {
-  const canonical = canonicalDropTable(dbInUse, repo, table);
+  const canonical = canonicalBatchOp(dbInUse, { drop_table: table, repo, cascade: opts?.cascade ?? false, if_exists: opts?.if_exists ?? false });
   const op: DropTableOp = {
     drop_table: table,
     repo,
@@ -174,13 +167,7 @@ export function startMigration(
   dstEngine: string,
   opts?: { dst_path?: string },
 ): StartMigrationOp {
-  const canonical = canonicalStartMigration(
-    dbInUse,
-    srcRepo,
-    table,
-    dstRepo,
-    dstEngine,
-  );
+  const canonical = canonicalBatchOp(dbInUse, { start_migration: table, repo: srcRepo, dst_repo: dstRepo, dst_engine: dstEngine, dst_path: opts?.dst_path });
   const op: StartMigrationOp = {
     start_migration: table,
     repo: srcRepo,
@@ -198,7 +185,7 @@ export function commitMigration(
   dbInUse: string,
   migrationId: string,
 ): CommitMigrationOp {
-  const canonical = canonicalCommitMigration(dbInUse, migrationId);
+  const canonical = canonicalBatchOp(dbInUse, { commit_migration: migrationId });
   return {
     commit_migration: migrationId,
     hmac: signer.hmacTagHex(canonical),
@@ -211,7 +198,7 @@ export function rollbackMigration(
   dbInUse: string,
   migrationId: string,
 ): RollbackMigrationOp {
-  const canonical = canonicalRollbackMigration(dbInUse, migrationId);
+  const canonical = canonicalBatchOp(dbInUse, { rollback_migration: migrationId });
   return {
     rollback_migration: migrationId,
     hmac: signer.hmacTagHex(canonical),

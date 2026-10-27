@@ -314,7 +314,10 @@ fn disk_export_refuses_resync_quarantined_repo() {
             subscription("sub_seed", "tcp://peer:9000", "pub", "prof_seed"),
         );
         source
-            .execute("app", &b.to_request_via_msgpack())
+            .execute(
+                "app",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         source
