@@ -3,6 +3,8 @@
 //! `RepoChangefeed` runtime (live broadcast + durable journal writer).
 
 pub(crate) mod core;
+pub(crate) mod error;
 pub(crate) mod events;
 
 pub use core::{ChangelogStore, RepoChangefeed};
+pub use error::{ChangelogError, ChangelogResult};

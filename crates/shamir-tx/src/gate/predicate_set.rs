@@ -156,39 +156,34 @@ impl Default for PredicateSet {
     }
 }
 
-/// `SORTED_TAG` must match
-/// `crates/shamir-engine/src/index/sorted_index_manager.rs:60`.
-/// Kept local (rather than re-exported) so shamir-tx stays decoupled
-/// from the engine crate. Pinned by `key_in_interval_prefix_tag_matches`
-/// test.
-pub const SORTED_TAG: u8 = 0x80;
+/// `SORTED_TAG` and `SORTED_PREFIX_LEN` plus prefix and posting construction
+/// are shared from `shamir_types::core::sorted_index_layout`; engine-side
+/// manager-bound round trips in `crates/shamir-engine/src/tx/tests/
+/// preparation/claims/predicate_range_tests.rs` pin the actual producer.
+pub use shamir_types::core::sorted_index_layout::{SORTED_PREFIX_LEN, SORTED_TAG};
+
+#[cfg(test)]
+thread_local! {
+    static INDEX_RANGE_PROBE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn index_range_probe() -> u64 {
+    INDEX_RANGE_PROBE.with(std::cell::Cell::get)
+}
 
 /// Length of the physical key prefix that uniquely identifies one
-/// sorted index (tag byte + 8-byte BE index id). See `entry_prefix`,
-/// sorted_index_manager.rs:574.
-pub const SORTED_PREFIX_LEN: usize = 1 + 8;
-
-/// Build the 9-byte sorted-index prefix `SORTED_TAG || index_id.to_be_bytes()`.
-/// Mirror of the private `SortedIndexManager::entry_prefix` (:574) — kept
-/// here so the predicate layer can construct/check bounds without
-/// re-entering the engine.
+/// sorted index (tag byte + 8-byte BE index id). See shared layout helper.
 #[inline]
 fn sorted_prefix_bytes(index_id: u64) -> [u8; SORTED_PREFIX_LEN] {
-    let mut p = [0u8; SORTED_PREFIX_LEN];
-    p[0] = SORTED_TAG;
-    p[1..].copy_from_slice(&index_id.to_be_bytes());
-    p
+    shamir_types::core::sorted_index_layout::sorted_prefix(index_id)
 }
 
 /// True iff `posting_key` is a sorted-index posting for `index_id` AND
 /// falls inside the byte interval `[lo, hi]`.
 ///
-/// Layout assumed (sorted_index_manager.rs:582 / :15 doc block):
-///   `posting_key = SORTED_TAG (1) || index_id BE8 (8) || encoded_value || rid (16)`
-///
-/// Bounds were constructed in the same physical-byte space by
-/// `range_bounds` (sorted_index_manager.rs:516) and stored in
-/// `PredicateDep::IndexRange { lo, hi }` (doc section 3.1).
+/// Layout is shared through `shamir_types::core::sorted_index_layout`;
+/// the engine-side manager-bound oracle pins actual producer output.
 ///
 /// Comparison is plain lexicographic on byte slices — exactly the
 /// order under which the sort_codec was designed (see
@@ -243,6 +238,39 @@ pub fn key_in_interval(
         }
     }
     true
+}
+
+/// Bounded overlap check over ONE table's sorted posting keys. Binary-search
+/// the maximum of the target index's prefix start and the lower-bound start,
+/// then test exactly one candidate with `key_in_interval`; no interval walk.
+pub fn index_range_overlaps_sorted(
+    posting_keys: &[Bytes],
+    index_id: u64,
+    lo: &Bound<Bytes>,
+    hi: &Bound<Bytes>,
+) -> bool {
+    // Binary-search the first key of the TARGET index's contiguous 9-byte
+    // prefix run: keys shorter than SORTED_PREFIX_LEN and keys with a
+    // lexicographically smaller 9-byte prefix all sort before the run, so
+    // `partition_point` lands exactly on the run's first key.
+    let prefix = sorted_prefix_bytes(index_id);
+    let prefix_start = posting_keys.partition_point(|k| k.as_ref() < prefix.as_slice());
+    // First key satisfying the lower bound (binary search — sorted input).
+    let start = match lo {
+        Bound::Unbounded => prefix_start,
+        Bound::Included(b) => {
+            prefix_start.max(posting_keys.partition_point(|k| k.as_ref() < b.as_ref()))
+        }
+        Bound::Excluded(b) => {
+            prefix_start.max(posting_keys.partition_point(|k| k.as_ref() <= b.as_ref()))
+        }
+    };
+    let Some(k) = posting_keys.get(start) else {
+        return false;
+    };
+    #[cfg(test)]
+    INDEX_RANGE_PROBE.with(|probe| probe.set(probe.get() + 1));
+    key_in_interval(k, index_id, lo, hi)
 }
 
 impl std::fmt::Debug for PredicateSet {
