@@ -75,7 +75,7 @@ impl IpcListener {
         let inner = match TokioUnixListener::bind(path) {
             Ok(listener) => listener,
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                reclaim_stale_socket(path)?;
+                reclaim_stale_socket(path).await?;
                 TokioUnixListener::bind(path)?
             }
             Err(error) => return Err(error),
@@ -141,7 +141,7 @@ fn remove_if_identity(path: &Path, identity: (u64, u64)) {
     }
 }
 
-fn reclaim_stale_socket(path: &Path) -> io::Result<()> {
+async fn reclaim_stale_socket(path: &Path) -> io::Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -153,8 +153,16 @@ fn reclaim_stale_socket(path: &Path) -> io::Result<()> {
             "IPC endpoint exists and is not a socket",
         ));
     }
-    match std::os::unix::net::UnixStream::connect(path) {
+    // Non-blocking probe: a full accept backlog reports WouldBlock instead of
+    // stalling the runtime; only a refused connect proves the socket is stale.
+    match UnixStream::connect(path).await {
         Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "IPC socket is live",
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 "IPC socket is live",

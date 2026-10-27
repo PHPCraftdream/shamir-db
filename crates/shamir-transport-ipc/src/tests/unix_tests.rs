@@ -232,8 +232,13 @@ async fn rv_transport_ipc_07d10afd_bind_existing_path_fails_without_clobbering()
         "the failed bind must not remove the original socket file"
     );
 
-    // The original listener still serves clients after the collision.
+    // The original listener still serves clients after the collision. The
+    // failed bind's liveness probe is queued first: accept it, expect EOF.
     let server = tokio::spawn(async move {
+        let mut probe = listener.accept().await.expect("accept probe");
+        let mut rest = Vec::new();
+        probe.read_to_end(&mut rest).await.expect("probe read");
+        assert!(rest.is_empty(), "the liveness probe sends no bytes");
         let mut stream = listener.accept().await.expect("accept");
         let mut buf = [0u8; 4];
         stream.read_exact(&mut buf).await.expect("server read");
