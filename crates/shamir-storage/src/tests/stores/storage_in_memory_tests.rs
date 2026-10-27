@@ -60,6 +60,144 @@ async fn run_store_tests(store: Arc<dyn Store>) {
 }
 
 #[tokio::test]
+async fn rv_storage_5e99bede_zero_batch_is_empty() {
+    let store = InMemoryStore::new();
+    store
+        .set(RecordKey::from(b"present".to_vec()), Bytes::from("v"))
+        .await
+        .unwrap();
+    assert!(store.iter_stream(0).next().await.is_none());
+    assert!(store
+        .scan_prefix_stream(Bytes::from("p"), 0)
+        .next()
+        .await
+        .is_none());
+    assert!(store
+        .iter_range_stream(None, None, 0)
+        .next()
+        .await
+        .is_none());
+    assert!(store
+        .iter_range_stream_reverse(None, None, 0)
+        .next()
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn rv_storage_b4524afa_range_cursor_survives_deleting_yielded_key() {
+    let store = InMemoryStore::new();
+    for key in ["a", "b", "c"] {
+        store
+            .set(RecordKey::from(key.as_bytes().to_vec()), Bytes::from(key))
+            .await
+            .unwrap();
+    }
+    let mut stream = store.iter_range_stream(None, None, 1);
+    assert_eq!(stream.next().await.unwrap().unwrap()[0].0.as_ref(), b"a");
+    store.remove(RecordKey::from(b"a".to_vec())).await.unwrap();
+    assert_eq!(stream.next().await.unwrap().unwrap()[0].0.as_ref(), b"b");
+}
+
+#[tokio::test]
+async fn rv_storage_d00d27de_reverse_range_is_bounded_and_descending() {
+    let store = InMemoryStore::new();
+    for key in ["a", "b", "c", "d"] {
+        store
+            .set(RecordKey::from(key.as_bytes().to_vec()), Bytes::from(key))
+            .await
+            .unwrap();
+    }
+    let mut stream = store.iter_range_stream_reverse(None, None, 1);
+    assert_eq!(stream.next().await.unwrap().unwrap()[0].0.as_ref(), b"d");
+    store
+        .set(RecordKey::from(b"c".to_vec()), Bytes::from("fresh-c"))
+        .await
+        .unwrap();
+    let next = stream.next().await.unwrap().unwrap();
+    assert_eq!(next[0].0.as_ref(), b"c");
+    assert_eq!(next[0].1, Bytes::from("fresh-c"));
+}
+
+#[tokio::test]
+async fn rv_storage_01f46fa6_full_and_prefix_streams_yield_incrementally() {
+    let store = InMemoryStore::new();
+    for key in ["a0", "a1", "a2", "b0"] {
+        store
+            .set(RecordKey::from(key.as_bytes().to_vec()), Bytes::from(key))
+            .await
+            .unwrap();
+    }
+    let mut full = store.iter_stream(1);
+    assert_eq!(full.next().await.unwrap().unwrap()[0].0.as_ref(), b"a0");
+    store
+        .set(RecordKey::from(b"a1".to_vec()), Bytes::from("full-updated"))
+        .await
+        .unwrap();
+    assert_eq!(
+        full.next().await.unwrap().unwrap()[0].1,
+        Bytes::from("full-updated")
+    );
+    let mut prefix = store.scan_prefix_stream(Bytes::from("a"), 1);
+    assert_eq!(prefix.next().await.unwrap().unwrap()[0].0.as_ref(), b"a0");
+    store
+        .set(
+            RecordKey::from(b"a1".to_vec()),
+            Bytes::from("prefix-updated"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        prefix.next().await.unwrap().unwrap()[0].1,
+        Bytes::from("prefix-updated")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_storage_822dbd98_set_never_reports_missing_during_replacement_stress() {
+    let store = Arc::new(InMemoryStore::new());
+    let key = RecordKey::from(b"stable-key".to_vec());
+    store
+        .set(key.clone(), Bytes::from_static(b"seed"))
+        .await
+        .unwrap();
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut tasks = tokio::task::JoinSet::new();
+    for writer in 0..8u8 {
+        let store = store.clone();
+        let key = key.clone();
+        let barrier = barrier.clone();
+        tasks.spawn(async move {
+            barrier.wait().await;
+            for iteration in 0..128u16 {
+                store
+                    .set(
+                        key.clone(),
+                        Bytes::copy_from_slice(&[writer, iteration as u8]),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+    }
+    let reader_store = store.clone();
+    let reader_key = key.clone();
+    let reader_barrier = barrier.clone();
+    tasks.spawn(async move {
+        reader_barrier.wait().await;
+        for _ in 0..1024 {
+            assert!(
+                reader_store.get(reader_key.clone()).await.is_ok(),
+                "replacement must not expose a missing key"
+            );
+        }
+    });
+    while let Some(result) = tasks.join_next().await {
+        result.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn test_inmemory_repo_basic() {
     let repo = InMemoryRepo::new();
     let store = repo.store_get("test_table").await.unwrap();

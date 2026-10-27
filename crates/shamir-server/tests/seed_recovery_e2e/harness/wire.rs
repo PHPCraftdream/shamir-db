@@ -92,13 +92,24 @@ async fn open(admin: &Client, db: &str, repo: Option<&str>, table: Option<&str>)
         _ => ddl::res::database(db),
     };
     let key = shamir_query_types::hmac::derive_session_hmac_key(&admin.session_id());
-    let tag = shamir_query_types::hmac::compute_tag_hex(
-        &key,
-        &shamir_query_types::hmac::canonical_chmod(&res, 0o777),
-    );
+    // The v2 canonical form is computed over the op itself (tag excluded).
+    let unsigned = shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+        chmod: res.clone(),
+        mode: 0o777,
+        hmac: None,
+    });
+    let canonical =
+        shamir_query_types::hmac::canonical_batch_op(db, &unsigned).expect("chmod canonical form");
+    let tag = shamir_query_types::hmac::compute_tag_hex(&key, &canonical);
     let mut batch = Batch::new();
     batch.id("open");
-    batch.chmod("chmod", ddl::chmod(res, 0o777).hmac(tag));
+    batch.chmod(
+        "chmod",
+        ddl::chmod(res, 0o777)
+            .hmac(tag)
+            .build()
+            .expect("build signed chmod"),
+    );
     execute(admin, db, batch).await;
 }
 

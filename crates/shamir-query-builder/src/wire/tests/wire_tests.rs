@@ -3,12 +3,25 @@
 use shamir_query_types::batch::BatchRequest;
 
 use crate::batch::Batch;
-use crate::wire::ToWire;
+use crate::wire::{ToWire, WireError};
 use crate::Query;
 
-// ============================================================================
-// Batch convenience methods
-// ============================================================================
+struct FailingWireValue;
+
+impl serde::Serialize for FailingWireValue {
+    fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+        Err(serde::ser::Error::custom(
+            "intentional serialization failure",
+        ))
+    }
+}
+
+#[test]
+fn rv_query_builder_6931dbde_to_msgpack_wraps_encode_failure() {
+    let value = FailingWireValue;
+    let error = value.to_msgpack().unwrap_err();
+    assert!(matches!(error, WireError::Encode(_)));
+}
 
 #[test]
 fn batch_to_query_value_matches_build() {

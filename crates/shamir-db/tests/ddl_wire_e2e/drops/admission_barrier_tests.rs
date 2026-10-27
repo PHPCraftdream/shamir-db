@@ -35,7 +35,7 @@ async fn drop_table_cascade_acquires_write_barrier() {
         "op",
         ddl::create_index("idx_name", "users").fields([vec!["name".to_string()]]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Grab the TableManager BEFORE issuing the cascade drop, so the test can
@@ -47,8 +47,16 @@ async fn drop_table_cascade_acquires_write_barrier() {
 
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
-    let req = b.to_request_via_msgpack();
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .cascade()
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop table builder requires HMAC"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let db_drop = db.clone();
     let drop_task = tokio::spawn(async move { db_drop.execute("testdb", &req).await });
@@ -92,13 +100,21 @@ async fn drop_table_cascade_completes_without_external_contention() {
         "op",
         ddl::create_index("idx_name", "users").fields([vec!["name".to_string()]]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
     b.id("dt");
-    b.drop_table("op", ddl::drop_table("users").repo("main").cascade());
-    let req = b.to_request_via_msgpack();
+    b.drop_table(
+        "op",
+        ddl::drop_table("users")
+            .repo("main")
+            .cascade()
+            .hmac("deadbeef".repeat(8))
+            .build()
+            .expect("drop table builder requires HMAC"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),

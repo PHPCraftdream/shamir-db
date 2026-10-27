@@ -374,6 +374,7 @@ impl ShamirAdminExecutor {
         let table = &op.set_table_schema;
         let repo = &op.repo;
         let db = &self.db_name;
+        let _namespace_guard = self.shamir.lock_replication_control().await;
         let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         // Authz: Action::Write on the table.
@@ -386,7 +387,6 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
-        // Per-table RMW lock.
         let _guard = lock_schema_rmw(&self.shamir, db, repo, table).await;
 
         // Read the current catalogue record.
@@ -594,6 +594,7 @@ impl ShamirAdminExecutor {
         let table = &op.add_schema_rule;
         let repo = &op.repo;
         let db = &self.db_name;
+        let _namespace_guard = self.shamir.lock_replication_control().await;
         let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         self.shamir
@@ -798,6 +799,7 @@ impl ShamirAdminExecutor {
         let table = &op.remove_schema_rule;
         let repo = &op.repo;
         let db = &self.db_name;
+        let _namespace_guard = self.shamir.lock_replication_control().await;
         let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         self.shamir

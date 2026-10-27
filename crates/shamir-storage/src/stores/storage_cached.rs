@@ -9,7 +9,7 @@
 //! until the store is rebuilt.
 
 use crate::error::{DbError, DbResult};
-use crate::types::{RecordKey, Store};
+use crate::types::{RecordKey, RecordStream, Store};
 mod admission;
 #[cfg(test)]
 pub(crate) use admission::COMMAND_CHANNEL_CAPACITY;
@@ -807,6 +807,7 @@ impl Store for CachedStore {
         let health = self.health.clone();
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             let mut last_key: Option<RecordKey> = None;
 
             loop {
@@ -866,6 +867,7 @@ impl Store for CachedStore {
         let health = self.health.clone();
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             let mut last_key: Option<RecordKey> = None;
 
             loop {
@@ -911,6 +913,36 @@ impl Store for CachedStore {
                 if last_key.is_none() {
                     break;
                 }
+            }
+        })
+    }
+
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> RecordStream {
+        let cache = self.cache.clone();
+        let health = self.health.clone();
+        Box::pin(stream! {
+            if batch_size == 0 { return; }
+            let mut cursor: Option<RecordKey> = None;
+            loop {
+                let terminal = health.borrow().clone();
+                if let Some(msg) = terminal { yield Err(storage_err(msg)); return; }
+                let current = cursor.clone();
+                let batch = {
+                    let guard = scc::Guard::new();
+                    let lower = start_inclusive.clone().map(RecordKey::from).map(std::ops::Bound::Included).unwrap_or(std::ops::Bound::Unbounded);
+                    let upper = current.clone().map(std::ops::Bound::Excluded).or_else(|| end_inclusive.clone().map(RecordKey::from).map(std::ops::Bound::Included)).unwrap_or(std::ops::Bound::Unbounded);
+                    cache.range((lower, upper), &guard).rev().take(batch_size).map(|(k,v)| (k.clone(),v.clone())).collect::<Vec<_>>()
+                };
+                if batch.is_empty() { break; }
+                cursor = batch.last().map(|(k,_)| k.clone());
+                let done = batch.len() < batch_size;
+                yield Ok(batch);
+                if done { break; }
             }
         })
     }
