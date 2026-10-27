@@ -55,7 +55,7 @@ async fn seed_row(shamir: &ShamirDb, repo: &str) {
             .row(doc! { "name" => "Alice", "age" => 30 }),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 }
@@ -65,7 +65,9 @@ async fn read_users(shamir: &ShamirDb, db: &str, repo: &str) -> Result<BatchResp
     let mut b = Batch::new();
     b.id(9);
     b.query("r", Query::with_repo(repo, "users"));
-    shamir.execute(db, &b.to_request_via_msgpack()).await
+    shamir
+        .execute(db, &b.to_request_via_msgpack().unwrap())
+        .await
 }
 
 /// Create ONE Pull profile over a single `(db, repo)` scope (builder-only).
@@ -81,7 +83,7 @@ async fn create_profile(shamir: &ShamirDb, profile: &str, repo: &str) {
         ),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 }
@@ -94,7 +96,7 @@ async fn quarantine(shamir: &ShamirDb, sub: &str, profile: &str, repo: &str) {
     b.id(2);
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     shamir
@@ -139,7 +141,9 @@ async fn set_profile(
     b.id(id);
     b.try_op("alt", alter_subscription(sub).set_profile(profile))
         .unwrap();
-    shamir.execute("testdb", &b.to_request_via_msgpack()).await
+    shamir
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
+        .await
 }
 
 /// Evidence row 3 (in-process leg): `DROP REPLICATION PROFILE` after binding
@@ -156,7 +160,7 @@ async fn binding_profile_drop_keeps_bound_destination_blocked() {
     b.id(3);
     b.op("drp", drop_replication_profile("prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -164,7 +168,6 @@ async fn binding_profile_drop_keeps_bound_destination_blocked() {
     assert_eq!(err.code(), Some("resync_required"), "{err}");
     assert!(read_users(&shamir, "testdb", "side").await.is_ok());
 }
-
 /// Evidence row 5: SetProfile to an equal-destination profile SUCCEEDS and
 /// keeps the durable binding untouched; SetProfile to a different-destination
 /// profile is refused with `binding_destination_mismatch` and mutates
@@ -178,7 +181,7 @@ async fn binding_set_profile_and_same_name_guards() {
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -225,12 +228,11 @@ async fn binding_set_profile_and_same_name_guards() {
         subscription("sub", "tcp://other:9000", "pub", "prof_equal"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("already_exists"), "{err}");
 }
-
 /// Evidence row 5 (profile-replacement arm): recreating the REFERENCED
 /// profile with a different destination set is refused with
 /// `binding_destination_mismatch`; recreating it with the SAME destination
@@ -254,11 +256,10 @@ async fn binding_profile_replacement_to_different_destinations_refused_while_ref
         ),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("binding_destination_mismatch"), "{err}");
-
     // The bound destination is untouched, and `side` never became special.
     let row = subscription_row(&shamir, "sub").await;
     let destinations = row
@@ -284,7 +285,7 @@ async fn binding_profile_replacement_to_different_destinations_refused_while_ref
         ),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     assert!(read_users(&shamir, "testdb", "main").await.is_err());
@@ -312,7 +313,7 @@ async fn binding_terminal_flush_failure_keeps_prepublished_protection() {
         subscription("sub_side", "tcp://peer:9000", "pub", "prof_side"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -366,7 +367,7 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
     b.id(3);
     b.op("drop", drop_subscription("sub"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     // Round 6, traced: the DROP SUBSCRIPTION guard surfaces the DEDICATED
@@ -382,7 +383,7 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
     b.id(4);
     b.op("ls", list_subscriptions());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let subs = resp.results["ls"].records[0]
@@ -443,7 +444,7 @@ async fn binding_cascade_drop_repo_over_bound_destination_refused_and_intact() {
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -451,7 +452,7 @@ async fn binding_cascade_drop_repo_over_bound_destination_refused_and_intact() {
     b.id(3);
     b.op("drop", drop_repo("main").cascade());
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     // Round 6: the coded `replication_destination_bound` refusal names the
@@ -486,7 +487,7 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -494,7 +495,7 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
     b.id(3);
     b.op("drop", drop_db("testdb").cascade());
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     // Round 6: coded `replication_destination_bound`, blocker UNQUOTED.
@@ -514,7 +515,6 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
     assert_eq!(served.get("name").and_then(|v| v.as_str()), Some("Alice"));
     assert!(read_users(&shamir, "testdb", "side").await.is_ok());
 }
-
 /// S5c-X round 2 (C7, deterministic — no sleeps): destination lifecycle
 /// shares the catalogue replication-control interlock. While the lock is
 /// held, `remove_repo` has not even STARTED its first poll step (Pending);
@@ -554,7 +554,7 @@ async fn binding_pending_durable_barrier_survives_failed_flush_until_retry() {
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert!(
@@ -602,7 +602,7 @@ async fn binding_pending_durable_barrier_survives_failed_flush_until_retry() {
     b.id(3);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let row = subscription_row(&shamir, "sub").await;
@@ -650,7 +650,7 @@ async fn binding_corrupted_profile_stream_refuses_creation_and_never_unblocks() 
         subscription("sub", "tcp://peer:9000", "pub", "corrupt"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("seed_wrong_scope"), "{err}");
@@ -665,7 +665,7 @@ async fn binding_corrupted_profile_stream_refuses_creation_and_never_unblocks() 
         subscription("sub2", "tcp://peer:9000", "pub", "prof"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     shamir
@@ -757,7 +757,7 @@ async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
     let mut b = Batch::new();
     b.id(3);
     b.op("drop", drop_repo("main").cascade());
-    let request = b.to_request_via_msgpack();
+    let request = b.to_request_via_msgpack().unwrap();
     let cascade_shamir = shamir.clone();
     let mut cascade = Box::pin(async move { cascade_shamir.execute("testdb", &request).await });
 
@@ -773,7 +773,7 @@ async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
         ),
     );
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
-    let request = b.to_request_via_msgpack();
+    let request = b.to_request_via_msgpack().unwrap();
     let create_shamir = shamir.clone();
     let mut create = Box::pin(async move { create_shamir.execute("testdb", &request).await });
 
@@ -852,7 +852,7 @@ async fn binding_pending_row_refuses_resume_with_typed_error() {
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     assert!(
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await
             .is_err(),
         "the injected flush fault must fail the creation at the pending barrier"
@@ -863,7 +863,7 @@ async fn binding_pending_row_refuses_resume_with_typed_error() {
     b.id(3);
     b.try_op("alt", alter_subscription("sub").resume()).unwrap();
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("pending_creation_barrier"), "{err}");
@@ -895,7 +895,7 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     assert!(
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await
             .is_err(),
         "the injected flip-flush fault must fail the creation batch"
@@ -925,7 +925,7 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
     b.id(3);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let row = subscription_row(&shamir, "sub").await;
@@ -961,7 +961,7 @@ async fn binding_cancellation_dropped_at_final_write_boundary_leaves_pending_dur
     let mut b = Batch::new();
     b.id(2);
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
-    let request = b.to_request_via_msgpack();
+    let request = b.to_request_via_msgpack().unwrap();
     let mut create = Box::pin(shamir.execute("testdb", &request));
     let mut wait = Box::pin(shamir.final_write_arrived.notified());
     // Biased order polls `wait` first, so the seam's notify_one cannot be

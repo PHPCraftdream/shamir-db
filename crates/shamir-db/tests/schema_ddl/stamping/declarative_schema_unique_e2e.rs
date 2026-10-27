@@ -71,7 +71,10 @@ async fn exec_set_schema(
     }
     b.set_table_schema(alias, builder);
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(resp.results[alias].records[0].as_value().as_ref().clone())
@@ -94,7 +97,10 @@ async fn try_insert_tx(
     b.transactional();
     b.insert("ins", insert(table).row(record));
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -129,7 +135,10 @@ async fn try_insert_tx_two_stmts(
     b.insert("ins1", insert(table).row(r1));
     b.insert("ins2", insert(table).row(r2));
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -163,9 +172,12 @@ async fn try_insert_autocommit(
     b.id(1);
     // NOTE: deliberately NOT calling b.transactional() — autocommit path.
     b.insert("ins", insert(table).row(record));
-    db.execute(db_name, &b.to_request_via_msgpack())
-        .await
-        .map_err(|e| e.to_string())?;
+    db.execute(
+        db_name,
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -180,9 +192,12 @@ async fn setup_with_index(sys_path: std::path::PathBuf) -> ShamirDb {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Create an index on users.email.
     let mut b = Batch::new();
@@ -191,9 +206,12 @@ async fn setup_with_index(sys_path: std::path::PathBuf) -> ShamirDb {
         "idx",
         ddl::create_index("email_idx", "users").field("email"),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     db
 }
@@ -299,9 +317,12 @@ async fn unique_without_index_rejected_at_ddl() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Try to set unique schema without an index on the field.
     let result = exec_set_schema(
@@ -620,7 +641,10 @@ async fn unique_update_skip_if_unchanged() {
     )
     .unwrap();
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string());
 
@@ -731,9 +755,12 @@ async fn unique_bare_index_without_rule_rejects_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["items"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Create a UNIQUE index on items.sku — but do NOT set a schema unique
     // rule (no set_table_schema call at all).
@@ -743,7 +770,12 @@ async fn unique_bare_index_without_rule_rejects_duplicate() {
         "idx",
         ddl::create_index("sku_idx", "items").field("sku").unique(),
     );
-    let resp = db.execute("testdb", &b.to_request_via_msgpack()).await;
+    let resp = db
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await;
     assert!(
         resp.is_ok(),
         "create unique index should succeed: {:?}",

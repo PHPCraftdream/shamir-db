@@ -62,7 +62,10 @@ async fn exec_set_schema(
     }
     b.set_table_schema(alias, builder);
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(resp.results[alias].records[0].as_value().as_ref().clone())
@@ -81,7 +84,10 @@ async fn try_insert_tx(
     b.transactional();
     b.insert("ins", insert(table).row(record));
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -112,7 +118,10 @@ async fn try_update_tx(
     b.try_update("upd", update(table).where_(filter).set(set_doc))
         .unwrap();
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -144,9 +153,12 @@ async fn setup_combined(sys_path: std::path::PathBuf) -> ShamirDb {
         "cr",
         ddl::create_repo("main").tables(["departments", "employees"]),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Index on departments.dept_id (needed for FK lookup).
     let mut b = Batch::new();
@@ -155,9 +167,12 @@ async fn setup_combined(sys_path: std::path::PathBuf) -> ShamirDb {
         "idx_dept",
         ddl::create_index("dept_id_idx", "departments").field("dept_id"),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Index on employees.badge (needed for unique constraint).
     let mut b = Batch::new();
@@ -166,9 +181,12 @@ async fn setup_combined(sys_path: std::path::PathBuf) -> ShamirDb {
         "idx_badge",
         ddl::create_index("badge_idx", "employees").field("badge"),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Insert two parent departments.
     let mut b = Batch::new();
@@ -187,9 +205,12 @@ async fn setup_combined(sys_path: std::path::PathBuf) -> ShamirDb {
             "name": "Marketing"
         })),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     db
 }

@@ -45,7 +45,7 @@ async fn exec_op(
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["op"].clone()
 }
@@ -401,7 +401,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.create_group("op", ddl::create_group("wire-devs"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -431,7 +431,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.rename_group("op", ddl::rename_group(group_ref.clone(), "wire-devs-2"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -443,7 +443,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.add_group_member("op", ddl::add_group_member(group_ref.clone(), 999));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -454,7 +454,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.remove_group_member("op", ddl::remove_group_member(group_ref.clone(), 999));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -465,7 +465,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.drop_group("op", ddl::drop_group(ddl::GroupRef::Id { id: gid }));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator, "testdb", &req)
         .await
@@ -505,7 +505,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.rename_group("op", ddl::rename_group(group_ref.clone(), "should-fail"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir
         .execute_as(stranger.clone(), "testdb", &req)
         .await
@@ -519,7 +519,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
     let mut b = Batch::new();
     b.id(1);
     b.drop_group("op", ddl::drop_group(group_ref));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir
         .execute_as(stranger, "testdb", &req)
         .await

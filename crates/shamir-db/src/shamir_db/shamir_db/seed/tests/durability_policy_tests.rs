@@ -31,7 +31,7 @@ async fn commit_one(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> u64
         "ins",
         write::Insert::with_repo(repo, table).row(doc! { "name" => "widget" }),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute(db, &req).await.unwrap();
     resp.transaction
         .and_then(|t| t.commit_version)
@@ -233,7 +233,7 @@ async fn boot_reopen_inherits_policy_and_recovered_prefix() {
         .await
         .unwrap();
     let version = commit_one(&shamir, "appdb", "data", "items").await;
-    shamir.flush_all().await.unwrap();
+    shamir.flush_all_for_test().await.unwrap();
     drop(shamir);
     let reopened = reinit_synced_with_retry(meta).await;
     let repo = reopened.get_db("appdb").unwrap().get_repo("data").unwrap();
@@ -254,7 +254,7 @@ async fn boot_reopen_inherits_policy_and_recovered_prefix() {
     let next = commit_one(&reopened, "appdb", "data", "items").await;
     assert_eq!(next, version + 1);
     assert_eq!(repo.wal_group().await.unwrap().recoverable_through(), next);
-    reopened.flush_all().await.unwrap();
+    reopened.flush_all_for_test().await.unwrap();
 }
 
 #[tokio::test]
@@ -306,5 +306,5 @@ async fn mem_policy_warning_is_once_per_open_not_per_commit() {
     if capturing {
         assert_eq!(WARNINGS.0.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
-    shamir.flush_all().await.unwrap();
+    shamir.flush_all_for_test().await.unwrap();
 }

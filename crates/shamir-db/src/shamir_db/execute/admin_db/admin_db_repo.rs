@@ -181,7 +181,12 @@ impl ShamirAdminExecutor {
                         for table_name in &tables {
                             if let Err(e) = self
                                 .shamir
-                                .drop_table_cleaning_validators(&op.drop_db, repo_name, table_name)
+                                .drop_table_cleaning_validators_locked(
+                                    &op.drop_db,
+                                    repo_name,
+                                    table_name,
+                                    &_control,
+                                )
                                 .await
                             {
                                 table_failures.push(format!(
@@ -300,6 +305,7 @@ impl ShamirAdminExecutor {
             .clone();
         let _create_guard = repo_lock.lock().await;
 
+        let _control = self.shamir.lock_replication_control().await;
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_repo(&op.create_repo) {
@@ -400,11 +406,12 @@ impl ShamirAdminExecutor {
         }
 
         self.shamir
-            .add_repo_as_with_durability(
+            .add_repo_as_with_durability_locked(
                 &self.db_name,
                 config,
                 self.actor.clone(),
                 op.durability.as_ref(),
+                &_control,
             )
             .await
             .map_err(|e| err(e.to_string()))?;
@@ -512,10 +519,11 @@ impl ShamirAdminExecutor {
                     for table_name in &tables {
                         if let Err(e) = self
                             .shamir
-                            .drop_table_cleaning_validators(
+                            .drop_table_cleaning_validators_locked(
                                 &self.db_name,
                                 &op.drop_repo,
                                 table_name,
+                                &_control,
                             )
                             .await
                         {
