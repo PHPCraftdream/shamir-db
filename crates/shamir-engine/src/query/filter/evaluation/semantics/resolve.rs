@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
@@ -393,27 +394,14 @@ pub fn resolve_filter_query(
         // `$cond`'s condition is not special-cased; it inherits this
         // behaviour rather than introducing a new error path.
         FilterValue::Cond { cond } => {
-            // #643: check the pre-compiled cache first (populated once by
-            // `prescan_cond_cache`, e.g. `SelectProjection::new`) — avoids
-            // re-walking/re-interning `cond.condition` on every record.
-            //
-            // Group 13 Defect 1: when `ctx.cond_cache` is `None` (every
-            // caller that hasn't opted into the eager prescan — WHERE,
-            // `when`, `for_each`'s `over`, write-value resolution), fall
-            // back to `ctx.local_cond_cache` (see `eval_context.rs`'s doc)
-            // instead of recompiling `cond.condition` unconditionally: the
-            // first evaluation against this `FilterContext` compiles and
-            // caches it, every later evaluation sharing the same context
-            // (e.g. every row of one WHERE/HAVING scan) reuses the
-            // compiled `FilterNode`.
-            let matched = match ctx
+            let node = match ctx
                 .cond_cache
-                .and_then(|c| cond_cache_get(c, &cond.condition))
+                .and_then(|cache| cond_cache_get(cache, &cond.condition))
             {
-                Some(node) => node.matches(record, ctx),
-                None => compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner)
-                    .matches(record, ctx),
-            };
+                Some(node) => Some(Arc::clone(node)),
+                None => compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner),
+            }?;
+            let matched = node.matches(record, ctx);
             if matched {
                 resolve_filter_query(&cond.then, record, ctx)
             } else {

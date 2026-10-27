@@ -1,9 +1,7 @@
 use std::time::Instant;
 
 use crate::query::batch::authorized::Authorized;
-use crate::query::batch::batch_validate::{
-    validate_filter_depth, validate_filter_patterns, validate_tables,
-};
+use crate::query::batch::batch_validate::{validate_executable_guards, validate_tables};
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::op_watchdog::register_op_watchdog;
@@ -147,7 +145,8 @@ pub(crate) async fn execute_batch_unchecked(
 /// reuse the resulting [`BatchPlan`] across every iteration, instead of
 /// paying a full re-plan + async table-resolution re-validation on every
 /// single pass (see that module's `ForEach` handling for the loop that does
-/// exactly this).
+/// exactly this). The executable-value surface guard runs once over the full
+/// nested tree before body planning/execution.
 ///
 /// Split out of `execute_batch_impl` so the single-call path (`ForEach`'s
 /// sibling `BatchOp::Batch`, and the top-level [`execute_batch`] entry)
@@ -158,7 +157,12 @@ pub(in crate::query::batch) async fn plan_and_validate_batch(
     resolver: &dyn TableResolver,
     scope: &ExecScope,
 ) -> Result<BatchPlan, BatchError> {
+    // Validate receipt policy before planning or dispatch, including unchecked
+    // test callers and recursively executed bodies.
     crate::query::batch::receipts::validate(request, resolver).await?;
+    // Validate all executable filter/value/projection surfaces before planning
+    // or running any operation, including nested batch/foreach bodies.
+    validate_executable_guards(&request.queries)?;
     let effective = request.limits.clamped_to(scope.limits());
     for visit in shamir_query_types::batch::BatchTreeVisitor::new(&request.queries) {
         let nested_wait = match &visit.entry.op {
@@ -194,14 +198,6 @@ pub(in crate::query::batch) async fn plan_and_validate_batch(
 
     // 2. Validate: all referenced tables exist (skip admin ops)
     validate_tables(&request.queries, resolver, &effective, scope.limits()).await?;
-
-    // 2b. Validate: filter nesting depth (DoS guard)
-    validate_filter_depth(&request.queries)?;
-
-    // 2c. Validate: filter pattern length cap + Regex/Like validity
-    // (DoS guard / silent-full-table-match guard)
-    validate_filter_patterns(&request.queries)?;
-
     Ok(plan)
 }
 

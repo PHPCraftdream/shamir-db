@@ -1,8 +1,10 @@
 use crate::query::batch::executor_traits::TableResolver;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
-use shamir_collections::TFxSet;
-use shamir_query_types::batch::{BatchLimits, LimitKind};
-use shamir_types::types::common::TMap;
+use crate::query::filter::FilterValue;
+use shamir_collections::{TFxSet, TMap};
+use shamir_query_types::batch::{BatchLimits, BatchTreeVisitor, LimitKind};
+use shamir_query_types::filter::Filter;
+use shamir_query_types::read::{ReadQuery, SelectExpr, SelectItem};
 
 /// Validate that all referenced tables exist before execution.
 ///
@@ -134,77 +136,94 @@ pub(in crate::query::batch) fn tables_created_in_batch(
     (created_tables, created_repos)
 }
 
-/// Collect every top-level `Filter` tree attached to `entry` that the
-/// engine will compile: the op's own WHERE/HAVING clause(s) plus the
-/// entry's `when` guard (compiled unchecked by `query_runner::resolve_skip`
-/// otherwise). Shared by [`validate_filter_depth`] and
-/// [`validate_filter_patterns`] so the two validation passes can never
-/// drift on which filters are covered — before this helper existed,
-/// `Read.group_by.having` and `entry.when` were compiled with NO depth or
-/// pattern check at all.
-fn collect_entry_filters(entry: &QueryEntry) -> Vec<&shamir_query_types::filter::Filter> {
-    let mut filters: Vec<&shamir_query_types::filter::Filter> = match &entry.op {
-        BatchOp::Read(q) => {
-            let mut fs: Vec<&shamir_query_types::filter::Filter> = q.r#where.iter().collect();
-            if let Some(group_by) = &q.group_by {
-                fs.extend(group_by.having.iter());
-            }
-            fs
-        }
-        BatchOp::Delete(d) => vec![&d.where_clause],
-        BatchOp::Update(u) => u.where_clause.iter().collect(),
-        _ => vec![],
-    };
-    filters.extend(entry.when.iter());
-    filters
-}
-
-/// Validate that no filter in the batch exceeds the nesting depth cap.
-///
-/// Covers the op's own WHERE/HAVING clause AND `entry.when` (a `Filter`
-/// that `query_runner::resolve_skip` compiles unconditionally — before this
-/// fix, an over-deep `when`/`having` bypassed this guard entirely and could
-/// blow the stack inside `compile_filter`/`resolve_filter_query` at
-/// execution time; see `check_filter_depth`'s doc for the full mechanism,
-/// including the "shallow Filter, deep FilterValue" variant).
-pub(in crate::query::batch) fn validate_filter_depth(
+/// Validate every executable filter/value/select-expression surface in all
+/// nested batch and foreach bodies in one iterative batch-tree walk.
+pub(in crate::query::batch) fn validate_executable_guards(
     queries: &TMap<String, QueryEntry>,
 ) -> Result<(), BatchError> {
-    for (alias, entry) in queries {
-        for f in collect_entry_filters(entry) {
-            if let Err(e) = shamir_query_types::filter::check_filter_depth(f) {
-                return Err(BatchError::QueryError {
-                    alias: alias.clone(),
-                    message: e,
-                    code: None,
-                });
-            }
-        }
+    for visit in BatchTreeVisitor::new(queries) {
+        let alias = visit.alias;
+        validate_entry_surfaces(visit.entry, alias)?;
     }
     Ok(())
 }
 
-/// Validate that every `Regex`/`Like`/`ILike` pattern in the batch (WHERE,
-/// HAVING, `when`) is within the length cap and compiles successfully.
-///
-/// Without this, `compile_filter` silently folds an invalid pattern to
-/// `FilterNode::False` — which, under a `NOT`, becomes effectively `True`
-/// (e.g. `DELETE ... WHERE NOT (regex-with-a-typo)` matches every row) with
-/// no error surfaced to the caller. This runs in the same validation pass
-/// as [`validate_filter_depth`], over the same filter set.
-pub(in crate::query::batch) fn validate_filter_patterns(
-    queries: &TMap<String, QueryEntry>,
-) -> Result<(), BatchError> {
-    for (alias, entry) in queries {
-        for f in collect_entry_filters(entry) {
-            if let Err(message) = crate::query::filter::check_filter_patterns(f) {
-                return Err(BatchError::QueryError {
-                    alias: alias.clone(),
-                    message,
-                    code: None,
-                });
-            }
+fn validate_entry_surfaces(entry: &QueryEntry, alias: &str) -> Result<(), BatchError> {
+    let mut filters: Vec<&Filter> = entry.when.iter().collect();
+    let mut values: Vec<&FilterValue> = Vec::new();
+    let mut expressions: Vec<&SelectExpr> = Vec::new();
+    match &entry.op {
+        BatchOp::Read(read) => {
+            collect_read_surfaces(read, &mut filters, &mut values, &mut expressions)
         }
+        BatchOp::Delete(delete) => filters.push(&delete.where_clause),
+        BatchOp::Update(update) => filters.extend(update.where_clause.iter()),
+        BatchOp::Batch(sub) => values.extend(sub.bind.values()),
+        BatchOp::ForEach(for_each) => values.push(&for_each.over),
+        _ => {}
+    }
+    for filter in filters {
+        validate_filter_surface(alias, filter)?;
+    }
+    for value in values {
+        validate_value_surface(alias, value)?;
+    }
+    for expression in expressions {
+        let depth = shamir_query_types::filter::check_select_expr_depth(expression);
+        map_guard_result(alias, depth)?;
+        let patterns = crate::query::filter::check_select_expr_patterns(expression);
+        map_guard_result(alias, patterns)?;
     }
     Ok(())
+}
+
+fn collect_read_surfaces<'a>(
+    read: &'a ReadQuery,
+    filters: &mut Vec<&'a Filter>,
+    values: &mut Vec<&'a FilterValue>,
+    expressions: &mut Vec<&'a SelectExpr>,
+) {
+    filters.extend(read.r#where.iter());
+    if let Some(group) = &read.group_by {
+        filters.extend(group.having.iter());
+    }
+    for item in &read.select.items {
+        match item {
+            SelectItem::Aggregate { input, .. } => values.extend(input.iter()),
+            SelectItem::AggregateFn { input, args, .. } => {
+                values.extend(input.iter());
+                values.extend(args);
+            }
+            SelectItem::Function { args, .. } => values.extend(args),
+            SelectItem::Expression { expr, .. } => expressions.push(expr),
+            SelectItem::All | SelectItem::Field { .. } | SelectItem::CountAll { .. } => {}
+        }
+    }
+}
+
+fn validate_filter_surface(alias: &str, filter: &Filter) -> Result<(), BatchError> {
+    map_guard_result(
+        alias,
+        shamir_query_types::filter::check_filter_depth(filter),
+    )?;
+    map_guard_result(alias, crate::query::filter::check_filter_patterns(filter))
+}
+
+fn validate_value_surface(alias: &str, value: &FilterValue) -> Result<(), BatchError> {
+    map_guard_result(
+        alias,
+        shamir_query_types::filter::check_filter_value_depth(value),
+    )?;
+    map_guard_result(
+        alias,
+        crate::query::filter::check_filter_value_patterns(value),
+    )
+}
+
+fn map_guard_result(alias: &str, result: Result<(), String>) -> Result<(), BatchError> {
+    result.map_err(|message| BatchError::QueryError {
+        alias: alias.to_string(),
+        message,
+        code: None,
+    })
 }
