@@ -62,12 +62,21 @@ async fn rv_db_5977a782_group_name_resolution_is_keyed() {
 async fn rv_db_c58706f9_chmod_between_requests_is_not_memoized() {
     let db = ShamirDb::init_memory().await.expect("db");
     db.create_db("authdb").await.expect("database");
+    db.set_resource_meta(&ResourcePath::database("authdb"), &ResourceMeta::open())
+        .await
+        .expect("open database");
     db.add_repo(
         "authdb",
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
     )
     .await
     .expect("repository");
+    db.set_resource_meta(
+        &ResourcePath::store("authdb", "main"),
+        &ResourceMeta::open(),
+    )
+    .await
+    .expect("open repository");
     let path = ResourcePath::table("authdb", "main", "items");
     db.set_resource_meta(
         &path,
@@ -102,12 +111,16 @@ async fn rv_db_c58706f9_chmod_between_requests_is_not_memoized() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("items"));
+    assert!(error.to_string().to_ascii_lowercase().contains("denied"));
 }
 
 #[tokio::test]
 async fn rv_db_c58706f9_batch_denial_names_table() {
     let db = ShamirDb::init_memory().await.expect("db");
     db.create_db("authdb").await.expect("database");
+    db.set_resource_meta(&ResourcePath::database("authdb"), &ResourceMeta::open())
+        .await
+        .expect("open database");
     db.add_repo(
         "authdb",
         RepoConfig::new("main", BoxRepoFactory::in_memory())
@@ -116,6 +129,12 @@ async fn rv_db_c58706f9_batch_denial_names_table() {
     )
     .await
     .expect("repository");
+    db.set_resource_meta(
+        &ResourcePath::store("authdb", "main"),
+        &ResourceMeta::open(),
+    )
+    .await
+    .expect("open repository");
     for (name, mode) in [("allowed", 0o755), ("private", 0o700)] {
         db.set_resource_meta(
             &ResourcePath::table("authdb", "main", name),
@@ -138,6 +157,7 @@ async fn rv_db_c58706f9_batch_denial_names_table() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("private"));
+    assert!(error.to_string().to_ascii_lowercase().contains("denied"));
 }
 
 #[tokio::test]
@@ -158,6 +178,9 @@ async fn rv_db_23a03103_load_repository_record_is_not_a_full_load() {
 async fn rv_db_c58706f9_batch_auth_reads_shared_ancestors_once() {
     let db = ShamirDb::init_memory().await.expect("db");
     db.create_db("authdb").await.expect("database");
+    db.set_resource_meta(&ResourcePath::database("authdb"), &ResourceMeta::open())
+        .await
+        .expect("open database");
     let config = RepoConfig::new("main", BoxRepoFactory::in_memory())
         .add_table(TableConfig::new("t0"))
         .add_table(TableConfig::new("t1"))
@@ -168,6 +191,12 @@ async fn rv_db_c58706f9_batch_auth_reads_shared_ancestors_once() {
         .add_table(TableConfig::new("t6"))
         .add_table(TableConfig::new("t7"));
     db.add_repo("authdb", config).await.expect("repository");
+    db.set_resource_meta(
+        &ResourcePath::store("authdb", "main"),
+        &ResourceMeta::open(),
+    )
+    .await
+    .expect("open repository");
     for i in 0..8 {
         db.set_resource_meta(
             &ResourcePath::table("authdb", "main", format!("t{i}")),
