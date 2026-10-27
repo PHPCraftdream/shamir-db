@@ -129,7 +129,13 @@ pub fn verify_change_password_request_with_sid(
     // The `Guard` pins the slot; we deref through it to the `Option<Arc<_>>`.
     let pending_guard = session.pending_changepw_challenge.swap(None);
     let pending: &PendingChangePwChallenge = pending_guard.as_deref().ok_or(Error::AuthFailed)?;
-    if now_ns - pending.issued_at_ns > CHANGEPW_CHALLENGE_TTL_NS {
+    // TTL check with a backwards-clock guard (RV-CONNECT-C9066D95): a
+    // reversed timestamp (`now_ns < issued_at_ns`) must be rejected, never
+    // wrap through unsigned underflow into a huge "elapsed" value.
+    let elapsed_ns = now_ns
+        .checked_sub(pending.issued_at_ns)
+        .ok_or(Error::AuthFailed)?;
+    if elapsed_ns > CHANGEPW_CHALLENGE_TTL_NS {
         return Err(Error::AuthFailed);
     }
 

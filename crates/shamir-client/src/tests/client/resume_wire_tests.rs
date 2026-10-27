@@ -6,10 +6,50 @@
 use crate::client::resume_wire_exchange;
 use crate::client::transport::{WireResumeInit, WireResumeOk, WireResumeProofOk};
 use crate::client::verify_resume_identity_proof;
+use crate::error::ClientError;
 use shamir_connect::common::crypto::Ed25519Keypair;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
+use std::error::Error as _;
 use std::time::Duration;
-use tokio::io::{duplex, split, AsyncReadExt};
+use tokio::io::{duplex, split, AsyncReadExt, AsyncWriteExt};
+
+/// FAILS IF the client's pre-auth frame cap (MAX_PRE_AUTH_FRAME in
+/// connect.rs challenge/auth_ok/proof_ok/ok reads) is reverted to
+/// MAX_FRAME_SIZE_DEFAULT — the 4097-byte read then completes and the
+/// failure becomes a Protocol/handshake error instead of
+/// Transport("frame too large ...").
+#[tokio::test]
+async fn rv_transport_tcp_5940216b_oversized_preauth_frame_is_rejected() {
+    let (mut peer, client_side) = duplex(64 * 1024);
+    let fake_server = tokio::spawn(async move {
+        let mut hdr = [0u8; 4];
+        peer.read_exact(&mut hdr).await.expect("proof init header");
+        let body_len = u32::from_be_bytes(hdr) as usize;
+        let mut body = vec![0u8; body_len];
+        peer.read_exact(&mut body).await.expect("proof init body");
+        // Pre-auth reply declaring 4097 bytes — one over the 4 KiB cap.
+        peer.write_all(&4097u32.to_be_bytes())
+            .await
+            .expect("size header");
+        peer.write_all(&vec![0u8; 4097]).await.expect("size body");
+    });
+    let (mut r, mut w) = split(client_side);
+    let result = tokio::time::timeout(
+        SEND_BUDGET,
+        crate::client::resume_wire_exchange(&mut r, &mut w, vec![0xAA; 64], [0u8; 32], [0u8; 32]),
+    )
+    .await
+    .expect("oversized pre-auth read must not hang");
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => panic!("expected the pre-auth size cap to reject 4097 bytes"),
+    };
+    assert!(
+        matches!(err, ClientError::Transport { .. }) && err.to_string().contains("frame too large"),
+        "expected the pre-auth size cap to reject 4097 bytes, got {err}"
+    );
+    fake_server.await.unwrap();
+}
 
 /// No-hang revert oracle: every client-side exchange below is wrapped in this
 /// budget so a revert that makes the client await a reply forever fails the
@@ -414,4 +454,96 @@ async fn rv_client_de75addd_valid_proof_proceeds_and_sends_ticket_once() {
     drop(client_reader);
     drop(client_writer);
     server.await.expect("emulated server task panicked");
+}
+
+/// RV-CLIENT-35A189A9: typed error sources must survive. The pre-fix code
+/// stored `Transport(String)` / `Handshake(String)` / `Tls(String)` — flat
+/// strings produced with `e.to_string()`, so `.source()` was always `None`
+/// and the concrete io/SCRAM/rustls cause was unrecoverable.
+#[tokio::test]
+async fn rv_client_35a189a9_resume_eof_preserves_source() {
+    let (mut client_reader, mut client_writer, mut c2s, s2c) = wire_halves();
+    let server = tokio::spawn(async move {
+        let _proof_init = read_frame(&mut c2s, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .expect("client sends proof init");
+        drop(s2c);
+    });
+    let err = match resume_wire_exchange(
+        &mut client_reader,
+        &mut client_writer,
+        vec![0xAA; 48],
+        [0; 32],
+        [0; 32],
+    )
+    .await
+    {
+        Ok(_) => panic!("EOF while waiting for proof response"),
+        Err(err) => err,
+    };
+    assert!(err.to_string().contains("read resume_proof_ok"));
+    assert!(matches!(
+        err.source()
+            .and_then(|source| source.downcast_ref::<shamir_transport_tcp::framing::FrameError>()),
+        Some(shamir_transport_tcp::framing::FrameError::PeerEof)
+    ));
+    server.await.expect("server task");
+}
+
+#[test]
+fn rv_client_35a189a9_typed_sources_survive_transport_tls_handshake() {
+    // Transport: the real io::Error stays reachable through the chain.
+    let err = ClientError::transport(
+        "read resume ok",
+        shamir_transport_tcp::framing::FrameError::PeerEof,
+    );
+    assert!(err.to_string().contains("peer eof"));
+    assert!(matches!(
+        err.source()
+            .and_then(|e| e.downcast_ref::<shamir_transport_tcp::framing::FrameError>()),
+        Some(shamir_transport_tcp::framing::FrameError::PeerEof)
+    ));
+
+    // Transport: the real io::Error stays reachable through the chain.
+    let err = ClientError::transport(
+        "send auth_init",
+        shamir_transport_tcp::framing::FrameError::Io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "socket gone",
+        )),
+    );
+    let src = err.source().expect("transport must carry its io source");
+    let frame_src = src
+        .downcast_ref::<shamir_transport_tcp::framing::FrameError>()
+        .expect("transport source must stay a typed FrameError");
+    let io_src = match frame_src {
+        shamir_transport_tcp::framing::FrameError::Io(io) => io,
+        other => panic!("expected FrameError::Io, got {other:?}"),
+    };
+    assert_eq!(io_src.kind(), std::io::ErrorKind::BrokenPipe);
+    assert!(err.to_string().contains("send auth_init"));
+
+    // Handshake: the SCRAM model error stays reachable through the chain.
+    let scram = shamir_connect::common::Error::ServerAuthFailed;
+    let err = ClientError::handshake_with("process auth ok", scram);
+    let src = err.source().expect("handshake must carry its scram source");
+    assert!(
+        matches!(
+            src.downcast_ref::<shamir_connect::common::Error>(),
+            Some(shamir_connect::common::Error::ServerAuthFailed)
+        ),
+        "handshake source must stay a typed model::Error"
+    );
+
+    // Tls: `From<rustls::Error>` keeps the typed rustls error, not a string.
+    let err = ClientError::from(rustls::Error::General("bad cert".into()));
+    assert!(err.to_string().contains("bad cert"));
+    let src = err.source().expect("tls must carry its rustls source");
+    assert!(
+        matches!(
+            src.downcast_ref::<rustls::Error>(),
+            Some(rustls::Error::General(_))
+        ),
+        "tls source must stay a typed rustls::Error"
+    );
 }

@@ -143,10 +143,14 @@ impl ConsumedCounterStore for InMemoryConsumedCounters {
 /// time and reused across every resume. Rebuilding the key schedule per
 /// call (~10% of AES-GCM total time) is eliminated.
 pub struct ResumeConfig {
-    /// Current `ticket_key` for AES-GCM.
-    pub ticket_key: [u8; 32],
-    /// Optional previous `ticket_key` for 24h overlap.
-    pub ticket_key_previous: Option<[u8; 32]>,
+    /// Current `ticket_key` for AES-GCM. Private (RV-CONNECT-B11F48CA):
+    /// [`Self::ciphers`] permanently initializes its `OnceLock` caches, so a
+    /// public mutable key would let callers swap the key AFTER the caches
+    /// were warmed, leaving ciphers bound to the old key active. Set once at
+    /// construction; read via [`Self::ticket_key`] / [`Self::ticket_key_previous`].
+    ticket_key: [u8; 32],
+    /// Optional previous `ticket_key` for 24h overlap. Private, see above.
+    ticket_key_previous: Option<[u8; 32]>,
     /// Strict mode: refuse browser → native upgrade (spec §6.1).
     pub allow_browser_ticket_upgrade: bool,
     /// Refuse plain → TLS upgrade (spec §6.4).
@@ -174,6 +178,17 @@ impl ResumeConfig {
             cached_current: std::sync::OnceLock::new(),
             cached_previous: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Current ticket key (read-only view; keys are immutable after
+    /// construction — RV-CONNECT-B11F48CA).
+    pub fn ticket_key(&self) -> &[u8; 32] {
+        &self.ticket_key
+    }
+
+    /// Previous ticket key, if configured (read-only view).
+    pub fn ticket_key_previous(&self) -> Option<&[u8; 32]> {
+        self.ticket_key_previous.as_ref()
     }
 
     /// Get (lazily-constructed, then cached) AES-GCM ciphers for the current

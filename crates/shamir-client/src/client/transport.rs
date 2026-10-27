@@ -6,11 +6,11 @@ use std::cell::Cell;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::task::{Context, Poll};
 
 use serde::{Deserialize, Serialize};
-use shamir_collections::TFxMap;
+use shamir_collections::{TFxMap, THasher};
 use tokio::io::{AsyncWrite, WriteHalf};
 use tokio::net::TcpStream;
 #[cfg(test)]
@@ -25,7 +25,7 @@ use shamir_connect::common::push_envelope::PushEnvelope;
 
 use shamir_transport_tcp::framing::{read_frame_into, FrameError, MAX_FRAME_SIZE_DEFAULT};
 
-use crate::client::subscription::{PushSender, EARLY_BUFFER_CAP};
+use crate::client::subscription::{PushSender, EARLY_BUFFER_CAP, EARLY_BUFFER_TOTAL_CAP};
 use crate::error::{ClientError, CloseCause};
 
 /// [`Client`]'s write half, over whichever transport it connected with.
@@ -148,26 +148,67 @@ pub(crate) async fn connect_ipc(
 /// transport-level error.
 pub(crate) type PendingSender = oneshot::Sender<Result<Vec<u8>, ClientError>>;
 
-/// A closeable registry: `closed` is `Some(cause)` once shutdown ran; the
-/// invariant `closed.is_some() => map.is_empty()` holds under the registry
-/// lock. Contention model: O(1) insert/remove, never held across `.await`.
-pub(crate) struct Registry<K, V> {
-    pub(crate) closed: Option<CloseCause>,
-    pub(crate) map: TFxMap<K, V>,
+/// Monotonic close state (RV-CLIENT-B80C0D09): the cause is stored before
+/// the flag is raised, so Acquire readers observing the flag see the cause.
+#[derive(Default)]
+pub(crate) struct ClosedState {
+    flag: AtomicBool,
+    cause: OnceLock<CloseCause>,
 }
 
-/// Pending-request registry (request id → oneshot sender).
-pub(crate) type PendingMap = Arc<StdMutex<Registry<u32, PendingSender>>>;
+impl ClosedState {
+    /// Publish the terminal cause. Returns `true` only for the FIRST caller
+    /// (all later causes are dropped — first cause wins), making exactly one
+    /// [`Lifecycle::shutdown`] invocation the single drainer of both
+    /// registries.
+    pub(crate) fn publish(&self, cause: CloseCause) -> bool {
+        if self.cause.set(cause).is_err() {
+            return false;
+        }
+        self.flag.store(true, Ordering::Release);
+        true
+    }
 
-/// Subscription registry inner state: the close cause plus live senders and
-/// the early buffer. Contention model: O(1) insert/remove, never held across
-/// `.await` (push routing clones/buffers synchronously).
+    pub(crate) fn is_closed(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// The stored cause; `Some` iff closed. The `Acquire` flag load pairs
+    /// with the `Release` flag store that follows `OnceLock::set`, so the
+    /// `get` below always finds the cause once `is_closed()` held.
+    pub(crate) fn cause(&self) -> Option<CloseCause> {
+        if !self.is_closed() {
+            return None;
+        }
+        Some(
+            self.cause
+                .get()
+                .cloned()
+                .unwrap_or(CloseCause::ReaderCancelled),
+        )
+    }
+}
+
+/// Pending-request registry: request id → oneshot sender. `scc::HashMap` uses
+/// internal bucket synchronization. Close-vs-register protocol: the cause is
+/// published BEFORE the drain, so a registrant re-reads
+/// `closed.cause()` AFTER a successful insert — an insert that landed before
+/// the drain is resolved by it; one that lands after removes its own entry
+/// and fails with the published cause.
+pub(crate) struct PendingRegistry {
+    pub(crate) closed: ClosedState,
+    pub(crate) map: scc::HashMap<u32, PendingSender, THasher>,
+}
+
+/// Pending-request registry handle.
+pub(crate) type PendingMap = Arc<PendingRegistry>;
+
+/// Standard mutex guards the coherent subscription state; its contention model is one reader task plus rare subscribe calls per connection.
 pub(crate) struct SubsInner {
     pub(crate) closed: Option<CloseCause>,
     pub(crate) live: TFxMap<u64, PushSender>,
     pub(crate) early: TFxMap<u64, Vec<PushEnvelope>>,
-    /// Per-subscription termination channels: `shutdown` sends the typed
-    /// cause to every handle that was created while the client was open.
+    pub(crate) early_total: usize,
     pub(crate) terminal: TFxMap<u64, oneshot::Sender<CloseCause>>,
 }
 
@@ -175,8 +216,7 @@ pub(crate) type SubsMap = Arc<StdMutex<SubsInner>>;
 
 /// The ONE closeable lifecycle state shared by request registration,
 /// subscription registration and teardown (P0 C1). `closed_hint` is a FAST
-/// PATH ONLY (not authoritative); the authoritative state lives under the
-/// two registry locks, where check-open and insert are atomic.
+/// PATH ONLY (not authoritative); the authoritative lifecycle cause is in PendingRegistry.
 #[derive(Clone)]
 pub(crate) struct Lifecycle {
     pub(crate) pending: PendingMap,
@@ -194,14 +234,15 @@ pub(crate) struct Lifecycle {
 impl Lifecycle {
     pub(crate) fn new() -> Self {
         Self {
-            pending: Arc::new(StdMutex::new(Registry {
-                closed: None,
-                map: TFxMap::default(),
-            })),
+            pending: Arc::new(PendingRegistry {
+                closed: ClosedState::default(),
+                map: scc::HashMap::with_hasher(THasher::default()),
+            }),
             subs: Arc::new(StdMutex::new(SubsInner {
                 closed: None,
                 live: TFxMap::default(),
                 early: TFxMap::default(),
+                early_total: 0,
                 terminal: TFxMap::default(),
             })),
             closed_hint: Arc::new(AtomicBool::new(false)),
@@ -211,11 +252,7 @@ impl Lifecycle {
 
     /// The stored close cause, if the lifecycle is closed.
     pub(crate) fn cause(&self) -> Option<CloseCause> {
-        self.pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .closed
-            .clone()
+        self.pending.closed.cause()
     }
 
     /// Resolves with the close cause once [`Lifecycle::shutdown`] has run.
@@ -237,45 +274,42 @@ impl Lifecycle {
         cause
     }
 
-    /// Idempotent terminal transition; the FIRST cause wins. Takes both maps
-    /// under their locks, then resolves pending waiters, subscription
-    /// terminals and the watch channel OUTSIDE the locks, and drops every
-    /// PushSender + the early buffer, then raises `closed_hint`.
+    /// Idempotent terminal transition; the FIRST cause wins. Subscription
+    /// shutdown sends each terminal cause, then clears route/buffer state,
+    /// under the same mutex as registration and reader routing.
     pub(crate) fn shutdown(&self, cause: CloseCause) {
-        let waiters: Vec<PendingSender> = {
-            let mut reg = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-            if reg.closed.is_some() {
-                // Already closed — first cause wins, nothing to do.
-                return;
-            }
-            reg.closed = Some(cause.clone());
-            reg.map.drain().map(|(_, tx)| tx).collect()
-        };
-        // Terminal subscription teardown, all inside ONE critical section:
-        // each terminal oneshot is sent (synchronously — `send` never blocks)
-        // BEFORE the push senders are dropped, so no consumer can observe
-        // end-of-stream before its typed cause is deliverable. The lock is
-        // still never held across an `.await`.
+        if !self.pending.closed.publish(cause.clone()) {
+            // Already closed — first cause wins, nothing to do.
+            return;
+        }
         {
             let mut subs = self.subs.lock().unwrap_or_else(|p| p.into_inner());
-            if subs.closed.is_none() {
-                subs.closed = Some(cause.clone());
+            if subs.closed.is_some() {
+                return;
             }
-            let terminals: Vec<oneshot::Sender<CloseCause>> =
-                subs.terminal.drain().map(|(_, tx)| tx).collect();
-            for tx in terminals {
+            subs.closed = Some(cause.clone());
+            for tx in subs.terminal.drain().map(|(_, tx)| tx) {
                 let _ = tx.send(cause.clone());
             }
-            // Dropping the senders ends every subscriber's stream after its
-            // queued items; the early buffer dies with the connection.
+            debug_assert!(subs.closed.is_some());
             subs.live.clear();
             subs.early.clear();
+            subs.early_total = 0;
+            debug_assert_eq!(
+                subs.early_total,
+                subs.early.values().map(Vec::len).sum::<usize>()
+            );
         }
-        // `send_replace`, NOT `send`: stores the value even when no receiver
-        // has subscribed yet (tokio watch `send` fails and DROPS the value in
-        // that case — a lost wakeup for later `closed_wait` callers).
         self.closed_tx.send_replace(Some(cause.clone()));
         self.closed_hint.store(true, Ordering::Release);
+        let mut waiters: Vec<PendingSender> = Vec::new();
+        self.pending.map.retain_sync(|_, tx| {
+            // Move the sender out (oneshot::Sender is not Clone): leave a
+            // fresh throwaway channel behind — the entry is removed anyway.
+            let (dummy, _) = oneshot::channel();
+            waiters.push(std::mem::replace(tx, dummy));
+            false
+        });
         for tx in waiters {
             let _ = tx.send(Err(ClientError::ConnectionClosed(cause.clone())));
         }
@@ -419,6 +453,11 @@ pub(crate) struct LifecycleHooks {
 /// `Result<Vec<u8>, ClientError>`: `Ok(payload)` on success, the reader
 /// task's `ClientError` on a delivered error, `ConnectionClosed` if the
 /// sender was dropped, or `RequestTimeout` on deadline elapse.
+///
+/// The receive is raced against [`Lifecycle::closed_wait`]
+/// (RV-CLIENT-B80C0D09, belt-and-suspenders): even a hypothetically
+/// stranded pending entry can never hang the caller — closure unblocks it
+/// and the orphaned entry is removed.
 pub(crate) async fn await_pending_response(
     rx: oneshot::Receiver<Result<Vec<u8>, ClientError>>,
     timeout: Option<std::time::Duration>,
@@ -426,16 +465,26 @@ pub(crate) async fn await_pending_response(
     rid: u32,
 ) -> Result<Vec<u8>, ClientError> {
     let recv = match timeout {
-        None => rx.await,
-        Some(d) => match tokio::time::timeout(d, rx).await {
-            Ok(res) => res,
-            Err(_elapsed) => {
-                // Drop the now-orphaned pending entry so a late response for
-                // this rid is cleanly dropped instead of leaking a dead
-                // sender in the map.
-                let mut reg = state.pending.lock().unwrap_or_else(|p| p.into_inner());
-                reg.map.remove(&rid);
-                return Err(ClientError::RequestTimeout(d));
+        None => tokio::select! {
+            biased;
+            r = rx => r,
+            cause = state.closed_wait() => {
+                state.pending.map.remove_sync(&rid);
+                return Err(ClientError::ConnectionClosed(cause));
+            }
+        },
+        Some(d) => tokio::select! {
+            biased;
+            r = tokio::time::timeout(d, rx) => match r {
+                Ok(res) => res,
+                Err(_elapsed) => {
+                    state.pending.map.remove_sync(&rid);
+                    return Err(ClientError::RequestTimeout(d));
+                }
+            },
+            cause = state.closed_wait() => {
+                state.pending.map.remove_sync(&rid);
+                return Err(ClientError::ConnectionClosed(cause));
             }
         },
     };
@@ -449,7 +498,7 @@ pub(crate) async fn await_pending_response(
 }
 
 /// Background reader loop.  Owns the read half; demuxes frames to pending
-/// waiters and live/early subscription channels (under the ONE subs lock).
+/// waiters and live/early subscription channels via the coherent subscription mutex.
 ///
 /// A [`ShutdownGuard`] is installed BEFORE the loop: EOF and I/O errors set
 /// their cause explicitly; abort/cancel/panic fall back to
@@ -493,31 +542,44 @@ pub(crate) async fn reader_task<R>(
             None => {
                 // Not a response/error envelope — try push frame.
                 if let Ok(envelope) = rmp_serde::from_slice::<PushEnvelope>(&frame_buf) {
-                    // ONE subs lock: route to the live sender or buffer the
-                    // push early — atomic w.r.t. subscribe_push and shutdown.
-                    // `try_send` is non-blocking, so the lock is never held
-                    // across an `.await`.
+                    // Route to live sender or buffer early under the shared subscription mutex.
                     enum PushAction {
                         Live(Result<(), tokio::sync::mpsc::error::TrySendError<PushEnvelope>>),
                         Buffered,
                     }
-                    let action = {
-                        let mut subs = state.subs.lock().unwrap_or_else(|p| p.into_inner());
-                        match subs.live.get(&envelope.sub).cloned() {
-                            Some(tx) => PushAction::Live(tx.try_send(envelope)),
-                            None => {
-                                let entry = subs.early.entry(envelope.sub).or_default();
-                                if entry.len() < EARLY_BUFFER_CAP {
-                                    entry.push(envelope);
-                                } else {
-                                    tracing::debug!(
-                                        "reader_task: early buffer full for sub={}, dropping",
-                                        envelope.sub
-                                    );
-                                }
-                                PushAction::Buffered
+                    // One reader task and rare subscribe calls per connection; this mutex makes route/install/flush atomic.
+                    let mut subs = state.subs.lock().unwrap_or_else(|p| p.into_inner());
+                    debug_assert_eq!(
+                        subs.early_total,
+                        subs.early.values().map(Vec::len).sum::<usize>()
+                    );
+                    let action = if let Some(tx) = subs.live.get(&envelope.sub) {
+                        PushAction::Live(tx.try_send(envelope))
+                    } else if subs.closed.is_none() {
+                        if subs.early_total < EARLY_BUFFER_TOTAL_CAP {
+                            let items = subs.early.entry(envelope.sub).or_default();
+                            if items.len() < EARLY_BUFFER_CAP {
+                                items.push(envelope);
+                                subs.early_total += 1;
+                            } else {
+                                tracing::debug!(
+                                    "reader_task: early buffer full for sub {}; push dropped",
+                                    envelope.sub
+                                );
                             }
+                        } else {
+                            tracing::debug!(
+                                "reader_task: aggregate early buffer full; push for sub {} dropped",
+                                envelope.sub
+                            );
                         }
+                        debug_assert_eq!(
+                            subs.early_total,
+                            subs.early.values().map(Vec::len).sum::<usize>()
+                        );
+                        PushAction::Buffered
+                    } else {
+                        PushAction::Buffered
                     };
                     if let PushAction::Live(res) = action {
                         match res {
@@ -546,12 +608,7 @@ pub(crate) async fn reader_task<R>(
 
         let (rid, outcome) = match result {
             DemuxResult::Response { rid, payload } => (rid, Ok(payload)),
-            DemuxResult::Error { rid, error } => (
-                rid,
-                Err(ClientError::Protocol(format!(
-                    "server error envelope: {error}"
-                ))),
-            ),
+            DemuxResult::Error { rid, error } => (rid, Err(ClientError::Server { code: error })),
         };
 
         let rid = match rid {
@@ -563,11 +620,7 @@ pub(crate) async fn reader_task<R>(
             }
         };
 
-        let sender = {
-            // SAFETY of lock: std::sync::Mutex, no .await while held.
-            let mut reg = state.pending.lock().unwrap_or_else(|p| p.into_inner());
-            reg.map.remove(&rid)
-        };
+        let sender = state.pending.map.remove_sync(&rid).map(|(_, tx)| tx);
 
         match sender {
             Some(tx) => {

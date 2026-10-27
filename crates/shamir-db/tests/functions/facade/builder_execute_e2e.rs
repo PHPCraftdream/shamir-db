@@ -57,7 +57,10 @@ impl ShamirFunction for RunBatchProc {
         let gw = ctx
             .db_gateway()
             .ok_or_else(|| FunctionError::Compute("no db gateway".to_string()))?;
-        let resp_bytes = gw.execute(&bytes).await.map_err(FunctionError::Compute)?;
+        let resp_bytes = gw
+            .execute(&bytes)
+            .await
+            .map_err(|e| FunctionError::Compute(e.to_string()))?;
 
         // Decode the response.
         let resp: BatchResponse = rmp_serde::from_slice(&resp_bytes)

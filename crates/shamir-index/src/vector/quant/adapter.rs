@@ -105,6 +105,14 @@ pub trait VectorAdapter: Send + Sync {
     /// EITHER every row is applied OR none are (atomic on dim-mismatch —
     /// all dims are validated up front before the first insert).
     async fn upsert_batch(&self, items: &[(RecordId, Vec<f32>)]) -> Result<(), VectorError> {
+        for (_, vec) in items {
+            if vec.len() != self.dim() as usize {
+                return Err(VectorError::DimMismatch {
+                    expected: self.dim(),
+                    got: u32::try_from(vec.len()).unwrap_or(u32::MAX),
+                });
+            }
+        }
         for (rid, vec) in items {
             self.upsert(*rid, vec).await?;
         }

@@ -289,11 +289,13 @@ async fn f77_supports_atomic_transact_is_honest_for_every_backend() {
         hard-wired false and the honesty signal works both ways)"
     );
 
-    // --- CachedStore delegation: surfaces inner's flag ---------------
-    // The cache layer delegates to inner. Wrapping a non-atomic
-    // InMemoryStore must surface false; wrapping the genuinely-atomic
-    // mock must surface true. Proves the delegation chain does not
-    // silently invent or drop the capability signal.
+    // --- CachedStore: capability WITHDRAWN at the cache layer --------
+    // RV-STORAGE-007DEF6B: the cache layer republishes a committed
+    // transaction's cache entries ONE KEY AT A TIME while cache-hit reads
+    // trust an unfenced mirror probe, so whole-batch visibility is NOT
+    // guaranteed even when the inner backend is genuinely atomic. The
+    // flag is therefore NOT re-derived from inner: CachedStore reports
+    // `false` for every inner (F-77 honesty contract, cache layer).
     use crate::storage_cached::CachedStore;
     let cached_over_mem: Arc<dyn Store> = Arc::new(
         CachedStore::new_sync(Arc::new(InMemoryStore::new()))
@@ -302,14 +304,15 @@ async fn f77_supports_atomic_transact_is_honest_for_every_backend() {
     );
     assert!(
         !cached_over_mem.supports_atomic_transact(),
-        "CachedStore(InMemoryStore) must report false via delegation"
+        "CachedStore(InMemoryStore) must report false"
     );
     let cached_over_atomic: Arc<dyn Store> =
         Arc::new(CachedStore::new_sync(atomic_mock.clone()).await.unwrap());
     assert!(
-        cached_over_atomic.supports_atomic_transact(),
-        "CachedStore(atomic) must report true via delegation — the flag \
-         must propagate truthfully through wrapper layers"
+        !cached_over_atomic.supports_atomic_transact(),
+        "CachedStore must NOT advertise atomic transact visibility even \
+         over a genuinely-atomic inner: the cache layer itself publishes \
+         the batch per-key with unfenced cache-hit reads"
     );
 
     // --- The mirror-inside-MirroredStore's flag is IRRELEVANT --------

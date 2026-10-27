@@ -376,7 +376,10 @@ impl IndexBackend for FunctionalBackend {
         let prefix = self.descriptor.id.to_le_bytes();
         let entries = self.scan_postings_by_prefix(&prefix).await?;
         for (key_bytes, _) in entries {
-            let _ = self.store.remove(key_bytes).await;
+            self.store
+                .remove(key_bytes)
+                .await
+                .map_err(|e| IndexError::Storage(e.to_string()))?;
         }
         Ok(())
     }
