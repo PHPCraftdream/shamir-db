@@ -57,10 +57,16 @@ impl RuntimeTunables {
         self.io_frame_buffer_cap.store(v, Ordering::Relaxed);
     }
 
-    /// Override (rare): store a new value (takes effect on the next read).
+    /// Override (rare): stores the interval rounded up to the next whole
+    /// millisecond, preserving every nonzero interval. Sub-millisecond values
+    /// therefore become 1 ms; values beyond the `u64` millisecond range clamp
+    /// to `u64::MAX` ms. Zero remains a valid disabled/immediate interval.
     pub fn set_server_poll_interval(&self, v: Duration) {
+        let millis = v.as_millis();
+        let millis = millis.saturating_add(u128::from(!v.subsec_nanos().is_multiple_of(1_000_000)));
+        let millis = u64::try_from(millis).unwrap_or(u64::MAX);
         self.server_poll_interval_ms
-            .store(v.as_millis() as u64, Ordering::Relaxed);
+            .store(millis, Ordering::Relaxed);
     }
 
     /// Zero-overhead read: single relaxed atomic load.

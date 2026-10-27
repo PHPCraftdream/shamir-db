@@ -79,44 +79,100 @@ pub type TMap<K, V> = IndexMap<K, V, THasher>;
 /// deserialization input are ignored after the first occurrence.
 pub type TSet<T> = IndexSet<T, THasher>;
 
+/// Create an empty insertion-ordered map using [`THasher`].
 pub fn new_map<K: Eq + Hash, V>() -> TMap<K, V> {
     IndexMap::with_hasher(THasher::default())
 }
 
+/// Create an insertion-ordered map with the requested initial capacity (`wc`).
+/// This is an infallible reservation: it panics on capacity overflow and
+/// aborts the process on allocation failure. Use [`try_new_map_wc`] when the capacity
+/// comes from untrusted input.
 pub fn new_map_wc<K: Eq + Hash, V>(capacity: usize) -> TMap<K, V> {
     IndexMap::with_capacity_and_hasher(capacity, THasher::default())
 }
 
+/// Try to reserve an insertion-ordered map's initial capacity. Returns
+/// `indexmap::TryReserveError` on capacity overflow or allocator failure.
+pub fn try_new_map_wc<K: Eq + Hash, V>(
+    capacity: usize,
+) -> Result<TMap<K, V>, indexmap::TryReserveError> {
+    let mut map = new_map();
+    map.try_reserve(capacity)?;
+    Ok(map)
+}
+
+/// Create an empty insertion-ordered set using [`THasher`].
 pub fn new_set<V: Eq + Hash>() -> TSet<V> {
     IndexSet::with_hasher(THasher::default())
 }
 
+/// Create an insertion-ordered set with the requested initial capacity (`wc`).
+/// This is an infallible reservation: it panics on capacity overflow and
+/// aborts the process on allocation failure. Use [`try_new_set_wc`] when the capacity
+/// comes from untrusted input.
 pub fn new_set_wc<V: Eq + Hash>(capacity: usize) -> TSet<V> {
     IndexSet::with_capacity_and_hasher(capacity, THasher::default())
 }
 
-/// Order-agnostic map: `std::HashMap` with `FxHasher`. ~15-20% faster than
-/// `TMap` for hot-path lookups that do not need insertion-order iteration.
+/// Try to reserve an insertion-ordered set's initial capacity. Returns
+/// `indexmap::TryReserveError` on capacity overflow or allocator failure.
+pub fn try_new_set_wc<V: Eq + Hash>(capacity: usize) -> Result<TSet<V>, indexmap::TryReserveError> {
+    let mut set = new_set();
+    set.try_reserve(capacity)?;
+    Ok(set)
+}
+
+/// Order-agnostic map using `FxHasher`; see [`THasher`] for the threat model.
 pub type TFxMap<K, V> = HashMap<K, V, THasher>;
 
-/// Order-agnostic set: `std::HashSet` with `FxHasher`. ~15-20% faster than
-/// `TSet` for hot-path membership tests that do not need insertion order.
+/// Order-agnostic set using `FxHasher`; see [`THasher`] for the threat model.
 pub type TFxSet<T> = HashSet<T, THasher>;
 
+/// Create an empty order-agnostic map using [`THasher`].
 pub fn new_fx_map<K: Eq + Hash, V>() -> TFxMap<K, V> {
     HashMap::with_hasher(THasher::default())
 }
 
+/// Create an order-agnostic map with the requested initial capacity (`wc`).
+/// This is an infallible reservation: it panics on capacity overflow and
+/// aborts the process on allocation failure. Use [`try_new_fx_map_wc`] when the capacity
+/// comes from untrusted input.
 pub fn new_fx_map_wc<K: Eq + Hash, V>(capacity: usize) -> TFxMap<K, V> {
     HashMap::with_capacity_and_hasher(capacity, THasher::default())
 }
 
+/// Try to reserve capacity for an order-agnostic map. Returns
+/// `std::collections::TryReserveError` on capacity overflow or allocator failure.
+pub fn try_new_fx_map_wc<K: Eq + Hash, V>(
+    capacity: usize,
+) -> Result<TFxMap<K, V>, std::collections::TryReserveError> {
+    let mut map = new_fx_map();
+    map.try_reserve(capacity)?;
+    Ok(map)
+}
+
+/// Create an empty order-agnostic set using [`THasher`].
 pub fn new_fx_set<T: Eq + Hash>() -> TFxSet<T> {
     HashSet::with_hasher(THasher::default())
 }
 
+/// Create an order-agnostic set with the requested initial capacity (`wc`).
+/// This is an infallible reservation: it panics on capacity overflow and
+/// aborts the process on allocation failure. Use [`try_new_fx_set_wc`] when the capacity
+/// comes from untrusted input.
 pub fn new_fx_set_wc<T: Eq + Hash>(capacity: usize) -> TFxSet<T> {
     HashSet::with_capacity_and_hasher(capacity, THasher::default())
+}
+
+/// Try to reserve capacity for an order-agnostic set. Returns
+/// `std::collections::TryReserveError` on capacity overflow or allocator failure.
+pub fn try_new_fx_set_wc<T: Eq + Hash>(
+    capacity: usize,
+) -> Result<TFxSet<T>, std::collections::TryReserveError> {
+    let mut set = new_fx_set();
+    set.try_reserve(capacity)?;
+    Ok(set)
 }
 
 #[cfg(test)]
