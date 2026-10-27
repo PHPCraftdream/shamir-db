@@ -27,8 +27,8 @@ pub enum ResponseError {
     },
     /// A record failed to deserialize into the requested type `T`.
     ///
-    /// The source is an `rmp_serde` decode error produced when the msgpack
-    /// round-trip through `QueryValue` cannot be mapped onto `T`.
+    /// The source is a [`WireError`] from the msgpack round-trip through
+    /// `QueryValue`: encoding the record or decoding it into `T` failed.
     Deserialize {
         /// Alias whose record failed.
         alias: String,
