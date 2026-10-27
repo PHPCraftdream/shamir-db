@@ -41,6 +41,7 @@
 
 mod kind;
 mod lens;
+mod probe_key;
 mod record_ref;
 mod record_value;
 mod scalar_ref;
@@ -50,6 +51,7 @@ pub(crate) use lens::skip_value;
 #[cfg(test)]
 pub(crate) use lens::{reset_scan_steps, scan_steps};
 pub use lens::{FieldIndex, RecordView, RecordViewError, MAX_MSGPACK_DEPTH};
+pub use probe_key::ProbeKey;
 pub use record_ref::{HavingView, RecordRef};
 pub use record_value::{RawSeq, RawSeqIter, RecordValue};
 pub use scalar_ref::{scalar_ref_cmp, scalar_ref_cmp_qv, scalar_ref_numeric_eq, ScalarRef};
