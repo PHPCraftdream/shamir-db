@@ -312,13 +312,9 @@ impl TableManager {
                         // `count_total` counter.
                         topk_total += 1;
                         let qv = match shamir_types::record_view::RecordView::new(&bytes) {
-                            Ok(view) => {
-                                topk_proj.as_ref().unwrap().project_value(&view, interner)?
-                            }
+                            Ok(view) => topk_proj.as_ref().unwrap().project_value(&view, interner),
                             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                                Ok(iv) => {
-                                    topk_proj.as_ref().unwrap().project_value(&iv, interner)?
-                                }
+                                Ok(iv) => topk_proj.as_ref().unwrap().project_value(&iv, interner),
                                 Err(_) => {
                                     corrupt.push(crate::query::read::CorruptRecordRef {
                                         table: self.name().to_string(),

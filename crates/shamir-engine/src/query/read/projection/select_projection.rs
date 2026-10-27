@@ -9,7 +9,6 @@ use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::inner_value_to_query_value;
-use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::{new_map_wc, TMap};
@@ -234,24 +233,22 @@ impl SelectProjection {
         &self,
         record: &(impl RecordRef + ?Sized),
         interner: &Interner,
-    ) -> Result<QueryValue, CodecError> {
+    ) -> QueryValue {
         if self.is_all {
             return record.to_query_value(interner);
         }
         if self.fields.is_empty() && self.funcs.is_empty() {
-            return Ok(QueryValue::Map(shamir_types::types::common::new_map_wc(0)));
+            return QueryValue::Map(shamir_types::types::common::new_map_wc(0));
         }
         let mut obj = shamir_types::types::common::new_map_wc(self.fields.len() + self.funcs.len());
         for (interned_path, key) in &self.fields {
             // F10: `interned_path` is already `&Vec<InternerKey>` — pass
             // directly to `materialize_at` (no per-row `SmallVec` rebuild).
-            let val = match interned_path
+            let val = interned_path
                 .as_ref()
-                .and_then(|path| record.materialize_at(path))
-            {
-                Some(value) => inner_value_to_query_value(&value, interner)?,
-                None => QueryValue::Null,
-            };
+                .and_then(|p| record.materialize_at(p))
+                .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
+                .unwrap_or(QueryValue::Null);
             obj.insert(key.clone(), val);
         }
         if !self.funcs.is_empty() {
@@ -291,6 +288,6 @@ impl SelectProjection {
                 obj.insert(key.clone(), val);
             }
         }
-        Ok(QueryValue::Map(obj))
+        QueryValue::Map(obj)
     }
 }

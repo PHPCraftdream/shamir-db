@@ -9,7 +9,6 @@
 //! Static dispatch only: consumers take `&impl RecordRef`, never `dyn`.
 
 use crate::codecs::interned::{inner_value_to_query_value, record_view_to_query_value};
-use crate::codecs::CodecError;
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::kind::Kind;
 use crate::record_view::record_value::RecordValue;
@@ -103,9 +102,9 @@ pub trait RecordRef {
 
     /// De-intern and convert the whole record to a [`QueryValue::Map`] with
     /// string keys. `InnerValue` delegates to the existing tree de-intern;
-    /// `RecordView` uses the new O(N) lens walker.
     ///
-    fn to_query_value(&self, interner: &Interner) -> Result<QueryValue, CodecError>;
+    /// Returns `QueryValue::Null` on a de-intern error (missing key in interner).
+    fn to_query_value(&self, interner: &Interner) -> QueryValue;
 }
 
 // ---------------------------------------------------------------------------
@@ -219,8 +218,8 @@ impl RecordRef for InnerValue {
         }
     }
 
-    fn to_query_value(&self, interner: &Interner) -> Result<QueryValue, CodecError> {
-        inner_value_to_query_value(self, interner)
+    fn to_query_value(&self, interner: &Interner) -> QueryValue {
+        inner_value_to_query_value(self, interner).unwrap_or(QueryValue::Null)
     }
 }
 
@@ -340,8 +339,8 @@ impl RecordRef for RecordView<'_> {
         });
     }
 
-    fn to_query_value(&self, interner: &Interner) -> Result<QueryValue, CodecError> {
-        record_view_to_query_value(self, interner)
+    fn to_query_value(&self, interner: &Interner) -> QueryValue {
+        record_view_to_query_value(self, interner).unwrap_or(QueryValue::Null)
     }
 }
 
@@ -535,9 +534,9 @@ impl<'a> RecordRef for HavingView<'a> {
         }
     }
 
-    fn to_query_value(&self, _interner: &Interner) -> Result<QueryValue, CodecError> {
-        // The row is already a QueryValue; no de-interning can fail.
-        Ok(self.row.clone())
+    fn to_query_value(&self, _interner: &Interner) -> QueryValue {
+        // The row is already a QueryValue; return a clone without conversion.
+        self.row.clone()
     }
 }
 

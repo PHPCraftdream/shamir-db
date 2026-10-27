@@ -403,8 +403,8 @@ fn select_projection_caches_field_ref_and_evaluates_per_record() {
     let record_a = make_record_2(&interner, "alice", 0);
     let record_b = make_record_2(&interner, "bob", 0);
 
-    let qval_a = proj.project_value(&record_a, &interner).unwrap();
-    let qval_b = proj.project_value(&record_b, &interner).unwrap();
+    let qval_a = proj.project_value(&record_a, &interner);
+    let qval_b = proj.project_value(&record_b, &interner);
 
     match &qval_a {
         QueryValue::Map(m) => {

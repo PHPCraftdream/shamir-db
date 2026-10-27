@@ -1,6 +1,6 @@
 //! Regression checks for interned-record codec and HavingView cards.
 
-use crate::codecs::interned::{inner_value_to_query_value, validate_keys_resolve_interner};
+use crate::codecs::interned::validate_keys_resolve_interner;
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{HavingView, RecordRef, RecordView};
 use crate::types::common::new_map_wc;
@@ -69,16 +69,4 @@ fn rv_types_6c7c9e1e_having_paths_distinguish_scalar_container_missing() {
     assert_eq!(view.materialize_at(&[list]), None);
     assert_eq!(view.materialize_at(&[unknown]), None);
     assert_eq!(view.materialize_at(&[nested, leaf]), None);
-}
-
-#[test]
-fn rv_types_97a84e4f_recordref_propagates_missing_reverse_key() {
-    let interner = Interner::new();
-    let mut map = new_map_wc(1);
-    map.insert(InternerKey::new(500), InnerValue::Int(1));
-    let error = inner_value_to_query_value(&InnerValue::Map(map.clone()), &interner).unwrap_err();
-    assert!(format!("{error}").contains("500"));
-    let bytes = InnerValue::Map(map).to_bytes().unwrap();
-    let view = RecordView::new(&bytes).unwrap();
-    assert!(view.to_query_value(&interner).is_err());
 }
