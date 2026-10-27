@@ -86,6 +86,9 @@ pub struct SystemStore {
     /// Test-only count of function-catalogue reads.
     #[cfg(test)]
     function_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only count of validator-catalogue reads.
+    #[cfg(test)]
+    validator_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Build a `QueryValue::Map` with a single string-keyed entry (for simple
@@ -153,11 +156,30 @@ impl SystemStore {
             function_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             group_names: Arc::new(ArcSwapOption::empty()),
             group_names_rebuild: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            validator_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         store.rebuild_group_names().await;
         Ok(store)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_validator_catalogue_reads(&self) {
+        self.validator_catalogue_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validator_catalogue_read_count(&self) -> usize {
+        self.validator_catalogue_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_validator_catalogue_read(&self) {
+        self.validator_catalogue_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     #[cfg(test)]
     pub(crate) fn reset_function_catalogue_reads(&self) {
         self.function_catalogue_reads

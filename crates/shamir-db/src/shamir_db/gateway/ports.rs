@@ -3,7 +3,7 @@
 //!
 //! shamir-db consumes opaque `principal64` ids in `Actor`/owner/group-member
 //! positions and never authenticates anyone itself. The two traits here are
-//! the narrow injected surface lets the engine resolve and enumerate
+//! the narrow injected surface that lets the engine resolve and enumerate
 //! principals for introspection (`access_tree`, `List`, owner-delegation
 //! scope lookup) and drive user-administration writes through the real
 //! durable directory instead of its own historically-ineffective Store B.
@@ -37,7 +37,7 @@ pub enum PortErrorKind {
     Other,
 }
 
-/// Typed user administration error with an optional source error retained for diagnostics.
+/// Typed user administration error.
 #[derive(Debug)]
 pub struct PortError {
     kind: PortErrorKind,
@@ -61,6 +61,18 @@ impl PortError {
 
     pub fn kind(&self) -> PortErrorKind {
         self.kind
+    }
+}
+
+impl From<String> for PortError {
+    fn from(message: String) -> Self {
+        Self::other(message)
+    }
+}
+
+impl From<&str> for PortError {
+    fn from(message: &str) -> Self {
+        Self::other(message)
     }
 }
 

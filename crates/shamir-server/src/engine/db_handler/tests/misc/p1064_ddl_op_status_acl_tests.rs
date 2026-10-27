@@ -25,6 +25,7 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::wire::{DbRequest, DbResponse};
+use shamir_types::types::record_id::RecordId;
 
 use crate::db_handler::handler::ShamirDbHandler;
 
@@ -129,6 +130,24 @@ fn get_ddl_op_status_req(op_id: &str) -> DbRequest {
         table: "items".to_string(),
         op_id: op_id.to_string(),
     }
+}
+
+#[tokio::test]
+async fn rv_db_48da8907_missing_table_status_uses_not_found_code() {
+    let (handler, _) = build_handler_with_dropped_index().await;
+    let alice = alice_session();
+    let response = send(
+        &handler,
+        &alice,
+        DbRequest::GetDdlOpStatus {
+            db: "app".into(),
+            repo: "main".into(),
+            table: "missing".into(),
+            op_id: RecordId::system("never_existed").to_string(),
+        },
+    )
+    .await;
+    assert!(matches!(response, DbResponse::Error { code, .. } if code == "not_found"));
 }
 
 /// An actor with NO access to the table must NOT be able to poll a REAL,

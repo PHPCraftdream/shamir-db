@@ -182,6 +182,28 @@ fn parse_kind_fail_safe() {
 }
 
 #[tokio::test]
+async fn rv_db_f19ee56c_list_validators_with_kind_loads_catalogue_once() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    for name in ["val_a", "val_b", "val_c"] {
+        shamir
+            .register_native_validator(name, false, |_, _, _| {
+                shamir_engine::validator::Validation::accept()
+            })
+            .await
+            .unwrap();
+    }
+    let store = shamir.system_store();
+    store.reset_validator_catalogue_reads();
+    let listed = shamir.list_validators_with_kind().await.unwrap();
+    assert_eq!(store.validator_catalogue_read_count(), 1);
+    for name in ["val_a", "val_b", "val_c"] {
+        assert!(listed.iter().any(|(_, listed_name, kind)| {
+            listed_name == name && *kind == ArtifactKind::Native
+        }));
+    }
+}
+
+#[tokio::test]
 async fn rv_db_f19ee56c_list_functions_with_kind_loads_catalogue_once() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     for name in ["fn_a", "fn_b", "fn_c"] {

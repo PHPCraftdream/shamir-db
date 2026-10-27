@@ -44,7 +44,15 @@ pub(super) fn admin_result_with_op_id(
     data: QueryValue,
     op_id: RecordId,
 ) -> Result<QueryResult, BatchError> {
-    let completed_at = system_time_to_unix_millis(std::time::SystemTime::now())?;
+    admin_result_with_op_id_at(data, op_id, std::time::SystemTime::now())
+}
+
+pub(super) fn admin_result_with_op_id_at(
+    data: QueryValue,
+    op_id: RecordId,
+    now: std::time::SystemTime,
+) -> Result<QueryResult, BatchError> {
+    let completed_at = system_time_to_unix_millis(now).ok();
     Ok(QueryResult {
         receipt: None,
         records: vec![QueryRecord::Direct(data)],
@@ -61,7 +69,7 @@ pub(super) fn admin_result_with_op_id(
         versions: None,
         corrupt_records: Vec::new(),
         op_id: Some(op_id),
-        ddl_status: Some(DdlOpState::Succeeded { completed_at }),
+        ddl_status: completed_at.map(|completed_at| DdlOpState::Succeeded { completed_at }),
     })
 }
 
