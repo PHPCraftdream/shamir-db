@@ -49,7 +49,10 @@ async fn insert_row(shamir: &ShamirDb, db: &str, repo: &str, name: &str, age: i6
             .row(doc! { "name" => name, "age" => age }),
     );
     shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -59,7 +62,12 @@ async fn read_users(shamir: &ShamirDb, db: &str, repo: &str) -> Result<BatchResp
     let mut b = Batch::new();
     b.id(9);
     b.query("r", Query::with_repo(repo, "users"));
-    shamir.execute(db, &b.to_request_via_msgpack()).await
+    shamir
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
 }
 
 /// Create ONE Pull profile over `testdb/main` plus an ACTIVE subscription
@@ -77,7 +85,10 @@ async fn create_profile_and_subscription(shamir: &ShamirDb, sub: &str, profile: 
     );
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -121,7 +132,10 @@ async fn drop_db_cascade_from_session_db_spares_session_db() {
             .expect("build op"),
     );
     shamir
-        .execute("sessdb", &b.to_request_via_msgpack())
+        .execute(
+            "sessdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -155,7 +169,10 @@ async fn drop_repo_over_bound_destination_refused_with_typed_code() {
         drop_repo("main").hmac("test").build().expect("build op"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -185,7 +202,10 @@ async fn rename_repo_over_bound_destination_preserves_typed_code() {
     b.id(3);
     b.op("rename", rename_repo("main", "main2"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -222,7 +242,10 @@ async fn drop_quarantined_subscription_refused_with_typed_code() {
             .expect("build op"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -269,7 +292,10 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
             .expect("build op"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -286,7 +312,10 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
         drop_repo("main").hmac("test").build().expect("build op"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
@@ -303,7 +332,10 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
             .expect("build op"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
@@ -313,7 +345,10 @@ async fn prepublished_quarantine_cache_blocks_destination_lifecycle() {
     b.id(6);
     b.op("rename", rename_repo("main", "main2"));
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), Some("replication_destination_bound"), "{err}");
@@ -367,7 +402,10 @@ async fn drop_subscription_refused_when_any_bound_destination_is_quarantined() {
         .await
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -392,7 +430,10 @@ async fn drop_subscription_refused_when_any_bound_destination_is_quarantined() {
             .expect("build op"),
     );
     let err = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -441,7 +482,10 @@ async fn blocker_quarantined_flag_covers_any_matching_pending_destination() {
     );
     b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

@@ -51,7 +51,7 @@ async fn drop_index_returns_op_id_and_status() {
             .build()
             .expect("valid DROP INDEX operation"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let result = &resp.results["d"];
@@ -96,7 +96,7 @@ async fn rename_index_returns_op_id_and_status() {
         "r",
         ddl::rename_index("items", "idx_city", "idx_city_renamed").repo("main"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let result = &resp.results["r"];
@@ -135,7 +135,7 @@ async fn poll_finds_correct_op_status_record() {
             .build()
             .expect("valid DROP INDEX operation"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let result = &resp.results["d"];
@@ -208,7 +208,7 @@ async fn poll_right_op_id_wrong_table_returns_none() {
             .build()
             .expect("valid DROP INDEX operation"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let result = &resp.results["d"];
@@ -271,7 +271,10 @@ async fn two_drop_index_dispatches_on_one_table_mint_distinct_pollable_op_ids() 
             .expect("valid DROP INDEX operation"),
     );
     let resp1 = shamir
-        .execute("testdb", &b1.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b1.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let op_id_city = *resp1.results["d"]
@@ -290,7 +293,10 @@ async fn two_drop_index_dispatches_on_one_table_mint_distinct_pollable_op_ids() 
             .expect("valid DROP INDEX operation"),
     );
     let resp2 = shamir
-        .execute("testdb", &b2.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b2.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let op_id_zip = *resp2.results["d"]

@@ -45,9 +45,14 @@ pub(super) async fn home(complete: bool) -> ShamirDb {
             ReplMode::ReadOnly,
         ),
     );
-    home.execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    home.execute(
+        "app",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     home
 }
 
@@ -55,9 +60,14 @@ async fn create(home: &ShamirDb) {
     let mut batch = Batch::new();
     batch.id(2);
     batch.op("sub", paused_subscription("sub", "peer", "pub", "prof"));
-    home.execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    home.execute(
+        "app",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 }
 
 /// Metadata refusals are observed through the real repository and catalogue;

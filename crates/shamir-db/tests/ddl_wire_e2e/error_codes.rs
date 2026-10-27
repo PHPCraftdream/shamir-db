@@ -21,7 +21,7 @@ async fn error_code_exists_create_db_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_db("op", ddl::create_db("dup_db"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir.execute("bootstrap", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -40,7 +40,7 @@ async fn error_code_exists_create_table_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("op", ddl::create_table("users").repo("main"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -59,7 +59,7 @@ async fn error_code_exists_create_repo_duplicate() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("op", ddl::create_repo("main").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -84,7 +84,7 @@ async fn error_code_still_referenced_drop_db() {
             .build()
             .expect("build drop_db"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -109,7 +109,7 @@ async fn error_code_still_referenced_drop_repo() {
             .build()
             .expect("build drop_repo"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -143,7 +143,7 @@ async fn error_code_access_denied_ddl() {
             .expect("build chmod"),
     );
     b.after(&chmod_h, &chown_h);
-    let chmod_req = b.to_request_via_msgpack();
+    let chmod_req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &chmod_req).await.unwrap();
 
     // Non-owner user tries to create a table (needs traversal through db).
@@ -151,7 +151,7 @@ async fn error_code_access_denied_ddl() {
     let mut b = Batch::new();
     b.id(2);
     b.create_table("op", ddl::create_table("forbidden_table").repo("main"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute_as(user_actor, "testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -182,7 +182,7 @@ async fn error_code_not_found_grant_role_user() {
             .build()
             .expect("build grant_role"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -207,7 +207,7 @@ async fn error_code_exists_create_index_duplicate() {
             .repo("main")
             .fields(vec![vec!["name".to_string()]]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Try to create the same index again.

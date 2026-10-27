@@ -35,7 +35,10 @@ async fn setup() -> ShamirDb {
             .tables(["items"]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     // G.4c: new objects default to enforced (0o700, System). Open the db +
@@ -73,7 +76,10 @@ async fn restrict_table(shamir: &ShamirDb) {
             .expect("build Chmod"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -97,7 +103,10 @@ async fn restrict_repo(shamir: &ShamirDb) {
             .expect("build Chmod"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -121,7 +130,10 @@ async fn restrict_db(shamir: &ShamirDb) {
             .expect("build Chmod"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -134,7 +146,11 @@ macro_rules! assert_access_denied {
         b.id("t");
         b.op($op_key, $op);
         let err = $shamir
-            .execute_as($actor, "testdb", &b.to_request_via_msgpack())
+            .execute_as(
+                $actor,
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -154,7 +170,11 @@ macro_rules! assert_permitted {
         b.id("t");
         b.op($op_key, $op);
         let result = $shamir
-            .execute_as($actor, "testdb", &b.to_request_via_msgpack())
+            .execute_as(
+                $actor,
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -244,7 +264,10 @@ async fn drop_index_gated_by_table_write() {
             .fields(vec![vec!["name".to_string()]]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -309,7 +332,10 @@ async fn drop_index_if_exists_denies_unauthorized_on_existing_index() {
             .fields(vec![vec!["name".to_string()]]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -363,7 +389,10 @@ async fn rename_index_if_exists_denies_unauthorized_on_existing_index() {
             .fields(vec![vec!["name".to_string()]]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -413,7 +442,11 @@ async fn drop_repo_gated_by_store_delete() {
                 .expect("build op"),
         );
         let result = shamir
-            .execute_as(Actor::User(OWNER), "testdb", &b.to_request_via_msgpack())
+            .execute_as(
+                Actor::User(OWNER),
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await;
         assert!(
             result.is_ok(),
@@ -450,7 +483,10 @@ async fn drop_db_gated_by_database_delete() {
             .expect("build Chmod"),
     );
     shamir
-        .execute("dropme", &b.to_request_via_msgpack())
+        .execute(
+            "dropme",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -466,7 +502,11 @@ async fn drop_db_gated_by_database_delete() {
                 .expect("build op"),
         );
         let err = shamir
-            .execute_as(Actor::User(OTHER), "dropme", &b2.to_request_via_msgpack())
+            .execute_as(
+                Actor::User(OTHER),
+                "dropme",
+                &b2.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap_err();
         assert_eq!(
@@ -490,7 +530,11 @@ async fn drop_db_gated_by_database_delete() {
                 .expect("build op"),
         );
         let result = shamir
-            .execute_as(Actor::User(OWNER), "dropme", &b3.to_request_via_msgpack())
+            .execute_as(
+                Actor::User(OWNER),
+                "dropme",
+                &b3.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await;
         assert!(result.is_ok(), "owner should succeed DropDb: {:?}", result);
     }
@@ -509,7 +553,11 @@ async fn list_tables_gated_by_store_list() {
     b.id("t");
     b.op("op", ddl::list_tables().repo("main"));
     let err = shamir
-        .execute_as(Actor::User(OTHER), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(OTHER),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -534,7 +582,11 @@ async fn list_indexes_gated_by_table_list() {
     b.id("t");
     b.op("op", ddl::list_indexes("items").repo("main"));
     let err = shamir
-        .execute_as(Actor::User(OTHER), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(OTHER),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -559,7 +611,11 @@ async fn list_repos_gated_by_database_list() {
     b.id("t");
     b.op("op", ddl::list_repos());
     let err = shamir
-        .execute_as(Actor::User(OTHER), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(OTHER),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -688,7 +744,10 @@ async fn restrict_db_create_only(shamir: &ShamirDb) {
             .expect("build Chmod"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -868,7 +927,10 @@ async fn drop_db_if_exists_denies_unauthorized_on_existing_db() {
             .expect("build Chmod"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

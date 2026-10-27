@@ -45,7 +45,7 @@ async fn exec_op(
     let mut b = Batch::new();
     b.id(1);
     b.op("op", op);
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["op"].clone()
 }
@@ -487,7 +487,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -523,7 +523,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -541,7 +541,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -558,7 +558,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator.clone(), "testdb", &req)
         .await
@@ -575,7 +575,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(creator, "testdb", &req)
         .await
@@ -628,7 +628,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir
         .execute_as(stranger.clone(), "testdb", &req)
         .await
@@ -648,7 +648,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir
         .execute_as(stranger, "testdb", &req)
         .await
@@ -671,7 +671,7 @@ async fn group_owner_can_manage_own_group_via_wire_without_root_manage() {
 // the real wire dispatcher (`handle_add_group_member` /
 // `handle_remove_group_member` in `admin_access.rs`).
 //
-// `.build()` (not `.to_request_via_msgpack()`) is used deliberately: the
+// `.build()` (not `.to_request_via_msgpack().expect("batch request encoding")`) is used deliberately: the
 // generic msgpack `Value` round-trip that codec path exercises cannot
 // faithfully carry a bare `u64::MAX` through an untagged/i64-shaped
 // intermediate representation (it decodes as `-1`, panicking before the

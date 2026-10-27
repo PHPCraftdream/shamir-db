@@ -47,7 +47,12 @@ async fn rv_db_42e3530e_drop_repo_cascade_reports_table_drop_failure() {
     batch.id(1);
     batch.create_repo("main", ddl::create_repo("main").tables(["alpha", "beta"]));
     shamir
-        .execute("t", &batch.to_request_via_msgpack())
+        .execute(
+            "t",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect("create_repo with two tables must succeed");
 
@@ -66,7 +71,12 @@ async fn rv_db_42e3530e_drop_repo_cascade_reports_table_drop_failure() {
             .expect("build DropRepo"),
     );
     let err = shamir
-        .execute("t", &drop.to_request_via_msgpack())
+        .execute(
+            "t",
+            &drop
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect_err("RV-DB-42E3530E: DROP REPO CASCADE must fail when a table drop fails");
     assert_cascade_drop_failed(err, "drop repo cascade");
@@ -87,7 +97,12 @@ async fn rv_db_42e3530e_drop_db_cascade_reports_table_drop_failure() {
     batch.id(1);
     batch.create_repo("main", ddl::create_repo("main").tables(["alpha", "beta"]));
     shamir
-        .execute("u", &batch.to_request_via_msgpack())
+        .execute(
+            "u",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect("create_repo with two tables must succeed");
 
@@ -104,7 +119,12 @@ async fn rv_db_42e3530e_drop_db_cascade_reports_table_drop_failure() {
             .expect("build DropDb"),
     );
     let err = shamir
-        .execute("u", &drop.to_request_via_msgpack())
+        .execute(
+            "u",
+            &drop
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .expect_err("RV-DB-42E3530E: DROP DATABASE CASCADE must fail when a table drop fails");
     assert_cascade_drop_failed(err, "drop db cascade");

@@ -37,7 +37,7 @@ async fn drop_function_refused_when_validator_bound() {
             .build()
             .expect("create function builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // 2. Create a validator with the SAME name (independent registry,
@@ -51,7 +51,7 @@ async fn drop_function_refused_when_validator_bound() {
             .build()
             .expect("create validator builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // 3. Bind the validator to the "users" table.
@@ -64,7 +64,7 @@ async fn drop_function_refused_when_validator_bound() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // 4. Drop the FUNCTION → must be refused with drop_refused_bound.
@@ -77,7 +77,7 @@ async fn drop_function_refused_when_validator_bound() {
             .build()
             .expect("drop function builder requires HMAC"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -124,7 +124,7 @@ async fn drop_function_succeeds_after_unbind() {
             .build()
             .expect("create function builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -136,7 +136,7 @@ async fn drop_function_succeeds_after_unbind() {
             .build()
             .expect("create validator builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -148,7 +148,7 @@ async fn drop_function_succeeds_after_unbind() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Drop while bound → refused.
@@ -161,7 +161,7 @@ async fn drop_function_succeeds_after_unbind() {
             .build()
             .expect("drop function builder requires HMAC"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(err.code(), Some("drop_refused_bound"));
 
@@ -172,7 +172,7 @@ async fn drop_function_succeeds_after_unbind() {
         "op",
         ddl::unbind_validator("shared_name", "users").db("testdb"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Now the function drop must succeed with existed: true.
@@ -185,7 +185,7 @@ async fn drop_function_succeeds_after_unbind() {
             .build()
             .expect("drop function builder requires HMAC"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -221,7 +221,7 @@ async fn drop_function_succeeds_after_drop_validator() {
             .build()
             .expect("create function builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -233,7 +233,7 @@ async fn drop_function_succeeds_after_drop_validator() {
             .build()
             .expect("create validator builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -245,7 +245,7 @@ async fn drop_function_succeeds_after_drop_validator() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Unbind first (drop_validator itself refuses while bound).
@@ -255,7 +255,7 @@ async fn drop_function_succeeds_after_drop_validator() {
         "op",
         ddl::unbind_validator("shared_name", "users").db("testdb"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // Drop the validator entirely.
@@ -268,7 +268,7 @@ async fn drop_function_succeeds_after_drop_validator() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -285,7 +285,7 @@ async fn drop_function_succeeds_after_drop_validator() {
             .build()
             .expect("drop function builder requires HMAC"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),
@@ -314,7 +314,7 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
             .build()
             .expect("create function builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -326,7 +326,7 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
             .build()
             .expect("create validator builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     let mut b = Batch::new();
@@ -338,7 +338,7 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
             .ops([WriteOp::Insert])
             .priority(1500),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // drop_function with if_exists — the function EXISTS and is bound, so the
@@ -353,7 +353,7 @@ async fn drop_function_if_exists_does_not_bypass_guard() {
             .build()
             .expect("drop function builder requires HMAC"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -382,7 +382,7 @@ async fn drop_function_unbound_succeeds() {
             .build()
             .expect("create function builder should succeed"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     db.execute("testdb", &req).await.unwrap();
 
     // No validator named "lonely_fn" exists → guard is a no-op.
@@ -395,7 +395,7 @@ async fn drop_function_unbound_succeeds() {
             .build()
             .expect("drop function builder requires HMAC"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["op"].records[0].get_value_bool("existed"),

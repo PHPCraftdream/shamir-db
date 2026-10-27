@@ -72,9 +72,14 @@ async fn persisted_quarantine_flip_revokes_idle_receiver_without_post_flip_write
         "sub",
         shamir_query_builder::ddl::subscription("sub", "tcp://peer:9000", "pub", "prof"),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     let mut receiver = db
         .subscribe_changelog("testdb", "main")
         .await
@@ -224,9 +229,14 @@ async fn marking_after_profile_removal_quarantines_exactly_bound_destination() {
         "sub",
         shamir_query_builder::ddl::subscription("sub", "tcp://peer:9000", "pub", "prof"),
     );
-    db.execute("testdb", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     // Remove the profile: S5c-X PR8b-2 — coverage comes from the row's
     // durable binding, so profile resolution is never consulted and marking
     // must still succeed.
@@ -238,9 +248,14 @@ async fn marking_after_profile_removal_quarantines_exactly_bound_destination() {
             shamir_query_builder::ddl::drop_replication_profile("prof").hmac("test-hmac"),
         )
         .unwrap();
-    db.execute("testdb", &drop_batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &drop_batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     db.mark_subscription_resync_required("sub", 7, 3)
         .await

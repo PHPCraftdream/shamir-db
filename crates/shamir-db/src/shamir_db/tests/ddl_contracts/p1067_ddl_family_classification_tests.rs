@@ -63,7 +63,7 @@ async fn setup_with_all_families() -> ShamirDb {
             .index_type("functional")
             .functional_op("lower"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute("testdb", &req)
         .await
@@ -95,7 +95,10 @@ async fn p1067_drop_regular_classified_as_drop_hash_index() {
             .expect("build op"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -133,7 +136,10 @@ async fn p1067_drop_unique_classified_as_drop_unique_hash_index() {
             .expect("build op"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -173,7 +179,10 @@ async fn p1067_drop_sorted_classified_as_drop_sorted_index() {
             .expect("build op"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -212,7 +221,10 @@ async fn p1067_drop_index2_classified_as_drop_index2() {
             .expect("build op"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -252,7 +264,10 @@ async fn p1067_rename_regular_classified_as_rename_hash_index() {
             .request_id(op_id),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -288,7 +303,10 @@ async fn p1067_rename_unique_classified_as_rename_unique_hash_index() {
             .request_id(op_id),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -327,7 +345,10 @@ async fn p1067_rename_sorted_classified_as_rename_sorted_index() {
             .request_id(op_id),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -367,7 +388,10 @@ async fn p1067_rename_index2_classified_as_rename_index2() {
             .request_id(op_id),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -418,7 +442,10 @@ async fn p1067_sorted_drop_op_id_round_trips() {
             .expect("build op"),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let result = &resp.results["d"];
@@ -460,7 +487,10 @@ async fn p1067_sorted_rename_op_id_round_trips() {
             .request_id(client_supplied_id),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let result = &resp.results["r"];

@@ -197,7 +197,12 @@ async fn create_user_with_roles_changed_hmac_rejected_and_user_not_created() {
             .build()
             .expect("build create user"),
     );
-    let response = exec_batch_raw(&handler, &session, &b.to_request_via_msgpack()).await;
+    let response = exec_batch_raw(
+        &handler,
+        &session,
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let (code, _) = expect_error(response);
     assert_eq!(code, "hmac_mismatch");
     assert!(
@@ -234,7 +239,7 @@ async fn create_user_routes_through_port_to_real_directory() {
             .build()
             .expect("build create user"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
     assert!(
         resp.results.contains_key("u"),
@@ -280,7 +285,7 @@ async fn drop_user_routes_through_port_and_removes_from_directory() {
             .build()
             .expect("build drop user"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
     assert!(resp.results.contains_key("d"));
 
@@ -322,7 +327,7 @@ async fn grant_role_routes_through_port_to_real_directory() {
             .build()
             .expect("build grant role"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
     assert!(resp.results.contains_key("g"));
 
@@ -370,7 +375,7 @@ async fn revoke_role_routes_through_port_to_real_directory() {
             .build()
             .expect("build revoke role"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
     assert!(resp.results.contains_key("r"));
 
@@ -435,7 +440,7 @@ async fn list_users_reflects_resolver_data() {
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
     b.list_users("list", shamir_query_builder::ddl::list_users());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
 
     let rec = resp.results["list"]
@@ -465,7 +470,7 @@ async fn list_users_without_resolver_returns_not_supported() {
     let mut b = shamir_query_builder::batch::Batch::new();
     b.id(1);
     b.list_users("list", shamir_query_builder::ddl::list_users());
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let res = exec_batch_raw(&handler, &session, &req).await;
     let (code, _msg) = expect_error(res);
     assert_eq!(
@@ -766,7 +771,7 @@ async fn scoped_user_has_database_field_in_directory() {
             .build()
             .expect("build scoped create user"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = exec_batch(&handler, &session, &req).await;
     assert!(resp.results.contains_key("u"));
 
@@ -825,7 +830,7 @@ async fn create_user_with_reserved_superuser_role_leaves_no_orphan_account() {
             .build()
             .expect("build create user with roles"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let res = exec_batch_raw(&handler, &session, &req).await;
     expect_error(res);
 

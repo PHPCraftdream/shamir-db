@@ -83,7 +83,7 @@ async fn drop_index_refuses_pre_existing_cross_family_collision() {
             .build()
             .expect("valid DROP INDEX operation"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir
         .execute("testdb", &req)

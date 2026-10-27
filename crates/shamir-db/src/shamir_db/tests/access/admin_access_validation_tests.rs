@@ -139,7 +139,7 @@ async fn chown_to_nonexistent_user_succeeds_without_resolver() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -169,7 +169,7 @@ async fn chown_to_nonexistent_user_rejected_with_resolver() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir.execute("testdb", &req).await.expect_err(
         "chown to an unresolvable owner id must be rejected when a resolver is installed",
@@ -193,7 +193,7 @@ async fn chown_to_existing_user_succeeds_with_resolver() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -249,7 +249,7 @@ async fn chown_to_system_by_non_system_actor_is_rejected() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir
         .execute_as(Actor::User(alice), "testdb", &req)
@@ -295,7 +295,7 @@ async fn chown_to_system_by_system_actor_succeeds() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // `execute` = `execute_as(Actor::System, ...)`.
     shamir
@@ -342,7 +342,7 @@ async fn chown_to_system_by_admin_actor_succeeds() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute_as(Actor::Admin(999), "testdb", &req)
@@ -377,7 +377,7 @@ async fn chgrp_to_nonexistent_group_is_rejected() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir
         .execute("testdb", &req)
@@ -420,7 +420,7 @@ async fn chgrp_to_none_clears_unconditionally() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -450,7 +450,7 @@ async fn chgrp_to_existing_group_succeeds() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -489,7 +489,7 @@ async fn add_group_member_nonexistent_group_id_is_rejected() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir
         .execute("testdb", &req)
@@ -524,7 +524,7 @@ async fn add_group_member_nonexistent_user_succeeds_without_resolver() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -552,7 +552,7 @@ async fn add_group_member_nonexistent_user_rejected_with_resolver() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir
         .execute("testdb", &req)
@@ -587,7 +587,7 @@ async fn add_group_member_existing_user_succeeds_with_resolver() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -620,7 +620,7 @@ async fn remove_group_member_nonexistent_user_is_harmless_noop() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     shamir
         .execute("testdb", &req)
@@ -776,7 +776,7 @@ async fn access_tree_dispatch_admin_gate_denies_non_admin() {
     let mut b = Batch::new();
     b.id(1);
     b.access_tree("tree", ddl::access_tree());
-    let req: BatchRequest = b.to_request_via_msgpack();
+    let req: BatchRequest = b.to_request_via_msgpack().expect("batch request encoding");
 
     let tree_present = |res: &Result<BatchResponse, BatchError>| -> bool {
         matches!(res, Ok(r) if r

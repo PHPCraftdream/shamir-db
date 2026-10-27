@@ -9,7 +9,7 @@ use crate::write::BuilderError;
 pub fn create_user(name: impl Into<String>, password: impl Into<String>) -> CreateUser {
     CreateUser {
         name: name.into(),
-        password: password.into(),
+        password: SecretString::from(password.into()),
         roles: Vec::new(),
         database: None,
         hmac: None,
@@ -19,7 +19,7 @@ pub fn create_user(name: impl Into<String>, password: impl Into<String>) -> Crea
 /// Builder for [`CreateUserOp`].
 pub struct CreateUser {
     name: String,
-    password: String,
+    password: SecretString,
     roles: Vec<String>,
     database: Option<String>,
     hmac: Option<String>,
@@ -52,7 +52,7 @@ impl CreateUser {
         let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
         Ok(BatchOp::CreateUser(CreateUserOp {
             create_user: self.name,
-            password: SecretString::from(self.password),
+            password: self.password,
             roles: self.roles,
             database: self.database,
             hmac: Some(hmac),

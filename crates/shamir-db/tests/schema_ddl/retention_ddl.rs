@@ -72,7 +72,10 @@ async fn create_table_with_retention_applies_policy() {
         }),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -101,7 +104,10 @@ async fn create_table_without_retention_is_current_only() {
     b.id(1);
     b.create_table("ct", ddl::create_table("logs"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -142,7 +148,10 @@ async fn set_retention_changes_live_table_policy() {
         .unwrap(),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -190,7 +199,9 @@ async fn set_retention_waits_for_repository_write_admission() {
         .build()
         .unwrap(),
     );
-    let request = batch.to_request_via_msgpack();
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     let mut execution = Box::pin(shamir.execute("testdb", &request));
     let waker = futures::task::noop_waker();
     let mut context = std::task::Context::from_waker(&waker);
@@ -243,7 +254,10 @@ async fn set_retention_full_policy() {
         .unwrap(),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -282,7 +296,10 @@ async fn set_retention_denied_without_manage() {
     );
     b.after(&chmod_h, &chown_h);
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -304,7 +321,11 @@ async fn set_retention_denied_without_manage() {
         .unwrap(),
     );
     let err = shamir
-        .execute_as(Actor::User(999), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(999),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect_err("User(999) must be denied SetRetention");
     assert_eq!(

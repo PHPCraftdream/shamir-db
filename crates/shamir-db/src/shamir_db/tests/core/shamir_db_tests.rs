@@ -15,7 +15,7 @@ async fn create_db_lock_actually_serialises_concurrent_callers() {
     let mut b = Batch::new();
     b.id(1);
     b.create_db("cd", ddl::create_db("lockedb"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let shamir2 = shamir.clone();
     let spawned = tokio::spawn(async move { shamir2.execute("router", &req).await });
 
@@ -51,7 +51,7 @@ async fn create_repo_lock_actually_serialises_concurrent_callers() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("lockedrepo").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let shamir2 = shamir.clone();
     let spawned = tokio::spawn(async move { shamir2.execute("testdb", &req).await });
 

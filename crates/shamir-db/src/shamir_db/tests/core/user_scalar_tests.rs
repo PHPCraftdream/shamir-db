@@ -36,7 +36,7 @@ async fn setup() -> ShamirDb {
 
 /// Helper: run a batch and return the response.
 async fn run(shamir: &ShamirDb, b: Batch) -> shamir_query_types::batch::BatchResponse {
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &req).await.unwrap()
 }
 
@@ -214,7 +214,7 @@ async fn setup_durable(sys_path: std::path::PathBuf) -> ShamirDb {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["users"]));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let _ = shamir.execute("testdb", &req).await.unwrap();
 
     shamir
@@ -264,7 +264,7 @@ async fn builtin_functional_index_survives_reopen() {
         "ins",
         insert("users").row(doc().set("name", "Bob").unwrap()),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let result = shamir.execute("testdb", &req).await;
     assert!(
         result.is_ok(),
@@ -356,7 +356,7 @@ async fn user_scalar_index_fails_closed_before_re_register() {
         "ins",
         insert("users").row(doc().set("name", "bob").unwrap()),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let result = shamir.execute("testdb", &req).await;
 
     assert!(
@@ -444,7 +444,7 @@ async fn user_scalar_index_works_after_re_register() {
         "ins",
         insert("users").row(doc().set("name", "bob").unwrap()),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let result = shamir.execute("testdb", &req).await;
     assert!(
         result.is_ok(),
@@ -507,7 +507,7 @@ async fn non_vouched_scalar_rejected_from_index() {
             .index_type("functional")
             .functional_op("my_unsafe_fn"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let result = shamir.execute("testdb", &req).await;
 
     assert!(

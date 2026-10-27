@@ -102,7 +102,7 @@ async fn p1065_inprogress_written_before_mutation() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let shamir_c = shamir.clone();
     let drop_task = tokio::spawn(async move { shamir_c.execute("testdb", &req).await });
@@ -183,7 +183,7 @@ async fn p1065_terminal_status_durable_before_tombstone_clear_inline() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let shamir_c = shamir.clone();
     let drop_task = tokio::spawn(async move { shamir_c.execute("testdb", &req).await });
@@ -397,7 +397,7 @@ async fn p1065_client_supplied_correlation_id_round_trips() {
             .build()
             .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let result = &resp.results["d"];
@@ -455,7 +455,7 @@ async fn p1065_idempotent_retry_does_not_reexecute() {
             .build()
             .expect("build op"),
     );
-    let req1 = b1.to_request_via_msgpack();
+    let req1 = b1.to_request_via_msgpack().expect("batch request encoding");
     let resp1 = shamir.execute("testdb", &req1).await.unwrap();
     let result1 = &resp1.results["d"];
     assert_eq!(result1.op_id.unwrap(), client_supplied_id);
@@ -478,7 +478,7 @@ async fn p1065_idempotent_retry_does_not_reexecute() {
             .build()
             .expect("build op"),
     );
-    let req2 = b2.to_request_via_msgpack();
+    let req2 = b2.to_request_via_msgpack().expect("batch request encoding");
     let resp2 = shamir.execute("testdb", &req2).await.unwrap();
     let result2 = &resp2.results["d"];
 
@@ -606,7 +606,7 @@ async fn p1065_rename_ddlopkind_family_classification() {
             .repo("main")
             .request_id(regular_op_id),
     );
-    let regular_req = br.to_request_via_msgpack();
+    let regular_req = br.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &regular_req).await.unwrap();
 
     let regular_status = ddl_op_log::read_op_status(&table.info_store_for_test(), &regular_op_id)
@@ -633,7 +633,7 @@ async fn p1065_rename_ddlopkind_family_classification() {
             .repo("main")
             .request_id(unique_op_id),
     );
-    let unique_req = bu.to_request_via_msgpack();
+    let unique_req = bu.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &unique_req).await.unwrap();
 
     let unique_status = ddl_op_log::read_op_status(&table.info_store_for_test(), &unique_op_id)
