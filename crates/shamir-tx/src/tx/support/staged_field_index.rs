@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use shamir_collections::{TFxMap, TFxSet};
 use shamir_types::core::interner::InternerKey;
-use shamir_types::record_view::{ProbeKey, RecordRef, RecordView};
+use shamir_types::record_view::{ProbeKey, RecordRef};
 use shamir_types::types::value::InnerValue;
 
 #[derive(Default)]
@@ -42,16 +42,11 @@ impl StagedFieldIndex {
         let Some(bytes) = bytes_at(pos) else {
             return;
         };
-        let decoded = match RecordView::new(bytes) {
-            Ok(view) => Ok(view
+        let decoded = InnerValue::from_bytes(bytes).map(|value| {
+            value
                 .scalar_at(std::slice::from_ref(field))
-                .map(ProbeKey::for_scalar)),
-            Err(_) => InnerValue::from_bytes(bytes).map(|value| {
-                value
-                    .scalar_at(std::slice::from_ref(field))
-                    .map(ProbeKey::for_scalar)
-            }),
-        };
+                .map(ProbeKey::for_scalar)
+        });
         match decoded {
             Ok(Some(keys)) => {
                 for key in keys {

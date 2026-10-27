@@ -9,7 +9,7 @@ use crate::types::value::QueryValue;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
 
-use super::ScalarRef;
+use crate::record_view::ScalarRef;
 
 /// Candidate keys. A numeric string contributes every exact interpretation
 /// accepted by the predicate, plus its literal string key. Keys only narrow

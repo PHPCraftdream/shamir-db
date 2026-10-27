@@ -121,13 +121,28 @@ async fn rv_engine_0db9257b_index_matches_linear_scan() {
 
     // Verify corrupt-candidate handling alongside matching valid candidates.
     staging.set(key(20), Bytes::from_static(b"\xc4"));
+    staging.set(key(21), Bytes::from_static(b"\x81"));
+    assert!(InnerValue::from_bytes(Bytes::from_static(b"\x81")).is_err());
     let int_five = QueryValue::Int(5);
+    for query in [
+        int_five.clone(),
+        QueryValue::F64(5.0),
+        QueryValue::Str("other".into()),
+        QueryValue::Bool(false),
+    ] {
+        let candidates = staging.probe_field(&field, &query);
+        assert!(candidates
+            .iter()
+            .any(|(candidate, _)| candidate == &key(20)));
+        assert!(candidates
+            .iter()
+            .any(|(candidate, _)| candidate == &key(21)));
+    }
     let corrupt = indexed(&staging, &field, &int_five);
-    assert_eq!(corrupt.undecodable, vec![key(20)]);
+    assert_eq!(corrupt, linear(&staging, &field, &int_five));
     assert!(corrupt.matches.contains(&key(0)) && corrupt.matches.contains(&key(1)));
-    let expected = linear(&staging, &field, &int_five);
-    assert_eq!(corrupt, expected);
     staging.remove(key(20));
+    staging.remove(key(21));
 
     let mut seed = 0x225u32;
     let mut recent_int = 5i64;

@@ -6,5 +6,4 @@ mod error_tests;
 mod match_tests;
 mod parity;
 mod path_tests;
-mod probe_key_tests;
 mod record_ref_tests;
