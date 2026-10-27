@@ -504,7 +504,14 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
         .unwrap();
     let mut first = Batch::new();
     first.id(1);
-    first.op("drop", ddl::drop_function("orphan").if_exists());
+    first.op(
+        "drop",
+        ddl::drop_function("orphan")
+            .hmac("test-hmac")
+            .if_exists()
+            .build()
+            .expect("build DropFunction"),
+    );
     let resp = db
         .execute(
             "testdb",
@@ -519,7 +526,14 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
 
     let mut second = Batch::new();
     second.id(2);
-    second.op("drop", ddl::drop_function("orphan").if_exists());
+    second.op(
+        "drop",
+        ddl::drop_function("orphan")
+            .hmac("test-hmac")
+            .if_exists()
+            .build()
+            .expect("build DropFunction"),
+    );
     let resp = db
         .execute(
             "testdb",

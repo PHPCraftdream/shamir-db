@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import type { ShamirClient } from '../../index.js';
+import { canonicalBatchOp } from '../../core/protocol/hmac.js';
 import { Batch, Query, ddl, write } from '../../index.js';
 import {
   SERVER_AVAILABLE,
@@ -278,7 +279,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       // drop
       br(await Batch.create('drop-fn')
-        .add('d', ddl.dropFunction('my_fn_v2'))
+        .add('d', ddl.dropFunction('my_fn_v2', { hmac: client!.hmacTagHex(canonicalBatchOp('', { drop_function: 'my_fn_v2', if_exists: false })) }))
         .execute(client!, db));
 
       // list functions — must NOT contain
@@ -344,7 +345,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       // drop validator
       br(await Batch.create('drop-val')
-        .add('d', ddl.dropValidator('check_qty'))
+        .add('d', ddl.dropValidator('check_qty', { hmac: client!.hmacTagHex(canonicalBatchOp('', { drop_validator: 'check_qty', if_exists: false })) }))
         .execute(client!, db));
 
       // list global validators — must NOT contain
@@ -666,7 +667,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         }))
         .execute(client!, db));
       br(await Batch.create('drop-val')
-        .add('d', ddl.dropValidator('v_new'))
+        .add('d', ddl.dropValidator('v_new', { hmac: client!.hmacTagHex(canonicalBatchOp('', { drop_validator: 'v_new', if_exists: false })) }))
         .execute(client!, db));
     });
 

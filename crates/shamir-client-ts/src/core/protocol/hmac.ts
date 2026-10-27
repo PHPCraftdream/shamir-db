@@ -1,434 +1,70 @@
-/**
- * Canonical HMAC input bytes + tag computation for destructive admin ops.
- *
- * Byte-for-byte mirror of `crates/shamir-query-types/src/hmac.rs` and the
- * e2e helper `tests/e2e/helpers/hmac.js`. Server and client MUST agree
- * exactly — changing a layout here is a breaking protocol change.
- *
- * The HMAC on `drop_*` / migration ops is a "did you mean it" intent guard,
- * not an auth gate (the session_id is already the bearer token). The client
- * cannot produce a matching tag by accident.
- *
- * Key derivation: `key = SHA256("shamir-db hmac key v1\0" || session_id)`.
- * Per-op canonical input: null-byte-separated identifier bytes.
- *
- * PLATFORM-AGNOSTIC: crypto is delegated to the injected `Platform`
- * (sha256 / hmacSha256). `TextEncoder` is a Web standard available in both
- * Node and browsers (same footing as the `@msgpack/msgpack` import in core).
- */
-
+import { sha256 } from '@noble/hashes/sha256';
 import type { Platform } from '../support/platform.js';
+import type { ResourceRef, GroupRef, ChmodOp, ChownOp, ChgrpOp, CreateGroupOp, DropGroupOp, RenameGroupOp, AddGroupMemberOp, RemoveGroupMemberOp, CreateUserOp, DropUserOp, GrantRoleOp, RevokeRoleOp, SetSuperuserOp, SetReplicatorOp } from '../types/access/admin.js';
+import type { DropDbOp, DropRepoOp, DropTableOp, DropIndexOp, StartMigrationOp, CommitMigrationOp, RollbackMigrationOp, SetRetentionOp, PurgeHistoryOp, CreateFunctionOp, CreateValidatorOp, DropFunctionOp, DropValidatorOp } from '../types/schema/ddl.js';
 
 const utf8 = new TextEncoder();
-
-/** Domain-separation prefix for the session HMAC key (includes trailing NUL). */
 const KEY_DOMAIN = utf8.encode('shamir-db hmac key v1\0');
-
-/** Concatenate byte chunks into one Uint8Array. */
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((n, c) => n + c.length, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.length;
-  }
-  return out;
+const PREFIX = utf8.encode('shamir-db hmac canonical v2\0');
+const TAGS = { drop_db:1, drop_repo:2, drop_table:3, drop_index:4, drop_user:5, start_migration:6, commit_migration:7, rollback_migration:8, grant_role:9, revoke_role:10, chmod:11, chown:12, chgrp:13, create_user:14, set_retention:15, purge_history:16, create_group:17, drop_group:18, rename_group:19, add_group_member:20, remove_group_member:21, create_function:22, set_superuser:23, set_replicator:24, create_scram_user:25, drop_function:26, drop_validator:27, create_validator:28, drop_replication_profile:29, drop_publication:30, drop_subscription:31 } as const;
+function concatBytes(chunks:Uint8Array[]):Uint8Array { const out=new Uint8Array(chunks.reduce((n,c)=>n+c.length,0));let i=0;for(const c of chunks){out.set(c,i);i+=c.length;}return out; }
+function hexEncode(bytes:Uint8Array):string { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(''); }
+export function deriveSessionHmacKey(platform:Platform,sessionId:Uint8Array):Uint8Array{return platform.sha256(concatBytes([KEY_DOMAIN,sessionId]));}
+export function computeTagHex(platform:Platform,key:Uint8Array,canonical:Uint8Array):string{return hexEncode(platform.hmacSha256(key,canonical));}
+export function signCanonical(platform:Platform,sessionId:Uint8Array,canonical:Uint8Array):string{return computeTagHex(platform,deriveSessionHmacKey(platform,sessionId),canonical);}
+/** Canonical DTO shape: unsigned (no required tag) and `cascade` as a plain flag. */
+type CanonOf<T> = T extends unknown ? Omit<T, 'hmac' | 'cascade'> & { hmac?: string; cascade?: boolean } : never;
+type BatchCanonicalOp = CanonOf<DropDbOp|DropRepoOp|DropTableOp|DropIndexOp|DropUserOp|StartMigrationOp|CommitMigrationOp|RollbackMigrationOp|GrantRoleOp|RevokeRoleOp|ChmodOp|ChownOp|ChgrpOp|CreateUserOp|SetRetentionOp|PurgeHistoryOp|CreateGroupOp|DropGroupOp|RenameGroupOp|AddGroupMemberOp|RemoveGroupMemberOp|CreateFunctionOp|DropFunctionOp|DropValidatorOp|CreateValidatorOp|{drop_replication_profile:string;hmac?:string}|{drop_publication:string;hmac?:string}|{drop_subscription:string;hmac?:string}>;
+export type DbCanonicalOp={op:'create_scram_user';name:string;password?:string;roles?:string[];hmac?:string}|(Omit<SetSuperuserOp,'hmac'>&{hmac?:string})|(Omit<SetReplicatorOp,'hmac'>&{hmac?:string});
+class Encoder {
+  private readonly chunks:Uint8Array[]=[PREFIX]; constructor(tag:number){this.raw(new Uint8Array([tag>>8,tag&255]));}
+  private raw(bytes:Uint8Array){this.chunks.push(bytes);} u8(n:number){this.raw(new Uint8Array([n]));} u16(n:number){if(!Number.isInteger(n)||n<0||n>0xffff)throw new RangeError('u16 out of range');this.raw(new Uint8Array([n>>8,n&255]));}
+  u32(n:number){this.raw(new Uint8Array([n>>>24,n>>>16,n>>>8,n]));} str(s:string){const b=utf8.encode(s);this.u32(b.length);this.raw(b);} bool(v:boolean){this.u8(v?1:0);}
+  u64(v:number|bigint){if(typeof v==='number'&&!Number.isSafeInteger(v))throw new RangeError('unsafe u64 number; use bigint');let n=BigInt(v);if(n<0n||n>0xffffffffffffffffn)throw new RangeError('u64 out of range');const b=new Uint8Array(8);for(let i=7;i>=0;i--){b[i]=Number(n&255n);n>>=8n;}this.raw(b);}
+  opt<T>(v:T|null|undefined,write:(x:T)=>void){if(v==null)this.u8(0);else{this.u8(1);write(v);}} list(v:string[]){this.u32(v.length);for(const x of v)this.str(x);} digest(v:string){this.raw(sha256(utf8.encode(v)));} finish(){return concatBytes(this.chunks);}
 }
-
-/**
- * Join parts with single 0x00 bytes between them (no leading/trailing NUL).
- * String parts are UTF-8 encoded; byte parts are used as-is.
- */
-export function joinNull(parts: Array<string | Uint8Array>): Uint8Array {
-  const encoded = parts.map((p) => (typeof p === 'string' ? utf8.encode(p) : p));
-  const chunks: Uint8Array[] = [];
-  for (let i = 0; i < encoded.length; i += 1) {
-    if (i > 0) chunks.push(new Uint8Array([0]));
-    chunks.push(encoded[i]!);
-  }
-  return concatBytes(chunks);
+function writeResource(e:Encoder,r:ResourceRef){if('database'in r){e.u8(0);e.str(r.database);}else if('store'in r){e.u8(1);e.str(r.store[0]);e.str(r.store[1]);}else if('table'in r){e.u8(2);e.str(r.table[0]);e.str(r.table[1]);e.str(r.table[2]);}else if('function'in r){e.u8(3);e.str(r.function);}else if('function_folder'in r){e.u8(4);e.list(r.function_folder);}else e.u8(5);}
+function writeGroup(e:Encoder,r:GroupRef){if('name'in r){e.u8(0);e.str(r.name);}else{e.u8(1);e.u64(r.id);}}
+function writeScope(e:Encoder,s:import('../types/schema/ddl.js').PurgeScope){if('older_than'in s){e.u8(0);e.u64(s.older_than.timestamp);}else{e.u8(1);e.u64(s.older_than_age.age_secs);}}
+function opTag(op:BatchCanonicalOp):keyof typeof TAGS {const names=Object.keys(TAGS) as Array<keyof typeof TAGS>;const found=names.find(k=>k in op);if(!found)throw new TypeError('unsupported canonical operation');return found;}
+/** Whole-operation canonical v2 bytes; db supplies execution context for DB-scoped operation schemas. */
+export function canonicalBatchOp(db:string,op:BatchCanonicalOp):Uint8Array {
+ const tag=opTag(op),e=new Encoder(TAGS[tag]);
+ switch(tag){
+ case'drop_db':{const x=op as DropDbOp;e.str(x.drop_db);e.bool(Boolean(x.cascade));e.bool(Boolean(x.if_exists));break;}
+ case'drop_repo':{const x=op as DropRepoOp;e.str(db);e.str(x.drop_repo);e.bool(Boolean(x.cascade));e.bool(Boolean(x.if_exists));break;}
+ case'drop_table':{const x=op as DropTableOp;e.str(db);e.str(x.repo);e.str(x.drop_table);e.bool(Boolean(x.cascade));e.bool(Boolean(x.if_exists));break;}
+ case'drop_index':{const x=op as DropIndexOp;e.str(db);e.str(x.repo);e.str(x.table);e.str(x.drop_index);e.bool(Boolean(x.if_exists));break;}
+ case'drop_user':{const x=op as DropUserOp;e.str(x.drop_user);e.bool(Boolean(x.if_exists));break;}
+ case'start_migration':{const x=op as StartMigrationOp;e.str(db);e.str(x.repo);e.str(x.start_migration);e.str(x.dst_repo);e.str(x.dst_engine);e.opt(x.dst_path,v=>e.str(v));break;}
+ case'commit_migration':{const x=op as CommitMigrationOp;e.str(db);e.str(x.commit_migration);break;}
+ case'rollback_migration':{const x=op as RollbackMigrationOp;e.str(db);e.str(x.rollback_migration);break;}
+ case'grant_role':{const x=op as GrantRoleOp;e.str(x.grant_role);e.str(x.user);break;}
+ case'revoke_role':{const x=op as RevokeRoleOp;e.str(x.revoke_role);e.str(x.user);break;}
+ case'chmod':{const x=op as ChmodOp;writeResource(e,x.chmod);e.u16(x.mode);break;}
+ case'chown':{const x=op as ChownOp;writeResource(e,x.chown);e.u64(x.owner);break;}
+ case'chgrp':{const x=op as ChgrpOp;writeResource(e,x.chgrp);e.opt(x.group,v=>e.u64(v));break;}
+ case'create_user':{const x=op as CreateUserOp;e.str(x.create_user);e.list(x.roles??[]);e.opt(x.database,v=>e.str(v));break;}
+ case'set_retention':{const x=op as SetRetentionOp;e.str(db);e.str(x.repo);e.str(x.set_retention);for(const k of ['max_age_secs','max_count','min_count'] as const)e.opt(x.retention?.[k],v=>e.u64(v));break;}
+ case'purge_history':{const x=op as PurgeHistoryOp;e.str(db);e.str(x.repo);e.str(x.purge_history);writeScope(e,x.scope);break;}
+ case'create_group':{const x=op as CreateGroupOp;e.str(x.create_group);break;}
+ case'drop_group':{const x=op as DropGroupOp;writeGroup(e,x.drop_group);e.bool(Boolean(x.if_exists));break;}
+ case'rename_group':{const x=op as RenameGroupOp;writeGroup(e,x.rename_group);e.str(x.to);break;}
+ case'add_group_member':{const x=op as AddGroupMemberOp;writeGroup(e,x.add_group_member);e.u64(x.user);break;}
+ case'remove_group_member':{const x=op as RemoveGroupMemberOp;writeGroup(e,x.remove_group_member);e.u64(x.user);break;}
+ case'create_function':{const x=op as CreateFunctionOp & {net_grants?:string[]};e.str(x.create_function);e.bool(x.replace);e.str(x.security??'invoker');e.opt(x.visibility,v=>e.str(v));e.list(x.secret_grants??[]);e.list(x.net_grants??[]);e.opt(x.source,v=>e.digest(v));e.opt(x.wasm,v=>e.digest(v));break;}
+ case'drop_function':{const x=op as DropFunctionOp;e.str(x.drop_function);e.bool(Boolean(x.if_exists));break;}
+ case'drop_validator':{const x=op as DropValidatorOp;e.str(x.drop_validator);e.bool(Boolean(x.if_exists));break;}
+ case'create_validator':{const x=op as CreateValidatorOp;e.str(x.create_validator);e.bool(x.replace);e.opt(x.source,v=>e.digest(v));e.opt(x.wasm,v=>e.digest(v));break;}
+ case'drop_replication_profile':{const x=op as {drop_replication_profile:string};e.str(x.drop_replication_profile);break;}
+ case'drop_publication':{const x=op as {drop_publication:string};e.str(x.drop_publication);break;}
+ case'drop_subscription':{const x=op as {drop_subscription:string};e.str(x.drop_subscription);break;}
+ }
+ return e.finish();
 }
-
-/** Lowercase hex encoding (matches the Rust `hex_encode`). */
-function hexEncode(bytes: Uint8Array): string {
-  const table = '0123456789abcdef';
-  let s = '';
-  for (const b of bytes) {
-    s += table[(b >> 4) & 0x0f]! + table[b & 0x0f]!;
-  }
-  return s;
-}
-
-/**
- * Derive the 32-byte session HMAC key from the session bearer token:
- * `SHA256("shamir-db hmac key v1\0" || session_id)`.
- */
-export function deriveSessionHmacKey(
-  platform: Platform,
-  sessionId: Uint8Array,
-): Uint8Array {
-  return platform.sha256(concatBytes([KEY_DOMAIN, sessionId]));
-}
-
-/** Hex-encoded HMAC-SHA256 tag over `canonical` keyed by `key`. */
-export function computeTagHex(
-  platform: Platform,
-  key: Uint8Array,
-  canonical: Uint8Array,
-): string {
-  return hexEncode(platform.hmacSha256(key, canonical));
-}
-
-/**
- * Sign canonical bytes with the key derived from `sessionId` — the
- * end-to-end "intent tag" for a destructive op.
- */
-export function signCanonical(
-  platform: Platform,
-  sessionId: Uint8Array,
-  canonical: Uint8Array,
-): string {
-  return computeTagHex(platform, deriveSessionHmacKey(platform, sessionId), canonical);
-}
-
-// ── Per-op canonical inputs (mirror hmac.rs canonical_* fns) ──────────
-
-export function canonicalDropDb(db: string): Uint8Array {
-  return joinNull(['drop_db', db]);
-}
-
-export function canonicalDropRepo(dbInUse: string, repo: string): Uint8Array {
-  return joinNull(['drop_repo', dbInUse, repo]);
-}
-
-export function canonicalDropTable(
-  dbInUse: string,
-  repo: string,
-  table: string,
-): Uint8Array {
-  return joinNull(['drop_table', dbInUse, repo, table]);
-}
-
-export function canonicalDropIndex(
-  dbInUse: string,
-  repo: string,
-  table: string,
-  index: string,
-): Uint8Array {
-  return joinNull([
-    'drop_index',
-    dbInUse,
-    repo,
-    table,
-    index,
-  ]);
-}
-
-export function canonicalDropUser(username: string): Uint8Array {
-  return joinNull(['drop_user', username]);
-}
-
-/**
- * `b"set_superuser\0<user>\0<on>"`. `<on>` is the literal `"true"` or
- * `"false"` string (not `"1"`/`"0"`), matching how the field round-trips
- * through the wire's `bool` — byte-for-byte mirror of the Rust
- * `canonical_set_superuser`. HMAC on `set_superuser` is UNCONDITIONAL
- * (unlike `create_function`'s conditional gate): every SetSuperuser op
- * requires the tag, regardless of whether it's a grant or a revoke.
- */
-export function canonicalSetSuperuser(user: string, on: boolean): Uint8Array {
-  return joinNull(['set_superuser', user, on ? 'true' : 'false']);
-}
-
-/**
- * `b"set_replicator\0<user>\0<on>"`. `<on>` is the literal `"true"` or
- * `"false"` string (not `"1"`/`"0"`) — byte-for-byte mirror of the Rust
- * `canonical_set_replicator` (itself a literal mirror of
- * `canonical_set_superuser` with a different op tag). HMAC on
- * `set_replicator` is UNCONDITIONAL: every SetReplicator op requires the
- * tag, regardless of whether it's a grant or a revoke.
- */
-export function canonicalSetReplicator(user: string, on: boolean): Uint8Array {
-  return joinNull(['set_replicator', user, on ? 'true' : 'false']);
-}
-
-export function canonicalStartMigration(
-  dbInUse: string,
-  srcRepo: string,
-  table: string,
-  dstRepo: string,
-  dstEngine: string,
-): Uint8Array {
-  return joinNull([
-    'start_migration',
-    dbInUse,
-    srcRepo,
-    table,
-    dstRepo,
-    dstEngine,
-  ]);
-}
-
-export function canonicalCommitMigration(
-  dbInUse: string,
-  migrationId: string,
-): Uint8Array {
-  return joinNull(['commit_migration', dbInUse, migrationId]);
-}
-
-export function canonicalRollbackMigration(
-  dbInUse: string,
-  migrationId: string,
-): Uint8Array {
-  return joinNull(['rollback_migration', dbInUse, migrationId]);
-}
-
-export function canonicalGrantRole(role: string, user: string): Uint8Array {
-  return joinNull(['grant_role', role, user]);
-}
-
-export function canonicalRevokeRole(role: string, user: string): Uint8Array {
-  return joinNull(['revoke_role', role, user]);
-}
-
-export function canonicalCreateUser(username: string): Uint8Array {
-  // Password is NEVER part of the canonical input — the tag confirms
-  // "you meant to create this account", not the credential.
-  return joinNull(['create_user', username]);
-}
-
-/**
- * `b"create_scram_user\0<name>\0<role1>\0<role2>\0..."`. Password is NEVER
- * part of the canonical input (same convention as `canonicalCreateUser`) —
- * the tag confirms "you meant to create this SCRAM-login account with these
- * roles", not the credential. Roles are joined in the order given — caller
- * and verifier must agree on ordering (no sorting), matching the Rust
- * `canonical_create_scram_user`'s `Vec<String>` as-is traversal. HMAC on
- * `create_scram_user` is UNCONDITIONAL (task #604) — every call signs it.
- */
-export function canonicalCreateScramUser(
-  name: string,
-  roles: string[],
-): Uint8Array {
-  return joinNull(['create_scram_user', name, ...roles]);
-}
-
-/**
- * Wire-encodable reference to a securable resource — byte-for-byte mirror
- * of the Rust `ResourceRef` (untagged, single-key object). Only the
- * shape needed to compute a canonical string is declared here; the full
- * type lives in `./types/admin.ts`.
- */
-type ResourceRefLike =
-  | { database: string }
-  | { store: [string, string] }
-  | { table: [string, string, string] }
-  | { function: string }
-  | { function_folder: string[] }
-  | { function_namespace: boolean };
-
-/**
- * Render a `ResourceRef` into the stable `scheme://path` string used by
- * `canonicalChmod` / `canonicalChown` / `canonicalChgrp`. Mirrors the
- * Rust `canonical_resource_ref` in `hmac.rs` (itself matching
- * `ResourcePath`'s `Display` shape) byte-for-byte.
- */
-export function canonicalResourceRef(r: ResourceRefLike): string {
-  if ('database' in r) return `db://${r.database}`;
-  if ('store' in r) return `db://${r.store[0]}/${r.store[1]}`;
-  if ('table' in r) return `db://${r.table[0]}/${r.table[1]}/${r.table[2]}`;
-  if ('function' in r) return `fn://${r.function}`;
-  if ('function_folder' in r) return `fn://${r.function_folder.join('/')}/`;
-  if ('function_namespace' in r) return 'fn://';
-  // Compile-time exhaustiveness guard: a future `ResourceRefLike` member
-  // that isn't handled above fails `tsc` here instead of silently
-  // falling through to a wrong scheme (mirrors the Rust `canonical_resource_ref`
-  // match, which has no wildcard arm for the same reason).
-  const exhaustive: never = r;
-  throw new Error(`unhandled ResourceRef variant: ${JSON.stringify(exhaustive)}`);
-}
-
-export function canonicalChmod(resource: ResourceRefLike, mode: number): Uint8Array {
-  return joinNull(['chmod', canonicalResourceRef(resource), String(mode)]);
-}
-
-export function canonicalChown(
-  resource: ResourceRefLike,
-  owner: number | bigint,
-): Uint8Array {
-  return joinNull(['chown', canonicalResourceRef(resource), String(owner)]);
-}
-
-/**
- * `group: null` (clear the group) canonicalizes to the literal sentinel
- * `"null"` — mirrors the Rust `canonical_chgrp`.
- */
-export function canonicalChgrp(
-  resource: ResourceRefLike,
-  group: number | bigint | null,
-): Uint8Array {
-  const groupStr = group === null ? 'null' : String(group);
-  return joinNull(['chgrp', canonicalResourceRef(resource), groupStr]);
-}
-
-/**
- * Per-table history retention — byte-for-byte mirror of the Rust
- * `Retention` shape needed to compute the canonical string.
- */
-interface RetentionLike {
-  max_age_secs?: number;
-  max_count?: number;
-  min_count?: number;
-}
-
-/**
- * Render a `Retention` into the stable textual form used by
- * `canonicalSetRetention`. Mirrors the Rust `canonical_retention`:
- * each of the three orthogonal optional knobs rendered as its decimal
- * value or the sentinel `"none"`, comma-joined in field-declaration order.
- */
-export function canonicalRetention(r: RetentionLike): string {
-  const age = r.max_age_secs === undefined ? 'none' : String(r.max_age_secs);
-  const max = r.max_count === undefined ? 'none' : String(r.max_count);
-  const min = r.min_count === undefined ? 'none' : String(r.min_count);
-  return `${age},${max},${min}`;
-}
-
-export function canonicalSetRetention(
-  dbInUse: string,
-  repo: string,
-  table: string,
-  retention: RetentionLike,
-): Uint8Array {
-  return joinNull([
-    'set_retention',
-    dbInUse,
-    repo,
-    table,
-    canonicalRetention(retention),
-  ]);
-}
-
-/**
- * Imperative history purge scope — byte-for-byte mirror of the Rust
- * `PurgeScope` shape needed to compute the canonical string.
- */
-type PurgeScopeLike =
-  | { older_than: { timestamp: number } }
-  | { older_than_age: { age_secs: number } };
-
-/**
- * Render a `PurgeScope` into the stable textual form used by
- * `canonicalPurgeHistory`. Mirrors the Rust `canonical_purge_scope`:
- * `"older_than:<timestamp>"` or `"older_than_age:<age_secs>"`.
- */
-export function canonicalPurgeScope(scope: PurgeScopeLike): string {
-  if ('older_than' in scope) return `older_than:${scope.older_than.timestamp}`;
-  return `older_than_age:${scope.older_than_age.age_secs}`;
-}
-
-export function canonicalPurgeHistory(
-  dbInUse: string,
-  repo: string,
-  table: string,
-  scope: PurgeScopeLike,
-): Uint8Array {
-  return joinNull([
-    'purge_history',
-    dbInUse,
-    repo,
-    table,
-    canonicalPurgeScope(scope),
-  ]);
-}
-
-/**
- * Wire-encodable reference to a group — byte-for-byte mirror of the Rust
- * `GroupRef` (untagged, single-key object). Only the shape needed to
- * compute a canonical string is declared here; the full type lives in
- * `./types/admin.ts`.
- */
-type GroupRefLike = { name: string } | { id: number };
-
-/**
- * Render a `GroupRef` into the stable `name:<name>` / `id:<id>` string
- * used by every `canonical*Group*` helper below. Mirrors the Rust
- * `canonical_group_ref` in `hmac.rs` byte-for-byte.
- *
- * The `"name:"` / `"id:"` prefixes are reserved tags outside either
- * variant's raw payload space, so the two variants can never collide: a
- * group literally named `"id:3"` renders as `"name:id:3"`, not `"id:3"`
- * (which only `{ id: 3 }` produces).
- */
-export function canonicalGroupRef(r: GroupRefLike): string {
-  if ('name' in r) return `name:${r.name}`;
-  if ('id' in r) return `id:${r.id}`;
-  // Compile-time exhaustiveness guard: a future `GroupRefLike` member
-  // that isn't handled above fails `tsc` here instead of silently
-  // falling through to a wrong scheme (mirrors the Rust
-  // `canonical_group_ref` match, which has no wildcard arm for the
-  // same reason).
-  const exhaustive: never = r;
-  throw new Error(`unhandled GroupRef variant: ${JSON.stringify(exhaustive)}`);
-}
-
-export function canonicalCreateGroup(name: string): Uint8Array {
-  return joinNull(['create_group', name]);
-}
-
-export function canonicalDropGroup(group: GroupRefLike): Uint8Array {
-  return joinNull(['drop_group', canonicalGroupRef(group)]);
-}
-
-export function canonicalRenameGroup(
-  group: GroupRefLike,
-  to: string,
-): Uint8Array {
-  return joinNull(['rename_group', canonicalGroupRef(group), to]);
-}
-
-export function canonicalAddGroupMember(
-  group: GroupRefLike,
-  user: number | bigint,
-): Uint8Array {
-  return joinNull([
-    'add_group_member',
-    canonicalGroupRef(group),
-    String(user),
-  ]);
-}
-
-export function canonicalRemoveGroupMember(
-  group: GroupRefLike,
-  user: number | bigint,
-): Uint8Array {
-  return joinNull([
-    'remove_group_member',
-    canonicalGroupRef(group),
-    String(user),
-  ]);
-}
-
-/**
- * `b"create_function\0<name>\0<security>\0<secret_grants_csv>"` —
- * byte-for-byte mirror of the Rust `canonical_create_function`.
- *
- * `<security>` is the literal string being set (`"invoker"` or `"definer"`)
- * — the caller passes the same value the wire op carries; the server fills
- * in `"invoker"` when the field is absent (matching
- * `CreateFunctionOp::security`'s default). `<secret_grants_csv>` is the
- * grants joined by `,` in the order given (empty string if none) — must be
- * BYTE-IDENTICAL between client and server, so do not sort/dedupe.
- *
- * HMAC on `create_function` is CONDITIONAL (unlike every other op in this
- * module): the tag is only required when `security === 'definer'` or
- * `secret_grants` is non-empty. The caller decides whether to sign.
- */
-export function canonicalCreateFunction(
-  name: string,
-  security: string,
-  secretGrants: string[],
-): Uint8Array {
-  return joinNull(['create_function', name, security, secretGrants.join(',')]);
+/** Canonical bytes for HMAC-bearing top-level DbRequest operations. */
+export function canonicalDbRequest(op:DbCanonicalOp):Uint8Array {
+ if(op.op==='create_scram_user'){const e=new Encoder(TAGS.create_scram_user);e.str(op.name);e.list(op.roles??[]);return e.finish();}
+ if(op.op==='set_superuser'){const e=new Encoder(TAGS.set_superuser);e.str(op.user);e.bool(op.on);return e.finish();}
+ const e=new Encoder(TAGS.set_replicator);e.str(op.user);e.bool(op.on);return e.finish();
 }
