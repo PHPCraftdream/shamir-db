@@ -3736,8 +3736,8 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "shamir-private-dir",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
