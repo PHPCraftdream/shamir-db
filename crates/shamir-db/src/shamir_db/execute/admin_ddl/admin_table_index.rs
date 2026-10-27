@@ -3,7 +3,6 @@
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::{DdlOpKind, DdlOpState, DdlOpStatus, QueryResult};
-use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
@@ -46,6 +45,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
+        let _control = self.shamir.lock_replication_control().await;
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_table(&op.repo, &op.create_table) {
@@ -69,12 +69,13 @@ impl ShamirAdminExecutor {
         // Route through ShamirDb so the table is persisted to the
         // catalogue and survives a restart (I.2).
         self.shamir
-            .add_table_as(
+            .add_table_as_locked(
                 &self.db_name,
                 &op.repo,
                 &op.create_table,
                 false,
                 self.actor.clone(),
+                &_control,
             )
             .await
             .map_err(|e| err(e.to_string()))?;
@@ -132,6 +133,7 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
+        let _control = self.shamir.lock_replication_control().await;
         // if_exists early-exit: missing db or missing table → no-op.
         if op.if_exists {
             let exists = self
@@ -160,110 +162,80 @@ impl ShamirAdminExecutor {
         // execute-path compile step is not reliably visible on the admin
         // handle. The catalogue is the coherent source of truth — every
         // `set_table_schema` commits the FK there before this guard runs.
-        if let Some(db) = self.shamir.get_db(&self.db_name) {
-            let table_names = db.list_tables(&op.repo).unwrap_or_default();
-            for name in &table_names {
-                if name == &op.drop_table {
-                    continue;
-                }
-                let rec = match self
-                    .shamir
-                    .system_store()
-                    .load_table_record(&self.db_name, &op.repo, name)
-                    .await
-                {
-                    Ok(Some(r)) => r,
-                    _ => continue,
-                };
-                let rules = match rec.get(SCHEMA_FIELD) {
-                    Some(QueryValue::List(rules)) => rules,
-                    _ => continue,
-                };
-                for rule in rules {
-                    let refs_drop = rule
-                        .get("foreign_key")
-                        .and_then(|fk| fk.get("ref_table"))
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|rt| rt == op.drop_table);
-                    if refs_drop {
-                        return Err(err_code(
-                            "drop_refused_fk",
-                            format!(
-                                "cannot drop table '{}': still referenced by a foreign key in '{}'",
-                                op.drop_table, name
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-
-        // cascade: explicitly drop the table's own indexes (regular,
-        // unique, sorted, index2) before removing validators and the
-        // table itself.  Without cascade, indexes are orphaned in
-        // storage (harmless — the catalogue entry is gone so they
-        // will never be loaded again).
+        let Some(db) = self.shamir.get_db(&self.db_name) else {
+            return Err(err(format!("Database '{}' not found", self.db_name)));
+        };
+        self.shamir
+            .reject_drop_if_fk_reference(&self.db_name, &op.repo, &op.drop_table)
+            .await
+            .map_err(|e| match e {
+                crate::DbError::Validation(message) => err_code("drop_refused_fk", message),
+                other => err(other.to_string()),
+            })?;
         if op.cascade {
-            if let Some(db) = self.shamir.get_db(&self.db_name) {
-                if let Ok(table) = db.get_table(&op.repo, &op.drop_table).await {
-                    // F-3 (#1030): hold `ddl_admission` (via `begin_write_barrier`)
-                    // for this WHOLE block of direct index-registry mutations.
-                    // Pre-fix, these manager-level primitives
-                    // (`index_manager_ref().drop_index`/`drop_unique_index`,
-                    // `sorted_indexes().drop_index`, `index2_registry().remove_by_id`)
-                    // bypassed the barrier `TableManager`'s own
-                    // `drop_index`/`drop_unique_index`/`drop_sorted_index`/
-                    // `drop_index2` wrappers take — violating the precondition
-                    // `IndexRegistry::insert`'s doc comment states every
-                    // registry-mutating DDL op must uphold (see
-                    // `crates/shamir-index/src/registry.rs`, "# Precondition"):
-                    // a concurrent `CREATE INDEX` could race this cascade's
-                    // direct drops to the same next generation-counter value,
-                    // un-serialized. One `begin_write_barrier` acquisition
-                    // covering the entire block (not four separate ones, which
-                    // would only serialize against itself) restores that
-                    // guarantee. Bit choice: `REGULAR_INDEX_CREATE` — the same
-                    // single `ddl_admission` mutex backs every bit
-                    // (`begin_write_barrier`'s Step 0), so any one existing bit
-                    // is sufficient for the admission serialization this fix
-                    // needs; no new bit is minted since the table is about to
-                    // be removed entirely regardless of which writers see the
-                    // slow path via this specific bit. The raw manager
-                    // primitives the sweep uses do NOT themselves acquire
-                    // `ddl_admission`/`unique_write_lock` (confirmed by reading
-                    // `TableManager::drop_index`/`drop_unique_index`/
-                    // `drop_sorted_index`/`drop_index2`, which call these exact
-                    // primitives AFTER already taking the barrier) — so
-                    // acquiring it once cannot re-enter the non-reentrant
-                    // `tokio::sync::Mutex`.
-                    //
-                    // S5c-X: the sweep itself is engine-owned now — the facade
-                    // acquires repo admission and
-                    // `TableManager::drop_all_indexes_for_table_removal_admitted`
-                    // runs the identical barrier + raw primitive sequence
-                    // internally (write_receipt/admission/admitted_ops.rs).
-                    let repo_instance = db
-                        .get_repo(&op.repo)
-                        .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
-                    let permit = repo_instance
-                        .write_domain()
-                        .admit()
-                        .await
-                        .map_err(|e| err(e.to_string()))?;
-                    table
-                        .drop_all_indexes_for_table_removal_admitted(&permit)
-                        .await
-                        .map_err(|e| err(e.to_string()))?;
-                    // Release repo admission before the rest of the DROP TABLE
-                    // flow (non-reentrant repository write mutex).
-                    drop(permit);
-                }
+            if let Ok(table) = db.get_table(&op.repo, &op.drop_table).await {
+                // F-3 (#1030): hold `ddl_admission` (via `begin_write_barrier`)
+                // for this WHOLE block of direct index-registry mutations.
+                // Pre-fix, these manager-level primitives
+                // (`index_manager_ref().drop_index`/`drop_unique_index`,
+                // `sorted_indexes().drop_index`, `index2_registry().remove_by_id`)
+                // bypassed the barrier `TableManager`'s own
+                // `drop_index`/`drop_unique_index`/`drop_sorted_index`/
+                // `drop_index2` wrappers take — violating the precondition
+                // `IndexRegistry::insert`'s doc comment states every
+                // registry-mutating DDL op must uphold (see
+                // `crates/shamir-index/src/registry.rs`, "# Precondition"):
+                // a concurrent `CREATE INDEX` could race this cascade's
+                // direct drops to the same next generation-counter value,
+                // un-serialized. One `begin_write_barrier` acquisition
+                // covering the entire block (not four separate ones, which
+                // would only serialize against itself) restores that
+                // guarantee. Bit choice: `REGULAR_INDEX_CREATE` — the same
+                // single `ddl_admission` mutex backs every bit
+                // (`begin_write_barrier`'s Step 0), so any one existing bit
+                // is sufficient for the admission serialization this fix
+                // needs; no new bit is minted since the table is about to
+                // be removed entirely regardless of which writers see the
+                // slow path via this specific bit. The raw manager
+                // primitives the sweep uses do NOT themselves acquire
+                // `ddl_admission`/`unique_write_lock` (confirmed by reading
+                // `TableManager::drop_index`/`drop_unique_index`/
+                // `drop_sorted_index`/`drop_index2`, which call these exact
+                // primitives AFTER already taking the barrier) — so
+                // acquiring it once cannot re-enter the non-reentrant
+                // `tokio::sync::Mutex`.
+                //
+                // S5c-X: the sweep itself is engine-owned now — the facade
+                // acquires repo admission and
+                // `TableManager::drop_all_indexes_for_table_removal_admitted`
+                // runs the identical barrier + raw primitive sequence
+                // internally (write_receipt/admission/admitted_ops.rs).
+                let repo_instance = db
+                    .get_repo(&op.repo)
+                    .ok_or_else(|| err(format!("Repository '{}' not found", op.repo)))?;
+                let permit = repo_instance
+                    .write_domain()
+                    .admit()
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                table
+                    .drop_all_indexes_for_table_removal_admitted(&permit)
+                    .await
+                    .map_err(|e| err(e.to_string()))?;
+                // Release repo admission before the rest of the DROP TABLE
+                // flow (non-reentrant repository write mutex).
+                drop(permit);
             }
         }
 
         let removed = self
             .shamir
-            .drop_table_cleaning_validators(&self.db_name, &op.repo, &op.drop_table)
+            .drop_table_cleaning_validators_locked(
+                &self.db_name,
+                &op.repo,
+                &op.drop_table,
+                &_control,
+            )
             .await
             .map_err(|e| err(e.to_string()))?;
         Ok(admin_result(mpack!({
@@ -308,13 +280,15 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
+        let _control = self.shamir.lock_replication_control().await;
         self.shamir
-            .rename_table_as(
+            .rename_table_as_locked(
                 &self.db_name,
                 &op.repo,
                 &op.rename_table,
                 &op.to,
                 self.actor.clone(),
+                &_control,
             )
             .await
             .map_err(|e| err(e.to_string()))?;

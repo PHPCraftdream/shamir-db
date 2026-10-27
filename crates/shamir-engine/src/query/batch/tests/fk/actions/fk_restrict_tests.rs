@@ -6,12 +6,16 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use futures::StreamExt;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_query_types::admin::FkAction;
+use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::access::Actor;
+use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 use smallvec::smallvec;
@@ -31,6 +35,7 @@ use crate::validator::{ValidatorBinding, ValidatorRegistry, WriteOp};
 // ── Test resolver that injects a shared ValidatorRegistry ────────────────────
 
 use super::super::support::FkTestResolver;
+use super::support::bind_fk_validator;
 
 /// Build a test environment with parent + child tables.
 ///
@@ -743,4 +748,180 @@ async fn restrict_blocks_on_middle_value_among_several_deduped_parents() {
         "all three parents should delete cleanly once no children reference \
          any of them"
     );
+}
+
+// RV-ENGINE-BEC5D158 malformed-body regression coverage.
+async fn fixture() -> FkTestResolver {
+    let config = RepoConfig {
+        name: "default".to_string(),
+        factory: BoxRepoFactory::in_memory(),
+        tables: vec![TableConfig::new("parent"), TableConfig::new("child")],
+    };
+    let db = DbInstance::with_repos(vec![config]).await.unwrap();
+    let registry = std::sync::Arc::new(ValidatorRegistry::new());
+    bind_fk_validator(
+        &db,
+        &registry,
+        "child",
+        "restrict_fk",
+        "parent_id",
+        "parent",
+        "id",
+        FkAction::Restrict,
+        true,
+    );
+    FkTestResolver {
+        db,
+        repo: "default".to_string(),
+        registry,
+    }
+}
+
+async fn insert_parent(resolver: &FkTestResolver) {
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.insert(
+        "parent",
+        write::insert("parent").row(
+            doc()
+                .set("id", 7_i64)
+                .unwrap()
+                .set("name", "parent")
+                .unwrap(),
+        ),
+    );
+    execute_batch(&batch.build(), resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+}
+
+async fn delete_parent(
+    resolver: &FkTestResolver,
+) -> Result<shamir_query_types::batch::BatchResponse, shamir_query_types::batch::BatchError> {
+    let mut batch = Batch::new();
+    batch.id(2);
+    batch
+        .try_delete(
+            "delete",
+            write::delete("parent").where_(filter::eq("id", 7_i64)),
+        )
+        .unwrap();
+    execute_batch(&batch.build(), resolver, None, None, Actor::System, "test").await
+}
+
+async fn staged_corrupt_parent_fixture(resolver: &FkTestResolver) -> TxContext {
+    let table = resolver.db.get_table("default", "parent").await.unwrap();
+    let rows = table.list_stream(16);
+    let id = {
+        futures::pin_mut!(rows);
+        rows.next().await.unwrap().unwrap()[0].0
+    };
+    let bytes = Bytes::from_static(&[0x81]);
+    let mut tx = TxContext::new(TxId::new(5001), 0, 0, IsolationLevel::Snapshot);
+    let mut staging = StagingStore::new(std::sync::Arc::clone(table.data_store()));
+    staging.set(id.to_bytes().into(), bytes.clone());
+    tx.write_set.insert(table.table_token(), staging);
+    let batch = {
+        let stream = table.list_stream_tx(Some(&tx), 16);
+        futures::pin_mut!(stream);
+        stream.next().await.unwrap().unwrap()
+    };
+    match &batch[0].1 {
+        crate::table::record_cow::RecordCow::Borrowed(raw) => {
+            assert_eq!(raw.as_ref(), bytes.as_ref());
+        }
+        crate::table::record_cow::RecordCow::Owned(_) => {
+            panic!("staged corrupt bytes must remain raw")
+        }
+    }
+    tx
+}
+
+#[tokio::test]
+async fn rv_engine_bec5d158_restrict_parent_scan_fails_closed_on_corrupt_body() {
+    let resolver = fixture().await;
+    insert_parent(&resolver).await;
+    let tx = staged_corrupt_parent_fixture(&resolver).await;
+    let parent = resolver.db.get_table("default", "parent").await.unwrap();
+    let info = parent.info_store_read_view();
+    let refs = new_map();
+    let ctx = info.filter_context(&refs).await.unwrap();
+    let error = crate::query::batch::fk_restrict::check_fk_restrict(
+        &resolver,
+        &crate::query::TableRef::with_repo("default", "parent"),
+        &parent,
+        &filter::eq("id", 7_i64),
+        &ctx,
+        "delete",
+        &tx,
+    )
+    .await
+    .expect_err("corrupt parent data must abort FK RESTRICT rather than allow deletion");
+    assert!(error
+        .to_string()
+        .contains("fk_restrict: parent scan failed"));
+}
+
+#[tokio::test]
+async fn rv_engine_bec5d158_restrict_indexed_staged_corrupt_child_propagates_codec() {
+    let resolver = fixture().await;
+    insert_parent(&resolver).await;
+    let child = resolver.db.get_table("default", "child").await.unwrap();
+    child
+        .create_index("idx_parent_id", &["parent_id"])
+        .await
+        .unwrap();
+    let mut seed = Batch::new();
+    seed.id(4);
+    seed.insert(
+        "child",
+        write::insert("child").row(doc().set("parent_id", 99_i64).unwrap()),
+    );
+    execute_batch(&seed.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+
+    let rows = child.list_stream(16);
+    futures::pin_mut!(rows);
+    let child_id = rows.next().await.unwrap().unwrap()[0].0;
+    let bytes = Bytes::from_static(&[0x81]);
+    let mut tx = TxContext::new(TxId::new(5002), 0, u64::MAX, IsolationLevel::Snapshot);
+    let mut staging = StagingStore::new(std::sync::Arc::clone(child.data_store()));
+    staging.set(child_id.to_bytes().into(), bytes);
+    tx.write_set.insert(child.table_token(), staging);
+
+    let parent = resolver.db.get_table("default", "parent").await.unwrap();
+    let info = parent.info_store_read_view();
+    let refs = new_map();
+    let ctx = info.filter_context(&refs).await.unwrap();
+    let error = crate::query::batch::fk_restrict::check_fk_restrict(
+        &resolver,
+        &crate::query::TableRef::with_repo("default", "parent"),
+        &parent,
+        &filter::eq("id", 7_i64),
+        &ctx,
+        "delete",
+        &tx,
+    )
+    .await
+    .expect_err("indexed staged child decode failure must propagate");
+    assert!(error.to_string().contains("fk_restrict: child scan failed"));
+    assert!(error.to_string().contains("Codec"));
+}
+
+#[tokio::test]
+async fn rv_engine_bec5d158_restrict_parent_scan_allows_well_formed_absent_field() {
+    let resolver = fixture().await;
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.insert(
+        "parent",
+        write::insert("parent").row(doc().set("other", "well formed").unwrap()),
+    );
+    execute_batch(&batch.build(), &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    delete_parent(&resolver)
+        .await
+        .expect("well-formed record without the filtered id field remains non-matching");
 }
