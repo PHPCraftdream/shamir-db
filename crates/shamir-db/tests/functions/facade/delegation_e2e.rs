@@ -430,7 +430,15 @@ async fn rv_db_fa80a7b8_typed_not_found_classification_ignores_message_text() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
     let resp = shamir
-        .execute("testdb", &one_op(ddl::grant_role("analyst", "ghost")))
+        .execute(
+            "testdb",
+            &one_op(
+                ddl::grant_role("analyst", "ghost")
+                    .hmac("dummy")
+                    .build()
+                    .unwrap(),
+            ),
+        )
         .await;
     assert_eq!(resp.unwrap_err().code(), Some("not_found"));
 
@@ -441,7 +449,15 @@ async fn rv_db_fa80a7b8_typed_not_found_classification_ignores_message_text() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
     let resp = shamir
-        .execute("testdb", &one_op(ddl::grant_role("analyst", "ghost")))
+        .execute(
+            "testdb",
+            &one_op(
+                ddl::grant_role("analyst", "ghost")
+                    .hmac("dummy")
+                    .build()
+                    .unwrap(),
+            ),
+        )
         .await;
     assert_eq!(resp.unwrap_err().code(), Some("query"));
 }
@@ -455,7 +471,15 @@ async fn rv_db_fa80a7b8_fake_port_missing_user_is_typed_not_found() {
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
     let response = shamir
-        .execute("testdb", &one_op(ddl::grant_role("analyst", "absent")))
+        .execute(
+            "testdb",
+            &one_op(
+                ddl::grant_role("analyst", "absent")
+                    .hmac("dummy")
+                    .build()
+                    .unwrap(),
+            ),
+        )
         .await;
     assert_eq!(response.unwrap_err().code(), Some("not_found"));
 }
