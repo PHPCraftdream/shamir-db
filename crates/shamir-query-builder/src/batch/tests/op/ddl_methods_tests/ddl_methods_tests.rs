@@ -71,10 +71,22 @@ fn ddl_create_index_matches_op() {
 fn ddl_create_function_matches_op() {
     assert_same_wire(
         |b| {
-            b.create_function("fn", ddl::create_function("my_fn").source("fn main(){}"));
+            b.create_function(
+                "fn",
+                ddl::create_function("my_fn")
+                    .source("fn main(){}")
+                    .build()
+                    .unwrap(),
+            );
         },
         |b| {
-            b.op("fn", ddl::create_function("my_fn").source("fn main(){}"));
+            b.op(
+                "fn",
+                ddl::create_function("my_fn")
+                    .source("fn main(){}")
+                    .build()
+                    .unwrap(),
+            );
         },
     );
 }
@@ -87,10 +99,16 @@ fn ddl_create_function_matches_op() {
 fn ddl_create_validator_matches_op() {
     assert_same_wire(
         |b| {
-            b.create_validator("val", ddl::create_validator("check").wasm("AAAA"));
+            b.create_validator(
+                "val",
+                ddl::create_validator("check").wasm("AAAA").build().unwrap(),
+            );
         },
         |b| {
-            b.op("val", ddl::create_validator("check").wasm("AAAA"));
+            b.op(
+                "val",
+                ddl::create_validator("check").wasm("AAAA").build().unwrap(),
+            );
         },
     );
 }
@@ -129,13 +147,19 @@ fn ddl_chmod_matches_op() {
         |b| {
             b.chmod(
                 "perm",
-                ddl::chmod(ddl::res::table("app", "main", "users"), 0o750),
+                ddl::chmod(ddl::res::table("app", "main", "users"), 0o750)
+                    .hmac("cafe")
+                    .build()
+                    .unwrap(),
             );
         },
         |b| {
             b.op(
                 "perm",
-                ddl::chmod(ddl::res::table("app", "main", "users"), 0o750),
+                ddl::chmod(ddl::res::table("app", "main", "users"), 0o750)
+                    .hmac("cafe")
+                    .build()
+                    .unwrap(),
             );
         },
     );
@@ -149,10 +173,24 @@ fn ddl_chmod_matches_op() {
 fn ddl_create_user_matches_op() {
     assert_same_wire(
         |b| {
-            b.create_user("usr", ddl::create_user("alice", "s3cret").roles(["admin"]));
+            b.create_user(
+                "usr",
+                ddl::create_user("alice", "s3cret")
+                    .roles(["admin"])
+                    .hmac("beef")
+                    .build()
+                    .unwrap(),
+            );
         },
         |b| {
-            b.op("usr", ddl::create_user("alice", "s3cret").roles(["admin"]));
+            b.op(
+                "usr",
+                ddl::create_user("alice", "s3cret")
+                    .roles(["admin"])
+                    .hmac("beef")
+                    .build()
+                    .unwrap(),
+            );
         },
     );
 }
@@ -165,10 +203,16 @@ fn ddl_create_user_matches_op() {
 fn ddl_create_group_matches_op() {
     assert_same_wire(
         |b| {
-            b.create_group("grp", ddl::create_group("devs"));
+            b.create_group(
+                "grp",
+                ddl::create_group("devs").hmac("f00d").build().unwrap(),
+            );
         },
         |b| {
-            b.op("grp", ddl::create_group("devs"));
+            b.op(
+                "grp",
+                ddl::create_group("devs").hmac("f00d").build().unwrap(),
+            );
         },
     );
 }
@@ -184,7 +228,10 @@ fn ddl_add_group_member_matches_op() {
                         name: "devs".into(),
                     },
                     42,
-                ),
+                )
+                .hmac("5eed")
+                .build()
+                .unwrap(),
             );
         },
         |b| {
@@ -195,7 +242,10 @@ fn ddl_add_group_member_matches_op() {
                         name: "devs".into(),
                     },
                     42,
-                ),
+                )
+                .hmac("5eed")
+                .build()
+                .unwrap(),
             );
         },
     );
@@ -209,10 +259,22 @@ fn ddl_add_group_member_matches_op() {
 fn ddl_start_migration_matches_op() {
     assert_same_wire(
         |b| {
-            b.start_migration("mig", ddl::start_migration("events", "archive", "fjall"));
+            b.start_migration(
+                "mig",
+                ddl::start_migration("events", "archive", "fjall")
+                    .hmac("d00d")
+                    .build()
+                    .unwrap(),
+            );
         },
         |b| {
-            b.op("mig", ddl::start_migration("events", "archive", "fjall"));
+            b.op(
+                "mig",
+                ddl::start_migration("events", "archive", "fjall")
+                    .hmac("d00d")
+                    .build()
+                    .unwrap(),
+            );
         },
     );
 }
@@ -267,7 +329,10 @@ fn mixed_ddl_and_dml_batch() {
     );
     b1.chmod(
         "perm",
-        ddl::chmod(ddl::res::table("app", "main", "users"), 0o750),
+        ddl::chmod(ddl::res::table("app", "main", "users"), 0o750)
+            .hmac("cafe")
+            .build()
+            .unwrap(),
     );
     b1.query("q", Query::from("users").select(["id"]));
 
@@ -283,7 +348,10 @@ fn mixed_ddl_and_dml_batch() {
     );
     b2.op(
         "perm",
-        ddl::chmod(ddl::res::table("app", "main", "users"), 0o750),
+        ddl::chmod(ddl::res::table("app", "main", "users"), 0o750)
+            .hmac("cafe")
+            .build()
+            .unwrap(),
     );
     b2.query("q", Query::from("users").select(["id"]));
 

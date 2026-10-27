@@ -22,7 +22,7 @@ use crate::{DbError, ShamirDb};
 
 /// In-memory ShamirDb with `testdb/{main,side}` and `otherdb/main`, each with
 /// a `users` table.
-async fn setup() -> ShamirDb {
+pub(super) async fn setup() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
     for repo in ["main", "side"] {
@@ -46,7 +46,7 @@ async fn setup() -> ShamirDb {
 
 /// Insert one row into `testdb/{repo}.users` (repo-qualified insert builder:
 /// the row must land in the repo the helper is given).
-async fn seed_row(shamir: &ShamirDb, repo: &str) {
+pub(super) async fn seed_row(shamir: &ShamirDb, repo: &str) {
     let mut b = Batch::new();
     b.id(1);
     b.insert(
@@ -71,7 +71,7 @@ async fn read_users(shamir: &ShamirDb, db: &str, repo: &str) -> Result<BatchResp
 }
 
 /// Create ONE Pull profile over a single `(db, repo)` scope (builder-only).
-async fn create_profile(shamir: &ShamirDb, profile: &str, repo: &str) {
+pub(super) async fn create_profile(shamir: &ShamirDb, profile: &str, repo: &str) {
     let mut b = Batch::new();
     b.id(2);
     b.op(
@@ -140,9 +140,12 @@ async fn set_profile(
     let mut b = Batch::new();
     b.id(id);
     b.try_op("alt", alter_subscription(sub).set_profile(profile))
-        .unwrap();
+        .expect("build op");
     shamir
-        .execute("testdb", &b.to_request_via_msgpack().unwrap())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
 }
 
@@ -158,7 +161,8 @@ async fn binding_profile_drop_keeps_bound_destination_blocked() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drp", drop_replication_profile("prof"));
+    b.try_op("drp", drop_replication_profile("prof").hmac("x"))
+        .unwrap();
     shamir
         .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
@@ -365,7 +369,8 @@ async fn binding_quarantined_destination_drop_rename_and_subscription_drop_refus
     // row is still present afterwards.
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_subscription("sub"));
+    b.try_op("drop", drop_subscription("sub").hmac("x"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
@@ -450,7 +455,8 @@ async fn binding_cascade_drop_repo_over_bound_destination_refused_and_intact() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_repo("main").cascade());
+    b.try_op("drop", drop_repo("main").cascade().hmac("x"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
@@ -493,7 +499,8 @@ async fn binding_cascade_drop_db_over_bound_destination_refused_and_intact() {
 
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_db("testdb").cascade());
+    b.try_op("drop", drop_db("testdb").cascade().hmac("x"))
+        .unwrap();
     let err = shamir
         .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
@@ -706,7 +713,7 @@ async fn binding_corrupted_profile_stream_refuses_creation_and_never_unblocks() 
 
 /// Read the raw subscription row for `name` if it exists (None while the
 /// pending-creation barrier write has not landed yet).
-async fn subscription_row_opt(shamir: &ShamirDb, name: &str) -> Option<QueryValue> {
+pub(super) async fn subscription_row_opt(shamir: &ShamirDb, name: &str) -> Option<QueryValue> {
     let table = shamir.system_store().subscriptions_table().await.ok()?;
     let interner = table.interner_for_test().get().await.ok()?;
     let refs = crate::types::common::new_map();
@@ -756,8 +763,9 @@ async fn binding_cascade_interlock_serializes_create_and_never_partial_drops() {
     // Batch 1: DROP REPO main CASCADE.
     let mut b = Batch::new();
     b.id(3);
-    b.op("drop", drop_repo("main").cascade());
-    let request = b.to_request_via_msgpack().unwrap();
+    b.try_op("drop", drop_repo("main").cascade().hmac("x"))
+        .unwrap();
+    let request = b.to_request_via_msgpack().expect("batch request encoding");
     let cascade_shamir = shamir.clone();
     let mut cascade = Box::pin(async move { cascade_shamir.execute("testdb", &request).await });
 
@@ -942,58 +950,4 @@ async fn binding_final_flip_flush_failure_never_makes_row_startable() {
             .unwrap(),
         "creation must not quarantine anything"
     );
-}
-
-/// S5c-X round 4 (T7, deterministic — no sleeps): the creation future is
-/// DROPPED (never aborted) exactly at the final-write Notify seam — the
-/// pending barrier row is durable, the final flip NEVER starts, and the row
-/// can never be startable (reconcile's start gate requires `active`). The
-/// catalogue stays valid throughout.
-#[tokio::test]
-async fn binding_cancellation_dropped_at_final_write_boundary_leaves_pending_durable() {
-    let shamir = setup().await;
-    seed_row(&shamir, "main").await;
-    create_profile(&shamir, "prof", "main").await;
-
-    shamir
-        .final_write_pause
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    let mut b = Batch::new();
-    b.id(2);
-    b.op("sub", subscription("sub", "tcp://peer:9000", "pub", "prof"));
-    let request = b.to_request_via_msgpack().unwrap();
-    let mut create = Box::pin(shamir.execute("testdb", &request));
-    let mut wait = Box::pin(shamir.final_write_arrived.notified());
-    // Biased order polls `wait` first, so the seam's notify_one cannot be
-    // missed once `wait` is registered.
-    tokio::select! {
-        biased;
-        _ = &mut wait => {}
-        res = create.as_mut() => panic!("creation ran past the final-write seam: {res:?}"),
-    }
-    drop(create); // DROP the parked future — never abort
-    shamir
-        .final_write_pause
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-
-    // The dropped-at-the-boundary creation left the durable pending barrier.
-    let row = subscription_row_opt(&shamir, "sub")
-        .await
-        .expect("the pending barrier row must be durable");
-    assert_eq!(
-        row.get("state").and_then(|v| v.as_str()),
-        Some(crate::repl_binding::pending::PENDING_STATE),
-        "the final write must never have started"
-    );
-    assert!(
-        row.get("binding_generation")
-            .and_then(|v| v.as_u64())
-            .is_some(),
-        "the pending barrier carries its binding generation"
-    );
-    // The catalogue stays valid.
-    shamir.refresh_resync_quarantine_cache().await.unwrap();
-    crate::repl_binding::validate::validate_subscription_catalogue(&shamir)
-        .await
-        .unwrap();
 }
