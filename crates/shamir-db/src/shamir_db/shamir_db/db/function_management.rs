@@ -422,16 +422,20 @@ impl ShamirDb {
     pub async fn list_functions_with_kind(&self) -> DbResult<Vec<(String, ArtifactKind)>> {
         let mut names = self.functions.list();
         names.sort();
-        // One targeted lookup per name — O(N) in the function count, but each
-        // lookup is O(1) against the name-keyed catalogue table. A full scan
-        // would also be correct but does unnecessary work for large catalogues.
+        // Resolve kinds from one catalogue read, avoiding one filtered scan
+        // per live function. The listing is O(N + M) for N live functions and
+        // M catalogue records.
+        let catalogue = self.system_store.load_functions().await?;
+        let mut kinds = shamir_types::types::common::new_map();
+        for record in &catalogue {
+            if let Some(name) = record.get("name").and_then(|value| value.as_str()) {
+                kinds.insert(name.to_string(), ArtifactKind::from_record(record));
+            }
+        }
         let mut out = Vec::with_capacity(names.len());
-        for name in &names {
-            let kind = match self.system_store.load_function(name).await? {
-                Some(rec) => ArtifactKind::from_record(&rec),
-                None => ArtifactKind::Wasm, // builtin / no catalogue row
-            };
-            out.push((name.clone(), kind));
+        for name in names {
+            let kind = kinds.get(&name).copied().unwrap_or(ArtifactKind::Wasm);
+            out.push((name, kind));
         }
         Ok(out)
     }

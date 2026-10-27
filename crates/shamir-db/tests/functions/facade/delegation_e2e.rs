@@ -24,7 +24,7 @@ use shamir_db::engine::repo::RepoConfig;
 use shamir_db::engine::table::TableConfig;
 use shamir_db::query::auth::CreateUserOp;
 use shamir_db::query::batch::BatchRequest;
-use shamir_db::{PortError, ShamirDb, UserAdminPort};
+use shamir_db::{PortError, PortErrorKind, ShamirDb, UserAdminPort};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_types::access::{Actor, ResourceMeta, ResourcePath};
@@ -338,18 +338,16 @@ async fn db_owner_creates_scoped_user_through_port() {
     );
 }
 
-// ===========================================================================
-// C. Error classification — `handle_grant_role`/`handle_revoke_role`
-// classify a `UserAdminPort` error containing "user not found" into code
-// `not_found`, and any other message into the generic `query` (task #559
-// review follow-up, #565).
-// ===========================================================================
+// ==========================================================================
+// C. Error classification: message matching must not control typed errors.
+// ==========================================================================
 
 /// A `UserAdminPort` whose `grant_role`/`revoke_role` always fail with a
 /// caller-supplied message. `create_user`/`drop_user`/`set_superuser` are
 /// unused by these tests and just succeed trivially.
 struct FailingRolePort {
     message: String,
+    kind: PortErrorKind,
 }
 
 #[async_trait]
@@ -367,10 +365,16 @@ impl UserAdminPort for FailingRolePort {
         Ok(false)
     }
     async fn grant_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
-        Err(self.message.clone().into())
+        Err(match self.kind {
+            PortErrorKind::UserNotFound => PortError::user_not_found(self.message.clone()),
+            PortErrorKind::Other => PortError::other(self.message.clone()),
+        })
     }
     async fn revoke_role(&self, _user: &str, _role: &str) -> Result<(), PortError> {
-        Err(self.message.clone().into())
+        Err(match self.kind {
+            PortErrorKind::UserNotFound => PortError::user_not_found(self.message.clone()),
+            PortErrorKind::Other => PortError::other(self.message.clone()),
+        })
     }
     async fn set_superuser(&self, _user: &str, _on: bool) -> Result<(), PortError> {
         Ok(())
@@ -378,10 +382,50 @@ impl UserAdminPort for FailingRolePort {
 }
 
 #[tokio::test]
+async fn rv_db_fa80a7b8_typed_not_found_classification_ignores_message_text() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "directory says principal is absent".to_string(),
+        kind: PortErrorKind::UserNotFound,
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+    let resp = shamir
+        .execute("testdb", &one_op(ddl::grant_role("analyst", "ghost")))
+        .await;
+    assert_eq!(resp.unwrap_err().code(), Some("not_found"));
+
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "user not found in diagnostic text, but this is I/O".to_string(),
+        kind: PortErrorKind::Other,
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+    let resp = shamir
+        .execute("testdb", &one_op(ddl::grant_role("analyst", "ghost")))
+        .await;
+    assert_eq!(resp.unwrap_err().code(), Some("query"));
+}
+
+#[tokio::test]
+async fn rv_db_fa80a7b8_real_directory_missing_user_is_typed_not_found() {
+    let shamir = setup().await;
+    let port = Arc::new(FailingRolePort {
+        message: "native directory missing-user diagnostic".to_string(),
+        kind: PortErrorKind::UserNotFound,
+    });
+    let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
+    let response = shamir
+        .execute("testdb", &one_op(ddl::grant_role("analyst", "absent")))
+        .await;
+    assert_eq!(response.unwrap_err().code(), Some("not_found"));
+}
+
+#[tokio::test]
 async fn grant_role_user_not_found_maps_to_not_found_code() {
     let shamir = setup().await;
     let port = Arc::new(FailingRolePort {
         message: "user not found: ghost".to_string(),
+        kind: PortErrorKind::UserNotFound,
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
@@ -396,6 +440,7 @@ async fn grant_role_other_error_maps_to_query_code() {
     let shamir = setup().await;
     let port = Arc::new(FailingRolePort {
         message: "directory I/O failure".to_string(),
+        kind: PortErrorKind::Other,
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
@@ -410,6 +455,7 @@ async fn revoke_role_user_not_found_maps_to_not_found_code() {
     let shamir = setup().await;
     let port = Arc::new(FailingRolePort {
         message: "user not found: ghost".to_string(),
+        kind: PortErrorKind::UserNotFound,
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 
@@ -424,6 +470,7 @@ async fn revoke_role_other_error_maps_to_query_code() {
     let shamir = setup().await;
     let port = Arc::new(FailingRolePort {
         message: "directory I/O failure".to_string(),
+        kind: PortErrorKind::Other,
     });
     let shamir = shamir.with_user_admin_port(port as Arc<dyn UserAdminPort>);
 

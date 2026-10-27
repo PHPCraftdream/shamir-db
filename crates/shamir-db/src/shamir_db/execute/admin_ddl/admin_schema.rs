@@ -838,6 +838,16 @@ impl ShamirAdminExecutor {
         let before = rules.len();
         rules.retain(|r| r.path != op.path);
         let removed = rules.len() < before;
+        if !removed {
+            let current_version = rec
+                .get(SCHEMA_VERSION_FIELD)
+                .and_then(|value| value.as_i64())
+                .unwrap_or(0);
+            return Ok(admin_result(mpack!({
+                "removed": false,
+                "schema_version": @(QueryValue::Int(current_version)),
+            })));
+        }
 
         let schema_qv = serialise_rules(&rules, interner);
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())

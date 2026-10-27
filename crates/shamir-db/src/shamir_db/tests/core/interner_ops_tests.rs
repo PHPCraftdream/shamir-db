@@ -38,6 +38,74 @@ async fn run_one(
 }
 
 #[tokio::test]
+async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
+    let shamir = setup_shamir().await;
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::database("testdb"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let denied_meta = crate::access::ResourceMeta {
+        owner: crate::access::Actor::User(1),
+        group: None,
+        mode: 0o700,
+    };
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::store("testdb", "main"),
+            &denied_meta,
+        )
+        .await
+        .unwrap();
+    let mut request = shamir_query_builder::batch::Batch::new();
+    request.id("ambient-denied");
+    let mut request = request.to_request_via_msgpack();
+    request.interner_epochs.insert("main".into(), 0);
+
+    let error = shamir
+        .execute_as(crate::access::Actor::User(99), "testdb", &request)
+        .await
+        .expect_err("ambient interner data must require Store Read");
+    assert!(matches!(
+        error,
+        crate::query::batch::BatchError::QueryError {
+            code: Some(ref code),
+            ..
+        } if code == "access_denied"
+    ));
+}
+
+#[tokio::test]
+async fn rv_db_4d93f623_ambient_delta_succeeds_with_store_read() {
+    let shamir = setup_shamir().await;
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::database("testdb"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::store("testdb", "main"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let mut batch = shamir_query_builder::batch::Batch::new();
+    batch.id("ambient-allowed");
+    let mut request = batch.to_request_via_msgpack();
+    request.interner_epochs.insert("main".into(), 0);
+    let response = shamir
+        .execute_as(crate::access::Actor::User(99), "testdb", &request)
+        .await
+        .unwrap();
+    assert!(response.interner_delta.contains_key("main"));
+}
+
+#[tokio::test]
 async fn touch_assigns_distinct_ids_and_42_is_not_id_42() {
     let shamir = setup_shamir().await;
 

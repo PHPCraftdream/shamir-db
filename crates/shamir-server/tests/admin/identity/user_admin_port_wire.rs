@@ -228,6 +228,25 @@ async fn drop_user_routes_through_port_and_removes_from_directory() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rv_db_fa80a7b8_directory_adapter_classifies_missing_users() {
+    let temp = TempDir::new().unwrap();
+    let directory =
+        Arc::new(FjallUserDirectory::open(temp.path().join("adapter-users.db")).unwrap());
+    let ports = DirectoryPorts::new(directory.clone(), fast_kdf());
+
+    let original = directory.grant_role("absent", "analyst", 1).unwrap_err();
+    assert!(matches!(
+        original,
+        shamir_connect::common::error::Error::UserNotFound
+    ));
+    let typed = shamir_db::UserAdminPort::grant_role(&ports, "absent", "analyst")
+        .await
+        .unwrap_err();
+    assert_eq!(typed.kind(), shamir_db::PortErrorKind::UserNotFound);
+    assert_eq!(typed.to_string(), original.to_string());
+}
+
 /// grant_role through the BatchOp path persists to the real directory.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn grant_role_routes_through_port_to_real_directory() {

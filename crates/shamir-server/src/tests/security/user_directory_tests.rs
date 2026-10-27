@@ -197,8 +197,6 @@ fn sample_record() -> UserRecord {
 
 /// Sanity: `state_by_user_id` returns `None` for a user_id that was never
 /// inserted (the directory-level primitive the resume adapter relies on).
-/// This duplicates the public-API test but lives next to the projection
-/// tests so a regression in the reverse-index read is caught here too.
 #[test]
 fn state_by_user_id_unknown_after_fresh_open() {
     let dir = TempDir::new().expect("tempdir");

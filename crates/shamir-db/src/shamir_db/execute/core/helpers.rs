@@ -40,8 +40,12 @@ pub(super) fn admin_result(data: QueryValue) -> QueryResult {
 /// The `ddl_status` field is populated ONLY for the inline-succeeded common case
 /// (i.e., `Succeeded`). For crash-recovered operations, the client MUST poll
 /// via `DbRequest::GetDdlOpStatus` to see `SucceededViaCrashRecovery`.
-pub(super) fn admin_result_with_op_id(data: QueryValue, op_id: RecordId) -> QueryResult {
-    QueryResult {
+pub(super) fn admin_result_with_op_id(
+    data: QueryValue,
+    op_id: RecordId,
+) -> Result<QueryResult, BatchError> {
+    let completed_at = system_time_to_unix_millis(std::time::SystemTime::now())?;
+    Ok(QueryResult {
         receipt: None,
         records: vec![QueryRecord::Direct(data)],
         stats: Some(QueryStats {
@@ -57,13 +61,19 @@ pub(super) fn admin_result_with_op_id(data: QueryValue, op_id: RecordId) -> Quer
         versions: None,
         corrupt_records: Vec::new(),
         op_id: Some(op_id),
-        ddl_status: Some(DdlOpState::Succeeded {
-            completed_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64,
-        }),
-    }
+        ddl_status: Some(DdlOpState::Succeeded { completed_at }),
+    })
+}
+
+/// Convert a clock reading to the DDL status timestamp, rejecting pre-epoch values.
+pub(super) fn system_time_to_unix_millis(time: std::time::SystemTime) -> Result<u64, BatchError> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .map_err(|error| BatchError::QueryError {
+            alias: String::new(),
+            message: format!("system clock precedes UNIX_EPOCH: {error}"),
+            code: Some("internal_error".to_string()),
+        })
 }
 
 /// Serialize any `serde::Serialize` value to `QueryValue` via msgpack round-trip.
@@ -72,11 +82,17 @@ pub(super) fn admin_result_with_op_id(data: QueryValue, op_id: RecordId) -> Quer
 /// `ChangelogEvent`, `ResourceRef`) must be embedded in an admin response
 /// `QueryValue` but has no direct `→ QueryValue` conversion. The msgpack
 /// codec is byte-identical to the wire, so this is lossless.
-pub(super) fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
-    rmp_serde::to_vec_named(v)
-        .ok()
-        .and_then(|b| rmp_serde::from_slice::<QueryValue>(&b).ok())
-        .unwrap_or(QueryValue::Null)
+pub(super) fn to_qv<T: serde::Serialize>(v: &T) -> Result<QueryValue, BatchError> {
+    let bytes = rmp_serde::to_vec_named(v).map_err(|error| BatchError::QueryError {
+        alias: String::new(),
+        message: format!("failed to serialize admin response value: {error}"),
+        code: Some("internal_error".to_string()),
+    })?;
+    rmp_serde::from_slice::<QueryValue>(&bytes).map_err(|error| BatchError::QueryError {
+        alias: String::new(),
+        message: format!("failed to decode admin response value: {error}"),
+        code: Some("internal_error".to_string()),
+    })
 }
 
 /// Map a typed [`crate::DbError`] onto a coded [`BatchError`] so the admin

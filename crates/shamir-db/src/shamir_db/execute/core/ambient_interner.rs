@@ -17,8 +17,8 @@ use crate::query::batch::{BatchError, BatchRequest, BatchResponse, InternerDelta
 /// For each `(repo, client_epoch)` in `request.interner_epochs`: resolve the
 /// db's `RepoInstance`, `repo_interner().get().await`, `entries_after(epoch)`,
 /// and build an [`InternerDelta`] from `(entries, new_high)`. Unknown repos are
-/// skipped. Errors loading an interner are surfaced as a soft `BatchError` —
-/// the batch itself already executed successfully.
+/// skipped. Interner-loading failures are ignored because batch results have
+/// already been computed; ambient synchronization is best-effort.
 pub(super) async fn attach_interner_delta(
     response: &mut BatchResponse,
     request: &BatchRequest,
@@ -35,13 +35,11 @@ pub(super) async fn attach_interner_delta(
         // Load the per-repo interner. A failure here means the interner store
         // could not be opened; we skip this repo rather than failing the whole
         // response — the batch results are already computed.
-        let mgr = match repo.repo_interner().await {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(mgr) = repo.repo_interner().await else {
+            continue;
         };
-        let interner = match mgr.get().await {
-            Ok(i) => i,
-            Err(_) => continue,
+        let Ok(interner) = mgr.get().await else {
+            continue;
         };
         let (entries, new_high) = interner.entries_after(*client_epoch as usize);
         let delta = InternerDelta {
