@@ -75,7 +75,13 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry {
             f: std::sync::Arc::new(|a: &[_]| {
                 let then = arg_i64(a, 0)?;
-                Ok(v_int((Utc::now().timestamp_millis() - then) / 1000))
+                // Checked: now - i64::MIN overflows; surface "out_of_range"
+                // instead of a debug panic / silent wrap (RV-FUNCLIB-D45CF639).
+                let diff = Utc::now()
+                    .timestamp_millis()
+                    .checked_sub(then)
+                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                Ok(v_int(diff / 1000))
             }),
             min_args: 1,
             max_args: Some(1),

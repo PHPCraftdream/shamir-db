@@ -70,37 +70,56 @@ impl Default for EnvPolicy {
 
 /// Tiny `*`-only glob matcher — no external dependency.
 ///
-/// A pattern is split at `*` into literal segments that must appear
-/// consecutively in `text`. A single `*` matches zero or more characters.
+/// A pattern is split at `*` into literal segments. Non-final segments are
+/// matched left-to-right with first-find; the FINAL non-empty segment of a
+/// pattern not ending in `*` must match at the END of `text`. A single `*`
+/// matches zero or more characters.
 pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
     if !pattern.contains('*') {
         return pattern == text;
     }
     let parts: Vec<&str> = pattern.split('*').collect();
-    if parts.is_empty() {
-        return true;
-    }
-    // Leading empty string → pattern starts with *
-    // Trailing empty string → pattern ends with *
+    let last = parts.len() - 1;
+    // Leading empty string → pattern starts with * (no start anchor).
+    // Trailing empty string → pattern ends with * (no end anchor).
+    let anchored_start = !pattern.starts_with('*');
+    let anchored_end = !pattern.ends_with('*');
     let mut cursor = 0usize;
     for (i, part) in parts.iter().enumerate() {
         if part.is_empty() {
             continue;
         }
-        match text[cursor..].find(part) {
-            Some(pos) => {
-                // First segment must anchor to start if pattern doesn't start with *
-                if i == 0 && !pattern.starts_with('*') && pos != 0 {
-                    return false;
-                }
-                cursor += pos + part.len();
+        if i == last && anchored_end {
+            // Final non-empty segment must match at the END of the text
+            // (RV-WASM-HOST-935F15D1: an early occurrence of the final
+            // literal must not consume text needed by the end anchor).
+            if text.len() < part.len() {
+                return false;
             }
-            None => return false,
+            let start = text.len() - part.len();
+            // The suffix must END the text at a valid UTF-8 boundary
+            // (RV-WASM-HOST-935F15D1: a byte offset can split a multibyte
+            // char, e.g. pattern "*a" vs text "é" → start=1 lands mid-char;
+            // such a text cannot end with the literal part, so no match).
+            if !text.is_char_boundary(start) {
+                return false;
+            }
+            if start < cursor || !text[start..].starts_with(part) {
+                return false;
+            }
+            cursor = text.len();
+        } else {
+            match text[cursor..].find(part) {
+                Some(pos) => {
+                    // First segment must anchor to start if pattern doesn't start with *
+                    if i == 0 && anchored_start && pos != 0 {
+                        return false;
+                    }
+                    cursor += pos + part.len();
+                }
+                None => return false,
+            }
         }
-    }
-    // If pattern doesn't end with *, the last segment must anchor to end
-    if !pattern.ends_with('*') && cursor != text.len() {
-        return false;
     }
     true
 }

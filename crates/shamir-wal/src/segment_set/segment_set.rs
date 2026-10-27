@@ -12,8 +12,10 @@
 //! append path and the truncation path therefore never touch the same file
 //! (zero writer↔truncator coordination, see `docs/dev-artifacts/perf/f6-subplan.md` §1).
 //!
-//! PURELY ADDITIVE (F6a): wired into nothing yet — production still runs a
-//! single [`WalSegment`] via `WalSink::File`. F6b cuts `repo_instance` over.
+//! Wiring: production repository initialization constructs the set via
+//! [`SegmentSet::open`] and installs it as [`crate::WalSink::File`] behind
+//! [`crate::WalGroupCommit`] (see `shamir-engine`'s repo-instance
+//! transaction bootstrap).
 
 use std::fs::remove_file;
 pub(super) use std::path::PathBuf;

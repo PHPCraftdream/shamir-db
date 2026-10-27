@@ -644,7 +644,7 @@ async fn run_handshake<F: Framer>(
     const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
     let (ticket_bytes, ticket_expires_at_ns) =
         match shamir_connect::server::resume::issue_initial_ticket(
-            &ctx.resume_config.ticket_key,
+            ctx.resume_config.ticket_key(),
             user_id,
             username.as_str().to_string(),
             ctx.transport_kind.as_u8(),

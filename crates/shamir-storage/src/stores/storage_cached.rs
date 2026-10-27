@@ -9,11 +9,22 @@
 //! until the store is rebuilt.
 
 use crate::error::{DbError, DbResult};
-use crate::types::{RecordKey, Store};
+use crate::types::{RecordKey, RecordStream, Store};
+mod admission;
+#[cfg(test)]
+pub(crate) use admission::COMMAND_CHANNEL_CAPACITY;
+#[cfg(test)]
+pub(crate) use admission::QUEUED_PAYLOAD_BUDGET_BYTES;
+#[cfg(test)]
+pub(crate) use admission::{
+    budget_waits_for_tests, reset_retry_count_for_tests, retry_count_for_tests,
+};
+mod owner_health;
 use async_stream::stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{stream::Stream, StreamExt};
+use owner_health::{await_reply, publish_failure, storage_err, HealthWatch, OwnerGuard};
 use scc::TreeIndex;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -81,75 +92,6 @@ enum Command {
     },
 }
 
-fn storage_err(msg: impl Into<String>) -> DbError {
-    DbError::Storage(msg.into())
-}
-
-/// Health watch payload: `None` = healthy, `Some(msg)` = sticky failure.
-type HealthWatch = watch::Sender<Option<String>>;
-
-/// Publishes a terminal failure if none existed yet (idempotent).
-fn publish_failure(health: &HealthWatch, msg: String) {
-    if health.borrow().is_none() {
-        health.send_replace(Some(msg));
-    }
-}
-
-/// RAII: dropped when the owner future is dropped (normal exit, panic
-/// unwind, or abort before the first poll — built before `tokio::spawn`).
-/// Marks the store terminally failed on every exit path.
-struct OwnerGuard {
-    health: HealthWatch,
-}
-
-impl Drop for OwnerGuard {
-    fn drop(&mut self) {
-        publish_failure(
-            &self.health,
-            "cache owner task terminated (panic, abort or shutdown)".into(),
-        );
-    }
-}
-
-/// Await a command reply, racing it against the persistent terminal
-/// failure watch. A failed reply send is also published sticky.
-async fn await_reply<T>(
-    rx: oneshot::Receiver<DbResult<T>>,
-    mut health: watch::Receiver<Option<String>>,
-    health_tx: HealthWatch,
-) -> DbResult<T> {
-    // Check the watch BEFORE the select so a ready reply cannot race it.
-    if let Some(msg) = health.borrow().clone() {
-        return Err(storage_err(msg));
-    }
-    tokio::select! {
-        r = rx => match r {
-            Ok(v) => {
-                // Re-check health before returning a trusted success.
-                if let Some(msg) = health.borrow_and_update().clone() {
-                    return Err(storage_err(msg));
-                }
-                v
-            }
-            Err(_) => {
-                let msg = "cache owner dropped the command reply".to_string();
-                publish_failure(&health_tx, msg.clone());
-                Err(storage_err(msg))
-            }
-        },
-        changed = health.changed() => match changed {
-            Ok(()) => Err(storage_err(
-                health
-                    .borrow()
-                    .clone()
-                    .unwrap_or_else(|| "cache owner terminated".into()),
-            )),
-            Err(_) => Err(storage_err("cache owner health channel closed")),
-        },
-    }
-}
-
-/// Checked fetch-and-increment of the epoch; exhaustion fails closed.
 fn bump_epoch(epoch: &AtomicU64) -> Result<u64, String> {
     let mut cur = epoch.load(Ordering::Acquire);
     loop {
@@ -275,7 +217,7 @@ struct OwnerState {
 /// before the next dequeue, so cache and backing mutate in submission
 /// order. Exits when every `CachedStore` handle is dropped.
 async fn run_owner(
-    mut rx: mpsc::UnboundedReceiver<Command>,
+    mut rx: mpsc::Receiver<admission::QueuedCommand>,
     state: OwnerState,
     guard: OwnerGuard,
     #[cfg(test)] start_gate: Option<Arc<Notify>>,
@@ -300,7 +242,13 @@ async fn run_owner(
     // this message; the loop then drains-and-fails forever.
     let mut failed: Option<String> = None;
 
-    while let Some(cmd) = rx.recv().await {
+    while let Some(queued) = rx.recv().await {
+        // Drop the command's reservation AT DEQUEUE — its `Drop` refunds
+        // the retained-payload charge (byte budget, RV-STORAGE-E02C8A80).
+        // The same refund happens automatically if the owner aborts or
+        // the receiver drops while commands are still queued.
+        let (cmd, reservation) = queued.into_parts();
+        drop(reservation);
         if let Some(msg) = failed.clone() {
             fail_command(cmd, &msg);
             continue;
@@ -561,7 +509,16 @@ pub struct CachedStore {
     /// Odd/even: ODD while a mutation/reload is in flight, EVEN when
     /// quiescent; completion bumps invalidate captures taken mid-flight.
     epoch: Arc<AtomicU64>,
-    tx: mpsc::UnboundedSender<Command>,
+    /// Bounded command channel to the FIFO owner (RV-STORAGE-E02C8A80):
+    /// value-bearing `Async` commands are admitted via
+    /// [`admission::admit`]'s `try_send` + `yield_now` retry so a stalled
+    /// owner cannot grow the queue without bound. Each queued item
+    /// carries its own byte-budget reservation guard.
+    tx: mpsc::Sender<admission::QueuedCommand>,
+    /// Shared retained-payload byte counter backing the admission budget
+    /// (RV-STORAGE-E02C8A80 round 2); charges are released by the
+    /// reservation guards traveling inside the queued commands.
+    queued_bytes: Arc<AtomicUsize>,
     health: watch::Receiver<Option<String>>,
     /// Health sender clone: lets a dropped-reply diagnostic be published
     /// sticky even if the `OwnerGuard` publication races.
@@ -597,7 +554,9 @@ impl CachedStore {
 
         let pending_writes = Arc::new(AtomicUsize::new(0));
         let epoch = Arc::new(AtomicU64::new(0));
-        let (tx, rx) = mpsc::unbounded_channel::<Command>();
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) =
+            mpsc::channel::<admission::QueuedCommand>(admission::COMMAND_CHANNEL_CAPACITY);
         let (health_tx, health_rx) = watch::channel(None);
         // Built BEFORE spawn: even an abort before the first poll marks
         // the store failed on drop.
@@ -633,6 +592,7 @@ impl CachedStore {
             size,
             epoch,
             tx,
+            queued_bytes,
             health: health_rx,
             health_tx: health_tx_store,
             #[cfg(test)]
@@ -690,9 +650,7 @@ impl CachedStore {
             return Err(storage_err(msg));
         }
         let (reply_tx, reply_rx) = oneshot::channel();
-        if self.tx.send(make(reply_tx)).is_err() {
-            return Err(storage_err("cache owner command channel closed"));
-        }
+        admission::admit(&self.tx, &self.queued_bytes, &self.health, make(reply_tx)).await?;
         await_reply(reply_rx, self.health.clone(), self.health_tx.clone()).await
     }
 
@@ -766,6 +724,12 @@ impl CachedStore {
     #[cfg(test)]
     pub(crate) fn abort_owner_for_tests(&self) {
         self.abort_handle.abort();
+    }
+
+    /// Current retained-payload byte charge (RV-STORAGE-E02C8A80 oracle).
+    #[cfg(test)]
+    pub(crate) fn queued_bytes_for_tests(&self) -> usize {
+        self.queued_bytes.load(Ordering::Relaxed)
     }
 
     /// Resolves once the health watch holds a terminal value.
@@ -843,6 +807,7 @@ impl Store for CachedStore {
         let health = self.health.clone();
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             let mut last_key: Option<RecordKey> = None;
 
             loop {
@@ -902,6 +867,7 @@ impl Store for CachedStore {
         let health = self.health.clone();
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             let mut last_key: Option<RecordKey> = None;
 
             loop {
@@ -951,15 +917,51 @@ impl Store for CachedStore {
         })
     }
 
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> RecordStream {
+        let cache = self.cache.clone();
+        let health = self.health.clone();
+        Box::pin(stream! {
+            if batch_size == 0 { return; }
+            let mut cursor: Option<RecordKey> = None;
+            loop {
+                let terminal = health.borrow().clone();
+                if let Some(msg) = terminal { yield Err(storage_err(msg)); return; }
+                let current = cursor.clone();
+                let batch = {
+                    let guard = scc::Guard::new();
+                    let lower = start_inclusive.clone().map(RecordKey::from).map(std::ops::Bound::Included).unwrap_or(std::ops::Bound::Unbounded);
+                    let upper = current.clone().map(std::ops::Bound::Excluded).or_else(|| end_inclusive.clone().map(RecordKey::from).map(std::ops::Bound::Included)).unwrap_or(std::ops::Bound::Unbounded);
+                    cache.range((lower, upper), &guard).rev().take(batch_size).map(|(k,v)| (k.clone(),v.clone())).collect::<Vec<_>>()
+                };
+                if batch.is_empty() { break; }
+                cursor = batch.last().map(|(k,_)| k.clone());
+                let done = batch.len() < batch_size;
+                yield Ok(batch);
+                if done { break; }
+            }
+        })
+    }
+
     /// Delegate to inner store's `transact`, then populate (`Set`) /
     /// evict (`Remove`) the cache. Ack after backing AND cache.
     async fn transact(&self, ops: Vec<crate::types::KvOp>) -> DbResult<()> {
         self.command(|reply| Command::Transact { ops, reply }).await
     }
 
-    /// Delegates to inner store (F-77 #904).
+    /// RV-STORAGE-007DEF6B: the atomic-visibility capability is WITHDRAWN
+    /// at the cache layer. A committed `transact` republishes its cache
+    /// actions ONE KEY AT A TIME while cache-hit reads (`get`) trust an
+    /// unfenced mirror probe (no epoch validation on hit), so a reader
+    /// running during the publication window can observe new A alongside
+    /// old B REGARDLESS of how atomic the inner backend is. The flag is
+    /// therefore never re-derived from `inner` (F-77 honesty contract).
     fn supports_atomic_transact(&self) -> bool {
-        self.inner.supports_atomic_transact()
+        false
     }
 
     /// Pass-through: the underlying store owns the buffer knobs.

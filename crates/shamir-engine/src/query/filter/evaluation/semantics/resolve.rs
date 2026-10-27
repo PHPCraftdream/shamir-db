@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner_with};
 use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -19,6 +20,34 @@ use crate::query::filter::evaluation::runtime::core::eval_context::FilterContext
 use crate::query::filter::evaluation::semantics::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
 use crate::query::read::QueryResult;
+
+/// Dispatch a scalar, offloading a call named argon2id. Name-based selection
+/// also applies to a user scalar shadowing that builtin; all other scalars run
+/// inline. On a multi-thread runtime, block_in_place permits worker handoff.
+/// Outside a multi-thread runtime it stays inline: the sync evaluator cannot
+/// offload there without a wider async-path redesign.
+pub(crate) fn call_scalar_offloaded(
+    resolver: ScalarResolver,
+    name: &str,
+    args: Vec<QueryValue>,
+) -> Option<QueryValue> {
+    if name != "crypto/argon2id" && name != "argon2id" {
+        return resolver.call(name, &args).ok();
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            let name = name.to_owned();
+            tokio::task::block_in_place(|| {
+                handle.block_on(tokio::task::spawn_blocking(move || {
+                    resolver.call(&name, &args).ok()
+                }))
+            })
+            .ok()
+            .flatten()
+        }
+        _ => resolver.call(name, &args).ok(),
+    }
+}
 
 /// Extract a value from an InnerValue by a path of interned keys.
 ///
@@ -370,7 +399,7 @@ pub fn resolve_filter_query(
                 let qv = resolve_filter_query(a, record, ctx)?;
                 qv_args.push(qv);
             }
-            ctx.scalars.call(call.name(), &qv_args).ok()
+            call_scalar_offloaded(ctx.scalars.clone(), call.name(), qv_args)
         }
         FilterValue::Param { name } => {
             // Injected sub-batch parameter. Populated by the recursive
