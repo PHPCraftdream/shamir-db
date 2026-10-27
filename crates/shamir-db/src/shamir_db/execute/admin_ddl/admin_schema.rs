@@ -44,7 +44,7 @@ use shamir_types::types::record_id::RecordId;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
 use super::schema_codec::{
-    dto_list_from_catalogue, map_insert, serialise_rules, serialise_rules_flat,
+    dto_list_from_catalogue, map_insert, schema_version_of, serialise_rules, serialise_rules_flat,
 };
 
 #[path = "../repo_admin/admin_schema_admission.rs"]
@@ -485,7 +485,9 @@ impl ShamirAdminExecutor {
         .await?;
 
         // Serialise the DTO rules into the catalogue form (interning paths).
-        let schema_qv = serialise_rules(&stamped_rules, interner);
+        // RU8: propagate the typed quota code from a base-intern over cap.
+        let schema_qv = serialise_rules(&stamped_rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
 
         // schema_validator_id: reuse if present (ALTER), else mint a new one.
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
@@ -697,8 +699,9 @@ impl ShamirAdminExecutor {
         )
         .await?;
 
-        // Re-serialise + persist.
-        let schema_qv = serialise_rules(&rules, interner);
+        // Re-serialise + persist. RU8: propagate the typed quota code.
+        let schema_qv = serialise_rules(&rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
             Some(id_str) => id_str
@@ -839,17 +842,15 @@ impl ShamirAdminExecutor {
         rules.retain(|r| r.path != op.path);
         let removed = rules.len() < before;
         if !removed {
-            let current_version = rec
-                .get(SCHEMA_VERSION_FIELD)
-                .and_then(|value| value.as_i64())
-                .unwrap_or(0);
             return Ok(admin_result(mpack!({
                 "removed": false,
-                "schema_version": @(QueryValue::Int(current_version)),
+                "schema_version": @(QueryValue::Int(schema_version_of(&rec) as i64)),
             })));
         }
 
-        let schema_qv = serialise_rules(&rules, interner);
+        // RU8: propagate the typed quota code.
+        let schema_qv = serialise_rules(&rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
             Some(id_str) => id_str
@@ -857,11 +858,7 @@ impl ShamirAdminExecutor {
                 .unwrap_or_else(|_| RecordId::new()),
             None => RecordId::new(),
         };
-        let current_version = rec
-            .get(SCHEMA_VERSION_FIELD)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as u64;
-        let new_version = current_version + 1;
+        let new_version = schema_version_of(&rec) + 1;
 
         // Recompile (even if empty — an empty schema validator accepts all).
         // F-4 — precompile gate BEFORE we touch the catalogue (see
