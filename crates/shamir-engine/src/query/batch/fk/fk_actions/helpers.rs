@@ -211,6 +211,8 @@ pub(super) fn extract_ref_field_value(
     path: &[shamir_types::core::interner::InternerKey],
 ) -> shamir_storage::error::DbResult<Option<QueryValue>> {
     if let Ok(view) = RecordView::new(bytes) {
+        view.get_with_err(path[0].clone())
+            .map_err(|error| shamir_storage::error::DbError::Codec(error.to_string()))?;
         return Ok(view.scalar_at(path).map(scalar_ref_to_qv));
     }
     match InnerValue::from_bytes(bytes.clone()) {

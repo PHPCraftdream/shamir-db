@@ -608,6 +608,34 @@ async fn cascade_grandchild_ref_field_collection_propagates_read_error() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
+async fn rv_engine_80890c84_cascade_fails_closed_on_malformed_map_body() {
+    let resolver = setup_grandchild_cascade_chain().await;
+
+    let b_table = resolver.db.get_table("default", "b").await.unwrap();
+    let b_token = b_table.table_token();
+    let b_id = {
+        let stream = b_table.list_stream(64);
+        futures::pin_mut!(stream);
+        let batch = stream.next().await.unwrap().unwrap();
+        batch[0].0
+    };
+
+    let hook =
+        TEST_READ_ONE_TX_BYTES_FAILURE.get_or_init(|| Arc::new(ReadOneTxBytesFailHook::default()));
+    hook.arm_corrupt(b_token, b_id, Bytes::from_static(b"\x81\xc4\x05\x01"));
+
+    let result = delete_a(&resolver).await;
+    let err = result.expect_err(
+        "a malformed-map row during grandchild ref_field collection must abort cascade",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("grandchild ref_field decode failed"),
+        "expected the site-3-decode-specific error message, got: {message}"
+    );
+}
+
+#[tokio::test]
 async fn cascade_grandchild_ref_field_collection_fails_closed_on_decode_corrupt_row() {
     let resolver = setup_grandchild_cascade_chain().await;
 
