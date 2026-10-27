@@ -3,8 +3,11 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use futures_util::Sink;
-use tokio_tungstenite::tungstenite::Message;
+use futures_util::{Sink, SinkExt, StreamExt};
+use tokio::io::duplex;
+use tokio::sync::oneshot;
+use tokio_tungstenite::tungstenite::{protocol::Role, Message};
+use tokio_tungstenite::WebSocketStream;
 
 use crate::framing::ws_send_sink_prereserved;
 
@@ -12,16 +15,12 @@ struct PointerSink(Option<*const u8>);
 
 #[tokio::test]
 async fn rv_transport_ws_b8ed1366_heartbeat_pong_does_not_consume_control_budget() {
-    use futures_util::SinkExt;
-    use tokio::io::duplex;
-    use tokio_tungstenite::tungstenite::{protocol::Role, Message};
-    use tokio_tungstenite::WebSocketStream;
-
     let (server_io, client_io) = duplex(64 * 1024);
     let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
     let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
     let state = crate::HeartbeatState::default();
     let (ping, _) = state.next_ping();
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
     let sender = tokio::spawn(async move {
         for _ in 0..64 {
             client.send(Message::Ping(vec![1].into())).await.unwrap();
@@ -34,6 +33,16 @@ async fn rv_transport_ws_b8ed1366_heartbeat_pong_does_not_consume_control_budget
             .send(Message::Binary(vec![0, 0, 0, 0].into()))
             .await
             .unwrap();
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                incoming = client.next() => match incoming {
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => panic!("peer WS drain failed: {error}"),
+                    None => break,
+                }
+            }
+        }
     });
     let result =
         crate::framing::ws_recv_into_stream_observing(&mut server, 1024, &mut Vec::new(), &state)
@@ -42,6 +51,7 @@ async fn rv_transport_ws_b8ed1366_heartbeat_pong_does_not_consume_control_budget
         result.is_ok(),
         "64 controls plus one matched Pong should fit budget: {result:?}"
     );
+    let _ = stop_tx.send(());
     sender.await.unwrap();
 }
 

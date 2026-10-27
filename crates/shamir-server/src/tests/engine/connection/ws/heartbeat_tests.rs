@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::{duplex, AsyncReadExt};
+use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Notify, Semaphore};
 use tokio_tungstenite::tungstenite::{protocol::Role, Message};
 use tokio_tungstenite::WebSocketStream;
@@ -43,21 +43,61 @@ async fn receive_ping(client: &mut WebSocketStream<tokio::io::DuplexStream>) -> 
     .expect("Ping deadline")
 }
 
-async fn receive_close(client: &mut WebSocketStream<tokio::io::DuplexStream>) -> (u16, String) {
+async fn receive_wire_close(io: &mut tokio::io::DuplexStream) -> (u16, String) {
     tokio::time::timeout(Duration::from_secs(1), async {
+        // A heartbeat Ping due at the same instant may precede the Close.
         loop {
-            match client.next().await {
-                Some(Ok(Message::Close(Some(frame)))) => {
-                    break (u16::from(frame.code), frame.reason.to_string())
+            let mut header = [0u8; 2];
+            io.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[1] & 0x80, 0, "server frames must not be masked");
+            let mut len = usize::from(header[1] & 0x7f);
+            if len == 126 {
+                let mut ext = [0u8; 2];
+                io.read_exact(&mut ext).await.unwrap();
+                len = usize::from(u16::from_be_bytes(ext));
+            } else if len == 127 {
+                let mut ext = [0u8; 8];
+                io.read_exact(&mut ext).await.unwrap();
+                len = usize::try_from(u64::from_be_bytes(ext)).unwrap();
+            }
+            let mut payload = vec![0; len];
+            io.read_exact(&mut payload).await.unwrap();
+            match header[0] & 0x0f {
+                0x9 => continue,
+                0x8 => {
+                    break (
+                        u16::from_be_bytes([payload[0], payload[1]]),
+                        String::from_utf8(payload[2..].to_vec()).unwrap(),
+                    )
                 }
-                Some(Ok(_)) => continue,
-                Some(Err(error)) => panic!("codec error before Close: {error}"),
-                None => panic!("stream ended before Close"),
+                opcode => panic!("expected WS Close frame, got opcode {opcode:#x}"),
             }
         }
     })
     .await
-    .expect("Close deadline")
+    .expect("wire Close deadline")
+}
+
+async fn receive_wire_ping(io: &mut tokio::io::DuplexStream) -> [u8; 8] {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        let mut header = [0u8; 2];
+        io.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0] & 0x0f, 0x9, "expected server Ping");
+        assert_eq!(header[1] & 0x7f, 8);
+        let mut ping = [0u8; 8];
+        io.read_exact(&mut ping).await.unwrap();
+        ping
+    })
+    .await
+    .expect("server Ping deadline")
+}
+
+async fn write_client_pong(io: &mut tokio::io::DuplexStream, payload: &[u8; 8]) {
+    const MASK: [u8; 4] = [0x31, 0x72, 0xa5, 0xc9];
+    io.write_all(&[0x8a, 0x88]).await.unwrap();
+    io.write_all(&MASK).await.unwrap();
+    let masked = std::array::from_fn::<_, 8, _>(|i| payload[i] ^ MASK[i % 4]);
+    io.write_all(&masked).await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -97,9 +137,8 @@ async fn rv_transport_ws_a3b8161a_request_loop_ping_and_matched_pongs() {
 
 #[tokio::test(start_paused = true)]
 async fn rv_transport_ws_a3b8161a_unanswered_ping_closes_4003() {
-    let (server_io, client_io) = duplex(64 * 1024);
+    let (server_io, mut client_io) = duplex(64 * 1024);
     let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
-    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
     let (reader, writer) = WsFramer::new(server).split();
     let mut context = Arc::try_unwrap(heartbeat_test_context(Duration::from_secs(2)))
         .ok()
@@ -113,6 +152,7 @@ async fn rv_transport_ws_a3b8161a_unanswered_ping_closes_4003() {
     ));
     settle().await;
     tokio::time::advance(Duration::from_secs(30)).await;
+    let _ping = receive_wire_ping(&mut client_io).await;
     settle().await;
     tokio::time::advance(Duration::from_secs(10)).await;
     settle().await;
@@ -120,16 +160,15 @@ async fn rv_transport_ws_a3b8161a_unanswered_ping_closes_4003() {
         task.is_finished(),
         "request_loop returns at the Pong deadline"
     );
-    let (code, reason) = receive_close(&mut client).await;
+    let (code, reason) = receive_wire_close(&mut client_io).await;
     assert_eq!((code, reason.as_str()), (4003, "heartbeat_timeout"));
     task.await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
 async fn rv_transport_ws_a3b8161a_mismatched_pong_times_out() {
-    let (server_io, client_io) = duplex(64 * 1024);
+    let (server_io, mut client_io) = duplex(64 * 1024);
     let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
-    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
     let (reader, writer) = WsFramer::new(server).split();
     let task = tokio::spawn(crate::connection::request_loop(
         heartbeat_test_context(Duration::from_secs(2)),
@@ -139,24 +178,31 @@ async fn rv_transport_ws_a3b8161a_mismatched_pong_times_out() {
     ));
     settle().await;
     tokio::time::advance(Duration::from_secs(30)).await;
-    let mut wrong = receive_ping(&mut client).await;
+    let ping = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut header = [0u8; 2];
+        client_io.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0] & 0x0f, 0x9, "expected server Ping");
+        assert_eq!(header[1] & 0x7f, 8);
+        let mut ping = [0u8; 8];
+        client_io.read_exact(&mut ping).await.unwrap();
+        ping
+    })
+    .await
+    .expect("server Ping deadline");
+    let mut wrong = ping;
     wrong[0] ^= 1;
-    client
-        .send(Message::Pong(wrong.clone().into()))
-        .await
-        .unwrap();
+    write_client_pong(&mut client_io, &wrong).await;
     settle().await;
     tokio::time::advance(Duration::from_secs(10)).await;
     settle().await;
-    assert_eq!(receive_close(&mut client).await.0, 4003);
+    assert_eq!(receive_wire_close(&mut client_io).await.0, 4003);
     task.await.unwrap();
 }
 
 #[tokio::test(start_paused = true)]
 async fn rv_transport_ws_a3b8161a_matched_pongs_do_not_reset_idle_timeout() {
-    let (server_io, client_io) = duplex(64 * 1024);
+    let (server_io, mut client_io) = duplex(64 * 1024);
     let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
-    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
     let (reader, writer) = WsFramer::new(server).split();
     let mut context = Arc::try_unwrap(heartbeat_test_context(Duration::from_secs(2)))
         .ok()
@@ -174,8 +220,18 @@ async fn rv_transport_ws_a3b8161a_matched_pongs_do_not_reset_idle_timeout() {
         let ping_due = interval * 30;
         tokio::time::advance(Duration::from_secs(ping_due - now)).await;
         now = ping_due;
-        let ping = receive_ping(&mut client).await;
-        client.send(Message::Pong(ping.into())).await.unwrap();
+        let ping = tokio::time::timeout(Duration::from_secs(1), async {
+            let mut header = [0u8; 2];
+            client_io.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0] & 0x0f, 0x9, "expected server Ping");
+            assert_eq!(header[1] & 0x7f, 8);
+            let mut ping = [0u8; 8];
+            client_io.read_exact(&mut ping).await.unwrap();
+            ping
+        })
+        .await
+        .expect("server Ping deadline");
+        write_client_pong(&mut client_io, &ping).await;
         settle().await;
         let pong_due = now + 1;
         tokio::time::advance(Duration::from_secs(pong_due - now)).await;
@@ -189,7 +245,7 @@ async fn rv_transport_ws_a3b8161a_matched_pongs_do_not_reset_idle_timeout() {
     tokio::time::advance(Duration::from_secs(19)).await;
     settle().await;
     assert!(task.is_finished(), "idle timeout closes at 600s");
-    assert_eq!(receive_close(&mut client).await.0, 1000);
+    assert_eq!(receive_wire_close(&mut client_io).await.0, 1000);
     task.await.unwrap();
 }
 
@@ -367,6 +423,7 @@ async fn rv_transport_ws_b8ed1366_sixty_five_peer_pings_still_hit_control_budget
     let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
     let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
     let state = shamir_transport_ws::HeartbeatState::default();
+    let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
     let sender = tokio::spawn(async move {
         for _ in 0..65 {
             client.send(Message::Ping(vec![0x33].into())).await.unwrap();
@@ -375,6 +432,16 @@ async fn rv_transport_ws_b8ed1366_sixty_five_peer_pings_still_hit_control_budget
             .send(Message::Binary(vec![0, 0, 0, 0].into()))
             .await
             .unwrap();
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                incoming = client.next() => match incoming {
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => panic!("peer WS drain failed: {error}"),
+                    None => break,
+                }
+            }
+        }
     });
     let result = shamir_transport_ws::framing::ws_recv_into_stream_observing(
         &mut server,
@@ -387,6 +454,7 @@ async fn rv_transport_ws_b8ed1366_sixty_five_peer_pings_still_hit_control_budget
         result,
         Err(shamir_transport_ws::WsFrameError::ControlFlood { .. })
     ));
+    let _ = stop_tx.send(());
     sender.await.unwrap();
 }
 #[tokio::test(start_paused = true)]
