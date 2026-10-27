@@ -100,7 +100,10 @@ async fn insert_record(shamir: &ShamirDb, db: &str, table: &str, name: &str, age
         }]),
     );
     shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -117,7 +120,10 @@ async fn update_record(shamir: &ShamirDb, db: &str, table: &str, name: &str, new
     )
     .unwrap();
     shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -141,7 +147,10 @@ async fn run_query(shamir: &ShamirDb, db: &str, q: Query) -> Vec<QueryValue> {
     b.id(3);
     b.query("q", q.where_eq("name", "alice").clone());
     let resp = shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("query execute");
     resp.results["q"]
@@ -158,7 +167,10 @@ async fn run_changes_since(shamir: &ShamirDb, db: &str, cursor: u64) -> QueryVal
     b.id(4);
     b.changes_since("cs", ddl::changes_since(cursor));
     let resp = shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("ChangesSince execute");
     resp.results["cs"].records[0].as_value().into_owned()
@@ -204,7 +216,10 @@ async fn temporal_lifecycle_e2e() {
         }),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -348,7 +363,10 @@ async fn temporal_lifecycle_e2e() {
         ddl::purge_history("users", PurgeScope::OlderThan { timestamp: 25_000 }),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let rec = &resp.results["ph"].records[0];
@@ -417,7 +435,10 @@ async fn temporal_lifecycle_e2e() {
         .repo("main"),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -496,7 +517,10 @@ async fn as_of_timestamp_resolves_point_in_time() {
         }),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 

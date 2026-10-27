@@ -78,7 +78,11 @@ async fn wasm_function_inserts_and_queries() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("all", Query::from("people"));
-    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec_built(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["all"].records;
     assert_eq!(
         records.len(),
@@ -113,7 +117,11 @@ async fn wasm_function_get_by_key() {
     let mut b = Batch::new();
     b.id("verify");
     b.query("all", Query::from("people"));
-    let resp = exec_built(&shamir, b.to_request_via_msgpack()).await;
+    let resp = exec_built(
+        &shamir,
+        b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await;
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].get_value_i64("id"), Some(42));
