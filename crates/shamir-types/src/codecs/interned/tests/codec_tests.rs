@@ -1,7 +1,40 @@
-use crate::codecs::interned::codec::inner_value_to_query_value;
-use crate::core::interner::Interner;
+use crate::codecs::interned::codec::{
+    inner_value_to_query_value, inner_value_to_query_value_with, record_view_to_query_value_with,
+};
+use crate::core::interner::{Interner, InternerKey};
+use crate::record_view::RecordView;
 use crate::types::common::{new_map, new_set};
 use crate::types::value::{InnerValue, QueryValue, Value};
+
+#[test]
+fn resolver_codec_matches_interner_codec_and_fails_closed_on_unknown_id() {
+    let interner = Interner::new();
+    let id = interner.touch_ind("name").unwrap().key().id();
+    let mut map = new_map();
+    map.insert(InternerKey::new(id), InnerValue::Str("Alice".to_string()));
+    let value = InnerValue::Map(map);
+    let resolver = |key| (key == id).then(|| "name".to_string());
+
+    let expected = inner_value_to_query_value(&value, &interner).unwrap();
+    assert_eq!(inner_value_to_query_value_with(&value, &resolver).unwrap(), expected);
+    assert!(inner_value_to_query_value_with(&value, &|_| None)
+        .unwrap_err()
+        .to_string()
+        .contains(&format!("unknown interned id {id}")));
+
+    let bytes = crate::codecs::interned::query_value_to_storage_bytes(&expected, &|name| {
+        interner
+            .get_ind(name)
+            .ok_or_else(|| crate::codecs::CodecError::Encode("missing test key".to_string()))
+    })
+    .unwrap();
+    let view = RecordView::new(&bytes).unwrap();
+    assert_eq!(record_view_to_query_value_with(&view, &resolver).unwrap(), expected);
+    assert!(record_view_to_query_value_with(&view, &|_| None)
+        .unwrap_err()
+        .to_string()
+        .contains(&format!("unknown interned id {id}")));
+}
 
 // ---------------------------------------------------------------------------
 // inner_value_to_query_value — direct, type-preserving path

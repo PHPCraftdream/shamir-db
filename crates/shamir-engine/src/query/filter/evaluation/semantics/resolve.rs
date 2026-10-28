@@ -5,7 +5,7 @@ use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shamir_funclib::scalar_resolver::ScalarResolver;
-use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner_with};
+use shamir_types::codecs::interned::query_value_to_inner_with;
 use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
@@ -333,21 +333,19 @@ pub fn resolve_filter_query(
             let owned_ipath;
             let ipath: &[InternerKey] =
                 match ctx.field_path_cache.and_then(|c| c.get(&field_ref_key(fv))) {
-                    Some(cached) => cached.as_slice(),
-                    None => {
-                        let keys = intern_field_path(path, ctx.interner)?;
-                        owned_ipath = keys
+                    Some(cached) if ctx.interner_overlay.is_none() => cached.as_slice(),
+                    Some(_) | None => {
+                        let keys = path
                             .iter()
-                            .map(|&id| InternerKey::new(id))
-                            .collect::<SmallVec<[InternerKey; 4]>>();
+                            .map(|name| ctx.resolve_interner_id(name).map(InternerKey::new))
+                            .collect::<Option<SmallVec<[InternerKey; 4]>>>()?;
+                        owned_ipath = keys;
                         owned_ipath.as_slice()
                     }
                 };
-            // Single lens→QueryValue boundary (replaces the old lens→InnerValue
-            // materialization). NOT a net-new round-trip — see fn doc.
             record
                 .materialize_at(ipath)
-                .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok())
+                .and_then(|iv| ctx.resolve_query_value(&iv).ok())
         }
         FilterValue::QueryRef { alias, path } => {
             // F2: check the lazy per-scan cache first (slot RESERVED once by

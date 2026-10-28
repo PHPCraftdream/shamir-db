@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use shamir_query_builder::{ddl, filter, select, Query};
+use shamir_query_builder::{ddl, filter, select, write, Query};
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::read::ReadQuery;
 use shamir_storage::error::DbError;
@@ -550,6 +550,45 @@ async fn tx_read_shortcut_filter_stream_decodable_nonmap_fallback() {
             "decodable Borrowed row must survive the tree fallback"
         );
     }
+}
+
+#[tokio::test]
+async fn read_tx_resolves_interactive_overlay_projection_and_order_path() {
+    let (repo, table, _) = fixture(false).await;
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tx.set_implicit(false);
+    let write = write::insert("t")
+        .rows([
+            write::doc().set("overlay_field", 42).unwrap(),
+            write::doc().set("overlay_field", 7).unwrap(),
+        ])
+        .build();
+    table
+        .execute_insert_tx(
+            &write,
+            &mut tx,
+            false,
+            None,
+            &shamir_types::access::Actor::System,
+        )
+        .await
+        .unwrap();
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let query = Query::from("t")
+        .select(["overlay_field"])
+        .where_(filter::eq("overlay_field", 7))
+        .order_by_asc("overlay_field")
+        .build();
+    let result = table.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
+    assert_eq!(result.records.len(), 5);
+    let overlay_rows: Vec<_> = result
+        .records
+        .iter()
+        .filter_map(|record| record.get_value_i64("overlay_field"))
+        .collect();
+    assert_eq!(overlay_rows, vec![7, 42]);
 }
 
 #[tokio::test]

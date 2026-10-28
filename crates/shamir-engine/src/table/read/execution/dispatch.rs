@@ -19,7 +19,7 @@ use crate::table::table_manager::TableManager;
 
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_types::core::interner::{Interner, InternerKey};
+use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -188,9 +188,9 @@ pub(in crate::table::read) fn is_select_all(select: &Select) -> bool {
 /// Returns `None` when any path is un-internable (miss in the interner) —
 /// that field does not exist in this table so the projection would silently
 /// drop it; we fall back to the Name path to preserve behaviour parity.
-pub(in crate::table::read) fn intern_simple_projection_ids(
+pub(in crate::table::read) fn intern_simple_projection_ids_with_context(
     select: &Select,
-    interner: &Interner,
+    ctx: &FilterContext<'_>,
 ) -> Option<Vec<InternerKey>> {
     let mut ids = Vec::with_capacity(select.items.len());
     for item in &select.items {
@@ -205,8 +205,7 @@ pub(in crate::table::read) fn intern_simple_projection_ids(
                 return None;
             }
             let key = path.first()?;
-            // `get_ind` is a read-only lookup (no new id allocation).
-            let k = interner.get_ind(key)?;
+            let k = ctx.resolve_interner_id(key).map(InternerKey::new)?;
             ids.push(k);
         }
     }
@@ -274,6 +273,22 @@ impl TableManager {
     }
 
     async fn read_impl(
+        &self,
+        query: &ReadQuery,
+        ctx: &FilterContext<'_>,
+        tx: Option<&shamir_tx::TxContext>,
+        encoding: ResultEncoding,
+    ) -> DbResult<QueryResult> {
+        let overlay_tx = tx.filter(|tx| !tx.implicit && !tx.interner_overlay.is_empty());
+        if let Some(tx_ref) = overlay_tx {
+            let overlay_ctx = ctx.clone_with_read_overlay(&tx_ref.interner_overlay);
+            self.read_impl_with_context(query, &overlay_ctx, tx, encoding).await
+        } else {
+            self.read_impl_with_context(query, ctx, tx, encoding).await
+        }
+    }
+
+    async fn read_impl_with_context(
         &self,
         query: &ReadQuery,
         ctx: &FilterContext<'_>,
@@ -721,7 +736,7 @@ impl TableManager {
         // generic ORDER BY + LIMIT path would shadow the seek.
         // P0-3a (#1037): if the sorted index is being dropped, fall through to full scan.
         if let Some((idx_name, encoded_key, after_id, limit, direction)) =
-            self.try_plan_keyset_seek(query, interner)
+            self.try_plan_keyset_seek_with_interner(query, interner, Some(ctx))
         {
             match self
                 .read_keyset_seek(
@@ -764,7 +779,7 @@ impl TableManager {
         // match (DESC, multi-field order_by, residual filter, etc.).
         // P0-3a (#1037): if the sorted index is being dropped, fall through to full scan.
         if let Some((idx_name, take, skip, direction)) =
-            self.try_plan_order_limit_fast_path(query, interner)
+            self.try_plan_order_limit_fast_path_with_context(query, interner, Some(ctx))
         {
             match self
                 .read_order_limit_fast(query, ctx, interner, idx_name, take, skip, direction, start)

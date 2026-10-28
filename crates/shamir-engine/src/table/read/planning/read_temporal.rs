@@ -163,7 +163,7 @@ impl TableManager {
         // cases impossible on this path; the classifier's
         // `concurrent_modified` counter is the belt-and-suspenders fallback.
         if let Some((idx_name, encoded_key, after_id, limit, direction)) =
-            self.try_plan_keyset_seek(query, interner)
+            self.try_plan_keyset_seek_with_interner(query, interner, Some(ctx))
         {
             if self.sorted_indexes().last_mutation_version(idx_name) <= version {
                 if let Some(result) = self
@@ -263,10 +263,12 @@ impl TableManager {
             None
         };
         let topk_proj = if use_topk {
-            Some(
-                exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-                    .with_context(ctx),
-            )
+            Some(exec::SelectProjection::new_with_context(
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+                Some(ctx),
+            )?)
         } else {
             None
         };
@@ -322,22 +324,20 @@ impl TableManager {
                         // `count_total` counter.
                         topk_total += 1;
                         let qv = match shamir_types::record_view::RecordView::new(&bytes) {
-                            Ok(view) =>
-                            {
+                            Ok(view) => {
                                 #[expect(
                                     clippy::unwrap_used,
                                     reason = "guard: use_topk initializes the projection before scanning"
                                 )]
-                                topk_proj.as_ref().unwrap().project_value(&view, interner)
+                                topk_proj.as_ref().unwrap().project_value(&view, interner)?
                             }
                             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                                Ok(iv) =>
-                                {
+                                Ok(iv) => {
                                     #[expect(
                                         clippy::unwrap_used,
                                         reason = "guard: use_topk initializes the projection before scanning"
                                     )]
-                                    topk_proj.as_ref().unwrap().project_value(&iv, interner)
+                                    topk_proj.as_ref().unwrap().project_value(&iv, interner)?
                                 }
                                 Err(_) => {
                                     corrupt.push(crate::query::read::CorruptRecordRef {

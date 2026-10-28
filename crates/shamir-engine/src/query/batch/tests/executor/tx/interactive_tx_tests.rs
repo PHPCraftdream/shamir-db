@@ -14,9 +14,105 @@ use crate::query::batch::{
 
 use super::super::common::TxTestResolver;
 
-// ============================================================================
-// Phase B — interactive (multi-call) transaction glue
-// ============================================================================
+#[tokio::test]
+async fn interactive_tx_read_resolves_overlay_interned_field_names() {
+    let repo = crate::repo::RepoInstance::from_factory(
+        "test".into(),
+        crate::repo::repo_types::BoxRepoFactory::in_memory(),
+        vec![crate::table::TableConfig::new("users")],
+    )
+    .await
+    .unwrap();
+    let resolver = TxTestResolver { repo: repo.clone() };
+    let (mut tx, guard) = open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
+        .await
+        .unwrap();
+
+    let mut insert_batch = Batch::new();
+    insert_batch.insert(
+        "insert-1",
+        write::insert("users").row(
+            doc()
+                .set("name", "overlay-name")
+                .unwrap()
+                .set("qty", 37)
+                .unwrap(),
+        ),
+    );
+    insert_batch.insert(
+        "insert-2",
+        write::insert("users").row(
+            doc()
+                .set("name", "overlay-name-2")
+                .unwrap()
+                .set("qty", 12)
+                .unwrap(),
+        ),
+    );
+    execute_in_open_tx(
+        &insert_batch.build(),
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
+
+    let mut read_batch = Batch::new();
+    read_batch.query(
+        "plain",
+        Query::from("users").select(["name", "qty"]).build(),
+    );
+    let response = execute_in_open_tx(
+        &read_batch.build(),
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
+    let plain = &response.results["plain"].records;
+    assert_eq!(plain.len(), 2);
+    assert_eq!(plain[0].get_value_str("name"), Some("overlay-name"));
+    assert_eq!(plain[0].get_value_i64("qty"), Some(37));
+    assert_eq!(plain[1].get_value_str("name"), Some("overlay-name-2"));
+    assert_eq!(plain[1].get_value_i64("qty"), Some(12));
+
+    let mut ordered = Batch::new();
+    ordered.query(
+        "ordered",
+        Query::from("users")
+            .select(["name", "qty"])
+            .order_by(shamir_query_types::read::OrderByItem::desc("qty"))
+            .build(),
+    );
+    let response = execute_in_open_tx(
+        &ordered.build(),
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
+    let rows = &response.results["ordered"].records;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get_value_str("name"), Some("overlay-name"));
+    assert_eq!(rows[0].get_value_i64("qty"), Some(37));
+    assert_eq!(rows[1].get_value_str("name"), Some("overlay-name-2"));
+    assert_eq!(rows[1].get_value_i64("qty"), Some(12));
+
+    drop(tx);
+    drop(guard);
+}
 
 #[tokio::test]
 async fn interactive_tx_accumulates_writes_across_calls_then_commits() {
