@@ -107,6 +107,10 @@ pub(crate) async fn verify_identity(
     // watermark is the receipt's OWN predecessor bookmark: that is the
     // allocation state the original translation ran against.
     for (index, mapping) in receipt.mapping.iter().enumerate() {
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: receipt validation proved this mapped upstream version is covered by offered events"
+        )]
         let event = offered
             .iter()
             .find(|event| event.event.commit_version == mapping.upstream_version)

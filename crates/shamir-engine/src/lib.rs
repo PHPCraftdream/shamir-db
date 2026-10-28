@@ -1,4 +1,5 @@
-//! ShamirDB engine + query layer — `DbInstance` / `RepoInstance` /
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 //! `TableManager` / `IndexManager` runtime AND the SDBQL query types
 //! (filter / read / write / batch / admin / auth).
 //!

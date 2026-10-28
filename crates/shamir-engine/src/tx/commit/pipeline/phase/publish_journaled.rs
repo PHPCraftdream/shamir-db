@@ -4,6 +4,30 @@ use shamir_tx::{ChangelogEvent, RepoChangefeed, VersionGuard};
 
 use crate::repo::RepoInstance;
 
+#[cfg(test)]
+fn maybe_crash_before_publish(
+    prepared: Option<&(Arc<ChangelogEvent>, Option<Arc<RepoChangefeed>>)>,
+) {
+    if !std::env::var("SHAMIR_TEST_CRASH_AFTER").is_ok_and(|phase| phase == "pre_publish") {
+        return;
+    }
+    if let (Ok(path), Some((event, _))) = (
+        std::env::var("SHAMIR_COLD_RECONCILE_EXPECTED_EVENTS"),
+        prepared,
+    ) {
+        let mut file = std::fs::File::create(path).expect("create pre-publish oracle");
+        rmp_serde::encode::write(&mut file, event.as_ref()).expect("encode pre-publish event");
+        std::io::Write::flush(&mut file).expect("flush pre-publish oracle");
+        file.sync_all().expect("sync pre-publish oracle");
+    }
+    if let Ok(marker) = std::env::var("SHAMIR_COLD_RECONCILE_PHASE_MARKER") {
+        let mut file = std::fs::File::create(marker).expect("create pre-publish marker");
+        std::io::Write::write_all(&mut file, b"pre_publish").expect("write pre-publish marker");
+        file.sync_all().expect("sync pre-publish marker");
+    }
+    std::process::abort();
+}
+
 /// Publish only at the point of no return, after WAL success and the last
 /// crash/failure exit. No event is ever enqueued for a version that never
 /// publishes: preparation alone has no journal/gap side effect, and this
@@ -21,23 +45,7 @@ pub(in crate::tx) fn publish_journaled(
     prepared: Option<(Arc<ChangelogEvent>, Option<Arc<RepoChangefeed>>)>,
 ) -> Option<Arc<ChangelogEvent>> {
     #[cfg(test)]
-    if std::env::var("SHAMIR_TEST_CRASH_AFTER").is_ok_and(|phase| phase == "pre_publish") {
-        if let (Ok(path), Some((event, _))) = (
-            std::env::var("SHAMIR_COLD_RECONCILE_EXPECTED_EVENTS"),
-            prepared.as_ref(),
-        ) {
-            let mut file = std::fs::File::create(path).expect("create pre-publish oracle");
-            rmp_serde::encode::write(&mut file, event.as_ref()).expect("encode pre-publish event");
-            std::io::Write::flush(&mut file).expect("flush pre-publish oracle");
-            file.sync_all().expect("sync pre-publish oracle");
-        }
-        if let Ok(marker) = std::env::var("SHAMIR_COLD_RECONCILE_PHASE_MARKER") {
-            let mut file = std::fs::File::create(marker).expect("create pre-publish marker");
-            std::io::Write::write_all(&mut file, b"pre_publish").expect("write pre-publish marker");
-            file.sync_all().expect("sync pre-publish marker");
-        }
-        std::process::abort();
-    }
+    maybe_crash_before_publish(prepared.as_ref());
     let event = prepared.map(|(event, feed)| {
         match feed {
             Some(feed) => feed.journal_enqueue(&event),

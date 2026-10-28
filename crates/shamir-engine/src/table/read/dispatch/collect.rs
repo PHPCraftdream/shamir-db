@@ -139,10 +139,20 @@ impl TableManager {
         // `with_ids` mirrors `tracking_versions` so the post-heap version
         // rebuild (`collect_versions`) still gets the surviving page's ids.
         let mut topk_heap: Option<exec::TopKHeap<'_>> = if use_topk {
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: use_topk proves order_by and finite take are present"
+            )]
+            let order_by = query.order_by.as_ref().unwrap();
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: use_topk proves finite take is present"
+            )]
+            let take = take_resolved.unwrap() as usize;
             Some(exec::TopKHeap::new(
-                query.order_by.as_ref().unwrap(),
+                order_by,
                 skip_resolved as usize,
-                take_resolved.unwrap() as usize,
+                take,
                 tracking_versions,
             ))
         } else {
@@ -188,6 +198,10 @@ impl TableManager {
                                 // `count_total` counter (independent of the
                                 // heap's K-row window).
                                 topk_total += 1;
+                                #[expect(
+                                    clippy::unwrap_used,
+                                    reason = "guard: !needs_raw initializes the projection before rows are scanned"
+                                )]
                                 let qv = proj.as_ref().unwrap().project_value(&view, interner);
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge(
@@ -209,6 +223,10 @@ impl TableManager {
                                 }
                                 raw_acc.push((id, b));
                             } else {
+                                #[expect(
+                                    clippy::unwrap_used,
+                                    reason = "guard: !needs_raw initializes the projection before rows are scanned"
+                                )]
                                 let row = QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&view, interner),
                                 );
@@ -232,6 +250,10 @@ impl TableManager {
                                 // F-53a (#874): inline bounded heap (Owned arm
                                 // — already-decoded InnerValue, e.g. from MVCC).
                                 topk_total += 1;
+                                #[expect(
+                                    clippy::unwrap_used,
+                                    reason = "guard: !needs_raw initializes the projection before rows are scanned"
+                                )]
                                 let qv = proj.as_ref().unwrap().project_value(&record, interner);
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge(
@@ -265,6 +287,10 @@ impl TableManager {
                                     }
                                 }
                             } else {
+                                #[expect(
+                                    clippy::unwrap_used,
+                                    reason = "guard: !needs_raw initializes the projection before rows are scanned"
+                                )]
                                 let row = QueryRecord::Direct(
                                     proj.as_ref().unwrap().project_value(&record, interner),
                                 );
@@ -310,6 +336,10 @@ impl TableManager {
             // accumulation, then sort + paginate.
             let mut qv_result: Vec<shamir_types::types::value::QueryValue> = if has_group_by {
                 exec::validate_aggregate_select(&query.select)?;
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "guard: has_group_by selects this branch only when group_by is present"
+                )]
                 let group_by = query.group_by.as_ref().unwrap();
                 exec::try_apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)?
             } else if has_agg {

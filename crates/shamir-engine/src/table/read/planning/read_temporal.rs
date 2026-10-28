@@ -243,10 +243,20 @@ impl TableManager {
             && !has_group_by
             && !has_agg;
         let mut topk_heap: Option<exec::TopKHeap<'_>> = if use_topk {
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: use_topk proves order_by and finite take are present"
+            )]
+            let order_by = query.order_by.as_ref().unwrap();
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: use_topk proves finite take is present"
+            )]
+            let take = take_resolved.unwrap() as usize;
             Some(exec::TopKHeap::new(
-                query.order_by.as_ref().unwrap(),
+                order_by,
                 skip_resolved as usize,
-                take_resolved.unwrap() as usize,
+                take,
                 false,
             ))
         } else {
@@ -312,9 +322,23 @@ impl TableManager {
                         // `count_total` counter.
                         topk_total += 1;
                         let qv = match shamir_types::record_view::RecordView::new(&bytes) {
-                            Ok(view) => topk_proj.as_ref().unwrap().project_value(&view, interner),
+                            Ok(view) =>
+                            {
+                                #[expect(
+                                    clippy::unwrap_used,
+                                    reason = "guard: use_topk initializes the projection before scanning"
+                                )]
+                                topk_proj.as_ref().unwrap().project_value(&view, interner)
+                            }
                             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                                Ok(iv) => topk_proj.as_ref().unwrap().project_value(&iv, interner),
+                                Ok(iv) =>
+                                {
+                                    #[expect(
+                                        clippy::unwrap_used,
+                                        reason = "guard: use_topk initializes the projection before scanning"
+                                    )]
+                                    topk_proj.as_ref().unwrap().project_value(&iv, interner)
+                                }
                                 Err(_) => {
                                     corrupt.push(crate::query::read::CorruptRecordRef {
                                         table: self.name().to_string(),
@@ -382,6 +406,10 @@ impl TableManager {
 
         let mut result_qv = if has_group_by {
             exec::validate_aggregate_select(&query.select)?;
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: has_group_by selects this branch only when group_by is present"
+            )]
             let group_by = query.group_by.as_ref().unwrap();
             exec::try_apply_group_by(&matched, group_by, &query.select, interner, ctx)?
         } else if has_agg {

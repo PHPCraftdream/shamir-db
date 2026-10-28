@@ -202,10 +202,15 @@ impl ValidatorRegistry {
         #[cfg(test)]
         self.run_hook("rename_from_removed");
         next.name_to_id.insert(to.to_string(), id);
-        next.by_id
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: writer lock keeps the name-to-id and id-to-entry maps consistent during rename"
+        )]
+        let entry = next
+            .by_id
             .get_mut(&id)
-            .expect("live name must have an entry")
-            .name = to.to_string();
+            .expect("live name must have an entry");
+        entry.name = to.to_string();
         self.state.store(Arc::new(next));
         Ok(())
     }

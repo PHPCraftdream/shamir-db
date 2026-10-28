@@ -19,7 +19,10 @@ use shamir_storage::types::RecordKey;
 
 use crate::meta::repl::bookmark_v3::{load_bookmark_v3, save_bookmark_v3, BookmarkV3};
 use crate::meta::MetaEnvelope;
-use crate::repo::{BoxRepo, BoxRepoFactory, RepoInstance};
+use crate::repo::BoxRepo;
+#[cfg(feature = "fjall")]
+use crate::repo::BoxRepoFactory;
+use crate::repo::RepoInstance;
 use crate::table::TableConfig;
 
 /// Build an in-memory repo with one configured table `items`.

@@ -89,7 +89,7 @@ fn rv_funclib_5fa455f7_group_by_mixed_numeric_corpus() {
         distinct: false,
     };
     let records: Vec<(RecordId, Bytes)> = to_bytes_records(&rows);
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx).unwrap();
     assert_eq!(result.len(), 6, "six canonical classes over stored bytes");
     let total: i64 = result
         .iter()
@@ -191,7 +191,7 @@ fn rv_funclib_5fa455f7_group_by_stored_big_groups_as_string_until_d2() {
         distinct: false,
     };
     let records: Vec<(RecordId, Bytes)> = to_bytes_records(&rows);
-    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx);
+    let result = apply_group_by(&records, &group_by, &select, &interner, &ctx).unwrap();
     assert_eq!(result.len(), 1, "stored Big(1) groups with Str(\"1\")");
     assert_eq!(result[0]["cnt"], 2_i64);
     assert!(matches!(&result[0]["v"], QueryValue::Str(s) if s == "1"));

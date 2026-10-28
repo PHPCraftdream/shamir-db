@@ -20,7 +20,9 @@ impl<T> WriteOutcome<T> {
                 reason,
                 ..
             } => Err(DbError::WriteCommittedVisibilityPending {
-                commit_version: self.commit_version.expect("pending write minted a version"),
+                commit_version: self.commit_version.ok_or_else(|| {
+                    DbError::Internal("pending visibility must have a commit version".to_string())
+                })?,
                 visible_through,
                 reason: match reason {
                     VisibilityPendingReason::Timeout => "timeout",

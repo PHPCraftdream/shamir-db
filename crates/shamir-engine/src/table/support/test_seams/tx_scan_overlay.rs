@@ -207,10 +207,22 @@ where
             for (ik, iv) in batch {
                 // Emit every overlay entry that sorts strictly before the
                 // current inner key (overlay-only keys interleaved in order).
-                while let Some((ok, _)) = ov.peek() {
-                    if *ok < ik {
-                        let (ok, row) = ov.next().unwrap();
-                        if let StagedRowOverlay::Set(bytes) = row {
+                while let Some((ok, row)) = ov.next_if(|(ok, _)| *ok < ik) {
+                    if let StagedRowOverlay::Set(bytes) = row {
+                        if let Some(bytes) = admit(&ok, bytes) {
+                            out.push((ok, RecordCow::Borrowed(bytes)));
+                            if out.len() >= batch_cap {
+                                yield Ok(std::mem::take(&mut out));
+                                out = Vec::with_capacity(batch_cap);
+                            }
+                        }
+                    }
+                    // Removed-only overlay key: nothing to emit.
+                }
+                // Overlay entry for the EXACT inner key wins (newer write).
+                if let Some((ok, row)) = ov.next_if(|(ok, _)| *ok == ik) {
+                    match row {
+                        StagedRowOverlay::Set(bytes) => {
                             if let Some(bytes) = admit(&ok, bytes) {
                                 out.push((ok, RecordCow::Borrowed(bytes)));
                                 if out.len() >= batch_cap {
@@ -219,30 +231,10 @@ where
                                 }
                             }
                         }
-                        // Removed-only overlay key: nothing to emit.
-                    } else {
-                        break;
+                        // Tombstone masks the stale inner value → skip.
+                        StagedRowOverlay::Removed => {}
                     }
-                }
-                // Overlay entry for the EXACT inner key wins (newer write).
-                if let Some((ok, _)) = ov.peek() {
-                    if *ok == ik {
-                        let (ok, row) = ov.next().unwrap();
-                        match row {
-                            StagedRowOverlay::Set(bytes) => {
-                                if let Some(bytes) = admit(&ok, bytes) {
-                                    out.push((ok, RecordCow::Borrowed(bytes)));
-                                    if out.len() >= batch_cap {
-                                        yield Ok(std::mem::take(&mut out));
-                                        out = Vec::with_capacity(batch_cap);
-                                    }
-                                }
-                            }
-                            // Tombstone masks the stale inner value → skip.
-                            StagedRowOverlay::Removed => {}
-                        }
-                        continue;
-                    }
+                    continue;
                 }
                 // No overlay entry for this key → inner value stands
                 // unchanged (already filtered/decoded by the caller).

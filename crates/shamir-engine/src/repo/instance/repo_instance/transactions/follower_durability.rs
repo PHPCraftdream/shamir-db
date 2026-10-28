@@ -22,7 +22,7 @@ impl RepoInstance {
 
     /// Raw named-store access, test-only: every caller lives under `tests/`,
     /// so this would be dead code in the non-test build.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn raw_store(&self, name: &str) -> DbResult<Arc<dyn Store>> {
         self.repo.store_get(name).await
     }

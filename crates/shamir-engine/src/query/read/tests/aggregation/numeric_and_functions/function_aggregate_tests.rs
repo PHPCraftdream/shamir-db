@@ -43,7 +43,8 @@ fn aggregate_fn_median_per_group() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .unwrap();
 
     // Groups are emitted in alphabetical key order: LA, then NYC.
     assert_eq!(result.len(), 2);
@@ -71,7 +72,8 @@ fn aggregate_fn_count_distinct_all_rows() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     // Distinct cities across the four rows: NYC, LA -> 2.
     assert_eq!(result[0]["cities"], 2_i64);
@@ -91,7 +93,8 @@ fn aggregate_fn_unknown_name_is_null() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     // An unregistered aggregate yields a null cell, never a panic.
     assert!(result[0]["x"].is_null());
@@ -139,7 +142,8 @@ fn aggregate_all_user_scalar_resolves() {
     };
 
     let resolver = resolver_with_user_scalar();
-    let result = apply_aggregate_all(&to_bytes_records(&records), &select, &interner, resolver);
+    let result =
+        apply_aggregate_all(&to_bytes_records(&records), &select, &interner, resolver).unwrap();
     assert_eq!(result.len(), 1);
     // The first record's age is 30 (from make_records), so my_double(30) = 60.
     assert_eq!(result[0]["doubled_age"], 60_i64);
@@ -199,7 +203,8 @@ fn percentile_with_args_p90() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     // p=0.9, n=10 → idx = ceil(9.0)-1 = 8 → sorted[8] = 90.
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["p90"], 90_i64);
@@ -219,7 +224,8 @@ fn percentile_default_is_median() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     // p=0.5, n=10 → idx = ceil(5.0)-1 = 4 → sorted[4] = 50.
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["p50"], 50_i64);
@@ -244,7 +250,8 @@ fn string_agg_with_custom_sep() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["joined"], "Alice; Bob; Carol; Dave");
 }
@@ -263,7 +270,8 @@ fn string_agg_default_sep() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["joined"], "Alice,Bob,Carol,Dave");
 }

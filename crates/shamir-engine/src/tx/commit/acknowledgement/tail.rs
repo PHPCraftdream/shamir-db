@@ -56,6 +56,10 @@ pub(crate) async fn commit_tx_with_kind(
             return Err(error.into());
         }
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "guard: tx_gate() returned successfully and the initialized gate is never reset"
+    )]
     let gate = repo
         .initialized_tx_gate()
         .expect("gate initialized before commit");

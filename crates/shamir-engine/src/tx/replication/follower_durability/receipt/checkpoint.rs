@@ -43,7 +43,9 @@ fn fail_final_flushes() -> &'static Mutex<TFxMap<String, bool>> {
 
 #[cfg(all(test, feature = "fjall"))]
 pub(crate) fn set_fail_final_flush(repo_name: &str, fail: bool) {
-    let mut failures = fail_final_flushes().lock().unwrap();
+    let mut failures = fail_final_flushes()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if fail {
         failures.insert(repo_name.to_owned(), true);
     } else {
@@ -61,7 +63,7 @@ fn fail_final_flush(repo_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
     SIMULATE_CHECKPOINT_UNCERTAIN.store(on, Ordering::Release);
 }
@@ -77,7 +79,7 @@ pub(crate) fn set_simulate_checkpoint_uncertain(on: bool) {
 #[cfg(test)]
 static DISABLE_UNCERTAIN_RECONCILE: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn disable_uncertain_reconcile(on: bool) {
     DISABLE_UNCERTAIN_RECONCILE.store(on, Ordering::Release);
 }
@@ -89,7 +91,7 @@ pub(crate) fn disable_uncertain_reconcile(on: bool) {
 #[cfg(test)]
 static UNCERTAIN_WITHOUT_COMMIT: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn set_uncertain_without_commit(on: bool) {
     UNCERTAIN_WITHOUT_COMMIT.store(on, Ordering::Release);
 }
@@ -101,7 +103,7 @@ pub(crate) fn set_uncertain_without_commit(on: bool) {
 #[cfg(test)]
 static CHECKPOINT_RECONCILES: AtomicUsize = AtomicUsize::new(0);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn checkpoint_reconciles() -> usize {
     CHECKPOINT_RECONCILES.load(Ordering::Acquire)
 }
@@ -112,10 +114,10 @@ pub(crate) fn checkpoint_reconciles() -> usize {
 /// tests hold the guard across `.await` points for their whole body, so a
 /// poisoning-`Mutex` guard would trip `clippy::await_holding_lock` — this
 /// is the workspace-sanctioned `tokio::sync::Mutex` case.
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 static CHECKPOINT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) async fn checkpoint_test_lock() -> tokio::sync::MutexGuard<'static, ()> {
     CHECKPOINT_TEST_LOCK.lock().await
 }
@@ -132,7 +134,7 @@ static COMMIT_PARK_REACHED: Notify = Notify::const_new();
 #[cfg(test)]
 static COMMIT_PARK_RELEASE: Notify = Notify::const_new();
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn arm_commit_park(on: bool) {
     COMMIT_PARK_ARMED.store(on, Ordering::Release);
 }
@@ -147,12 +149,12 @@ static RECONCILE_PARK_REACHED: Notify = Notify::const_new();
 #[cfg(test)]
 static RECONCILE_PARK_RELEASE: Notify = Notify::const_new();
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn arm_reconcile_park(on: bool) {
     RECONCILE_PARK_ARMED.store(on, Ordering::Release);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) async fn wait_reconcile_park_reached() {
     let notified = RECONCILE_PARK_REACHED.notified();
     tokio::pin!(notified);
@@ -160,7 +162,7 @@ pub(crate) async fn wait_reconcile_park_reached() {
     notified.await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn release_reconcile_park() {
     RECONCILE_PARK_RELEASE.notify_waiters();
 }

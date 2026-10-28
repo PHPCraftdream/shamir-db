@@ -54,7 +54,8 @@ fn aggregate_group_by_all_funcs() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .unwrap();
 
     // Groups sorted alphabetically: LA, NYC.
     assert_eq!(result.len(), 2);
@@ -89,7 +90,8 @@ fn aggregate_sum_float_serialisation() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
 
     let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
@@ -131,7 +133,8 @@ fn aggregate_having_filters_correctly() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .unwrap();
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["city"], QueryValue::Str("NYC".into()));
@@ -155,7 +158,8 @@ fn aggregate_avg_float_serialisation() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
 
     let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
@@ -190,7 +194,8 @@ fn aggregate_count_as_int() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     let qv_bytes = rmp_serde::to_vec_named(&result[0]).unwrap();
 
     let expected_map = QueryValue::Map({
@@ -228,7 +233,8 @@ fn aggregate_all_no_group() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
 
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["cnt"], QueryValue::Int(4));

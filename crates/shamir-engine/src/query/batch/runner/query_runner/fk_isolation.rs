@@ -304,5 +304,9 @@ where
         }
     }
     // Budget exhausted — surface the last (coded) conflict unchanged.
+    #[expect(
+        clippy::expect_used,
+        reason = "guard: loop budget guarantees a prior error"
+    )]
     Err(last_err.expect("loop runs at least once, so an exhausted budget always has an error"))
 }

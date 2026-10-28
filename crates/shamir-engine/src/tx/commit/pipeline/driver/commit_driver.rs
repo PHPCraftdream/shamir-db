@@ -56,6 +56,11 @@ impl Future for CommitDriver {
         assert!(!this.in_poll, "commit future polled after an inline panic");
         this.in_poll = true;
         // Pending delegates waker registration to the owned child future.
+        // The future remains present until this poll completes.
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: CommitDriver removes its future only after a Ready poll"
+        )]
         let result = this
             .future
             .as_mut()

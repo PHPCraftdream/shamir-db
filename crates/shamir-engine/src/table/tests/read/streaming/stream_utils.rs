@@ -6,6 +6,7 @@
 #![allow(deprecated)] // this module's own collectors are deprecated by design; internal cross-use is intentional
 
 use crate::table::record_cow::RecordCow;
+#[cfg(feature = "fjall")]
 use crate::table::Table;
 use futures::StreamExt;
 use shamir_storage::error::{DbError, DbResult};
@@ -22,6 +23,7 @@ use shamir_types::types::value::InnerValue;
     since = "0.1.0",
     note = "FOR TESTS ONLY. Can consume all memory on large datasets."
 )]
+#[cfg(feature = "fjall")]
 pub async fn collect_list_stream(table: &Table) -> DbResult<Vec<(RecordId, InnerValue)>> {
     let mut result = Vec::new();
     let stream = table.list_stream(1000);

@@ -5,6 +5,7 @@ use std::sync::Arc;
 #[cfg(feature = "fjall")]
 use crate::repo::BoxRepoFactory;
 use crate::repo::{BoxRepo, RepoInstance};
+#[cfg(feature = "fjall")]
 use crate::table::TableConfig;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 /// Retry helper for reopening a disk-backed repo on Windows, where the

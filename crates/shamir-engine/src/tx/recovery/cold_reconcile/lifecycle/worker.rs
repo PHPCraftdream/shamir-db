@@ -71,9 +71,17 @@ impl<T: FailClosedResource> FailClosedGuard<T> {
         }
     }
     pub fn get(&self) -> &T {
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: FailClosedGuard keeps its owned value present until commit or drop"
+        )]
         self.value.as_ref().expect("guard value is present")
     }
     pub fn get_mut(&mut self) -> &mut T {
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: FailClosedGuard keeps its owned value present until commit or drop"
+        )]
         self.value.as_mut().expect("guard value is present")
     }
 }
@@ -82,6 +90,10 @@ impl FailClosedGuard<VersionGuard> {
     /// Consume the guard and commit its version on the successful path.
     /// Dropping without this call retains fail-closed cleanup behavior.
     pub fn commit(mut self) {
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: commit consumes the present VersionGuard before Drop runs"
+        )]
         self.value.take().expect("guard value is present").commit();
     }
 }

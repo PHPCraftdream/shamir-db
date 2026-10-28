@@ -621,6 +621,10 @@ async fn plan_cascade_for_ids(
                         code: Some("fk_actions".to_string()),
                     })?;
                 if let Some(qv) = qv {
+                    #[expect(
+                        clippy::unwrap_used,
+                        reason = "guard: parent_values is initialized for every parent_ref_field"
+                    )]
                     parent_values.get_mut(field).unwrap().insert(qv);
                 }
             }

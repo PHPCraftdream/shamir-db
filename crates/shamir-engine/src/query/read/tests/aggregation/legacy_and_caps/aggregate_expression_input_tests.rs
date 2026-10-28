@@ -252,8 +252,7 @@ fn expression_sum_preserves_numeric_accumulator_lanes() {
 }
 
 #[test]
-#[should_panic(expected = "apply_aggregate_all: aggregate execution failed")]
-fn aggregate_all_wrapper_panics_with_clear_message() {
+fn aggregate_all_wrapper_returns_aggregate_error() {
     let interner = Interner::default();
     let select = selection([select::agg_fn_with_args(
         "percentile",
@@ -261,12 +260,13 @@ fn aggregate_all_wrapper_panics_with_clear_message() {
         "p",
         [val::lit(2.0)],
     )]);
-    apply_aggregate_all(&[], &select, &interner, ScalarResolver::builtins_only());
+    let error =
+        apply_aggregate_all(&[], &select, &interner, ScalarResolver::builtins_only()).unwrap_err();
+    assert!(matches!(error, DbError::Validation(_)));
 }
 
 #[test]
-#[should_panic(expected = "apply_group_by: aggregate execution failed")]
-fn group_by_wrapper_panics_with_clear_message() {
+fn group_by_wrapper_returns_aggregate_error() {
     let interner = Interner::default();
     let refs = new_map_wc(0);
     let ctx = FilterContext::new(&interner, &refs);
@@ -276,5 +276,6 @@ fn group_by_wrapper_panics_with_clear_message() {
         "p",
         [val::lit(2.0)],
     )]);
-    apply_group_by(&[], &GroupBy::new(["v"]), &select, &interner, &ctx);
+    let error = apply_group_by(&[], &GroupBy::new(["v"]), &select, &interner, &ctx).unwrap_err();
+    assert!(matches!(error, DbError::Validation(_)));
 }

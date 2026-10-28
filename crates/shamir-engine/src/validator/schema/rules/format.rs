@@ -79,12 +79,24 @@ impl FormatKind {
 // test in `format_tests.rs` cross-checks a sample of values against the
 // funclib scalars to catch accidental divergence.
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "guard: these literals are fixed regex patterns; no runtime input is compiled"
+)]
 static EMAIL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$").unwrap());
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "guard: these literals are fixed regex patterns; no runtime input is compiled"
+)]
 static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^https?://[^\s/$.?#][^\s]*$").unwrap());
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "guard: these literals are fixed regex patterns; no runtime input is compiled"
+)]
 static UUID_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
         .unwrap()
@@ -110,10 +122,18 @@ fn is_date_like(s: &str) -> bool {
     false
 }
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "guard: these literals are fixed regex patterns; no runtime input is compiled"
+)]
 static RFC3339_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$").unwrap()
 });
 
+#[expect(
+    clippy::unwrap_used,
+    reason = "guard: these literals are fixed regex patterns; no runtime input is compiled"
+)]
 static BARE_DATE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(\d{4})-(\d{2})-(\d{2})$").unwrap());
 

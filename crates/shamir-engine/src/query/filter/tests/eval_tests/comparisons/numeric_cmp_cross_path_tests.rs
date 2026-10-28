@@ -215,7 +215,8 @@ fn assert_all_paths_agree(case: &Case) {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(agg_result.len(), 1);
     let (expected_min, expected_max) = if case.exactly_equal {
         // Either representation is an acceptable "the smallest/largest" —

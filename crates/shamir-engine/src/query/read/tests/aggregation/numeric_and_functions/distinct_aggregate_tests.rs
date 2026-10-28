@@ -45,7 +45,8 @@ fn aggregate_fn_distinct_string_agg_deduplicates() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["joined"], "a,b");
 }
@@ -74,7 +75,8 @@ fn aggregate_fn_non_distinct_keeps_duplicates() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["joined"], "a,a,b");
 }
@@ -183,7 +185,8 @@ fn distinct_min_succeeds_and_produces_correct_result() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .unwrap();
     // LA: ages [25, 25] → min 25 (distinct is a no-op for min).
     assert_eq!(result[0]["min_age"], 25_i64);
     // NYC: ages [30, 35] → min 30.
@@ -210,7 +213,8 @@ fn fast_path_distinct_false_behaves_as_before() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .unwrap();
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["s"], 115_i64); // 30+25+35+25
     assert_eq!(result[0]["c"], 4_i64);

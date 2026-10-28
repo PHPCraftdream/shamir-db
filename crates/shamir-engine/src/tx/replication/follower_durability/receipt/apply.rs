@@ -574,6 +574,10 @@ async fn run_chunk_tail(
         // durable authority for what gets published. Then go directly to
         // `durable_tail` (journal verify/repair + confirm + checkpoint all
         // happen inside it, so every idempotency property is kept).
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: matches! above proves stored is Some and its receipt matches the plan"
+        )]
         let stored = &stored.expect("matched above").receipt;
         // Test seam on the FAST path too (reviewer P1 #2): without this
         // check a sticky `fail_after = Phase::Materialized` flag could never
