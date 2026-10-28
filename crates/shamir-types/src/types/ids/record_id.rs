@@ -2,6 +2,7 @@ use crate::types::base::{self, Base58Error};
 use bytes::Bytes;
 use chrono::Utc;
 use rand::RngCore;
+use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -82,7 +83,6 @@ impl RecordId {
     fn fill_random_tail(dest: &mut [u8]) {
         thread_local! {
             static RNG: RefCell<Xoshiro256PlusPlus> = {
-                use rand::SeedableRng;
                 RefCell::new(Xoshiro256PlusPlus::from_os_rng())
             };
         }

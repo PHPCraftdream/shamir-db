@@ -399,14 +399,10 @@ async fn persist_fails_when_backing_store_set_fails() {
     );
 }
 
-/// RV-TYPES-2A1AB215 regression: hydration must seed the persistence
-/// cursor from the highest persisted ID, not from the hydrated tuple
-/// count. Chunks [(1,a),(3,c)], [(3,c)], [(3,c)] hydrate 4 tuples but
-/// max ID 3; seeding the cursor at 4 made the first persist() after
-/// reopen scan only IDs > 4 and silently skip the freshly allocated
-/// id-4 mapping, so a second reopen lost it.
+/// RV-TYPES-2A1AB215 regression: hydration seeds the cursor from the end of the contiguous
+/// hydrated ID prefix, not tuple count. A fresh allocation beyond that cursor must survive reload.
 #[tokio::test]
-async fn rv_types_2a1ab215_hydrated_cursor_uses_max_id_not_tuple_count() {
+async fn rv_types_2a1ab215_hydrated_cursor_is_contiguous_prefix() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
 
     // Three chunks with a duplicate-recapture history and a permanent
@@ -430,30 +426,63 @@ async fn rv_types_2a1ab215_hydrated_cursor_uses_max_id_not_tuple_count() {
             .unwrap();
     }
 
-    // First reopen: the cursor must be the max hydrated ID (3), not
-    // the tuple count (4).
+    // The persisted cursor is the contiguous hydrated prefix (1), not max ID.
     let manager1 = InternerManager::new(Arc::clone(&store));
     let interner1 = manager1.get().await.unwrap();
     assert_eq!(
         manager1.persisted_high_water(),
-        3,
-        "hydration must seed the cursor from the max persisted ID, not the tuple count"
+        1,
+        "hydration cursor stops before sparse hole, not tuple count"
     );
 
-    // Allocate a fresh mapping above the hydrated cursor and persist.
+    // Allocate above the hydrated gap and persist; reopen must still resolve it.
     let touch = interner1.touch_ind("delta").unwrap();
     assert_eq!(touch.key().id(), 4);
     manager1.persist().await.unwrap();
 
-    // Second reopen: the id-4 mapping must resolve. On the unfixed
-    // code persist() skipped it (cursor 4 → scan starts at id 5) and
-    // this lookup returns None.
+    // Second reopen: the id-4 mapping must resolve. This assertion guards
+    // against treating the tuple count or sparse max as the safe cursor.
     let manager2 = InternerManager::new(store);
     let interner2 = manager2.get().await.unwrap();
     let got = interner2
         .get_str(&InternerKey::new(4))
         .expect("id 4 must be persisted and resolve after reopen");
     assert_eq!(&*got, "delta");
+}
+
+/// Regression: filling a hole from hydrated state must trigger persistence
+/// even though the new ID is below the hydrated max cursor.
+#[tokio::test]
+async fn hydration_gap_then_fill_persists_across_reopen() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    // Hydrate exactly [1, 3], with a missing id 2.
+    store
+        .set(
+            RecordId::system("i.d000000000").to_bytes().into(),
+            bincode::to_bytes(&vec![
+                (InternerKey::new(1), UserKey::from_str("one")),
+                (InternerKey::new(3), UserKey::from_str("three")),
+            ])
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let manager = InternerManager::new(Arc::clone(&store));
+    let interner = manager.get().await.unwrap();
+    assert_eq!(manager.persisted_high_water(), 1);
+
+    interner.touch_with_id("two", 2).unwrap();
+    manager.persist().await.unwrap();
+    let reopened = InternerManager::new(store);
+    let persisted = reopened.get().await.unwrap();
+    assert_eq!(
+        persisted.get_str(&InternerKey::new(2)).as_deref(),
+        Some("two")
+    );
+    assert_eq!(
+        persisted.get_str(&InternerKey::new(3)).as_deref(),
+        Some("three")
+    );
 }
 
 // ── RU8 (RV-TYPES-2EB39DFD): per-repo interner quota at load ───────────
