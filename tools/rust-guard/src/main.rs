@@ -12,6 +12,7 @@ mod common;
 mod conservation_cmd;
 mod discovery_cmd;
 mod modules_cmd;
+mod orderings_cmd;
 mod structure_cmd;
 
 #[derive(Parser)]
@@ -40,6 +41,11 @@ enum Command {
         /// Path to the exceptions file (default: .rust-guard/exceptions.toml).
         #[arg(long)]
         exceptions: Option<String>,
+    },
+    /// AST pin gate for atomic memory orderings.
+    Orderings {
+        #[arg(long)]
+        pins: Option<String>,
     },
     /// AST rules for changed/moved areas (CI-03a chunk B).
     Structure {
@@ -125,6 +131,7 @@ fn main() -> ExitCode {
             let code = modules_cmd::run(rev.as_deref(), exceptions.as_deref(), &repo);
             ExitCode::from(code)
         }
+        Command::Orderings { pins } => ExitCode::from(orderings_cmd::run(&repo, pins.as_deref())),
         Command::Structure {
             paths,
             scopes,

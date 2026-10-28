@@ -1,0 +1,20 @@
+[[pin]]
+path = "crates/shamir-engine/src/table/support/guards/writer_drain_barrier.rs"
+item = "WriterDrainBarrier::enter_writer"
+owner = "@engine"
+reason = "F-56 cross-atomic drain protocol requires SeqCst increment"
+calls = [{ method = "fetch_add", min = "SeqCst" }]
+
+[[pin]]
+path = "crates/shamir-engine/src/table/support/guards/writer_drain_barrier.rs"
+item = "WriterDrainBarrier::drain"
+owner = "@engine"
+reason = "Drain must observe active writers with SeqCst ordering"
+calls = [{ method = "load", min = "SeqCst" }]
+
+[[pin]]
+path = "crates/shamir-engine/src/table/support/guards/writer_drain_barrier.rs"
+item = "WriterDrainGuard::drop"
+owner = "@engine"
+reason = "Guard release participates in the SeqCst drain protocol"
+calls = [{ method = "fetch_sub", min = "SeqCst" }]

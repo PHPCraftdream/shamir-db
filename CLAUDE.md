@@ -466,6 +466,12 @@ self-tests run in the `rust-guard self-test` job, CI only):
 * `conservation` — per active campaign (`.rust-guard/stages.toml`,
   normally empty = no-op): every item survives between revisions, or the
   change is declared in the campaign's delta file.
+* `orderings` — AST pin of atomic memory orderings on the production
+  (`not(loom)`) branch of `WriterDrainBarrier`; pins live in
+  `.rust-guard/atomic_orderings.toml`. Changing a pinned ordering requires
+  editing its pin with `owner` and `reason`.
+
+CI caches the rust-guard binary using a source-hash key.
 
 Adding an exception: `.rust-guard/exceptions.toml` (`[[exception]]` /
 `[[producer]]`) or `.rust-guard/owned_impl.toml` — exact path/name plus

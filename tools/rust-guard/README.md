@@ -32,8 +32,11 @@ the OS temp dir. Ancillary config files (`.rust-guard/exceptions.toml`,
 `.rust-guard/owned_impl.toml`) remain relative to the process working
 directory unless an explicit `--exceptions` path is given.
 
-## Subcommands
+## Atomic ordering pins (`rust-guard orderings`)
 
+`.rust-guard/atomic_orderings.toml` pins AST-selected Rust functions and methods. Each `[[pin]]` names a `path`, `item` (`fn` or `Type::method`), optional `branch` (`production`, the default, or `loom`), `owner`, `reason`, and `calls` entries containing `method` and minimum `Ordering` variant. Optional `require_fence` demands an explicit fence. The gate reports missing items, weakened or non-literal orderings, unpinned calls, missing fences, and stale call pins. Calls are pinned by method and required minimum ordering; CAS and fetch-update failure orderings are checked with the Rust failure-order constraints. Nested cfg predicates select the loom/production branch, and macro token arguments are parsed as expressions when possible.
+
+## Subcommands
 - `rust-guard modules [--rev <rev>] [--exceptions <path>]` — module
   reachability. Discovers package/target roots (`cargo metadata
   --no-deps` workspace members — matched by `packages[].id` against
