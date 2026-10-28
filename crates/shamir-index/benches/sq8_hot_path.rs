@@ -39,7 +39,7 @@ fn main() {
     // --- sq8_approx_dot/dim_128 ---------------------------------------------
     {
         let ds = clustered_vectors(N_TRAIN, DIM, 32, 0.15, 4242);
-        let training: Vec<Vec<f32>> = ds.vectors.clone();
+        let training: Vec<Vec<f32>> = ds.vectors.iter().map(<[f32]>::to_vec).collect();
         let q = Sq8Quantizer::fit(&training, DIM);
         let pool_codes: Vec<Vec<u8>> = ds
             .vectors
@@ -61,7 +61,7 @@ fn main() {
     // --- shamir_dist_u8_eval/{L2,Dot,Cosine}/dim_128 ------------------------
     {
         let ds = clustered_vectors(N_TRAIN, DIM, 32, 0.15, 4242);
-        let training: Vec<Vec<f32>> = ds.vectors.clone();
+        let training: Vec<Vec<f32>> = ds.vectors.iter().map(<[f32]>::to_vec).collect();
         let q = Arc::new(Sq8Quantizer::fit(&training, DIM));
         let pool_codes: Vec<Vec<u8>> = ds
             .vectors
@@ -96,7 +96,7 @@ fn main() {
     // also recomputed the query's own norm per candidate in the old path).
     {
         let ds = clustered_vectors(N_TRAIN, DIM, 32, 0.15, 4242);
-        let training: Vec<Vec<f32>> = ds.vectors.clone();
+        let training: Vec<Vec<f32>> = ds.vectors.iter().map(<[f32]>::to_vec).collect();
         let q = Sq8Quantizer::fit(&training, DIM);
         let pool_codes: Vec<Vec<u8>> = ds
             .vectors
@@ -105,7 +105,7 @@ fn main() {
             .map(|v| q.quantize(v))
             .collect();
         // The rescore query is the ORIGINAL f32 vector (as in the search path).
-        let query_f32: Vec<f32> = ds.centroids[0].clone();
+        let query_f32: Vec<f32> = ds.centroids[0].to_vec();
 
         for metric in [VectorMetric::L2, VectorMetric::Dot, VectorMetric::Cosine] {
             // OLD: dequantize each candidate into a fresh Vec, then score.
