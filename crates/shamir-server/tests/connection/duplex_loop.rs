@@ -26,7 +26,7 @@ use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{HandlerFuture, RequestHandler};
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 
-use shamir_server::connection::request_loop;
+use shamir_server::connection::{request_loop, ConnTasks};
 use shamir_server::framer::{Framer, TcpFramer};
 
 use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
@@ -179,6 +179,7 @@ fn make_ctx_with_session_and_idle_timeout(
         idle_timeout,
         max_in_flight,
         meta,
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
 
     (ctx, session_id)

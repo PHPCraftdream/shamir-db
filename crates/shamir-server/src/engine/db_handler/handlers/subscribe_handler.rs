@@ -84,7 +84,9 @@ pub(crate) fn activate_subscriptions(
                 // handler got around to inserting the entry, leaving a
                 // permanently-dangling slot once the entry was inserted
                 // afterward. See `SubscriptionRegistry::reserve_pending`.
-                registry.reserve_pending(sub_id);
+                if !registry.reserve_pending(sub_id) {
+                    continue;
+                }
                 // Operator-configured query limits (finding 2b-ii): the batch
                 // limits here are already capped to the operator maximums in
                 // `handler::execute`. Reactive `Batch`/`Call` deliveries run
