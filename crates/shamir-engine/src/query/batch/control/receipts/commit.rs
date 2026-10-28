@@ -43,7 +43,8 @@ pub(crate) fn receipt_error_code(error: &CommitError) -> Option<&'static str> {
         // RETRYABLE: the refusal clears by itself once the drainer truncates
         // the WAL back under the cap; a retried commit then succeeds.
         CommitError::WalRetentionExceeded => Some("wal_retention_exceeded"),
-        CommitError::Storage(_) | CommitError::Expired { .. } => None,
+        CommitError::Storage(error) => error.code(),
+        CommitError::Expired { .. } => None,
         CommitError::WalDurability { .. } => Some("wal_durability"),
     }
 }

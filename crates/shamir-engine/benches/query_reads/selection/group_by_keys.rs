@@ -142,39 +142,30 @@ fn main() {
         let group_by_age = group_by_age.clone();
         let select = select.clone();
         h.bench("apply_group_by/by_int_100_groups", move || {
-            black_box(apply_group_by(
-                records,
-                &group_by_age,
-                &select,
-                interner,
-                ctx,
-            ));
+            black_box(
+                apply_group_by(records, &group_by_age, &select, interner, ctx)
+                    .expect("group-by benchmark execution succeeds"),
+            );
         });
     }
     {
         let group_by_city = group_by_city.clone();
         let select = select.clone();
         h.bench("apply_group_by/by_str_10_groups", move || {
-            black_box(apply_group_by(
-                records,
-                &group_by_city,
-                &select,
-                interner,
-                ctx,
-            ));
+            black_box(
+                apply_group_by(records, &group_by_city, &select, interner, ctx)
+                    .expect("group-by benchmark execution succeeds"),
+            );
         });
     }
     {
         let group_by_two = group_by_two.clone();
         let select = select.clone();
         h.bench("apply_group_by/by_str_int_composite", move || {
-            black_box(apply_group_by(
-                records,
-                &group_by_two,
-                &select,
-                interner,
-                ctx,
-            ));
+            black_box(
+                apply_group_by(records, &group_by_two, &select, interner, ctx)
+                    .expect("group-by benchmark execution succeeds"),
+            );
         });
     }
 
@@ -184,13 +175,10 @@ fn main() {
         let group_by_city = group_by_city.clone();
         let select_multi = select_multi.clone();
         h.bench("apply_group_by/multi_aggregate_5_funcs", move || {
-            black_box(apply_group_by(
-                records,
-                &group_by_city,
-                &select_multi,
-                interner,
-                ctx,
-            ));
+            black_box(
+                apply_group_by(records, &group_by_city, &select_multi, interner, ctx)
+                    .expect("group-by benchmark execution succeeds"),
+            );
         });
     }
 
@@ -200,13 +188,10 @@ fn main() {
     h.bench(
         "apply_group_by/multi_aggregate_5_funcs_many_groups",
         move || {
-            black_box(apply_group_by(
-                records,
-                &group_by_age,
-                &select_multi,
-                interner,
-                ctx,
-            ));
+            black_box(
+                apply_group_by(records, &group_by_age, &select_multi, interner, ctx)
+                    .expect("group-by benchmark execution succeeds"),
+            );
         },
     );
 

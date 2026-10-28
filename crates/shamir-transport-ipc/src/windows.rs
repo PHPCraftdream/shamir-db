@@ -20,8 +20,11 @@
 
 use std::ffi::c_void;
 use std::io;
+#[cfg(test)]
+use std::os::windows::io::AsRawHandle;
 
 use shamir_private_dir::OwnerOnlySecurityDescriptor;
+
 use tokio::net::windows::named_pipe::{
     ClientOptions, NamedPipeClient, NamedPipeServer, PipeMode, ServerOptions,
 };
@@ -51,6 +54,7 @@ const CONNECT_PIPE_BUSY_RETRIES: usize = 200;
 /// Retries a bounded number of times on `ERROR_PIPE_BUSY` (no pending server
 /// instance during accept rotation) instead of surfacing the raw error.
 pub async fn connect(name: &str) -> io::Result<IpcClientStream> {
+    crate::validate_endpoint(name)?;
     let mut attempts = 0;
     loop {
         match ClientOptions::new().open(name) {
@@ -80,8 +84,9 @@ pub struct IpcListener {
 impl IpcListener {
     /// Create a Named Pipe server at `name` (e.g. `\\.\pipe\shamir-db`),
     /// restricted to the current process's own user account.
-    pub async fn bind(name: impl Into<String>) -> io::Result<Self> {
-        let name = name.into();
+    pub async fn bind(name: &str) -> io::Result<Self> {
+        crate::validate_endpoint(name)?;
+        let name = name.to_owned();
         let sec_desc = OwnerOnlySecurityDescriptor::for_current_user()?;
         let first = create_instance(&name, &sec_desc, /* first_pipe_instance */ true)?;
         Ok(Self {
@@ -115,7 +120,7 @@ impl IpcListener {
         let pending = self
             .next
             .take()
-            .expect("IpcListener::accept: no pending instance — invariant violated");
+            .ok_or_else(|| io::Error::other("IpcListener::accept: no pending instance"))?;
         match create_replacement(&self.name, &self.sec_desc) {
             Ok(replacement) => self.next = Some(replacement),
             Err(e) => {
@@ -130,6 +135,15 @@ impl IpcListener {
     /// The pipe name this listener is bound to (e.g. `\\.\pipe\shamir-db`).
     pub fn path(&self) -> &str {
         &self.name
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pipe_handle(&self) -> io::Result<std::os::windows::io::RawHandle> {
+        Ok(self
+            .next
+            .as_ref()
+            .ok_or_else(|| io::Error::other("no pending pipe"))?
+            .as_raw_handle())
     }
 }
 

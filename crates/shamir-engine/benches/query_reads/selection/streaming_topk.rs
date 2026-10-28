@@ -114,14 +114,14 @@ fn query_full_materialize() -> ReadQuery {
 /// during it. The table's source bytes are alive in both samples, so the
 /// DELTA between the two paths isolates the projected-row accumulation.
 async fn peak_of_read(mgr: &TableManager, q: &ReadQuery) -> usize {
-    shamir_bench_utils::peak_mem::reset();
-    let interner = mgr.interner_for_test().get().await.unwrap();
-    let refs = new_map();
-    let ctx = FilterContext::new(interner, &refs);
-    let res = mgr.read(q, &ctx).await.unwrap();
-    let peak = shamir_bench_utils::peak_mem::current_peak();
-    // Touch the result so it isn't optimised out before the peak is captured.
-    black_box(res);
+    let (_, peak) = shamir_bench_utils::peak_mem::measure_async(async {
+        let interner = mgr.interner_for_test().get().await.unwrap();
+        let refs = new_map();
+        let ctx = FilterContext::new(interner, &refs);
+        black_box(mgr.read(q, &ctx).await.unwrap());
+    })
+    .await
+    .expect("exclusive peak-memory window");
     peak
 }
 

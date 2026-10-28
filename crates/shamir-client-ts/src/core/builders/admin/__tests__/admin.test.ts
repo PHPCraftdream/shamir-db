@@ -11,22 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { admin } from '../index.js';
 import type { Action, SetSuperuserOp, SetReplicatorOp } from '../../../types/access/admin.js';
-import {
-  canonicalDropUser,
-  canonicalChmod,
-  canonicalChown,
-  canonicalChgrp,
-  canonicalCreateUser,
-  canonicalGrantRole,
-  canonicalRevokeRole,
-  canonicalSetSuperuser,
-  canonicalSetReplicator,
-  canonicalCreateGroup,
-  canonicalDropGroup,
-  canonicalRenameGroup,
-  canonicalAddGroupMember,
-  canonicalRemoveGroupMember,
-} from '../../../protocol/hmac.js';
+import { canonicalBatchOp, canonicalDbRequest } from '../../../protocol/hmac.js';
 
 /** Fake signer that returns a predictable tag based on canonical length. */
 const fakeSigner = {
@@ -146,7 +131,7 @@ describe('GroupRef', () => {
 describe('chmod (HMAC)', () => {
   it('emits {chmod: ResourceRef, mode, hmac}', () => {
     const resource = admin.refTable('db', 'main', 'users');
-    const canonical = canonicalChmod(resource, 0o740);
+    const canonical = canonicalBatchOp('', { chmod: resource, mode: 0o740 });
     const op = admin.chmod(fakeSigner, resource, 0o740);
     expect(op).toEqual({
       chmod: { table: ['db', 'main', 'users'] },
@@ -159,7 +144,7 @@ describe('chmod (HMAC)', () => {
 describe('chown (HMAC)', () => {
   it('emits {chown: ResourceRef, owner, hmac} with number', () => {
     const resource = admin.refDatabase('mydb');
-    const canonical = canonicalChown(resource, 7);
+    const canonical = canonicalBatchOp('', { chown: resource, owner: 7 });
     const op = admin.chown(fakeSigner, resource, 7);
     expect(op).toEqual({
       chown: { database: 'mydb' },
@@ -174,7 +159,7 @@ describe('chown (HMAC)', () => {
     expect(op).toEqual({
       chown: { database: 'mydb' },
       owner: 42n,
-      hmac: fakeSigner.hmacTagHex(canonicalChown(resource, 42n)),
+      hmac: fakeSigner.hmacTagHex(canonicalBatchOp('', { chown: resource, owner: 42n })),
     });
   });
 
@@ -185,18 +170,17 @@ describe('chown (HMAC)', () => {
     // a compile error — same pattern as batch.test.ts's records_idmsgpack
     // compile-fail guard.
     const resource = admin.refDatabase('mydb');
+    // At runtime the string fails closed: the canonical encoder needs a
+    // numeric principal, so no tag is ever signed for a wrong owner.
     // @ts-expect-error string username is no longer accepted; pass bigint|number
-    const op = admin.chown(fakeSigner, resource, 'alice');
-    // At runtime the string slips through (TS types are erased), but the
-    // owner field echoes it verbatim now — no silent hashing to a wrong id.
-    expect((op as { owner: unknown }).owner).toBe('alice');
+    expect(() => admin.chown(fakeSigner, resource, 'alice')).toThrow();
   });
 });
 
 describe('chgrp (HMAC)', () => {
   it('emits {chgrp: ResourceRef, group: number, hmac}', () => {
     const resource = admin.refStore('db', 'main');
-    const canonical = canonicalChgrp(resource, 3);
+    const canonical = canonicalBatchOp('', { chgrp: resource, group: 3 });
     const op = admin.chgrp(fakeSigner, resource, 3);
     expect(op).toEqual({
       chgrp: { store: ['db', 'main'] },
@@ -207,7 +191,7 @@ describe('chgrp (HMAC)', () => {
 
   it('group:null clears the group', () => {
     const resource = admin.refDatabase('mydb');
-    const canonical = canonicalChgrp(resource, null);
+    const canonical = canonicalBatchOp('', { chgrp: resource, group: null });
     const op = admin.chgrp(fakeSigner, resource, null);
     expect(op).toEqual({
       chgrp: { database: 'mydb' },
@@ -218,8 +202,8 @@ describe('chgrp (HMAC)', () => {
 });
 
 describe('createGroup', () => {
-  it('emits {create_group: name, hmac} — hmac = signer over canonicalCreateGroup(name)', () => {
-    const canonical = canonicalCreateGroup('devs');
+  it('emits {create_group: name, hmac} — signer over canonical v2 DTO', () => {
+    const canonical = canonicalBatchOp('', { create_group: 'devs' });
     const op = admin.createGroup(fakeSigner, 'devs');
     expect(op).toEqual({
       create_group: 'devs',
@@ -229,9 +213,9 @@ describe('createGroup', () => {
 });
 
 describe('dropGroup', () => {
-  it('by name — hmac = signer over canonicalDropGroup(ref)', () => {
+  it('by name — complete v2 drop_group DTO', () => {
     const ref = admin.groupName('devs');
-    const canonical = canonicalDropGroup(ref);
+    const canonical = canonicalBatchOp('', { drop_group: ref, if_exists: false });
     const op = admin.dropGroup(fakeSigner, ref);
     expect(op).toEqual({
       drop_group: { name: 'devs' },
@@ -241,7 +225,7 @@ describe('dropGroup', () => {
 
   it('by id', () => {
     const ref = admin.groupId(3);
-    const canonical = canonicalDropGroup(ref);
+    const canonical = canonicalBatchOp('', { drop_group: ref, if_exists: false });
     const op = admin.dropGroup(fakeSigner, ref);
     expect(op).toEqual({
       drop_group: { id: 3 },
@@ -256,9 +240,9 @@ describe('dropGroup', () => {
 });
 
 describe('renameGroup', () => {
-  it('by name — hmac = signer over canonicalRenameGroup(ref, to)', () => {
+  it('by name — signer over the complete canonical v2 DTO', () => {
     const ref = admin.groupName('devs');
-    const canonical = canonicalRenameGroup(ref, 'engineers');
+    const canonical = canonicalBatchOp('', { rename_group: ref, to: 'engineers' });
     const op = admin.renameGroup(fakeSigner, ref, 'engineers');
     expect(op).toEqual({
       rename_group: { name: 'devs' },
@@ -269,7 +253,7 @@ describe('renameGroup', () => {
 
   it('by id', () => {
     const ref = admin.groupId(3);
-    const canonical = canonicalRenameGroup(ref, 'engineers');
+    const canonical = canonicalBatchOp('', { rename_group: ref, to: 'engineers' });
     const op = admin.renameGroup(fakeSigner, ref, 'engineers');
     expect(op).toEqual({
       rename_group: { id: 3 },
@@ -282,7 +266,7 @@ describe('renameGroup', () => {
 describe('addGroupMember', () => {
   it('emits {add_group_member: GroupRef, user, hmac} with number', () => {
     const ref = admin.groupName('devs');
-    const canonical = canonicalAddGroupMember(ref, 42);
+    const canonical = canonicalBatchOp('', { add_group_member: ref, user: 42 });
     const op = admin.addGroupMember(fakeSigner, ref, 42);
     expect(op).toEqual({
       add_group_member: { name: 'devs' },
@@ -295,16 +279,17 @@ describe('addGroupMember', () => {
     // The string overload was removed: a username MUST be resolved to its
     // real principal64 first via `ShamirClient.resolvePrincipal(username)`.
     const ref = admin.groupName('devs');
+    // At runtime the string fails closed (the canonical encoder needs a
+    // numeric principal).
     // @ts-expect-error string username is no longer accepted; pass bigint|number
-    const op = admin.addGroupMember(fakeSigner, ref, 'bob');
-    expect((op as { user: unknown }).user).toBe('bob');
+    expect(() => admin.addGroupMember(fakeSigner, ref, 'bob')).toThrow();
   });
 });
 
 describe('removeGroupMember', () => {
   it('emits {remove_group_member: GroupRef, user, hmac}', () => {
     const ref = admin.groupId(5);
-    const canonical = canonicalRemoveGroupMember(ref, 7);
+    const canonical = canonicalBatchOp('', { remove_group_member: ref, user: 7 });
     const op = admin.removeGroupMember(fakeSigner, ref, 7);
     expect(op).toEqual({
       remove_group_member: { id: 5 },
@@ -393,8 +378,8 @@ describe('permission', () => {
 });
 
 describe('createUser (HMAC)', () => {
-  it('emits roles:[] by default (always present), hmac over username only', () => {
-    const canonical = canonicalCreateUser('alice');
+  it('emits roles:[] by default (always present), canonical v2 binds roles/database but not password', () => {
+    const canonical = canonicalBatchOp('', { create_user: 'alice', password: 'pw', roles: [], database: undefined });
     const op = admin.createUser(fakeSigner, 'alice', 's3cret');
     expect(op).toEqual({
       create_user: 'alice',
@@ -407,7 +392,7 @@ describe('createUser (HMAC)', () => {
   });
 
   it('with roles, profile, database', () => {
-    const canonical = canonicalCreateUser('bob');
+    const canonical = canonicalBatchOp('', { create_user: 'bob', password: 'pw', roles: ['admin'], database: 'mydb' });
     const op = admin.createUser(fakeSigner, 'bob', 'pw', {
       roles: ['admin'],
       profile: { department: 'eng' },
@@ -431,9 +416,9 @@ describe('createUser (HMAC)', () => {
 });
 
 describe('dropUser (HMAC)', () => {
-  it('hmac = signer over canonicalDropUser(username)', () => {
+  it('hmac = signer over canonical v2 drop_user DTO', () => {
     const username = 'alice';
-    const canonical = canonicalDropUser(username);
+    const canonical = canonicalBatchOp('', { drop_user: username, if_exists: false });
     const op = admin.dropUser(fakeSigner, username);
     expect(op).toEqual({
       drop_user: 'alice',
@@ -446,7 +431,7 @@ describe('dropUser (HMAC)', () => {
 
 describe('setSuperuser (HMAC)', () => {
   it('emits {op:"set_superuser", user, on, hmac} — grant (on=true)', () => {
-    const canonical = canonicalSetSuperuser('carol', true);
+    const canonical = canonicalDbRequest({ op: 'set_superuser', user: 'carol', on: true });
     const op = admin.setSuperuser(fakeSigner, 'carol', true);
     const expected: SetSuperuserOp = {
       op: 'set_superuser',
@@ -458,7 +443,7 @@ describe('setSuperuser (HMAC)', () => {
   });
 
   it('emits {op:"set_superuser", user, on, hmac} — revoke (on=false)', () => {
-    const canonical = canonicalSetSuperuser('dave', false);
+    const canonical = canonicalDbRequest({ op: 'set_superuser', user: 'dave', on: false });
     const op = admin.setSuperuser(fakeSigner, 'dave', false);
     expect(op).toEqual({
       op: 'set_superuser',
@@ -470,17 +455,18 @@ describe('setSuperuser (HMAC)', () => {
 
   it('hmac is unconditional — always present', () => {
     expect(admin.setSuperuser(fakeSigner, 'eve', true).hmac).toBe(
-      fakeSigner.hmacTagHex(canonicalSetSuperuser('eve', true)),
+      fakeSigner.hmacTagHex(canonicalDbRequest({ op: 'set_superuser', user: 'eve', on: true })),
     );
     expect(admin.setSuperuser(fakeSigner, 'eve', false).hmac).toBe(
-      fakeSigner.hmacTagHex(canonicalSetSuperuser('eve', false)),
+      fakeSigner.hmacTagHex(canonicalDbRequest({ op: 'set_superuser', user: 'eve', on: false })),
     );
   });
 
   it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
-    const grantTag = admin.setSuperuser(fakeSigner, 'frank', true).hmac;
-    const revokeTag = admin.setSuperuser(fakeSigner, 'frank', false).hmac;
-    expect(grantTag).not.toBe(revokeTag);
+    // fakeSigner only encodes the length, so compare the canonical bytes.
+    const grant = canonicalDbRequest({ op: 'set_superuser', user: 'frank', on: true });
+    const revoke = canonicalDbRequest({ op: 'set_superuser', user: 'frank', on: false });
+    expect(Array.from(grant)).not.toEqual(Array.from(revoke));
   });
 });
 
@@ -488,7 +474,7 @@ describe('setSuperuser (HMAC)', () => {
 
 describe('setReplicator (HMAC)', () => {
   it('emits {op:"set_replicator", user, on, hmac} — grant (on=true)', () => {
-    const canonical = canonicalSetReplicator('carol', true);
+    const canonical = canonicalDbRequest({ op: 'set_replicator', user: 'carol', on: true });
     const op = admin.setReplicator(fakeSigner, 'carol', true);
     const expected: SetReplicatorOp = {
       op: 'set_replicator',
@@ -500,7 +486,7 @@ describe('setReplicator (HMAC)', () => {
   });
 
   it('emits {op:"set_replicator", user, on, hmac} — revoke (on=false)', () => {
-    const canonical = canonicalSetReplicator('dave', false);
+    const canonical = canonicalDbRequest({ op: 'set_replicator', user: 'dave', on: false });
     const op = admin.setReplicator(fakeSigner, 'dave', false);
     expect(op).toEqual({
       op: 'set_replicator',
@@ -512,23 +498,24 @@ describe('setReplicator (HMAC)', () => {
 
   it('hmac is unconditional — always present', () => {
     expect(admin.setReplicator(fakeSigner, 'eve', true).hmac).toBe(
-      fakeSigner.hmacTagHex(canonicalSetReplicator('eve', true)),
+      fakeSigner.hmacTagHex(canonicalDbRequest({ op: 'set_replicator', user: 'eve', on: true })),
     );
     expect(admin.setReplicator(fakeSigner, 'eve', false).hmac).toBe(
-      fakeSigner.hmacTagHex(canonicalSetReplicator('eve', false)),
+      fakeSigner.hmacTagHex(canonicalDbRequest({ op: 'set_replicator', user: 'eve', on: false })),
     );
   });
 
   it('on=true and on=false produce distinct canonical bytes (and tags)', () => {
-    const grantTag = admin.setReplicator(fakeSigner, 'frank', true).hmac;
-    const revokeTag = admin.setReplicator(fakeSigner, 'frank', false).hmac;
-    expect(grantTag).not.toBe(revokeTag);
+    // fakeSigner only encodes the length, so compare the canonical bytes.
+    const grant = canonicalDbRequest({ op: 'set_replicator', user: 'frank', on: true });
+    const revoke = canonicalDbRequest({ op: 'set_replicator', user: 'frank', on: false });
+    expect(Array.from(grant)).not.toEqual(Array.from(revoke));
   });
 });
 
 describe('grantRole (HMAC)', () => {
   it('emits {grant_role, user, hmac}', () => {
-    const canonical = canonicalGrantRole('reader', 'alice');
+    const canonical = canonicalBatchOp('', { grant_role: 'reader', user: 'alice' });
     const op = admin.grantRole(fakeSigner, 'reader', 'alice');
     expect(op).toEqual({
       grant_role: 'reader',
@@ -540,7 +527,7 @@ describe('grantRole (HMAC)', () => {
 
 describe('revokeRole (HMAC)', () => {
   it('emits {revoke_role, user, hmac}', () => {
-    const canonical = canonicalRevokeRole('reader', 'bob');
+    const canonical = canonicalBatchOp('', { revoke_role: 'reader', user: 'bob' });
     const op = admin.revokeRole(fakeSigner, 'reader', 'bob');
     expect(op).toEqual({
       revoke_role: 'reader',

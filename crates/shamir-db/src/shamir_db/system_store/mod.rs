@@ -1,4 +1,5 @@
 mod catalogue;
+mod group_names;
 mod identities;
 mod settings;
 mod store;

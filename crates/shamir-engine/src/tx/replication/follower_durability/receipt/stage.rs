@@ -61,19 +61,25 @@ pub(crate) fn inject_materialization_batch_failures(
     repo_name: &str,
     failures: &[MaterializationBatchFailure],
 ) {
-    let mut all = MATERIALIZATION_BATCH_FAILURES.lock().unwrap();
+    let mut all = MATERIALIZATION_BATCH_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     all.get_or_insert_with(TFxMap::default)
         .insert(repo_name.to_owned(), failures.to_vec());
 }
 
 #[cfg(all(test, feature = "fjall"))]
 pub(crate) fn clear_materialization_batch_failures(repo_name: &str) {
-    if let Some(queues) = MATERIALIZATION_BATCH_FAILURES.lock().unwrap().as_mut() {
+    if let Some(queues) = MATERIALIZATION_BATCH_FAILURES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+    {
         queues.remove(repo_name);
     }
     MATERIALIZATION_READBACK_UNAVAILABLE
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_mut()
         .and_then(|map| map.remove(repo_name));
 }
@@ -106,7 +112,9 @@ impl AtomicBatch for InjectedMaterializationBatch {
     }
     async fn commit(self: Box<Self>) -> DbResult<AtomicCommitOutcome> {
         let failure = {
-            let mut all = MATERIALIZATION_BATCH_FAILURES.lock().unwrap();
+            let mut all = MATERIALIZATION_BATCH_FAILURES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             all.as_mut()
                 .and_then(|map| map.get_mut(&self.repo_name))
                 .and_then(|q| {
@@ -139,7 +147,7 @@ static MATERIALIZATION_READBACK_UNAVAILABLE: Mutex<Option<TFxMap<String, bool>>>
 pub(crate) fn set_materialization_readback_unavailable(repo_name: &str, on: bool) {
     MATERIALIZATION_READBACK_UNAVAILABLE
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_or_insert_with(TFxMap::default)
         .insert(repo_name.to_owned(), on);
 }
@@ -148,7 +156,7 @@ pub(crate) fn set_materialization_readback_unavailable(repo_name: &str, on: bool
 fn take_materialization_readback_failure(repo_name: &str) -> bool {
     MATERIALIZATION_READBACK_UNAVAILABLE
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_mut()
         .and_then(|map| map.remove(repo_name))
         .unwrap_or(false)
@@ -161,7 +169,7 @@ static MATERIALIZATION_COMMITS: Mutex<Option<TFxMap<String, usize>>> = Mutex::ne
 pub(crate) fn materialization_commit_count(repo_name: &str) -> usize {
     MATERIALIZATION_COMMITS
         .lock()
-        .unwrap()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .as_ref()
         .and_then(|counts| counts.get(repo_name).copied())
         .unwrap_or(0)
@@ -179,7 +187,7 @@ fn record_materialization_commit(repo_name: &str) {
 #[cfg(test)]
 static SIMULATE_UNCERTAIN: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
+#[cfg(all(test, feature = "fjall"))]
 pub(crate) fn set_simulate_uncertain(on: bool) {
     SIMULATE_UNCERTAIN.store(on, Ordering::Release);
 }

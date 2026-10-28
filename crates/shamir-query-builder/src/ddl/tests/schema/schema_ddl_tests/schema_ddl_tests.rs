@@ -31,19 +31,20 @@ fn create_db_wire() {
 
 #[test]
 fn drop_db_no_hmac() {
-    let op = ddl::drop_db("mydb").build();
+    let op = ddl::drop_db("mydb").hmac("abc123").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
-            "drop_db": "mydb"
+            "drop_db": "mydb",
+            "hmac": "abc123"
         })
     );
 }
 
 #[test]
 fn drop_db_with_hmac() {
-    let op = ddl::drop_db("mydb").hmac("abc123").build();
+    let op = ddl::drop_db("mydb").hmac("abc123").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -199,12 +200,13 @@ fn alter_repo_builder_round_trip() {
 
 #[test]
 fn drop_repo_wire() {
-    let op = ddl::drop_repo("temp").build();
+    let op = ddl::drop_repo("temp").hmac("ff00").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
-            "drop_repo": "temp"
+            "drop_repo": "temp",
+            "hmac": "ff00"
         })
     );
 }
@@ -242,20 +244,25 @@ fn create_table_custom_repo() {
 
 #[test]
 fn drop_table_default() {
-    let op = ddl::drop_table("users").build();
+    let op = ddl::drop_table("users").hmac("ff00").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
             "drop_table": "users",
-            "repo": "main"
+            "repo": "main",
+            "hmac": "ff00"
         })
     );
 }
 
 #[test]
 fn drop_table_with_hmac() {
-    let op = ddl::drop_table("users").hmac("ff00").repo("cold").build();
+    let op = ddl::drop_table("users")
+        .hmac("ff00")
+        .repo("cold")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -428,21 +435,28 @@ fn create_index_sorted_with_include() {
 
 #[test]
 fn drop_index_wire() {
-    let op = ddl::drop_index("name_idx", "users").build();
+    let op = ddl::drop_index("name_idx", "users")
+        .hmac("dead")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
             "drop_index": "name_idx",
             "table": "users",
-            "repo": "main"
+            "repo": "main",
+            "hmac": "dead"
         })
     );
 }
 
 #[test]
 fn drop_index_with_hmac() {
-    let op = ddl::drop_index("email_idx", "users").hmac("dead").build();
+    let op = ddl::drop_index("email_idx", "users")
+        .hmac("dead")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["hmac"], "dead");
 }
