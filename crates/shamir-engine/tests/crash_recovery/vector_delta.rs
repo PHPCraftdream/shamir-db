@@ -117,20 +117,18 @@ fn child_entrypoint_vec() {
 }
 
 /// Spawn the Phase 5d vector crash child.
-fn spawn_child_vec(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
+async fn spawn_child_vec(phase: &str, repo_path: &Path) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "vector_delta::child_entrypoint_vec",
-            "--nocapture",
-        ])
-        .env(CHILD_SENTINEL_VEC, "1")
-        .env(CRASH_AFTER, phase)
-        .env(REPO_PATH, repo_path)
-        .output()
-        .expect("spawn vec crash child")
-        .status
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args([
+        "--exact",
+        "vector_delta::child_entrypoint_vec",
+        "--nocapture",
+    ])
+    .env(CHILD_SENTINEL_VEC, "1")
+    .env(CRASH_AFTER, phase)
+    .env(REPO_PATH, repo_path);
+    super::child_proc::run_crash_child(phase, cmd).await
 }
 
 /// Count the durable vector delta chunks the child wrote for this index's
@@ -193,10 +191,10 @@ async fn crash_at_phase5d_delta_recovers_vector() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_vec("phase5d_delta", &repo_path);
+    let (status, child_output) = spawn_child_vec("phase5d_delta", &repo_path).await;
     assert!(
         !status.success(),
-        "vec child must die abnormally at phase5d_delta; got {status:?}"
+        "vec child must die abnormally at phase5d_delta; got {status:?}\n{child_output}"
     );
 
     // REOPEN over the same on-disk image.
@@ -261,10 +259,10 @@ async fn crash_at_phase5c_vector_delta_chunk_absent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_vec("phase5c", &repo_path);
+    let (status, child_output) = spawn_child_vec("phase5c", &repo_path).await;
     assert!(
         !status.success(),
-        "vec child must die abnormally at phase5c; got {status:?}"
+        "vec child must die abnormally at phase5c; got {status:?}\n{child_output}"
     );
 
     let repo = open_repo_vec(&repo_path).await;

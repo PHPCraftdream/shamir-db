@@ -5,7 +5,8 @@
 
 use crate::function::builtin_aggs;
 use crate::query::filter::{
-    compile_filter, resolve_filter_query, FilterContext, FilterExprOp, FilterValue,
+    compile_filter, compile_filter_with_context, resolve_filter_query, FilterContext, FilterExprOp,
+    FilterValue,
 };
 use shamir_funclib::agg::Aggregator;
 use shamir_funclib::registry::ScalarError;
@@ -192,7 +193,9 @@ pub(super) fn resolve_aggregate_input(
             }
             let fresh = FilterContext::new(ctx.interner, ctx.resolved_refs)
                 .with_params(&params)
-                .with_scalars(ctx.scalars.clone());
+                .with_scalars(ctx.scalars.clone())
+                .with_overlay_snapshot(ctx.interner_overlay.clone())
+                .with_overlay_ids_snapshot(ctx.interner_overlay_ids.clone());
             resolve_filter_query(&FilterValue::Expr { expr: bound }, record, &fresh)
                 .ok_or_else(|| DbError::Validation("agg_input_expression_error".into()))
         }
@@ -207,13 +210,16 @@ pub(super) fn resolve_aggregate_input(
                 .map_err(|error| DbError::Function(error.to_string()))
         }
         FilterValue::Cond { cond } => {
-            let matched = ctx
-                .cond_cache
-                .and_then(|cache| crate::query::filter::cond_cache_get(cache, &cond.condition))
-                .map_or_else(
-                    || compile_filter(&cond.condition, ctx.interner).matches(record, ctx),
-                    |node| node.matches(record, ctx),
-                );
+            let matched = if ctx.interner_overlay_ids.is_some() {
+                compile_filter_with_context(&cond.condition, ctx).matches(record, ctx)
+            } else {
+                ctx.cond_cache
+                    .and_then(|cache| crate::query::filter::cond_cache_get(cache, &cond.condition))
+                    .map_or_else(
+                        || compile_filter(&cond.condition, ctx.interner).matches(record, ctx),
+                        |node| node.matches(record, ctx),
+                    )
+            };
             resolve_aggregate_input(
                 if matched { &cond.then } else { &cond.or_else },
                 record,

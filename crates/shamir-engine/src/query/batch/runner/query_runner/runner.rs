@@ -240,10 +240,15 @@ impl<'a> QueryRunner<'a> {
                 code: None,
             })?;
 
-        let ctx = FilterContext::new(interner, resolved_refs)
+        let mut ctx = FilterContext::new(interner, resolved_refs)
             .with_max_accumulator_bytes(self.scope.limits().max_result_size)
             .with_scalars(self.resolver.scalar_resolver())
             .with_params(self.params);
+        if let (BatchOp::Read(_), Some(tx)) = (&entry.op, self.tx.as_deref()) {
+            if !tx.implicit && !tx.interner_overlay.is_empty() {
+                ctx = ctx.with_read_overlay(&tx.interner_overlay);
+            }
+        }
 
         let arm = DataArm {
             alias,
