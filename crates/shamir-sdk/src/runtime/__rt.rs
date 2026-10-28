@@ -223,6 +223,25 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
     }
 }
 
+/// Report a deliberate guest error through the terminal host import.
+pub fn raise(error: &Error) -> ! {
+    let message = sanitize_trap_message(error.message());
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY: `message` remains alive and readable for the synchronous host import.
+        unsafe {
+            crate::runtime::host_imports::raise_error(
+                error.kind().abi_code(),
+                message.as_ptr() as i32,
+                message.len() as i32,
+            );
+        }
+        core::arch::wasm32::unreachable();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    panic!("shamir function error: {:?}: {message}", error.kind());
+}
+
 /// Abort with a WASM trap. The host maps a trap to `FunctionError::Compute`.
 pub fn trap(msg: &str) -> ! {
     let sanitized = sanitize_trap_message(msg);
