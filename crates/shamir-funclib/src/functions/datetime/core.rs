@@ -1,7 +1,8 @@
 //! `/datetime` scalar category — temporal functions over a canonical
 //! **epoch-millis UTC `i64`** timestamp.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `datetime/` folder prefix:
 //! `now to_epoch_s to_epoch_ms from_epoch_s from_epoch_ms parse_rfc3339
 //!  format_rfc3339 parse format year month day hour minute second weekday
 //!  is_weekend add_secs add_days diff_secs start_of_day start_of_week
@@ -34,7 +35,7 @@ use shamir_types::types::value::QueryValue;
 fn to_dt(ms: i64) -> Result<DateTime<Utc>, ScalarError> {
     match Utc.timestamp_millis_opt(ms) {
         chrono::LocalResult::Single(dt) => Ok(dt),
-        _ => Err(ScalarError::new("out_of_range")),
+        _ => Err(ScalarError::builtin("out_of_range")),
     }
 }
 
@@ -51,7 +52,7 @@ fn dt_arg(a: &[QueryValue], i: usize) -> Result<DateTime<Utc>, ScalarError> {
 /// `DelayedFormat`.
 fn validate_pattern(pattern: &str) -> Result<(), ScalarError> {
     if StrftimeItems::new(pattern).any(|item| matches!(item, Item::Error)) {
-        return Err(ScalarError::new("parse"));
+        return Err(ScalarError::builtin("parse"));
     }
     Ok(())
 }
@@ -80,7 +81,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let diff = Utc::now()
                     .timestamp_millis()
                     .checked_sub(then)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 Ok(v_int(diff / 1000))
             }),
             min_args: 1,
@@ -107,7 +108,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 arg_i64(a, 0)?
                     .checked_mul(1000)
                     .map(v_int)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))
             },
             1,
             Some(1),
@@ -125,7 +126,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let s = arg_str(a, 0)?;
                 let dt = DateTime::parse_from_rfc3339(s)
-                    .map_err(|_| ScalarError::new("parse"))?
+                    .map_err(|_| ScalarError::builtin("parse"))?
                     .with_timezone(&Utc);
                 Ok(v_int(dt.timestamp_millis()))
             },
@@ -158,7 +159,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                         NaiveDate::parse_from_str(s, pattern)
                             .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
                     })
-                    .map_err(|_| ScalarError::new("parse"))?;
+                    .map_err(|_| ScalarError::builtin("parse"))?;
                 Ok(v_int(ndt.and_utc().timestamp_millis()))
             },
             2,
@@ -233,10 +234,10 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let dt = dt_arg(a, 0)?;
                 let n = arg_i64(a, 1)?;
                 let delta =
-                    Duration::try_seconds(n).ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    Duration::try_seconds(n).ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 let out = dt
                     .checked_add_signed(delta)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 Ok(v_int(out.timestamp_millis()))
             },
             2,
@@ -250,10 +251,10 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let dt = dt_arg(a, 0)?;
                 let n = arg_i64(a, 1)?;
                 let delta =
-                    Duration::try_days(n).ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    Duration::try_days(n).ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 let out = dt
                     .checked_add_signed(delta)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 Ok(v_int(out.timestamp_millis()))
             },
             2,
@@ -268,7 +269,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let y = arg_i64(a, 1)?;
                 let diff = x
                     .checked_sub(y)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 Ok(v_int(div_floor(diff, 1000)))
             },
             2,
@@ -303,7 +304,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                     "week" => start_of_week(dt)?,
                     "month" => start_of_month(dt)?,
                     "year" => start_of_year(dt)?,
-                    _ => return Err(ScalarError::new("bad_unit")),
+                    _ => return Err(ScalarError::builtin("bad_unit")),
                 };
                 Ok(v_int(ms))
             },
@@ -323,7 +324,7 @@ fn start_of_minute(dt: DateTime<Utc>) -> Result<i64, ScalarError> {
     let t = dt
         .with_second(0)
         .and_then(|d| d.with_nanosecond(0))
-        .ok_or_else(|| ScalarError::new("out_of_range"))?;
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
     Ok(t.timestamp_millis())
 }
 
@@ -332,7 +333,7 @@ fn start_of_hour(dt: DateTime<Utc>) -> Result<i64, ScalarError> {
         .with_minute(0)
         .and_then(|d| d.with_second(0))
         .and_then(|d| d.with_nanosecond(0))
-        .ok_or_else(|| ScalarError::new("out_of_range"))?;
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
     Ok(t.timestamp_millis())
 }
 
@@ -342,7 +343,7 @@ fn start_of_day(dt: DateTime<Utc>) -> Result<i64, ScalarError> {
         .and_then(|d| d.with_minute(0))
         .and_then(|d| d.with_second(0))
         .and_then(|d| d.with_nanosecond(0))
-        .ok_or_else(|| ScalarError::new("out_of_range"))?;
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
     Ok(t.timestamp_millis())
 }
 
@@ -350,7 +351,7 @@ fn start_of_week(dt: DateTime<Utc>) -> Result<i64, ScalarError> {
     let days_back = dt.weekday().num_days_from_monday() as i64;
     let monday = dt
         .checked_sub_signed(Duration::days(days_back))
-        .ok_or_else(|| ScalarError::new("out_of_range"))?;
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
     start_of_day(monday)
 }
 
@@ -361,7 +362,7 @@ fn start_of_month(dt: DateTime<Utc>) -> Result<i64, ScalarError> {
         .and_then(|d| d.with_minute(0))
         .and_then(|d| d.with_second(0))
         .and_then(|d| d.with_nanosecond(0))
-        .ok_or_else(|| ScalarError::new("out_of_range"))?;
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
     Ok(t.timestamp_millis())
 }
 
@@ -373,6 +374,6 @@ fn start_of_year(dt: DateTime<Utc>) -> Result<i64, ScalarError> {
         .and_then(|d| d.with_minute(0))
         .and_then(|d| d.with_second(0))
         .and_then(|d| d.with_nanosecond(0))
-        .ok_or_else(|| ScalarError::new("out_of_range"))?;
+        .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
     Ok(t.timestamp_millis())
 }

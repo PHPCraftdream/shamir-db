@@ -49,8 +49,12 @@ pub fn register(reg: &mut ScalarRegistry) {
         "if_null",
         FnEntry::pure(
             |a| {
-                let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
-                let default = a.get(1).ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let v = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
+                let default = a
+                    .get(1)
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 if matches!(v, QueryValue::Null) {
                     Ok(default.clone())
                 } else {
@@ -65,8 +69,12 @@ pub fn register(reg: &mut ScalarRegistry) {
         "nullif",
         FnEntry::pure(
             |a| {
-                let x = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
-                let y = a.get(1).ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let x = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
+                let y = a
+                    .get(1)
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 if compare(x, y) == Ordering::Equal {
                     Ok(QueryValue::Null)
                 } else {
@@ -81,7 +89,9 @@ pub fn register(reg: &mut ScalarRegistry) {
         "is_null",
         FnEntry::pure(
             |a| {
-                let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let v = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 Ok(v_bool(matches!(v, QueryValue::Null)))
             },
             1,

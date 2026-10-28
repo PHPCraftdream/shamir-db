@@ -21,7 +21,7 @@ use shamir_transport_ws::browser::BrowserOriginPolicy;
 use shamir_db::access::Actor;
 use shamir_db::ShamirDb;
 
-use crate::connection::ConnectionContext;
+use crate::connection::{ConnTasks, ConnectionContext};
 use crate::server::boot_error::BootError;
 use crate::server_meta::ServerMetaStore;
 use crate::user_directory::FjallUserDirectory;
@@ -82,6 +82,7 @@ pub(super) fn build_ctx(
     kdf_override: Option<KdfParams>,
     auth_init_timeout: Duration,
     meta: &Arc<ServerMetaStore>,
+    tasks: ConnTasks,
 ) -> Arc<ConnectionContext> {
     let identity_keypair = Ed25519Keypair::from_seed(&identity_seed);
     let max_in_flight = shamir_tunables::instance_defaults::CONN_MAX_IN_FLIGHT;
@@ -107,6 +108,7 @@ pub(super) fn build_ctx(
         idle_timeout,
         max_in_flight,
         meta.clone(),
+        tasks,
     )
 }
 
@@ -114,6 +116,7 @@ pub(super) fn build_ctx(
 /// connection future releases its limiter guards and every store reference
 /// reachable through its handler context, which is what lets
 /// `ServerHandle::shutdown` return with the stores released.
+/// Post-handshake teardown is shielded by request_loop's own shutdown branch.
 pub(super) async fn run_until_cancelled<F: std::future::Future<Output = ()>>(
     shutdown: tokio_util::sync::CancellationToken,
     connection: F,

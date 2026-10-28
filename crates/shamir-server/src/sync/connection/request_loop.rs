@@ -31,6 +31,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::{mpsc, Semaphore};
@@ -51,6 +52,8 @@ use crate::subscriptions::SubscriptionRegistry;
 
 use super::in_flight_guard::InFlightGuard;
 use super::ConnectionContext;
+
+const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Serialize `val` as named msgpack directly into a length-prefixed buffer,
 /// avoiding the extra memcpy that `write_frame_into` does to prepend the
@@ -104,6 +107,14 @@ pub(crate) enum WriterMsg {
     Push(Vec<u8>),
 }
 
+struct CloseSubscriptionsOnDrop(Arc<SubscriptionRegistry>);
+
+impl Drop for CloseSubscriptionsOnDrop {
+    fn drop(&mut self) {
+        self.0.close_all();
+    }
+}
+
 /// Duplex post-handshake request loop for a single connection.
 ///
 /// # Duplex model
@@ -141,11 +152,28 @@ pub(crate) enum WriterMsg {
 /// 1. `join_set.abort_all()` — cancel in-flight tasks.
 /// 2. Drop `tx` — signal writer task that no more messages are coming.
 /// 3. `writer_handle.await` — wait for the writer to flush and shut down.
-pub async fn request_loop<R, W>(
+pub async fn request_loop<R, W>(ctx: Arc<ConnectionContext>, reader: R, writer: W, sid: [u8; 32])
+where
+    R: FrameReader + 'static,
+    W: FrameWriter + 'static,
+{
+    let scope = ctx.tasks.scope();
+    if let Err(error) = scope
+        .spawn(run_request_loop(ctx, reader, writer, sid, scope.clone()))
+        .await
+    {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+    }
+}
+
+async fn run_request_loop<R, W>(
     ctx: Arc<ConnectionContext>,
     mut reader: R,
     writer: W,
     sid: [u8; 32],
+    scope: crate::connection::session::conn_tasks::ConnScope,
 ) where
     R: FrameReader + 'static,
     W: FrameWriter + 'static,
@@ -158,12 +186,13 @@ pub async fn request_loop<R, W>(
     // bridges can send server-initiated frames to this connection's writer.
     let push_sink = Arc::new(MpscPushSink::new(tx.clone()));
     let registry = Arc::new(SubscriptionRegistry::new());
+    // Close immediately after the registry, so unwinding the loop closes it too.
+    let _close_subscriptions_on_drop = CloseSubscriptionsOnDrop(Arc::clone(&registry));
     let conn = Arc::new(ConnectionServices {
         conn_id: 0,
         push: Some(push_sink),
         extensions: Some(Arc::clone(&registry) as Arc<dyn std::any::Any + Send + Sync>),
     });
-
     // Shared flag: set to true by a dispatch task that sends ReplyAndClose.
     // The reader loop checks this flag and stops accepting new frames.
     let close_requested = Arc::new(AtomicBool::new(false));
@@ -175,7 +204,7 @@ pub async fn request_loop<R, W>(
     // All WriterMsg payloads are prereserved ([4-byte len][payload]) — the
     // writer calls `write_frame_prereserved` directly, skipping the memcpy
     // that `write_frame_into` does to prepend the length prefix (§3.4).
-    let mut writer_handle = tokio::spawn(async move {
+    let mut writer_handle = scope.spawn(async move {
         let mut writer = writer;
         loop {
             match rx.recv().await {
@@ -234,6 +263,9 @@ pub async fn request_loop<R, W>(
     // tearing down the connection entirely, so any partially-read frame is
     // discarded along with everything else. We never resume the read after
     // the writer exits.
+    let drain = scope.drain().clone().cancelled_owned();
+    tokio::pin!(drain);
+
     'conn: loop {
         // Non-blocking drain of completed dispatch tasks: releases permits
         // and surfaces panics before we block on the next acquire.
@@ -257,9 +289,13 @@ pub async fn request_loop<R, W>(
         // Acquire a semaphore permit (back-pressure gate).
         // When all max_in_flight slots are taken this awaits the release of
         // an existing permit by a completing dispatch task.
-        let permit = match semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break, // semaphore closed — should never happen
+        let permit = tokio::select! {
+            biased;
+            _ = &mut drain => break,
+            result = semaphore.clone().acquire_owned() => match result {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
         };
 
         // Double-check the close flag: a ReplyAndClose dispatch task may have
@@ -305,6 +341,11 @@ pub async fn request_loop<R, W>(
                 drop(permit);
                 break;
             }
+            _ = &mut drain => {
+                // Teardown path is protected by the outer ConnScope.
+                drop(permit);
+                break;
+            }
         }
 
         // Spawn a per-request dispatch task. Each task owns:
@@ -319,8 +360,7 @@ pub async fn request_loop<R, W>(
         let close_flag = Arc::clone(&close_requested);
         let sid_copy = sid;
         let conn_clone = Arc::clone(&conn);
-
-        join_set.spawn(async move {
+        let dispatch = async move {
             let _guard = InFlightGuard::new();
             let _permit = permit;
 
@@ -403,13 +443,15 @@ pub async fn request_loop<R, W>(
             }
 
             let _ = sid_copy;
-        });
+        };
+        join_set.spawn(scope.track(dispatch));
     }
 
     // --- Teardown ------------------------------------------------------------
     // Cancel all active subscriptions (aborts bridge tasks that hold
     // Arc<MpscPushSink> clones — must happen before dropping conn/tx).
     registry.close_all();
+    drop(_close_subscriptions_on_drop);
     // Cancel all in-flight dispatch tasks (they hold Arc<conn> + tx clones).
     join_set.abort_all();
     // Drain the JoinSet so aborted tasks drop their Arc<conn>/tx clones.
@@ -422,7 +464,12 @@ pub async fn request_loop<R, W>(
     drop(tx);
     // Wait for the writer task to finish. §B21: no detached tasks.
     // If writer_done is true the select! branch already consumed the handle.
-    if !writer_done {
+    if !writer_done
+        && tokio::time::timeout(WRITER_DRAIN_TIMEOUT, &mut writer_handle)
+            .await
+            .is_err()
+    {
+        writer_handle.abort();
         let _ = writer_handle.await;
     }
 
