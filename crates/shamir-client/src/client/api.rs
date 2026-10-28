@@ -128,7 +128,9 @@ impl Client {
     }
 
     /// `auth_ok.rotation_in_progress` (spec §6.5), when the server sent one.
-    /// Surfaced as a hint only; no identity recovery is performed here.
+    /// Surfaced as a hint when unchanged; a verified changed identity returns
+    /// `ClientError::IdentityRotationPending`. The caller must approve out of
+    /// band and reconnect with the new pin; no pin is updated automatically.
     pub fn rotation_in_progress(&self) -> Option<&RotationInProgressPayload> {
         self.rotation_in_progress.as_ref()
     }
