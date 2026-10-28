@@ -1,6 +1,7 @@
 use crate::backend::{FtsMode, IndexBackend, IndexQuery, IndexResult};
+use crate::bm25::FtsStatsSnapshot;
 use crate::descriptor::IndexDescriptor;
-use crate::fts_ranked_backend::FtsRankedBackend;
+use crate::fts_ranked_backend::{ranked_top_k, FtsRankedBackend};
 use crate::kind::{IndexKind, TokenizerKind};
 use crate::tokenizer::token_hash;
 use crate::write_ops::IndexWriteOp;
@@ -11,7 +12,6 @@ use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 fn intern(i: &Interner, s: &str) -> u64 {
@@ -63,6 +63,24 @@ fn make_backend(interner: &Interner, store: Arc<dyn Store>) -> FtsRankedBackend 
     FtsRankedBackend::new(desc, vec![intern(interner, "body")], store)
 }
 
+#[test]
+fn rv_index_dc5c642e_ranked_top_k_matches_full_order_and_bounds_heap() {
+    let candidates = (0..64_u64).map(|id| {
+        let rid = RecordId::from_ts_seq(1_700_000_000_000_000, id as u32);
+        (rid, if id % 3 == 0 { 4.0 } else { (id % 7) as f64 })
+    });
+    let all: Vec<_> = candidates.collect();
+    let mut expected: Vec<_> = all
+        .iter()
+        .map(|(rid, score)| (*rid, *score as f32))
+        .collect();
+    expected.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    let k = 7;
+    let (limited, bounded_max) = ranked_top_k(all, k);
+    assert_eq!(limited, expected[..k]);
+    assert_eq!(bounded_max, k);
+}
+
 #[tokio::test]
 async fn ranked_and_query_returns_scores() {
     let i = Interner::new();
@@ -79,6 +97,7 @@ async fn ranked_and_query_returns_scores() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("rust")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -111,6 +130,7 @@ async fn ranked_or_query_union() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("alpha"), token_hash("gamma")],
             mode: FtsMode::OrAny,
+            limit: None,
         })
         .await
         .unwrap();
@@ -135,11 +155,54 @@ async fn stats_track_across_insert_delete() {
     let rec = make_rec(&i, "hello world foo bar");
     apply_insert(&fts, &store, r1, &rec).await;
 
-    assert_eq!(fts.stats.doc_count.load(Ordering::Relaxed), 1);
+    assert_eq!(fts.stats.doc_count(), 1);
     assert!((fts.stats.avg_doc_len() - 4.0).abs() < 0.01);
 
     apply_delete(&fts, &store, r1, &rec).await;
-    assert_eq!(fts.stats.doc_count.load(Ordering::Relaxed), 0);
+    assert_eq!(fts.stats.doc_count(), 0);
+}
+
+#[tokio::test]
+async fn rv_index_68011961_update_empty_to_nonempty_counts_document() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let fts = make_backend(&i, Arc::clone(&store));
+    let rid = RecordId::new();
+    let empty = make_rec(&i, "");
+    let nonempty = make_rec(&i, "alpha beta");
+
+    let ops = fts.plan_update(rid, &empty, &nonempty).await.unwrap();
+    let bumps: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IndexWriteOp::BumpFtsStats { doc_len, sign, .. } => Some((*doc_len, *sign)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bumps, vec![(2, 1)]);
+    crate::apply_index_ops(&ops, &store, &fts).await.unwrap();
+    assert_eq!(
+        fts.stats.snapshot(),
+        FtsStatsSnapshot {
+            doc_count: 1,
+            sum_doc_len: 2,
+        }
+    );
+}
+
+#[tokio::test]
+async fn rv_index_68011961_update_nonempty_to_empty_removes_document() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let fts = make_backend(&i, Arc::clone(&store));
+    let rid = RecordId::new();
+    let nonempty = make_rec(&i, "alpha beta");
+    let empty = make_rec(&i, "");
+    apply_insert(&fts, &store, rid, &nonempty).await;
+
+    let ops = fts.plan_update(rid, &nonempty, &empty).await.unwrap();
+    crate::apply_index_ops(&ops, &store, &fts).await.unwrap();
+    assert_eq!(fts.stats.snapshot(), FtsStatsSnapshot::default());
 }
 
 #[tokio::test]
@@ -167,6 +230,7 @@ async fn longer_doc_gets_lower_score() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("rust")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -208,21 +272,30 @@ async fn rebuild_restores_stats_from_data_store() {
     }
 
     // Verify stats are correct after inserts.
-    assert_eq!(fts.stats.doc_count.load(Ordering::Relaxed), 4); // "" has doc_len=0 → not counted
-    assert_eq!(fts.stats.sum_doc_len.load(Ordering::Relaxed), 14); // 3+4+1+6
+    assert_eq!(
+        fts.stats.snapshot(),
+        FtsStatsSnapshot {
+            doc_count: 4,
+            sum_doc_len: 14,
+        }
+    );
 
     // Reset stats to zero (simulates reopen where counters start at 0).
-    fts.stats.doc_count.store(0, Ordering::Relaxed);
-    fts.stats.sum_doc_len.store(0, Ordering::Relaxed);
+    fts.stats.reset();
 
-    assert_eq!(fts.stats.doc_count.load(Ordering::Relaxed), 0);
+    assert_eq!(fts.stats.doc_count(), 0);
 
     // Rebuild from data_store.
     fts.rebuild(Arc::clone(&data_store)).await.unwrap();
 
     // Stats must be restored.
-    assert_eq!(fts.stats.doc_count.load(Ordering::Relaxed), 4);
-    assert_eq!(fts.stats.sum_doc_len.load(Ordering::Relaxed), 14);
+    assert_eq!(
+        fts.stats.snapshot(),
+        FtsStatsSnapshot {
+            doc_count: 4,
+            sum_doc_len: 14,
+        }
+    );
     assert!((fts.stats.avg_doc_len() - 3.5).abs() < 0.01); // 14/4
 }
 
@@ -293,8 +366,13 @@ async fn apply_in_memory_bumps_stats() {
         },
     ];
     fts.apply_in_memory(&ops).await.unwrap();
-    assert_eq!(fts.stats.doc_count.load(Ordering::Relaxed), 2);
-    assert_eq!(fts.stats.sum_doc_len.load(Ordering::Relaxed), 13);
+    assert_eq!(
+        fts.stats.snapshot(),
+        FtsStatsSnapshot {
+            doc_count: 2,
+            sum_doc_len: 13,
+        }
+    );
 }
 
 #[tokio::test]
@@ -323,13 +401,14 @@ async fn plan_apply_round_trip_ranked() {
     apply_insert(&backend, &store, rid, &rec).await;
 
     // Stats should reflect the insert
-    assert_eq!(backend.stats.doc_count.load(Ordering::Relaxed), 1);
+    assert_eq!(backend.stats.doc_count(), 1);
 
     // Lookup should find the record
     let result = backend
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("rust")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -339,5 +418,109 @@ async fn plan_apply_round_trip_ranked() {
             assert_eq!(ranked[0].0, rid);
         }
         _ => panic!("expected Ranked"),
+    }
+}
+
+#[test]
+fn rv_index_dc5c642e_heap_high_water_and_adversarial_order() {
+    let all: Vec<_> = [1.0, 10.0, 5.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, score)| {
+            (
+                RecordId::from_ts_seq(1_700_000_000_000_000, i as u32),
+                score,
+            )
+        })
+        .collect();
+    let (limited, high_water) = ranked_top_k(all.clone(), 2);
+    let mut expected: Vec<_> = all
+        .iter()
+        .map(|(rid, score)| (*rid, *score as f32))
+        .collect();
+    expected.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    assert_eq!(limited, expected[..2]);
+    assert_eq!(high_water, 2);
+    let (_, zero_high_water) = ranked_top_k(all.iter().copied(), 0);
+    assert_eq!(zero_high_water, 0);
+    let (unbounded, huge_high_water) = ranked_top_k(all, usize::MAX);
+    assert_eq!(unbounded, expected);
+    assert_eq!(huge_high_water, expected.len());
+}
+
+#[tokio::test]
+async fn rv_index_dc5c642e_backend_collector_high_water_is_bounded() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_backend(&interner, Arc::clone(&store));
+    for id in 0..128_u32 {
+        apply_insert(
+            &backend,
+            &store,
+            RecordId::from_ts_seq(1_700_000_000_000_000, id),
+            &make_rec(&interner, "common"),
+        )
+        .await;
+    }
+    let result = backend
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_hash("common")],
+            mode: FtsMode::OrAny,
+            limit: Some(3),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(result, IndexResult::Ranked(ref rows) if rows.len() == 3));
+    assert_eq!(backend.collector_high_water(), 3);
+    assert!(backend.collector_high_water() <= 3);
+    assert!(
+        backend.collector_high_water() > 0,
+        "bounded collector must run"
+    );
+}
+
+#[tokio::test]
+async fn rv_index_dc5c642e_limited_backend_matches_unlimited_for_modes_ties_and_edges() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_backend(&i, Arc::clone(&store));
+    let ids = [
+        RecordId::from_ts_seq(1_700_000_000_000_000, 3),
+        RecordId::from_ts_seq(1_700_000_000_000_000, 1),
+        RecordId::from_ts_seq(1_700_000_000_000_000, 2),
+    ];
+    for rid in ids {
+        apply_insert(&backend, &store, rid, &make_rec(&i, "alpha beta")).await;
+    }
+    for mode in [FtsMode::AndAll, FtsMode::OrAny] {
+        let lookup = |limit| {
+            backend.lookup(IndexQuery::Fts {
+                tokens: vec![token_hash("alpha"), token_hash("beta")],
+                mode,
+                limit,
+            })
+        };
+        let unlimited = match lookup(None).await.unwrap() {
+            IndexResult::Ranked(rows) => rows,
+            _ => panic!("expected Ranked"),
+        };
+        let mut expected_ids = ids.to_vec();
+        expected_ids.sort();
+        assert_eq!(
+            unlimited.iter().map(|row| row.0).collect::<Vec<_>>(),
+            expected_ids
+        );
+        for (limit, count) in [
+            (Some(0), 0),
+            (Some(1), 1),
+            (Some(2), 2),
+            (Some(usize::MAX), 3),
+        ] {
+            let limited = match lookup(limit).await.unwrap() {
+                IndexResult::Ranked(rows) => rows,
+                _ => panic!("expected Ranked"),
+            };
+            assert_eq!(limited, unlimited[..count]);
+        }
     }
 }

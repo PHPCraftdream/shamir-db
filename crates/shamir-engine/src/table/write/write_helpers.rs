@@ -359,7 +359,11 @@ pub(super) fn intern_via_layered<'a>(
 ) -> Result<shamir_types::core::interner::InternerKey, shamir_types::codecs::CodecError>
        + 'a {
     move |key: &str| {
-        let id = layered.touch_sync(key);
+        // RU8: Direct mode can hit the base quota — propagate the typed
+        // error through CodecError::Interner (DbError keeps the wire code).
+        let id = layered
+            .try_touch_sync(key)
+            .map_err(shamir_types::codecs::CodecError::from)?;
         Ok(shamir_types::core::interner::InternerKey::new(id))
     }
 }

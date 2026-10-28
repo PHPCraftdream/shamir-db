@@ -152,6 +152,7 @@ async fn committed_tx_index_postings_visible() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("transaction")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();

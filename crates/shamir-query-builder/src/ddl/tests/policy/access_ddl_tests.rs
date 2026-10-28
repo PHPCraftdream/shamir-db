@@ -58,7 +58,10 @@ fn access_tree_with_db() {
 
 #[test]
 fn chmod_table_wire() {
-    let op = ddl::chmod(ddl::res::table("mydb", "main", "users"), 0o700).build();
+    let op = ddl::chmod(ddl::res::table("mydb", "main", "users"), 0o700)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -66,7 +69,8 @@ fn chmod_table_wire() {
             "chmod": {
                 "table": ["mydb", "main", "users"]
             },
-            "mode": 448
+            "mode": 448,
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -76,7 +80,8 @@ fn chmod_table_wire() {
 fn chmod_with_hmac() {
     let op = ddl::chmod(ddl::res::table("mydb", "main", "users"), 0o700)
         .hmac("abc")
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -92,7 +97,10 @@ fn chmod_with_hmac() {
 
 #[test]
 fn chmod_function_namespace_wire() {
-    let op = ddl::chmod(ddl::res::function_namespace(), 0o755).build();
+    let op = ddl::chmod(ddl::res::function_namespace(), 0o755)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -100,14 +108,18 @@ fn chmod_function_namespace_wire() {
             "chmod": {
                 "function_namespace": true
             },
-            "mode": 493
+            "mode": 493,
+            "hmac": "abc"
         })
     );
 }
 
 #[test]
 fn chown_database_wire() {
-    let op = ddl::chown(ddl::res::database("testdb"), 7).build();
+    let op = ddl::chown(ddl::res::database("testdb"), 7)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -115,7 +127,8 @@ fn chown_database_wire() {
             "chown": {
                 "database": "testdb"
             },
-            "owner": 7
+            "owner": 7,
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -125,7 +138,8 @@ fn chown_database_wire() {
 fn chown_with_hmac() {
     let op = ddl::chown(ddl::res::database("testdb"), 7)
         .hmac("abc")
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -141,7 +155,10 @@ fn chown_with_hmac() {
 
 #[test]
 fn chown_function_wire() {
-    let op = ddl::chown(ddl::res::function("my_fn"), 10).build();
+    let op = ddl::chown(ddl::res::function("my_fn"), 10)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -149,14 +166,18 @@ fn chown_function_wire() {
             "chown": {
                 "function": "my_fn"
             },
-            "owner": 10
+            "owner": 10,
+            "hmac": "abc"
         })
     );
 }
 
 #[test]
 fn chgrp_store_wire() {
-    let op = ddl::chgrp(ddl::res::store("testdb", "main"), Some(3)).build();
+    let op = ddl::chgrp(ddl::res::store("testdb", "main"), Some(3))
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -164,7 +185,8 @@ fn chgrp_store_wire() {
             "chgrp": {
                 "store": ["testdb", "main"]
             },
-            "group": 3
+            "group": 3,
+            "hmac": "abc"
         })
     );
 }
@@ -173,7 +195,8 @@ fn chgrp_store_wire() {
 fn chgrp_with_hmac() {
     let op = ddl::chgrp(ddl::res::store("testdb", "main"), Some(3))
         .hmac("abc")
-        .build();
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -194,7 +217,10 @@ fn chgrp_with_hmac() {
 #[test]
 fn chmod_function_folder_wire() {
     // ResourceRef::FunctionFolder carries a Vec<String> of path segments.
-    let op = ddl::chmod(ddl::res::function_folder(["reports", "daily"]), 0o755).build();
+    let op = ddl::chmod(ddl::res::function_folder(["reports", "daily"]), 0o755)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -202,7 +228,8 @@ fn chmod_function_folder_wire() {
             "chmod": {
                 "function_folder": ["reports", "daily"]
             },
-            "mode": 493
+            "mode": 493,
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -210,7 +237,10 @@ fn chmod_function_folder_wire() {
 
 #[test]
 fn chown_function_folder_wire() {
-    let op = ddl::chown(ddl::res::function_folder(["reports"]), 7).build();
+    let op = ddl::chown(ddl::res::function_folder(["reports"]), 7)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -218,14 +248,18 @@ fn chown_function_folder_wire() {
             "chown": {
                 "function_folder": ["reports"]
             },
-            "owner": 7
+            "owner": 7,
+            "hmac": "abc"
         })
     );
 }
 
 #[test]
 fn chgrp_null_group_wire() {
-    let op = ddl::chgrp(ddl::res::database("testdb"), None).build();
+    let op = ddl::chgrp(ddl::res::database("testdb"), None)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -233,7 +267,8 @@ fn chgrp_null_group_wire() {
             "chgrp": {
                 "database": "testdb"
             },
-            "group": null
+            "group": null,
+            "hmac": "abc"
         })
     );
 }
@@ -244,12 +279,13 @@ fn chgrp_null_group_wire() {
 
 #[test]
 fn create_group_wire() {
-    let op = ddl::create_group("devs").build();
+    let op = ddl::create_group("devs").hmac("abc").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
-            "create_group": "devs"
+            "create_group": "devs",
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -260,28 +296,35 @@ fn drop_group_by_name_wire() {
     let op = ddl::drop_group(ddl::GroupRef::Name {
         name: "devs".into(),
     })
-    .build();
+    .hmac("abc")
+    .build()
+    .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
             "drop_group": {
                 "name": "devs"
-            }
+            },
+            "hmac": "abc"
         })
     );
 }
 
 #[test]
 fn drop_group_by_id_wire() {
-    let op = ddl::drop_group(ddl::GroupRef::Id { id: 3 }).build();
+    let op = ddl::drop_group(ddl::GroupRef::Id { id: 3 })
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
             "drop_group": {
                 "id": 3
-            }
+            },
+            "hmac": "abc"
         })
     );
 }
@@ -294,7 +337,9 @@ fn add_group_member_wire() {
         },
         42,
     )
-    .build();
+    .hmac("abc")
+    .build()
+    .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -302,7 +347,8 @@ fn add_group_member_wire() {
             "add_group_member": {
                 "name": "devs"
             },
-            "user": 42
+            "user": 42,
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -310,7 +356,10 @@ fn add_group_member_wire() {
 
 #[test]
 fn remove_group_member_wire() {
-    let op = ddl::remove_group_member(ddl::GroupRef::Id { id: 1 }, 42).build();
+    let op = ddl::remove_group_member(ddl::GroupRef::Id { id: 1 }, 42)
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -318,7 +367,8 @@ fn remove_group_member_wire() {
             "remove_group_member": {
                 "id": 1
             },
-            "user": 42
+            "user": 42,
+            "hmac": "abc"
         })
     );
 }
@@ -328,8 +378,20 @@ fn remove_group_member_wire() {
 // ============================================================================
 
 #[test]
+fn rv_query_builder_fc88a91a_password_is_wrapped_at_builder_creation() {
+    let builder = ddl::create_user("alice", "s3cret");
+    assert!(format!("{builder:?}").contains("SecretString(***)"));
+    drop(builder);
+    let operation = ddl::create_user("alice", "s3cret").build();
+    assert!(!format!("{operation:?}").contains("s3cret"));
+}
+
+#[test]
 fn create_user_minimal() {
-    let op = ddl::create_user("alice", "s3cret").build();
+    let op = ddl::create_user("alice", "s3cret")
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["create_user"], "alice");
     assert_eq!(j["password"], "s3cret");
@@ -342,7 +404,9 @@ fn create_user_full() {
     let op = ddl::create_user("bob", "hunter2")
         .roles(["admin", "viewer"])
         .database("testdb")
-        .build();
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(j["create_user"], "bob");
     assert_eq!(j["roles"], mpack!(["admin", "viewer"]));
@@ -351,19 +415,20 @@ fn create_user_full() {
 
 #[test]
 fn drop_user_wire() {
-    let op = ddl::drop_user("alice").build();
+    let op = ddl::drop_user("alice").hmac("abc").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
-            "drop_user": "alice"
+            "drop_user": "alice",
+            "hmac": "abc"
         })
     );
 }
 
 #[test]
 fn drop_user_with_hmac() {
-    let op = ddl::drop_user("alice").hmac("abc").build();
+    let op = ddl::drop_user("alice").hmac("abc").build().unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -376,13 +441,17 @@ fn drop_user_with_hmac() {
 
 #[test]
 fn grant_role_wire() {
-    let op = ddl::grant_role("admin", "alice").build();
+    let op = ddl::grant_role("admin", "alice")
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
             "grant_role": "admin",
-            "user": "alice"
+            "user": "alice",
+            "hmac": "abc"
         })
     );
     assert!(op.is_admin());
@@ -390,7 +459,10 @@ fn grant_role_wire() {
 
 #[test]
 fn grant_role_with_hmac() {
-    let op = ddl::grant_role("admin", "alice").hmac("abc").build();
+    let op = ddl::grant_role("admin", "alice")
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
@@ -404,20 +476,27 @@ fn grant_role_with_hmac() {
 
 #[test]
 fn revoke_role_wire() {
-    let op = ddl::revoke_role("admin", "alice").build();
+    let op = ddl::revoke_role("admin", "alice")
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,
         mpack!({
             "revoke_role": "admin",
-            "user": "alice"
+            "user": "alice",
+            "hmac": "abc"
         })
     );
 }
 
 #[test]
 fn revoke_role_with_hmac() {
-    let op = ddl::revoke_role("admin", "alice").hmac("abc").build();
+    let op = ddl::revoke_role("admin", "alice")
+        .hmac("abc")
+        .build()
+        .unwrap();
     let j = roundtrip(&op);
     assert_eq!(
         j,

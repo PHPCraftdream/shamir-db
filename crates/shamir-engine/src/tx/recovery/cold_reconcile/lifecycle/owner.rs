@@ -333,6 +333,10 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
             }
             return Err(InstallError::ClosedOrForbidden);
         }
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: Open lifecycle state retains its pending receiver until worker installation"
+        )]
         let receiver = control
             .pending_rx
             .take()
@@ -487,6 +491,7 @@ impl<J: Send, R: Send> RepoWorkerLifecycle<J, R> {
     ) -> Result<WorkerTerminal, ShutdownError> {
         let result = tokio::time::timeout_at(deadline, async {
             let value = rx.wait_for(|t| t.is_some()).await?;
+            #[expect(clippy::expect_used, reason = "guard: watch receiver wait_for returns only after its predicate observes Some")]
             Ok::<WorkerTerminal, tokio::sync::watch::error::RecvError>(
                 value
                     .as_ref()

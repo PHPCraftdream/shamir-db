@@ -30,7 +30,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
 `shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*` glob doesn't try to load it). The default workspace ships
-**26 crates** under `crates/` (including the `shamir-client-node` napi-rs
+**27 crates** under `crates/` (including the `shamir-client-node` napi-rs
 binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
@@ -40,7 +40,7 @@ binding, a regular member; MSVC-only on Windows) plus the vendored
 `shamir-server`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
 `shamir-sdk-macros`, `shamir-tunables`, `shamir-wasm-host`, `shamir-index`,
-`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`.
+`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`.
 
 Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
 scoped to the touched crates (`-p <crate>`) — see "Compile / build / test

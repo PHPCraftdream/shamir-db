@@ -310,6 +310,7 @@ async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
         .lookup(IndexQuery::Fts {
             tokens,
             mode: crate::index2::backend::FtsMode::OrAny,
+            limit: None,
         })
         .await
         .expect("fts lookup must succeed");

@@ -5,6 +5,7 @@
 //! (RV-CONNECT-FED6910E). The `server` modules re-export them so all
 //! existing `server::<module>::` paths keep working.
 
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::common::bootstrap_message::build_bootstrap_input;
@@ -143,4 +144,45 @@ pub struct RotationInProgressPayload {
     /// Ed25519 signature by previous priv over the
     /// `(previous_pub, current_pub, transition_until_ns)` rotation chain.
     pub rotation_proof: [u8; 64],
+}
+
+/// Serde wire form of [`RotationInProgressPayload`]: fixed-size arrays travel
+/// as `Vec<u8>` (serde has no `Deserialize` for `[u8; 64]`) and are
+/// length-checked by [`RotationInProgressWire::into_payload`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RotationInProgressWire {
+    /// Previous server public identity key (32 bytes).
+    #[serde(with = "serde_bytes")]
+    pub previous_pub: Vec<u8>,
+    /// Previous identity signature (64 bytes).
+    #[serde(with = "serde_bytes")]
+    pub identity_sig_previous: Vec<u8>,
+    /// Unix-nanosecond end of the identity transition window.
+    pub transition_until_ns: u64,
+    /// Rotation proof signature (64 bytes).
+    #[serde(with = "serde_bytes")]
+    pub rotation_proof: Vec<u8>,
+}
+
+impl From<&RotationInProgressPayload> for RotationInProgressWire {
+    fn from(p: &RotationInProgressPayload) -> Self {
+        Self {
+            previous_pub: p.previous_pub.to_vec(),
+            identity_sig_previous: p.identity_sig_previous.to_vec(),
+            transition_until_ns: p.transition_until_ns,
+            rotation_proof: p.rotation_proof.to_vec(),
+        }
+    }
+}
+
+impl RotationInProgressWire {
+    /// `None` when any fixed-size field has the wrong length.
+    pub fn into_payload(self) -> Option<RotationInProgressPayload> {
+        Some(RotationInProgressPayload {
+            previous_pub: self.previous_pub.try_into().ok()?,
+            identity_sig_previous: self.identity_sig_previous.try_into().ok()?,
+            transition_until_ns: self.transition_until_ns,
+            rotation_proof: self.rotation_proof.try_into().ok()?,
+        })
+    }
 }

@@ -3,7 +3,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Expr};
+use syn::{parse_macro_input, BinOp, Expr};
 
 // ── public entry for the `filter!` proc-macro ──────────────────────
 
@@ -53,8 +53,6 @@ fn lower(expr: &Expr) -> syn::Result<TokenStream2> {
 // ── binary expressions ─────────────────────────────────────────────
 
 fn lower_binary(bin: &syn::ExprBinary) -> syn::Result<TokenStream2> {
-    use syn::BinOp;
-
     match &bin.op {
         // Logical combinators — recurse both sides.
         BinOp::And(_) => {
@@ -326,18 +324,22 @@ pub fn field_path(expr: &Expr) -> syn::Result<TokenStream2> {
     }
 }
 
-/// Recursively flatten `Expr::Field` chains into string-literal segments.
+fn unraw_ident(ident: &syn::Ident) -> String {
+    let value = ident.to_string();
+    value.strip_prefix("r#").unwrap_or(&value).to_owned()
+}
+
 fn collect_field_segments(expr: &Expr, out: &mut Vec<String>) -> syn::Result<()> {
     match expr {
         Expr::Path(p) if p.path.segments.len() == 1 => {
-            out.push(p.path.segments[0].ident.to_string());
+            out.push(unraw_ident(&p.path.segments[0].ident));
             Ok(())
         }
         Expr::Field(f) => {
             collect_field_segments(&f.base, out)?;
             match &f.member {
                 syn::Member::Named(ident) => {
-                    out.push(ident.to_string());
+                    out.push(unraw_ident(ident));
                     Ok(())
                 }
                 syn::Member::Unnamed(idx) => Err(syn::Error::new_spanned(

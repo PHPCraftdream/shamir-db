@@ -108,6 +108,7 @@ async fn migrate_index2_fts() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("hello"), token_hash("world")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();

@@ -130,7 +130,14 @@ fn build_residual(conjuncts: &[Filter], consumed_idx: usize) -> Option<Filter> {
         .collect();
     match remaining.len() {
         0 => None,
-        1 => Some(remaining.into_iter().next().unwrap()),
+        1 =>
+        {
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: remaining.len() == 1 guarantees exactly one residual filter"
+            )]
+            Some(remaining.into_iter().next().unwrap())
+        }
         _ => Some(Filter::And { filters: remaining }),
     }
 }

@@ -1,7 +1,9 @@
+use super::super::batch_response_ext::{codec_setup_count, reset_codec_setup_count};
 use serde::Deserialize;
 use shamir_collections::TMap;
 use shamir_query_types::batch::{BatchResponse, TransactionInfo};
 use shamir_query_types::read::{QueryRecord, QueryResult};
+use shamir_query_types::write::InsertedRecord;
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -162,9 +164,44 @@ fn rows_as_deserialize_failure() {
     );
 }
 
-// ============================================================================
-// row_as — single record
-// ============================================================================
+#[test]
+fn rv_query_builder_028443e5_rows_as_sets_up_codec_once_for_many_rows() {
+    reset_codec_setup_count();
+    let records = (0..3)
+        .map(|_id| record(mpack!({"id": 1, "name": "Ada"})))
+        .collect();
+    let mut results = TMap::default();
+    results.insert("users".to_owned(), qresult(records));
+    let response = batch_resp(results, vec![], None);
+    let users: Vec<User> = response.rows_as("users").unwrap();
+    assert_eq!(users.len(), 3);
+    assert_eq!(codec_setup_count(), 1);
+}
+
+#[test]
+fn rv_query_builder_028443e5_rows_as_preserves_inserted_projection() {
+    let row = InsertedRecord {
+        id: None,
+        fields: mpack!({
+            "id": 7,
+            "name": "Ada"
+        }),
+    };
+    let mut results = TMap::default();
+    results.insert(
+        "users".to_owned(),
+        qresult(vec![QueryRecord::Inserted(row)]),
+    );
+    let response = batch_resp(results, vec![], None);
+    let users: Vec<User> = response.rows_as("users").unwrap();
+    assert_eq!(
+        users,
+        vec![User {
+            id: 7,
+            name: "Ada".into(),
+        }]
+    );
+}
 
 #[test]
 fn row_as_valid_index() {

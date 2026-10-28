@@ -30,7 +30,7 @@ async fn drop_unique_index_via_catalog_resolution() {
                 .field("name")
                 .unique(),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create unique index");
@@ -40,8 +40,14 @@ async fn drop_unique_index_via_catalog_resolution() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_name", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("idx_name", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].records[0].get_value_bool("existed")
     };
@@ -74,7 +80,7 @@ async fn drop_regular_index_via_catalog_resolution() {
             "op",
             ddl::create_index("idx_age", "users").field("age"), // unique defaults to false
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create regular index");
@@ -84,8 +90,14 @@ async fn drop_regular_index_via_catalog_resolution() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_age", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("idx_age", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].records[0].get_value_bool("existed")
     };
@@ -121,7 +133,7 @@ async fn drop_unique_index_via_catalog_resolution_if_exists() {
                 .field("email")
                 .unique(),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create unique index");
@@ -132,8 +144,15 @@ async fn drop_unique_index_via_catalog_resolution_if_exists() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_email", "users").if_exists());
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("idx_email", "users")
+                .if_exists()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db
             .execute("testdb", &req)
             .await
@@ -163,7 +182,7 @@ async fn drop_regular_index_via_catalog_resolution_if_exists() {
         let mut b = Batch::new();
         b.id("ci");
         b.create_index("op", ddl::create_index("idx_score", "users").field("score"));
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create regular index");
@@ -174,8 +193,15 @@ async fn drop_regular_index_via_catalog_resolution_if_exists() {
     let removed = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_score", "users").if_exists());
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("idx_score", "users")
+                .if_exists()
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db
             .execute("testdb", &req)
             .await
@@ -210,7 +236,7 @@ async fn ddl_op_kind_reflects_true_family_unique_index() {
                 .field("phone")
                 .unique(),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create unique index");
@@ -220,8 +246,14 @@ async fn ddl_op_kind_reflects_true_family_unique_index() {
     let op_id = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_phone", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("idx_phone", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].op_id.expect("op_id must be set")
     };
@@ -267,7 +299,7 @@ async fn ddl_op_kind_reflects_true_family_regular_index() {
             "op",
             ddl::create_index("idx_address", "users").field("address"),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create regular index");
@@ -277,8 +309,14 @@ async fn ddl_op_kind_reflects_true_family_regular_index() {
     let op_id = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("idx_address", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("idx_address", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].op_id.expect("op_id must be set")
     };
@@ -328,7 +366,7 @@ async fn ddl_op_kind_reflects_index2_family() {
                 .index_type("functional")
                 .functional_op("lower"),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create functional index");
@@ -338,8 +376,14 @@ async fn ddl_op_kind_reflects_index2_family() {
     let op_id = {
         let mut b = Batch::new();
         b.id("di");
-        b.drop_index("op", ddl::drop_index("func_idx", "users"));
-        let req = b.to_request_via_msgpack();
+        b.drop_index(
+            "op",
+            ddl::drop_index("func_idx", "users")
+                .hmac("test")
+                .build()
+                .expect("build op"),
+        );
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = db.execute("testdb", &req).await.expect("drop");
         resp.results["op"].op_id.expect("op_id must be set")
     };
@@ -394,7 +438,7 @@ async fn drop_index_refuses_genuine_cross_family_collision() {
             "op",
             ddl::create_index("shared_name", "users").field("name"),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().expect("batch request encoding");
         db.execute("testdb", &req)
             .await
             .expect("create regular index");
@@ -429,8 +473,14 @@ async fn drop_index_refuses_genuine_cross_family_collision() {
     //    and leave the illegally-registered sorted definition behind.
     let mut b = Batch::new();
     b.id("di");
-    b.drop_index("op", ddl::drop_index("shared_name", "users"));
-    let req = b.to_request_via_msgpack();
+    b.drop_index(
+        "op",
+        ddl::drop_index("shared_name", "users")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert_eq!(
         err.code(),
@@ -452,8 +502,14 @@ async fn drop_index_missing_without_if_exists_returns_error() {
     // if_exists → must return an error, not a no-op.
     let mut b = Batch::new();
     b.id("di");
-    b.drop_index("op", ddl::drop_index("nonexistent_idx", "users"));
-    let req = b.to_request_via_msgpack();
+    b.drop_index(
+        "op",
+        ddl::drop_index("nonexistent_idx", "users")
+            .hmac("test")
+            .build()
+            .expect("build op"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
 
     assert_eq!(
@@ -477,9 +533,13 @@ async fn drop_index_missing_with_if_exists_returns_existed_false() {
     b.id("di");
     b.drop_index(
         "op",
-        ddl::drop_index("nonexistent_idx", "users").if_exists(),
+        ddl::drop_index("nonexistent_idx", "users")
+            .if_exists()
+            .hmac("test")
+            .build()
+            .expect("build op"),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = db
         .execute("testdb", &req)
         .await

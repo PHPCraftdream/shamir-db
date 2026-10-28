@@ -76,6 +76,11 @@ fn parses_minimal_valid_config() {
 
 #[test]
 fn parses_full_example_with_all_listener_kinds() {
+    let ipc_addr = if cfg!(windows) {
+        r"\\.\pipe\shamir-db"
+    } else {
+        "/run/shamir/shamir-db.sock"
+    };
     let src = "\
 data_dir: /var/lib/shamir-db
 
@@ -117,7 +122,7 @@ listeners: [
     }
     {
         kind: unix
-        addr: /run/shamir/shamir-db.sock
+        addr: __IPC_ADDR__
         profile: plain
     }
 ]
@@ -126,8 +131,9 @@ tls: {
     cert_path: /var/lib/shamir-db/cert.pem
     key_path: /var/lib/shamir-db/key.pem
 }
-";
-    let cfg: Config = ktav::from_str(src).expect("parse ok");
+"
+    .replace("__IPC_ADDR__", ipc_addr);
+    let cfg: Config = ktav::from_str(&src).expect("parse ok");
     cfg.validate().expect("validate ok");
 
     assert_eq!(cfg.listeners.len(), 5);
@@ -155,7 +161,23 @@ tls: {
     // Listener 4: local IPC (Unix socket path / Windows pipe name).
     assert_eq!(cfg.listeners[4].kind, ListenerKind::Unix);
     assert_eq!(cfg.listeners[4].profile, ProfileKind::Plain);
-    assert_eq!(cfg.listeners[4].addr, "/run/shamir/shamir-db.sock");
+    assert_eq!(cfg.listeners[4].addr, ipc_addr);
+}
+
+#[test]
+fn validate_rejects_bad_platform_ipc_address() {
+    let src = minimal_tcp_tls().to_string();
+    let mut config: Config = ktav::from_str(&src).expect("base config parses");
+    config.listeners[0].kind = ListenerKind::Unix;
+    config.listeners[0].profile = ProfileKind::Plain;
+    config.listeners[0].addr = if cfg!(windows) {
+        "shamir-db"
+    } else {
+        "relative.sock"
+    }
+    .into();
+    let error = config.validate().expect_err("invalid IPC address rejected");
+    assert!(error.to_string().contains("listeners[0]"));
 }
 
 #[test]
@@ -536,7 +558,7 @@ kdf_defaults: {
 listeners: [
     {
         kind: unix
-        addr: /run/shamir/shamir-db.sock
+        addr: __IPC_ADDR__
         profile: tls_exporter
     }
 ]

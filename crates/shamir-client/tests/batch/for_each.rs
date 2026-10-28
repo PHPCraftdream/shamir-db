@@ -343,6 +343,91 @@ async fn for_each_over_query_column_ref_inserts_one_audit_row_per_order_over_rea
     handle.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_2d08f353_smart_for_each_over_query_ref() {
+    let (handle, client, _password) = boot().await;
+    let db = "fedb_smart_query_ref";
+    make_db(&client, db).await;
+    let expected_ids = [1001_i64, 1002, 1003];
+    let mut seed = Batch::new();
+    seed.id("seed");
+    for (index, order_id) in expected_ids.into_iter().enumerate() {
+        seed.insert(
+            format!("o{index}"),
+            insert("orders").rows([doc()
+                .set("order_id", order_id)
+                .unwrap()
+                .set("customer_id", "alice")
+                .unwrap()
+                .set("amount", (index as i64 + 1) * 10)
+                .unwrap()
+                .build()]),
+        );
+    }
+    client.execute(db, seed.build()).await.expect("seed");
+    let mut b = Batch::new();
+    b.id("txn-basic");
+    b.transactional();
+    let orders_q = b.query(
+        "orders_q",
+        Query::from("orders").where_eq("customer_id", "alice"),
+    );
+    b.for_each(
+        "loop",
+        orders_q.column("order_id"),
+        "order_id",
+        audit_insert_body("order_id"),
+    );
+    let resp = client
+        .execute_with_touch(db, b.build())
+        .await
+        .expect("txn-basic");
+    let loop_result = resp.results.get("loop").expect("loop alias");
+    assert!(!loop_result.skipped, "loop must run: {loop_result:?}");
+    let list = loop_result
+        .value
+        .as_ref()
+        .expect("loop must carry a value")
+        .as_array()
+        .expect("loop value must be a List");
+    assert_eq!(
+        list.len(),
+        3,
+        "loop result must have exactly 3 elements, one per seeded order: {list:?}"
+    );
+    let mut q = Batch::new();
+    q.id("verify");
+    q.query("audit_rows", Query::from("audit_log"));
+    let vresp = client
+        .execute_with_touch(db, q.build())
+        .await
+        .expect("verify read");
+    let rows = &vresp.results.get("audit_rows").expect("audit_rows").records;
+    assert_eq!(
+        rows.len(),
+        3,
+        "exactly one audit row per seeded order must exist: {rows:?}"
+    );
+    let mut actual_ids: Vec<i64> = rows
+        .iter()
+        .map(|row| {
+            row.get_value_i64("order_id")
+                .expect("audit row must have order_id")
+        })
+        .collect();
+    actual_ids.sort_unstable();
+    assert_eq!(actual_ids, expected_ids);
+    for row in rows.iter() {
+        assert_eq!(
+            row.get_value_str("note"),
+            Some("audited"),
+            "every audit row must carry the loop body's fixed note field: {rows:?}"
+        );
+    }
+    client.close().await;
+    handle.shutdown().await;
+}
+
 /// Scenario 2: zero iterations — seed zero matching orders, assert the loop
 /// result is an empty list and NO audit rows are inserted, over the real
 /// wire.

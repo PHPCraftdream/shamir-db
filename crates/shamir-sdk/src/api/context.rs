@@ -77,14 +77,19 @@ impl Ctx {
 
     /// Invoke another registered function by name.
     ///
-    /// `args` should be a `Value::Map` whose entries become the callee's
-    /// `Params`. Returns the callee's result as a `Value`.
+    /// `args` must be a `Value::Map` whose entries become the callee's
+    /// `Params`. A non-map is rejected locally with `Error::InvalidArgument`;
+    /// it is never forwarded to the host.
     ///
-    /// If the callee is not found, the recursion depth limit is exceeded,
-    /// or the callee itself errors, the host traps and the current function
-    /// fails with a `Compute` error. A codec failure decoding the callee's
-    /// response is returned as an `Err` with the decode cause.
+    /// # Errors
+    /// Returns `InvalidArgument` if `args` is not a map; missing callee,
+    /// depth exhaustion and nested failures are reported by the host.
     pub fn call(&self, name: &str, args: crate::Value) -> crate::Result<crate::Value> {
+        if !matches!(&args, crate::Value::Map(_)) {
+            return Err(crate::Error::invalid_argument(
+                "call args must be a Value::Map",
+            ));
+        }
         crate::host_imports::call(name, args)
     }
 
@@ -115,7 +120,7 @@ impl Ctx {
     /// - `[true, { status, headers, body }]` → `Ok(HttpResponse)`
     /// - `[false, "error message"]` → `Err(Error)`
     pub fn http_fetch(&self, req: crate::HttpRequest) -> crate::Result<crate::HttpResponse> {
-        let raw = crate::host_imports::http_fetch(&req.to_value())?;
+        let raw = crate::host_imports::http_fetch(&req.try_to_value()?)?;
         crate::http::decode_fetch_envelope(&raw)
     }
 

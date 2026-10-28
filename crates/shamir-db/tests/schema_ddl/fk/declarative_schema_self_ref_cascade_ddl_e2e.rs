@@ -36,7 +36,10 @@ async fn exec_set_schema(
     b.id(1);
     b.set_table_schema(alias, ddl::set_table_schema(table).rules(rules));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(resp.results[alias].records[0].as_value().as_ref().clone())
@@ -55,7 +58,10 @@ async fn exec_add_schema_rule(
     b.try_add_schema_rule(alias, ddl::add_schema_rule(table).rule(rule))
         .unwrap();
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(resp.results[alias].records[0].as_value().as_ref().clone())
@@ -75,17 +81,23 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["employees"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Index on employees.id — the FK target field.
     let mut b = Batch::new();
     b.id(2);
     b.create_index("idx", ddl::create_index("id_idx", "employees").field("id"));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     (db, dir)
 }
@@ -198,17 +210,23 @@ async fn non_self_ref_cascade_still_accepted() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["parent", "child"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Index on parent.id (FK target).
     let mut b = Batch::new();
     b.id(2);
     b.create_index("idx", ddl::create_index("id_idx", "parent").field("id"));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     let result = exec_set_schema(
         &db,

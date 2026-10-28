@@ -32,6 +32,60 @@ mod tests {
     }
 
     #[test]
+    fn rv_types_f8fa8e1f_timestamp_prefix_is_clamped_at_system_boundary() {
+        const EPOCH: i64 = 1_769_817_600_000_000;
+        const BOUNDARY: i64 = 1i64 << 32;
+        for relative in [0, 1, BOUNDARY - 1] {
+            let ts = EPOCH + relative;
+            assert!(!RecordId::from_ts(ts).is_system());
+            assert!(!RecordId::from_ts_seq(ts, 7).is_system());
+            assert_eq!(
+                &RecordId::from_ts(ts).as_bytes()[..8],
+                &BOUNDARY.to_be_bytes()
+            );
+            assert_eq!(
+                &RecordId::from_ts_seq(ts, 7).as_bytes()[..8],
+                &BOUNDARY.to_be_bytes()
+            );
+        }
+        for relative in [BOUNDARY, BOUNDARY + 1] {
+            let ts = EPOCH + relative;
+            assert!(!RecordId::from_ts(ts).is_system());
+            assert!(!RecordId::from_ts_seq(ts, 7).is_system());
+            let expected = relative.to_be_bytes();
+            assert_eq!(&RecordId::from_ts(ts).as_bytes()[..8], &expected);
+            assert_eq!(&RecordId::from_ts_seq(ts, 7).as_bytes()[..8], &expected);
+        }
+        for timestamp in [EPOCH - 1, i64::MIN] {
+            let expected = timestamp.saturating_sub(EPOCH).to_be_bytes();
+            assert!(!RecordId::from_ts(timestamp).is_system());
+            assert!(!RecordId::from_ts_seq(timestamp, 7).is_system());
+            assert_eq!(&RecordId::from_ts(timestamp).as_bytes()[..8], &expected);
+            assert_eq!(
+                &RecordId::from_ts_seq(timestamp, 7).as_bytes()[..8],
+                &expected
+            );
+        }
+    }
+
+    #[test]
+    fn rv_types_f8fa8e1f_system_names_and_timestamp_prefix_ambiguity() {
+        for name in ["", "a", "catalogue", "123456789012"] {
+            assert!(RecordId::system(name).is_system());
+        }
+
+        let custom_epoch_micros = 1_769_817_600_000_000i64;
+        assert!(!RecordId::from_ts(custom_epoch_micros).is_system());
+        assert!(!RecordId::from_ts(custom_epoch_micros + 1).is_system());
+        assert!(!RecordId::from_ts_seq(custom_epoch_micros, 0).is_system());
+        assert!(!RecordId::from_ts_seq(custom_epoch_micros, 1).is_system());
+        assert_eq!(
+            &RecordId::from_ts(custom_epoch_micros).as_bytes()[..8],
+            &(1i64 << 32).to_be_bytes()
+        );
+    }
+
+    #[test]
     fn test_system_record_id_logic() {
         // Short name
         let id_short = RecordId::system("users");
