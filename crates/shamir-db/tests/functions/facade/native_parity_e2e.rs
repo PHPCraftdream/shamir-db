@@ -50,14 +50,14 @@ fn insert_request(id: &str, record: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert("users").row(record));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 fn read_all_request(id: &str) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.query("all", Query::from("users"));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 // ========================================================================

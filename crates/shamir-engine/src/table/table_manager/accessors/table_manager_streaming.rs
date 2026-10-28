@@ -848,6 +848,10 @@ impl TableManager {
             // Phase C (Step 6): one-shot predicate-set recording derived
             // from query.r#where. Zero-overhead: this block only runs for
             // Serializable txs.
+            #[expect(
+                clippy::expect_used,
+                reason = "guard: recording is computed by filtering Some(tx), so it implies tx is Some"
+            )]
             let tx_ref = tx.expect("recording=true implies tx is Some");
             let token = self.table_token();
             match query.r#where.as_ref() {
@@ -909,6 +913,10 @@ impl TableManager {
             .filter(|t| t.isolation == shamir_tx::IsolationLevel::Serializable)
             .is_some();
         if recording {
+            #[expect(
+                clippy::expect_used,
+                reason = "guard: recording is computed by filtering Some(tx), so it implies tx is Some"
+            )]
             let tx_ref = tx.expect("recording=true implies tx is Some");
             let token = self.table_token();
             match query.r#where.as_ref() {

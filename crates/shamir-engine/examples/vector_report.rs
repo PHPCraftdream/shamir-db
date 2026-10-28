@@ -217,12 +217,15 @@ fn run_cell(
         .vectors
         .iter()
         .enumerate()
-        .map(|(i, v)| (rid_from(i), v.clone()))
+        .map(|(i, v)| (rid_from(i), v.to_vec()))
         .collect();
 
     // ── query set: distinct lineage (seed+1), same params ──────────
-    let queries: Vec<Vec<f32>> =
-        clustered_vectors(n_queries, dim, k_clusters, sigma, seed + 1).vectors;
+    let queries: Vec<Vec<f32>> = clustered_vectors(n_queries, dim, k_clusters, sigma, seed + 1)
+        .vectors
+        .iter()
+        .map(<[f32]>::to_vec)
+        .collect();
 
     // ── ground truth: BruteForceAdapter (exact KNN, SIMD-scanned) ──
     // Built and settled inside block_on (its actor needs a runtime ctx).

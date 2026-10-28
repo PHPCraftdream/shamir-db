@@ -134,6 +134,19 @@ fn published_durability_error_maps_to_committed_metadata() {
 }
 
 #[test]
+fn rv_types_2eb39dfd_interner_quota_storage_error_keeps_typed_abort_reason() {
+    let error =
+        crate::tx::CommitError::Storage(shamir_storage::error::DbError::InternerQuotaExceeded {
+            repo: "repo-17".to_string(),
+            kind: shamir_types::core::interner::InternerQuotaKind::Names,
+            limit: 7,
+        });
+    let info = error.into_transaction_info(13, 100);
+    assert_eq!(info.status, "aborted");
+    assert_eq!(info.reason.as_deref(), Some("interner_quota_exceeded"));
+}
+
+#[test]
 fn deferred_outcome_maps_to_materialized_false() {
     use crate::tx::tx_outcome::MaterializationState;
 

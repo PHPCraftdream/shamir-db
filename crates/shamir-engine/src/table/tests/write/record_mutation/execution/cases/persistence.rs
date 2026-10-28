@@ -3,7 +3,9 @@ use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::tests::write::record_mutation::execution::shared::write_exec_tests::*;
 use crate::table::TableConfig;
+use futures::StreamExt;
 use shamir_query_builder::write::{self, doc};
+use shamir_types::core::interner::InternerQuota;
 use shamir_types::types::common::new_map;
 
 /// This test verifies that new interned keys are persisted after insert.
@@ -89,4 +91,72 @@ async fn test_interner_persisted_after_set() {
     let interner = table.interner().get().await.unwrap();
     assert!(interner.get_ind("unique_field_xyz").is_some());
     assert!(interner.get_ind("another_new_field").is_some());
+}
+
+/// RU8 acceptance 6: an implicit INSERT whose field-name intern hits the
+/// per-repo quota fails with the wire code, leaves NO visible row and NO WAL
+/// record. The quota manager is installed on an empty repo before creating the
+/// table; the pre-touched name exhausts the cap before the insert's field is
+/// metered, so the rejection is the insert's own touch.
+#[tokio::test]
+async fn rv_types_2eb39dfd_insert_quota_failure_no_row_no_wal() {
+    // The constructor installs the quota manager before recovery, then this
+    // admitted publication registers the fully initialized repo in the DB.
+    let db = DbInstance::new();
+    let instance = crate::repo::RepoInstance::from_factory_with_interner_quota_for_test(
+        "default".to_string(),
+        BoxRepoFactory::in_memory(),
+        Vec::new(),
+        InternerQuota {
+            max_names: 1,
+            max_bytes: 1_048_576,
+        },
+    )
+    .await
+    .unwrap();
+    let permit = instance.write_domain().admit().await.unwrap();
+    db.publish_repo_admitted(instance, &permit).unwrap();
+    drop(permit);
+    let repo = db.get_repo("default").unwrap();
+    db.create_table_checked("default", "users").await.unwrap();
+    let table = db.get_table("default", "users").await.unwrap();
+    // Exhaust the cap before the insert runs.
+    table
+        .interner()
+        .get()
+        .await
+        .unwrap()
+        .touch_ind("occupied")
+        .unwrap();
+
+    let wal = repo.repo_wal().await.unwrap();
+    let wal_len_before = wal.recover().await.unwrap().len();
+
+    let op = write::insert("users")
+        .row(doc().set("fresh_field", "value1").unwrap())
+        .build();
+    let err = insert_via_tx(&repo, &table, &op, true)
+        .await
+        .expect_err("insert over the interner quota must fail");
+    assert!(
+        matches!(&err, crate::query::batch::BatchError::QueryError { code, .. }
+            if code.as_deref() == Some("interner_quota_exceeded")),
+        "unexpected error: {err:?}"
+    );
+
+    // No WAL record for the failed implicit insert.
+    assert_eq!(
+        wal.recover().await.unwrap().len(),
+        wal_len_before,
+        "a quota-rejected implicit insert must append no WAL record"
+    );
+
+    // No visible row: the rejected touch consumed nothing.
+    let stream = table.list_stream(64);
+    futures::pin_mut!(stream);
+    let mut count = 0usize;
+    while let Some(batch) = stream.next().await {
+        count += batch.unwrap().len();
+    }
+    assert_eq!(count, 0, "quota-rejected insert must leave no row");
 }

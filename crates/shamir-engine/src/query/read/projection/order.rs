@@ -91,6 +91,10 @@ fn qv_sort_permutation(records: &[QueryValue], order_by: &OrderBy) -> Option<Vec
 /// picks by index (no `Default` bound needed, so this works for `QueryValue`,
 /// which has none). The permutation must be a valid reordering of `0..v.len()`;
 /// each index is taken exactly once.
+#[expect(
+    clippy::expect_used,
+    reason = "guard: permutation indexes are guaranteed unique and in range by the caller"
+)]
 fn apply_permutation<T>(v: &mut Vec<T>, idx: &[usize]) {
     let mut tmp: Vec<Option<T>> = v.drain(..).map(Some).collect();
     for &i in idx {
@@ -295,6 +299,10 @@ impl<'ob> TopKHeap<'ob> {
             values.push(item.value);
             if self.with_ids {
                 // Alignment invariant: with_ids ⇒ every push carried Some(id).
+                #[expect(
+                    clippy::expect_used,
+                    reason = "guard: with_ids is set only by callers pairing every pushed row with its source id"
+                )]
                 ids.push(item.id.expect("with_ids heap item must carry a RecordId"));
             }
         }

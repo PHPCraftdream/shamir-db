@@ -87,6 +87,12 @@ impl Params {
         }
     }
 
+    /// Consume this parameter set as its underlying map.
+    #[doc(hidden)]
+    pub fn into_raw(self) -> Vec<(String, Value)> {
+        self.map
+    }
+
     /// The raw underlying map.
     pub fn raw(&self) -> &[(String, Value)] {
         &self.map
