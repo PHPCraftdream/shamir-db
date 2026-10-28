@@ -163,16 +163,20 @@ fn write_table_tokens(
 
 impl InsertMacro {
     pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
-        let mut chain = write_table_tokens(
+        let chain = write_table_tokens(
             &self.table,
             quote! { ::shamir_query_builder::write::Insert },
             quote! { into },
         );
-        for doc in &self.docs {
-            let doc_ts = lower_doc_map(doc);
-            chain = quote! { #chain.row(#doc_ts) };
-        }
-        Ok(quote! { #chain.build() })
+        let rows: Vec<TokenStream2> = self
+            .docs
+            .iter()
+            .map(|doc| {
+                let doc_ts = lower_doc_map(doc);
+                quote! { .row(#doc_ts) }
+            })
+            .collect();
+        Ok(quote! { #chain #(#rows)* .build() })
     }
 }
 

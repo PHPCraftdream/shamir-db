@@ -12,12 +12,19 @@ fn fts_serde_round_trip() {
         field: vec!["body".to_string()],
         query: "hello world".to_string(),
         mode: "and".to_string(),
+        limit: None,
     };
     match &f {
-        Filter::Fts { field, query, mode } => {
+        Filter::Fts {
+            field,
+            query,
+            mode,
+            limit,
+        } => {
             assert_eq!(field, &["body"]);
             assert_eq!(query, "hello world");
             assert_eq!(mode, "and");
+            assert_eq!(*limit, None);
         }
         _ => panic!("expected Fts"),
     }

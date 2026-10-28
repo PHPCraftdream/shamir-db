@@ -83,10 +83,11 @@ fn main() {
         .vectors
         .iter()
         .enumerate()
-        .map(|(i, v)| (rid_from(i), v.clone()))
+        .map(|(i, v)| (rid_from(i), v.to_vec()))
         .collect();
 
-    let query: Vec<f32> = clustered_vectors(1, DIM, K_CLUSTERS, SIGMA, SEED + 1).vectors[0].clone();
+    let query: Vec<f32> =
+        clustered_vectors(1, DIM, K_CLUSTERS, SIGMA, SEED + 1).vectors[0].to_vec();
 
     let hnsw = Arc::new(HnswAdapter::new(
         DIM as u32,

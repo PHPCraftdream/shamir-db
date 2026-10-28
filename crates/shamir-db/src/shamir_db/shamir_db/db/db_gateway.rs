@@ -40,17 +40,19 @@ pub(super) struct FacadeDbGateway {
 impl FacadeDbGateway {
     /// Convert a [`QueryValue`] scalar into a [`FilterValue`] for use in a
     /// `Filter::Eq` predicate.
-    fn qv_to_filter_value(val: &QueryValue) -> FilterValue {
+    fn qv_to_filter_value(val: &QueryValue, field: &str) -> Result<FilterValue, String> {
         match val {
-            QueryValue::Null => FilterValue::Null,
-            QueryValue::Bool(b) => FilterValue::Bool(*b),
-            QueryValue::Int(i) => FilterValue::Int(*i),
-            QueryValue::F64(f) => FilterValue::Float(*f),
-            QueryValue::Str(s) => FilterValue::String(s.clone()),
-            QueryValue::Bin(b) => FilterValue::Binary(b.clone()),
-            // For composite or array values fall back to Null — these are not
-            // expected as key components in the gateway's key_to_filter path.
-            _ => FilterValue::Null,
+            QueryValue::Null => Ok(FilterValue::Null),
+            QueryValue::Bool(b) => Ok(FilterValue::Bool(*b)),
+            QueryValue::Int(i) => Ok(FilterValue::Int(*i)),
+            QueryValue::F64(f) => Ok(FilterValue::Float(*f)),
+            QueryValue::Str(s) => Ok(FilterValue::String(s.clone())),
+            QueryValue::Bin(b) => Ok(FilterValue::Binary(b.clone())),
+            QueryValue::List(_) => Err(format!("unsupported key value List for field {field}")),
+            QueryValue::Map(_) => Err(format!("unsupported key value Map for field {field}")),
+            QueryValue::Set(_) => Err(format!("unsupported key value Set for field {field}")),
+            QueryValue::Dec(_) => Err(format!("unsupported key value Dec for field {field}")),
+            QueryValue::Big(_) => Err(format!("unsupported key value Big for field {field}")),
         }
     }
 
@@ -61,28 +63,31 @@ impl FacadeDbGateway {
     /// - Scalar `QueryValue` (e.g. `Int`, `Str`) → `Eq` on the `"id"` field.
     ///
     /// Returns `None` for an empty map (match-all / no filter).
-    fn key_to_filter(key: &QueryValue) -> Option<Filter> {
+    /// WASM-bridge exception: guest msgpack `Value` key -> typed `Filter`; use
+    /// `Db::execute` (feature `query-builder`) for builder queries.
+    fn key_to_filter(key: &QueryValue) -> Result<Option<Filter>, String> {
         match key {
             QueryValue::Map(entries) => {
                 if entries.is_empty() {
-                    return None;
+                    return Ok(None);
                 }
-                let mut filters: Vec<Filter> = entries
-                    .iter()
-                    .map(|(field, val)| Filter::Eq {
+                let mut filters = Vec::with_capacity(entries.len());
+                for (field, val) in entries {
+                    filters.push(Filter::Eq {
                         field: vec![field.clone()],
-                        value: Self::qv_to_filter_value(val),
-                    })
-                    .collect();
-                if filters.len() == 1 {
-                    return Some(filters.remove(0));
+                        value: Self::qv_to_filter_value(val, field)?,
+                    });
                 }
-                Some(Filter::And { filters })
+                if filters.len() == 1 {
+                    Ok(filters.pop())
+                } else {
+                    Ok(Some(Filter::And { filters }))
+                }
             }
-            other => Some(Filter::Eq {
+            other => Ok(Some(Filter::Eq {
                 field: vec!["id".to_string()],
-                value: Self::qv_to_filter_value(other),
-            }),
+                value: Self::qv_to_filter_value(other, "id")?,
+            })),
         }
     }
 }
@@ -121,7 +126,7 @@ impl DbGateway for FacadeDbGateway {
         table: &str,
         key: QueryValue,
     ) -> Result<Option<QueryValue>, DbGatewayError> {
-        let where_clause = Self::key_to_filter(&key);
+        let where_clause = Self::key_to_filter(&key).map_err(DbGatewayError::Execution)?;
         let table_ref = if repo == "main" {
             TableRef::new(table)
         } else {
@@ -264,7 +269,10 @@ impl DbGateway for FacadeDbGateway {
             TableRef::with_repo(repo, table)
         };
 
-        let where_clause = filter.as_ref().and_then(Self::key_to_filter);
+        let where_clause = match filter.as_ref() {
+            Some(value) => Self::key_to_filter(value).map_err(DbGatewayError::Execution)?,
+            None => None,
+        };
 
         let read_query = ReadQuery {
             from: table_ref,

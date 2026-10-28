@@ -16,15 +16,15 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 pub fn decode_params(bytes: &[u8]) -> Result<Params> {
     match rmp_serde::from_slice::<Value>(bytes) {
         Ok(Value::Map(entries)) => Ok(Params::from_map(entries)),
-        Ok(_) => Err(Error::user("decode params: expected a string-keyed map")),
-        Err(e) => Err(Error::user(format!("decode params: {e}"))),
+        Ok(_) => Err(Error::codec("decode params: expected a string-keyed map")),
+        Err(e) => Err(Error::codec(format!("decode params: {e}"))),
     }
 }
 
 /// Encode a `Value` to msgpack bytes. Codec failures surface as errors
 /// instead of an empty-byte fallback.
 pub fn encode_value(value: &Value) -> Result<Vec<u8>> {
-    rmp_serde::to_vec(value).map_err(|e| Error::user(format!("encode value: {e}")))
+    rmp_serde::to_vec(value).map_err(|e| Error::codec(format!("encode value: {e}")))
 }
 
 /// An owned request buffer handed to a host import.
@@ -182,7 +182,7 @@ pub(crate) fn live_response_bytes() -> usize {
 /// Pure core of host-import response decoding: fail closed with the codec
 /// cause instead of a plausible fallback value.
 pub fn decode_value_bytes(bytes: &[u8]) -> Result<Value> {
-    rmp_serde::from_slice(bytes).map_err(|e| Error::user(format!("decode host response: {e}")))
+    rmp_serde::from_slice(bytes).map_err(|e| Error::codec(format!("decode host response: {e}")))
 }
 
 /// Decode a packed `i64` host-import return into `(ptr, len)`.
@@ -217,7 +217,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
     let mut future = core::pin::pin!(future);
     match future.as_mut().poll(&mut cx) {
         Poll::Ready(out) => Ok(out),
-        Poll::Pending => Err(Error::user(
+        Poll::Pending => Err(Error::host(
             "guest future returned Pending; suspension is not supported in guest ABI",
         )),
     }
@@ -225,6 +225,21 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
 
 /// Abort with a WASM trap. The host maps a trap to `FunctionError::Compute`.
 pub fn trap(msg: &str) -> ! {
+    let sanitized = sanitize_trap_message(msg);
     // The guest SDK is built with std available, so panic is fine.
-    panic!("shamir function error: {msg}");
+    panic!("shamir function error: {sanitized}");
+}
+
+const MAX_TRAP_MESSAGE_BYTES: usize = 1024;
+
+pub(crate) fn sanitize_trap_message(msg: &str) -> String {
+    let mut sanitized = String::with_capacity(msg.len().min(MAX_TRAP_MESSAGE_BYTES));
+    for ch in msg.chars() {
+        let ch = if ch.is_control() { '\u{fffd}' } else { ch };
+        if sanitized.len() + ch.len_utf8() > MAX_TRAP_MESSAGE_BYTES {
+            break;
+        }
+        sanitized.push(ch);
+    }
+    sanitized
 }

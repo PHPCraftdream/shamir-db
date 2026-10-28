@@ -24,14 +24,14 @@ use crate::Value;
 pub(crate) fn decode_fetch_envelope(raw: &Value) -> Result<HttpResponse> {
     let items = match raw {
         Value::List(items) => items,
-        _ => return Err(Error::user("http_fetch: host returned unexpected value")),
+        _ => return Err(Error::codec("http_fetch: host returned unexpected value")),
     };
     if items.len() != 2 {
-        return Err(Error::user("http_fetch: host envelope has wrong shape"));
+        return Err(Error::codec("http_fetch: host envelope has wrong shape"));
     }
     let ok = match &items[0] {
         Value::Bool(b) => *b,
-        _ => return Err(Error::user("http_fetch: envelope ok-flag is not a bool")),
+        _ => return Err(Error::codec("http_fetch: envelope ok-flag is not a bool")),
     };
     if !ok {
         let msg = match &items[1] {
@@ -41,6 +41,95 @@ pub(crate) fn decode_fetch_envelope(raw: &Value) -> Result<HttpResponse> {
         return Err(Error::user(msg));
     }
     HttpResponse::from_value(&items[1])
+}
+
+/// Validate an HTTP token according to RFC 9110 §5.6.2.
+fn is_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        ..=b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+                )
+        })
+}
+
+fn validate_method(method: &str) -> Result<()> {
+    if is_token(method) {
+        Ok(())
+    } else {
+        Err(Error::invalid_argument("http_fetch: invalid method token"))
+    }
+}
+
+/// Validate an HTTP URL as an absolute HTTP(S) URL without userinfo.
+// Hostnames are dot-separated non-empty labels; the absolute FQDN form with a
+// trailing dot (`example.com.`) is rejected.
+fn validate_url(url: &str) -> Result<()> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(Error::invalid_argument(
+            "http_fetch: URL must be absolute HTTP(S)",
+        ));
+    };
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+        || rest.is_empty()
+        || url.bytes().any(|b| b <= 0x20 || b == 0x7f)
+    {
+        return Err(Error::invalid_argument("http_fetch: invalid URL"));
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let valid_port = |port: &str| {
+        !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok()
+    };
+    let valid_host = |host: &str| {
+        !host.is_empty()
+            && host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    && label
+                        .as_bytes()
+                        .first()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+                    && label
+                        .as_bytes()
+                        .last()
+                        .is_some_and(u8::is_ascii_alphanumeric)
+            })
+    };
+    let valid_authority = if let Some(bracketed) = authority.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((address, suffix)) => {
+                address.parse::<std::net::Ipv6Addr>().is_ok()
+                    && (suffix.is_empty() || suffix.strip_prefix(':').is_some_and(valid_port))
+            }
+            None => false,
+        }
+    } else {
+        match authority.split_once(':') {
+            Some((host, port)) => valid_host(host) && valid_port(port),
+            None => valid_host(authority),
+        }
+    };
+    if !valid_authority || authority.contains('@') {
+        return Err(Error::invalid_argument("http_fetch: invalid URL authority"));
+    }
+    Ok(())
+}
+
+fn validate_header(name: &str, value: &str) -> Result<()> {
+    if !is_token(name) || value.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) {
+        return Err(Error::invalid_argument(
+            "http_fetch: invalid header name or value",
+        ));
+    }
+    Ok(())
 }
 
 /// An HTTP request for the egress gateway.
@@ -76,10 +165,30 @@ impl HttpRequest {
         }
     }
 
-    /// Add a header.
+    /// Add a header. Invalid names or values are rejected by `try_header`
+    /// or by `try_to_value` (used by `Ctx::http_fetch`).
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
         self
+    }
+
+    /// Add a validated HTTP header.
+    pub fn try_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Result<Self> {
+        let name = name.into();
+        let value = value.into();
+        validate_header(&name, &value)?;
+        self.headers.push((name, value));
+        Ok(self)
+    }
+
+    /// Validate and convert to the wire `Value::Map` shape.
+    pub fn try_to_value(&self) -> Result<Value> {
+        validate_method(&self.method)?;
+        validate_url(&self.url)?;
+        for (name, value) in &self.headers {
+            validate_header(name, value)?;
+        }
+        Ok(self.to_value())
     }
 
     /// Set the HTTP method.
@@ -94,7 +203,8 @@ impl HttpRequest {
         self
     }
 
-    /// Convert to the wire `Value::Map` shape.
+    /// Convert to the wire `Value::Map` shape without validation; use
+    /// [`HttpRequest::try_to_value`] to reject invalid fields.
     pub fn to_value(&self) -> Value {
         // Pair-list form so duplicate header names (Set-Cookie) survive.
         let header_pairs: Vec<Value> = self
@@ -125,43 +235,45 @@ impl HttpResponse {
     pub fn from_value(val: &Value) -> Result<Self> {
         let map = match val {
             Value::Map(entries) => entries,
-            _ => return Err(Error::user("http_fetch: response is not a Map")),
+            _ => return Err(Error::codec("http_fetch: response is not a Map")),
         };
 
         let status = map
             .iter()
             .find(|(k, _)| k == "status")
             .and_then(|(_, v)| match v {
-                Value::Int(n) => Some(*n as u16),
+                Value::Int(n) if (100..=599).contains(n) => u16::try_from(*n).ok(),
                 _ => None,
             })
-            .ok_or_else(|| Error::user("http_fetch: missing status field"))?;
+            .ok_or_else(|| Error::codec("http_fetch: invalid or missing status field"))?;
 
         // List-of-pairs is canonical; map form accepted for legacy hosts.
         let headers = match map.iter().find(|(k, _)| k == "headers") {
             Some((_, Value::List(items))) => items
                 .iter()
-                .filter_map(|item| match item {
+                .map(|item| match item {
                     Value::List(pair) if pair.len() == 2 => match (&pair[0], &pair[1]) {
-                        (Value::Str(k), Value::Str(v)) => Some((k.clone(), v.clone())),
-                        _ => None,
+                        (Value::Str(k), Value::Str(v)) => Ok((k.clone(), v.clone())),
+                        _ => Err(Error::codec("http_fetch: malformed response header pair")),
                     },
-                    _ => None,
+                    _ => Err(Error::codec("http_fetch: malformed response header pair")),
                 })
-                .collect(),
+                .collect::<Result<Vec<_>>>()?,
             Some((_, Value::Map(entries))) => entries
                 .iter()
-                .filter_map(|(k, v)| match v {
-                    Value::Str(s) => Some((k.clone(), s.clone())),
-                    _ => None,
+                .map(|(k, v)| match v {
+                    Value::Str(s) => Ok((k.clone(), s.clone())),
+                    _ => Err(Error::codec("http_fetch: malformed response header value")),
                 })
-                .collect(),
-            _ => Vec::new(),
+                .collect::<Result<Vec<_>>>()?,
+            Some(_) => return Err(Error::codec("http_fetch: malformed response headers")),
+            None => Vec::new(),
         };
 
         let body = match map.iter().find(|(k, _)| k == "body") {
             Some((_, Value::Bin(b))) => b.clone(),
-            _ => Vec::new(),
+            Some(_) => return Err(Error::codec("http_fetch: malformed response body")),
+            None => Vec::new(),
         };
 
         Ok(Self {

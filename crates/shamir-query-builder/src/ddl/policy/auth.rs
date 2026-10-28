@@ -17,6 +17,7 @@ pub fn create_user(name: impl Into<String>, password: impl Into<String>) -> Crea
 }
 
 /// Builder for [`CreateUserOp`].
+#[derive(Debug)]
 pub struct CreateUser {
     name: String,
     password: SecretString,

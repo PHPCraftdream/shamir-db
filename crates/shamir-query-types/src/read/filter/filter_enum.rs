@@ -161,6 +161,9 @@ pub enum Filter {
         query: String,
         #[serde(default = "default_fts_mode")]
         mode: String,
+        /// Optional ranked-result cap for FTS lookups.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
     },
 
     /// Vector similarity search (top-k nearest neighbors).
