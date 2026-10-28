@@ -741,7 +741,13 @@ async fn create_profile_and_subscription(follower: &ShamirDb, profile: &str, rep
 async fn drop_sub_a(follower: &ShamirDb) {
     let mut b = Batch::new();
     b.id(2);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop subscription"),
+    );
     follower
         .execute(
             "app",

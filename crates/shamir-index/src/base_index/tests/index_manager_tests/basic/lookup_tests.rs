@@ -52,6 +52,31 @@ async fn test_lookup_by_index_single_record() {
 }
 
 #[tokio::test]
+async fn rv_index_8f977bf5_singular_planner_borrows_definition_snapshot() {
+    let (_, _, manager) = create_manager();
+    manager
+        .create_index(IndexDefinition::new(
+            8_977,
+            vec![IndexInfoItem::new(vec![1])],
+        ))
+        .await
+        .unwrap();
+    let record = create_test_value(&[(1, InnerValue::Str("indexed".to_owned()))]);
+    let record_id = RecordId::new();
+    manager.indexes.reset_iter_count();
+    let ops = manager
+        .plan_record_created(&record_id, &record)
+        .await
+        .unwrap();
+    assert_eq!(ops.len(), 1);
+    assert_eq!(manager.indexes.iter_count(), 0);
+
+    // Prove the counter is live on this IndexInfo instance.
+    let _ = manager.indexes.iter().count();
+    assert_eq!(manager.indexes.iter_count(), 1);
+}
+
+#[tokio::test]
 async fn test_lookup_by_index_multiple_records() {
     let (_, _, manager) = create_manager();
 

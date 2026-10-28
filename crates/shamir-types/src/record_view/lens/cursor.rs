@@ -125,10 +125,9 @@ pub(super) fn read_bin_len(buf: &[u8], pos: &mut usize) -> Result<usize, RecordV
 }
 
 /// Read the str-header marker at `*pos` and return the byte length of the
-/// string payload. Used for VALUE reads (not keys — keys are `bin` in the
-/// storage form).
+/// string payload. Non-string markers → [`RecordViewError::NonString`].
 #[inline]
-pub(super) fn read_str_len(buf: &[u8], pos: &mut usize) -> Result<usize, RecordViewError> {
+pub(crate) fn read_str_len(buf: &[u8], pos: &mut usize) -> Result<usize, RecordViewError> {
     let start = *pos;
     let m = read_u8(buf, pos)?;
     match m {
@@ -136,7 +135,7 @@ pub(super) fn read_str_len(buf: &[u8], pos: &mut usize) -> Result<usize, RecordV
         0xd9 => Ok(read_be::<1>(buf, pos)? as usize),
         0xda => Ok(read_be::<2>(buf, pos)? as usize),
         0xdb => Ok(read_be::<4>(buf, pos)? as usize),
-        _ => Err(RecordViewError::NonBinKey(start)),
+        _ => Err(RecordViewError::NonString(start)),
     }
 }
 

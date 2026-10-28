@@ -1,7 +1,11 @@
 use crate::expr::{ExprError, IndexExpr};
+use shamir_funclib::registry::FnEntry;
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn intern(i: &Interner, s: &str) -> u64 {
     match i.touch_ind(s).unwrap() {
@@ -104,6 +108,79 @@ fn modulo() {
     let rec = make_rec(&i);
     let expr = IndexExpr::Mod(Box::new(IndexExpr::Field(vec![intern(&i, "age")])), 7);
     assert_eq!(expr.eval(&rec).unwrap(), InnerValue::Int(2)); // 30 % 7 = 2
+}
+
+#[test]
+fn rv_index_215567c1_mod_min_by_negative_one_returns_error() {
+    let i = Interner::new();
+    let rec = make_num_rec(&i, i64::MIN);
+    let expr = IndexExpr::Mod(Box::new(IndexExpr::Field(vec![intern(&i, "n")])), -1);
+    assert!(matches!(expr.eval(&rec), Err(ExprError::RemainderOverflow)));
+}
+
+fn make_num_rec(interner: &Interner, n: i64) -> InnerValue {
+    let mut m = new_map_wc(1);
+    m.insert(InternerKey::new(intern(interner, "n")), InnerValue::Int(n));
+    InnerValue::Map(m)
+}
+
+#[test]
+fn rv_index_bcd7caf0_scalar_dispatch_rejects_untrusted_user_entry() {
+    let interner = Interner::new();
+    let rec = make_rec(&interner);
+    let user = Arc::new(UserScalarLayer::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    user.register(
+        "index_scalar",
+        FnEntry::pure(|_| Ok(QueryValue::Int(7)), 1, Some(1)).trusted_pure(),
+    );
+    let resolver = ScalarResolver::new(Arc::clone(&user));
+    let replacement_calls = Arc::clone(&calls);
+    user.register(
+        "index_scalar",
+        FnEntry::pure(
+            move |_| {
+                replacement_calls.fetch_add(1, Ordering::Relaxed);
+                Ok(QueryValue::Int(9))
+            },
+            1,
+            Some(1),
+        ),
+    );
+    let expr = IndexExpr::Scalar {
+        name: "index_scalar".into(),
+        inner: Box::new(IndexExpr::Field(vec![intern(&interner, "age")])),
+    };
+    let result = expr.eval_with_scalars(&rec, Some(&resolver));
+    assert!(matches!(result, Err(ExprError::ScalarError(code)) if code == "not_indexable"));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn rv_index_bcd7caf0_trusted_scalar_dispatch_preserves_result_and_arity() {
+    let interner = Interner::new();
+    let rec = make_rec(&interner);
+    let user = Arc::new(UserScalarLayer::new());
+    user.register(
+        "index_scalar",
+        FnEntry::pure(|args| Ok(args[0].clone()), 1, Some(1)).trusted_pure(),
+    );
+    let resolver = ScalarResolver::new(user);
+    let expr = IndexExpr::Scalar {
+        name: "index_scalar".into(),
+        inner: Box::new(IndexExpr::Field(vec![intern(&interner, "age")])),
+    };
+    assert_eq!(
+        expr.eval_with_scalars(&rec, Some(&resolver)).unwrap(),
+        InnerValue::Int(30)
+    );
+    assert_eq!(
+        resolver
+            .call_indexable("index_scalar", &[])
+            .unwrap_err()
+            .code,
+        "arity"
+    );
 }
 
 #[test]

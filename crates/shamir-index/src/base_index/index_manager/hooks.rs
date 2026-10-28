@@ -40,6 +40,15 @@ impl IndexManager {
         self.lookup_pause_hook.store(hook);
     }
 
+    /// D3ED367D test-only: pause after lookup scan completion and before cache publication.
+    /// Not `#[cfg(test)]`-gated for cross-crate test consumers.
+    pub fn set_lookup_post_scan_pause_hook(
+        &self,
+        hook: Option<Arc<crate::base_index::backfill_pause_hook::BackfillPauseHook>>,
+    ) {
+        self.lookup_post_scan_pause_hook.store(hook);
+    }
+
     /// P0-3a (#1011) test/telemetry oracle: how many `drop_index` drains
     /// genuinely had to wait for at least one in-flight reader. Passthrough to
     /// [`reader_drain_gate::ReaderDrainGate::drain_waits`]. The drain-waits

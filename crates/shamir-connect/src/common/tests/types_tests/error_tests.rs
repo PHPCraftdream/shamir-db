@@ -50,6 +50,7 @@ fn rv_connect_94e37810_to_wire_collapse_set_oracle() {
     assert_collapse(Error::ServerIdentityChanged, Error::AuthFailed);
     assert_collapse(Error::KdfParamsRejected, Error::AuthFailed);
     assert_collapse(Error::KnownHostsIntegrityFailed, Error::AuthFailed);
+    assert_collapse(Error::UserNotFound, Error::AuthFailed);
     assert_collapse(Error::InvalidInput("x"), Error::AuthFailed);
     assert_collapse(Error::InvalidUsername("x"), Error::AuthFailed);
     assert_collapse(Error::InvalidPassword("x"), Error::AuthFailed);

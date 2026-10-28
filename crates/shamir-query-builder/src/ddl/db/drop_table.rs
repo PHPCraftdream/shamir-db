@@ -1,7 +1,8 @@
 use shamir_query_types::admin::DropTableOp;
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::TryIntoBatchOp;
+use crate::write::BuilderError;
 
 /// Drop a table. Defaults to `repo = "main"`.
 pub fn drop_table(name: impl Into<String>) -> DropTable {
@@ -51,26 +52,22 @@ impl DropTable {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::DropTable(DropTableOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::DropTable(DropTableOp {
             drop_table: self.name,
             repo: self.repo,
-            hmac: self.hmac,
+            hmac: Some(hmac),
             if_exists: self.if_exists,
             cascade: self.cascade,
-        })
+        }))
     }
 }
 
-impl From<DropTable> for BatchOp {
-    fn from(b: DropTable) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for DropTable {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for DropTable {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

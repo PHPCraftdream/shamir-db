@@ -1,7 +1,7 @@
 //! `UserKey` / `TouchInd` wire-format and `touch_with_id` semantics tests.
 
 use super::basic::arc_str;
-use crate::core::interner::{Interner, InternerKey, UserKey};
+use crate::core::interner::{Interner, InternerError, InternerKey, UserKey};
 
 #[test]
 fn test_user_key_from_str_and_display() {
@@ -97,7 +97,7 @@ fn touch_with_id_conflict_different_id_for_known_name() {
     let interner = Interner::new();
     interner.touch_with_id("email", 5).unwrap();
     let err = interner.touch_with_id("email", 10).unwrap_err();
-    assert!(err.contains("already mapped"), "unexpected error: {err}");
+    assert!(matches!(err, InternerError::NameConflict { .. }));
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn touch_with_id_collision_id_used_by_different_name() {
     let interner = Interner::new();
     interner.touch_with_id("email", 5).unwrap();
     let err = interner.touch_with_id("score", 5).unwrap_err();
-    assert!(err.contains("already used"), "unexpected error: {err}");
+    assert!(matches!(err, InternerError::IdConflict { .. }));
 }
 
 #[test]

@@ -149,7 +149,15 @@ async fn set_replicator_with_correct_hmac_grants() {
 
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_set_replicator("bob", true));
+    let unsigned = DbRequest::SetReplicator {
+        user: "bob".into(),
+        on: true,
+        hmac: None,
+    };
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&unsigned).expect("set-replicator canonical form"),
+    );
 
     let req = DbRequest::SetReplicator {
         user: "bob".into(),
@@ -267,7 +275,15 @@ async fn set_replicator_unknown_user_returns_not_found() {
     let (handler, _user_dir) = build_handler().await;
     let session = root_session();
     let key = session_key(&session);
-    let tag = canon::compute_tag_hex(&key, &canon::canonical_set_replicator("ghost", true));
+    let unsigned = DbRequest::SetReplicator {
+        user: "ghost".into(),
+        on: true,
+        hmac: None,
+    };
+    let tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&unsigned).expect("set-replicator canonical form"),
+    );
 
     let req = DbRequest::SetReplicator {
         user: "ghost".into(),
@@ -305,7 +321,15 @@ async fn set_replicator_revoke_after_grant_succeeds() {
     let key = session_key(&session);
 
     // Grant.
-    let grant_tag = canon::compute_tag_hex(&key, &canon::canonical_set_replicator("bob", true));
+    let grant_unsigned = DbRequest::SetReplicator {
+        user: "bob".into(),
+        on: true,
+        hmac: None,
+    };
+    let grant_tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&grant_unsigned).expect("set-replicator canonical form"),
+    );
     let grant_req = DbRequest::SetReplicator {
         user: "bob".into(),
         on: true,
@@ -325,7 +349,15 @@ async fn set_replicator_revoke_after_grant_succeeds() {
 
     // Revoke — zero replicators afterward is a perfectly normal state
     // (no last-remaining guard for `replicator`).
-    let revoke_tag = canon::compute_tag_hex(&key, &canon::canonical_set_replicator("bob", false));
+    let revoke_unsigned = DbRequest::SetReplicator {
+        user: "bob".into(),
+        on: false,
+        hmac: None,
+    };
+    let revoke_tag = canon::compute_tag_hex(
+        &key,
+        &canon::canonical_db_request(&revoke_unsigned).expect("set-replicator canonical form"),
+    );
     let revoke_req = DbRequest::SetReplicator {
         user: "bob".into(),
         on: false,

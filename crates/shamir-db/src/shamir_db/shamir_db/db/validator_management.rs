@@ -468,12 +468,18 @@ impl ShamirDb {
         &self,
     ) -> DbResult<Vec<(RecordId, String, ArtifactKind)>> {
         let entries = self.validators.list();
+        let records = self.system_store.load_validators().await?;
+        let mut kinds = shamir_types::types::common::new_map();
+        for record in &records {
+            if let Some(name) = record.get("name").and_then(|value| value.as_str()) {
+                kinds
+                    .entry(name.to_string())
+                    .or_insert_with(|| ArtifactKind::from_record(record));
+            }
+        }
         let mut out = Vec::with_capacity(entries.len());
         for (id, name) in entries {
-            let kind = match self.system_store.load_validator(&name).await? {
-                Some(rec) => ArtifactKind::from_record(&rec),
-                None => ArtifactKind::Wasm,
-            };
+            let kind = kinds.get(&name).copied().unwrap_or(ArtifactKind::Wasm);
             out.push((id, name, kind));
         }
         Ok(out)
