@@ -31,6 +31,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio::sync::{mpsc, Semaphore};
@@ -46,11 +47,13 @@ use super::push_sink::MpscPushSink;
 use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
 use crate::byte_budget::{self, ByteBudgetGuard};
-use crate::framer::{FrameReader, FrameWriter};
+use crate::framer::{close_reason, CloseIntent, FrameReader, FrameWriter};
 use crate::subscriptions::SubscriptionRegistry;
 
 use super::in_flight_guard::InFlightGuard;
 use super::ConnectionContext;
+
+const WRITER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Serialize `val` as named msgpack directly into a length-prefixed buffer,
 /// avoiding the extra memcpy that `write_frame_into` does to prepend the
@@ -104,6 +107,14 @@ pub(crate) enum WriterMsg {
     Push(Vec<u8>),
 }
 
+struct CloseSubscriptionsOnDrop(Arc<SubscriptionRegistry>);
+
+impl Drop for CloseSubscriptionsOnDrop {
+    fn drop(&mut self) {
+        self.0.close_all();
+    }
+}
+
 /// Duplex post-handshake request loop for a single connection.
 ///
 /// # Duplex model
@@ -141,11 +152,28 @@ pub(crate) enum WriterMsg {
 /// 1. `join_set.abort_all()` — cancel in-flight tasks.
 /// 2. Drop `tx` — signal writer task that no more messages are coming.
 /// 3. `writer_handle.await` — wait for the writer to flush and shut down.
-pub async fn request_loop<R, W>(
+pub async fn request_loop<R, W>(ctx: Arc<ConnectionContext>, reader: R, writer: W, sid: [u8; 32])
+where
+    R: FrameReader + 'static,
+    W: FrameWriter + 'static,
+{
+    let scope = ctx.tasks.scope();
+    if let Err(error) = scope
+        .spawn(run_request_loop(ctx, reader, writer, sid, scope.clone()))
+        .await
+    {
+        if error.is_panic() {
+            std::panic::resume_unwind(error.into_panic());
+        }
+    }
+}
+
+async fn run_request_loop<R, W>(
     ctx: Arc<ConnectionContext>,
     mut reader: R,
     writer: W,
     sid: [u8; 32],
+    scope: crate::connection::session::conn_tasks::ConnScope,
 ) where
     R: FrameReader + 'static,
     W: FrameWriter + 'static,
@@ -158,15 +186,21 @@ pub async fn request_loop<R, W>(
     // bridges can send server-initiated frames to this connection's writer.
     let push_sink = Arc::new(MpscPushSink::new(tx.clone()));
     let registry = Arc::new(SubscriptionRegistry::new());
+    // Close immediately after the registry, so unwinding the loop closes it too.
+    let _close_subscriptions_on_drop = CloseSubscriptionsOnDrop(Arc::clone(&registry));
     let conn = Arc::new(ConnectionServices {
         conn_id: 0,
         push: Some(push_sink),
         extensions: Some(Arc::clone(&registry) as Arc<dyn std::any::Any + Send + Sync>),
     });
-
     // Shared flag: set to true by a dispatch task that sends ReplyAndClose.
     // The reader loop checks this flag and stops accepting new frames.
     let close_requested = Arc::new(AtomicBool::new(false));
+
+    // Rejection close code observed by the reader (RV-TRANSPORT-WS-B0F1151C):
+    // consumed by the writer task so teardown sends the coded Close.
+    let close_intent = CloseIntent::new();
+    let writer_close_intent = close_intent.clone();
 
     // --- Writer task ---------------------------------------------------------
     // Owns the write half; receives replies over mpsc; shuts down on
@@ -175,48 +209,77 @@ pub async fn request_loop<R, W>(
     // All WriterMsg payloads are prereserved ([4-byte len][payload]) — the
     // writer calls `write_frame_prereserved` directly, skipping the memcpy
     // that `write_frame_into` does to prepend the length prefix (§3.4).
-    let mut writer_handle = tokio::spawn(async move {
+    let heartbeat = writer.heartbeat_state();
+    let heartbeat_for_writer = heartbeat.clone();
+    let heartbeat_interval = ctx.ws_ping_interval;
+    let heartbeat_timeout = ctx.ws_pong_timeout;
+    let mut writer_handle = scope.spawn(async move {
         let mut writer = writer;
+        let mut next_ping = tokio::time::Instant::now() + heartbeat_interval;
+        let mut deadline: Option<tokio::time::Instant> = None;
+        let mut timer = Box::pin(tokio::time::sleep_until(next_ping));
         loop {
-            match rx.recv().await {
-                None => {
-                    // Channel closed (all senders dropped) — clean exit.
-                    break;
-                }
-                Some(WriterMsg::Reply(bytes, budget_guard)) => {
-                    // DEFECT C fix: on write error (broken pipe / dead client)
-                    // break immediately so the JoinHandle resolves and the
-                    // reader's select! branch wakes up (Defect B fix).
-                    //
-                    // RI-15: `budget_guard` (if any) is held across the
-                    // write and only drops when this match arm ends —
-                    // whether the write succeeds or errors. That release
-                    // (in `ByteBudgetGuard::drop`) is what frees the
-                    // reserved bytes back to the server-wide budget; it
-                    // happens HERE, in the writer task, never in the
-                    // dispatch task that produced `bytes`.
-                    let write_failed = writer.write_frame_prereserved(&bytes).await.is_err();
-                    drop(budget_guard);
-                    if write_failed {
+            tokio::select! {
+                biased;
+                _ = &mut timer, if heartbeat_for_writer.is_some() => {
+                    let state = heartbeat_for_writer.as_ref().expect("guarded heartbeat state");
+                    if let Some(deadline_at) = deadline {
+                        if deadline_at <= tokio::time::Instant::now() && state.pending() && !state.is_reader_parked() {
+                            let _ = tokio::time::timeout(Duration::from_secs(2), writer.close_with(4003, "heartbeat_timeout")).await;
+                            return;
+                        }
+                        if state.is_reader_parked() {
+                            deadline = Some(tokio::time::Instant::now() + heartbeat_timeout);
+                            timer.as_mut().reset(deadline.unwrap());
+                            continue;
+                        }
+                        deadline = None;
+                        timer.as_mut().reset(next_ping);
+                        continue;
+                    }
+                    let (payload, _) = state.next_ping();
+                    if writer.send_heartbeat(payload).await.is_err() { break; }
+                    let written = tokio::time::Instant::now();
+                    deadline = Some(written + heartbeat_timeout);
+                    next_ping = written + heartbeat_interval;
+                    timer.as_mut().reset(deadline.unwrap());
+                },
+                message = rx.recv() => match message {
+                    None => break,
+                    Some(WriterMsg::Reply(bytes, budget_guard)) => {
+                        // DEFECT C fix: break immediately on write failure so
+                        // the reader's select! wakes instead of hanging.
+                        // RI-15: retain the budget guard across the write; it
+                        // drops here on either success or error, releasing
+                        // reserved bytes in the writer task.
+                        let failed = writer.write_frame_prereserved(bytes).await.is_err();
+                        drop(budget_guard);
+                        if failed { break; }
+                    }
+                    Some(WriterMsg::Push(bytes)) => if writer.write_frame_prereserved(bytes).await.is_err() { break; },
+                    Some(WriterMsg::ReplyAndClose(bytes, budget_guard)) => {
+                        // Write error is ignored; the connection is closing.
+                        // RI-15: release the budget guard after the attempted
+                        // write, whether it succeeds or fails.
+                        let _ = writer.write_frame_prereserved(bytes).await;
+                        drop(budget_guard);
                         break;
                     }
-                }
-                Some(WriterMsg::Push(bytes)) => {
-                    if writer.write_frame_prereserved(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                Some(WriterMsg::ReplyAndClose(bytes, budget_guard)) => {
-                    // Write error here is ignored — we're closing anyway.
-                    // RI-15: release the budget guard after the write
-                    // attempt regardless of outcome, same as the Reply arm.
-                    let _ = writer.write_frame_prereserved(&bytes).await;
-                    drop(budget_guard);
-                    break;
                 }
             }
         }
-        writer.shutdown().await;
+        match writer_close_intent.take() {
+            Some(code) => {
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    writer.close_with(code, close_reason(code)),
+                )
+                .await;
+            }
+            None => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), writer.shutdown()).await;
+            }
+        }
     });
 
     let mut join_set: JoinSet<()> = JoinSet::new();
@@ -234,6 +297,10 @@ pub async fn request_loop<R, W>(
     // tearing down the connection entirely, so any partially-read frame is
     // discarded along with everything else. We never resume the read after
     // the writer exits.
+    let mut idle_timer = Box::pin(tokio::time::sleep(ctx.idle_timeout));
+    let drain = scope.drain().clone().cancelled_owned();
+    tokio::pin!(drain);
+
     'conn: loop {
         // Non-blocking drain of completed dispatch tasks: releases permits
         // and surfaces panics before we block on the next acquire.
@@ -257,13 +324,18 @@ pub async fn request_loop<R, W>(
         // Acquire a semaphore permit (back-pressure gate).
         // When all max_in_flight slots are taken this awaits the release of
         // an existing permit by a completing dispatch task.
-        let permit = match semaphore.clone().acquire_owned().await {
-            Ok(p) => p,
-            Err(_) => break, // semaphore closed — should never happen
+        reader.set_reader_parked(true);
+        let permit = tokio::select! {
+            biased;
+            _ = &mut drain => break,
+            result = semaphore.clone().acquire_owned() => match result {
+                Ok(permit) => permit,
+                Err(_) => break,
+            },
+            _ = &mut writer_handle => { writer_done = true; break; }
         };
-
-        // Double-check the close flag: a ReplyAndClose dispatch task may have
-        // completed while we were waiting for the permit.
+        reader.set_reader_parked(false);
+        // A ReplyAndClose dispatch task may have completed while admission waited.
         if close_requested.load(Ordering::Relaxed) {
             drop(permit);
             break;
@@ -280,8 +352,8 @@ pub async fn request_loop<R, W>(
             read_res = reader.read_frame_into(MAX_FRAME_SIZE_DEFAULT, &mut frame_buf) => {
                 match read_res {
                     Ok(()) => {}
-                    Err(_) => {
-                        // Client closed or transport error.
+                    Err(e) => {
+                        close_intent.set(&e);
                         drop(permit);
                         break;
                     }
@@ -294,18 +366,24 @@ pub async fn request_loop<R, W>(
                 writer_done = true;
                 break;
             }
-            _ = tokio::time::sleep(ctx.idle_timeout) => {
-                // No frame arrived within the idle window — close the
-                // connection (task #616 pt.3). Not an error path per se, just
-                // reclaiming an abandoned/dead connection's resources. This
-                // `sleep` is recreated fresh on every loop iteration, so it
-                // naturally measures time since the *last* frame, not a
-                // fixed wall-clock deadline — no manual Instant/reset needed.
+            _ = &mut idle_timer => {
+                // Timer is pinned and reset after each complete application
+                // frame; control-only WS traffic never reaches this branch.
                 tracing::info!(idle_timeout_secs = ctx.idle_timeout.as_secs(), "connection idle timeout");
                 drop(permit);
                 break;
             }
+            _ = &mut drain => {
+                // Teardown path is protected by the outer ConnScope.
+                drop(permit);
+                break;
+            }
         }
+
+        // Reset the application-idle deadline only for an application frame.
+        idle_timer
+            .as_mut()
+            .reset(tokio::time::Instant::now() + ctx.idle_timeout);
 
         // Spawn a per-request dispatch task. Each task owns:
         //   - `frame_buf`: raw msgpack bytes (fresh Vec — no reuse on
@@ -319,8 +397,7 @@ pub async fn request_loop<R, W>(
         let close_flag = Arc::clone(&close_requested);
         let sid_copy = sid;
         let conn_clone = Arc::clone(&conn);
-
-        join_set.spawn(async move {
+        let dispatch = async move {
             let _guard = InFlightGuard::new();
             let _permit = permit;
 
@@ -403,13 +480,15 @@ pub async fn request_loop<R, W>(
             }
 
             let _ = sid_copy;
-        });
+        };
+        join_set.spawn(scope.track(dispatch));
     }
 
     // --- Teardown ------------------------------------------------------------
     // Cancel all active subscriptions (aborts bridge tasks that hold
     // Arc<MpscPushSink> clones — must happen before dropping conn/tx).
     registry.close_all();
+    drop(_close_subscriptions_on_drop);
     // Cancel all in-flight dispatch tasks (they hold Arc<conn> + tx clones).
     join_set.abort_all();
     // Drain the JoinSet so aborted tasks drop their Arc<conn>/tx clones.
@@ -422,7 +501,12 @@ pub async fn request_loop<R, W>(
     drop(tx);
     // Wait for the writer task to finish. §B21: no detached tasks.
     // If writer_done is true the select! branch already consumed the handle.
-    if !writer_done {
+    if !writer_done
+        && tokio::time::timeout(WRITER_DRAIN_TIMEOUT, &mut writer_handle)
+            .await
+            .is_err()
+    {
+        writer_handle.abort();
         let _ = writer_handle.await;
     }
 

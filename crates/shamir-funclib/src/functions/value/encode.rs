@@ -1,6 +1,8 @@
 //! `/encode` scalar category — binary/text encoding & escaping primitives.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names): direct category
+//! registration stores these names verbatim; `register_builtins` dispatches them
+//! under the production `encode/` folder prefix.
 //! `base64_enc base64_dec base64url_enc base64url_dec hex_enc hex_dec
 //!  base32_enc base32_dec url_encode url_decode html_escape str_escape_chars
 //!  to_json parse_json`.
@@ -14,9 +16,10 @@
 //! - `html_escape` / `str_escape_chars` (registered as `json_escape`) are text→text escapers (return `Str`).
 //! - `to_json(v)` / `parse_json(s)` bridge between `QueryValue` and JSON text
 //!   via the existing `Value<Key>` serde impl (`serde_json::to_string` /
-//!   `from_str`). These are self-describing-format conversions, NOT lossless
-//!   for every variant. `to_json` maps a serialization failure to
-//!   `"encode_failed"`; `parse_json` maps a parse failure to
+//!   `from_str`). These conversions are not lossless for every variant;
+//!   non-finite F64 values serialize as JSON `null`, so only finite F64 values
+//!   belong to the lossless round-trip domain. `to_json` maps serialization
+//!   failures to `"encode_failed"`; `parse_json` maps parse failures to
 //!   `"decode_failed"` (matching the existing decode-error convention).
 //!
 //!   Type-decay caveats (same limitations as this codebase's msgpack
@@ -24,7 +27,7 @@
 //!   - `Dec`/`Big` → JSON string → `Str` (not `Dec`/`Big`).
 //!   - `Set` → JSON array → `List` (not `Set`).
 //!   - `Bin` → JSON array of byte numbers → `List` of `Int` (not `Bin`).
-//!   - `Null`/`Bool`/`Int`/`F64`/`Str`/`List`/`Map` round-trip losslessly.
+//!   - `Null`/`Bool`/`Int`/finite `F64`/`Str`/`List`/`Map` round-trip losslessly.
 //! - Every function here is pure + deterministic.
 
 use crate::registry::{arg_str, v_bytes, v_str, FnEntry, ScalarError, ScalarRegistry};
@@ -46,7 +49,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 STANDARD
                     .decode(arg_str(a, 0)?)
                     .map(v_bytes)
-                    .map_err(|_| ScalarError::new("decode_failed"))
+                    .map_err(|_| ScalarError::builtin("decode_failed"))
             },
             1,
             Some(1),
@@ -63,7 +66,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 URL_SAFE
                     .decode(arg_str(a, 0)?)
                     .map(v_bytes)
-                    .map_err(|_| ScalarError::new("decode_failed"))
+                    .map_err(|_| ScalarError::builtin("decode_failed"))
             },
             1,
             Some(1),
@@ -79,7 +82,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 hex::decode(arg_str(a, 0)?)
                     .map(v_bytes)
-                    .map_err(|_| ScalarError::new("decode_failed"))
+                    .map_err(|_| ScalarError::builtin("decode_failed"))
             },
             1,
             Some(1),
@@ -100,7 +103,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 data_encoding::BASE32
                     .decode(arg_str(a, 0)?.as_bytes())
                     .map(v_bytes)
-                    .map_err(|_| ScalarError::new("decode_failed"))
+                    .map_err(|_| ScalarError::builtin("decode_failed"))
             },
             1,
             Some(1),
@@ -125,7 +128,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 percent_decode_str(s)
                     .decode_utf8()
                     .map(|cow| v_str(cow.into_owned()))
-                    .map_err(|_| ScalarError::new("decode_failed"))
+                    .map_err(|_| ScalarError::builtin("decode_failed"))
             },
             1,
             Some(1),
@@ -143,10 +146,12 @@ pub fn register(reg: &mut ScalarRegistry) {
         "to_json",
         FnEntry::pure(
             |a| {
-                let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let v = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 serde_json::to_string(v)
                     .map(v_str)
-                    .map_err(|_| ScalarError::new("encode_failed"))
+                    .map_err(|_| ScalarError::builtin("encode_failed"))
             },
             1,
             Some(1),
@@ -157,7 +162,8 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let s = arg_str(a, 0)?;
-                serde_json::from_str::<QueryValue>(s).map_err(|_| ScalarError::new("decode_failed"))
+                serde_json::from_str::<QueryValue>(s)
+                    .map_err(|_| ScalarError::builtin("decode_failed"))
             },
             1,
             Some(1),
@@ -168,10 +174,13 @@ pub fn register(reg: &mut ScalarRegistry) {
 /// Extract encoder input as bytes: a `Bin` is used verbatim, a `Str` is taken as
 /// its UTF-8 bytes. Any other variant is a `"type_mismatch"`.
 fn in_bytes(args: &[QueryValue], i: usize) -> Result<&[u8], ScalarError> {
-    match args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))? {
+    match args
+        .get(i)
+        .ok_or_else(|| ScalarError::builtin("missing_arg"))?
+    {
         QueryValue::Bin(b) => Ok(b.as_slice()),
         QueryValue::Str(s) => Ok(s.as_bytes()),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 

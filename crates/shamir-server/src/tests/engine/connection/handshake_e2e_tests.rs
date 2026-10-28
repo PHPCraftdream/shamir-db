@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use futures_util::{SinkExt, StreamExt};
 use shamir_connect::client::handshake::{ClientHandshake, HandshakeBuilder, ServerChallenge};
 use shamir_connect::common::crypto::Ed25519Keypair;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -32,14 +33,16 @@ use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::{Session, SessionStore};
 use shamir_connect::server::user_record::UserRecord;
 use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::connection::wire::{
     AuthInit as WireAuthInit, AuthOk as WireAuthOk, Challenge as WireChallenge,
     ClientProof as WireClientProof,
 };
 use crate::connection::CLOCK_OVERRIDE_NS;
+use crate::connection::{request_loop, ConnTasks};
 use crate::framer::{FrameReader, FrameWriter, Framer, FramerError, TcpFramer};
+use crate::server::drain_connections;
 use crate::server_meta::ServerMetaStore;
 
 // ---------------------------------------------------------------------
@@ -80,6 +83,7 @@ fn test_kdf() -> KdfParams {
 fn handshake_ctx_with_users(
     auth_init_timeout: Duration,
     users: &[(&str, &[u8], u32)],
+    tasks: ConnTasks,
 ) -> Arc<crate::connection::ConnectionContext> {
     let kdf = test_kdf();
     let seed = [0x11u8; 32];
@@ -157,17 +161,117 @@ fn handshake_ctx_with_users(
         Duration::from_secs(60),
         1,
         meta,
+        tasks,
+    )
+}
+
+pub(super) fn heartbeat_test_context(
+    auth_init_timeout: Duration,
+) -> Arc<crate::connection::ConnectionContext> {
+    handshake_ctx_with_users(
+        auth_init_timeout,
+        &[],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     )
 }
 
 fn handshake_ctx(auth_init_timeout: Duration) -> Arc<crate::connection::ConnectionContext> {
-    handshake_ctx_with_users(auth_init_timeout, &[])
+    heartbeat_test_context(auth_init_timeout)
 }
 
-// ---------------------------------------------------------------------------
-// Scripted framer: deterministic reads/writes with optional stall points,
-// for paused-clock tests (no real transport, no sleeps).
-// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn rv_transport_ws_b0f1151c_preauth_close_codes() {
+    use tokio::io::duplex;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::WebSocketStream;
+
+    for (message, expected) in [
+        (
+            tokio_tungstenite::tungstenite::Message::Text("bad".into()),
+            1003u16,
+        ),
+        (
+            tokio_tungstenite::tungstenite::Message::Binary(vec![0, 0, 0, 3, 7].into()),
+            1002,
+        ),
+        (
+            tokio_tungstenite::tungstenite::Message::Binary({
+                let mut bytes = 4097u32.to_be_bytes().to_vec();
+                bytes.resize(4 + 4097, 0);
+                bytes.into()
+            }),
+            1009,
+        ),
+    ] {
+        let (server_io, client_io) = duplex(32 * 1024);
+        let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let task = tokio::spawn(crate::connection::handle_connection(
+            handshake_ctx(Duration::from_secs(2)),
+            "127.0.0.1:1234".parse().unwrap(),
+            crate::framer::WsFramer::new(server),
+            [0; 32],
+        ));
+        let mut client = client;
+        client.send(message).await.unwrap();
+        let code = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(Some(frame)))) => {
+                        break u16::from(frame.code)
+                    }
+                    Some(Err(error)) => panic!("client codec error before Close: {error}"),
+                    None => panic!("client stream ended before Close"),
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, expected);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rv_transport_ws_b0f1151c_codec_overflow_lifecycle_close_1009() {
+    use tokio::io::duplex;
+    use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
+
+    let (server_io, client_io) = duplex(32 * 1024);
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(32))
+        .max_frame_size(Some(32));
+    let server = WebSocketStream::from_raw_socket(server_io, Role::Server, Some(config)).await;
+    let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    let task = tokio::spawn(crate::connection::handle_connection(
+        handshake_ctx(Duration::from_secs(2)),
+        "127.0.0.1:1234".parse().unwrap(),
+        crate::framer::WsFramer::new(server),
+        [0; 32],
+    ));
+    let mut client = client;
+    client
+        .send(Message::Binary(vec![0x55; 64].into()))
+        .await
+        .unwrap();
+    let code = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match client.next().await {
+                Some(Ok(Message::Close(Some(frame)))) => break u16::from(frame.code),
+                Some(Err(error)) => panic!("client codec error before Close: {error}"),
+                None => panic!("client stream ended before Close"),
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 1009);
+    task.await.unwrap();
+}
 
 struct DeadReader;
 impl FrameReader for DeadReader {
@@ -180,6 +284,20 @@ impl FrameReader for DeadReader {
     }
 }
 
+#[tokio::test]
+async fn rv_transport_ws_a3b8161a_tcp_does_not_send_heartbeat() {
+    use tokio::io::duplex;
+
+    let (tcp, peer) = duplex(64);
+    let framer = TcpFramer::new(tcp);
+    let (_, mut writer) = framer.split();
+    assert!(writer.heartbeat_state().is_none());
+    assert!(writer.send_heartbeat([0; 8]).await.is_err());
+    writer.shutdown().await;
+    let (reader, _writer) = tokio::io::split(peer);
+    drop(reader);
+}
+
 struct DeadWriter;
 impl FrameWriter for DeadWriter {
     fn write_frame_into<'a>(
@@ -189,11 +307,15 @@ impl FrameWriter for DeadWriter {
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
         std::future::pending()
     }
-
     fn shutdown<'a>(&'a mut self) -> impl Future<Output = ()> + Send + 'a {
         std::future::pending()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scripted framer: deterministic reads/writes with optional stall points,
+// for paused-clock tests (no real transport, no sleeps).
+// ---------------------------------------------------------------------------
 
 /// Serves queued frames as reads; the SECOND read (the proof) optionally
 /// resolves only after a virtual delay, and shutdown optionally never
@@ -473,6 +595,84 @@ impl Framer for ChannelFramer {
     }
 }
 
+struct StalledShutdownWriter {
+    entered: Option<oneshot::Sender<()>>,
+    _drop_flag: DropFlag,
+}
+
+impl FrameWriter for StalledShutdownWriter {
+    async fn write_frame_into(
+        &mut self,
+        _payload: &[u8],
+        _scratch: &mut Vec<u8>,
+    ) -> Result<(), FramerError> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        if let Some(tx) = self.entered.take() {
+            let _ = tx.send(());
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// RV-SERVER-FE6B4C98: the post-handshake writer cannot hold shutdown open.
+#[tokio::test(start_paused = true)]
+async fn rv_server_fe6b4c98_stalled_request_writer_is_aborted_before_shutdown_returns() {
+    let drain_token = tokio_util::sync::CancellationToken::new();
+    let tasks = ConnTasks::new(drain_token.clone());
+    let ctx = handshake_ctx_with_users(Duration::from_secs(1), &[], tasks.clone());
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let writer = StalledShutdownWriter {
+        entered: Some(entered_tx),
+        _drop_flag: DropFlag(Arc::clone(&dropped)),
+    };
+    let _conn = tasks.spawn(request_loop(ctx, DeadReader, writer, [7u8; 32]));
+
+    drain_token.cancel();
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("writer shutdown was not reached")
+        .expect("writer task dropped before notifying shutdown entry");
+
+    let mut report = shamir_db::ShutdownReport::pending(Vec::new());
+    let started = tokio::time::Instant::now();
+    let joined = tokio::time::timeout(
+        Duration::from_secs(5),
+        drain_connections(
+            &tasks,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            &mut report,
+        ),
+    )
+    .await
+    .expect("bounded connection drain timed out");
+    let elapsed = started.elapsed();
+
+    assert!(elapsed <= Duration::from_secs(2), "drain took {elapsed:?}");
+    assert!(joined, "forced abort must join tracked connection task");
+    assert!(
+        !report.is_clean(),
+        "drain timeout must report unclean shutdown"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "writer future was not dropped"
+    );
+    assert_eq!(tasks.live(), 0);
+}
+
 fn channel_conn(
     ctx: Arc<crate::connection::ConnectionContext>,
     shutdown_stalls: bool,
@@ -508,6 +708,7 @@ async fn rv_transport_tcp_b5244fa2_proof_at_30s_within_effective_40s_budget_is_a
     let ctx = handshake_ctx_with_users(
         Duration::from_millis(500),
         &[("alice", b"kdf-budget-password", 8)],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
 
     let (conn, reads_tx, mut writes_rx) = channel_conn(ctx, false);
@@ -554,6 +755,7 @@ async fn rv_transport_tcp_b5244fa2_proof_at_41s_past_effective_40s_budget_is_rej
     let ctx = handshake_ctx_with_users(
         Duration::from_millis(500),
         &[("alice", b"kdf-budget-password", 8)],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
 
     let (conn, reads_tx, mut writes_rx) = channel_conn(ctx, false);
@@ -607,6 +809,7 @@ async fn rv_server_17329fc9_bootstrap_token_expiring_between_auth_start_and_proo
             ("alice_ok", b"ttl-control-password", 2),
             ("alice_ttl", b"ttl-scenario-password", 2),
         ],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
     let meta = Arc::clone(&ctx.meta);
 

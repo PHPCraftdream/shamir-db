@@ -74,7 +74,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             f: std::sync::Arc::new(|a: &[_]| {
                 let n = arg_i64(a, 0)?;
                 if n < 0 || n > MAX_RANDOM_BYTES as i64 {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 let mut buf = vec![0u8; n as usize];
                 rand::rng().fill_bytes(&mut buf);

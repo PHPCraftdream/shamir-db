@@ -9,6 +9,7 @@ use shamir_transport_ipc::IpcListener;
 use shamir_transport_tcp::tls::extract_tls_exporter;
 use shamir_transport_ws::browser::BrowserOriginPolicy;
 use shamir_transport_ws::server::{accept_browser_ws, accept_native_ws};
+use shamir_transport_ws::tls_exporter::BROWSER_CHANNEL_BINDING;
 
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -90,7 +91,8 @@ pub(super) async fn accept_loop_tcp(
                 };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;  // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     // Bound the TLS handshake — without this a client that
@@ -187,7 +189,8 @@ pub(super) async fn accept_loop_plain(
                     }
                 };
                 let ctx = ctx.clone();
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard; // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     let framer = TcpFramer::new(tcp);
@@ -251,7 +254,8 @@ pub(super) async fn accept_loop_ipc(
                     }
                 };
                 let ctx = ctx.clone();
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard; // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     let framer = TcpFramer::new(stream);
@@ -262,9 +266,11 @@ pub(super) async fn accept_loop_ipc(
     }
 }
 
-/// Native WSS accept loop — `tcp -> tls -> ws upgrade -> handle_connection`
-/// with the TLS exporter extracted before the WS upgrade consumes the
-/// stream. binding_mode = TlsExporter.
+/// Native WSS accept loop — `tcp -> tls -> ws upgrade -> handle_connection`.
+/// binding_mode = TlsExporter. The exporter is extracted BEFORE the WS
+/// upgrade by choice: it keeps the extraction failure a cheap pre-upgrade
+/// reject. (TLS remains reachable post-upgrade via `ws.get_ref()`; the
+/// earlier ordering is a choice, not an access restriction.)
 pub(super) async fn accept_loop_ws_native(
     listener: TcpListener,
     acceptor: TlsAcceptor,
@@ -320,7 +326,8 @@ pub(super) async fn accept_loop_ws_native(
                     path: params.path.clone(),
                     policy: params.policy.clone(),
                 };
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
                     let tls = match tokio::time::timeout(
@@ -341,9 +348,9 @@ pub(super) async fn accept_loop_ws_native(
                             return;
                         }
                     };
-                    // CRITICAL: extract exporter BEFORE the WS upgrade
-                    // consumes `tls`. After upgrade the TLS state is owned
-                    // by the WebSocketStream and not directly accessible.
+                    // Extract BEFORE the WS upgrade by choice (cheap
+                    // pre-upgrade reject on failure); TLS stays reachable
+                    // after the upgrade via `ws.get_ref()`.
                     let exporter = match extract_tls_exporter(&tls) {
                         Ok(exporter) => exporter,
                         Err(e) => {
@@ -435,7 +442,8 @@ pub(super) async fn accept_loop_ws_browser(
                     path: params.path.clone(),
                     policy: params.policy.clone(),
                 };
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
                     let tls = match tokio::time::timeout(
@@ -457,7 +465,7 @@ pub(super) async fn accept_loop_ws_browser(
                         }
                     };
                     // Browser binding mode: exporter MUST be zeros per spec.
-                    let exporter = [0u8; 32];
+                    let exporter = BROWSER_CHANNEL_BINDING;
                     let ws = match tokio::time::timeout(
                         ctx.auth_init_timeout,
                         accept_browser_ws(tls, &params.path, &params.policy),
