@@ -2,39 +2,31 @@
 //! content hash of a [`Value`], used by the sequenced-write / optimistic-CAS
 //! protocol ("blockchain ordering of writes", #160).
 //!
-//! # Why a bespoke serializer
+//! # Frozen v1 format
 //!
-//! The existing MessagePack codec preserves *insertion order* of map keys
-//! ([`TMap`](shamir_types::types::common::TMap) is an `IndexMap`), so two maps
-//! that differ only in key order serialise to different bytes. That is exactly
-//! what a canonical hash must NOT do. This module instead walks the value tree
-//! and emits an explicit, type-tagged byte stream in which **map entries are
-//! sorted by their serialised key bytes** at every level. Arrays/sets keep
-//! their element order; scalars are emitted verbatim. The result is fed to
-//! BLAKE3 and returned as a lowercase hex string.
+//! The canonical stream is format v1 and has no version prefix. Its bytes are
+//! frozen because clients and stored `_prev_hash` values depend on them. A v1
+//! stream starts with one of the type tags `0x00`, `0x01`, `0x02`, `0x03`,
+//! `0x06`, `0x07`, `0x08`, `0x09`, or `0x0a`; leading bytes `0x0b..=0xff` are
+//! reserved for future version markers. Any future byte change must introduce
+//! a marker and retain a v1 verifier.
+//!
+//! Values use explicit type tags; lengths are fixed 8-byte big-endian. Maps
+//! sort entries by the serialized key bytes at every level. The key bytes in
+//! the stream include their MessagePack encoding header. For String keys this
+//! means UTF-8 byte length first, then UTF-8 bytes (for example, `"b"` sorts
+//! before `"aa"`). Interned numeric keys sort by MessagePack uint encoding, and
+//! the hash is stable only within one interner instance. `_prev_hash` is
+//! excluded only at the top level and only if the key serializes as the
+//! MessagePack string `"_prev_hash"`; nested instances are ordinary data.
 //!
 //! # Determinism contract
 //!
 //! - Two values differing ONLY in map-key order produce the SAME hash.
 //! - Any change to data (a value, a key name, an element) changes the hash.
-//! - The reserved top-level key [`PREV_HASH_FIELD`] (`_prev_hash`) is
-//!   EXCLUDED from the hash. This breaks the self-reference of the CAS
-//!   protocol: a record carries the expected hash of the *previous* version
-//!   in `_prev_hash`, and that field must not feed back into the record's own
-//!   hash (which would otherwise be a fixed-point recursion).
-//!
-//! # Key ordering and portability
-//!
-//! Sorting is by the **serialised key bytes**. For a string-keyed
-//! [`QueryValue`](shamir_types::types::value::QueryValue) those bytes are the
-//! UTF-8 key name, so the ordering — and therefore the hash — is portable and
-//! depends only on the logical content. For an interned
-//! [`InnerValue`](shamir_types::types::value::InnerValue) the key bytes are the
-//! interner id, so the hash is deterministic only *within a single interner
-//! instance*. The CAS protocol and the `canonical_hash(record)` SELECT-field
-//! both run inside one engine/interner, so this is sufficient there; for a
-//! portable, content-only hash callers should canonicalise a string-keyed
-//! `QueryValue` (this is what the CAS validator does).
+//! - The reserved top-level key [`PREV_HASH_FIELD`] is EXCLUDED, which breaks
+//!   the CAS self-reference: a record's hash must not depend on the prev-hash
+//!   it asserts.
 
 use crate::registry::{FnEntry, ScalarError, ScalarRegistry};
 use serde::Serialize;
@@ -46,6 +38,30 @@ use std::hash::Hash;
 /// EXCLUDED from [`canonical_hash`] / [`canonical_bytes`] at the top level so
 /// the record's hash does not depend on the prev-hash it asserts.
 pub const PREV_HASH_FIELD: &str = "_prev_hash";
+/// Leading bytes available to future canonical format markers; v1 has no prefix.
+pub const CANONICAL_V1_RESERVED_MARKERS: std::ops::RangeInclusive<u8> = 0x0b..=0xff;
+/// Precomputed MessagePack string encoding of `PREV_HASH_FIELD` (`0xaa` + UTF-8).
+pub const PREV_HASH_KEY_BYTES: &[u8] = &[
+    0xaa, b'_', b'p', b'r', b'e', b'v', b'_', b'h', b'a', b's', b'h',
+];
+
+/// Key serialization failure while building the canonical stream.
+#[derive(Debug)]
+pub struct CanonicalError(rmp_serde::encode::Error);
+
+impl From<rmp_serde::encode::Error> for CanonicalError {
+    fn from(error: rmp_serde::encode::Error) -> Self {
+        Self(error)
+    }
+}
+
+impl std::fmt::Display for CanonicalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "canonical serialization failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for CanonicalError {}
 
 // Type tags. Distinct leading bytes keep two values of different types from
 // ever colliding on their payloads (e.g. the empty string vs. an empty list).
@@ -69,9 +85,8 @@ const T_MAP: u8 = 0x0a;
 /// Emit the canonical byte encoding of `value` into `out`.
 ///
 /// `top_level` selects whether the [`PREV_HASH_FIELD`] key is stripped from a
-/// map (only at the top level). Lengths are written as fixed 8-byte
-/// big-endian so a value's framing cannot be confused with its payload.
-fn encode<K>(value: &Value<K>, out: &mut Vec<u8>, top_level: bool)
+/// map (only at the top level).
+fn encode<K>(value: &Value<K>, out: &mut Vec<u8>, top_level: bool) -> Result<(), CanonicalError>
 where
     K: Eq + Hash + Ord + Clone + Serialize + std::fmt::Debug,
 {
@@ -100,12 +115,8 @@ where
             out.extend_from_slice(&bits.to_be_bytes());
         }
         Value::Dec(d) => {
-            // Round-trip invariant: Dec is serialised to the wire as a plain
-            // string (Value::Serialize uses `d.to_string()`), so on read-back
-            // the value is Value::Str(d.to_string()).  We must hash Dec
-            // identically to that Str — same tag (T_STR) and same bytes —
-            // otherwise canonical_hash(in-memory Dec) != canonical_hash(same
-            // record after a storage/wire round-trip), breaking CAS.
+            // Round-trip invariant: Dec reads back as Value::Str(d.to_string()),
+            // so it must hash identically to that Str or CAS breaks.
             out.push(T_STR);
             write_bytes(out, d.to_string().as_bytes());
         }
@@ -126,17 +137,17 @@ where
             out.push(T_LIST);
             out.extend_from_slice(&(l.len() as u64).to_be_bytes());
             for el in l {
-                encode(el, out, false);
+                encode(el, out, false)?;
             }
         }
         Value::Set(s) => {
             // A set is unordered; sort the elements' canonical encodings so the
             // hash is independent of iteration order.
             out.push(T_SET);
-            let mut elems: Vec<Vec<u8>> = Vec::with_capacity(s.len());
+            let mut elems = Vec::with_capacity(s.len());
             for el in s {
                 let mut buf = Vec::new();
-                encode(el, &mut buf, false);
+                encode(el, &mut buf, false)?;
                 elems.push(buf);
             }
             elems.sort_unstable();
@@ -146,26 +157,24 @@ where
             }
         }
         Value::Map(m) => {
-            out.push(T_MAP);
-            // Build (serialised-key-bytes, value-ref) pairs, dropping the
-            // reserved prev-hash field at the top level, then sort by key
-            // bytes so key order does not affect the hash.
             let mut entries: Vec<(Vec<u8>, &Value<K>)> = Vec::with_capacity(m.len());
             for (k, v) in m {
-                let key_bytes = serialise_key(k);
+                let key_bytes = serialise_key(k)?;
                 if top_level && key_is_prev_hash(&key_bytes) {
                     continue;
                 }
                 entries.push((key_bytes, v));
             }
             entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            out.push(T_MAP);
             out.extend_from_slice(&(entries.len() as u64).to_be_bytes());
             for (key_bytes, v) in entries {
                 write_bytes(out, &key_bytes);
-                encode(v, out, false);
+                encode(v, out, false)?;
             }
         }
     }
+    Ok(())
 }
 
 /// Length-prefixed (8-byte BE) raw bytes.
@@ -174,58 +183,43 @@ fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// Serialise a map key to its canonical bytes. A string key (`QueryValue`)
-/// serialises to its UTF-8 name; any other key type falls back to its
-/// MessagePack encoding (deterministic per interner instance).
-fn serialise_key<K>(key: &K) -> Vec<u8>
-where
-    K: Serialize,
-{
-    // rmp_serde of a bare `String` is a length-tagged copy of its UTF-8 bytes,
-    // so string keys order exactly as their names do; non-string keys (interned
-    // ids) order by their encoded form.
-    rmp_serde::to_vec(key).unwrap_or_default()
+fn serialise_key<K: Serialize>(key: &K) -> Result<Vec<u8>, CanonicalError> {
+    Ok(rmp_serde::to_vec(key)?)
 }
 
-/// Whether `key_bytes` is the MessagePack encoding of the reserved
-/// [`PREV_HASH_FIELD`] string (so the check works on string-keyed values).
 fn key_is_prev_hash(key_bytes: &[u8]) -> bool {
-    rmp_serde::to_vec(PREV_HASH_FIELD)
-        .map(|b| b == key_bytes)
-        .unwrap_or(false)
+    key_bytes == PREV_HASH_KEY_BYTES
 }
 
-/// Canonical byte encoding of `value` (top level: `_prev_hash` excluded).
-pub fn canonical_bytes<K>(value: &Value<K>) -> Vec<u8>
+/// Canonical v1 bytes (unprefixed); excludes only a top-level string key whose
+/// serialization is exactly the MessagePack encoding of `_prev_hash`.
+pub fn canonical_bytes<K>(value: &Value<K>) -> Result<Vec<u8>, CanonicalError>
 where
     K: Eq + Hash + Ord + Clone + Serialize + std::fmt::Debug,
 {
     let mut out = Vec::with_capacity(128);
-    encode(value, &mut out, true);
-    out
+    encode(value, &mut out, true)?;
+    Ok(out)
 }
 
-/// Deterministic, order-independent BLAKE3 content hash of `value`, as a
-/// lowercase hex string. The top-level [`PREV_HASH_FIELD`] key is excluded.
-///
-/// See the module docs for the determinism contract and the string-key vs.
-/// interned-key portability note.
-pub fn canonical_hash<K>(value: &Value<K>) -> String
+/// BLAKE3 hash of canonical v1 bytes, as lowercase hex.
+pub fn canonical_hash<K>(value: &Value<K>) -> Result<String, CanonicalError>
 where
     K: Eq + Hash + Ord + Clone + Serialize + std::fmt::Debug,
 {
-    let bytes = canonical_bytes(value);
-    blake3::hash(&bytes).to_hex().to_string()
+    let bytes = canonical_bytes(value)?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
 }
 
-/// `canonical_hash(value) -> Str` scalar.
-///
-/// Hashes its single argument with [`canonical_hash`]. Registered under
-/// `crypto/canonical_hash`. Under the `QueryValue` ABI the argument is
-/// string-keyed, so the hash is portable and content-only.
+/// `canonical_hash(value) -> Str` scalar, registered under
+/// `crypto/canonical_hash`.
 fn canonical_hash_fn(a: &[QueryValue]) -> Result<QueryValue, ScalarError> {
-    let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
-    Ok(QueryValue::Str(canonical_hash(v)))
+    let v = a
+        .first()
+        .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
+    canonical_hash(v)
+        .map(QueryValue::Str)
+        .map_err(|_| ScalarError::builtin("encode_failed"))
 }
 
 /// Register the canonical-hash scalar into the `/crypto` folder.

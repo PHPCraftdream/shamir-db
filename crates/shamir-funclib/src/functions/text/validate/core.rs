@@ -1,6 +1,7 @@
 //! `/validate` scalar category — predicate functions returning `Bool`.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `validate/` folder prefix:
 //! `is_email is_url is_uuid is_ipv4 is_ipv6 is_phone luhn in_range matches
 //!  is_json is_empty len_between`.
 //!
@@ -346,7 +347,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let lo = crate::registry::arg_dec(a, 1)?;
                 let hi = crate::registry::arg_dec(a, 2)?;
                 if lo > hi {
-                    return Err(ScalarError::new("bad_bounds"));
+                    return Err(ScalarError::builtin("bad_bounds"));
                 }
                 Ok(v_bool(x >= lo && x <= hi))
             },
@@ -360,7 +361,8 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let s = arg_str(a, 0)?;
                 let pat = arg_str(a, 1)?;
-                let re = regex_cache::compile(pat).map_err(|_| ScalarError::new("bad_pattern"))?;
+                let re =
+                    regex_cache::compile(pat).map_err(|_| ScalarError::builtin("bad_pattern"))?;
                 Ok(v_bool(re.is_match(s)))
             },
             2,
@@ -379,7 +381,9 @@ pub fn register(reg: &mut ScalarRegistry) {
         "is_empty",
         FnEntry::pure(
             |a| {
-                let v = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let v = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 Ok(v_bool(value_is_empty(v)))
             },
             1,
@@ -394,7 +398,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let lo = arg_i64(a, 1)?;
                 let hi = arg_i64(a, 2)?;
                 if lo < 0 || hi < 0 || lo > hi {
-                    return Err(ScalarError::new("bad_bounds"));
+                    return Err(ScalarError::builtin("bad_bounds"));
                 }
                 let n = s.chars().count() as i64;
                 Ok(v_bool(n >= lo && n <= hi))

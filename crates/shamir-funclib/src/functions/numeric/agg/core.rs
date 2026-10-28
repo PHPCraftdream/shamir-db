@@ -134,19 +134,19 @@ fn to_dec(v: &QueryValue) -> Result<Decimal, ScalarError> {
         QueryValue::Int(n) => Ok(Decimal::from(*n)),
         QueryValue::Bool(b) => Ok(Decimal::from(*b as i64)),
         QueryValue::F64(f) => rust_decimal::Decimal::from_f64_retain(*f)
-            .ok_or_else(|| ScalarError::new("out_of_range")),
+            .ok_or_else(|| ScalarError::builtin("out_of_range")),
         QueryValue::Big(b) => {
             // Try i64 path first, then f64 fallback.
             if let Some(n) = b.to_i64() {
                 Ok(Decimal::from(n))
             } else if let Some(f) = b.to_f64() {
                 rust_decimal::Decimal::from_f64_retain(f)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))
             } else {
-                Err(ScalarError::new("out_of_range"))
+                Err(ScalarError::builtin("out_of_range"))
             }
         }
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -174,7 +174,7 @@ impl Aggregator for CountAgg {
             let next_n = self
                 .n
                 .checked_add(1)
-                .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
             self.n = next_n;
         }
         Ok(())
@@ -221,7 +221,7 @@ impl CompareBuckets {
         self.count = self
             .count
             .checked_add(1)
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         Ok(true)
     }
 
@@ -334,7 +334,7 @@ impl Aggregator for SumAgg {
         self.acc = self
             .acc
             .checked_add(to_dec(v)?)
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         self.any = true;
         Ok(())
     }
@@ -373,19 +373,19 @@ impl Aggregator for AvgAgg {
         self.sum = self
             .sum
             .checked_add(to_dec(v)?)
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         self.count += 1;
         Ok(())
     }
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.count == 0 {
-            return Err(ScalarError::new("empty"));
+            return Err(ScalarError::builtin("empty"));
         }
         let mean = self
             .sum
             .checked_div(Decimal::from(self.count))
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         Ok(QueryValue::Dec(mean))
     }
 }
@@ -423,7 +423,7 @@ impl Aggregator for MinAgg {
     }
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
-        self.val.ok_or_else(|| ScalarError::new("empty"))
+        self.val.ok_or_else(|| ScalarError::builtin("empty"))
     }
 }
 
@@ -460,7 +460,7 @@ impl Aggregator for MaxAgg {
     }
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
-        self.val.ok_or_else(|| ScalarError::new("empty"))
+        self.val.ok_or_else(|| ScalarError::builtin("empty"))
     }
 }
 
@@ -488,7 +488,7 @@ impl Aggregator for MedianAgg {
 
     fn finalize(mut self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
-            return Err(ScalarError::new("empty"));
+            return Err(ScalarError::builtin("empty"));
         }
         self.vals.sort_by(compare::compare);
         let n = self.vals.len();
@@ -529,35 +529,35 @@ impl Welford {
         let next_n = self
             .n
             .checked_add(1)
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         self.n = next_n;
         let d = x
             .checked_sub(self.mean)
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         self.mean = self
             .mean
             .checked_add(
                 d.checked_div(Decimal::from(self.n))
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?,
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?,
             )
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         let d2 = x
             .checked_sub(self.mean)
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         self.m2 = self
             .m2
             .checked_add(
                 d.checked_mul(d2)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?,
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?,
             )
-            .ok_or_else(|| ScalarError::new("out_of_range"))?;
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
         Ok(())
     }
 
     fn population_variance(&self) -> Result<Decimal, ScalarError> {
         self.m2
             .checked_div(Decimal::from(self.n))
-            .ok_or_else(|| ScalarError::new("out_of_range"))
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))
     }
 }
 
@@ -581,14 +581,14 @@ impl Aggregator for StddevAgg {
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.w.n == 0 {
-            return Err(ScalarError::new("empty"));
+            return Err(ScalarError::builtin("empty"));
         }
         let variance = self.w.population_variance()?;
         let f = variance.to_f64().unwrap_or(f64::NAN);
         let sd = f.sqrt();
         Decimal::from_f64_retain(sd)
             .map(QueryValue::Dec)
-            .ok_or_else(|| ScalarError::new("out_of_range"))
+            .ok_or_else(|| ScalarError::builtin("out_of_range"))
     }
 }
 
@@ -616,7 +616,7 @@ impl Aggregator for VarianceAgg {
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.w.n == 0 {
-            return Err(ScalarError::new("empty"));
+            return Err(ScalarError::builtin("empty"));
         }
         Ok(QueryValue::Dec(self.w.population_variance()?))
     }
@@ -655,10 +655,10 @@ impl Aggregator for PercentileAgg {
 
     fn finalize(mut self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
-            return Err(ScalarError::new("empty"));
+            return Err(ScalarError::builtin("empty"));
         }
         if !(0.0..=1.0).contains(&self.p) {
-            return Err(ScalarError::new("out_of_range"));
+            return Err(ScalarError::builtin("out_of_range"));
         }
         self.vals.sort_by(compare::compare);
         let n = self.vals.len();
@@ -696,7 +696,7 @@ impl Aggregator for FirstAgg {
     }
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
-        self.val.ok_or_else(|| ScalarError::new("empty"))
+        self.val.ok_or_else(|| ScalarError::builtin("empty"))
     }
 }
 
@@ -720,7 +720,7 @@ impl Aggregator for LastAgg {
     }
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
-        self.val.ok_or_else(|| ScalarError::new("empty"))
+        self.val.ok_or_else(|| ScalarError::builtin("empty"))
     }
 }
 
@@ -757,7 +757,7 @@ impl Aggregator for StringAggAgg {
                 self.parts.push(s.clone());
                 Ok(())
             }
-            _ => Err(ScalarError::new("type_mismatch")),
+            _ => Err(ScalarError::builtin("type_mismatch")),
         }
     }
 
@@ -821,7 +821,7 @@ impl Aggregator for BoolAndAgg {
                 self.any = true;
                 Ok(())
             }
-            _ => Err(ScalarError::new("type_mismatch")),
+            _ => Err(ScalarError::builtin("type_mismatch")),
         }
     }
 
@@ -857,7 +857,7 @@ impl Aggregator for BoolOrAgg {
                 self.any = true;
                 Ok(())
             }
-            _ => Err(ScalarError::new("type_mismatch")),
+            _ => Err(ScalarError::builtin("type_mismatch")),
         }
     }
 
@@ -892,7 +892,7 @@ impl Aggregator for ModeAgg {
 
     fn finalize(mut self: Box<Self>) -> Result<QueryValue, ScalarError> {
         if self.vals.is_empty() {
-            return Err(ScalarError::new("empty"));
+            return Err(ScalarError::builtin("empty"));
         }
         // Sort so equal values are adjacent, then run-length count.
         self.vals.sort_by(compare::compare);
@@ -958,7 +958,7 @@ impl Aggregator for RangeAgg {
             (Some(lo), Some(hi)) => hi
                 .checked_sub(lo)
                 .map(QueryValue::Dec)
-                .ok_or_else(|| ScalarError::new("out_of_range")),
+                .ok_or_else(|| ScalarError::builtin("out_of_range")),
             _ => Ok(QueryValue::Int(0)),
         }
     }

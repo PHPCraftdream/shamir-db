@@ -41,7 +41,7 @@ pub(crate) fn compile(pat: &str) -> Result<Regex, ScalarError> {
     if let Some(entry) = cache.read_sync(pat, |_, v| v.clone()) {
         return Ok(entry);
     }
-    let re = Regex::new(pat).map_err(|_| ScalarError::new("bad_regex"))?;
+    let re = Regex::new(pat).map_err(|_| ScalarError::builtin("bad_regex"))?;
     // Atomically reserve a slot: concurrent misses cannot all pass the cap
     // check, because each CAS moves the counter by exactly one and fails
     // once it has reached REGEX_CACHE_MAX.

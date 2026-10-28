@@ -1,6 +1,7 @@
 //! `/crypto` scalar category — pure, deterministic crypto primitives.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `crypto/` folder prefix:
 //! `sha256 sha512 sha3_256 blake3 hmac_sha256 ct_eq argon2id`.
 //!
 //! Conventions (mirroring `math.rs`):
@@ -238,7 +239,7 @@ fn opt_u32(a: &[QueryValue], i: usize, default: u32) -> Result<u32, ScalarError>
         return Ok(default);
     }
     let n = arg_i64(a, i)?;
-    u32::try_from(n).map_err(|_| ScalarError::new("out_of_range"))
+    u32::try_from(n).map_err(|_| ScalarError::builtin("out_of_range"))
 }
 
 /// `argon2id(password, salt, [memory_kb, time, parallelism, length]) -> Bin`.
@@ -255,11 +256,11 @@ fn argon2id_fn(a: &[QueryValue]) -> Result<QueryValue, ScalarError> {
         || parallelism > A2_MAX_PARALLELISM
         || length > A2_MAX_LENGTH as usize
     {
-        return Err(ScalarError::new("out_of_range"));
+        return Err(ScalarError::builtin("out_of_range"));
     }
 
     let cfg = Argon2Params::new(memory_kb, time, parallelism, Some(length))
-        .map_err(|_| ScalarError::new("bad_params"))?;
+        .map_err(|_| ScalarError::builtin("bad_params"))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, cfg);
     let mut out = vec![0u8; length];
     // Gate the expensive KDF work behind the process-wide concurrency cap
@@ -276,7 +277,7 @@ fn argon2id_fn(a: &[QueryValue]) -> Result<QueryValue, ScalarError> {
     A2_PEAK_IN_FLIGHT.fetch_max(prev + 1, Ordering::Relaxed);
     let res = argon
         .hash_password_into(password, salt, &mut out)
-        .map_err(|_| ScalarError::new("compute"));
+        .map_err(|_| ScalarError::builtin("compute"));
     A2_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
     res?;
     Ok(v_bytes(out))
@@ -336,7 +337,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let msg = arg_bytes(a, 1)?;
                 // SimpleHmac accepts keys of any length; new_from_slice is infallible here.
                 let mut mac = SimpleHmac::<Sha256>::new_from_slice(key)
-                    .map_err(|_| ScalarError::new("bad_key"))?;
+                    .map_err(|_| ScalarError::builtin("bad_key"))?;
                 mac.update(msg);
                 Ok(v_bytes(mac.finalize().into_bytes().to_vec()))
             },

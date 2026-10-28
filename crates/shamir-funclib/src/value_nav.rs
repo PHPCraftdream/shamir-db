@@ -1,7 +1,8 @@
 //! `/value_nav` scalar category — structural navigation over the [`QueryValue`]
 //! `Map` / `List` tree, with no external dependency.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `value_nav/` folder prefix:
 //! `get_path array_length keys type_of exists`.
 //!
 //! Conventions:
@@ -40,7 +41,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| match &a[0] {
                 QueryValue::List(l) => Ok(v_int(l.len() as i64)),
-                _ => Err(ScalarError::new("type_mismatch")),
+                _ => Err(ScalarError::builtin("type_mismatch")),
             },
             1,
             Some(1),
@@ -51,7 +52,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| match &a[0] {
                 QueryValue::Map(m) => Ok(v_list(m.keys().map(|k| v_str(k.clone())).collect())),
-                _ => Err(ScalarError::new("type_mismatch")),
+                _ => Err(ScalarError::builtin("type_mismatch")),
             },
             1,
             Some(1),
@@ -133,7 +134,7 @@ fn navigate<'a>(
                 },
                 _ => return Ok(None),
             },
-            _ => return Err(ScalarError::new("type_mismatch")),
+            _ => return Err(ScalarError::builtin("type_mismatch")),
         }
     }
     Ok(Some(cur))

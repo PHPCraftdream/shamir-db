@@ -87,7 +87,7 @@ impl RecordValidator for CasValidator {
                 // canonical_hash excludes the top-level _prev_hash, so it hashes
                 // the *content* of the current version — exactly what the writer
                 // must have based its update on.
-                let current = canonical_hash(&old_val);
+                let current = canonical_hash(&old_val).expect("canonical hash serialization");
                 // Non-secret content hashes; a plain compare is fine (no
                 // timing-attack surface — anyone holding the record can
                 // recompute the hash).
@@ -179,7 +179,7 @@ async fn current_hash(db: &ShamirDb) -> String {
         .unwrap();
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1, "expected exactly one stored row");
-    canonical_hash(&records[0].as_value())
+    canonical_hash(&records[0].as_value()).expect("canonical hash serialization")
 }
 
 // ═══════════════════════════════════════════════════════════════════════

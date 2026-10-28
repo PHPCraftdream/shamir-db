@@ -3,7 +3,8 @@
 //! [`FnEntry`] built with the `registry` value helpers, registered under a
 //! plain name (no folder prefix), with machine-readable error codes only.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `text/` folder prefix:
 //! `normalize_nfc normalize_nfkc slugify levenshtein jaro_winkler word_count
 //!  truncate_ellipsis`.
 //!
@@ -40,7 +41,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let x = arg_str(a, 0)?;
                 let y = arg_str(a, 1)?;
                 let d = strsim::levenshtein(x, y);
-                let d = i64::try_from(d).map_err(|_| ScalarError::new("out_of_range"))?;
+                let d = i64::try_from(d).map_err(|_| ScalarError::builtin("out_of_range"))?;
                 Ok(v_int(d))
             },
             2,
@@ -64,7 +65,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let n = arg_str(a, 0)?.split_whitespace().count();
-                let n = i64::try_from(n).map_err(|_| ScalarError::new("out_of_range"))?;
+                let n = i64::try_from(n).map_err(|_| ScalarError::builtin("out_of_range"))?;
                 Ok(v_int(n))
             },
             1,
@@ -78,7 +79,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let s = arg_str(a, 0)?;
                 let max = arg_i64(a, 1)?;
                 if max < 0 {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 Ok(v_str(truncate_ellipsis(s, max as usize)))
             },

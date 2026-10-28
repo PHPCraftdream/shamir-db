@@ -36,8 +36,8 @@ fn key_order_does_not_change_hash() {
     ]);
 
     assert_eq!(
-        canonical_hash(&a),
-        canonical_hash(&b),
+        canonical_hash(&a).unwrap(),
+        canonical_hash(&b).unwrap(),
         "key order must not affect the canonical hash"
     );
 }
@@ -51,8 +51,8 @@ fn nested_key_order_does_not_change_hash() {
     let b = map(&[("pos", inner_2), ("id", Value::Int(7))]);
 
     assert_eq!(
-        canonical_hash(&a),
-        canonical_hash(&b),
+        canonical_hash(&a).unwrap(),
+        canonical_hash(&b).unwrap(),
         "nested map key order must not affect the canonical hash"
     );
 }
@@ -62,16 +62,16 @@ fn data_change_changes_hash() {
     let a = map(&[("name", s("Alice")), ("age", Value::Int(30))]);
     let b = map(&[("name", s("Alice")), ("age", Value::Int(31))]);
     assert_ne!(
-        canonical_hash(&a),
-        canonical_hash(&b),
+        canonical_hash(&a).unwrap(),
+        canonical_hash(&b).unwrap(),
         "changing a value must change the hash"
     );
 
     // Renaming a key must also change the hash.
     let c = map(&[("name", s("Alice")), ("years", Value::Int(30))]);
     assert_ne!(
-        canonical_hash(&a),
-        canonical_hash(&c),
+        canonical_hash(&a).unwrap(),
+        canonical_hash(&c).unwrap(),
         "renaming a key must change the hash"
     );
 }
@@ -81,8 +81,8 @@ fn array_order_is_significant() {
     let a = QueryValue::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
     let b = QueryValue::List(vec![Value::Int(3), Value::Int(2), Value::Int(1)]);
     assert_ne!(
-        canonical_hash(&a),
-        canonical_hash(&b),
+        canonical_hash(&a).unwrap(),
+        canonical_hash(&b).unwrap(),
         "array element order must be significant"
     );
 }
@@ -104,13 +104,13 @@ fn prev_hash_field_does_not_affect_hash() {
     ]);
 
     assert_eq!(
-        canonical_hash(&base),
-        canonical_hash(&with_prev),
+        canonical_hash(&base).unwrap(),
+        canonical_hash(&with_prev).unwrap(),
         "the reserved _prev_hash field must be excluded from the hash"
     );
     assert_eq!(
-        canonical_hash(&with_prev),
-        canonical_hash(&with_other_prev),
+        canonical_hash(&with_prev).unwrap(),
+        canonical_hash(&with_other_prev).unwrap(),
         "the value of _prev_hash must not affect the hash"
     );
 }
@@ -122,8 +122,8 @@ fn prev_hash_excluded_only_at_top_level() {
     let nested_a = map(&[("meta", map(&[(PREV_HASH_FIELD, s("aaa"))]))]);
     let nested_b = map(&[("meta", map(&[(PREV_HASH_FIELD, s("bbb"))]))]);
     assert_ne!(
-        canonical_hash(&nested_a),
-        canonical_hash(&nested_b),
+        canonical_hash(&nested_a).unwrap(),
+        canonical_hash(&nested_b).unwrap(),
         "_prev_hash nested below the top level is ordinary content"
     );
 }
@@ -134,15 +134,15 @@ fn type_tags_disambiguate_payloads() {
     let empty_str = QueryValue::Str(String::new());
     let empty_list = QueryValue::List(Vec::new());
     assert_ne!(
-        canonical_hash(&empty_str),
-        canonical_hash(&empty_list),
+        canonical_hash(&empty_str).unwrap(),
+        canonical_hash(&empty_list).unwrap(),
         "different types with empty payloads must hash differently"
     );
 
     // Int 1 vs Bool true must not collide.
     assert_ne!(
-        canonical_hash(&Value::<String>::Int(1)),
-        canonical_hash(&Value::<String>::Bool(true)),
+        canonical_hash(&Value::<String>::Int(1)).unwrap(),
+        canonical_hash(&Value::<String>::Bool(true)).unwrap(),
         "Int and Bool must hash differently"
     );
 }
@@ -150,7 +150,7 @@ fn type_tags_disambiguate_payloads() {
 #[test]
 fn hash_is_lowercase_hex_64_chars() {
     let v = map(&[("name", s("Alice"))]);
-    let h = canonical_hash(&v);
+    let h = canonical_hash(&v).unwrap();
     assert_eq!(h.len(), 64, "BLAKE3 hex digest is 64 chars");
     assert!(
         h.chars()
@@ -193,8 +193,8 @@ fn dec_hash_equals_its_wire_str_hash() {
     let d = Decimal::from_str("1.50").unwrap();
     let wire_str = d.to_string(); // exactly what Serialize produces
 
-    let hash_dec = canonical_hash(&QueryValue::Dec(d));
-    let hash_str = canonical_hash(&QueryValue::Str(wire_str));
+    let hash_dec = canonical_hash(&QueryValue::Dec(d)).unwrap();
+    let hash_str = canonical_hash(&QueryValue::Str(wire_str)).unwrap();
 
     assert_eq!(
         hash_dec, hash_str,
@@ -208,8 +208,8 @@ fn big_hash_equals_its_wire_str_hash() {
     let b: BigInt = "123456789012345678901234567890".parse().unwrap();
     let wire_str = b.to_string();
 
-    let hash_big = canonical_hash(&QueryValue::Big(b));
-    let hash_str = canonical_hash(&QueryValue::Str(wire_str));
+    let hash_big = canonical_hash(&QueryValue::Big(b)).unwrap();
+    let hash_str = canonical_hash(&QueryValue::Str(wire_str)).unwrap();
 
     assert_eq!(
         hash_big, hash_str,
@@ -229,8 +229,8 @@ fn dec_field_hash_survives_msgpack_round_trip() {
     let record_after: QueryValue = QueryValue::from_bytes(&bytes).expect("deserialise");
 
     assert_eq!(
-        canonical_hash(&record_before),
-        canonical_hash(&record_after),
+        canonical_hash(&record_before).unwrap(),
+        canonical_hash(&record_after).unwrap(),
         "canonical_hash must be identical before and after a msgpack round-trip for Dec fields"
     );
 }
@@ -246,8 +246,8 @@ fn big_field_hash_survives_msgpack_round_trip() {
     let record_after: QueryValue = QueryValue::from_bytes(&bytes).expect("deserialise");
 
     assert_eq!(
-        canonical_hash(&record_before),
-        canonical_hash(&record_after),
+        canonical_hash(&record_before).unwrap(),
+        canonical_hash(&record_after).unwrap(),
         "canonical_hash must be identical before and after a msgpack round-trip for Big fields"
     );
 }
