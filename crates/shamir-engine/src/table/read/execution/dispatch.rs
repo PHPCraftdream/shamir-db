@@ -280,8 +280,7 @@ impl TableManager {
         encoding: ResultEncoding,
     ) -> DbResult<QueryResult> {
         // Attach the interactive-tx overlay snapshot unless the caller already
-        // did. Selected inline (no wrapper async fn): an extra future layer
-        // overflowed the stack of deep in-process callers in debug builds.
+        // did. Selected inline: no extra async layer on the read path.
         let overlay_ctx = match tx {
             Some(tx_ref)
                 if !tx_ref.implicit
