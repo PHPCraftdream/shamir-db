@@ -2,12 +2,21 @@
 //! handling, request-buffer ownership, and the guest executor poll contract.
 
 use crate::__rt;
+use crate::error::ErrorKind;
 use crate::Value;
 use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::rc::Rc;
+
+#[test]
+fn rv_sdk_6d2497ca_abi_codes_pinned() {
+    assert_eq!(ErrorKind::User.abi_code(), 1);
+    assert_eq!(ErrorKind::InvalidArgument.abi_code(), 2);
+    assert_eq!(ErrorKind::Codec.abi_code(), 3);
+    assert_eq!(ErrorKind::Host.abi_code(), 4);
+}
 
 /// RV-SDK-MACROS-D7F6AEC5: trap messages replace control characters and are
 /// capped at 1024 bytes without splitting a UTF-8 code point.

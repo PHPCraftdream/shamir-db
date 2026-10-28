@@ -100,18 +100,18 @@ pub async fn v(_r: shamir_sdk::Value, _o: Option<shamir_sdk::Value>, _c: shamir_
 fn rv_sdk_macros_4db0d871_expansion_traps_on_decode_and_missing_record() {
     let fn_item = syn::parse_str::<syn::ItemFn>(VALIDATOR_SRC).unwrap();
     let s = expand_validator(fn_item).unwrap().to_string();
-    // Decode failure must trap: the decode match arm's Err branch must call
-    // `trap` before the `record` extraction happens.
+    // Decode failure must raise: the decode match arm's Err branch must call
+    // `raise` before the `record` extraction happens.
     let dec = s
         .find("decode_params")
         .expect("decode_params call in expansion");
     let rec = s.find("key == \"record\"").expect("record extraction");
     let decode_arm = &s[dec..rec];
     assert!(
-        decode_arm.contains("trap") && decode_arm.contains(":: Err"),
-        "decode match arm's Err branch must call trap; got: {decode_arm}"
+        decode_arm.contains("raise") && decode_arm.contains(":: Err"),
+        "decode match arm's Err branch must call raise; got: {decode_arm}"
     );
-    // Missing `record` must trap: the expansion emits the message as ONE
+    // Missing `record` must raise: the expansion emits the message as ONE
     // string literal "validator: missing `record` parameter", and
     // TokenStream::to_string does not add spaces inside a literal.
     assert!(s.contains("validator: missing"), "got: {s}");
@@ -121,7 +121,7 @@ fn rv_sdk_macros_4db0d871_expansion_traps_on_decode_and_missing_record() {
         .expect("old_record extraction");
     assert!(
         !s[rec..rec + old].contains("shamir_sdk :: Value :: Null"),
-        "record arm must trap, not fall back to Null; got: {}",
+        "record arm must raise, not fall back to Null; got: {}",
         &s[rec..rec + old]
     );
 }
