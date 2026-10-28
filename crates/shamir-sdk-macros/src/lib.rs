@@ -9,9 +9,69 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, FnArg, ItemFn, PatType, PathArguments, ReturnType, Type};
 
+fn compile_error(err: syn::Error) -> TokenStream {
+    err.to_compile_error().into()
+}
+
+fn validate_signature(
+    fn_item: &ItemFn,
+    name: &str,
+    arity: usize,
+    return_valid: bool,
+) -> syn::Result<()> {
+    let sig = &fn_item.sig;
+    if sig.asyncness.is_none() {
+        return Err(syn::Error::new_spanned(
+            sig.fn_token,
+            format!("#[{name}] requires an async function"),
+        ));
+    }
+    if sig.inputs.len() != arity {
+        return Err(syn::Error::new_spanned(
+            &sig.inputs,
+            format!("#[{name}] expects exactly {arity} arguments"),
+        ));
+    }
+    if !return_valid {
+        return Err(syn::Error::new_spanned(
+            &sig.output,
+            format!("#[{name}] has an invalid return type"),
+        ));
+    }
+    for arg in &sig.inputs {
+        if let FnArg::Receiver(receiver) = arg {
+            return Err(syn::Error::new_spanned(
+                receiver,
+                format!("#[{name}] does not accept a `self` receiver"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn helper_ident(fn_name: &syn::Ident) -> syn::Ident {
+    let name = fn_name.to_string();
+    let normalized = name.strip_prefix("r#").unwrap_or(&name);
+    syn::Ident::new(&format!("__shamir_impl_{normalized}"), fn_name.span())
+}
+
+fn wrapper_idents(fn_item: &ItemFn) -> Vec<syn::Ident> {
+    fn_item
+        .sig
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            syn::Ident::new(
+                &format!("__shamir_arg_{index}"),
+                proc_macro2::Span::mixed_site(),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests;
-
 /// Attribute macro that turns an async validator function into a WASM guest
 /// module.
 ///
@@ -46,48 +106,22 @@ mod tests;
 #[proc_macro_attribute]
 pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
-    let expanded = expand_validator(fn_item);
-    TokenStream::from(expanded)
+    match expand_validator(fn_item) {
+        Ok(expanded) => expanded.into(),
+        Err(err) => compile_error(err),
+    }
 }
 
-fn expand_validator(fn_item: ItemFn) -> proc_macro2::TokenStream {
+fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
-    let inner_name = syn::Ident::new(&format!("__shamir_impl_{}", fn_name), fn_name.span());
-
-    // Validate: must be async
-    assert!(
-        fn_item.sig.asyncness.is_some(),
-        "#[validator] requires an async function"
-    );
-
-    // Validate: exactly 3 arguments (record, old_record, ctx)
-    assert!(
-        fn_item.sig.inputs.len() == 3,
-        "#[validator] expects exactly 3 arguments: (record: Value, old_record: Option<Value>, ctx: Ctx)"
-    );
-
-    // Validate return type is Validation
-    match &fn_item.sig.output {
-        ReturnType::Type(_, ty) => {
-            let type_str = quote!(#ty).to_string().replace(' ', "");
-            assert!(
-                is_validation_return(ty),
-                "#[validator] must return Validation, got: {type_str}"
-            );
-        }
-        _ => panic!("#[validator] must return Validation"),
-    }
-
-    // Extract argument names
-    let arg_names: Vec<_> = fn_item
-        .sig
-        .inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Typed(PatType { pat, .. }) => pat.clone(),
-            _ => panic!("#[validator] expects named arguments"),
-        })
-        .collect();
+    let inner_name = helper_ident(fn_name);
+    validate_signature(
+        &fn_item,
+        "validator",
+        3,
+        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_validation_return(ty)),
+    )?;
+    let arg_names = wrapper_idents(&fn_item);
 
     let arg0 = &arg_names[0]; // record
     let arg1 = &arg_names[1]; // old_record
@@ -126,11 +160,21 @@ fn expand_validator(fn_item: ItemFn) -> proc_macro2::TokenStream {
         /// Guest ABI entry for a validator: decode params, extract record +
         /// old_record, drive the user's async function, encode the validation
         /// result, and return a packed `(ptr, len)`.
+        /// # Safety
+        /// `ptr` must be the guest-memory address of `len` initialized bytes
+        /// readable for this call; the host must provide the allocation and
+        /// keep it live until this function returns. Negative lengths are rejected.
         #[no_mangle]
-        pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
-            let bytes: &[u8] = unsafe {
-                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
+        pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
+            if len < 0 || (len > 0 && ptr == 0) {
+                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            }
+            let bytes: &[u8] = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: caller upholds the pointer validity contract above; the
+                // guards establish a positive length and non-null pointer.
+                unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
@@ -138,18 +182,22 @@ fn expand_validator(fn_item: ItemFn) -> proc_macro2::TokenStream {
                 ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
             };
 
-            // Extract `record` (required; the host always sends it).
-            let record: shamir_sdk::Value = match params.get("record") {
-                ::core::result::Result::Ok(v) => v.clone(),
-                ::core::result::Result::Err(_) => shamir_sdk::__rt::trap("validator: missing `record` parameter"),
+            let mut entries = params.into_raw();
+            let record: shamir_sdk::Value = match entries.iter().position(|(key, _)| key == "record") {
+                ::core::option::Option::Some(index) => entries.remove(index).1,
+                ::core::option::Option::None => shamir_sdk::__rt::trap("validator: missing `record` parameter"),
             };
 
             // Extract `old_record` (optional: absent or null → None).
-            let old_record: ::core::option::Option<shamir_sdk::Value> = match params.get("old_record") {
-                ::core::result::Result::Ok(shamir_sdk::Value::Null) => ::core::option::Option::None,
-                ::core::result::Result::Ok(v) => ::core::option::Option::Some(v.clone()),
-                ::core::result::Result::Err(_) => ::core::option::Option::None,
-            };
+            let old_record: ::core::option::Option<shamir_sdk::Value> =
+                match entries.iter().position(|(key, _)| key == "old_record") {
+                    ::core::option::Option::Some(index) => match entries.remove(index).1 {
+                        shamir_sdk::Value::Null => ::core::option::Option::None,
+                        value => ::core::option::Option::Some(value),
+                    },
+                    ::core::option::Option::None => ::core::option::Option::None,
+                };
+            ::core::mem::drop(entries);
 
             let ctx = shamir_sdk::Ctx::new();
 
@@ -168,7 +216,7 @@ fn expand_validator(fn_item: ItemFn) -> proc_macro2::TokenStream {
         }
     };
 
-    expanded
+    Ok(expanded)
 }
 
 /// Attribute macro that turns an async function into a WASM guest module.
@@ -194,44 +242,22 @@ fn expand_validator(fn_item: ItemFn) -> proc_macro2::TokenStream {
 #[proc_macro_attribute]
 pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
-    let expanded = expand_function(fn_item);
-    TokenStream::from(expanded)
+    match expand_function(fn_item) {
+        Ok(expanded) => expanded.into(),
+        Err(err) => compile_error(err),
+    }
 }
 
-fn expand_function(fn_item: ItemFn) -> proc_macro2::TokenStream {
+fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
-    let inner_name = syn::Ident::new(&format!("__shamir_impl_{}", fn_name), fn_name.span());
-    assert!(
-        fn_item.sig.asyncness.is_some(),
-        "#[function] requires an async function"
-    );
-    assert!(
-        fn_item.sig.inputs.len() == 3,
-        "#[function] expects exactly 3 arguments: (ctx: Ctx, batch: Batch, params: Params)"
-    );
-
-    // Validate return type is Result<Value>
-    match &fn_item.sig.output {
-        ReturnType::Type(_, ty) => {
-            let type_str = quote!(#ty).to_string().replace(' ', "");
-            assert!(
-                is_result_value_return(ty),
-                "#[function] must return Result<Value>, got: {type_str}"
-            );
-        }
-        _ => panic!("#[function] must return Result<Value>"),
-    }
-
-    // Extract argument names for the wrapper
-    let arg_names: Vec<_> = fn_item
-        .sig
-        .inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Typed(PatType { pat, .. }) => pat.clone(),
-            _ => panic!("#[function] expects named arguments"),
-        })
-        .collect();
+    let inner_name = helper_ident(fn_name);
+    validate_signature(
+        &fn_item,
+        "function",
+        3,
+        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_result_value_return(ty)),
+    )?;
+    let arg_names = wrapper_idents(&fn_item);
 
     let arg0 = &arg_names[0]; // ctx
     let arg1 = &arg_names[1]; // batch
@@ -273,11 +299,21 @@ fn expand_function(fn_item: ItemFn) -> proc_macro2::TokenStream {
         /// On user `Err(...)`: traps (the host maps a trap to
         /// `FunctionError::Compute`).
         // TODO(slice 4): clean Result envelope so user errors become FunctionError::User
+        /// # Safety
+        /// `ptr` must be the guest-memory address of `len` initialized bytes
+        /// readable for this call; the host must provide the allocation and
+        /// keep it live until this function returns. Negative lengths are rejected.
         #[no_mangle]
-        pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
-            let bytes: &[u8] = unsafe {
-                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
+        pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
+            if len < 0 || (len > 0 && ptr == 0) {
+                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            }
+            let bytes: &[u8] = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: caller upholds the pointer validity contract above; the
+                // guards establish a positive length and non-null pointer.
+                unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
@@ -308,7 +344,7 @@ fn expand_function(fn_item: ItemFn) -> proc_macro2::TokenStream {
         }
     };
 
-    expanded
+    Ok(expanded)
 }
 
 /// Attribute macro for a **procedure** — a guest function with database access.
@@ -339,45 +375,22 @@ fn expand_function(fn_item: ItemFn) -> proc_macro2::TokenStream {
 #[proc_macro_attribute]
 pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
-
-    let fn_name = &fn_item.sig.ident;
-    let inner_name = syn::Ident::new(&format!("__shamir_impl_{}", fn_name), fn_name.span());
-
-    // Validate: must be async
-    assert!(
-        fn_item.sig.asyncness.is_some(),
-        "#[procedure] requires an async function"
-    );
-
-    // Validate: exactly 2 arguments (ctx, params)
-    assert!(
-        fn_item.sig.inputs.len() == 2,
-        "#[procedure] expects exactly 2 arguments: (ctx: Ctx, params: Params)"
-    );
-
-    // Validate return type is Result<Value>
-    match &fn_item.sig.output {
-        ReturnType::Type(_, ty) => {
-            let type_str = quote!(#ty).to_string().replace(' ', "");
-            assert!(
-                is_result_value_return(ty),
-                "#[procedure] must return Result<Value>, got: {type_str}"
-            );
-        }
-        _ => panic!("#[procedure] must return Result<Value>"),
+    match expand_procedure(fn_item) {
+        Ok(expanded) => expanded.into(),
+        Err(err) => compile_error(err),
     }
+}
 
-    // Extract argument names for the wrapper
-    let arg_names: Vec<_> = fn_item
-        .sig
-        .inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Typed(PatType { pat, .. }) => pat.clone(),
-            _ => panic!("#[procedure] expects named arguments"),
-        })
-        .collect();
-
+fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+    let fn_name = &fn_item.sig.ident;
+    let inner_name = helper_ident(fn_name);
+    validate_signature(
+        &fn_item,
+        "procedure",
+        2,
+        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_result_value_return(ty)),
+    )?;
+    let arg_names = wrapper_idents(&fn_item);
     let arg0 = &arg_names[0]; // ctx
     let arg1 = &arg_names[1]; // params
 
@@ -413,11 +426,21 @@ pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// Guest ABI entry for a procedure: decode params, build Ctx, drive
         /// the user's async function, encode the result, and return a packed
         /// `(ptr, len)`.
+        /// # Safety
+        /// `ptr` must be the guest-memory address of `len` initialized bytes
+        /// readable for this call; the host must provide the allocation and
+        /// keep it live until this function returns. Negative lengths are rejected.
         #[no_mangle]
-        pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
-            let bytes: &[u8] = unsafe {
-                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
+        pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
+            if len < 0 || (len > 0 && ptr == 0) {
+                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            }
+            let bytes: &[u8] = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: caller upholds the pointer validity contract above; the
+                // guards establish a positive length and non-null pointer.
+                unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
@@ -447,7 +470,7 @@ pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    TokenStream::from(expanded)
+    Ok(expanded)
 }
 
 /// Returns `true` if the return type structurally matches `Result<Value>` in
@@ -542,56 +565,32 @@ fn type_contains_ctx(ty: &Type) -> bool {
 #[proc_macro_attribute]
 pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_item = parse_macro_input!(item as ItemFn);
+    match expand_scalar(fn_item) {
+        Ok(expanded) => expanded.into(),
+        Err(err) => compile_error(err),
+    }
+}
 
+fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
-    let inner_name = syn::Ident::new(&format!("__shamir_impl_{}", fn_name), fn_name.span());
-
-    // Validate: must be async
-    assert!(
-        fn_item.sig.asyncness.is_some(),
-        "#[scalar] requires an async function"
-    );
-
-    // Validate: exactly 1 argument (params)
-    assert!(
-        fn_item.sig.inputs.len() == 1,
-        "#[scalar] expects exactly 1 argument: (params: Params). \
-         Scalars are pure value functions — use #[procedure] if you need Ctx for database access."
-    );
-
-    // Reject Ctx in any argument type (purity guarantee)
+    let inner_name = helper_ident(fn_name);
+    validate_signature(
+        &fn_item,
+        "scalar",
+        1,
+        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_result_value_return(ty)),
+    )?;
+    let arg_names = wrapper_idents(&fn_item);
     for arg in &fn_item.sig.inputs {
         if let FnArg::Typed(PatType { ty, .. }) = arg {
-            assert!(
-                !type_contains_ctx(ty),
-                "#[scalar] must not take Ctx — scalars are pure value functions \
-                 with no database access. Use #[procedure] for functions that need Ctx."
-            );
+            if type_contains_ctx(ty) {
+                return Err(syn::Error::new_spanned(
+                    ty,
+                    "#[scalar] must not take Ctx — scalars are pure value functions with no database access. Use #[procedure] for functions that need Ctx.",
+                ));
+            }
         }
     }
-
-    // Validate return type is Result<Value>
-    match &fn_item.sig.output {
-        ReturnType::Type(_, ty) => {
-            let type_str = quote!(#ty).to_string().replace(' ', "");
-            assert!(
-                is_result_value_return(ty),
-                "#[scalar] must return Result<Value>, got: {type_str}"
-            );
-        }
-        _ => panic!("#[scalar] must return Result<Value>"),
-    }
-
-    // Extract argument names for the wrapper
-    let arg_names: Vec<_> = fn_item
-        .sig
-        .inputs
-        .iter()
-        .map(|arg| match arg {
-            FnArg::Typed(PatType { pat, .. }) => pat.clone(),
-            _ => panic!("#[scalar] expects named arguments"),
-        })
-        .collect();
 
     let arg0 = &arg_names[0]; // params
 
@@ -625,11 +624,21 @@ pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
         /// Guest ABI entry for a scalar: decode params, drive the user's pure
         /// async function, encode the result, and return a packed `(ptr, len)`.
+        /// # Safety
+        /// `ptr` must be the guest-memory address of `len` initialized bytes
+        /// readable for this call; the host must provide the allocation and
+        /// keep it live until this function returns. Negative lengths are rejected.
         #[no_mangle]
-        pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            // Safety: the host wrote `len` msgpack bytes at `ptr` via shamir_alloc.
-            let bytes: &[u8] = unsafe {
-                ::core::slice::from_raw_parts(ptr as *const u8, len as usize)
+        pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
+            if len < 0 || (len > 0 && ptr == 0) {
+                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            }
+            let bytes: &[u8] = if len == 0 {
+                &[]
+            } else {
+                // SAFETY: caller upholds the pointer validity contract above; the
+                // guards establish a positive length and non-null pointer.
+                unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
@@ -658,5 +667,5 @@ pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    TokenStream::from(expanded)
+    Ok(expanded)
 }
