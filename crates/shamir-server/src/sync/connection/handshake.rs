@@ -112,6 +112,15 @@ async fn bounded_shutdown<F: Framer>(framer: &mut F) {
     let _ = tokio::time::timeout(SHUTDOWN_GRACE, framer.shutdown()).await;
 }
 
+async fn bounded_close<F: Framer>(framer: &mut F, err: &crate::framer::FramerError) {
+    const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+    if let Some((code, reason)) = err.ws_close_code() {
+        let _ = tokio::time::timeout(SHUTDOWN_GRACE, framer.close_with(code, reason)).await;
+    } else {
+        bounded_shutdown(framer).await;
+    }
+}
+
 pub(super) fn prefix_8(sid: &[u8; 32]) -> [u8; 8] {
     let mut out = [0u8; 8];
     out.copy_from_slice(&sid[..8]);
@@ -120,6 +129,8 @@ pub(super) fn prefix_8(sid: &[u8; 32]) -> [u8; 8] {
 
 #[derive(Debug)]
 pub(super) enum HandshakeError {
+    /// Read error from the transport, retained so WS rejection codes survive.
+    Framer(crate::framer::FramerError),
     Io,
     Decode,
     Policy,
@@ -293,12 +304,11 @@ async fn run_handshake<F: Framer>(
     // spec §8 deadline covering challenge → proof → decision, so a stalled
     // proof can never outlive it). Terminal shutdown is bounded separately
     // by `bounded_shutdown` in `handle_connection`.
-    if framer
+    if let Err(error) = framer
         .read_frame_into(MAX_PRE_AUTH_FRAME, &mut proof_frame_buf)
         .await
-        .is_err()
     {
-        return Err(HandshakeError::Io);
+        return Err(HandshakeError::Framer(error));
     }
     let proof_msg: wire::ClientProof = match rmp_serde::from_slice(&proof_frame_buf) {
         Ok(v) => v,
@@ -766,7 +776,7 @@ pub async fn handle_connection<F>(
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             tracing::debug!(?e, "first frame read failed");
-            bounded_shutdown(&mut framer).await;
+            bounded_close(&mut framer, &e).await;
             return;
         }
         Err(_elapsed) => {
@@ -799,7 +809,7 @@ pub async fn handle_connection<F>(
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
                 tracing::debug!(?e, "post-proof first frame read failed");
-                bounded_shutdown(&mut framer).await;
+                bounded_close(&mut framer, &e).await;
                 return;
             }
             Err(_elapsed) => {
@@ -892,6 +902,7 @@ pub async fn handle_connection<F>(
                     HandshakeError::Admission => "admission",
                     HandshakeError::UnsupportedVersion => "unsupported_version",
                     HandshakeError::Policy => "policy",
+                    HandshakeError::Framer(_) => "io_or_decode",
                     HandshakeError::Io | HandshakeError::Decode => "io_or_decode",
                 };
                 record_auth_attempt(label);
@@ -915,7 +926,10 @@ pub async fn handle_connection<F>(
                 // transport cannot retain the connection task (and the
                 // admission guards that live until it returns) after the
                 // handshake is already over.
-                bounded_shutdown(&mut framer).await;
+                match &e {
+                    HandshakeError::Framer(error) => bounded_close(&mut framer, error).await,
+                    _ => bounded_shutdown(&mut framer).await,
+                }
                 return;
             }
         }

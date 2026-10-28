@@ -2,7 +2,8 @@
 
 use futures_util::{SinkExt, StreamExt};
 use shamir_transport_ws::framing::{
-    ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, MAX_WS_FRAME_SIZE,
+    ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, ws_send_sink_prereserved,
+    MAX_WS_FRAME_SIZE,
 };
 use shamir_transport_ws::WsFrameError;
 use tokio::io::duplex;
@@ -229,4 +230,86 @@ async fn rv_transport_ws_4fc6bcdd_length_prefix_mismatch_is_length_mismatch() {
         }
         other => panic!("expected LengthMismatch, got {other:?}"),
     }
+}
+
+/// RV-TRANSPORT-WS-624F81B1: `ws_send_sink` must reject payloads above the
+/// frame cap BEFORE narrowing the length to u32 / allocating — an
+/// over-cap send is `TooLarge`, never a wrapped/truncated prefix.
+#[tokio::test]
+async fn rv_transport_ws_624f81b1_send_sink_rejects_over_cap_before_narrowing() {
+    let (a, _b) = duplex(64 * 1024);
+    let server_ws = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
+    let (mut sink, _stream) = server_ws.split();
+
+    let over_cap = vec![0u8; MAX_WS_FRAME_SIZE + 1];
+    let result = ws_send_sink(&mut sink, &over_cap).await;
+    assert!(
+        matches!(&result, Err(WsFrameError::TooLarge { actual, max })
+            if *actual == MAX_WS_FRAME_SIZE + 1 && *max == MAX_WS_FRAME_SIZE),
+        "expected TooLarge for over-cap send, got {result:?}"
+    );
+}
+
+/// RV-TRANSPORT-WS-B8ED1366: the receive loop must BOUND the number of
+/// consecutive control frames it skips — a ping flood without any data
+/// frame ends in `WsFrameError::ControlFlood`, not an unbounded loop.
+#[tokio::test]
+async fn rv_transport_ws_b8ed1366_ping_flood_control_loop_is_bounded() {
+    let (a, b) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
+
+    let pinger = tokio::spawn(async move {
+        // Far above the control-frame budget.
+        for _ in 0..200 {
+            client
+                .send(Message::Ping(vec![0x1u8; 125].into()))
+                .await
+                .expect("send ping");
+        }
+        // Keep the socket open so the server would loop forever on old code.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+    });
+
+    let result = ws_recv(&mut server, MAX_WS_FRAME_SIZE).await;
+    assert!(
+        matches!(result, Err(WsFrameError::ControlFlood { .. })),
+        "expected ControlFlood under ping flood, got {result:?}"
+    );
+    pinger.abort();
+}
+
+/// RV-TRANSPORT-WS-B7D06174: the owned prereserved send path produces
+/// wire-identical output to `ws_send_sink` (one BINARY message carrying
+/// `[u32_be len][payload]`) WITHOUT a fresh allocation + full-payload copy,
+/// and validates the prefix / frame cap before sending.
+#[tokio::test]
+async fn rv_transport_ws_b7d06174_prereserved_send_is_wire_identical_and_validated() {
+    let (a, b) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(a, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(b, Role::Client, None).await;
+
+    let payload = vec![0x5au8; 4096];
+    let mut buf = (payload.len() as u32).to_be_bytes().to_vec();
+    buf.extend_from_slice(&payload);
+
+    let writer = tokio::spawn(async move {
+        ws_send_sink_prereserved(&mut client, buf).await.unwrap();
+    });
+
+    // The peer must see exactly `[len][payload]` — identical to ws_send_sink
+    // (ws_recv validates the inner prefix matches the message body length).
+    let got = ws_recv(&mut server, MAX_WS_FRAME_SIZE).await.unwrap();
+    assert_eq!(got, payload);
+    writer.await.unwrap();
+
+    // Mismatched prefix is rejected locally (never reaches the wire).
+    let bad = vec![0, 0, 0, 9, 1, 2];
+    assert!(matches!(
+        ws_send_sink_prereserved(&mut server, bad).await,
+        Err(WsFrameError::LengthMismatch {
+            declared: 9,
+            actual: 2
+        })
+    ));
 }

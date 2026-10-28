@@ -4,7 +4,7 @@
 //!
 //! - **`/shamir/v1`** (native): TLS 1.3 + WebSocket upgrade. Caller
 //!   extracts the exporter via [`crate::tls_exporter::extract_tls_exporter_from_stream`]
-//!   AFTER the WS handshake completes.
+//!   before or after upgrade; launcher chooses before.
 //!
 //! - **`/shamir/v1/browser`** (browser): TLS 1.3 + WebSocket upgrade +
 //!   mandatory `Origin` header validation. The exporter is NOT used;
@@ -82,9 +82,13 @@ fn negotiate_subprotocol(req: &Request, resp: Response) -> Result<Response, Erro
 pub(crate) fn server_ws_config() -> WebSocketConfig {
     // `WebSocketConfig` is `#[non_exhaustive]`: build from `Default` via the
     // setters so any other field keeps its default.
+    // RV-TRANSPORT-WS-C038F1F3: the tungstenite ceilings bound the WIRE
+    // message (`len_be || payload`), so they must admit the full 16 MiB
+    // logical payload range plus the 4-byte prefix.
+    let wire_ceiling = MAX_WS_FRAME_SIZE + 4;
     WebSocketConfig::default()
-        .max_message_size(Some(MAX_WS_FRAME_SIZE))
-        .max_frame_size(Some(MAX_WS_FRAME_SIZE))
+        .max_message_size(Some(wire_ceiling))
+        .max_frame_size(Some(wire_ceiling))
 }
 
 /// Errors raised when accepting a WS upgrade.
@@ -132,8 +136,10 @@ where
     // Not a hot path: once-per-handshake capture, the callback and the
     // single awaiting task are the only users.
     let actual_path: Arc<Mutex<Option<String>>> = Arc::default();
+    let origin_rej: Arc<Mutex<Option<OriginRejected>>> = Arc::default();
     let cb_path = path.clone();
     let cb_actual_path = actual_path.clone();
+    let cb_origin_rej = origin_rej.clone();
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         #[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
@@ -150,10 +156,14 @@ where
             if let Some(origin_val) = req.headers().get(http::header::ORIGIN) {
                 let supplied = origin_val.to_str().ok();
                 let rejected = match supplied {
-                    Some(origin) => validate_origin(&policy, Some(origin)).is_err(),
-                    None => true, // supplied but non-text: never treat as absent
+                    Some(origin) => validate_origin(&policy, Some(origin)).err(),
+                    // supplied but non-text: never treat as absent
+                    None => Some(OriginRejected::NotAllowed("<non-utf8>".into())),
                 };
-                if rejected {
+                if let Some(rej) = rejected {
+                    // Preserve the typed rejection for the caller
+                    // (RV-TRANSPORT-WS-6C58DE5C).
+                    *cb_origin_rej.lock().expect("origin capture poisoned") = Some(rej);
                     let mut err = ErrorResponse::new(Some("origin rejected".into()));
                     *err.status_mut() = http::StatusCode::FORBIDDEN;
                     return Err(err);
@@ -176,6 +186,18 @@ where
                     .take()
                     .unwrap_or_default(),
             }
+        }
+        tokio_tungstenite::tungstenite::Error::Http(ref resp)
+            if resp.status() == http::StatusCode::FORBIDDEN =>
+        {
+            // RV-TRANSPORT-WS-6C58DE5C: surface the callback's typed
+            // rejection instead of collapsing into `Handshake`.
+            let rej = origin_rej
+                .lock()
+                .expect("origin capture poisoned")
+                .take()
+                .unwrap_or(OriginRejected::Missing);
+            WsAcceptError::OriginRejected(rej)
         }
         other => other.into(),
     })?;
@@ -204,8 +226,10 @@ where
     // Not a hot path: once-per-handshake capture, the callback and the
     // single awaiting task are the only users.
     let actual_path: Arc<Mutex<Option<String>>> = Arc::default();
+    let origin_rej: Arc<Mutex<Option<OriginRejected>>> = Arc::default();
     let cb_path = path.clone();
     let cb_actual_path = actual_path.clone();
+    let cb_origin_rej = origin_rej.clone();
     let ws = tokio_tungstenite::accept_hdr_async_with_config(
         stream,
         #[allow(clippy::result_large_err)] // Err type is tungstenite's Callback trait contract
@@ -224,6 +248,9 @@ where
             match validate_origin(&policy, origin) {
                 Ok(()) => negotiate_subprotocol(req, resp),
                 Err(rej) => {
+                    // Preserve the typed rejection for the caller
+                    // (RV-TRANSPORT-WS-6C58DE5C).
+                    *cb_origin_rej.lock().expect("origin capture poisoned") = Some(rej.clone());
                     let (status, msg) = match rej {
                         OriginRejected::Missing => (
                             http::StatusCode::BAD_REQUEST,
@@ -255,6 +282,19 @@ where
                     .take()
                     .unwrap_or_default(),
             }
+        }
+        tokio_tungstenite::tungstenite::Error::Http(resp)
+            if resp.status() == http::StatusCode::BAD_REQUEST
+                || resp.status() == http::StatusCode::FORBIDDEN =>
+        {
+            // RV-TRANSPORT-WS-6C58DE5C: surface the callback's typed
+            // rejection instead of collapsing into `Handshake`.
+            let rej = origin_rej
+                .lock()
+                .expect("origin capture poisoned")
+                .take()
+                .unwrap_or(OriginRejected::Missing);
+            WsAcceptError::OriginRejected(rej)
         }
         other => other.into(),
     })?;

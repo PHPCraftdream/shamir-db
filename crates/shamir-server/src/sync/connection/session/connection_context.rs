@@ -64,6 +64,8 @@ pub struct ConnectionContext {
     /// session can hold its slot + socket while sending nothing at all.
     /// Default is [`shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT`].
     pub idle_timeout: Duration,
+    pub ws_ping_interval: Duration,
+    pub ws_pong_timeout: Duration,
     /// Maximum number of requests in-flight concurrently on a single
     /// connection. Controls the per-connection semaphore + writer-channel
     /// capacity in [`request_loop`]. `1` gives lock-step semantics;
@@ -137,6 +139,8 @@ impl ConnectionContext {
             kdf_override,
             auth_init_timeout,
             idle_timeout,
+            ws_ping_interval: shamir_tunables::instance_defaults::WS_PING_INTERVAL,
+            ws_pong_timeout: shamir_tunables::instance_defaults::WS_PONG_TIMEOUT,
             max_in_flight,
             meta,
             tasks,
