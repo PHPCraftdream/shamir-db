@@ -5,6 +5,36 @@ use crate::access::{
 use crate::mpack;
 
 #[test]
+fn rv_types_65dde5b8_principal64_projects_first_eight_bytes_and_masks_sign_bit() {
+    assert_eq!(
+        principal64([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        0x1234_5678_9abc_def0
+    );
+    assert_eq!(
+        principal64([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0]),
+        i64::MAX as u64
+    );
+}
+
+#[test]
+fn rv_types_65dde5b8_resource_path_wasm_compiler_is_distinct() {
+    assert_ne!(ResourcePath::WasmCompiler, ResourcePath::FunctionNamespace);
+    assert_eq!(
+        ResourcePath::WasmCompiler.parent(),
+        Some(ResourcePath::Root)
+    );
+}
+#[test]
+fn rv_types_65dde5b8_owner_field_distinguishes_absent_from_system() {
+    let absent = mpack!({});
+    let explicit_system = ResourceMeta::open().to_query_value();
+    assert_eq!(ResourceMeta::owner_field(&absent), None);
+    assert_eq!(
+        ResourceMeta::owner_field(&explicit_system),
+        Some(Actor::System)
+    );
+}
+#[test]
 fn system_is_default() {
     assert_eq!(Actor::default(), Actor::System);
 }

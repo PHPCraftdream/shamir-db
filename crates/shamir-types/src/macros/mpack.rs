@@ -283,10 +283,8 @@ macro_rules! mpack {
 // accessible via the crate-qualified path used inside `mpack!`.
 // ---------------------------------------------------------------------------
 
-/// Sealed trait used internally by the `mpack!` macro to dispatch numeric and
-/// string literals to the correct `QueryValue` variant.
-///
-/// Not part of the public API; subject to change without notice.
+/// Doc-hidden helper trait used internally by `mpack!`; public because the
+/// exported macro expands through this path. It is not sealed.
 #[doc(hidden)]
 pub trait MpackIntoValue {
     fn __into_qv(self) -> crate::types::value::QueryValue;

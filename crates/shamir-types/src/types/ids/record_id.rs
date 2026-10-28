@@ -14,9 +14,12 @@ use std::str::FromStr;
 /// Value: `chrono::Utc.with_ymd_and_hms(2026, 1, 31, 0, 0, 0).unwrap().timestamp_micros()`
 const CUSTOM_EPOCH_MICROS: i64 = 1_769_817_600_000_000;
 
-/// A prefix of 4 zero bytes, representing a timestamp of 0 relative to the epoch.
-/// This is used to identify system records, as a real timestamp will never be zero.
+/// Timestamp IDs produced by the constructors reserve the first 2^32 relative
+/// microseconds so their first four bytes avoid the legacy system-ID prefix.
+/// Historical persisted timestamp IDs and IDs supplied from arbitrary bytes
+/// may still have that prefix; the 16-byte encoding is unchanged.
 const SYSTEM_RECORD_PREFIX: &[u8] = &[0, 0, 0, 0];
+const SYSTEM_PREFIX_TIMESTAMP_BOUNDARY: i64 = 1i64 << 32;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordId(pub [u8; 16]);
@@ -35,15 +38,19 @@ impl RecordId {
         Utc::now().timestamp_micros()
     }
 
-    /// Creates a `RecordId` with a caller-supplied `timestamp_micros`
-    /// (absolute, same scale as `Utc::now().timestamp_micros()`) and a
-    /// fresh 8-byte random tail.  Use for single-row inserts where no
-    /// intra-batch ordering is needed.
+    /// Creates a `RecordId` with a caller-supplied `timestamp_micros` and a
+    /// fresh random tail. Relative timestamps in `[0, 2^32)` microseconds are
+    /// clamped to 2^32 to preserve the system-ID prefix.
     pub fn from_ts(timestamp_micros: i64) -> Self {
         let mut bytes = [0u8; 16];
 
         // Timestamp part, relative to the custom epoch.
         let relative_micros = timestamp_micros.saturating_sub(CUSTOM_EPOCH_MICROS);
+        let relative_micros = if (0..SYSTEM_PREFIX_TIMESTAMP_BOUNDARY).contains(&relative_micros) {
+            SYSTEM_PREFIX_TIMESTAMP_BOUNDARY
+        } else {
+            relative_micros
+        };
         bytes[0..8].copy_from_slice(&relative_micros.to_be_bytes());
 
         // Random part — thread-local Xoshiro256++ seeded once from OsRng.
@@ -56,6 +63,7 @@ impl RecordId {
 
     /// Creates a `RecordId` with a caller-supplied `timestamp_micros` and
     /// an ascending `seq` counter embedded in the tail's high 4 bytes.
+    /// Relative timestamps in `[0, 2^32)` microseconds clamp to 2^32;
     /// Layout: `[0..8] BE relative_ts | [8..12] BE seq (u32) | [12..16] 4 random bytes`.
     ///
     /// Use in batch paths: one `now_micros()` call per batch, then
@@ -66,6 +74,11 @@ impl RecordId {
         let mut bytes = [0u8; 16];
 
         let relative_micros = timestamp_micros.saturating_sub(CUSTOM_EPOCH_MICROS);
+        let relative_micros = if (0..SYSTEM_PREFIX_TIMESTAMP_BOUNDARY).contains(&relative_micros) {
+            SYSTEM_PREFIX_TIMESTAMP_BOUNDARY
+        } else {
+            relative_micros
+        };
         bytes[0..8].copy_from_slice(&relative_micros.to_be_bytes());
 
         // Sequence counter in tail's high 4 bytes — gives lex-ascending
@@ -102,8 +115,10 @@ impl RecordId {
         Self(bytes)
     }
 
-    /// Checks if the `RecordId` is a system record.
-    /// Returns `true` if the first 4 bytes are zero.
+    /// Checks the reserved zero prefix. Newly generated timestamp IDs clamp
+    /// relative times in `[0, 2^32)` microseconds to 2^32. Historical persisted
+    /// and externally supplied IDs may still have this prefix and are
+    /// indistinguishable from system IDs in the existing encoding.
     pub fn is_system(&self) -> bool {
         self.0.starts_with(SYSTEM_RECORD_PREFIX)
     }

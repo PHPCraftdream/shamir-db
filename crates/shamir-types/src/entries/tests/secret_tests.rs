@@ -17,6 +17,12 @@ fn serde_roundtrip_preserves_value() {
 }
 
 #[test]
+fn rv_types_65dde5b8_secret_into_inner_returns_owned_value() {
+    let secret = SecretString::new("secret123".to_owned());
+    assert_eq!(secret.into_inner(), "secret123");
+}
+
+#[test]
 fn from_str_and_string() {
     let from_lit: SecretString = "hello".into();
     assert_eq!(from_lit.reveal(), "hello");

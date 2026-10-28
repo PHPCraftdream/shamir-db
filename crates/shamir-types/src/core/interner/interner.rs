@@ -421,8 +421,10 @@ impl Interner {
             .map(|id| id.clone())
     }
 
-    /// Returns the publication generation for caches compiled against interned
-    /// names. It advances only after each name is visible in both directions.
+    /// Returns the published generation for cache invalidation. It advances
+    /// exactly once after each successful new automatic or explicit ID is
+    /// visible in both maps; rejected operations and existing-key lookups do
+    /// not advance it. The generation is a change counter, not an entry count.
     #[inline]
     pub fn generation(&self) -> u64 {
         self.published_generation.load(Ordering::Acquire)

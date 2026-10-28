@@ -28,10 +28,12 @@ pub enum RecordViewError {
     /// Nesting deeper than [`MAX_MSGPACK_DEPTH`].
     #[error("MessagePack nesting depth exceeds {0}")]
     DepthExceeded(usize),
-    /// A reserved marker byte (`0xc1`) was encountered — the canonical decoder
-    /// rejects these too.
+    /// The `0xc1` reserved marker was encountered.
     #[error("reserved MessagePack marker at byte {0}")]
     ReservedMarker(usize),
+    /// A string value was not encoded with a MessagePack string marker.
+    #[error("non-string marker where a string was expected at byte {0}")]
+    NonString(usize),
     /// An unknown marker byte outside the MessagePack spec.
     #[error("unknown MessagePack marker {got:#04x} at byte {at}")]
     UnknownMarker { got: u8, at: usize },

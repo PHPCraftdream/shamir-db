@@ -6,6 +6,13 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 #[test]
+fn rv_types_65dde5b8_generation_tracks_publication() {
+    let interner = Interner::new();
+    let initial = interner.generation();
+    interner.touch_ind("generation-contract").unwrap();
+    assert!(interner.generation() > initial);
+}
+#[test]
 fn rv_types_056200a9_generation_tracks_explicit_hole_publication() {
     let interner = Interner::new();
     interner.touch_with_id("upper", 2).unwrap();

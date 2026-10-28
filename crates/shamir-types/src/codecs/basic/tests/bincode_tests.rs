@@ -1,4 +1,5 @@
-use crate::codecs::basic::bincode::{from_bytes, to_bytes, CodecError};
+use crate::codecs::basic::bincode::{from_bytes, to_bytes};
+use crate::codecs::CodecError;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct TestStruct {
@@ -131,11 +132,19 @@ fn test_roundtrip_tuple_and_option() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn rv_types_83113a25_bincode_helpers_use_canonical_error() {
+    assert!(matches!(from_bytes::<i32>(&[]), Err(CodecError::Decode(_))));
+    let bytes = to_bytes(&42u64).unwrap();
+    let result: Result<u64, CodecError> = from_bytes(&bytes);
+    assert_eq!(result.unwrap(), 42);
+}
+
+#[test]
 fn test_deserialize_empty_bytes() {
     let result = from_bytes::<i32>(&[]);
     assert!(result.is_err());
     match result.unwrap_err() {
-        CodecError::Deserialize(_) => {}
+        CodecError::Decode(_) => {}
         other => panic!("expected Deserialize, got {:?}", other),
     }
 }
@@ -170,9 +179,9 @@ fn test_deserialize_wrong_type_interpretation() {
 
 #[test]
 fn test_serialize_error_display() {
-    let err = CodecError::Serialize("bad".to_string());
-    assert_eq!(format!("{}", err), "serialization error: bad");
+    let err = CodecError::Encode("bad".to_string());
+    assert_eq!(format!("{}", err), "Failed to encode data: bad");
 
-    let err = CodecError::Deserialize("oops".to_string());
-    assert_eq!(format!("{}", err), "deserialization error: oops");
+    let err = CodecError::Decode("oops".to_string());
+    assert_eq!(format!("{}", err), "Failed to decode data: oops");
 }
