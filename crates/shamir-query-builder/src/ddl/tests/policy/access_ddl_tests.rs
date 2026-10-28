@@ -380,7 +380,7 @@ fn remove_group_member_wire() {
 #[test]
 fn rv_query_builder_fc88a91a_password_is_wrapped_at_builder_creation() {
     let builder = ddl::create_user("alice", "s3cret");
-    // Abandoning the builder must still drop a SecretString, whose Debug is redacted.
+    assert!(format!("{builder:?}").contains("SecretString(***)"));
     drop(builder);
     let operation = ddl::create_user("alice", "s3cret").build();
     assert!(!format!("{operation:?}").contains("s3cret"));
