@@ -16,6 +16,7 @@
 use crate::access::{Action, ResourcePath};
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
+use crate::shamir_db::gateway::ports::PortErrorKind;
 use crate::types::value::QueryValue;
 use shamir_types::mpack;
 
@@ -145,7 +146,7 @@ impl ShamirAdminExecutor {
         // any other directory error falls back to the generic `query`.
         if let Err(e) = port.grant_role(&op.user, &op.grant_role).await {
             let msg = e.to_string();
-            let code = if msg.contains("user not found") {
+            let code = if e.kind() == PortErrorKind::UserNotFound {
                 "not_found"
             } else {
                 "query"
@@ -184,7 +185,7 @@ impl ShamirAdminExecutor {
         };
         if let Err(e) = port.revoke_role(&op.user, &op.revoke_role).await {
             let msg = e.to_string();
-            let code = if msg.contains("user not found") {
+            let code = if e.kind() == PortErrorKind::UserNotFound {
                 "not_found"
             } else {
                 "query"

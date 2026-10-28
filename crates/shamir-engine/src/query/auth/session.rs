@@ -183,7 +183,14 @@ impl SessionPermissions {
 
         match filters.len() {
             0 => None,
-            1 => Some(filters.into_iter().next().unwrap()),
+            1 => {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "guard: filters.len() == 1 guarantees exactly one filter"
+                )]
+                let filter = filters.into_iter().next().unwrap();
+                Some(filter)
+            }
             _ => Some(Filter::Or { filters }),
         }
     }
@@ -660,7 +667,15 @@ fn merge_row_filters(
         }
 
         // All filters are Some — OR them together
+        #[expect(
+            clippy::unwrap_used,
+            reason = "guard: the preceding any(is_none) check proves every filter is Some"
+        )]
         let concrete: Vec<Filter> = filters.into_iter().map(|f| f.unwrap()).collect();
+        #[expect(
+            clippy::unwrap_used,
+            reason = "guard: concrete.len() == 1 guarantees exactly one filter"
+        )]
         let merged = match concrete.len() {
             1 => concrete.into_iter().next().unwrap(),
             _ => Filter::Or { filters: concrete },

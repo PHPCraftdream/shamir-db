@@ -14,7 +14,7 @@ use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ObservabilityConfig,
     ProfileKind, TlsConfig,
 };
-use shamir_server::server::{BootstrapMode, ServerLauncher};
+use shamir_server::server::{BootError, BootstrapMode, ServerHandle, ServerLauncher};
 
 fn fast_kdf() -> KdfConfig {
     KdfConfig {
@@ -25,11 +25,7 @@ fn fast_kdf() -> KdfConfig {
     }
 }
 
-fn make_config(temp: &TempDir, obs_addr: &str) -> Config {
-    make_config_with_public_metrics(temp, obs_addr, false)
-}
-
-/// Same as [`make_config`] but with the `allow_public_metrics` knob
+/// Test config with the `allow_public_metrics` knob
 /// threaded through — used by the non-loopback-bind-allowed coverage
 /// below, which exercises the real `server_launcher/launch.rs` boot path (not
 /// just `observability::spawn` directly) to prove the CONFIG FIELD
@@ -83,6 +79,46 @@ async fn pick_free_port() -> SocketAddr {
     addr
 }
 
+/// Bounded retries for [`launch_on_free_port`].
+const PORT_RETRIES: usize = 10;
+
+/// Boots with the observability server on `host:<free port>`. A port
+/// picked by [`pick_free_port`] can be taken by a parallel test before the
+/// launcher binds it; that bind error retries with a fresh port and data
+/// dir. Returns the handle, the bound port and the data dir.
+async fn launch_on_free_port(
+    host: &str,
+    allow_public_metrics: bool,
+) -> (ServerHandle, u16, TempDir) {
+    for _ in 0..PORT_RETRIES {
+        let temp = TempDir::new().unwrap();
+        let port = pick_free_port().await.port();
+        let cfg =
+            make_config_with_public_metrics(&temp, &format!("{host}:{port}"), allow_public_metrics);
+        let launcher = ServerLauncher {
+            config: cfg,
+            bootstrap: BootstrapMode::Password {
+                username: "admin".into(),
+                password: Zeroizing::new(b"hunter2".to_vec()),
+            },
+        };
+        match launcher.launch().await {
+            Ok(handle) => return (handle, port, temp),
+            Err(BootError::Bind(msg)) if is_addr_in_use(&msg) => continue,
+            Err(e) => panic!("launcher (allow_public_metrics={allow_public_metrics}): {e}"),
+        }
+    }
+    panic!("observability port stayed in use after {PORT_RETRIES} attempts");
+}
+
+/// Linux `EADDRINUSE` (98), macOS (48), Windows `WSAEADDRINUSE` (10048).
+fn is_addr_in_use(msg: &str) -> bool {
+    msg.contains("Address already in use")
+        || msg.contains("os error 98")
+        || msg.contains("os error 48")
+        || msg.contains("os error 10048")
+}
+
 /// Raw HTTP GET returning status code and body bytes (needed for binary
 /// responses such as the msgpack `/info` endpoint).
 async fn http_get_raw(addr: SocketAddr, path: &str) -> (u16, Vec<u8>) {
@@ -121,18 +157,8 @@ async fn http_get(addr: SocketAddr, path: &str) -> (u16, String) {
 async fn endpoints_return_expected_codes_and_content() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let temp = TempDir::new().unwrap();
-    let obs_addr = pick_free_port().await;
-
-    let cfg = make_config(&temp, &obs_addr.to_string());
-    let launcher = ServerLauncher {
-        config: cfg,
-        bootstrap: BootstrapMode::Password {
-            username: "admin".into(),
-            password: Zeroizing::new(b"hunter2".to_vec()),
-        },
-    };
-    let handle = launcher.launch().await.expect("launcher");
+    let (handle, port, _temp) = launch_on_free_port("127.0.0.1", false).await;
+    let obs_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 
     // Give the HTTP server a moment to actually start serving.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -235,26 +261,11 @@ async fn refuses_non_loopback_bind_without_opt_in() {
 async fn boot_path_allows_non_loopback_bind_when_config_opts_in() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let temp = TempDir::new().unwrap();
-    // Reserve a free port, then bind the observability server to the
-    // wildcard (non-loopback) address on that same port. If the config
-    // field weren't wired through, `server_launcher/launch.rs` would still pass
-    // the old hardcoded `false` and this bind would be rejected with
-    // `BootError::Bind` before any socket opens.
-    let probe = pick_free_port().await;
-    let obs_addr_str = format!("0.0.0.0:{}", probe.port());
-    let cfg = make_config_with_public_metrics(&temp, &obs_addr_str, true);
-    let launcher = ServerLauncher {
-        config: cfg,
-        bootstrap: BootstrapMode::Password {
-            username: "admin".into(),
-            password: Zeroizing::new(b"hunter2".to_vec()),
-        },
-    };
-    let handle = launcher
-        .launch()
-        .await
-        .expect("boot must succeed: allow_public_metrics=true in config must let a non-loopback observability bind through");
+    // Bind the observability server to the wildcard (non-loopback)
+    // address. If the config field weren't wired through,
+    // `server_launcher/launch.rs` would still pass the old hardcoded
+    // `false` and this bind would be rejected before any socket opens.
+    let (handle, port, _temp) = launch_on_free_port("0.0.0.0", true).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -262,7 +273,7 @@ async fn boot_path_allows_non_loopback_bind_when_config_opts_in() {
     // `/healthz` over 127.0.0.1 on the same port proves the server is
     // really listening on the wildcard bind the config asked for (not
     // silently falling back to loopback-only).
-    let loopback_addr: SocketAddr = format!("127.0.0.1:{}", probe.port()).parse().unwrap();
+    let loopback_addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
     let (status, body) = http_get(loopback_addr, "/healthz").await;
     assert_eq!(status, 200, "healthz status on the opted-in wildcard bind");
     assert!(body.contains("ok"), "healthz body should say ok");

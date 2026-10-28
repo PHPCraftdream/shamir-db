@@ -4,6 +4,7 @@ use std::task::{Context, Poll, Waker};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::windows::named_pipe::ClientOptions;
 
+use crate::validate_endpoint;
 use crate::IpcListener;
 
 /// Unique-enough per-test pipe name — Windows named pipes share one
@@ -16,6 +17,54 @@ fn test_pipe_name(tag: &str) -> String {
     )
 }
 
+#[test]
+fn rv_transport_ipc_bd4ebef7_windows_endpoint_rules_and_boundaries() {
+    assert!(validate_endpoint(r"\\.\pipe\").is_err());
+    assert!(validate_endpoint(r"\\.\pipe\parent\child").is_err());
+    assert!(validate_endpoint("\\\\.\\pipe\\nested\\child").is_err());
+    assert!(validate_endpoint(r"\\.\pipe\name").is_ok());
+    assert!(validate_endpoint(r"\\.\PIPE\name").is_ok());
+    assert!(validate_endpoint("\\\\server\\pipe\\x").is_err());
+    assert!(validate_endpoint(r"\\?\pipe\x").is_err());
+    assert!(validate_endpoint("//./pipe/x").is_err());
+    assert!(validate_endpoint("shamir-db").is_err());
+    assert!(validate_endpoint(&format!(r"\\.\pipe\{}", "x".repeat(247))).is_ok());
+    assert!(validate_endpoint(&format!(r"\\.\pipe\{}", "x".repeat(248))).is_err());
+    assert!(validate_endpoint("\\\\.\\pipe\\bad\0name").is_err());
+}
+
+#[tokio::test]
+async fn rv_transport_ipc_bd4ebef7_windows_entrypoints_reject_invalid_addresses() {
+    let connect_error = crate::connect("shamir-db")
+        .await
+        .expect_err("invalid endpoint");
+    let bind_error = match IpcListener::bind("shamir-db").await {
+        Ok(_) => panic!("invalid endpoint unexpectedly bound"),
+        Err(error) => error,
+    };
+    let remote_error = crate::connect(r"\\server\pipe\x")
+        .await
+        .expect_err("invalid endpoint");
+    for error in [connect_error, bind_error, remote_error] {
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    let name = test_pipe_name("8ed1b450");
+    let mut listener = IpcListener::bind(&name).await.expect("first bind");
+    let handle = listener.pipe_handle().expect("pending pipe handle");
+    crate::tests::windows_dacl::check_handle_owner_dacl(handle as _)
+        .expect("effective DACL is one owner SID allow ACE");
+    assert!(IpcListener::bind(&name).await.is_err());
+    let server = tokio::spawn(async move {
+        let mut stream = listener.accept().await.expect("accept");
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).await.expect("read");
+        byte
+    });
+    let mut client = crate::connect(&name).await.expect("owner may connect");
+    client.write_all(&[0x5a]).await.expect("write");
+    assert_eq!(server.await.expect("server"), [0x5a]);
+}
 #[tokio::test]
 async fn accept_and_round_trip_bytes() {
     let name = test_pipe_name("roundtrip");
@@ -212,7 +261,7 @@ async fn rv_transport_ipc_4e8be4fd_drop_releases_pipe_name_for_rebind() {
 
     assert!(
         IpcListener::bind(&name).await.is_err(),
-        "second live bind on the same pipe name must fail"
+        "second live bind must fail"
     );
 
     drop(listener);

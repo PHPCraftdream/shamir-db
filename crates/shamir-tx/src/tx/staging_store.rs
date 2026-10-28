@@ -14,11 +14,14 @@
 //! §5b floor (#61): staged Set/Remove operate on id-keyed storage bytes —
 //! recovery anchor. See `docs/dev-artifacts/perf/innervalue-floor.md` (Category 3).
 
+use crate::tx::support::staged_field_index::StagedFieldIndex;
 use bytes::Bytes;
-use shamir_collections::TMap;
+use shamir_collections::{THasher, TMap};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey, Store};
-use shamir_types::types::value::InnerValue;
+use shamir_types::core::interner::InternerKey;
+use shamir_types::record_view::ProbeKey;
+use shamir_types::types::value::{InnerValue, QueryValue};
 use std::borrow::Cow;
 use std::sync::Arc;
 
@@ -79,6 +82,9 @@ pub enum StagedKind {
 pub struct StagingStore {
     base: Arc<dyn Store>,
     writes: TMap<RecordKey, StagedOp>,
+    probe_index: scc::HashMap<u64, StagedFieldIndex, THasher>,
+    overwritten: Vec<usize>,
+    probe_built: std::sync::atomic::AtomicBool,
     /// #1205 (A8 amortization): `true` once every `Set` staged into this
     /// store came from a `TableManager` write path that captured its
     /// `InternerKey` ids into `TxContext::referenced_interner_ids` at stage
@@ -99,6 +105,9 @@ impl StagingStore {
         Self {
             base,
             writes: shamir_collections::new_map(),
+            probe_index: scc::HashMap::with_hasher(THasher::default()),
+            overwritten: Vec::new(),
+            probe_built: std::sync::atomic::AtomicBool::new(false),
             referenced_ids_captured: false,
         }
     }
@@ -178,7 +187,10 @@ impl StagingStore {
     /// on the same store) conservatively lands A8 back on its decode
     /// fallback for the whole table.
     pub fn set(&mut self, k: RecordKey, v: Bytes) {
-        self.writes.insert(k, StagedOp::Set(StagedRow(v)));
+        let (i, old) = self.writes.insert_full(k, StagedOp::Set(StagedRow(v)));
+        if old.is_some() && *self.probe_built.get_mut() {
+            self.overwritten.push(i);
+        }
         self.referenced_ids_captured = false;
     }
 
@@ -189,14 +201,55 @@ impl StagingStore {
     /// reset — see `set`'s doc.
     pub fn set_many(&mut self, items: impl IntoIterator<Item = (RecordKey, Bytes)>) {
         for (k, v) in items {
-            self.writes.insert(k, StagedOp::Set(StagedRow(v)));
+            let (i, old) = self.writes.insert_full(k, StagedOp::Set(StagedRow(v)));
+            if old.is_some() && *self.probe_built.get_mut() {
+                self.overwritten.push(i);
+            }
         }
         self.referenced_ids_captured = false;
     }
 
     /// Stage a remove.
     pub fn remove(&mut self, k: RecordKey) {
-        self.writes.insert(k, StagedOp::Remove);
+        let (i, old) = self.writes.insert_full(k, StagedOp::Remove);
+        if old.is_some() && *self.probe_built.get_mut() {
+            self.overwritten.push(i);
+        }
+    }
+
+    /// Staged Set rows that MAY have `field == value`; callers must recheck exactly.
+    pub fn probe_field(&self, field: &InternerKey, value: &QueryValue) -> Vec<(RecordKey, Bytes)> {
+        let keys = ProbeKey::for_query(value);
+        if keys.is_empty() {
+            return self
+                .writes
+                .iter()
+                .filter_map(|(key, op)| match op {
+                    StagedOp::Set(row) => Some((key.clone(), row.as_bytes())),
+                    StagedOp::Remove => None,
+                })
+                .collect();
+        }
+        self.probe_built
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut index = self.probe_index.entry_sync(field.id()).or_default();
+        let index = index.get_mut();
+        index.catch_up(field, self.writes.len(), &self.overwritten, |i| {
+            self.writes.get_index(i).and_then(|(_, op)| match op {
+                StagedOp::Set(row) => Some(&row.0),
+                StagedOp::Remove => None,
+            })
+        });
+        index
+            .candidates(&keys)
+            .into_iter()
+            .filter_map(|i| {
+                self.writes.get_index(i).and_then(|(key, op)| match op {
+                    StagedOp::Set(row) => Some((key.clone(), row.as_bytes())),
+                    StagedOp::Remove => None,
+                })
+            })
+            .collect()
     }
 
     /// Snapshot of all staged ops without consuming.
@@ -330,6 +383,9 @@ impl StagingStore {
     where
         F: FnMut(&Bytes) -> Result<Bytes, String>,
     {
+        self.probe_index.clear_sync();
+        self.overwritten.clear();
+        *self.probe_built.get_mut() = false;
         for op in self.writes.values_mut() {
             if let StagedOp::Set(row) = op {
                 let bytes = row.as_bytes();

@@ -218,9 +218,9 @@ fn compile_cond_cached_returns_the_same_arc_on_repeated_calls() {
     let cond = make_score_cond();
     let cache = new_local_cond_cache();
 
-    let first = compile_cond_cached(&cache, &cond.condition, &interner);
-    let second = compile_cond_cached(&cache, &cond.condition, &interner);
-    let third = compile_cond_cached(&cache, &cond.condition, &interner);
+    let first = compile_cond_cached(&cache, &cond.condition, &interner).unwrap();
+    let second = compile_cond_cached(&cache, &cond.condition, &interner).unwrap();
+    let third = compile_cond_cached(&cache, &cond.condition, &interner).unwrap();
 
     assert!(
         std::sync::Arc::ptr_eq(&first, &second),

@@ -228,6 +228,26 @@ export class NodeIpcSocket implements Socket {
  * doc comment above).
  */
 export async function openIpcSocket(path: string): Promise<Socket> {
+  const invalid = (rule: string): Error => new Error(`Invalid IPC endpoint: ${rule}`);
+  if (process.platform === 'win32') {
+    const prefix = '\\\\.\\pipe\\';
+    const root = path.slice(0, prefix.length);
+    if (root.toLowerCase() !== prefix.toLowerCase()) {
+      throw invalid('Windows address must start with \\\\\\\\.\\\\pipe\\\\');
+    }
+    const rest = path.slice(prefix.length);
+    if (!rest || rest.includes('\\')) throw invalid('pipe name must be a non-empty single component');
+    if (path.includes('\0')) throw invalid('address must not contain NUL');
+    if ([...path].reduce((units, ch) => units + (ch.codePointAt(0)! > 0xffff ? 2 : 1), 0) > 256) {
+      throw invalid('address must not exceed 256 UTF-16 code units');
+    }
+  } else {
+    if (!path.startsWith('/')) throw invalid('Unix path must be absolute');
+    if (path.split('/').includes('..')) throw invalid('Unix path must not contain a parent-directory component');
+    if (path.includes('\0')) throw invalid('address must not contain NUL');
+    const limit = ['darwin', 'freebsd', 'openbsd', 'netbsd', 'dragonfly', 'ios'].includes(process.platform) ? 104 : 108;
+    if (Buffer.byteLength(path) >= limit) throw invalid(`Unix path must be shorter than SUN_PATH_LEN (${limit} bytes)`);
+  }
   return new Promise((resolve, reject) => {
     const socket = createConnection({ path }, () => {
       socket.off('error', onError);

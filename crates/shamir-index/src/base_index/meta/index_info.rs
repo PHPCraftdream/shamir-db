@@ -29,6 +29,8 @@ use crate::base_index::index_status::IndexStatus;
 use crate::state::IndexState;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -108,6 +110,8 @@ impl std::ops::Deref for StatusAtom {
 pub struct IndexInfo {
     indexes: shamir_numa::NodeReplicated<Vec<IndexDefinition>>,
     status: StatusAtom,
+    #[cfg(test)]
+    iter_count: Arc<AtomicUsize>,
 }
 
 impl std::fmt::Debug for IndexInfo {
@@ -141,6 +145,8 @@ impl<'de> Deserialize<'de> for IndexInfo {
         Ok(Self {
             indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
             status: StatusAtom::default(),
+            #[cfg(test)]
+            iter_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 }
@@ -151,6 +157,8 @@ impl IndexInfo {
         Self {
             indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), Vec::new()),
             status: StatusAtom(Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8()))),
+            #[cfg(test)]
+            iter_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -166,6 +174,8 @@ impl IndexInfo {
         Self {
             indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
             status: StatusAtom(Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8()))),
+            #[cfg(test)]
+            iter_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -205,6 +215,8 @@ impl IndexInfo {
                             status: StatusAtom(Arc::new(AtomicU8::new(
                                 IndexStatus::Actual.as_u8(),
                             ))),
+                            #[cfg(test)]
+                            iter_count: Arc::new(AtomicUsize::new(0)),
                         })
                     }
                     Err(_legacy_err) => {
@@ -308,10 +320,28 @@ impl IndexInfo {
     /// The snapshot Arc is held by the returned iterator so concurrent
     /// writers' COW replacements don't disturb the iteration.
     pub fn iter(&self) -> impl Iterator<Item = IndexDefinition> + '_ {
+        #[cfg(test)]
+        self.iter_count.fetch_add(1, Ordering::Relaxed);
         // Arc::clone extends the snapshot lifetime past the Guard's scope.
         let snap = Arc::clone(&*self.indexes.load_local());
         let len = snap.len();
         (0..len).map(move |i| snap[i].clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_iter_count(&self) {
+        self.iter_count.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn iter_count(&self) -> usize {
+        self.iter_count.load(Ordering::Relaxed)
+    }
+
+    /// Borrowed snapshot of the whole definition set: one `Arc` clone, no
+    /// per-definition cloning. Singular planners iterate `&defs` from this.
+    pub fn snapshot(&self) -> Arc<Vec<IndexDefinition>> {
+        Arc::clone(&*self.indexes.load_local())
     }
 
     /// Check if an index exists
@@ -339,6 +369,8 @@ impl Clone for IndexInfo {
         Self {
             indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), (*snap).clone()),
             status: self.status.clone(),
+            #[cfg(test)]
+            iter_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 }

@@ -161,6 +161,9 @@ pub enum Filter {
         query: String,
         #[serde(default = "default_fts_mode")]
         mode: String,
+        /// Optional ranked-result cap for FTS lookups.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
     },
 
     /// Vector similarity search (top-k nearest neighbors).
@@ -213,55 +216,62 @@ pub enum ValueCompareOp {
     Lte,
 }
 
-/// One entry of the combined `Filter`/`FilterValue` depth-walk stack (see
-/// [`check_filter_depth`]).
+/// One entry of the combined `Filter`/`FilterValue`/`SelectExpr` depth walk.
 enum DepthNode<'a> {
     Filter(&'a Filter),
     Value(&'a FilterValue),
+    SelectExpr(&'a crate::read::SelectExpr),
 }
 
-/// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`.
-///
-/// Thin wrapper over [`check_filter_depth_at`] seeded at depth 1; see that
-/// function for the full semantics and rationale.
+fn check_depth(depth: usize) -> Result<(), String> {
+    if depth > MAX_FILTER_DEPTH {
+        Err(format!("filter nesting depth exceeds {}", MAX_FILTER_DEPTH))
+    } else {
+        Ok(())
+    }
+}
+
 pub fn check_filter_depth(filter: &Filter) -> Result<(), String> {
     check_filter_depth_at(filter, 1)
+}
+
+/// Validate nesting in an executable value surface (`FilterValue` or select expression).
+pub fn check_filter_value_depth(value: &FilterValue) -> Result<(), String> {
+    check_depth_tree(DepthNode::Value(value), 1)
+}
+
+pub fn check_select_expr_depth(expr: &crate::read::SelectExpr) -> Result<(), String> {
+    check_depth_tree(DepthNode::SelectExpr(expr), 1)
+}
+
+fn check_depth_tree<'a>(root: DepthNode<'a>, start_depth: usize) -> Result<(), String> {
+    let mut stack: Vec<(DepthNode<'a>, usize)> = vec![(root, start_depth)];
+    while let Some((current, depth)) = stack.pop() {
+        check_depth(depth)?;
+        match current {
+            DepthNode::Filter(f) => push_filter_children(f, depth, &mut stack),
+            DepthNode::Value(v) => push_value_children(v, depth, &mut stack),
+            DepthNode::SelectExpr(e) => push_select_expr_children(e, depth, &mut stack),
+        }
+    }
+    Ok(())
 }
 
 /// Validate that a filter tree does not exceed `MAX_FILTER_DEPTH`, with the
 /// root considered to already sit at `start_depth` levels of accumulated
 /// nesting.
+/// Callers checking a subtree in a larger structure should pass its accumulated
+/// nesting depth as `start_depth`.
 ///
-/// Callers that check a SUBTREE embedded in a larger structure (e.g. the
-/// `condition` of a `FilterValue::Cond` encountered at depth `d` in
-/// `shamir-query-builder`'s `Doc::set` guard) must pass the ACCUMULATED
-/// depth as `start_depth` (e.g. `d + 1`), so an outer chain near the limit
-/// plus a legal-looking condition subtree cannot jointly exceed
-/// `MAX_FILTER_DEPTH`.
-///
-/// Walks BOTH the `Filter` (`And`/`Or`/`Not`) nesting AND every embedded
-/// `FilterValue` subtree that a comparison/membership operator's value(s)
-/// may carry (`$cond`/`$expr`/`$fn` args, `Array` elements, `$cond`'s own
-/// nested `condition: Filter`). A filter that is shallow at the `And`/`Or`/
-/// `Not` level can otherwise smuggle an unbounded compile/resolve recursion
-/// via a deeply nested VALUE — e.g. a depth-1 `Eq` whose `value` is a
-/// 100k-deep `$cond`/`Array` chain — which used to sail through this check
-/// and then blow the stack (process abort, not a catchable `Err`) inside
-/// `compile_filter`/`resolve_filter_query` at query-execution time.
-///
-/// Uses an explicit heap-allocated stack (iterative, no unbounded
-/// recursion) so the checker itself cannot stack-overflow on the very
-/// input it exists to reject. Returns `Ok(())` if the tree is within
-/// bounds.
+/// Walks both filter nesting and embedded FilterValue trees iteratively.
 pub fn check_filter_depth_at(filter: &Filter, start_depth: usize) -> Result<(), String> {
     let mut stack: Vec<(DepthNode<'_>, usize)> = vec![(DepthNode::Filter(filter), start_depth)];
     while let Some((current, depth)) = stack.pop() {
-        if depth > MAX_FILTER_DEPTH {
-            return Err(format!("filter nesting depth exceeds {}", MAX_FILTER_DEPTH));
-        }
+        check_depth(depth)?;
         match current {
             DepthNode::Filter(f) => push_filter_children(f, depth, &mut stack),
             DepthNode::Value(v) => push_value_children(v, depth, &mut stack),
+            DepthNode::SelectExpr(e) => push_select_expr_children(e, depth, &mut stack),
         }
     }
     Ok(())
@@ -370,6 +380,24 @@ fn push_value_children<'a>(
         | FilterValue::FieldRef { .. }
         | FilterValue::QueryRef { .. }
         | FilterValue::Param { .. } => {}
+    }
+}
+
+fn push_select_expr_children<'a>(
+    expr: &'a crate::read::SelectExpr,
+    depth: usize,
+    stack: &mut Vec<(DepthNode<'a>, usize)>,
+) {
+    use crate::read::SelectExpr;
+    match expr {
+        SelectExpr::Add { left, right }
+        | SelectExpr::Sub { left, right }
+        | SelectExpr::Mul { left, right }
+        | SelectExpr::Div { left, right } => {
+            stack.push((DepthNode::SelectExpr(left), depth + 1));
+            stack.push((DepthNode::SelectExpr(right), depth + 1));
+        }
+        SelectExpr::Field { .. } | SelectExpr::Literal { .. } => {}
     }
 }
 
