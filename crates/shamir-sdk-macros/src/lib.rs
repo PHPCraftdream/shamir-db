@@ -179,13 +179,13 @@ fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             };
 
             let mut entries = params.into_raw();
             let record: shamir_sdk::Value = match entries.iter().position(|(key, _)| key == "record") {
                 ::core::option::Option::Some(index) => entries.remove(index).1,
-                ::core::option::Option::None => shamir_sdk::__rt::trap("validator: missing `record` parameter"),
+                ::core::option::Option::None => shamir_sdk::__rt::raise(&shamir_sdk::Error::codec("validator: missing `record` parameter")),
             };
 
             // Extract `old_record` (optional: absent or null → None).
@@ -204,13 +204,13 @@ fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
             let validation: shamir_sdk::Validation =
                 match shamir_sdk::__rt::block_on(#inner_name(record, old_record, ctx)) {
                     ::core::result::Result::Ok(validation) => validation,
-                    ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                    ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
                 };
 
             let value = validation.into_value();
             let encoded = match shamir_sdk::__rt::encode_value(&value) {
                 ::core::result::Result::Ok(bytes) => bytes,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             };
             shamir_sdk::__rt::leak_result(encoded)
         }
@@ -296,9 +296,8 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         /// Guest ABI entry: decode params, drive the user's async function,
         /// encode the result, and return a packed `(ptr, len)`.
         ///
-        /// On user `Err(...)`: traps (the host maps a trap to
-        /// `FunctionError::Compute`).
-        // TODO(slice 4): clean Result envelope so user errors become FunctionError::User
+        /// On user `Err(...)` and malformed input: reports the error kind and
+        /// message to the host. Invalid ABI pointers and lengths still trap.
         /// # Safety
         /// `ptr` must be the guest-memory address of `len` initialized bytes
         /// readable for this call; the host must provide the allocation and
@@ -318,7 +317,7 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             };
             let ctx = shamir_sdk::Ctx::new();
             let batch = shamir_sdk::Batch::new();
@@ -331,15 +330,15 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     ::core::result::Result::Ok(value) => {
                         let encoded = match shamir_sdk::__rt::encode_value(&value) {
                             ::core::result::Result::Ok(bytes) => bytes,
-                            ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                            ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
                         };
                         shamir_sdk::__rt::leak_result(encoded)
                     }
                     ::core::result::Result::Err(e) => {
-                        shamir_sdk::__rt::trap(&e.to_string())
+                        shamir_sdk::__rt::raise(&e)
                     }
                 },
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             }
         }
     };
@@ -445,7 +444,7 @@ fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             };
             let ctx = shamir_sdk::Ctx::new();
 
@@ -457,15 +456,15 @@ fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     ::core::result::Result::Ok(value) => {
                         let encoded = match shamir_sdk::__rt::encode_value(&value) {
                             ::core::result::Result::Ok(bytes) => bytes,
-                            ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                            ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
                         };
                         shamir_sdk::__rt::leak_result(encoded)
                     }
                     ::core::result::Result::Err(e) => {
-                        shamir_sdk::__rt::trap(&e.to_string())
+                        shamir_sdk::__rt::raise(&e)
                     }
                 },
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             }
         }
     };
@@ -643,7 +642,7 @@ fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 
             let params = match shamir_sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             };
 
             let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
@@ -654,15 +653,15 @@ fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                     ::core::result::Result::Ok(value) => {
                         let encoded = match shamir_sdk::__rt::encode_value(&value) {
                             ::core::result::Result::Ok(bytes) => bytes,
-                            ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                            ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
                         };
                         shamir_sdk::__rt::leak_result(encoded)
                     }
                     ::core::result::Result::Err(e) => {
-                        shamir_sdk::__rt::trap(&e.to_string())
+                        shamir_sdk::__rt::raise(&e)
                     }
                 },
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::trap(&e.to_string()),
+                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
             }
         }
     };

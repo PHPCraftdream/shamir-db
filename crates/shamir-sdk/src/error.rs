@@ -57,6 +57,18 @@ impl Error {
     }
 }
 
+impl ErrorKind {
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) fn abi_code(self) -> i32 {
+        match self {
+            Self::User => 1,
+            Self::InvalidArgument => 2,
+            Self::Codec => 3,
+            Self::Host => 4,
+        }
+    }
+}
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)

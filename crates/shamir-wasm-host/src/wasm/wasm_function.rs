@@ -27,6 +27,7 @@
 //! * `batch_get(key_ptr, key_len) -> i64` — read from batch (0 = absent).
 //! * `global_set(key_ptr, key_len, val_ptr, val_len)` — write a global var.
 //! * `global_get(key_ptr, key_len) -> i64` — read a global var (0 = absent).
+//! * `raise_error(kind, msg_ptr, msg_len)` — terminal error import; never returns successfully and maps guest error categories to host errors.
 //!
 //! # Host imports (slice 8a — async)
 //!
@@ -70,6 +71,7 @@ use super::bindings::call::host_call;
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
 use super::bindings::globals::{host_global_get, host_global_set};
 use super::bindings::http::host_http_fetch;
+use super::bindings::raise::host_raise_error;
 #[cfg(test)]
 use super::fuel::FuelObserver;
 use super::fuel::{pool_refund, FuelLease};
@@ -212,6 +214,10 @@ pub(crate) fn build_linker(engine: &WasmEngine) -> FnResult<Linker<HostState>> {
     linker
         .func_wrap_async("shamir_host", "global_get", host_global_get)
         .map_err(|e| FunctionError::Compute(format!("linker global_get: {e}")))?;
+
+    linker
+        .func_wrap("shamir_host", "raise_error", host_raise_error)
+        .map_err(|e| FunctionError::Compute(format!("linker raise_error: {e}")))?;
 
     // Async host imports.
     linker
@@ -749,6 +755,7 @@ pub(super) fn map_wasm_error(e: wasmtime::Error, context: &str) -> FunctionError
     // `wasmtime::Trap`, not matched on message text.
     if let Some(nested) = e.downcast_ref::<FunctionError>() {
         return match nested {
+            FunctionError::User(m) => FunctionError::User(m.clone()),
             FunctionError::FuelExhausted => FunctionError::FuelExhausted,
             FunctionError::AggregateFuelExhausted => FunctionError::AggregateFuelExhausted,
             FunctionError::Interrupted => FunctionError::Interrupted,
