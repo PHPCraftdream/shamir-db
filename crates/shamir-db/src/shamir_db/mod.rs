@@ -13,7 +13,7 @@ pub use gateway::curl_gateway;
 pub use gateway::curl_gateway::CurlNetGateway;
 pub use gateway::ports;
 pub use gateway::ports::{
-    PortError, PrincipalInfo, PrincipalResolver, RepoAdminObserver, UserAdminPort,
+    PortError, PortErrorKind, PrincipalInfo, PrincipalResolver, RepoAdminObserver, UserAdminPort,
 };
 pub use shamir_db::ChangelogDeliveryGate;
 pub use shamir_db::ChangelogReceiver;

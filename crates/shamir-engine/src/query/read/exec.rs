@@ -160,7 +160,10 @@ pub fn has_aggregates(select: &Select) -> bool {
 ///
 /// This ensures that `compile_filter` (which uses `intern_field_path` / `get_ind`)
 /// can resolve field paths that refer to aggregate output keys like "total_age".
-pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) {
+/// Fallible (RU8 acceptance 8): a metered touch over the per-repo interner
+/// quota surfaces the typed `interner_quota_exceeded` error instead of being
+/// silently absorbed.
+pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) -> DbResult<()> {
     for item in &select.items {
         let key = match item {
             SelectItem::Field { path, alias } => {
@@ -190,9 +193,12 @@ pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) {
             SelectItem::Function { alias, name, .. } => alias.as_deref().unwrap_or(name.as_str()),
             _ => continue,
         };
-        // touch_ind ensures the key is interned (creates if missing)
-        let _ = interner.touch_ind(key);
+        // touch_ind ensures the key is interned (creates if missing).
+        interner
+            .touch_ind(key)
+            .map_err(shamir_storage::error::DbError::from)?;
     }
+    Ok(())
 }
 
 // ============================================================================

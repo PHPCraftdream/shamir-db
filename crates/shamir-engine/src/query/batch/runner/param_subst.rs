@@ -204,6 +204,19 @@ pub(in crate::query::batch) fn resolve_write_value(
     resolve_write_value_inner(value, ctx)
 }
 
+fn validate_marker_guards(
+    marker: &FilterValue,
+    original: &QueryValue,
+) -> Result<(), WriteValueError> {
+    shamir_query_types::filter::check_filter_value_depth(marker)
+        .and_then(|()| crate::query::filter::check_filter_value_patterns(marker))
+        .map_err(|message| {
+            WriteValueError::MalformedMarker(format!(
+                "marker {:?} failed executable filter guards: {message}",
+                original
+            ))
+        })
+}
 fn resolve_write_value_inner(
     value: &QueryValue,
     ctx: &FilterContext,
@@ -232,6 +245,7 @@ fn resolve_write_value_inner(
                             value
                         ))
                     })?;
+                validate_marker_guards(&fv, value)?;
                 // `$fn` calls whose args contain a `$ref` (anywhere, at any
                 // depth) are explicitly out of scope for THIS resolver (see
                 // the module doc comment's "$ref is explicitly OUT OF SCOPE"

@@ -4,8 +4,11 @@
 //! Uses a TableManager backed by any storage engine (fjall for production,
 //! in_memory for tests).
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use arc_swap::ArcSwapOption;
+use shamir_collections::TFxMap;
 use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
@@ -71,6 +74,21 @@ pub struct SystemStore {
     /// gated catalogue write fail (see `catalogue_write_fault_gate`); armed by
     /// catalogue fault-injection tests.
     catalogue_write_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    table_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    catalogue_accesses: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    full_catalogue_loads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(super) group_names: Arc<ArcSwapOption<super::group_names::GroupNames>>,
+    // DDL-only rebuild lock; group-catalogue writes are rare.
+    pub(super) group_names_rebuild: Arc<tokio::sync::Mutex<()>>,
+    /// Test-only count of function-catalogue reads.
+    #[cfg(test)]
+    function_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only count of validator-catalogue reads.
+    #[cfg(test)]
+    validator_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Build a `QueryValue::Map` with a single string-keyed entry (for simple
@@ -125,10 +143,59 @@ impl SystemStore {
         // DbInstance recovers/certifies before exposing the system repo.
         db.add_repo_with_durability(repo_config, policy).await?;
 
-        Ok(Self {
+        let store = Self {
             db,
             catalogue_write_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        })
+            #[cfg(test)]
+            table_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            catalogue_accesses: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            full_catalogue_loads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            function_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            group_names: Arc::new(ArcSwapOption::empty()),
+            group_names_rebuild: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            validator_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        store.rebuild_group_names().await;
+        Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_validator_catalogue_reads(&self) {
+        self.validator_catalogue_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn validator_catalogue_read_count(&self) -> usize {
+        self.validator_catalogue_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_validator_catalogue_read(&self) {
+        self.validator_catalogue_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    #[cfg(test)]
+    pub(crate) fn reset_function_catalogue_reads(&self) {
+        self.function_catalogue_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn function_catalogue_read_count(&self) -> usize {
+        self.function_catalogue_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_function_catalogue_read(&self) {
+        self.function_catalogue_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Arm the catalogue write-fault seam: the n-th subsequent gated
@@ -145,6 +212,24 @@ impl SystemStore {
     pub fn arm_catalogue_write_fault(&self, n: usize) {
         self.catalogue_write_faults
             .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_table_catalogue_reads(&self) {
+        self.table_catalogue_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn table_catalogue_read_count(&self) -> usize {
+        self.table_catalogue_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_table_catalogue_read(&self) {
+        self.table_catalogue_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Consulted by every catalogue write below; the armed countdown reaches
@@ -179,8 +264,72 @@ impl SystemStore {
         repo.shutdown_clean(timeout).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn catalogue_access_count(&self) -> usize {
+        self.catalogue_accesses
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_catalogue_load_count(&self) -> usize {
+        self.full_catalogue_loads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_full_catalogue_load(&self) {
+        self.full_catalogue_loads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_catalogue_counts(&self) {
+        self.catalogue_accesses
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.full_catalogue_loads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) async fn rebuild_group_names(&self) {
+        let _guard = self.group_names_rebuild.lock().await;
+        self.rebuild_group_names_locked().await;
+    }
+
+    pub(super) async fn rebuild_group_names_locked(&self) {
+        let Ok(groups) = self.load_groups().await else {
+            self.group_names.store(None);
+            return;
+        };
+        let mut by_name = TFxMap::default();
+        let mut by_id = TFxMap::default();
+        for group in groups {
+            let (Some(name), Some(id)) = (
+                group.get("name").and_then(|value| value.as_str()),
+                group.get("group_id").and_then(|value| value.as_u64()),
+            ) else {
+                continue;
+            };
+            by_name.entry(name.to_string()).or_insert(id);
+            by_id.insert(id, name.to_string());
+        }
+        self.group_names
+            .store(Some(Arc::new(super::group_names::GroupNames {
+                by_name,
+                by_id,
+            })));
+    }
+
+    pub(crate) fn group_id_by_name(&self, name: &str) -> Option<Option<u64>> {
+        self.group_names
+            .load_full()
+            .map(|snapshot| snapshot.by_name.get(name).copied())
+    }
+
     /// Get the table manager for a system table.
     pub(super) async fn table(&self, name: &str) -> DbResult<TableManager> {
+        #[cfg(test)]
+        self.catalogue_accesses
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.db.get_table(SYSTEM_REPO, name).await
     }
 

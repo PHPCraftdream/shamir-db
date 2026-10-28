@@ -729,7 +729,10 @@ async fn create_profile_and_subscription(follower: &ShamirDb, profile: &str, rep
         subscription("sub_a", "tcp://leader:9000", "pub_a", profile),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("create profile+subscription");
 }
@@ -738,9 +741,18 @@ async fn create_profile_and_subscription(follower: &ShamirDb, profile: &str, rep
 async fn drop_sub_a(follower: &ShamirDb) {
     let mut b = Batch::new();
     b.id(2);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop subscription"),
+    );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("drop subscription");
 }
@@ -848,7 +860,11 @@ async fn stale_startup_snapshot_is_refused_and_marks_nothing() {
         ]),
     );
     leader
-        .execute_as(owner(), "app", &b.to_request_via_msgpack())
+        .execute_as(
+            owner(),
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("leader seed");
     let v = leader

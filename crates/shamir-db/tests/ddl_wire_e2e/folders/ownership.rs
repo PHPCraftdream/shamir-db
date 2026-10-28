@@ -51,7 +51,7 @@ async fn owner_on_create_db_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_db("op", ddl::create_db("owned_db"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(user_actor.clone(), "bootstrap", &req)
         .await
@@ -112,7 +112,7 @@ async fn owner_on_create_repo_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("op", ddl::create_repo("user_repo").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -155,7 +155,7 @@ async fn owner_on_create_table_user_actor() {
     let mut b = Batch::new();
     b.id(1);
     b.create_table("op", ddl::create_table("owned_table").repo("main"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -196,8 +196,14 @@ async fn owner_on_create_function_user_actor() {
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id(1);
-    b.create_function("op", ddl::create_function("user_fn").wasm(wasm_b64(&wasm)));
-    let req = b.to_request_via_msgpack();
+    b.create_function(
+        "op",
+        ddl::create_function("user_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_function"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir
         .execute_as(user_actor.clone(), "testdb", &req)
         .await
@@ -228,8 +234,14 @@ async fn owner_on_create_function_system_stays_system() {
     // Use default execute (System actor).
     let mut b = Batch::new();
     b.id(1);
-    b.create_function("op", ddl::create_function("sys_fn").wasm(wasm_b64(&wasm)));
-    let req = b.to_request_via_msgpack();
+    b.create_function(
+        "op",
+        ddl::create_function("sys_fn")
+            .wasm(wasm_b64(&wasm))
+            .build()
+            .expect("build create_function"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     shamir.execute("testdb", &req).await.unwrap();
 
     let meta = shamir

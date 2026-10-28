@@ -69,7 +69,10 @@ async fn insert_record(shamir: &ShamirDb, db: &str, table: &str, name: &str) {
         }]),
     );
     shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -89,7 +92,10 @@ async fn update_record(shamir: &ShamirDb, db: &str, table: &str, name: &str, new
     )
     .unwrap();
     shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -148,10 +154,16 @@ async fn purge_older_than_age_removes_old_versions() {
     b.id(3);
     b.purge_history(
         "ph",
-        ddl::purge_history("users", PurgeScope::OlderThanAge { age_secs: 50 }),
+        ddl::purge_history("users", PurgeScope::OlderThanAge { age_secs: 50 })
+            .hmac("dummy")
+            .build()
+            .expect("build PurgeHistory"),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -226,10 +238,16 @@ async fn purge_older_than_absolute_timestamp() {
     b.id(10);
     b.purge_history(
         "ph",
-        ddl::purge_history("users", PurgeScope::OlderThan { timestamp: 50_000 }),
+        ddl::purge_history("users", PurgeScope::OlderThan { timestamp: 50_000 })
+            .hmac("dummy")
+            .build()
+            .expect("build PurgeHistory"),
     );
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -327,11 +345,26 @@ async fn purge_denied_without_permission() {
     // User(999) falls into "other" → no access bits → Manage denied.
     let mut b = Batch::new();
     b.id(1);
-    let chown_h = b.chown("chown", ddl::chown(ddl::res::database("testdb"), 1));
-    let chmod_h = b.chmod("chmod", ddl::chmod(ddl::res::database("testdb"), 0o700));
+    let chown_h = b.chown(
+        "chown",
+        ddl::chown(ddl::res::database("testdb"), 1)
+            .hmac("dummy")
+            .build()
+            .expect("build Chown"),
+    );
+    let chmod_h = b.chmod(
+        "chmod",
+        ddl::chmod(ddl::res::database("testdb"), 0o700)
+            .hmac("dummy")
+            .build()
+            .expect("build Chmod"),
+    );
     b.after(&chmod_h, &chown_h);
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -340,10 +373,17 @@ async fn purge_denied_without_permission() {
     b.id(2);
     b.purge_history(
         "ph",
-        ddl::purge_history("users", PurgeScope::OlderThanAge { age_secs: 1 }),
+        ddl::purge_history("users", PurgeScope::OlderThanAge { age_secs: 1 })
+            .hmac("dummy")
+            .build()
+            .expect("build PurgeHistory"),
     );
     let err = shamir
-        .execute_as(Actor::User(999), "testdb", &b.to_request_via_msgpack())
+        .execute_as(
+            Actor::User(999),
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect_err("User(999) must be denied PurgeHistory");
     assert_eq!(

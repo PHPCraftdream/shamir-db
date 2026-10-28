@@ -3,7 +3,8 @@ use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use super::{InternerKey, TouchInd, UserKey};
+use super::quota::{QuotaCounters, QuotaRejection};
+use super::{InternerError, InternerKey, InternerQuota, TouchInd, UserKey};
 
 /// A thread-safe, two-way map for interning strings into compact binary IDs.
 ///
@@ -77,6 +78,11 @@ pub struct Interner {
     /// race. Never taken by any read path.
     reverse_write_lock: std::sync::Mutex<()>,
     current_id: AtomicU64,
+    quota: Option<InternerQuota>,
+    /// Repo label threaded into `InternerError::QuotaExceeded` so the
+    /// message names the repository (empty for scratch/new interners).
+    quota_label: String,
+    counters: QuotaCounters,
 }
 
 impl Default for Interner {
@@ -94,16 +100,23 @@ impl Interner {
             reverse: ArcSwap::from_pointee(vec![OnceLock::new()]),
             reverse_write_lock: std::sync::Mutex::new(()),
             current_id: AtomicU64::new(0),
+            quota: None,
+            quota_label: String::new(),
+            counters: QuotaCounters::new(0, 0),
         }
     }
 
     /// Creates a new Interner from a pre-existing state.
     /// This is used to "hydrate" interner from a persistent store.
     pub fn with_state(initial_data: Vec<(InternerKey, UserKey)>) -> Self {
-        if initial_data.is_empty() {
-            return Self::new();
-        }
-
+        // Fx-hashed distinct-name view of the hydrated data — the quota
+        // counters must reflect distinct names, not duplicate tuples.
+        let names: shamir_collections::TFxSet<&str> =
+            initial_data.iter().map(|(_, name)| name.as_str()).collect();
+        let count = u64::try_from(names.len()).unwrap_or(u64::MAX);
+        let bytes = names.iter().fold(0u64, |sum, name| {
+            sum.saturating_add(u64::try_from(name.len()).unwrap_or(u64::MAX))
+        });
         let map_user_to_interned = new_dash_map_wc(initial_data.len());
         let mut max_id: u64 = 0;
         for (interned_key, _) in &initial_data {
@@ -131,13 +144,62 @@ impl Interner {
             reverse: ArcSwap::from_pointee(reverse),
             reverse_write_lock: std::sync::Mutex::new(()),
             current_id: AtomicU64::new(max_id),
+            quota: None,
+            quota_label: String::new(),
+            counters: QuotaCounters::new(count, bytes),
         }
     }
 
-    /// Gets an ID for a string, creating it if it doesn't exist.
-    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, &'static str> {
-        let s = str.as_ref();
+    /// Creates an interner with cumulative admission limits and hydrated counters.
+    pub fn with_quota(initial_data: Vec<(InternerKey, UserKey)>, quota: InternerQuota) -> Self {
+        Self::with_labeled_quota(initial_data, quota, String::new())
+    }
 
+    /// [`Interner::with_quota`] with a repo label embedded in quota errors.
+    pub fn with_labeled_quota(
+        initial_data: Vec<(InternerKey, UserKey)>,
+        quota: InternerQuota,
+        label: String,
+    ) -> Self {
+        let mut interner = Self::with_state(initial_data);
+        interner.quota = Some(quota);
+        interner.quota_label = label;
+        interner
+    }
+
+    /// Returns the admitted distinct-name and UTF-8 byte counters.
+    pub fn quota_usage(&self) -> (u64, u64) {
+        self.counters.snapshot()
+    }
+
+    /// Gets an ID for a string, creating it if it doesn't exist.
+    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl(str.as_ref(), true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn touch_ind_with_test_hook(
+        &self,
+        s: &str,
+        after_reservation: impl FnOnce(),
+    ) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl_with(s, true, after_reservation)
+    }
+
+    pub fn touch_ind_unmetered<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl(str.as_ref(), false)
+    }
+
+    fn touch_ind_impl(&self, s: &str, enforce_quota: bool) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl_with(s, enforce_quota, || {})
+    }
+
+    fn touch_ind_impl_with(
+        &self,
+        s: &str,
+        enforce_quota: bool,
+        after_reservation: impl FnOnce(),
+    ) -> Result<TouchInd, InternerError> {
         // Fast path: existing entry. `UserKey: Borrow<str>` lets the
         // DashMap lookup take a `&str` directly — no `String` alloc
         // on cache hits (the 99% case once the codec/query has warmed
@@ -145,6 +207,31 @@ impl Interner {
         if let Some(existing) = self.map_user_to_interned.get(s) {
             return Ok(TouchInd::Exists(existing.clone()));
         }
+
+        let bytes = u64::try_from(s.len()).unwrap_or(u64::MAX);
+        // Quota check runs only after the fast-path miss, before the id is
+        // reserved: a rejected touch consumes no id and leaves generation().
+        // untouched. Losing the forward-map race refunds below.
+        if enforce_quota {
+            if let Some(quota) = self.quota {
+                self.counters
+                    .reserve(quota, bytes)
+                    .map_err(
+                        |QuotaRejection { kind, limit }| InternerError::QuotaExceeded {
+                            label: self.quota_label.clone(),
+                            kind,
+                            limit,
+                        },
+                    )?;
+            } else {
+                self.counters.count_unmetered(bytes);
+            }
+        } else {
+            self.counters.count_unmetered(bytes);
+        }
+
+        // Test seam sits after admission but before ID allocation/map insertion.
+        after_reservation();
 
         let key = UserKey::from_str(s);
         // Op B: build Arc<str> once for the reverse slot — no extra alloc
@@ -161,8 +248,7 @@ impl Interner {
         use dashmap::mapref::entry::Entry;
         match self.map_user_to_interned.entry(key) {
             Entry::Occupied(existing) => {
-                // Race: another thread inserted between our get() and entry().
-                // `new_id` is wasted (small leaked slot, harmless).
+                self.counters.refund(bytes);
                 Ok(TouchInd::Exists(existing.get().clone()))
             }
             Entry::Vacant(vacant) => {
@@ -346,6 +432,10 @@ impl Interner {
     /// - If `id` is already used by a different name: Err (id collision).
     /// - Otherwise: insert atomically.
     pub fn touch_with_id(&self, name: &str, id: u64) -> Result<(), String> {
+        self.touch_with_id_impl(name, id)
+    }
+
+    fn touch_with_id_impl(&self, name: &str, id: u64) -> Result<(), String> {
         use dashmap::mapref::entry::Entry;
 
         if id == 0 {
@@ -354,7 +444,6 @@ impl Interner {
 
         let key = UserKey::from_str(name);
 
-        // Check if name already exists in the forward map.
         if let Some(existing) = self.map_user_to_interned.get(name) {
             let existing_id = existing.id();
             return if existing_id == id {
@@ -384,11 +473,14 @@ impl Interner {
             }
         }
 
+        let name_bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
+        self.counters.count_unmetered(name_bytes);
+        // Op B: build Arc<str> once for the reverse slot.
         let arc: Arc<str> = Arc::from(name);
-
         // CAS into forward map — another thread may have raced us.
         match self.map_user_to_interned.entry(key) {
             Entry::Occupied(existing) => {
+                self.counters.refund(name_bytes);
                 let existing_id = existing.get().id();
                 if existing_id == id {
                     Ok(())
@@ -443,6 +535,7 @@ impl Interner {
                         id, &*existing, name
                     );
                     self.map_user_to_interned.remove(name);
+                    self.counters.refund(name_bytes);
                     return Err(msg);
                 }
 

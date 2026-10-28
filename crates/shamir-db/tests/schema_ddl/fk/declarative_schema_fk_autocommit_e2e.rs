@@ -37,10 +37,13 @@ async fn try_insert_autocommit(
     let mut b = Batch::new();
     b.id(1);
     b.insert("ins", insert(table).row(record));
-    db.execute(db_name, &b.to_request_via_msgpack())
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    db.execute(
+        db_name,
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 #[tokio::test]
@@ -60,9 +63,12 @@ async fn fk_autocommit_accepts_existing_rejects_missing() {
         "cr",
         ddl::create_repo("main").tables(["departments", "employees"]),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Index on departments.dept_id (required for FK).
     let mut b = Batch::new();
@@ -71,9 +77,12 @@ async fn fk_autocommit_accepts_existing_rejects_missing() {
         "idx",
         ddl::create_index("dept_id_idx", "departments").field("dept_id"),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Insert a valid parent row via autocommit.
     let parent = try_insert_autocommit(
@@ -104,9 +113,12 @@ async fn fk_autocommit_accepts_existing_rejects_missing() {
     let mut b = Batch::new();
     b.id(3);
     b.set_table_schema("ss", ddl::set_table_schema("employees").rules(rules));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Valid: dept_id=100 exists in parent — inserted via plain AUTOCOMMIT
     // batch (no BeginTx/CommitTx). Before the F-28 Step 1 fix this was

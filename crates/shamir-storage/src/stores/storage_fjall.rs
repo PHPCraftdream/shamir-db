@@ -639,6 +639,7 @@ impl Store for FjallStore {
         let end_bytes = end_inclusive.map(|b| b.to_vec());
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             // Cursor walks downward; upper bound shrinks each batch.
             let mut cursor: Option<Vec<u8>> = None;
 
@@ -818,6 +819,7 @@ impl Store for FjallStore {
         let keyspace = self.keyspace.clone();
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             let mut last_key: Option<Vec<u8>> = None;
 
             loop {
@@ -879,6 +881,7 @@ impl Store for FjallStore {
         let keyspace = self.keyspace.clone();
 
         Box::pin(stream! {
+            if batch_size == 0 { return; }
             let mut last_key: Option<Vec<u8>> = None;
             let prefix_vec = prefix.to_vec();
 

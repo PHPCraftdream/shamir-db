@@ -1,7 +1,10 @@
 use crate::{FnBatch, FnCtx, FunctionRegistry, GlobalVars, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
+use std::thread;
+#[cfg(unix)]
+use std::{ffi::OsString, os::unix::ffi::OsStringExt, process::Command};
 
 use super::super::super::runtime::context::BatchContext;
 
@@ -61,6 +64,75 @@ impl ShamirFunction for GlobalBump {
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn rv_wasm_host_c51052df_context_put_never_exposes_missing_key() {
+    let context = Arc::new(BatchContext::new());
+    context.put("key", QueryValue::Int(0));
+    let start = Arc::new(Barrier::new(2));
+    let writer_context = Arc::clone(&context);
+    let writer_start = Arc::clone(&start);
+    let writer = thread::spawn(move || {
+        writer_start.wait();
+        for value in 1..=100_000 {
+            writer_context.put("key", QueryValue::Int(value));
+        }
+    });
+    start.wait();
+    for _ in 0..100_000 {
+        assert!(context.get("key").is_some(), "put exposed a missing key");
+    }
+    writer.join().expect("writer thread panicked");
+}
+
+#[test]
+fn rv_wasm_host_c51052df_global_set_never_exposes_missing_key() {
+    let globals = Arc::new(GlobalVars::new());
+    globals.set("key", QueryValue::Int(0));
+    let start = Arc::new(Barrier::new(2));
+    let writer_globals = Arc::clone(&globals);
+    let writer_start = Arc::clone(&start);
+    let writer = thread::spawn(move || {
+        writer_start.wait();
+        for value in 1..=100_000 {
+            writer_globals.set("key", QueryValue::Int(value));
+        }
+    });
+    start.wait();
+    for _ in 0..100_000 {
+        assert!(globals.get("key").is_some(), "set exposed a missing key");
+    }
+    writer.join().expect("writer thread panicked");
+}
+
+#[cfg(unix)]
+#[test]
+fn rv_wasm_host_a07b9019_seed_env_skips_non_unicode_entries() {
+    const CHILD_MODE: &str = "SHAMIR_A07B9019_SEED_ENV_CHILD";
+    if std::env::var_os(CHILD_MODE).is_some() {
+        let globals = GlobalVars::new();
+        globals.seed_env(&crate::EnvPolicy::default());
+        assert_eq!(
+            globals.get("env.SHAMIR_VALID"),
+            Some(QueryValue::Str("present".into()))
+        );
+        return;
+    }
+
+    let invalid_name = OsString::from_vec(b"SHAMIR_\xff".to_vec());
+    let invalid_value = OsString::from_vec(b"invalid-\xff-value".to_vec());
+    let status = Command::new(std::env::current_exe().expect("current test executable"))
+        .arg("--exact")
+        .arg("tests::runtime::context_tests::rv_wasm_host_a07b9019_seed_env_skips_non_unicode_entries")
+        .arg("--nocapture")
+        .env(CHILD_MODE, "1")
+        .env("SHAMIR_VALID", "present")
+        .env(invalid_name, "bad-name")
+        .env("SHAMIR_INVALID_VALUE", invalid_value)
+        .status()
+        .expect("run isolated seed_env test child");
+    assert!(status.success(), "seed_env child failed: {status}");
+}
 
 #[tokio::test]
 async fn batch_context_shares_between_functions() {

@@ -36,9 +36,14 @@ async fn quarantined_source() -> (ShamirDb, InProcessReplSource) {
             "prof_retry",
         ),
     );
-    db.execute("app", &batch.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "app",
+        &batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
     (db, source)
 }
 

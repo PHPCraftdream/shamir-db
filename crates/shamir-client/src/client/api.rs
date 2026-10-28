@@ -243,17 +243,23 @@ impl Client {
         password: Zeroizing<String>,
         roles: Vec<String>,
     ) -> Result<Vec<u8>, ClientError> {
-        let tag = {
-            let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
-            let canonical = shamir_query_types::hmac::canonical_create_scram_user(name, &roles);
-            shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
-        };
-        let req = DbRequest::CreateScramUser {
+        let mut req = DbRequest::CreateScramUser {
             name: name.to_string(),
             password: password.as_str().to_owned().into(),
             roles,
-            hmac: Some(tag),
+            hmac: None,
         };
+        let tag = {
+            let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+            let canonical =
+                shamir_query_types::hmac::canonical_db_request(&req).map_err(|error| {
+                    ClientError::Protocol(format!("canonical request failed: {error:?}"))
+                })?;
+            shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
+        };
+        if let DbRequest::CreateScramUser { hmac, .. } = &mut req {
+            *hmac = Some(tag);
+        }
         let result = self.roundtrip(&req).await;
         // Wipe the cleartext password copy placed into the request
         // immediately after the roundtrip, rather than waiting for `req`'s
@@ -282,16 +288,22 @@ impl Client {
     /// checked before the HMAC gate). The confirmation tag is computed from
     /// `self.session_id` — callers don't need to know about the HMAC plumbing.
     pub async fn set_replicator(&self, user: &str, on: bool) -> Result<(), ClientError> {
-        let tag = {
-            let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
-            let canonical = shamir_query_types::hmac::canonical_set_replicator(user, on);
-            shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
-        };
-        let req = DbRequest::SetReplicator {
+        let mut req = DbRequest::SetReplicator {
             user: user.to_string(),
             on,
-            hmac: Some(tag),
+            hmac: None,
         };
+        let tag = {
+            let key = shamir_connect::common::crypto::derive_session_hmac_key(&self.session_id);
+            let canonical =
+                shamir_query_types::hmac::canonical_db_request(&req).map_err(|error| {
+                    ClientError::Protocol(format!("canonical request failed: {error:?}"))
+                })?;
+            shamir_query_types::hmac::compute_tag_hex(&key, &canonical)
+        };
+        if let DbRequest::SetReplicator { hmac, .. } = &mut req {
+            *hmac = Some(tag);
+        }
         match self.roundtrip(&req).await? {
             DbResponse::ReplicatorSet { .. } => Ok(()),
             other => Err(ClientError::Protocol(format!(

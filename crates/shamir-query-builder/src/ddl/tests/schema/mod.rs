@@ -2,4 +2,5 @@
 
 pub mod function_ddl_tests;
 pub mod list_ddl_tests;
+pub mod rv_query_builder_e6f53e38;
 pub mod schema_ddl_tests;
