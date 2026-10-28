@@ -96,19 +96,17 @@ fn child_entrypoint_crit1() {
 }
 
 /// Spawn the CRIT-1 child (clean commit + sidecar write, NO crash).
-fn spawn_child_crit1(repo_path: &Path) -> std::process::ExitStatus {
+async fn spawn_child_crit1(repo_path: &Path) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "history_seed::child_entrypoint_crit1",
-            "--nocapture",
-        ])
-        .env(CHILD_SENTINEL_CRIT1, "1")
-        .env(REPO_PATH, repo_path)
-        .output()
-        .expect("spawn crit1 child")
-        .status
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args([
+        "--exact",
+        "history_seed::child_entrypoint_crit1",
+        "--nocapture",
+    ])
+    .env(CHILD_SENTINEL_CRIT1, "1")
+    .env(REPO_PATH, repo_path);
+    super::child_proc::run_crash_child("history_seed", cmd).await
 }
 
 /// CRIT-1 (#435) end-to-end proof: commit a tx (clean exit, durable WAL
@@ -124,11 +122,11 @@ async fn crit1_history_seed_failure_aborts_recovery_on_disk() {
     let repo_path = dir.path().join("repo.redb");
 
     // Child commits ONE record cleanly and writes the txn_id sidecar.
-    let status = spawn_child_crit1(&repo_path);
+    let (status, child_output) = spawn_child_crit1(&repo_path).await;
     assert!(
         status.success(),
         "crit1 child must exit cleanly (no crash — the WAL entry is durable); \
-         got {status:?}"
+         got {status:?}\n{child_output}"
     );
 
     // Reopen over the SAME on-disk image. The WAL entry the child committed
@@ -195,10 +193,10 @@ async fn crit1_no_fault_recovery_succeeds_on_disk() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_crit1(&repo_path);
+    let (status, child_output) = spawn_child_crit1(&repo_path).await;
     assert!(
         status.success(),
-        "crit1 child must exit cleanly; got {status:?}"
+        "crit1 child must exit cleanly; got {status:?}\n{child_output}"
     );
 
     // Defensive: ensure no stale fault env var leaks from a sibling test.

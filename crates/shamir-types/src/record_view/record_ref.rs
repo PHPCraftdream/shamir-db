@@ -9,6 +9,7 @@
 //! Static dispatch only: consumers take `&impl RecordRef`, never `dyn`.
 
 use crate::codecs::interned::{inner_value_to_query_value, record_view_to_query_value};
+use crate::codecs::CodecError;
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::record_value::RecordValue;
 use crate::record_view::scalar_ref::ScalarRef;
@@ -102,9 +103,9 @@ pub trait RecordRef {
 
     /// De-intern and convert the whole record to a [`QueryValue::Map`] with
     /// string keys. `InnerValue` delegates to the existing tree de-intern;
+    /// `RecordView` uses the new O(N) lens walker.
     ///
-    /// Returns `QueryValue::Null` on a de-intern error (missing key in interner).
-    fn to_query_value(&self, interner: &Interner) -> QueryValue;
+    fn to_query_value(&self, interner: &Interner) -> Result<QueryValue, CodecError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +219,8 @@ impl RecordRef for InnerValue {
         }
     }
 
-    fn to_query_value(&self, interner: &Interner) -> QueryValue {
-        inner_value_to_query_value(self, interner).unwrap_or(QueryValue::Null)
+    fn to_query_value(&self, interner: &Interner) -> Result<QueryValue, CodecError> {
+        inner_value_to_query_value(self, interner)
     }
 }
 
@@ -339,8 +340,8 @@ impl RecordRef for RecordView<'_> {
         });
     }
 
-    fn to_query_value(&self, interner: &Interner) -> QueryValue {
-        record_view_to_query_value(self, interner).unwrap_or(QueryValue::Null)
+    fn to_query_value(&self, interner: &Interner) -> Result<QueryValue, CodecError> {
+        record_view_to_query_value(self, interner)
     }
 }
 
@@ -382,11 +383,17 @@ impl<'a> HavingView<'a> {
     /// Build a `HavingView` over an aggregate-result `QueryValue`. The
     /// interner is used once to map each String key → `InternerKey`.
     pub fn new(row: &'a QueryValue, interner: &Interner) -> Self {
+        Self::new_with_resolver(row, &|name| interner.get_ind(name).map(|key| key.id()))
+    }
+
+    /// Build a view using a caller-provided name resolver, allowing transaction
+    /// overlay names to be resolved without mutating the base interner.
+    pub fn new_with_resolver(row: &'a QueryValue, resolve: &impl Fn(&str) -> Option<u64>) -> Self {
         let mut key_index: TMap<InternerKey, String> = new_map_wc(0);
         if let QueryValue::Map(map) = row {
             for (key_str, _val) in map {
-                if let Some(id) = interner.get_ind(key_str.as_str()) {
-                    key_index.insert(id, key_str.clone());
+                if let Some(id) = resolve(key_str.as_str()) {
+                    key_index.insert(InternerKey::new(id), key_str.clone());
                 }
             }
         }
@@ -534,9 +541,9 @@ impl<'a> RecordRef for HavingView<'a> {
         }
     }
 
-    fn to_query_value(&self, _interner: &Interner) -> QueryValue {
-        // The row is already a QueryValue; return a clone without conversion.
-        self.row.clone()
+    fn to_query_value(&self, _interner: &Interner) -> Result<QueryValue, CodecError> {
+        // The row is already a QueryValue; no de-interning can fail.
+        Ok(self.row.clone())
     }
 }
 

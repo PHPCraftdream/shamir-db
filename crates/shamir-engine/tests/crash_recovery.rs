@@ -40,10 +40,14 @@
 //! before Phase 4 leaves zero of each; a crash at/after it recovers both.
 #[path = "clean_horizon/admitted_field_id.rs"]
 mod admitted_field_id;
+#[path = "crash_recovery/child_proc.rs"]
+mod child_proc;
 #[path = "clean_horizon/crash_matrix.rs"]
 mod clean_horizon_crash_matrix;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures::StreamExt;
 use shamir_query_types::admin::CreateIndexOp;
@@ -271,13 +275,16 @@ async fn settle_background_drain(repo: &RepoInstance) {
 /// exits 0; normally the commit pipeline `process::abort()`s before this
 /// returns, so the parent observes an abnormal exit.
 async fn run_child_scenario(path: PathBuf) {
+    eprintln!("crash-child: open");
     let repo = open_repo(&path).await;
     let tbl = repo.get_table(TABLE).await.unwrap();
+    eprintln!("crash-child: create_index");
     tbl.create_index_v2(&fts_index_op()).await.unwrap();
 
     let body_id = field_id(&repo, &tbl, "body").await;
 
     let (mut tx, guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    eprintln!("crash-child: insert");
     tbl.insert_tx(
         &text_record(body_id, "shamir crash recovery atomicity"),
         Some(&mut tx),
@@ -287,14 +294,24 @@ async fn run_child_scenario(path: PathBuf) {
 
     // commit_tx will read SHAMIR_TEST_CRASH_AFTER and abort at the
     // matching seam. If the label is unknown it commits normally.
-    let _ = repo.commit_tx(tx).await;
+    eprintln!("crash-child: commit_tx");
+    let result = repo.commit_tx(tx).await;
+    eprintln!("crash-child: commit_tx returned {result:?}");
 
     // D2 P1d-2c: post-cutover the "phase7" seam (tx fully materialized + WAL
     // cleanup) lives in the background drainer, not the ack-path. Drive the
     // drainer so a `phase7` crash fires here. For the inline phases
     // (pre_commit..phase6_5) the process has already `process::abort`ed inside
     // `commit_tx` above and never reaches this line.
-    let _ = repo.drainer().drain_all(&repo).await;
+    let drainer = repo.drainer();
+    let drain = drainer.drain_all(&repo);
+    if tokio::time::timeout(Duration::from_secs(10), drain)
+        .await
+        .is_err()
+    {
+        eprintln!("crash-child: drain_all timed out");
+        std::process::exit(child_proc::CHILD_STALL_EXIT);
+    }
     settle_background_drain(&repo).await;
 
     drop(guard);
@@ -307,18 +324,16 @@ async fn run_child_scenario(path: PathBuf) {
 /// Spawn the crash child: re-exec THIS test binary with the child
 /// sentinel + crash phase + repo path set, running only the
 /// `child_entrypoint` test (`--exact`). Returns the child's exit status.
-fn spawn_child(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
+async fn spawn_child(phase: &str, repo_path: &Path) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    std::process::Command::new(exe)
-        // Run ONLY the child entrypoint test so the child does not
-        // recurse into the parent harness tests.
-        .args(["--exact", "child_entrypoint", "--nocapture"])
+    let mut cmd = tokio::process::Command::new(exe);
+    // Run ONLY the child entrypoint test so the child does not
+    // recurse into the parent harness tests.
+    cmd.args(["--exact", "child_entrypoint", "--nocapture"])
         .env(CHILD_SENTINEL, "1")
         .env(CRASH_AFTER, phase)
-        .env(REPO_PATH, repo_path)
-        .output()
-        .expect("spawn crash child")
-        .status
+        .env(REPO_PATH, repo_path);
+    child_proc::run_crash_child(phase, cmd).await
 }
 
 /// One full cycle: spawn a child that crashes at `phase`, then reopen the
@@ -328,32 +343,48 @@ async fn crash_then_recover(phase: &str) -> (usize, usize, usize) {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child(phase, &repo_path);
+    let (status, child_output) = spawn_child(phase, &repo_path).await;
+    assert_ne!(
+        status.code(),
+        Some(child_proc::CHILD_STALL_EXIT),
+        "child exited via CHILD_STALL_EXIT at {phase}: {child_output}"
+    );
     assert!(
         !status.success(),
-        "child must die abnormally on a process::abort() at phase {phase}; \
-         got a clean exit (status {status:?}) — the crash seam did not fire"
+        "child must die abnormally at {phase}: {status:?}\n{child_output}"
     );
+    let stage = Cell::new("open_repo");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        // === RESTART === reopen a fresh RepoInstance over the same on-disk
+        // redb image the killed child left behind.
+        let repo = open_repo(&repo_path).await;
 
-    // === RESTART === reopen a fresh RepoInstance over the same on-disk
-    // redb image the killed child left behind.
-    let repo = open_repo(&repo_path).await;
+        // Recover FIRST so the WAL replay writes any committed index postings
+        // to info_store before we register a backend to read them.
+        stage.set("recover_v2_inflight");
+        let replayed = repo.recover_v2_inflight().await.expect("recovery");
 
-    // Recover FIRST so the WAL replay writes any committed index postings
-    // to info_store before we register a backend to read them.
-    let replayed = repo.recover_v2_inflight().await.expect("recovery");
+        // `get_table` auto-loads the persisted index2 descriptors, so on the
+        // committed phases the FTS backend is already registered (with the
+        // child's original id) and reads the RECOVERED postings — no
+        // re-indexing happens here.
+        stage.set("get_table");
+        let tbl = repo.get_table(TABLE).await.unwrap();
+        stage.set("record counts");
+        let data = store_record_count(&tbl).await;
+        let fts = fts_hit_count(&tbl).await;
 
-    // `get_table` auto-loads the persisted index2 descriptors, so on the
-    // committed phases the FTS backend is already registered (with the
-    // child's original id) and reads the RECOVERED postings — no
-    // re-indexing happens here.
-    let tbl = repo.get_table(TABLE).await.unwrap();
-    let data = store_record_count(&tbl).await;
-    let fts = fts_hit_count(&tbl).await;
-
-    // tempdir drops here — the child process is already dead so the file
-    // is no longer open.
-    (replayed, data, fts)
+        // tempdir drops here — the child process is already dead so the file
+        // is no longer open.
+        (replayed, data, fts)
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "parent stalled in {} after {phase} crash\n{child_output}",
+            stage.get()
+        )
+    })
 }
 
 /// Child entrypoint: a `#[test]` that is a NO-OP in the parent process
@@ -372,6 +403,7 @@ fn child_entrypoint() {
         .build()
         .expect("child runtime");
     rt.block_on(run_child_scenario(path));
+    rt.shutdown_timeout(Duration::from_secs(5));
     // If we reach here the crash seam did not fire (unknown label); exit
     // cleanly so the parent's `!status.success()` assertion flags it.
 }
