@@ -131,7 +131,7 @@ impl TableManager {
 
         // 4. Keyset seek.
         if let Some((idx_name, _encoded_key, _after_id, _limit, _direction)) =
-            self.try_plan_keyset_seek(query, interner)
+            self.try_plan_keyset_seek_with_interner(query, interner, None)
         {
             return ExplainPlan {
                 plan_type: PlanType::KeysetSeek,
@@ -142,7 +142,7 @@ impl TableManager {
 
         // 5. ORDER BY + LIMIT fast path.
         if let Some((idx_name, take, skip, _direction)) =
-            self.try_plan_order_limit_fast_path(query, interner)
+            self.try_plan_order_limit_fast_path_with_context(query, interner, None)
         {
             return ExplainPlan {
                 plan_type: PlanType::OrderLimitFast,
@@ -239,12 +239,16 @@ pub(in crate::table::read) fn try_project_page_only(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-        .with_context(ctx);
+    let proj = exec::SelectProjection::new_with_context(
+        &query.select,
+        interner,
+        ctx.scalars.clone(),
+        Some(ctx),
+    )?;
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
         paged.push(crate::query::read::QueryRecord::Direct(
-            proj.project_value(record, interner),
+            proj.project_value(record, interner)?,
         ));
     }
 
@@ -317,14 +321,18 @@ pub(in crate::table::read) fn try_project_page_only_bytes(
     let page_end = skip.saturating_add(take).min(total_matches);
     let page_slice = &matched[page_start..page_end];
 
-    let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-        .with_context(ctx);
+    let proj = exec::SelectProjection::new_with_context(
+        &query.select,
+        interner,
+        ctx.scalars.clone(),
+        Some(ctx),
+    )?;
     let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
     for (rid, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
-            Ok(view) => proj.project_value(&view, interner),
+            Ok(view) => proj.project_value(&view, interner)?,
             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                Ok(iv) => proj.project_value(&iv, interner),
+                Ok(iv) => proj.project_value(&iv, interner)?,
                 Err(_) => {
                     corrupt.push(CorruptRecordRef {
                         table: table.to_string(),
@@ -379,25 +387,25 @@ pub(in crate::table::read) fn apply_select_value_bytes(
     corrupt: &mut Vec<CorruptRecordRef>,
 ) -> DbResult<Vec<QueryValue>> {
     let proj =
-        exec::SelectProjection::new(select, interner, ctx.scalars.clone())?.with_context(ctx);
-    Ok(matched
+        exec::SelectProjection::new_with_context(select, interner, ctx.scalars.clone(), Some(ctx))?;
+    matched
         .iter()
         .map(
             |(rid, bytes)| match shamir_types::record_view::RecordView::new(bytes) {
-                Ok(view) => proj.project_value(&view, interner),
+                Ok(view) => Ok(proj.project_value(&view, interner)?),
                 Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
-                    Ok(iv) => proj.project_value(&iv, interner),
+                    Ok(iv) => Ok(proj.project_value(&iv, interner)?),
                     Err(_) => {
                         corrupt.push(CorruptRecordRef {
                             table: table.to_string(),
                             id: *rid,
                         });
-                        QueryValue::Null
+                        Ok(QueryValue::Null)
                     }
                 },
             },
         )
-        .collect())
+        .collect()
 }
 
 /// Vector predicates have no row-level full-scan representation.

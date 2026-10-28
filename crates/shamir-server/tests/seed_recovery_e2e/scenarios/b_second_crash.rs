@@ -76,7 +76,8 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body() {
     let loop1 = follower::supervisor(&home1);
     ops::resume(&home1).await.expect("resume home-1");
     loop1.reconcile().await;
-    wait_converged(&home1, &admin, addr).await;
+    // Boxed: keeps the convergence wait out of the body's debug frame.
+    Box::pin(wait_converged(&home1, &admin, addr)).await;
     loop1.stop_all().await;
     let bookmark1 = follower::bookmark(&home1).await;
     assert_eq!(bookmark1, 2, "home-1 converged through leader version 2");
@@ -175,7 +176,8 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body() {
     );
     ops::resume(&home2).await.expect("resume home-2");
     loop2.reconcile().await;
-    wait_converged(&home2, &admin, addr).await;
+    // Boxed: keeps the convergence wait out of the body's debug frame.
+    Box::pin(wait_converged(&home2, &admin, addr)).await;
     assert_eq!(
         follower::bookmark(&home2).await,
         wire::current_version(&admin).await,

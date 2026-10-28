@@ -859,7 +859,8 @@ async fn shamir_with_failing_groups_table(
         std::sync::Arc::clone(system_repo.write_domain()),
     )
     .await
-    .unwrap();
+    .unwrap()
+    .with_interner(system_repo.repo_interner().await.unwrap());
 
     system_repo.install_table_for_test("groups", tbl);
 

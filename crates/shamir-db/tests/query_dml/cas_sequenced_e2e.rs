@@ -77,7 +77,7 @@ impl RecordValidator for CasValidator {
             .map(str::to_owned);
 
         // The materialized old record as QueryValue for canonical_hash.
-        let old_qv = old.map(|f| f.to_query_value());
+        let old_qv = old.map(|f| f.to_query_value().unwrap());
 
         match (old_qv, presented) {
             // No prior version and no prev-hash asserted → first write, accept.

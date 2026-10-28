@@ -19,7 +19,8 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::record_id::RecordId;
 
 use crate::table::read::execution::dispatch::{
-    collect_versions, intern_simple_projection_ids, is_select_all, is_select_simple, DynBatchStream,
+    collect_versions, intern_simple_projection_ids_with_context, is_select_all, is_select_simple,
+    DynBatchStream,
 };
 
 impl TableManager {
@@ -45,8 +46,12 @@ impl TableManager {
         let skip = skip as usize;
         let limit = take.map(|t| t as usize);
 
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-            .with_context(ctx);
+        let proj = exec::SelectProjection::new_with_context(
+            &query.select,
+            interner,
+            ctx.scalars.clone(),
+            Some(ctx),
+        )?;
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -97,7 +102,7 @@ impl TableManager {
                             if let Some(lim) = limit {
                                 if idx < skip + lim {
                                     let row =
-                                        QueryRecord::Direct(proj.project_value($rec, interner));
+                                        QueryRecord::Direct(proj.project_value($rec, interner)?);
                                     if let Some(meter) = ctx.row_byte_meter {
                                         meter.charge_record(&row)?;
                                     }
@@ -107,7 +112,7 @@ impl TableManager {
                                     result.push(row);
                                 }
                             } else {
-                                let row = QueryRecord::Direct(proj.project_value($rec, interner));
+                                let row = QueryRecord::Direct(proj.project_value($rec, interner)?);
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge_record(&row)?;
                                 }
@@ -209,7 +214,7 @@ impl TableManager {
         // For plain projection, intern the selected field ids once per query.
         // If interning fails (unknown field), fall back to the Name path.
         let id_projection_ids: Option<Vec<InternerKey>> = if use_id_encoding && !id_is_all {
-            intern_simple_projection_ids(&query.select, interner)
+            intern_simple_projection_ids_with_context(&query.select, ctx)
         } else {
             None
         };
@@ -217,8 +222,12 @@ impl TableManager {
         // If projection interning failed, fall back to Name for the whole query.
         let use_id_encoding = use_id_encoding && (id_is_all || id_projection_ids.is_some());
 
-        let proj = exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-            .with_context(ctx);
+        let proj = exec::SelectProjection::new_with_context(
+            &query.select,
+            interner,
+            ctx.scalars.clone(),
+            Some(ctx),
+        )?;
 
         // When a tx context is present, use tx-aware list_stream_tx so SSI
         // read-set recording is fused into this single scan (see read_collecting).
@@ -300,7 +309,7 @@ impl TableManager {
                                         QueryRecord::IdBytes(ByteBuf::from(bytes.as_ref()))
                                     }
                                     Err(_) => {
-                                        QueryRecord::Direct(proj.project_value(&view, interner))
+                                        QueryRecord::Direct(proj.project_value(&view, interner)?)
                                     }
                                 }
                             };
@@ -344,11 +353,13 @@ impl TableManager {
                                                 projected.as_ref(),
                                             )),
                                             Err(_) => QueryRecord::Direct(
-                                                proj.project_value(iv, interner),
+                                                proj.project_value(iv, interner)?,
                                             ),
                                         }
                                     }
-                                    Err(_) => QueryRecord::Direct(proj.project_value(iv, interner)),
+                                    Err(_) => {
+                                        QueryRecord::Direct(proj.project_value(iv, interner)?)
+                                    }
                                 }
                             };
                             if let Some(meter) = ctx.row_byte_meter {
@@ -384,7 +395,7 @@ impl TableManager {
                                 break;
                             }
                         }
-                        let row = QueryRecord::Direct(proj.project_value($rec, interner));
+                        let row = QueryRecord::Direct(proj.project_value($rec, interner)?);
                         if let Some(meter) = ctx.row_byte_meter {
                             meter.charge_record(&row)?;
                         }

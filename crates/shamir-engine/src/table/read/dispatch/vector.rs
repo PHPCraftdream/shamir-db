@@ -9,8 +9,8 @@ use futures::StreamExt;
 use crate::index2::backend::{IndexQuery, IndexResult};
 use crate::index2::vector::vector_backend::VectorBackend;
 use crate::index2::vector::{SearchOpts, VectorAdapter as _};
-use crate::query::filter::eval::{compile_filter, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::{compile_filter_with_context, eval::intern_field_path, FilterNode};
 use crate::query::read::{exec, CorruptRecordRef, QueryResult, ReadQuery};
 use crate::table::support::storage::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
@@ -67,7 +67,10 @@ impl TableManager {
         let hnsw = adapter.as_hnsw_adapter().ok_or_else(|| {
             DbError::Internal("snapshot vector scoring requires HNSW adapter".into())
         })?;
-        let residual = fvq.residual.as_ref().map(|f| compile_filter(f, interner));
+        let residual = fvq
+            .residual
+            .as_ref()
+            .map(|f| compile_filter_with_context(f, ctx));
         let k = fvq.k.min(MAX_TOPK) as usize;
         let mut ranked: Vec<(RecordId, f32, Bytes)> = Vec::new();
         let mut scanned = 0;
@@ -208,8 +211,10 @@ impl TableManager {
         };
 
         // Compile the residual predicate once (reused across retry iterations).
-        let residual_cb: Option<FilterNode> =
-            fvq.residual.as_ref().map(|f| compile_filter(f, interner));
+        let residual_cb: Option<FilterNode> = fvq
+            .residual
+            .as_ref()
+            .map(|f| compile_filter_with_context(f, ctx));
 
         let k = fvq.k;
         let oversample = resolve_oversample(fvq.oversample);
@@ -519,7 +524,7 @@ impl TableManager {
         let filter_cb: Option<Arc<FilterNode>> = query
             .r#where
             .as_ref()
-            .map(|f| Arc::new(compile_filter(f, interner)));
+            .map(|f| Arc::new(compile_filter_with_context(f, ctx)));
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
         let has_order = query.order_by.is_some();

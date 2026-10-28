@@ -134,10 +134,10 @@ pub(crate) fn apply_select_value_with_context(
     ctx: &FilterContext<'_>,
 ) -> DbResult<Vec<QueryValue>> {
     let proj = SelectProjection::new(select, interner, ctx.scalars.clone())?.with_context(ctx);
-    Ok(records
+    records
         .iter()
-        .map(|(_, record)| proj.project_value(record, interner))
-        .collect())
+        .map(|(_, record)| proj.project_value(record, interner).map_err(DbError::from))
+        .collect()
 }
 
 // ============================================================================
@@ -163,7 +163,11 @@ pub fn has_aggregates(select: &Select) -> bool {
 /// Fallible (RU8 acceptance 8): a metered touch over the per-repo interner
 /// quota surfaces the typed `interner_quota_exceeded` error instead of being
 /// silently absorbed.
-pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) -> DbResult<()> {
+pub(crate) fn pre_intern_select_keys(
+    select: &Select,
+    interner: &Interner,
+    resolve_existing: impl Fn(&str) -> Option<u64>,
+) -> DbResult<()> {
     for item in &select.items {
         let key = match item {
             SelectItem::Field { path, alias } => {
@@ -193,6 +197,9 @@ pub(crate) fn pre_intern_select_keys(select: &Select, interner: &Interner) -> Db
             SelectItem::Function { alias, name, .. } => alias.as_deref().unwrap_or(name.as_str()),
             _ => continue,
         };
+        if resolve_existing(key).is_some() {
+            continue;
+        }
         // touch_ind ensures the key is interned (creates if missing).
         interner
             .touch_ind(key)

@@ -21,6 +21,7 @@ pub(crate) use evaluation::semantics::numeric_cmp;
 
 // Re-export DTOs from the shared types crate.
 pub use compile::{compile_filter, try_compile_filter};
+pub(crate) use compile::{compile_filter_with_context, try_compile_filter_with_context};
 pub use cond_cache::{cond_cache_get, prescan_cond_cache, CondCache};
 pub use eval_context::FilterContext;
 pub use field_path_cache::{prescan_field_path_cache, FieldPathCache};

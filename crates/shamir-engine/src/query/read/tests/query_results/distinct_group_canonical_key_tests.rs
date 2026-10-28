@@ -147,19 +147,21 @@ fn rv_funclib_5fa455f7_group_key_item_complex_dec_big_numeric_classes() {
     let interner = Interner::default();
     let one = GroupKeyItem::Num(NumericKey::Int(1));
     assert_eq!(
-        group_key_item_complex(&InnerValue::Dec(Decimal::from(1)), &interner),
+        group_key_item_complex(&InnerValue::Dec(Decimal::from(1)), &interner, None),
         one
     );
     assert_eq!(
-        group_key_item_complex(&InnerValue::Big(BigInt::from(1)), &interner),
+        group_key_item_complex(&InnerValue::Big(BigInt::from(1)), &interner, None),
         one
     );
     let two_pow_63 = 1i128 << 63;
     let dec_key = group_key_item_complex(
         &InnerValue::Dec(Decimal::from_i128_with_scale(two_pow_63, 0)),
         &interner,
+        None,
     );
-    let big_key = group_key_item_complex(&InnerValue::Big(BigInt::from(two_pow_63)), &interner);
+    let big_key =
+        group_key_item_complex(&InnerValue::Big(BigInt::from(two_pow_63)), &interner, None);
     assert!(matches!(
         dec_key,
         GroupKeyItem::Num(NumericKey::BigBits { .. })

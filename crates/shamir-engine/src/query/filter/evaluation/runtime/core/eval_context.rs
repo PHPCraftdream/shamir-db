@@ -1,11 +1,12 @@
 //! FilterContext — evaluation context for filter callbacks.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::batch::{BatchLimits, VisibilityWait};
-use shamir_types::core::interner::Interner;
+use shamir_tx::OVERLAY_ID_BASE;
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
@@ -49,6 +50,9 @@ pub struct FilterContext<'a> {
     /// `pub` field would let read-view holders mutate through it. Engine
     /// readers use the field directly; no cross-crate reader exists.
     pub(crate) interner: &'a Interner,
+    /// O(1) reverse resolver snapshot for this transaction's overlay names.
+    pub(crate) interner_overlay: Option<Arc<shamir_collections::TFxMap<u64, String>>>,
+    pub(crate) interner_overlay_ids: Option<Arc<shamir_collections::TFxMap<String, u64>>>,
     pub resolved_refs: &'a TMap<String, QueryResult>,
     /// Scalar function resolver for `FnCall` dispatch. Defaults to
     /// built-ins only ([`ScalarResolver::builtins_only`]); a per-DB
@@ -128,6 +132,87 @@ fn builtins_only_resolver() -> ScalarResolver {
 }
 
 impl<'a> FilterContext<'a> {
+    pub(crate) fn resolve_query_value(
+        &self,
+        value: &shamir_types::types::value::InnerValue,
+    ) -> Result<QueryValue, shamir_types::codecs::CodecError> {
+        match &self.interner_overlay {
+            Some(overlay) => {
+                shamir_types::codecs::interned::inner_value_to_query_value_with(value, &|id| {
+                    if id >= OVERLAY_ID_BASE {
+                        overlay.get(&id).cloned()
+                    } else {
+                        self.interner
+                            .get_str(&InternerKey::new(id))
+                            .map(|name| name.to_string())
+                    }
+                })
+            }
+            None => {
+                shamir_types::codecs::interned::inner_value_to_query_value(value, self.interner)
+            }
+        }
+    }
+
+    pub(crate) fn with_overlay_snapshot(
+        mut self,
+        reverse: Option<Arc<shamir_collections::TFxMap<u64, String>>>,
+    ) -> Self {
+        self.interner_overlay = reverse;
+        self
+    }
+
+    pub(crate) fn with_overlay_ids_snapshot(
+        mut self,
+        ids: Option<Arc<shamir_collections::TFxMap<String, u64>>>,
+    ) -> Self {
+        self.interner_overlay_ids = ids;
+        self
+    }
+
+    pub(crate) fn with_read_overlay(
+        mut self,
+        overlay: &scc::HashMap<String, u64, shamir_collections::THasher>,
+    ) -> Self {
+        if overlay.is_empty() {
+            return self;
+        }
+        let mut reverse = shamir_collections::new_fx_map_wc(0);
+        let mut ids = shamir_collections::new_fx_map();
+        overlay.iter_sync(|name, id| {
+            reverse.insert(*id, name.clone());
+            ids.insert(name.clone(), *id);
+            true
+        });
+        self.interner_overlay_ids = Some(Arc::new(ids));
+        self.interner_overlay = Some(Arc::new(reverse));
+        self
+    }
+
+    pub(crate) fn clone_with_read_overlay(
+        &self,
+        overlay: &scc::HashMap<String, u64, shamir_collections::THasher>,
+    ) -> Self {
+        let mut cloned = Self::new(self.interner, self.resolved_refs)
+            .with_scalars(self.scalars.clone())
+            .with_params(self.params);
+        cloned.max_accumulator_bytes = self.max_accumulator_bytes;
+        cloned.read_visibility_budget = self.read_visibility_budget;
+        cloned.read_visibility_scope = self.read_visibility_scope;
+        cloned.row_byte_meter = self.row_byte_meter;
+        cloned.cond_cache = self.cond_cache;
+        cloned.field_path_cache = self.field_path_cache;
+        cloned.query_ref_cache = self.query_ref_cache;
+        cloned.with_read_overlay(overlay)
+    }
+
+    pub(crate) fn resolve_interner_id(&self, name: &str) -> Option<u64> {
+        self.interner
+            .get_ind(name)
+            .map(|key| key.id())
+            .or_else(|| self.interner_overlay_ids.as_ref()?.get(name).copied())
+    }
+
     pub fn new(interner: &'a Interner, resolved_refs: &'a TMap<String, QueryResult>) -> Self {
         Self {
             read_visibility_budget: Some(Duration::from_millis(5000)),
@@ -135,6 +220,8 @@ impl<'a> FilterContext<'a> {
             row_byte_meter: None,
             max_accumulator_bytes: None,
             interner,
+            interner_overlay: None,
+            interner_overlay_ids: None,
             resolved_refs,
             scalars: builtins_only_resolver(),
             params: empty_params(),

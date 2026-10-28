@@ -4,7 +4,6 @@
 use bytes::Bytes;
 use shamir_funclib::agg::{Aggregator, DistinctWrapper};
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
 use shamir_types::types::common::new_map_wc;
@@ -18,7 +17,9 @@ use crate::query::filter::{
 };
 use crate::query::read::{AggregateField, Select, SelectItem};
 
-use super::accumulator::{intern_field_path_keys, step_aggregate_input, AggAccum, AggState};
+use super::accumulator::{
+    intern_field_path_keys_with_overlay, step_aggregate_input, AggAccum, AggState,
+};
 use super::function_inputs::{
     aggregate_accumulation_error, make_aggregate_fn, resolve_aggregate_input,
 };
@@ -86,7 +87,17 @@ pub(in crate::query::read) fn build_aggregate_object(
                         AggregateField::All => format!("{:?}", func).to_lowercase(),
                     },
                 };
-                agg_slots.push((key, AggAccum::new(*func, field, interner), input.as_ref()));
+                agg_slots.push((
+                    key,
+                    AggAccum::new_with_snapshots(
+                        *func,
+                        field,
+                        interner,
+                        ctx.interner_overlay_ids.as_deref(),
+                        ctx.interner_overlay.clone(),
+                    ),
+                    input.as_ref(),
+                ));
             }
             SelectItem::Field { path, alias } => {
                 let default_key = path.last().map(|s| s.as_str()).unwrap_or("");
@@ -112,7 +123,14 @@ pub(in crate::query::read) fn build_aggregate_object(
                     },
                 };
                 let (field_path, all_field) = match field {
-                    AggregateField::Field(p) => (intern_field_path_keys(p, interner), false),
+                    AggregateField::Field(p) => (
+                        intern_field_path_keys_with_overlay(
+                            p,
+                            interner,
+                            ctx.interner_overlay_ids.as_deref(),
+                        ),
+                        false,
+                    ),
                     AggregateField::All => (None, true),
                 };
                 let agg = make_aggregate_fn(name, args, ctx)?;
@@ -165,6 +183,8 @@ pub(in crate::query::read) fn build_aggregate_object(
     let input_ctx = FilterContext::new(interner, ctx.resolved_refs)
         .with_params(ctx.params)
         .with_scalars(ctx.scalars.clone())
+        .with_overlay_snapshot(ctx.interner_overlay.clone())
+        .with_overlay_ids_snapshot(ctx.interner_overlay_ids.clone())
         .with_cond_cache(&cond_cache)
         .with_field_path_cache(&field_path_cache)
         .with_query_ref_cache(&query_ref_cache);
@@ -205,13 +225,29 @@ pub(in crate::query::read) fn build_aggregate_object(
                             agg.accumulate(&value)
                                 .map_err(aggregate_accumulation_error)?;
                         }
-                    } else if let Some(value) =
-                        view.with_ref(|r| fn_value_for_aggregator(r, path, *all_field, interner))
-                    {
-                        // Preserve legacy field-input error handling.
-                        if let Err(error) = agg.accumulate(&value) {
-                            if error.code.starts_with("result_too_large: ResultBytes ") {
-                                return Err(aggregate_accumulation_error(error));
+                    } else {
+                        let value = if *all_field {
+                            Some(view.with_ref(|r| {
+                                if ctx.interner_overlay.is_some() {
+                                    let mut inner = new_map_wc(0);
+                                    r.for_each_field(&mut |key, value| {
+                                        inner.insert(key, value);
+                                    });
+                                    let inner = InnerValue::Map(inner);
+                                    ctx.resolve_query_value(&inner)
+                                } else {
+                                    r.to_query_value(interner)
+                                }
+                            })?)
+                        } else {
+                            view.with_ref(|r| fn_value_for_aggregator(r, path, ctx))
+                        };
+                        if let Some(value) = value {
+                            // Preserve legacy field-input error handling.
+                            if let Err(error) = agg.accumulate(&value) {
+                                if error.code.starts_with("result_too_large: ResultBytes ") {
+                                    return Err(aggregate_accumulation_error(error));
+                                }
                             }
                         }
                     }
@@ -249,7 +285,11 @@ pub(in crate::query::read) fn build_aggregate_object(
         let val = group_records
             .first()
             .and_then(|(_, bytes)| {
-                let keys = intern_field_path_keys(path, interner)?;
+                let keys = intern_field_path_keys_with_overlay(
+                    path,
+                    interner,
+                    ctx.interner_overlay_ids.as_deref(),
+                )?;
                 match RecordView::new(bytes) {
                     Ok(v) => v
                         .scalar_at(keys.as_slice())
@@ -257,14 +297,14 @@ pub(in crate::query::read) fn build_aggregate_object(
                         .or_else(|| {
                             // Container leaf — materialise once.
                             v.materialize_at(keys.as_slice())
-                                .and_then(|iv| inner_value_to_query_value(&iv, interner).ok())
+                                .and_then(|iv| ctx.resolve_query_value(&iv).ok())
                         }),
                     Err(_) => InnerValue::from_bytes(bytes.as_ref()).ok().and_then(|iv| {
                         iv.scalar_at(keys.as_slice())
                             .map(scalar_ref_to_query)
                             .or_else(|| {
                                 iv.materialize_at(keys.as_slice())
-                                    .and_then(|v| inner_value_to_query_value(&v, interner).ok())
+                                    .and_then(|v| ctx.resolve_query_value(&v).ok())
                             })
                     }),
                 }
@@ -287,6 +327,8 @@ pub(in crate::query::read) fn build_aggregate_object(
         let fn_ctx = FilterContext::new(interner, ctx.resolved_refs)
             .with_params(ctx.params)
             .with_scalars(ctx.scalars.clone())
+            .with_overlay_snapshot(ctx.interner_overlay.clone())
+            .with_overlay_ids_snapshot(ctx.interner_overlay_ids.clone())
             .with_cond_cache(&cond_cache)
             .with_field_path_cache(&field_path_cache)
             .with_query_ref_cache(&query_ref_cache);
@@ -348,12 +390,8 @@ impl<'a> RowView<'a> {
 fn fn_value_for_aggregator(
     record: &dyn RecordRef,
     path: &Option<Vec<InternerKey>>,
-    all_field: bool,
-    interner: &Interner,
+    ctx: &FilterContext<'_>,
 ) -> Option<QueryValue> {
-    if all_field {
-        return Some(record.to_query_value(interner));
-    }
     let path = path.as_deref()?;
     // Try scalar first (the hot case): no Value materialisation.
     if let Some(s) = record.scalar_at(path) {
@@ -362,7 +400,7 @@ fn fn_value_for_aggregator(
     // Container / Dec / Big leaf — materialise this one field only.
     record
         .materialize_at(path)
-        .and_then(|iv| inner_value_to_query_value(&iv, interner).ok())
+        .and_then(|iv| ctx.resolve_query_value(&iv).ok())
 }
 
 /// Convert a `ScalarRef` to a `QueryValue` (the only leaf-level conversion;

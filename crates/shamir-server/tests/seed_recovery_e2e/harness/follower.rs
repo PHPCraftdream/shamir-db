@@ -47,9 +47,10 @@ pub async fn fresh_in_memory() -> ShamirDb {
 /// Open a seeded/installed follower home from disk. `init_seed` runs the
 /// boot gate: an abandoned (incomplete) installation is never registered.
 pub async fn open_home(data_dir: &Path) -> ShamirDb {
-    ShamirDb::init_seed(SystemStoreConfig::Fjall(
+    // Boxed: keeps the in-process engine future off the debug test-thread stack.
+    Box::pin(ShamirDb::init_seed(SystemStoreConfig::Fjall(
         data_dir.join("shamir_db_meta.redb"),
-    ))
+    )))
     .await
     .expect("open follower home")
 }
@@ -60,8 +61,9 @@ pub async fn read_refused_resync(home: &ShamirDb, table: &str) -> bool {
     let mut batch = Batch::new();
     batch.id("read");
     batch.query("rows", Query::with_repo(wire::REPO, table));
+    // Boxed: keeps the in-process engine future off the debug test-thread stack.
     matches!(
-        home.execute(wire::DB, &batch.build()).await,
+        Box::pin(home.execute(wire::DB, &batch.build())).await,
         Err(BatchError::ResyncRequired { .. })
     )
 }
@@ -70,7 +72,10 @@ pub async fn rows(home: &ShamirDb, table: &str) -> Vec<QueryValue> {
     let mut batch = Batch::new();
     batch.id("read");
     batch.query("rows", Query::with_repo(wire::REPO, table));
-    let response = home.execute(wire::DB, &batch.build()).await.expect("read");
+    // Boxed: keeps the in-process engine future off the debug test-thread stack.
+    let response = Box::pin(home.execute(wire::DB, &batch.build()))
+        .await
+        .expect("read");
     let result = &response.results["rows"];
     assert!(!result.skipped, "home read skipped: {result:?}");
     assert!(
@@ -101,8 +106,8 @@ pub async fn status_of(home: &ShamirDb, name: &str) -> Option<QueryValue> {
     let mut batch = Batch::new();
     batch.id("status");
     batch.op("status", ddl::replication_status());
-    let response = home
-        .execute(wire::DB, &batch.build())
+    // Boxed: keeps the in-process engine future off the debug test-thread stack.
+    let response = Box::pin(home.execute(wire::DB, &batch.build()))
         .await
         .expect("status");
     let entry = &response.results["status"];
@@ -172,7 +177,8 @@ pub async fn wait_until<F, Fut>(
 {
     let end = tokio::time::Instant::now() + deadline;
     loop {
-        match tokio::time::timeout_at(end, condition()).await {
+        // Boxed: the polled condition drives the in-process engine.
+        match tokio::time::timeout_at(end, Box::pin(condition())).await {
             Ok(true) => return,
             Ok(false) => {}
             Err(_) => break,
@@ -229,10 +235,14 @@ pub async fn wait_until<F, Fut>(
             Err(error) => format!("connect error: {error:?}"),
         }
     };
-    let (follower_snapshot, leader_snapshot) = tokio::join!(
-        tokio::time::timeout(Duration::from_secs(3), follower),
-        tokio::time::timeout(Duration::from_secs(3), leader),
-    );
+    // Boxed: the cold timeout diagnostics stay out of this future's inline state.
+    let (follower_snapshot, leader_snapshot) = Box::pin(async {
+        tokio::join!(
+            tokio::time::timeout(Duration::from_secs(3), follower),
+            tokio::time::timeout(Duration::from_secs(3), leader),
+        )
+    })
+    .await;
     panic!(
         "timed out waiting for {what} (deadline {deadline:?}); follower={follower_snapshot:?}; leader Hello={leader_snapshot:?}"
     );

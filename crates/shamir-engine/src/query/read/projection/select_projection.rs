@@ -1,6 +1,8 @@
 //! Pre-resolved SELECT projection — avoids re-interning paths per record.
 
-use crate::query::filter::eval::{intern_field_path, resolve_filter_query};
+use std::sync::Arc;
+
+use crate::query::filter::eval::resolve_filter_query;
 use crate::query::filter::{
     prescan_cond_cache, prescan_field_path_cache, prescan_query_ref_cache, CondCache,
     FieldPathCache, FilterContext, FilterValue, FnCall, QueryRefCache,
@@ -9,6 +11,7 @@ use crate::query::read::{QueryResult, Select, SelectItem};
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::inner_value_to_query_value;
+use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::{new_map_wc, TMap};
@@ -71,6 +74,10 @@ pub struct SelectProjection {
     /// Stored once in `new()`, cloned per-record into the `FilterContext`
     /// (cheap — `ScalarResolver` wraps an `Arc`).
     pub(in crate::query::read) scalars: ScalarResolver,
+    pub(in crate::query::read) interner_overlay:
+        Option<Arc<shamir_collections::TFxMap<u64, String>>>,
+    pub(in crate::query::read) interner_overlay_ids:
+        Option<Arc<shamir_collections::TFxMap<String, u64>>>,
 }
 
 impl SelectProjection {
@@ -86,6 +93,15 @@ impl SelectProjection {
     /// evaluation, including a `Select` built directly by Rust code that
     /// bypasses the wire parser.
     pub fn new(select: &Select, interner: &Interner, scalars: ScalarResolver) -> DbResult<Self> {
+        Self::new_with_context(select, interner, scalars, None)
+    }
+
+    pub(crate) fn new_with_context(
+        select: &Select,
+        interner: &Interner,
+        scalars: ScalarResolver,
+        ctx: Option<&FilterContext<'_>>,
+    ) -> DbResult<Self> {
         // #1069 Defect 1: `SELECT *` combined with other projected items used
         // to silently drop the extras — `is_all` went true the moment ANY
         // item was `All`, and the branch below then discarded `fields`/
@@ -108,6 +124,8 @@ impl SelectProjection {
         }
         let is_all = select.items.is_empty() || has_all;
 
+        let interner_overlay = ctx.and_then(|ctx| ctx.interner_overlay.clone());
+        let interner_overlay_ids = ctx.and_then(|ctx| ctx.interner_overlay_ids.clone());
         let (fields, funcs) = if is_all {
             (Vec::new(), Vec::new())
         } else {
@@ -119,7 +137,13 @@ impl SelectProjection {
                         // F10: convert raw `u64` IDs to `InternerKey` ONCE at
                         // projection-build time so `project_value` avoids
                         // re-wrapping every segment per record.
-                        let interned = intern_field_path(path, interner)
+                        let interned = path
+                            .iter()
+                            .map(|part| {
+                                ctx.and_then(|ctx| ctx.resolve_interner_id(part))
+                                    .or_else(|| interner.get_ind(part).map(|key| key.id()))
+                            })
+                            .collect::<Option<Vec<_>>>()
                             .map(|ids| ids.iter().map(|&id| InternerKey::new(id)).collect());
                         let key = alias
                             .clone()
@@ -192,15 +216,22 @@ impl SelectProjection {
         // caches for every record instead of re-running `compile_filter` /
         // `intern_field_path` / path-parsing per row per node.
         let mut funcs_cond_cache: CondCache = shamir_types::types::common::new_map();
-        let mut funcs_field_path_cache: FieldPathCache = shamir_types::types::common::new_map();
+        let funcs_field_path_cache: FieldPathCache = if interner_overlay.is_none() {
+            let mut cache = shamir_types::types::common::new_map();
+            for (_, fv) in &funcs {
+                prescan_field_path_cache(fv, interner, &mut cache);
+            }
+            cache
+        } else {
+            shamir_types::types::common::new_map()
+        };
         let mut funcs_query_ref_cache: QueryRefCache = shamir_types::types::common::new_map();
         for (_, fv) in &funcs {
             prescan_cond_cache(fv, interner, &mut funcs_cond_cache);
-            prescan_field_path_cache(fv, interner, &mut funcs_field_path_cache);
             prescan_query_ref_cache(fv, &mut funcs_query_ref_cache);
         }
 
-        Ok(Self {
+        let mut projection = Self {
             is_all,
             fields,
             funcs,
@@ -210,7 +241,18 @@ impl SelectProjection {
             funcs_field_path_cache,
             funcs_query_ref_cache,
             scalars,
-        })
+            interner_overlay,
+            interner_overlay_ids,
+        };
+        if let Some(ctx) = ctx {
+            projection.resolved_refs = ctx.resolved_refs.clone();
+            projection.params = ctx.params.clone();
+            projection.scalars = ctx.scalars.clone();
+            for cell in projection.funcs_query_ref_cache.values_mut() {
+                *cell = std::sync::OnceLock::new();
+            }
+        }
+        Ok(projection)
     }
 
     /// Bind this fresh projection to one execution. Owned snapshots cannot
@@ -219,6 +261,8 @@ impl SelectProjection {
         self.resolved_refs = ctx.resolved_refs.clone();
         self.params = ctx.params.clone();
         self.scalars = ctx.scalars.clone();
+        self.interner_overlay = ctx.interner_overlay.clone();
+        self.interner_overlay_ids = ctx.interner_overlay_ids.clone();
         for cell in self.funcs_query_ref_cache.values_mut() {
             *cell = std::sync::OnceLock::new();
         }
@@ -229,32 +273,76 @@ impl SelectProjection {
     ///
     /// Mirrors the deleted `project` exactly — same branching, same field/func
     /// handling — but builds a `QueryValue` (string-keyed) map.
+    fn resolve_interner_name(
+        interner: &Interner,
+        overlay: &shamir_collections::TFxMap<u64, String>,
+        id: u64,
+    ) -> Option<String> {
+        if id >= shamir_tx::OVERLAY_ID_BASE {
+            return overlay.get(&id).cloned();
+        }
+        interner
+            .get_str(&InternerKey::new(id))
+            .map(|name| name.to_string())
+    }
+
     pub fn project_value(
         &self,
         record: &(impl RecordRef + ?Sized),
         interner: &Interner,
-    ) -> QueryValue {
+    ) -> Result<QueryValue, CodecError> {
         if self.is_all {
+            if let Some(overlay) = &self.interner_overlay {
+                let mut inner = shamir_types::types::common::new_map_wc(0);
+                record.for_each_field(&mut |key, value| {
+                    inner.insert(key, value);
+                });
+                return shamir_types::codecs::interned::inner_value_to_query_value_with(
+                    &shamir_types::types::value::InnerValue::Map(inner),
+                    &|id| {
+                        if id >= shamir_tx::OVERLAY_ID_BASE {
+                            overlay.get(&id).cloned()
+                        } else {
+                            interner
+                                .get_str(&InternerKey::new(id))
+                                .map(|name| name.to_string())
+                        }
+                    },
+                );
+            }
             return record.to_query_value(interner);
         }
         if self.fields.is_empty() && self.funcs.is_empty() {
-            return QueryValue::Map(shamir_types::types::common::new_map_wc(0));
+            return Ok(QueryValue::Map(shamir_types::types::common::new_map_wc(0)));
         }
         let mut obj = shamir_types::types::common::new_map_wc(self.fields.len() + self.funcs.len());
         for (interned_path, key) in &self.fields {
             // F10: `interned_path` is already `&Vec<InternerKey>` — pass
             // directly to `materialize_at` (no per-row `SmallVec` rebuild).
-            let val = interned_path
+            let val = match interned_path
                 .as_ref()
-                .and_then(|p| record.materialize_at(p))
-                .map(|v| inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null))
-                .unwrap_or(QueryValue::Null);
+                .and_then(|path| record.materialize_at(path))
+            {
+                Some(value) => {
+                    if let Some(overlay) = &self.interner_overlay {
+                        shamir_types::codecs::interned::inner_value_to_query_value_with(
+                            &value,
+                            &|id| Self::resolve_interner_name(interner, overlay, id),
+                        )?
+                    } else {
+                        inner_value_to_query_value(&value, interner)?
+                    }
+                }
+                None => QueryValue::Null,
+            };
             obj.insert(key.clone(), val);
         }
         if !self.funcs.is_empty() {
             let ctx = FilterContext::new(interner, &self.resolved_refs)
                 .with_params(&self.params)
                 .with_scalars(self.scalars.clone())
+                .with_overlay_snapshot(self.interner_overlay.clone())
+                .with_overlay_ids_snapshot(self.interner_overlay_ids.clone())
                 .with_cond_cache(&self.funcs_cond_cache)
                 .with_field_path_cache(&self.funcs_field_path_cache)
                 .with_query_ref_cache(&self.funcs_query_ref_cache);
@@ -288,6 +376,6 @@ impl SelectProjection {
                 obj.insert(key.clone(), val);
             }
         }
-        QueryValue::Map(obj)
+        Ok(QueryValue::Map(obj))
     }
 }

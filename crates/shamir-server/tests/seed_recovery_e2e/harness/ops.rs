@@ -32,8 +32,8 @@ pub async fn create_subscription(home: &ShamirDb, upstream: &str, paused: bool) 
             ddl::subscription("sub", upstream, wire::PUBLICATION, "seedprof")
         },
     );
-    let response = home
-        .execute(wire::DB, &batch.build())
+    // Boxed: keeps the in-process engine future off the debug test-thread stack.
+    let response = Box::pin(home.execute(wire::DB, &batch.build()))
         .await
         .expect("admin ops");
     assert!(
@@ -49,7 +49,8 @@ pub async fn resume(home: &ShamirDb) -> Result<(), String> {
     batch
         .try_op("resume", ddl::alter_subscription("sub").resume())
         .expect("resume op builds");
-    match home.execute(wire::DB, &batch.build()).await {
+    // Boxed: keeps the in-process engine future off the debug test-thread stack.
+    match Box::pin(home.execute(wire::DB, &batch.build())).await {
         Ok(response) => {
             assert!(
                 !response.results.contains_key("__error"),

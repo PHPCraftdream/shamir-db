@@ -9,9 +9,9 @@ use std::time::Instant;
 use bytes::Bytes;
 
 use crate::index::sorted_index_manager::decode_covering_projection;
-use crate::query::filter::eval::{compile_filter, FilterNode};
+use crate::query::filter::eval::FilterNode;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::Filter;
+use crate::query::filter::{compile_filter_with_context, Filter};
 use crate::query::read::order::PREALLOC_CAP;
 use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem};
 use shamir_query_types::read::OrderDirection;
@@ -235,7 +235,7 @@ impl TableManager {
             .await?;
 
         // 2. Compile residual filter if present.
-        let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter(f, interner));
+        let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter_with_context(f, ctx));
 
         let has_group_by = query.group_by.is_some();
         let has_agg = exec::has_aggregates(&query.select);
@@ -672,7 +672,7 @@ impl TableManager {
         }
 
         // 2. Compile residual filter if present
-        let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter(f, interner));
+        let residual_cb: Option<FilterNode> = residual.map(|f| compile_filter_with_context(f, ctx));
 
         let id_vec: Vec<RecordId> = record_ids.iter().copied().collect();
 

@@ -8,8 +8,8 @@ use std::time::Instant;
 use futures::future::join_all;
 use futures::StreamExt;
 
-use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::{compile_filter_with_context, eval::FilterNode};
 use crate::query::read::{
     exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
 };
@@ -163,7 +163,7 @@ impl TableManager {
         // cases impossible on this path; the classifier's
         // `concurrent_modified` counter is the belt-and-suspenders fallback.
         if let Some((idx_name, encoded_key, after_id, limit, direction)) =
-            self.try_plan_keyset_seek(query, interner)
+            self.try_plan_keyset_seek_with_interner(query, interner, Some(ctx))
         {
             if self.sorted_indexes().last_mutation_version(idx_name) <= version {
                 if let Some(result) = self
@@ -190,8 +190,10 @@ impl TableManager {
         }
 
         // ── 2. Compile the WHERE filter (will be applied to AS-OF values). ──
-        let filter_cb: Option<FilterNode> =
-            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+        let filter_cb: Option<FilterNode> = query
+            .r#where
+            .as_ref()
+            .map(|f| compile_filter_with_context(f, ctx));
 
         // ── 3. Enumerate every record id via a tombstone-INCLUSIVE variant of
         //       the same full-scan streaming that the normal no-index read
@@ -263,10 +265,12 @@ impl TableManager {
             None
         };
         let topk_proj = if use_topk {
-            Some(
-                exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-                    .with_context(ctx),
-            )
+            Some(exec::SelectProjection::new_with_context(
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+                Some(ctx),
+            )?)
         } else {
             None
         };
@@ -328,7 +332,7 @@ impl TableManager {
                                     clippy::unwrap_used,
                                     reason = "guard: use_topk initializes the projection before scanning"
                                 )]
-                                topk_proj.as_ref().unwrap().project_value(&view, interner)
+                                topk_proj.as_ref().unwrap().project_value(&view, interner)?
                             }
                             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
                                 Ok(iv) =>
@@ -337,7 +341,7 @@ impl TableManager {
                                         clippy::unwrap_used,
                                         reason = "guard: use_topk initializes the projection before scanning"
                                     )]
-                                    topk_proj.as_ref().unwrap().project_value(&iv, interner)
+                                    topk_proj.as_ref().unwrap().project_value(&iv, interner)?
                                 }
                                 Err(_) => {
                                     corrupt.push(crate::query::read::CorruptRecordRef {
@@ -494,8 +498,10 @@ impl TableManager {
         //     deleted record contributes only historical rows, which
         //     is the documented semantics; we still ask history_of
         //     for them).
-        let filter_cb: Option<FilterNode> =
-            query.r#where.as_ref().map(|f| compile_filter(f, interner));
+        let filter_cb: Option<FilterNode> = query
+            .r#where
+            .as_ref()
+            .map(|f| compile_filter_with_context(f, ctx));
 
         let stream = self.list_stream(FULL_SCAN_BATCH);
         futures::pin_mut!(stream);

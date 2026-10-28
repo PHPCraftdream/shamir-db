@@ -494,6 +494,15 @@ impl TableManager {
         query: &ReadQuery,
         interner: &Interner,
     ) -> Option<(u64, usize, usize, shamir_query_types::read::OrderDirection)> {
+        self.try_plan_order_limit_fast_path_with_context(query, interner, None)
+    }
+
+    pub(in crate::table::read) fn try_plan_order_limit_fast_path_with_context(
+        &self,
+        query: &ReadQuery,
+        interner: &Interner,
+        ctx: Option<&crate::query::filter::FilterContext<'_>>,
+    ) -> Option<(u64, usize, usize, shamir_query_types::read::OrderDirection)> {
         // Shape guards.
         if query.r#where.is_some()
             || query.group_by.is_some()
@@ -521,7 +530,18 @@ impl TableManager {
         if !mgr.has_indexes() {
             return None;
         }
-        let field_path = intern_field_path(&item.field, interner)?;
+        let field_path = item
+            .field
+            .iter()
+            .map(|name| {
+                if let Some(ctx) = ctx {
+                    ctx.resolve_interner_id(name)
+                        .or_else(|| interner.get_ind(name).map(|key| key.id()))
+                } else {
+                    interner.get_ind(name).map(|key| key.id())
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
         // F-72 (#899, P0): state-filtered (`find_by_field_ready`, not
         // `find_by_field`) — a `Building` sorted index must be invisible to
         // this fast-path eligibility check, same as every other planner
@@ -544,6 +564,15 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
+    ) -> Option<KeysetSeekPlan> {
+        self.try_plan_keyset_seek_with_interner(query, interner, None)
+    }
+
+    pub(in crate::table::read) fn try_plan_keyset_seek_with_interner(
+        &self,
+        query: &ReadQuery,
+        interner: &Interner,
+        ctx: Option<&crate::query::filter::FilterContext<'_>>,
     ) -> Option<KeysetSeekPlan> {
         // Same shape guards as the ORDER BY + LIMIT K fast path.
         if query.r#where.is_some()
@@ -576,7 +605,18 @@ impl TableManager {
         if !mgr.has_indexes() {
             return None;
         }
-        let field_path = intern_field_path(&item.field, interner)?;
+        let field_path = item
+            .field
+            .iter()
+            .map(|name| {
+                if let Some(ctx) = ctx {
+                    ctx.resolve_interner_id(name)
+                        .or_else(|| interner.get_ind(name).map(|key| key.id()))
+                } else {
+                    interner.get_ind(name).map(|key| key.id())
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
         // F-72 (#899, P0): state-filtered (`find_by_field_ready`, not
         // `find_by_field`) — a `Building` sorted index must be invisible to
         // this fast-path eligibility check, same as every other planner

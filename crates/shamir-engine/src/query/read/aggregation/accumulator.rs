@@ -27,7 +27,9 @@ use crate::query::filter::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{FilterContext, FilterValue};
 use crate::query::read::{AggFunc, AggregateField};
 use shamir_storage::error::{DbError, DbResult};
-use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
+use shamir_types::codecs::interned::{
+    inner_value_to_query_value, inner_value_to_query_value_with, query_value_to_inner,
+};
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{RecordRef, ScalarRef};
 use shamir_types::types::common::new_map_wc;
@@ -196,6 +198,7 @@ pub(in crate::query::read) fn group_key_item_scalar(s: Option<ScalarRef<'_>>) ->
 pub(in crate::query::read) fn group_key_item_complex(
     val: &InnerValue,
     interner: &Interner,
+    overlay: Option<&shamir_collections::TFxMap<u64, String>>,
 ) -> GroupKeyItem {
     match val {
         InnerValue::Dec(d) => {
@@ -207,7 +210,19 @@ pub(in crate::query::read) fn group_key_item_complex(
         }
         InnerValue::Big(b) => GroupKeyItem::Num(NumericKey::from_bigint(b)),
         _ => {
-            let qv = inner_value_to_query_value(val, interner).unwrap_or(QueryValue::Null);
+            let qv = match overlay {
+                Some(overlay) => inner_value_to_query_value_with(val, &|id| {
+                    if id >= shamir_tx::OVERLAY_ID_BASE {
+                        overlay.get(&id).cloned()
+                    } else {
+                        interner
+                            .get_str(&InternerKey::new(id))
+                            .map(|name| name.to_string())
+                    }
+                }),
+                None => inner_value_to_query_value(val, interner),
+            }
+            .unwrap_or(QueryValue::Null);
             GroupKeyItem::Complex(query_value_canonical_str(&qv).into_boxed_str())
         }
     }
@@ -334,6 +349,8 @@ fn query_value_canonical_str(qv: &QueryValue) -> String {
 pub(in crate::query::read) struct AggAccum {
     /// Pre-interned field path as `InternerKey` (`None` for `AggregateField::All`).
     field_path: Option<Vec<InternerKey>>,
+    /// Overlay reverse snapshot used only when converting owned container extrema.
+    overlay: Option<std::sync::Arc<shamir_collections::TFxMap<u64, String>>>,
     /// `AggregateField::All` → step() uses the whole record as the value.
     all_field: bool,
     pub(super) state: AggState,
@@ -383,13 +400,27 @@ pub(in crate::query::read) enum AggState {
 }
 
 impl AggAccum {
+    #[cfg(test)]
     pub(in crate::query::read) fn new(
         func: AggFunc,
         field: &AggregateField,
         interner: &Interner,
     ) -> Self {
+        Self::new_with_snapshots(func, field, interner, None, None)
+    }
+
+    pub(in crate::query::read) fn new_with_snapshots(
+        func: AggFunc,
+        field: &AggregateField,
+        interner: &Interner,
+        overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+        overlay: Option<std::sync::Arc<shamir_collections::TFxMap<u64, String>>>,
+    ) -> Self {
         let (field_path, all_field) = match field {
-            AggregateField::Field(p) => (intern_field_path_keys(p, interner), false),
+            AggregateField::Field(p) => (
+                intern_field_path_keys_with_overlay(p, interner, overlay_ids),
+                false,
+            ),
             AggregateField::All => (None, true),
         };
         let state = match func {
@@ -407,6 +438,7 @@ impl AggAccum {
         Self {
             field_path,
             all_field,
+            overlay,
             state,
         }
     }
@@ -726,9 +758,21 @@ impl AggAccum {
                     OwnedExtreme::Scalar(s) => s.to_query(),
                     // Tree holds InnerValue (no interner needed in step).
                     // Convert at output boundary only (§5b boundary #3).
-                    OwnedExtreme::Tree(iv) => {
-                        inner_value_to_query_value(&iv, interner).unwrap_or(QueryValue::Null)
-                    }
+                    OwnedExtreme::Tree(iv) => match &self.overlay {
+                        Some(overlay) => inner_value_to_query_value_with(&iv, &|id| {
+                            if id >= shamir_tx::OVERLAY_ID_BASE {
+                                overlay.get(&id).cloned()
+                            } else {
+                                interner
+                                    .get_str(&InternerKey::new(id))
+                                    .map(|name| name.to_string())
+                            }
+                        })
+                        .unwrap_or(QueryValue::Null),
+                        None => {
+                            inner_value_to_query_value(&iv, interner).unwrap_or(QueryValue::Null)
+                        }
+                    },
                 })
                 .unwrap_or(QueryValue::Null),
         }
@@ -794,17 +838,19 @@ fn agg_leaf_exact(v: &InnerValue) -> Option<AggLeafExact> {
     }
 }
 
-/// Intern a `&[String]` path into `InternerKey`s (the lens path currency).
-/// `None` on any un-internable segment (mirrors `intern_field_path`'s old
-/// `Option<Vec<u64>>` miss).
-#[inline]
-pub(super) fn intern_field_path_keys(
+/// Intern a `&[String]` path into `InternerKey`s; `None` on any un-internable segment.
+pub(super) fn intern_field_path_keys_with_overlay(
     field: &[String],
     interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
 ) -> Option<Vec<InternerKey>> {
     let mut keys = Vec::with_capacity(field.len());
     for part in field {
-        let id = interner.get_ind(part)?;
+        let id = interner.get_ind(part).or_else(|| {
+            overlay_ids
+                .and_then(|ids| ids.get(part).copied())
+                .map(InternerKey::new)
+        })?;
         keys.push(id);
     }
     Some(keys)
