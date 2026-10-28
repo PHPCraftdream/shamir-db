@@ -141,6 +141,8 @@ impl IndexManager {
                 self.info_store.set_many(posting_writes).await?;
             }
             for ik in cache_index_keys {
+                self.posting_cache_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 self.posting_cache.remove(&ik);
             }
         }
@@ -287,6 +289,8 @@ impl IndexManager {
                 .into_iter()
                 .map(|(k, v)| (k.into(), v))
                 .collect();
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             // P1-2 (#967): if this backfill write fails AFTER Phase 1's
             // `save_index_info` already persisted the Building definition,
             // the index is durably registered but NOT queryable. Enrich
@@ -306,6 +310,8 @@ impl IndexManager {
                 })?;
         }
         for ik in cache_index_keys {
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.posting_cache.remove(&ik);
         }
 
@@ -512,12 +518,16 @@ impl IndexManager {
                     .into_iter()
                     .map(|(k, v)| (k.into(), v))
                     .collect();
+                self.posting_cache_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 self.info_store
                     .set_many(posting_writes)
                     .await
                     .map_err(enrich_backfill)?;
             }
             for ik in cache_index_keys {
+                self.posting_cache_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 self.posting_cache.remove(&ik);
             }
             batch_no += 1;
@@ -662,12 +672,18 @@ impl IndexManager {
         }
 
         if !removes.is_empty() {
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.info_store.remove_many(removes).await?;
         }
         if !sets.is_empty() {
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.info_store.set_many(sets).await?;
         }
         for k in cache_keys {
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.posting_cache.remove(&k);
         }
         Ok(())
@@ -689,8 +705,12 @@ impl IndexManager {
                 .into_iter()
                 .map(|(k, v)| (k.into(), v))
                 .collect();
+            self.posting_cache_generation
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             self.info_store.set_many(posting_writes).await?;
         }
+        self.posting_cache_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         for ik in cache_index_keys {
             self.posting_cache.remove(&ik);
         }

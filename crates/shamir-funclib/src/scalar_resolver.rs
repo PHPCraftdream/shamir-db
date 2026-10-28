@@ -129,6 +129,17 @@ impl ScalarResolver {
         )
     }
 
+    /// Call a resolved entry only when it is trusted for functional indexing.
+    pub fn call_indexable(&self, name: &str, args: &[QueryValue]) -> ScalarResult {
+        let entry = self
+            .get(name)
+            .ok_or_else(|| ScalarError::new("unknown_function"))?;
+        if !entry.is_indexable() {
+            return Err(ScalarError::new("not_indexable"));
+        }
+        dispatch_entry(&entry, args)
+    }
+
     /// Look up an entry by name (user layer first, builtin second).
     pub fn get(&self, name: &str) -> Option<FnEntry> {
         if let Some(e) = self.user.get(name) {

@@ -217,6 +217,7 @@ async fn fts_hit_count(tbl: &TableManager) -> usize {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("atomicity")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .expect("fts lookup")

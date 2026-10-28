@@ -17,6 +17,7 @@ fn test_fts_and_match() {
         field: vec!["body".into()],
         query: "hello world".into(),
         mode: "and".into(),
+        limit: None,
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&rec, &ctx));
@@ -32,6 +33,7 @@ fn test_fts_and_no_match() {
         field: vec!["body".into()],
         query: "hello world".into(),
         mode: "and".into(),
+        limit: None,
     };
     let cb = compile_filter(&filter, &interner);
     assert!(!cb.matches(&rec, &ctx));
@@ -47,6 +49,7 @@ fn test_fts_or_match() {
         field: vec!["body".into()],
         query: "hello baz".into(),
         mode: "or".into(),
+        limit: None,
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&rec, &ctx));
@@ -62,6 +65,7 @@ fn test_fts_case_insensitive() {
         field: vec!["body".into()],
         query: "hello WORLD".into(),
         mode: "and".into(),
+        limit: None,
     };
     let cb = compile_filter(&filter, &interner);
     assert!(cb.matches(&rec, &ctx));
@@ -78,6 +82,7 @@ fn test_fts_missing_field() {
         field: vec!["body".into()],
         query: "hello".into(),
         mode: "and".into(),
+        limit: None,
     };
     let cb = compile_filter(&filter, &interner);
     assert!(!cb.matches(&rec, &ctx));

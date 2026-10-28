@@ -274,6 +274,7 @@ pub fn fts(field: impl IntoFieldPath, query: impl Into<String>, mode: impl Into<
         field: fp(field),
         query: query.into(),
         mode: mode.into(),
+        limit: None,
     }
 }
 

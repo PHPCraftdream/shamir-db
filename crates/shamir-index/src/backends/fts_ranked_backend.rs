@@ -20,8 +20,59 @@ use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug)]
+struct RankedCandidate(RecordId, f32);
+
+impl PartialEq for RankedCandidate {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0 && self.1.to_bits() == other.1.to_bits()
+    }
+}
+
+impl Eq for RankedCandidate {}
+
+impl PartialOrd for RankedCandidate {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedCandidate {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .1
+            .total_cmp(&self.1)
+            .then_with(|| self.0.cmp(&other.0))
+    }
+}
+
+/// Keep at most k candidates. Higher scores win; ties use ascending RecordId.
+pub(crate) fn ranked_top_k(
+    scores: impl IntoIterator<Item = (RecordId, f64)>,
+    limit: usize,
+) -> (Vec<(RecordId, f32)>, usize) {
+    let mut max_retained = 0;
+    let mut heap = BinaryHeap::new();
+    for (rid, score) in scores {
+        let candidate = RankedCandidate(rid, score as f32);
+        if heap.len() < limit {
+            heap.push(candidate);
+            max_retained = max_retained.max(heap.len());
+        } else if heap.peek().is_some_and(|worst| candidate < *worst) {
+            heap.pop();
+            heap.push(candidate);
+        }
+    }
+    let mut ranked: Vec<_> = heap
+        .into_iter()
+        .map(|candidate| (candidate.0, candidate.1))
+        .collect();
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    (ranked, max_retained)
+}
 
 pub struct FtsRankedBackend {
     descriptor: IndexDescriptor,
@@ -30,6 +81,8 @@ pub struct FtsRankedBackend {
     store: Arc<dyn Store>,
     pub(crate) stats: Arc<FtsStats>,
     params: Bm25Params,
+    #[cfg(test)]
+    high_water: std::sync::atomic::AtomicUsize,
 }
 
 impl FtsRankedBackend {
@@ -45,6 +98,8 @@ impl FtsRankedBackend {
             store,
             stats: Arc::new(FtsStats::new()),
             params: Bm25Params::default(),
+            #[cfg(test)]
+            high_water: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -53,9 +108,7 @@ impl FtsRankedBackend {
     /// `BumpFtsStats` was applied exactly once (not double-counted) for a
     /// quiescent tx that planned the FTS insert at stage time.
     pub fn doc_count(&self) -> u64 {
-        self.stats
-            .doc_count
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.stats.doc_count()
     }
 
     /// #1063: sum of all document lengths tracked by the in-memory BM25 stats.
@@ -63,9 +116,12 @@ impl FtsRankedBackend {
     /// one FTS backend's stats with another's when multiple FTS indexes exist
     /// on the same table (cross-field `doc_len` contamination).
     pub fn sum_doc_len(&self) -> u64 {
-        self.stats
-            .sum_doc_len
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.stats.sum_doc_len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn collector_high_water(&self) -> usize {
+        self.high_water.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Resolve `self.field_path` to its interned-key form (see
@@ -220,16 +276,20 @@ impl IndexBackend for FtsRankedBackend {
                 provenance,
             });
         }
-        ops.push(IndexWriteOp::BumpFtsStats {
-            doc_len: old_doc_len,
-            sign: -1,
-            provenance,
-        });
-        ops.push(IndexWriteOp::BumpFtsStats {
-            doc_len: new_doc_len,
-            sign: 1,
-            provenance,
-        });
+        if old_doc_len > 0 {
+            ops.push(IndexWriteOp::BumpFtsStats {
+                doc_len: old_doc_len,
+                sign: -1,
+                provenance,
+            });
+        }
+        if new_doc_len > 0 {
+            ops.push(IndexWriteOp::BumpFtsStats {
+                doc_len: new_doc_len,
+                sign: 1,
+                provenance,
+            });
+        }
         Ok(ops)
     }
 
@@ -284,10 +344,12 @@ impl IndexBackend for FtsRankedBackend {
     async fn apply_in_memory(&self, ops: &[IndexWriteOp]) -> Result<(), IndexError> {
         for op in ops {
             if let IndexWriteOp::BumpFtsStats { doc_len, sign, .. } = op {
-                if *sign > 0 {
-                    self.stats.on_insert(*doc_len);
-                } else {
-                    self.stats.on_delete(*doc_len);
+                if *doc_len > 0 {
+                    if *sign > 0 {
+                        self.stats.on_insert(*doc_len);
+                    } else if *sign < 0 {
+                        self.stats.on_delete(*doc_len);
+                    }
                 }
             }
         }
@@ -296,82 +358,90 @@ impl IndexBackend for FtsRankedBackend {
 
     async fn lookup(&self, query: IndexQuery) -> Result<IndexResult, IndexError> {
         match query {
-            IndexQuery::Fts { tokens, mode } => {
+            IndexQuery::Fts {
+                tokens,
+                mode,
+                limit,
+            } => {
                 if tokens.is_empty() {
                     return Ok(IndexResult::Ranked(Vec::new()));
                 }
-                let total_docs = self
-                    .stats
-                    .doc_count
-                    .load(std::sync::atomic::Ordering::Relaxed);
-                let avg_dl = self.stats.avg_doc_len();
-
-                // Collect per-token posting lists with tf/doc_len.
+                let snapshot = self.stats.snapshot();
+                let total_docs = snapshot.doc_count;
+                let avg_dl = if total_docs == 0 || snapshot.sum_doc_len == 0 {
+                    1.0
+                } else {
+                    snapshot.sum_doc_len as f64 / total_docs as f64
+                };
                 let mut per_token: Vec<Vec<(RecordId, FtsPostingValue)>> =
                     Vec::with_capacity(tokens.len());
                 for th in &tokens {
                     per_token.push(self.scan_token_with_values(*th).await?);
                 }
 
-                match mode {
-                    FtsMode::AndAll => {
-                        // Intersect record sets, accumulate BM25.
-                        let mut rid_sets: Vec<BTreeSet<RecordId>> = per_token
-                            .iter()
-                            .map(|entries| entries.iter().map(|(r, _)| *r).collect())
+                let rank = |scores: TFxMap<RecordId, f64>, limit: Option<usize>| match limit {
+                    Some(k) => {
+                        let (ranked, high_water) = ranked_top_k(scores, k);
+                        #[cfg(test)]
+                        self.high_water
+                            .store(high_water, std::sync::atomic::Ordering::Relaxed);
+                        debug_assert!(high_water <= k);
+                        ranked
+                    }
+                    None => {
+                        let mut ranked: Vec<_> = scores
+                            .into_iter()
+                            .map(|(rid, score)| (rid, score as f32))
                             .collect();
-                        let intersection = {
-                            let mut iter = rid_sets.drain(..);
-                            let first = iter.next().unwrap();
-                            iter.fold(first, |acc, s| &acc & &s)
+                        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                        ranked
+                    }
+                };
+
+                let scores = match mode {
+                    FtsMode::AndAll => {
+                        let mut iter = per_token.iter().map(|entries| {
+                            entries.iter().map(|(rid, _)| *rid).collect::<BTreeSet<_>>()
+                        });
+                        let Some(first) = iter.next() else {
+                            return Ok(IndexResult::Ranked(Vec::new()));
                         };
+                        let intersection = iter.fold(first, |acc, set| &acc & &set);
                         let mut scores: TFxMap<RecordId, f64> = TFxMap::default();
-                        for entries in per_token.iter() {
-                            let df = entries.len() as u64;
-                            let idf_val = bm25::idf(total_docs, df);
-                            for (rid, pv) in entries {
+                        for entries in &per_token {
+                            let idf_val = bm25::idf(total_docs, entries.len() as u64);
+                            for (rid, posting) in entries {
                                 if intersection.contains(rid) {
                                     *scores.entry(*rid).or_insert(0.0) += bm25::term_score(
                                         &self.params,
-                                        pv.tf,
-                                        pv.doc_len,
+                                        posting.tf,
+                                        posting.doc_len,
                                         avg_dl,
                                         idf_val,
                                     );
                                 }
                             }
                         }
-                        let mut ranked: Vec<(RecordId, f32)> =
-                            scores.into_iter().map(|(r, s)| (r, s as f32)).collect();
-                        ranked.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        Ok(IndexResult::Ranked(ranked))
+                        scores
                     }
                     FtsMode::OrAny => {
-                        // Union, accumulate BM25 from each matching term.
                         let mut scores: TFxMap<RecordId, f64> = TFxMap::default();
                         for entries in &per_token {
-                            let df = entries.len() as u64;
-                            let idf_val = bm25::idf(total_docs, df);
-                            for (rid, pv) in entries {
+                            let idf_val = bm25::idf(total_docs, entries.len() as u64);
+                            for (rid, posting) in entries {
                                 *scores.entry(*rid).or_insert(0.0) += bm25::term_score(
                                     &self.params,
-                                    pv.tf,
-                                    pv.doc_len,
+                                    posting.tf,
+                                    posting.doc_len,
                                     avg_dl,
                                     idf_val,
                                 );
                             }
                         }
-                        let mut ranked: Vec<(RecordId, f32)> =
-                            scores.into_iter().map(|(r, s)| (r, s as f32)).collect();
-                        ranked.sort_by(|a, b| {
-                            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                        Ok(IndexResult::Ranked(ranked))
+                        scores
                     }
-                }
+                };
+                Ok(IndexResult::Ranked(rank(scores, limit)))
             }
             _ => Err(IndexError::Backend(
                 "FtsRankedBackend only supports Fts queries".into(),

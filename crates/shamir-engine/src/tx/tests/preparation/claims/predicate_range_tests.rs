@@ -135,6 +135,7 @@ async fn returns_none_for_unsupported_ops() {
             field: vec!["age".into()],
             query: "x".into(),
             mode: "and".into(),
+            limit: None,
         },
         Filter::IsNull {
             field: vec!["age".into()],

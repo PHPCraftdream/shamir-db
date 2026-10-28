@@ -513,9 +513,14 @@ impl SortedIndexManager {
     pub fn iter_indexes(&self) -> Vec<SortedIndexDefinition> {
         // Snapshot the current node-local Arc<Vec<...>> and clone its contents.
         // load_local() → Guard<Arc<T>>; *guard → Arc<T>; **guard → Vec<...>.
-        // Callers consume by-value; for hot-path planners that just
-        // need a borrow, see future `snapshot()` accessor.
+        // Callers consume by-value; hot singular planners use `snapshot()`.
         (**self.indexes.load_local()).clone()
+    }
+
+    /// Borrowed snapshot of the definition set for singular planners:
+    /// one `Arc` clone instead of cloning every `SortedIndexDefinition`.
+    pub fn snapshot(&self) -> Arc<Vec<SortedIndexDefinition>> {
+        Arc::clone(&*self.indexes.load_local())
     }
 
     /// Look up a definition whose `field_path` matches.

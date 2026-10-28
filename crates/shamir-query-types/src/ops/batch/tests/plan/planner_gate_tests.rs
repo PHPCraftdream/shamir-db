@@ -124,6 +124,7 @@ fn when_gap1_newly_covered_field_based_variants_are_rejected() {
                 field: field.clone(),
                 query: "hello".to_string(),
                 mode: "and".to_string(),
+                limit: None,
             },
         ),
         (

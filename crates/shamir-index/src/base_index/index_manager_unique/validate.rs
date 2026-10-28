@@ -4,6 +4,7 @@ use crate::base_index::index_manager::IndexManager;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::error::DbResult;
+use shamir_storage::types::KvOp;
 use shamir_tx::{IndexFamily, Provenance};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
@@ -83,7 +84,7 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(());
         }
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
+        let defs = self.indexes_unique.snapshot();
         self.validate_unique_for_create_with_defs(value, &defs)
             .await
     }
@@ -163,8 +164,8 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(());
         }
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
-        for def in &defs {
+        let defs = self.indexes_unique.snapshot();
+        for def in defs.iter() {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
@@ -206,8 +207,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
-        for def in defs {
+        let defs = self.indexes_unique.snapshot();
+        for def in defs.iter() {
             let old_key =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
             let new_key =
@@ -269,8 +270,8 @@ impl IndexManager {
             return Ok(());
         }
 
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
-        for def in defs {
+        let defs = self.indexes_unique.snapshot();
+        for def in defs.iter() {
             let old_key =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
             let new_key =
@@ -349,35 +350,6 @@ impl IndexManager {
     }
 
     // ============================================================================
-    // UNIQUE INDEXES - Storage helpers
-    // ============================================================================
-
-    /// Добавляет запись в уникальный индекс by pre-computed key.
-    ///
-    /// Ключ: `[index_key with is_unique=true]` (25 байт)
-    /// Значение: `RecordId` (16 байт)
-    ///
-    /// # Важно
-    ///
-    /// Не проверяет уникальность! Вызывай `validate_unique_*` перед этим методом.
-    async fn add_unique_entry_by_key(
-        &self,
-        index_key: Bytes,
-        record_id: &RecordId,
-    ) -> DbResult<()> {
-        self.info_store
-            .set(index_key.into(), record_id.to_bytes())
-            .await?;
-        Ok(())
-    }
-
-    /// Удаляет запись из уникального индекса by pre-computed key.
-    async fn remove_unique_entry_by_key(&self, index_key: Bytes) -> DbResult<()> {
-        self.info_store.remove(index_key.into()).await?;
-        Ok(())
-    }
-
-    // ============================================================================
     // UNIQUE INDEXES - Event handlers (AFTER write)
     // ============================================================================
 
@@ -398,14 +370,17 @@ impl IndexManager {
             return Ok(());
         }
 
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
-        for def in defs {
+        let defs = self.indexes_unique.snapshot();
+        let mut ops: Vec<KvOp> = Vec::with_capacity(defs.len());
+        for def in defs.iter() {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
-                self.add_unique_entry_by_key(irk.to_bytes(), record_id)
-                    .await?;
+                ops.push(KvOp::Set(irk.to_bytes().into(), record_id.to_bytes()));
             }
+        }
+        if !ops.is_empty() {
+            self.info_store.transact(ops).await?;
         }
 
         Ok(())
@@ -429,31 +404,36 @@ impl IndexManager {
             return Ok(());
         }
 
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
-        for def in defs {
+        let defs = self.indexes_unique.snapshot();
+        let mut ops: Vec<KvOp> = Vec::with_capacity(defs.len() * 2);
+        for def in defs.iter() {
             let old_key =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
             let new_key =
                 build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
 
+            // Mixed remove-then-set order is preserved per def: last-write-wins
+            // on the same key, and remove-then-set never swaps to set-then-remove.
             match (old_key, new_key) {
                 (None, None) => {}
                 (None, Some(nk)) => {
-                    self.add_unique_entry_by_key(nk.to_bytes(), record_id)
-                        .await?;
+                    ops.push(KvOp::Set(nk.to_bytes().into(), record_id.to_bytes()));
                 }
                 (Some(ok), None) => {
-                    self.remove_unique_entry_by_key(ok.to_bytes()).await?;
+                    ops.push(KvOp::Remove(ok.to_bytes().into()));
                 }
                 (Some(ok), Some(nk)) => {
                     let old_bytes = ok.to_bytes();
                     let new_bytes = nk.to_bytes();
                     if old_bytes != new_bytes {
-                        self.remove_unique_entry_by_key(old_bytes).await?;
-                        self.add_unique_entry_by_key(new_bytes, record_id).await?;
+                        ops.push(KvOp::Remove(old_bytes.into()));
+                        ops.push(KvOp::Set(new_bytes.into(), record_id.to_bytes()));
                     }
                 }
             }
+        }
+        if !ops.is_empty() {
+            self.info_store.transact(ops).await?;
         }
 
         Ok(())
@@ -472,13 +452,17 @@ impl IndexManager {
             return Ok(());
         }
 
-        let defs: Vec<IndexDefinition> = self.indexes_unique.iter().collect();
-        for def in defs {
+        let defs = self.indexes_unique.snapshot();
+        let mut ops: Vec<KvOp> = Vec::with_capacity(defs.len());
+        for def in defs.iter() {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
             {
-                self.remove_unique_entry_by_key(irk.to_bytes()).await?;
+                ops.push(KvOp::Remove(irk.to_bytes().into()));
             }
+        }
+        if !ops.is_empty() {
+            self.info_store.transact(ops).await?;
         }
 
         Ok(())
@@ -508,15 +492,16 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
+        let defs = self.indexes_unique.snapshot();
         let mut ops = Vec::new();
-        for def in self.indexes_unique.iter() {
+        for def in defs.iter() {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
                 ops.push(IndexWriteOp::SetPosting {
                     key: irk.to_bytes(),
                     value: Bytes::copy_from_slice(record_id.as_bytes()),
-                    provenance: unique_provenance(&def),
+                    provenance: unique_provenance(def),
                 });
             }
         }
@@ -538,9 +523,10 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
+        let defs = self.indexes_unique.snapshot();
         let mut ops = Vec::new();
-        for def in self.indexes_unique.iter() {
-            let provenance = unique_provenance(&def);
+        for def in defs.iter() {
+            let provenance = unique_provenance(def);
             let old_key =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths);
             let new_key =
@@ -593,14 +579,15 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
+        let defs = self.indexes_unique.snapshot();
         let mut ops = Vec::new();
-        for def in self.indexes_unique.iter() {
+        for def in defs.iter() {
             if let Some(irk) =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
             {
                 ops.push(IndexWriteOp::RemovePosting {
                     key: irk.to_bytes(),
-                    provenance: unique_provenance(&def),
+                    provenance: unique_provenance(def),
                     owner: Some(*record_id.as_bytes()),
                 });
             }
@@ -623,9 +610,10 @@ impl IndexManager {
         if !self.has_unique_indexes() {
             return Ok(Vec::new());
         }
+        let defs = self.indexes_unique.snapshot();
         let mut ops = Vec::with_capacity(1024);
-        for def in self.indexes_unique.iter() {
-            let provenance = unique_provenance(&def);
+        for def in defs.iter() {
+            let provenance = unique_provenance(def);
             for (rid, value) in items.clone() {
                 if let Some(irk) =
                     build_index_key_from_record(true, def.name_interned, value, &def.paths)

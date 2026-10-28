@@ -1,10 +1,14 @@
 use crate::descriptor::IndexDescriptor;
-use crate::kind::{FunctionalConfig, IndexKind, TokenizerKind};
+use crate::kind::{
+    FunctionalConfig, IndexKind, TokenizerKind, VectorBackendRef, VectorConfig, VectorMetric,
+};
 use crate::persistence::{
     add_to_dropping_index2, clear_from_dropping_index2, legacy_indexes_need_rebuild,
     load_dropping_index2, load_index2_metadata, load_legacy_index_version, save_index2_metadata,
-    save_legacy_index_version, PersistedIndexes, LEGACY_INDEX_FORMAT_VERSION,
+    save_index2_metadata_with_pending, save_legacy_index_version, PersistedIndexes,
+    LEGACY_INDEX_FORMAT_VERSION,
 };
+use crate::tests::runtime::registry_tests::DummyBackend;
 use crate::MetaEnvelope;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
@@ -19,10 +23,242 @@ fn meta_key_indexes() -> RecordId {
 }
 
 #[tokio::test]
+async fn rv_index_cf86432e_external_raw_secret_rejected_without_store_write() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let registry = crate::IndexRegistry::new();
+    let credential = "rv-index-cf86432e-raw-secret-marker";
+    let external = IndexDescriptor::new(
+        41,
+        "external_vector",
+        410,
+        SmallVec::new(),
+        IndexKind::Vector(Box::new(VectorConfig {
+            dim: 3,
+            metric: VectorMetric::Cosine,
+            backend: VectorBackendRef::External {
+                driver: "test-driver".to_string(),
+                url: "https://example.invalid".to_string(),
+                api_key_secret: credential.into(),
+            },
+            quantization: None,
+        })),
+    );
+
+    let error = save_index2_metadata_with_pending(&registry, &store, Some(external))
+        .await
+        .expect_err("raw external credentials must fail closed");
+    assert!(!error.to_string().contains(credential));
+    assert!(
+        store
+            .get(meta_key_indexes().to_bytes().into())
+            .await
+            .is_err(),
+        "failed save must not write metadata"
+    );
+
+    let empty_external = IndexDescriptor::new(
+        42,
+        "external_no_key",
+        420,
+        SmallVec::new(),
+        IndexKind::Vector(Box::new(VectorConfig {
+            dim: 3,
+            metric: VectorMetric::Cosine,
+            backend: VectorBackendRef::External {
+                driver: "test-driver".to_string(),
+                url: "https://example.invalid".to_string(),
+                api_key_secret: "".into(),
+            },
+            quantization: None,
+        })),
+    );
+    save_index2_metadata_with_pending(&registry, &store, Some(empty_external))
+        .await
+        .expect("empty external credential should persist");
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert!(matches!(
+        &loaded.descriptors[0].kind,
+        IndexKind::Vector(config)
+            if matches!(&config.backend, VectorBackendRef::External { api_key_secret, .. }
+                if api_key_secret.reveal().is_empty())
+    ));
+
+    let ordinary_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let ordinary = IndexDescriptor::new(
+        43,
+        "ordinary_fts",
+        430,
+        SmallVec::new(),
+        IndexKind::Fts {
+            tokenizer: TokenizerKind::Whitespace,
+            language: None,
+        },
+    );
+    save_index2_metadata_with_pending(&registry, &ordinary_store, Some(ordinary))
+        .await
+        .expect("non-external metadata should persist");
+    let loaded = load_index2_metadata(&ordinary_store)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(loaded.descriptors[0].kind, IndexKind::Fts { .. }));
+}
+
+#[tokio::test]
+async fn rv_index_cf86432e_allows_unchanged_legacy_credential_on_rewrite() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let registry = crate::IndexRegistry::new();
+    let credential = "legacy-marker-not-printed";
+    let legacy = IndexDescriptor::new(
+        41,
+        "external_vector",
+        410,
+        SmallVec::new(),
+        IndexKind::Vector(Box::new(VectorConfig {
+            dim: 3,
+            metric: VectorMetric::Cosine,
+            backend: VectorBackendRef::External {
+                driver: "test-driver".to_string(),
+                url: "https://example.invalid".to_string(),
+                api_key_secret: credential.into(),
+            },
+            quantization: None,
+        })),
+    );
+    let mut original = legacy.clone();
+    original.created_at_nanos = 1;
+    let mut legacy = legacy;
+    legacy.created_at_nanos = 1;
+    let bytes = MetaEnvelope::new(PersistedIndexes {
+        next_id: 42,
+        descriptors: vec![original],
+    })
+    .encode()
+    .unwrap();
+    store
+        .set(meta_key_indexes().to_bytes().into(), Bytes::from(bytes))
+        .await
+        .unwrap();
+    registry
+        .insert(Arc::new(DummyBackend(legacy.clone())))
+        .await
+        .unwrap();
+
+    let unrelated = IndexDescriptor::new(
+        42,
+        "unrelated",
+        420,
+        SmallVec::new(),
+        IndexKind::Fts {
+            tokenizer: TokenizerKind::Whitespace,
+            language: None,
+        },
+    );
+    registry
+        .insert(Arc::new(DummyBackend(unrelated)))
+        .await
+        .unwrap();
+
+    save_index2_metadata(&registry, &store).await.unwrap();
+    let persisted = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert_eq!(persisted.descriptors.len(), 2);
+    assert!(matches!(
+        persisted
+            .descriptors
+            .iter()
+            .find(|d| d.id == 41)
+            .unwrap()
+            .kind,
+        IndexKind::Vector(_)
+    ));
+    assert!(matches!(
+        &persisted.descriptors.iter().find(|d| d.id == 41).unwrap().kind,
+        IndexKind::Vector(config)
+            if matches!(&config.backend, VectorBackendRef::External { api_key_secret, .. }
+                if api_key_secret.reveal() == credential)
+    ));
+}
+
+#[tokio::test]
+async fn rv_index_cf86432e_rejects_changed_registered_credential() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let registry = crate::IndexRegistry::new();
+    let make_external = |credential: &str| {
+        IndexDescriptor::new(
+            51,
+            "external_vector",
+            510,
+            SmallVec::new(),
+            IndexKind::Vector(Box::new(VectorConfig {
+                dim: 3,
+                metric: VectorMetric::Cosine,
+                backend: VectorBackendRef::External {
+                    driver: "test-driver".to_string(),
+                    url: "https://example.invalid".to_string(),
+                    api_key_secret: credential.into(),
+                },
+                quantization: None,
+            })),
+        )
+    };
+    let old = make_external("old-private-marker");
+    let bytes = MetaEnvelope::new(PersistedIndexes {
+        next_id: 52,
+        descriptors: vec![old],
+    })
+    .encode()
+    .unwrap();
+    store
+        .set(meta_key_indexes().to_bytes().into(), Bytes::from(bytes))
+        .await
+        .unwrap();
+    registry
+        .insert(Arc::new(DummyBackend(make_external("new-private-marker"))))
+        .await
+        .unwrap();
+
+    let error = save_index2_metadata(&registry, &store).await.unwrap_err();
+    assert!(!error.to_string().contains("old-private-marker"));
+    assert!(!error.to_string().contains("new-private-marker"));
+}
+
+#[tokio::test]
+async fn rv_index_cf86432e_rejects_new_registered_credential() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let registry = crate::IndexRegistry::new();
+    let fresh = IndexDescriptor::new(
+        61,
+        "new_external",
+        610,
+        SmallVec::new(),
+        IndexKind::Vector(Box::new(VectorConfig {
+            dim: 3,
+            metric: VectorMetric::Cosine,
+            backend: VectorBackendRef::External {
+                driver: "test-driver".to_string(),
+                url: "https://example.invalid".to_string(),
+                api_key_secret: "new-private-marker".into(),
+            },
+            quantization: None,
+        })),
+    );
+    registry
+        .insert(Arc::new(DummyBackend(fresh)))
+        .await
+        .unwrap();
+
+    let error = save_index2_metadata(&registry, &store).await.unwrap_err();
+    assert!(!error.to_string().contains("new-private-marker"));
+    assert!(store
+        .get(meta_key_indexes().to_bytes().into())
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn round_trip_save_load() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let registry = crate::IndexRegistry::new();
-
     // Allocate IDs to advance counter.
     let _ = registry.allocate_id();
     let _ = registry.allocate_id();

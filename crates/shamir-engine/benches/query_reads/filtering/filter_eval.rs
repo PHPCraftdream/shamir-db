@@ -231,6 +231,7 @@ fn main() {
             field: vec!["name".to_string()],
             query: "user alpha".to_string(),
             mode: "and".to_string(),
+            limit: None,
         },
         interner,
     )));
@@ -248,6 +249,7 @@ fn main() {
             field: vec!["name".to_string()],
             query: "user alpha".to_string(),
             mode: "or".to_string(),
+            limit: None,
         },
         interner,
     )));

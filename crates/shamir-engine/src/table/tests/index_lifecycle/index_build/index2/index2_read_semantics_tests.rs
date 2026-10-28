@@ -14,6 +14,8 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
+
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
 use crate::table::TableManager;
@@ -277,6 +279,51 @@ async fn corrupt_fts_candidate() {
             assert_eq!(map.len(), 1);
         }
     }
+}
+
+#[tokio::test]
+async fn rv_index_dc5c642e_fts_page_keeps_valid_rows_after_high_rank_candidates_drop() {
+    let table = fixture(true, false, false).await;
+    let interner = table.interner().get().await.unwrap();
+    let field_path = interner.touch_ind("body").unwrap().into_key().id();
+    let lease = table
+        .index2_registry()
+        .lease_by_field_and_kind(&[field_path], "fts")
+        .await
+        .unwrap()
+        .unwrap();
+    let query_tokens = lease.backend.tokenize_query("hello");
+    let ranked = match lease
+        .backend
+        .lookup(IndexQuery::Fts {
+            tokens: query_tokens,
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap()
+    {
+        IndexResult::Ranked(rows) => rows,
+        _ => panic!("expected ranked FTS candidates"),
+    };
+    assert!(
+        ranked.len() > 2,
+        "fixture must have candidates beyond the page"
+    );
+    let dropped_id = ranked[0].0;
+    table
+        .data_store()
+        .set(
+            RecordKey::from_slice(dropped_id.as_bytes()),
+            Bytes::from_static(b"\xc4"),
+        )
+        .await
+        .unwrap();
+
+    let result = read(&table, Query::from("rows").limit(2), fts()).await;
+    assert_eq!(result.records.len(), 2);
+    assert_eq!(result.corrupt_records.len(), 1);
+    assert_eq!(result.corrupt_records[0].id, dropped_id);
 }
 
 #[tokio::test]
