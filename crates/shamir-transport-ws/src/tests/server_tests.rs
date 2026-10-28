@@ -19,15 +19,18 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 #[test]
 fn server_config_caps_message_and_frame_at_16_mib() {
     let cfg = server_ws_config();
+    // RV-TRANSPORT-WS-C038F1F3: the tungstenite ceilings bound the WIRE
+    // message (prefix + payload), so they sit 4 bytes above the logical
+    // 16 MiB payload ceiling.
     assert_eq!(
         cfg.max_message_size,
-        Some(MAX_WS_FRAME_SIZE),
-        "max_message_size must be pinned to the 16 MiB frame ceiling",
+        Some(MAX_WS_FRAME_SIZE + 4),
+        "max_message_size must admit 16 MiB payload + 4-byte prefix",
     );
     assert_eq!(
         cfg.max_frame_size,
-        Some(MAX_WS_FRAME_SIZE),
-        "max_frame_size must be pinned to the 16 MiB frame ceiling",
+        Some(MAX_WS_FRAME_SIZE + 4),
+        "max_frame_size must admit 16 MiB payload + 4-byte prefix",
     );
 
     // Strictly below the tungstenite defaults (msg 64 MiB / frame 16 MiB).
@@ -39,9 +42,77 @@ fn server_config_caps_message_and_frame_at_16_mib() {
         defaults.max_message_size,
     );
     assert!(
-        cfg.max_message_size <= Some(16 * 1024 * 1024),
-        "server max_message_size must be <= 16 MiB",
+        cfg.max_message_size <= Some(16 * 1024 * 1024 + 4),
+        "server max_message_size must be <= 16 MiB + prefix",
     );
+}
+
+/// RV-TRANSPORT-WS-C038F1F3: a wire message of exactly 16 MiB payload +
+/// 4-byte prefix (the top of the documented logical payload range) must
+/// pass the live accept path's tungstenite ceilings.
+#[tokio::test]
+async fn rv_transport_ws_c038f1f3_full_range_wire_message_accepted() {
+    let (server_io, client_io) = duplex(64 * 1024 * 1024);
+
+    let server = tokio::spawn(async move {
+        let mut ws = accept_native_ws(server_io, NATIVE_WS_PATH, &BrowserOriginPolicy::empty())
+            .await
+            .expect("accept");
+        match ws.next().await {
+            // The raw Binary body includes the four-byte length prefix.
+            Some(Ok(Message::Binary(b))) => b.len(),
+            other => panic!("expected binary, got {other:?}"),
+        }
+    });
+
+    let (mut client, _resp) =
+        tokio_tungstenite::client_async(ws_request(NATIVE_WS_PATH, None), client_io)
+            .await
+            .expect("client handshake");
+
+    // Exactly 16 MiB of logical payload; ws_send prepends the 4-byte
+    // prefix for a MAX_WS_FRAME_SIZE + 4 wire message.
+    let payload = vec![0x5au8; MAX_WS_FRAME_SIZE];
+    crate::ws_send(&mut client, &payload)
+        .await
+        .expect("send full-range frame");
+
+    let got_len = server.await.expect("join");
+    assert_eq!(got_len, MAX_WS_FRAME_SIZE + 4);
+}
+
+/// RV-TRANSPORT-WS-C038F1F3: tungstenite rejects a wire message exceeding
+/// the configured 16 MiB payload + 4-byte prefix ceiling with Capacity.
+#[tokio::test]
+async fn rv_transport_ws_c038f1f3_live_codec_overflow_is_message_too_large() {
+    let (server_io, client_io) = duplex(64 * 1024 * 1024);
+    let server = tokio::spawn(async move {
+        let mut ws = accept_native_ws(server_io, NATIVE_WS_PATH, &BrowserOriginPolicy::empty())
+            .await
+            .expect("accept");
+        let result = ws.next().await;
+        result
+    });
+
+    let client_cfg = WebSocketConfig::default()
+        .max_message_size(None)
+        .max_frame_size(None);
+    let (mut client, _) = tokio_tungstenite::client_async_with_config(
+        ws_request(NATIVE_WS_PATH, None),
+        client_io,
+        Some(client_cfg),
+    )
+    .await
+    .expect("client handshake");
+    let oversized = vec![0xa5u8; MAX_WS_FRAME_SIZE + 5];
+    let _ = client.send(Message::Binary(oversized.into())).await;
+    match server.await.expect("server task") {
+        Some(Err(tokio_tungstenite::tungstenite::Error::Capacity(
+            tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong { .. },
+        ))) => {}
+        Some(Err(other)) => panic!("expected MessageTooLong, got {other:?}"),
+        other => panic!("expected codec rejection, got {other:?}"),
+    }
 }
 
 /// NEW-1 (live wiring): a real WS handshake against `accept_native_ws`
@@ -81,8 +152,8 @@ async fn live_accept_rejects_message_over_cap() {
     .await
     .expect("client handshake");
 
-    // One byte over the server's 16 MiB ceiling.
-    let oversized = vec![0xa5u8; MAX_WS_FRAME_SIZE + 1];
+    // One byte over the server's wire ceiling (16 MiB payload + prefix).
+    let oversized = vec![0xa5u8; MAX_WS_FRAME_SIZE + 4 + 1];
     // The send itself may surface the peer's protocol close; either way
     // the server task must report an error rather than a buffered body.
     let _ = client.send(Message::Binary(oversized.into())).await;
@@ -591,4 +662,73 @@ async fn rv_transport_ws_c0c43a18_non_text_subprotocol_header_rejected_400() {
         String::from_utf8_lossy(&response)
     );
     server.await.expect("join");
+}
+
+/// RV-TRANSPORT-WS-6C58DE5C: the acceptors must return the callback's
+/// TYPED origin rejection (`WsAcceptError::OriginRejected`), not collapse
+/// every HTTP-level rejection into `WsAcceptError::Handshake`.
+#[tokio::test]
+async fn rv_transport_ws_6c58de5c_browser_missing_origin_is_origin_rejected() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server = tokio::spawn(async move {
+        accept_browser_ws(server_io, crate::server::BROWSER_WS_PATH, &policy).await
+    });
+
+    // Browser endpoint WITHOUT Origin: 400 + typed Missing rejection.
+    let req = ws_request(crate::server::BROWSER_WS_PATH, None);
+    let _err = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect_err("handshake must fail");
+
+    match server.await.expect("join") {
+        Err(WsAcceptError::OriginRejected(rej)) => {
+            assert_eq!(rej, crate::browser::OriginRejected::Missing);
+        }
+        other => panic!("expected OriginRejected(Missing), got {other:?}"),
+    }
+}
+
+/// RV-TRANSPORT-WS-6C58DE5C: a disallowed Origin on the browser endpoint
+/// surfaces as `OriginRejected(NotAllowed(..))`, preserving the allowlist
+/// detail from the callback.
+#[tokio::test]
+async fn rv_transport_ws_6c58de5c_browser_disallowed_origin_is_origin_rejected() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server = tokio::spawn(async move {
+        accept_browser_ws(server_io, crate::server::BROWSER_WS_PATH, &policy).await
+    });
+
+    let req = ws_request(crate::server::BROWSER_WS_PATH, Some("https://evil.example"));
+    let _err = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect_err("handshake must fail");
+
+    match server.await.expect("join") {
+        Err(WsAcceptError::OriginRejected(crate::browser::OriginRejected::NotAllowed(o))) => {
+            assert_eq!(o, "https://evil.example");
+        }
+        other => panic!("expected OriginRejected(NotAllowed), got {other:?}"),
+    }
+}
+
+/// RV-TRANSPORT-WS-6C58DE5C: the native acceptor (Origin optional but
+/// must match when present) also returns the typed rejection.
+#[tokio::test]
+async fn rv_transport_ws_6c58de5c_native_disallowed_origin_is_origin_rejected() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let policy = BrowserOriginPolicy::allow(["https://good.example"]);
+    let server =
+        tokio::spawn(async move { accept_native_ws(server_io, NATIVE_WS_PATH, &policy).await });
+
+    let req = ws_request(NATIVE_WS_PATH, Some("https://evil.example"));
+    let _err = tokio_tungstenite::client_async(req, client_io)
+        .await
+        .expect_err("handshake must fail");
+
+    match server.await.expect("join") {
+        Err(WsAcceptError::OriginRejected(crate::browser::OriginRejected::NotAllowed(_))) => {}
+        other => panic!("expected OriginRejected(NotAllowed), got {other:?}"),
+    }
 }

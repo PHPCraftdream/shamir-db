@@ -28,7 +28,8 @@ pub mod tls_exporter;
 
 pub use browser::{validate_origin, BrowserOriginPolicy, OriginRejected};
 pub use framing::{
-    ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink, WsFrameError,
+    is_matched_heartbeat_pong, ws_recv, ws_recv_into, ws_recv_into_stream, ws_send, ws_send_sink,
+    ws_send_sink_prereserved, HeartbeatState, WsFrameError,
 };
 pub use listener::{bind_validated, validate_addr, WsBindError, WsListenerProfile};
 pub use server::{
