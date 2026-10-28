@@ -126,10 +126,12 @@ impl TableManager {
             Vec::new()
         };
         let proj = if !needs_raw {
-            Some(
-                exec::SelectProjection::new(&query.select, interner, ctx.scalars.clone())?
-                    .with_context(ctx),
-            )
+            Some(exec::SelectProjection::new_with_context(
+                &query.select,
+                interner,
+                ctx.scalars.clone(),
+                Some(ctx),
+            )?)
         } else {
             None
         };
@@ -198,11 +200,12 @@ impl TableManager {
                                 // `count_total` counter (independent of the
                                 // heap's K-row window).
                                 topk_total += 1;
-                                #[expect(
-                                    clippy::unwrap_used,
-                                    reason = "guard: !needs_raw initializes the projection before rows are scanned"
-                                )]
-                                let qv = proj.as_ref().unwrap().project_value(&view, interner);
+                                let Some(projection) = proj.as_ref() else {
+                                    return Err(shamir_storage::error::DbError::Validation(
+                                        "top-K projection is unavailable".to_string(),
+                                    ));
+                                };
+                                let qv = projection.project_value(&view, interner)?;
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge(
                                         crate::query::batch::exec_scope::RowByteMeter::value_size(
@@ -228,7 +231,7 @@ impl TableManager {
                                     reason = "guard: !needs_raw initializes the projection before rows are scanned"
                                 )]
                                 let row = QueryRecord::Direct(
-                                    proj.as_ref().unwrap().project_value(&view, interner),
+                                    proj.as_ref().unwrap().project_value(&view, interner)?,
                                 );
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge_record(&row)?;
@@ -250,11 +253,12 @@ impl TableManager {
                                 // F-53a (#874): inline bounded heap (Owned arm
                                 // — already-decoded InnerValue, e.g. from MVCC).
                                 topk_total += 1;
-                                #[expect(
-                                    clippy::unwrap_used,
-                                    reason = "guard: !needs_raw initializes the projection before rows are scanned"
-                                )]
-                                let qv = proj.as_ref().unwrap().project_value(&record, interner);
+                                let Some(projection) = proj.as_ref() else {
+                                    return Err(shamir_storage::error::DbError::Validation(
+                                        "top-K projection is unavailable".to_string(),
+                                    ));
+                                };
+                                let qv = projection.project_value(&record, interner)?;
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge(
                                         crate::query::batch::exec_scope::RowByteMeter::value_size(
@@ -292,7 +296,7 @@ impl TableManager {
                                     reason = "guard: !needs_raw initializes the projection before rows are scanned"
                                 )]
                                 let row = QueryRecord::Direct(
-                                    proj.as_ref().unwrap().project_value(&record, interner),
+                                    proj.as_ref().unwrap().project_value(&record, interner)?,
                                 );
                                 if let Some(meter) = ctx.row_byte_meter {
                                     meter.charge_record(&row)?;

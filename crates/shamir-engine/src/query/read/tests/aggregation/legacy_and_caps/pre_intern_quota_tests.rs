@@ -38,11 +38,17 @@ fn rv_types_2eb39dfd_pre_intern_select_keys_at_cap_returns_typed_error() {
 
     // Alias interned first consumes the whole quota budget.
     let occupied = select_with_alias("a");
-    pre_intern_select_keys(&occupied, &interner).unwrap();
+    pre_intern_select_keys(&occupied, &interner, |name| {
+        interner.get_ind(name).map(|id| id.id())
+    })
+    .unwrap();
 
     // The next new alias is metered and must fail with the wire code.
     let over = select_with_alias("toolong");
-    let err = pre_intern_select_keys(&over, &interner).unwrap_err();
+    let err = pre_intern_select_keys(&over, &interner, |name| {
+        interner.get_ind(name).map(|id| id.id())
+    })
+    .unwrap_err();
     assert!(matches!(err, DbError::InternerQuotaExceeded { .. }));
     assert_eq!(err.code(), Some("interner_quota_exceeded"));
 }
@@ -56,7 +62,10 @@ fn rv_types_2eb39dfd_pre_intern_select_keys_under_cap_ok() {
             max_bytes: 1024,
         },
     );
-    pre_intern_select_keys(&select_with_alias("total"), &interner).unwrap();
+    pre_intern_select_keys(&select_with_alias("total"), &interner, |name| {
+        interner.get_ind(name).map(|id| id.id())
+    })
+    .unwrap();
 }
 
 #[test]
