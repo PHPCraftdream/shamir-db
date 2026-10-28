@@ -279,27 +279,20 @@ impl TableManager {
         tx: Option<&shamir_tx::TxContext>,
         encoding: ResultEncoding,
     ) -> DbResult<QueryResult> {
-        let overlay_tx = tx.filter(|tx| !tx.implicit && !tx.interner_overlay.is_empty());
-        if let Some(tx_ref) = overlay_tx {
-            if ctx.interner_overlay_ids.is_some() {
-                self.read_impl_with_context(query, ctx, tx, encoding).await
-            } else {
-                let overlay_ctx = ctx.clone_with_read_overlay(&tx_ref.interner_overlay);
-                self.read_impl_with_context(query, &overlay_ctx, tx, encoding)
-                    .await
+        // Attach the interactive-tx overlay snapshot unless the caller already
+        // did. Selected inline (no wrapper async fn): an extra future layer
+        // overflowed the stack of deep in-process callers in debug builds.
+        let overlay_ctx = match tx {
+            Some(tx_ref)
+                if !tx_ref.implicit
+                    && !tx_ref.interner_overlay.is_empty()
+                    && ctx.interner_overlay_ids.is_none() =>
+            {
+                Some(ctx.clone_with_read_overlay(&tx_ref.interner_overlay))
             }
-        } else {
-            self.read_impl_with_context(query, ctx, tx, encoding).await
-        }
-    }
-
-    async fn read_impl_with_context(
-        &self,
-        query: &ReadQuery,
-        ctx: &FilterContext<'_>,
-        tx: Option<&shamir_tx::TxContext>,
-        encoding: ResultEncoding,
-    ) -> DbResult<QueryResult> {
+            _ => None,
+        };
+        let ctx = overlay_ctx.as_ref().unwrap_or(ctx);
         let start = Instant::now();
         let batch_size = shamir_tunables::store_defaults::FULL_SCAN_BATCH;
         let interner = self.interner().get().await?;
