@@ -1,10 +1,18 @@
-use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
+use rustix::io::Errno;
+use rustix::process::{
+    kill_process_group, test_kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions,
+};
 use std::io;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Darwin `killpg` skips zombies and returns EPERM when no live member was signalled.
+const ZOMBIE_EPERM: bool = cfg!(target_vendor = "apple");
+/// Bound for confirming a zombie-only group vanished after the leader reap.
+const GONE_PROBE: Duration = Duration::from_secs(5);
 
 pub struct ProcessTree {
     pgid: Pid,
@@ -27,7 +35,7 @@ impl ProcessTree {
                         WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
                     ) {
                         Ok(_) => break Ok(()),
-                        Err(rustix::io::Errno::INTR) => continue,
+                        Err(Errno::INTR) => continue,
                         Err(error) => break Err(error),
                     }
                 };
@@ -73,7 +81,9 @@ impl ProcessTree {
             return Ok(());
         }
         match kill_process_group(self.pgid, Signal::KILL) {
-            Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+            Ok(()) | Err(Errno::SRCH) => Ok(()),
+            // Exited leader: ambiguous on Darwin; `reap` verifies the group is gone.
+            Err(Errno::PERM) if ZOMBIE_EPERM && self.leader_exited() => Ok(()),
             Err(error) => Err(io::Error::from(error)),
         }
     }
@@ -87,17 +97,48 @@ impl ProcessTree {
             problems.push("leader not reaped".into());
             return None;
         }
-        if let Err(error) = self.terminate() {
-            problems.push(format!("final tree kill: {error}"));
-        }
+        // The zombie leader pins the pgid, so this kill cannot hit a reused group.
+        let unverified = match kill_process_group(self.pgid, Signal::KILL) {
+            Ok(()) | Err(Errno::SRCH) => false,
+            Err(Errno::PERM) if ZOMBIE_EPERM => true,
+            Err(error) => {
+                problems.push(format!("final tree kill: {}", io::Error::from(error)));
+                false
+            }
+        };
         match child.wait() {
             Ok(status) => {
                 self.reaped = true;
+                if unverified && !self.group_gone() {
+                    problems.push("final tree kill: live member not signallable (EPERM)".into());
+                }
                 Some(status)
             }
             Err(error) => {
                 problems.push(format!("leader reap: {error}"));
+                if unverified {
+                    problems.push("final tree kill: EPERM unverified".into());
+                }
                 None
+            }
+        }
+    }
+
+    fn leader_exited(&self) -> bool {
+        let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+        matches!(waitid(WaitId::Pid(self.pgid), options), Ok(Some(_)))
+    }
+
+    /// After the leader reap: a zombie-only group vanishes (ESRCH); lasting EPERM means a live member.
+    fn group_gone(&self) -> bool {
+        let deadline = Instant::now() + GONE_PROBE;
+        loop {
+            match test_kill_process_group(self.pgid) {
+                Err(Errno::SRCH) => return true,
+                Err(Errno::PERM) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                _ => return false,
             }
         }
     }
