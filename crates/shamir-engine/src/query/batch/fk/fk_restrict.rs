@@ -280,6 +280,10 @@ async fn collect_parent_values(
                     // set (decode-error twin of the F-65/#891 read-error
                     // fix — see `extract_ref_field_value`'s doc).
                     if let Some(qv) = extract_ref_field_value(&bytes, path)? {
+                        #[expect(
+                            clippy::unwrap_used,
+                            reason = "guard: result is initialized for every ref_field before this scan"
+                        )]
                         result.get_mut(field).unwrap().insert(qv);
                     }
                 }

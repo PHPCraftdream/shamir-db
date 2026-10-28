@@ -34,7 +34,8 @@ fn group_by_count() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert_eq!(result.len(), 2);
     assert_eq!(result[0]["city"], "LA");
     assert_eq!(result[0]["cnt"], 2_i64);
@@ -65,7 +66,8 @@ fn group_by_sum_avg() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert_eq!(result[0]["city"], "LA");
     assert_eq!(result[0]["total_age"], 50_i64);
     assert_eq!(result[0]["avg_age"], 25.0_f64);
@@ -97,7 +99,8 @@ fn group_by_min_max() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert_eq!(result[0]["min_age"], 25_i64);
     assert_eq!(result[0]["max_age"], 25_i64);
     assert_eq!(result[1]["min_age"], 30_i64);
@@ -126,7 +129,8 @@ fn group_by_having() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["city"], "NYC");
 }
@@ -161,7 +165,8 @@ fn group_by_multiple_fields() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert_eq!(result.len(), 2);
 }
 
@@ -184,7 +189,8 @@ fn group_by_empty_input() {
         &select,
         &interner,
         &ctx,
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert!(result.is_empty());
 }
 
@@ -207,7 +213,8 @@ fn aggregate_all_count_sum() {
         &select,
         &interner,
         ScalarResolver::builtins_only(),
-    );
+    )
+    .expect("aggregate execution succeeds");
     assert_eq!(result.len(), 1);
     assert_eq!(result[0]["total"], 4_i64);
     assert_eq!(result[0]["sum_age"], 115_i64);
