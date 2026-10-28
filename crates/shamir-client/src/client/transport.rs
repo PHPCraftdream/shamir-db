@@ -737,4 +737,10 @@ pub(crate) struct WireAuthOk {
     /// (old server). Client emits v2 id-keyed write/read only when >= 2.
     #[serde(default)]
     pub server_query_version: u8,
+    /// Presently informational; identity recovery requires explicit policy.
+    #[serde(default)]
+    pub rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    /// Informational KDF-upgrade request from the authenticated server.
+    #[serde(default)]
+    pub kdf_upgrade_required: Option<bool>,
 }

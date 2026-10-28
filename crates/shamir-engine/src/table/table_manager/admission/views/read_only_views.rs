@@ -227,6 +227,10 @@ impl InternerReadView {
 
     /// Populated-cell accessor; only ever called by the read accessors.
     fn interner(&self) -> &Interner {
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: InternerReadView constructors populate the OnceCell before constructing the view"
+        )]
         self.cell
             .get()
             .expect("InternerReadView is constructed only after the cell is populated")
