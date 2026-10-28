@@ -7,6 +7,19 @@ use crate::batch::subscribe::{SourceBuilder, Subscribe};
 use crate::filter as filter_mod;
 use crate::val::lit;
 
+#[test]
+fn rv_query_builder_c6841ed3_consumer_paths_need_only_builder_crate() {
+    let mut bindings = shamir_query_builder::bind! { "key" => shamir_query_builder::val::lit(1) };
+    assert_eq!(
+        bindings.shift_remove("key"),
+        Some(shamir_query_builder::val::lit(1))
+    );
+    let _operation = shamir_query_builder::subscribe! {
+        source: ("main", "messages"),
+        where: shamir_query_builder::filter::eq("thread_id", 42),
+    };
+}
+
 // ── helpers ────────────────────────────────────────────────────────
 
 fn assert_eq_wire(a: &SubscribeOp, b: &SubscribeOp) {
@@ -24,8 +37,15 @@ fn assert_eq_wire(a: &SubscribeOp, b: &SubscribeOp) {
 
 #[test]
 fn rv_query_builder_c6841ed3_macro_paths_use_builder_owned_reexports() {
+    mod shamir_collections {}
+    mod shamir_query_types {}
+
     let mut bindings = crate::bind! { "key" => lit(1) };
     assert_eq!(bindings.shift_remove("key"), Some(crate::val::lit(1)));
+    let _operation = crate::subscribe! {
+        source: ("main", "messages"),
+        where: filter_mod::eq("thread_id", 42),
+    };
 }
 
 #[test]

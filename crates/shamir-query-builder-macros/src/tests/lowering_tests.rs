@@ -41,6 +41,54 @@ fn rv_query_builder_macros_eee42189_generated_chain_retains_sequence() {
 }
 
 #[test]
+fn rv_query_builder_macros_eee42189_loop_accumulates_fragments_without_reinterpolation() {
+    let source = include_str!("../query_parse_lower.rs");
+    let doc_map = source
+        .split_once("fn lower_doc_map(doc: &DocMapAst)")
+        .expect("doc-map lowering should exist")
+        .1
+        .split_once("/// Emit a table constructor prefix")
+        .expect("doc-map lowering should end")
+        .0;
+    assert!(
+        !doc_map.contains("#chain"),
+        "doc-map lowering re-interpolates chain: {doc_map}"
+    );
+    assert!(doc_map.contains(".map(|(key, val)|"));
+    assert!(doc_map.contains(".collect();"));
+    assert!(doc_map.contains("#(#entries)*"));
+
+    let insert_lowering = source
+        .split_once("impl InsertMacro {")
+        .expect("insert lowering should exist")
+        .1
+        .split_once("impl UpdateMacro {")
+        .expect("insert lowering should end")
+        .0;
+    assert!(
+        !insert_lowering.contains("#chain.row"),
+        "insert lowering re-interpolates chain: {insert_lowering}"
+    );
+    assert!(insert_lowering.contains(".docs\n            .iter()"));
+    assert!(insert_lowering.contains("quote! { .row(#doc_ts) }"));
+    assert!(insert_lowering.contains("#chain #(#rows)* .build()"));
+
+    let order_loop = source
+        .split_once("for (field, dir) in &self.order_by_items {")
+        .expect("order_by loop should exist")
+        .1
+        .split_once("\n        }")
+        .expect("order_by loop should end")
+        .0;
+    assert!(
+        !order_loop.contains("#chain"),
+        "order_by loop re-interpolates chain: {order_loop}"
+    );
+    assert!(order_loop.contains("order_by.push(match dir"));
+    assert!(source.contains("#chain #(#order_by)*"));
+}
+
+#[test]
 fn rv_query_builder_macros_36328515_expansion_has_no_query_types_paths() {
     let forms = [
         "from t where x == 1 select count(*) as n order_by x asc limit 5 offset 1",

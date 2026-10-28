@@ -1,5 +1,6 @@
 //! Tests for the `wire` module — QueryValue + msgpack multi-format encoding.
 
+use serde::ser::SerializeSeq;
 use shamir_query_types::batch::BatchRequest;
 
 use crate::batch::Batch;
@@ -8,12 +9,34 @@ use crate::Query;
 
 struct FailingWireValue;
 
+struct MalformedSequence;
+
+impl serde::Serialize for MalformedSequence {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(2))?;
+        sequence.serialize_element(&shamir_types::types::value::QueryValue::Null)?;
+        sequence.end()
+    }
+}
+
 impl serde::Serialize for FailingWireValue {
     fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
         Err(serde::ser::Error::custom(
             "intentional serialization failure",
         ))
     }
+}
+
+#[test]
+fn rv_query_builder_6931dbde_to_query_value_encode_failure_stays_encode() {
+    let error = FailingWireValue.to_query_value().unwrap_err();
+    assert!(matches!(error, WireError::Encode(_)));
+}
+
+#[test]
+fn rv_query_builder_6931dbde_malformed_msgpack_is_decode_error() {
+    let error = MalformedSequence.to_query_value().unwrap_err();
+    assert!(matches!(error, WireError::Decode(_)));
 }
 
 #[test]
