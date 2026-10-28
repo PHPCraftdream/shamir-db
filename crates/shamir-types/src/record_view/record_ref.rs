@@ -383,11 +383,17 @@ impl<'a> HavingView<'a> {
     /// Build a `HavingView` over an aggregate-result `QueryValue`. The
     /// interner is used once to map each String key → `InternerKey`.
     pub fn new(row: &'a QueryValue, interner: &Interner) -> Self {
+        Self::new_with_resolver(row, &|name| interner.get_ind(name).map(|key| key.id()))
+    }
+
+    /// Build a view using a caller-provided name resolver, allowing transaction
+    /// overlay names to be resolved without mutating the base interner.
+    pub fn new_with_resolver(row: &'a QueryValue, resolve: &impl Fn(&str) -> Option<u64>) -> Self {
         let mut key_index: TMap<InternerKey, String> = new_map_wc(0);
         if let QueryValue::Map(map) = row {
             for (key_str, _val) in map {
-                if let Some(id) = interner.get_ind(key_str.as_str()) {
-                    key_index.insert(id, key_str.clone());
+                if let Some(id) = resolve(key_str.as_str()) {
+                    key_index.insert(InternerKey::new(id), key_str.clone());
                 }
             }
         }

@@ -158,10 +158,14 @@ pub(crate) fn try_apply_group_by(
     if let Some(having_filter) = &group_by.having {
         // RU8: a HAVING on a new alias at the quota cap must surface the
         // typed error, not silently absorb the failed intern.
-        pre_intern_select_keys(select, interner)?;
+        pre_intern_select_keys(select, interner, |name| ctx.resolve_interner_id(name))?;
         let having_cb = compile_filter_with_context(having_filter, ctx);
         result.retain(|qv| {
-            let view = HavingView::new(qv, interner);
+            let view = if ctx.interner_overlay_ids.is_some() {
+                HavingView::new_with_resolver(qv, &|name| ctx.resolve_interner_id(name))
+            } else {
+                HavingView::new(qv, interner)
+            };
             having_cb.matches(&view, ctx)
         });
     }
