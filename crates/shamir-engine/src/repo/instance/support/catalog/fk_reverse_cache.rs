@@ -232,6 +232,10 @@ pub struct FkSnapshot {
 
 impl FkSnapshot {
     fn cache(&self) -> &CacheState {
+        #[expect(
+            clippy::expect_used,
+            reason = "guard: all FkSnapshot constructors publish a populated cache state"
+        )]
         self.state
             .cache
             .as_ref()
