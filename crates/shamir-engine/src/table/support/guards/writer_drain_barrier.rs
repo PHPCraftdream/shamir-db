@@ -146,9 +146,15 @@
 //! completes strictly BEFORE this caller (or any other) holds the lock.
 
 #[cfg(loom)]
-use loom::sync::{Arc, atomic::{AtomicUsize, Ordering, fence}};
+use loom::sync::{
+    atomic::{fence, AtomicUsize, Ordering},
+    Arc,
+};
 #[cfg(not(loom))]
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Reusable drain barrier for a table's non-tx write path.
 ///
@@ -181,27 +187,93 @@ use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 ///
 /// # Cost
 ///
-/// `enter_writer`: one `SeqCst fetch_add` in production, relaxed increment and
-/// loom-only fence in the model. `WriterDrainGuard::drop`: one SeqCst or Release
-/// decrement respectively. `drain`: a SeqCst load per iteration, `yield_now`
-/// between iterations (rare DDL path). When
+/// `enter_writer`: one `SeqCst fetch_add` (uncontended cache-line RMW,
+/// ~ns — the `SeqCst` strengthening is a full fence on x86 only at the
+/// *subsequent* `flag.load`, the RMW itself is a single locked instruction).
+/// `WriterDrainGuard::drop`: one `SeqCst fetch_sub`. `drain`: one `SeqCst`
+/// load per iteration, `yield_now` between iterations (rare DDL path). When
 /// no drain is in progress the drainer never touches this primitive — zero
 /// contention.
 ///
-/// # Memory model (F-56/F-84; loom proof)
+/// # Memory model (F-56, #882 — corrected; F-69, #896 — scope extended to
+/// # the FULL six-condition predicate, not just `schema_activation_barrier`)
 ///
-/// F-56's original argument for the shared flag/counter pair is that the
-/// writer's `fetch_add` precedes its flag load and the drainer's flag store
-/// precedes its counter load in the single SeqCst order S. If the writer reads
-/// the old flag, its increment precedes the drainer's counter load, which must
-/// then see that increment or a later modification. The same total-order
-/// argument applies to the packed barrier predicate described above.
+/// The four cross-atomic operations are ALL `Ordering::SeqCst`:
+///   - writer  `active.fetch_add` (`enter_writer`)
+///   - writer  `flag.load` (`needs_write_barrier`, now
+///     `WriteBarrierFlags::any_set()` — ONE `SeqCst` load of the packed word
+///     that replaced the six former independent flags)
+///   - drainer `flag.store(true)` (any `WriteBarrierFlags::set`/`set_to` call
+///     — `set_schema_activation_barrier` / `WriteBarrierGuard` (F-70, #897;
+///     formerly `IndexCreateBarrierGuard`) / `IndexManager`'s
+///     `UNIQUE_INDEX_EXISTS` setters all route through the SAME
+///     `fetch_or`/`fetch_and` on the SAME `Arc<AtomicU8>`)
+///   - drainer `active.load` (`drain`)
 ///
-/// This is the standard cross-atomic SeqCst proof: the counter and intent flag
-/// are separate atomics, so acquire/release alone cannot establish this
-/// ordering when the writer reads the old flag value. The data store's own
-/// synchronization provides write visibility; the counter ensures temporal
-/// drain membership through the writer's completed work.
+/// This dependency spans TWO independent atomics (`active` and `flag`), so
+/// `Release`/`Acquire` ALONE CANNOT carry it. A `synchronizes-with` edge —
+/// the only thing that creates a cross-thread happens-before relationship —
+/// requires an `Acquire` load to read the value written by a *specific*
+/// `Release` store **on the same atomic**. Here the writer's `flag.load`
+/// reads `false` (the OLD value), NOT the `true` the drainer's
+/// `flag.store(true)` wrote, so no synchronizes-with edge is created on
+/// `flag`; and `active` is an entirely separate atomic whose `Relaxed`
+/// increment the drainer's `Acquire` load has no ordering relationship with
+/// at all. A legal weak-memory outcome is therefore: the writer increments
+/// `active` (real time), reads `flag == false`, and proceeds; the drainer
+/// stores `flag = true`, then `active.load` observes `0` and `drain()`
+/// returns immediately — precisely the in-flight writer the primitive exists
+/// to hold back.
+///
+/// `SeqCst` closes it. `SeqCst` operations participate in a SINGLE total
+/// order `S` over all atomics, with the consistency constraints (C++/Rust
+/// memory model, [atomics.order]):
+///   (C1) same-thread sequenced-before is respected in `S`;
+///   (C2) each atomic's modification order is respected in `S`;
+///   (C3) a `SeqCst` load reads the value written by the most recent
+///        modification of that atomic that precedes it in `S`.
+/// Worked proof that the drainer cannot observe `active == 0`:
+///   1. Writer: `fetch_add` is sequenced-before `flag.load` ⟹ by (C1)
+///      `fetch_add ≺ flag.load` in `S`.
+///   2. Drainer: `flag.store(true)` is sequenced-before `active.load` ⟹ by
+///      (C1) `flag.store(true) ≺ active.load` in `S`.
+///   3. The writer's `flag.load` read `false`, i.e. the value written by the
+///      initial / pre-transition store on `flag` — NOT the drainer's
+///      `flag.store(true)`. By (C3), if `flag.store(true)` preceded
+///      `flag.load` in `S`, the load would have read `true`. It read `false`,
+///      so `flag.load ≺ flag.store(true)` in `S`.
+///   4. Chaining 1 → 3 → 2: `fetch_add ≺ flag.load ≺ flag.store(true) ≺
+///      active.load`, all in the single total order `S`.
+///   5. `fetch_add` and `active.load` are both `SeqCst` ops on the SAME
+///      atomic (`active`). By (C3), `active.load` reads the most recent
+///      modification of `active` preceding it in `S`. Since
+///      `fetch_add ≺ active.load` in `S`, that most-recent modification is
+///      `fetch_add` or a later one — so `active.load` observes a value
+///      `>= 1` (it cannot observe the pre-increment `0`). The drainer does
+///      NOT return; it waits. □
+///
+/// This is the standard "a third total order carries the cross-atomic
+/// happens-before" argument; it works precisely because `SeqCst`, unlike
+/// `Acquire`/`Release`, imposes a single global order across DIFFERENT
+/// atomics — exactly what this primitive's `flag` + `active` dependency
+/// needs. `WriterDrainGuard::drop`'s `fetch_sub` is `SeqCst` too, so the
+/// writer's pre-decrement work (data-store write, record-counter bump, index
+/// updates) is ordered before `drain()`'s `active.load` observes the
+/// resulting `0` (the same chain, step 5, on the decrement side) — i.e. when
+/// `drain()` returns, no fast-path writer is still in flight. The data
+/// store's own synchronization provides cross-thread write visibility; this
+/// counter provides temporal drain, mirroring the role `unique_write_lock`
+/// plays on the slow path.
+///
+/// The loom implementation uses the SC fence rule: if fence X (after writer
+/// increment A) precedes fence Y (after the drainer's flag store) in S, the
+/// counter load sees A or a later counter modification (including the
+/// writer's completed decrement). If Y precedes X, the writer's flag load
+/// sees the drainer's store or a later flag modification. Thus the modeled
+/// protocol cannot miss an in-flight writer. Production SeqCst accesses
+/// provide the same guarantee without production fences. The ordering-pin
+/// gate is `rust-guard orderings` and its pin file is
+/// `.rust-guard/atomic_orderings.toml`.
 ///
 /// # Reusability
 ///
@@ -249,14 +321,9 @@ impl WriterDrainBarrier {
 
     /// Starts the drain observation phase. The fence is modeling-only: the
     /// production SeqCst loads themselves participate in the global order.
+    #[cfg(loom)]
     pub fn begin_drain(&self) {
-        #[cfg(loom)]
         fence(Ordering::SeqCst);
-    }
-
-    #[cfg(not(loom))]
-    pub fn is_drained(&self) -> bool {
-        self.active.load(Ordering::SeqCst) == 0
     }
 
     #[cfg(loom)]
@@ -264,11 +331,28 @@ impl WriterDrainBarrier {
         self.active.load(Ordering::Acquire) == 0
     }
 
-    /// Drain until no writer remains. Production retains the diagnostic wait
-    /// reporting; loom's model uses its thread scheduler in the test module.
+    /// Drain: wait until every in-flight fast-path writer has exited the
+    /// drain set.
+    ///
+    /// The caller MUST have already raised its intent flag/bit (`SeqCst`
+    /// store) so NEW writers take the slow (locked) path. Then this catches
+    /// any writer that read `false` before the flag went up.
+    ///
+    /// F-70 (#897, P0): the caller must call this BEFORE acquiring
+    /// `unique_write_lock`, NOT after — see
+    /// [`TableManager::begin_write_barrier`](crate::table::table_manager::TableManager::begin_write_barrier)
+    /// and this module's "F-70 — THE canonical lock-order hierarchy" doc
+    /// section for why (the prior lock-then-drain order, F-57, deadlocked
+    /// against `pre_commit_prelock`'s drain-guard-then-lock shape). Holding
+    /// the lock is not required for `drain()` to be correct: what matters is
+    /// that the flag was raised first (so every NEW writer takes the slow
+    /// path and cannot re-enter the drain set) — the lock only serializes
+    /// those NEW slow-path writers against the caller's own body, a separate
+    /// concern from the drain wait itself.
+    ///
+    /// When no writers are active, returns after a single `SeqCst` load.
     #[cfg(not(loom))]
     pub async fn drain(&self) {
-        self.begin_drain();
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation.
         // NOT a behavior change: this is timestamped logging only, no new
         // await point, no retry/timeout.
@@ -293,7 +377,9 @@ impl WriterDrainBarrier {
             "WriterDrainBarrier::drain: enter, active={}",
             self.active.load(Ordering::SeqCst)
         );
-        while !self.is_drained() {
+        // SeqCst (not Acquire): pairs with the writer's SeqCst fetch_add via the
+        // single total order — see the struct-level memory-model proof.
+        while self.active.load(Ordering::SeqCst) != 0 {
             tokio::task::yield_now().await;
             // Threshold-gated so the common (fast, uncontended) path never
             // pays a Instant::now() + log call per yield — only once the
@@ -368,4 +454,3 @@ impl Drop for WriterDrainGuard {
 // F-56/F-84: loom 0.7's SeqCst access behavior does not provide the SC-order
 // guarantee, so explicit fences model it. Production uses the real SeqCst
 // accesses and does not need fences.
-

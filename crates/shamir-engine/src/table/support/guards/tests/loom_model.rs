@@ -118,7 +118,6 @@ fn rv_engine_898ecb5e_oracle_detects_unfenced_sb_loom_model() {
         let writer_wrote = Arc::clone(&wrote);
         let writer = thread::spawn(move || {
             writer_active.fetch_add(1, Ordering::Relaxed);
-            fence(Ordering::SeqCst);
             let took_fast = !writer_flag.load(Ordering::Relaxed);
             if took_fast {
                 writer_wrote.store(true, Ordering::Relaxed);
@@ -128,8 +127,7 @@ fn rv_engine_898ecb5e_oracle_detects_unfenced_sb_loom_model() {
         });
 
         flag.store(true, Ordering::Relaxed);
-        fence(Ordering::SeqCst);
-        while active.load(Ordering::Acquire) != 0 {
+        while active.load(Ordering::Relaxed) != 0 {
             thread::yield_now();
         }
         let snapshot = wrote.load(Ordering::Relaxed);
