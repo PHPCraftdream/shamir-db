@@ -7,27 +7,32 @@
 //!
 //! The delta is always attached (even when empty) so the client can advance
 //! its epoch to the server's high-water mark; `skip_serializing_if` keeps the
-//! wire clean for empty cases. Unknown repos are silently skipped.
+//! wire clean for empty cases. Unknown, unreadable, and unauthorized repos
+//! are silently skipped.
 
 use crate::engine::db_instance::db_instance::DbInstance;
-use crate::query::batch::{BatchError, BatchRequest, BatchResponse, InternerDelta};
+use crate::query::batch::{BatchRequest, BatchResponse, InternerDelta};
 
 /// Populate `response.interner_delta` from the server's per-repo interners.
 ///
 /// For each `(repo, client_epoch)` in `request.interner_epochs`: resolve the
 /// db's `RepoInstance`, `repo_interner().get().await`, `entries_after(epoch)`,
 /// and build an [`InternerDelta`] from `(entries, new_high)`. Unknown repos are
-/// skipped. Errors loading an interner are surfaced as a soft `BatchError` —
-/// the batch itself already executed successfully.
+/// skipped. Interner-loading failures are ignored because batch results have
+/// already been computed; ambient synchronization is best-effort.
 pub(super) async fn attach_interner_delta(
     response: &mut BatchResponse,
+    authorized_repos: &[String],
     request: &BatchRequest,
     db: &DbInstance,
-) -> Result<(), BatchError> {
+) {
     if request.interner_epochs.is_empty() {
-        return Ok(());
+        return;
     }
-    for (repo_name, client_epoch) in &request.interner_epochs {
+    for repo_name in authorized_repos {
+        let Some(client_epoch) = request.interner_epochs.get(repo_name) else {
+            continue;
+        };
         let Some(repo) = db.get_repo(repo_name) else {
             // Unknown repo → skip (the batch may have created/dropped it).
             continue;
@@ -35,13 +40,11 @@ pub(super) async fn attach_interner_delta(
         // Load the per-repo interner. A failure here means the interner store
         // could not be opened; we skip this repo rather than failing the whole
         // response — the batch results are already computed.
-        let mgr = match repo.repo_interner().await {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Ok(mgr) = repo.repo_interner().await else {
+            continue;
         };
-        let interner = match mgr.get().await {
-            Ok(i) => i,
-            Err(_) => continue,
+        let Ok(interner) = mgr.get().await else {
+            continue;
         };
         let (entries, new_high) = interner.entries_after(*client_epoch as usize);
         let delta = InternerDelta {
@@ -53,5 +56,4 @@ pub(super) async fn attach_interner_delta(
         };
         response.interner_delta.insert(repo_name.clone(), delta);
     }
-    Ok(())
 }

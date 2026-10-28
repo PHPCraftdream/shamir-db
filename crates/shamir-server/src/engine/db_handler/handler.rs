@@ -934,7 +934,12 @@ impl ShamirDbHandler {
         match self.db.get_ddl_op_status(db, repo, table, op_id_str).await {
             Ok(status) => DbResponse::DdlOpStatus { status },
             Err(e) => DbResponse::Error {
-                code: "query".to_string(),
+                code: match e {
+                    shamir_db::DbError::Validation(_) => "validation",
+                    shamir_db::DbError::NotFound(_) => "not_found",
+                    _ => "query",
+                }
+                .to_string(),
                 message: format!("Failed to read DDL op status: {}", e),
             },
         }
