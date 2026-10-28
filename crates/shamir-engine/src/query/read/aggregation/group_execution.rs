@@ -6,19 +6,19 @@ use bytes::Bytes;
 use indexmap::map::Entry;
 use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_storage::error::DbResult;
-use shamir_types::codecs::interned::inner_value_to_query_value;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::{HavingView, RecordRef, RecordView, ScalarRef};
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::filter::{compile_filter, FilterContext};
+use crate::query::filter::{compile_filter_with_context, FilterContext};
 use crate::query::read::exec::pre_intern_select_keys;
 use crate::query::read::{GroupBy, QueryResult, Select, SelectItem};
 
 use super::accumulator::{
-    group_key_item_complex, group_key_item_scalar, intern_field_path_keys, GroupKeyItem,
+    group_key_item_complex, group_key_item_scalar, intern_field_path_keys_with_overlay,
+    GroupKeyItem,
 };
 use super::function_inputs::make_aggregate_fn;
 use super::group_projection::{build_aggregate_object, scalar_ref_to_query, RowView};
@@ -62,7 +62,14 @@ pub(crate) fn try_apply_group_by(
         .iter()
         .map(|f| {
             let display_name = f.last().cloned().unwrap_or_default();
-            (display_name, intern_field_path_keys(f, interner))
+            (
+                display_name,
+                intern_field_path_keys_with_overlay(
+                    f,
+                    interner,
+                    ctx.interner_overlay_ids.as_deref(),
+                ),
+            )
         })
         .collect();
 
@@ -87,14 +94,14 @@ pub(crate) fn try_apply_group_by(
             Ok(v) => group_paths
                 .iter()
                 .map(|(_, path)| {
-                    group_key_from_lens(&v, path.as_deref(), interner, &mut nan_counter)
+                    group_key_from_lens(&v, path.as_deref(), interner, ctx, &mut nan_counter)
                 })
                 .collect(),
             Err(_) => match InnerValue::from_bytes(bytes.as_ref()) {
                 Ok(iv) => group_paths
                     .iter()
                     .map(|(_, path)| {
-                        group_key_from_lens(&iv, path.as_deref(), interner, &mut nan_counter)
+                        group_key_from_lens(&iv, path.as_deref(), interner, ctx, &mut nan_counter)
                     })
                     .collect(),
                 Err(_) => continue, // malformed — skip defensively
@@ -119,8 +126,8 @@ pub(crate) fn try_apply_group_by(
                     },
                 };
                 for (field_name, interned_path) in &group_paths {
-                    let qv = view
-                        .with_ref(|r| group_value_to_query(r, interned_path.as_deref(), interner));
+                    let qv =
+                        view.with_ref(|r| group_value_to_query(r, interned_path.as_deref(), ctx));
                     key_qv_values.push((field_name.clone(), qv));
                 }
                 v.insert((vec![(*id, bytes.clone())], key_qv_values));
@@ -152,7 +159,7 @@ pub(crate) fn try_apply_group_by(
         // RU8: a HAVING on a new alias at the quota cap must surface the
         // typed error, not silently absorb the failed intern.
         pre_intern_select_keys(select, interner)?;
-        let having_cb = compile_filter(having_filter, interner);
+        let having_cb = compile_filter_with_context(having_filter, ctx);
         result.retain(|qv| {
             let view = HavingView::new(qv, interner);
             having_cb.matches(&view, ctx)
@@ -170,6 +177,7 @@ fn group_key_from_lens<R: RecordRef + ?Sized>(
     record: &R,
     path: Option<&[InternerKey]>,
     interner: &Interner,
+    ctx: &FilterContext<'_>,
     nan_counter: &mut u64,
 ) -> GroupKeyItem {
     let Some(path) = path else {
@@ -189,7 +197,7 @@ fn group_key_from_lens<R: RecordRef + ?Sized>(
     }
     // Container / Dec / Big — materialise this one field only.
     match record.materialize_at(path) {
-        Some(v) => group_key_item_complex(&v, interner),
+        Some(v) => group_key_item_complex(&v, interner, ctx.interner_overlay.as_deref()),
         None => GroupKeyItem::Missing,
     }
 }
@@ -201,7 +209,7 @@ fn group_key_from_lens<R: RecordRef + ?Sized>(
 fn group_value_to_query<R: RecordRef + ?Sized>(
     record: &R,
     path: Option<&[InternerKey]>,
-    interner: &Interner,
+    ctx: &FilterContext<'_>,
 ) -> QueryValue {
     let Some(path) = path else {
         return QueryValue::Null;
@@ -210,7 +218,7 @@ fn group_value_to_query<R: RecordRef + ?Sized>(
         return scalar_ref_to_query(s);
     }
     match record.materialize_at(path) {
-        Some(v) => inner_value_to_query_value(&v, interner).unwrap_or(QueryValue::Null),
+        Some(v) => ctx.resolve_query_value(&v).unwrap_or(QueryValue::Null),
         None => QueryValue::Null,
     }
 }

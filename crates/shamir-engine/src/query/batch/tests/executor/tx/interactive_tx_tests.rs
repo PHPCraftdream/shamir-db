@@ -14,6 +14,10 @@ use crate::query::batch::{
 
 use super::super::common::TxTestResolver;
 
+// ============================================================================
+// Phase B — interactive (multi-call) transaction glue
+// ============================================================================
+
 #[tokio::test]
 async fn interactive_tx_read_resolves_overlay_interned_field_names() {
     let repo = crate::repo::RepoInstance::from_factory(
@@ -36,6 +40,8 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
                 .set("name", "overlay-name-12")
                 .unwrap()
                 .set("qty", 12)
+                .unwrap()
+                .set("overlay_group", "shared")
                 .unwrap(),
         ),
     );
@@ -46,6 +52,8 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
                 .set("name", "overlay-name-37")
                 .unwrap()
                 .set("qty", 37)
+                .unwrap()
+                .set("overlay_group", "other")
                 .unwrap(),
         ),
     );
@@ -56,6 +64,8 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
                 .set("name", "overlay-name-25")
                 .unwrap()
                 .set("qty", 7)
+                .unwrap()
+                .set("overlay_group", "shared")
                 .unwrap(),
         ),
     );
@@ -183,6 +193,72 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
     assert_eq!(descending[1].get_value_i64("qty"), Some(12));
     assert_eq!(descending[2].get_value_str("name"), Some("overlay-name-25"));
     assert_eq!(descending[2].get_value_i64("qty"), Some(7));
+
+    let mut aggregates = Batch::new();
+    aggregates.query(
+        "grouped",
+        Query::from("users")
+            .select([
+                shamir_query_builder::select::field("overlay_group"),
+                shamir_query_builder::select::count_all("count_value"),
+                shamir_query_builder::select::sum("qty", "sum_value"),
+                shamir_query_builder::select::min("qty", "min_value"),
+                shamir_query_builder::select::max("qty", "max_value"),
+            ])
+            .group_by("overlay_group")
+            .build(),
+    );
+    let conditional = shamir_query_builder::val::cond(
+        shamir_query_builder::filter::eq("qty", 12),
+        shamir_query_builder::val::lit(1),
+        shamir_query_builder::val::lit(0),
+    );
+    aggregates.query(
+        "conditional_sum",
+        Query::from("users")
+            .select([shamir_query_builder::select::sum_of(
+                conditional,
+                "sum_value",
+            )])
+            .build(),
+    );
+    let response = execute_in_open_tx(
+        &aggregates.build(),
+        &resolver,
+        None,
+        None,
+        &Actor::System,
+        "test",
+        &mut tx,
+    )
+    .await
+    .unwrap();
+    let rows = &response.results["grouped"].records;
+    assert_eq!(rows.len(), 2);
+    let mut aggregate_rows = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get_value_str("overlay_group").unwrap().to_owned(),
+                row.get_value_i64("count_value").unwrap(),
+                row.get_value_i64("sum_value").unwrap(),
+                row.get_value_i64("min_value").unwrap(),
+                row.get_value_i64("max_value").unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    aggregate_rows.sort_unstable();
+    assert_eq!(
+        aggregate_rows,
+        vec![
+            ("other".to_string(), 1, 37, 37, 37),
+            ("shared".to_string(), 2, 19, 7, 12)
+        ]
+    );
+    assert_eq!(
+        response.results["conditional_sum"].records[0].get_value_i64("sum_value"),
+        Some(1)
+    );
 
     drop(tx);
     drop(guard);

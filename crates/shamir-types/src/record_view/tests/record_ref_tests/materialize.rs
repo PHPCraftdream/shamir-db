@@ -1,8 +1,22 @@
 //! `materialize_at` parity tests.
 
 use super::helpers::{assert_materialize_parity, build_record, ik};
+use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{RecordRef, RecordView};
+use crate::types::common::new_map_wc;
 use crate::types::value::InnerValue;
+
+#[test]
+fn to_query_value_rejects_unknown_interned_map_key() {
+    let interner = Interner::default();
+    let unknown_id = u64::MAX;
+    assert!(interner.get_str(&InternerKey::new(unknown_id)).is_none());
+    let mut map = new_map_wc(1);
+    map.insert(InternerKey::new(unknown_id), InnerValue::Int(1));
+    let value = InnerValue::Map(map);
+
+    assert!(RecordRef::to_query_value(&value, &interner).is_err());
+}
 
 #[test]
 fn materialize_at_scalar() {
