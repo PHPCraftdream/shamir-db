@@ -165,21 +165,19 @@ fn child_entrypoint_trunc() {
 
 /// Spawn the truncation child at a given crash seam, passing the tiny segment
 /// cap so the child's repo rolls real segments. Returns the child exit status.
-fn spawn_child_trunc(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
+async fn spawn_child_trunc(phase: &str, repo_path: &Path) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "multi_table_drain::child_entrypoint_trunc",
-            "--nocapture",
-        ])
-        .env(CHILD_SENTINEL_TRUNC, "1")
-        .env(CRASH_AFTER, phase)
-        .env(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP)
-        .env(REPO_PATH, repo_path)
-        .output()
-        .expect("spawn truncation crash child")
-        .status
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args([
+        "--exact",
+        "multi_table_drain::child_entrypoint_trunc",
+        "--nocapture",
+    ])
+    .env(CHILD_SENTINEL_TRUNC, "1")
+    .env(CRASH_AFTER, phase)
+    .env(SEG_MAX_BYTES_ENV, TRUNC_SEG_CAP)
+    .env(REPO_PATH, repo_path);
+    super::child_proc::run_crash_child(phase, cmd).await
 }
 
 /// One truncation cycle: spawn a child that commits `TRUNC_RECORDS` and
@@ -208,12 +206,12 @@ async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_trunc(phase, &repo_path);
+    let (status, child_output) = spawn_child_trunc(phase, &repo_path).await;
     assert!(
         !status.success(),
         "truncation child must die abnormally at seam {phase}; got a clean \
          exit (status {status:?}) — the crash seam did not fire (not enough \
-         sealed segments to truncate?)"
+         sealed segments to truncate?)\n{child_output}"
     );
     let sidecar = repo_path.with_extension("childcount");
     let durably_committed = read_sidecar_committed(&sidecar);
@@ -225,20 +223,21 @@ async fn trunc_crash_then_recover(phase: &str) -> (usize, usize) {
     (data, durably_committed)
 }
 
-fn spawn_child_multi_table(phase: &str, repo_path: &Path) -> std::process::ExitStatus {
+async fn spawn_child_multi_table(
+    phase: &str,
+    repo_path: &Path,
+) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "multi_table_drain::child_entrypoint_multi_table",
-            "--nocapture",
-        ])
-        .env(CHILD_SENTINEL_MULTI, "1")
-        .env(CRASH_AFTER, phase)
-        .env(REPO_PATH, repo_path)
-        .output()
-        .expect("spawn crash child")
-        .status
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args([
+        "--exact",
+        "multi_table_drain::child_entrypoint_multi_table",
+        "--nocapture",
+    ])
+    .env(CHILD_SENTINEL_MULTI, "1")
+    .env(CRASH_AFTER, phase)
+    .env(REPO_PATH, repo_path);
+    super::child_proc::run_crash_child(phase, cmd).await
 }
 
 /// MED-A cheap-win (Phase-A tails S1.2): a multi-table tx that crashes at
@@ -253,10 +252,10 @@ async fn crash_at_phase4_two_tables_recover_cross_table_consistent() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_multi_table("phase4", &repo_path);
+    let (status, child_output) = spawn_child_multi_table("phase4", &repo_path).await;
     assert!(
         !status.success(),
-        "child must die abnormally on process::abort() at phase4; got {status:?}"
+        "child must die abnormally on process::abort() at phase4; got {status:?}\n{child_output}"
     );
 
     // REOPEN over the same on-disk image.
