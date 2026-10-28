@@ -128,6 +128,7 @@ pub(in crate::query::filter) fn intern_field_path_compact_with(
     Some(keys)
 }
 
+/// Lossy numeric → `f64` for cross-type comparison (NaN on overflow). Works
 /// for both `Decimal` and `BigInt` via the shared `ToPrimitive` trait.
 ///
 /// CR-C5 (#780): this remains the deliberate, ACCEPTED-approximation path
@@ -437,12 +438,21 @@ pub fn resolve_filter_query(
         // `$cond`'s condition is not special-cased; it inherits this
         // behaviour rather than introducing a new error path.
         FilterValue::Cond { cond } => {
-            let node = match ctx
-                .cond_cache
-                .and_then(|cache| cond_cache_get(cache, &cond.condition))
-            {
-                Some(node) => Some(Arc::clone(node)),
-                None => compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner),
+            let node = if ctx.interner_overlay_ids.is_some() {
+                Some(Arc::new(
+                    crate::query::filter::try_compile_filter_with_context(&cond.condition, ctx)
+                        .ok()?,
+                ))
+            } else {
+                match ctx
+                    .cond_cache
+                    .and_then(|cache| cond_cache_get(cache, &cond.condition))
+                {
+                    Some(node) => Some(Arc::clone(node)),
+                    None => {
+                        compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner)
+                    }
+                }
             }?;
             let matched = node.matches(record, ctx);
             if matched {

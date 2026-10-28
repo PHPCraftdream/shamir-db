@@ -36,8 +36,14 @@ pub(crate) fn compile_filter_with_context(
     filter: &Filter,
     ctx: &crate::query::filter::FilterContext<'_>,
 ) -> FilterNode {
+    try_compile_filter_with_context(filter, ctx).unwrap_or(FilterNode::False)
+}
+
+pub(crate) fn try_compile_filter_with_context(
+    filter: &Filter,
+    ctx: &crate::query::filter::FilterContext<'_>,
+) -> Result<FilterNode, String> {
     try_compile_filter_with_overlay(filter, ctx.interner, ctx.interner_overlay_ids.as_deref())
-        .unwrap_or(FilterNode::False)
 }
 
 pub fn try_compile_filter(filter: &Filter, interner: &Interner) -> Result<FilterNode, String> {
@@ -315,6 +321,11 @@ fn build_index_expr_with_overlay(
         "trim" => IndexExpr::Trim(Box::new(base)),
         "length" => IndexExpr::Length(Box::new(base)),
         "field" => base,
+        // Unknown ops are treated as user-registered scalar names. The
+        // brute-force eval path resolves the name via the ScalarResolver
+        // at match time; the index path validates `.trusted_pure()` at
+        // creation time. If the name doesn't resolve, the eval returns
+        // an error → the comparison yields false (no match).
         user_scalar => IndexExpr::Scalar {
             name: user_scalar.to_string(),
             inner: Box::new(base),
@@ -331,9 +342,12 @@ fn build_index_expr_with_overlay(
 /// the pre-resolved parallel slice — the same behaviour as before this
 /// optimisation.
 fn compile_in_node(path: CompactPath, values: &[FilterValue], negate: bool) -> FilterNode {
+    // Attempt to resolve every value to a literal.
     let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
         values.iter().map(filter_value_to_query).collect();
+
     if resolved.iter().all(Option::is_some) {
+        // Fast path: all literals → HashSet.
         let set: TSet<shamir_types::types::value::QueryValue> =
             resolved.into_iter().flatten().collect();
         FilterNode::InSet {
@@ -342,6 +356,7 @@ fn compile_in_node(path: CompactPath, values: &[FilterValue], negate: bool) -> F
             negate,
         }
     } else {
+        // Fallback: mixed literals + dynamic values → linear scan.
         FilterNode::In {
             field_path: path,
             values: values.to_vec(),

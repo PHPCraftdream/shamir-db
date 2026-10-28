@@ -667,6 +667,7 @@ async fn read_tx_snapshot_keyset_filter_resolves_overlay_field() {
         .rows([
             write::doc().set("overlay_rank", 23).unwrap(),
             write::doc().set("overlay_rank", 5).unwrap(),
+            write::doc().set("overlay_rank", 17).unwrap(),
         ])
         .build();
     table
@@ -685,20 +686,22 @@ async fn read_tx_snapshot_keyset_filter_resolves_overlay_field() {
     let q = Query::from("t")
         .select(["overlay_rank"])
         .where_(filter::and([
-            filter::in_("overlay_rank", [5, 23]),
+            filter::in_("overlay_rank", [5, 17]),
             filter::exists("overlay_rank"),
         ]))
         .order_by_asc("overlay_rank")
-        .after(vec![QueryValue::Int(0)], Some(5))
+        .after(vec![QueryValue::Int(10)], Some(5))
         .build();
     let result = table.read_tx(&q, &ctx, Some(&tx)).await.unwrap();
-    assert_eq!(result.records.len(), 2);
-    let values = result
-        .records
-        .iter()
-        .filter_map(|r| r.get_value_i64("overlay_rank"))
-        .collect::<Vec<_>>();
-    assert_eq!(values, vec![5, 23]);
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(
+        result
+            .records
+            .iter()
+            .filter_map(|record| record.get_value_i64("overlay_rank"))
+            .collect::<Vec<_>>(),
+        vec![17]
+    );
 }
 
 #[tokio::test]

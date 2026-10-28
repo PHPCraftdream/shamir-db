@@ -55,7 +55,7 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
             doc()
                 .set("name", "overlay-name-25")
                 .unwrap()
-                .set("qty", 25)
+                .set("qty", 7)
                 .unwrap(),
         ),
     );
@@ -103,7 +103,7 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
         plain_rows,
         vec![
             ("overlay-name-12".to_string(), 12),
-            ("overlay-name-25".to_string(), 25),
+            ("overlay-name-25".to_string(), 7),
             ("overlay-name-37".to_string(), 37),
         ]
     );
@@ -123,6 +123,32 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
             .order_by(shamir_query_types::read::OrderByItem::desc("qty"))
             .build(),
     );
+    let conditional_false = shamir_query_builder::val::cond(
+        shamir_query_builder::filter::eq("qty", 7),
+        shamir_query_builder::val::lit(1),
+        shamir_query_builder::val::lit(0),
+    );
+    ordered.query(
+        "condition_false",
+        Query::from("users")
+            .select(["name", "qty"])
+            .where_(shamir_query_builder::filter::value_eq(conditional_false, 0))
+            .order_by(shamir_query_types::read::OrderByItem::asc("qty"))
+            .build(),
+    );
+    let conditional_true = shamir_query_builder::val::cond(
+        shamir_query_builder::filter::eq("qty", 7),
+        shamir_query_builder::val::lit(1),
+        shamir_query_builder::val::lit(0),
+    );
+    ordered.query(
+        "condition_true",
+        Query::from("users")
+            .select(["name", "qty"])
+            .where_(shamir_query_builder::filter::value_eq(conditional_true, 1))
+            .order_by(shamir_query_types::read::OrderByItem::asc("qty"))
+            .build(),
+    );
     let response = execute_in_open_tx(
         &ordered.build(),
         &resolver,
@@ -136,20 +162,27 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
     .unwrap();
     let rows = &response.results["ordered"].records;
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[0].get_value_str("name"), Some("overlay-name-12"));
-    assert_eq!(rows[0].get_value_i64("qty"), Some(12));
-    assert_eq!(rows[1].get_value_str("name"), Some("overlay-name-25"));
-    assert_eq!(rows[1].get_value_i64("qty"), Some(25));
+    assert_eq!(rows[0].get_value_str("name"), Some("overlay-name-25"));
+    assert_eq!(rows[0].get_value_i64("qty"), Some(7));
+    assert_eq!(rows[1].get_value_str("name"), Some("overlay-name-12"));
+    assert_eq!(rows[1].get_value_i64("qty"), Some(12));
     assert_eq!(rows[2].get_value_str("name"), Some("overlay-name-37"));
     assert_eq!(rows[2].get_value_i64("qty"), Some(37));
+    let rows = &response.results["condition_false"].records;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].get_value_i64("qty"), Some(12));
+    assert_eq!(rows[1].get_value_i64("qty"), Some(37));
+    let rows = &response.results["condition_true"].records;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get_value_i64("qty"), Some(7));
     let descending = &response.results["descending"].records;
     assert_eq!(descending.len(), 3);
     assert_eq!(descending[0].get_value_str("name"), Some("overlay-name-37"));
     assert_eq!(descending[0].get_value_i64("qty"), Some(37));
-    assert_eq!(descending[1].get_value_str("name"), Some("overlay-name-25"));
-    assert_eq!(descending[1].get_value_i64("qty"), Some(25));
-    assert_eq!(descending[2].get_value_str("name"), Some("overlay-name-12"));
-    assert_eq!(descending[2].get_value_i64("qty"), Some(12));
+    assert_eq!(descending[1].get_value_str("name"), Some("overlay-name-12"));
+    assert_eq!(descending[1].get_value_i64("qty"), Some(12));
+    assert_eq!(descending[2].get_value_str("name"), Some("overlay-name-25"));
+    assert_eq!(descending[2].get_value_i64("qty"), Some(7));
 
     drop(tx);
     drop(guard);
