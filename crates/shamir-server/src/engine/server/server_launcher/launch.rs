@@ -40,6 +40,7 @@ use crate::bootstrap::{
 use crate::byte_budget::ByteBudget;
 use crate::config::{Config, ListenerKind, ProfileKind};
 use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
+use crate::connection::ConnTasks;
 use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
 };
@@ -100,6 +101,7 @@ impl ServerLauncher {
         // silently dropped — the cold-start hang we chased through the accept
         // loops). One concept, race-free by construction.
         let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let conn_tasks = ConnTasks::new(shutdown_token.clone());
 
         // 1. Durable stores.
         std::fs::create_dir_all(&config.data_dir)?;
@@ -641,6 +643,7 @@ impl ServerLauncher {
                     l.kdf_override.as_ref().map(kdf_from_config),
                     auth_init_timeout,
                     &meta,
+                    conn_tasks.clone(),
                 );
                 let token = shutdown_token.clone();
                 let limiter = conn_limiter.clone();
@@ -727,6 +730,7 @@ impl ServerLauncher {
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
                         &meta,
+                        conn_tasks.clone(),
                     );
                     let acceptor = tls_acceptor.clone();
                     let token = shutdown_token.clone();
@@ -764,6 +768,7 @@ impl ServerLauncher {
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
                         &meta,
+                        conn_tasks.clone(),
                     );
                     let token = shutdown_token.clone();
 
@@ -800,6 +805,7 @@ impl ServerLauncher {
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
                         &meta,
+                        conn_tasks.clone(),
                     );
                     let acceptor = tls_acceptor.clone();
                     let token = shutdown_token.clone();
@@ -846,6 +852,7 @@ impl ServerLauncher {
                         l.kdf_override.as_ref().map(kdf_from_config),
                         auth_init_timeout,
                         &meta,
+                        conn_tasks.clone(),
                     );
                     let acceptor = tls_acceptor.clone();
                     let token = shutdown_token.clone();
@@ -978,7 +985,7 @@ impl ServerLauncher {
             repl_supervisor_task: Some(repl_supervisor_task),
             shamir,
             data_dir: config.data_dir.clone(),
-            conn_limiter: conn_limiter.clone(),
+            conn_tasks: conn_tasks.clone(),
             _data_dir_lock: data_dir_lock,
             tunables: Arc::new(RuntimeTunables::new()),
         })

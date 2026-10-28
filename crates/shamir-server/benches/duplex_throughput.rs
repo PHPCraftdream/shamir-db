@@ -35,7 +35,7 @@ use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{HandlerFuture, RequestHandler};
 use shamir_connect::server::session::{Session, SessionPermissions, SessionStore};
 
-use shamir_server::connection::{request_loop, ConnectionContext};
+use shamir_server::connection::{request_loop, ConnTasks, ConnectionContext};
 use shamir_server::framer::{Framer, TcpFramer};
 
 use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
@@ -154,6 +154,7 @@ fn make_ctx(max_in_flight: usize) -> Arc<ConnectionContext> {
         shamir_tunables::instance_defaults::CONN_IDLE_TIMEOUT,
         max_in_flight,
         meta,
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     )
 }
 

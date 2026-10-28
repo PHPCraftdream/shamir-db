@@ -32,14 +32,16 @@ use shamir_connect::server::rotation::ServerIdentityState;
 use shamir_connect::server::session::{Session, SessionStore};
 use shamir_connect::server::user_record::UserRecord;
 use shamir_transport_tcp::framing::{read_frame_into, write_frame_into, MAX_FRAME_SIZE_DEFAULT};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::connection::wire::{
     AuthInit as WireAuthInit, AuthOk as WireAuthOk, Challenge as WireChallenge,
     ClientProof as WireClientProof,
 };
 use crate::connection::CLOCK_OVERRIDE_NS;
+use crate::connection::{request_loop, ConnTasks};
 use crate::framer::{FrameReader, FrameWriter, Framer, FramerError, TcpFramer};
+use crate::server::drain_connections;
 use crate::server_meta::ServerMetaStore;
 
 // ---------------------------------------------------------------------
@@ -80,6 +82,7 @@ fn test_kdf() -> KdfParams {
 fn handshake_ctx_with_users(
     auth_init_timeout: Duration,
     users: &[(&str, &[u8], u32)],
+    tasks: ConnTasks,
 ) -> Arc<crate::connection::ConnectionContext> {
     let kdf = test_kdf();
     let seed = [0x11u8; 32];
@@ -157,11 +160,16 @@ fn handshake_ctx_with_users(
         Duration::from_secs(60),
         1,
         meta,
+        tasks,
     )
 }
 
 fn handshake_ctx(auth_init_timeout: Duration) -> Arc<crate::connection::ConnectionContext> {
-    handshake_ctx_with_users(auth_init_timeout, &[])
+    handshake_ctx_with_users(
+        auth_init_timeout,
+        &[],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +481,84 @@ impl Framer for ChannelFramer {
     }
 }
 
+struct StalledShutdownWriter {
+    entered: Option<oneshot::Sender<()>>,
+    _drop_flag: DropFlag,
+}
+
+impl FrameWriter for StalledShutdownWriter {
+    async fn write_frame_into(
+        &mut self,
+        _payload: &[u8],
+        _scratch: &mut Vec<u8>,
+    ) -> Result<(), FramerError> {
+        Ok(())
+    }
+
+    async fn shutdown(&mut self) {
+        if let Some(tx) = self.entered.take() {
+            let _ = tx.send(());
+        }
+        std::future::pending::<()>().await;
+    }
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// RV-SERVER-FE6B4C98: the post-handshake writer cannot hold shutdown open.
+#[tokio::test(start_paused = true)]
+async fn rv_server_fe6b4c98_stalled_request_writer_is_aborted_before_shutdown_returns() {
+    let drain_token = tokio_util::sync::CancellationToken::new();
+    let tasks = ConnTasks::new(drain_token.clone());
+    let ctx = handshake_ctx_with_users(Duration::from_secs(1), &[], tasks.clone());
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let writer = StalledShutdownWriter {
+        entered: Some(entered_tx),
+        _drop_flag: DropFlag(Arc::clone(&dropped)),
+    };
+    let _conn = tasks.spawn(request_loop(ctx, DeadReader, writer, [7u8; 32]));
+
+    drain_token.cancel();
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("writer shutdown was not reached")
+        .expect("writer task dropped before notifying shutdown entry");
+
+    let mut report = shamir_db::ShutdownReport::pending(Vec::new());
+    let started = tokio::time::Instant::now();
+    let joined = tokio::time::timeout(
+        Duration::from_secs(5),
+        drain_connections(
+            &tasks,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            &mut report,
+        ),
+    )
+    .await
+    .expect("bounded connection drain timed out");
+    let elapsed = started.elapsed();
+
+    assert!(elapsed <= Duration::from_secs(2), "drain took {elapsed:?}");
+    assert!(joined, "forced abort must join tracked connection task");
+    assert!(
+        !report.is_clean(),
+        "drain timeout must report unclean shutdown"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "writer future was not dropped"
+    );
+    assert_eq!(tasks.live(), 0);
+}
+
 fn channel_conn(
     ctx: Arc<crate::connection::ConnectionContext>,
     shutdown_stalls: bool,
@@ -508,6 +594,7 @@ async fn rv_transport_tcp_b5244fa2_proof_at_30s_within_effective_40s_budget_is_a
     let ctx = handshake_ctx_with_users(
         Duration::from_millis(500),
         &[("alice", b"kdf-budget-password", 8)],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
 
     let (conn, reads_tx, mut writes_rx) = channel_conn(ctx, false);
@@ -554,6 +641,7 @@ async fn rv_transport_tcp_b5244fa2_proof_at_41s_past_effective_40s_budget_is_rej
     let ctx = handshake_ctx_with_users(
         Duration::from_millis(500),
         &[("alice", b"kdf-budget-password", 8)],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
 
     let (conn, reads_tx, mut writes_rx) = channel_conn(ctx, false);
@@ -607,6 +695,7 @@ async fn rv_server_17329fc9_bootstrap_token_expiring_between_auth_start_and_proo
             ("alice_ok", b"ttl-control-password", 2),
             ("alice_ttl", b"ttl-scenario-password", 2),
         ],
+        ConnTasks::new(tokio_util::sync::CancellationToken::new()),
     );
     let meta = Arc::clone(&ctx.meta);
 

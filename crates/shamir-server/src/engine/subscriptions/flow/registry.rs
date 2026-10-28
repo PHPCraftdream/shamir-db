@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use scc::HashMap as SccHashMap;
 use shamir_collections::THasher;
@@ -35,13 +35,20 @@ pub struct SubscriptionRegistry {
     /// every insert / remove / close_all to enforce the per-connection cap
     /// (finding 2b-i) without a full traversal on the hot subscribe path.
     active: AtomicUsize,
+    closed: AtomicBool,
     /// Maximum concurrently-active subscriptions this connection may hold.
     cap: usize,
 }
 
 impl Default for SubscriptionRegistry {
     fn default() -> Self {
-        Self::new()
+        Self {
+            subs: SccHashMap::with_hasher(THasher::default()),
+            next_id: AtomicU64::new(1),
+            active: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
+            cap: MAX_SUBSCRIPTIONS_PER_CONNECTION,
+        }
     }
 }
 
@@ -56,6 +63,7 @@ impl SubscriptionRegistry {
             subs: SccHashMap::with_hasher(THasher::default()),
             next_id: AtomicU64::new(1),
             active: AtomicUsize::new(0),
+            closed: AtomicBool::new(false),
             cap,
         }
     }
@@ -78,7 +86,7 @@ impl SubscriptionRegistry {
         let cap = self.cap;
         let mut current = self.active.load(Ordering::Relaxed);
         loop {
-            if current >= cap {
+            if self.closed.load(Ordering::Acquire) || current >= cap {
                 return Err(cap);
             }
             match self.active.compare_exchange_weak(
@@ -87,26 +95,26 @@ impl SubscriptionRegistry {
                 Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return Ok(()),
+                Ok(_) => {
+                    if self.closed.load(Ordering::Acquire) {
+                        self.release_reservation();
+                        return Err(cap);
+                    }
+                    return Ok(());
+                }
                 Err(observed) => current = observed,
             }
         }
     }
 
-    /// Reserve a handle-less placeholder slot for `id` — call this BEFORE
-    /// `tokio::spawn`ing the bridge task, not after.
-    ///
-    /// `@fl` review of task #527's self-exit slot-release fix (an RAII guard
-    /// inside `bridge_task` that calls [`Self::remove`] on every exit path)
-    /// found a race: on a multi-thread runtime, a fast-exiting bridge task
-    /// (e.g. the all-sources-denied path, which returns before any `.await`)
-    /// can run to completion and fire its guard's `remove(id)` BEFORE the
-    /// caller gets around to inserting the entry — `remove` finds nothing to
-    /// remove (a no-op), and the caller's later insert then creates a
-    /// permanently-dangling entry with no way left to clean it up. Reserving
-    /// a real map entry HERE, before spawn, guarantees the guard's `remove`
-    /// always finds something real, no matter how the race resolves.
-    pub(crate) fn reserve_pending(&self, id: u64) {
+    /// Reserve a handle-less placeholder slot for `id` before spawning.
+    /// Returns `false` and releases the already-reserved slot if the registry
+    /// is closed or the id is duplicated.
+    pub(crate) fn reserve_pending(&self, id: u64) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            self.release_reservation();
+            return false;
+        }
         if self
             .subs
             .insert_sync(
@@ -117,29 +125,40 @@ impl SubscriptionRegistry {
             )
             .is_err()
         {
-            // Duplicate id (never expected: ids are monotonic) — release the
-            // slot reserved for this insert so the counter stays accurate.
-            self.active.fetch_sub(1, Ordering::AcqRel);
+            self.release_reservation();
+            return false;
         }
+        if self.closed.load(Ordering::Acquire) {
+            self.remove(id);
+            return false;
+        }
+        true
+    }
+
+    fn release_reservation(&self) {
+        let previous = self.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
     }
 
     /// Attach the real bridge-task handle to an already-`reserve_pending`'d
-    /// slot — call this immediately after `tokio::spawn` returns.
-    ///
-    /// If the slot is already gone (the bridge task raced ahead, self-exited,
-    /// and its guard already removed the placeholder), this is a no-op: the
-    /// task has already finished, so `handle` is simply dropped (a finished
-    /// `JoinHandle`'s `Drop` detaches without aborting anything — there is
-    /// nothing left to abort).
+    /// slot. If the slot is missing or the registry is closed, abort the task
+    /// and remove any remaining slot.
     pub(crate) fn attach_handle(&self, id: u64, handle: JoinHandle<()>) {
-        self.subs.update_sync(&id, move |_, sub| {
-            sub.bridge_handle = Some(handle);
+        let mut handle = Some(handle);
+        self.subs.update_sync(&id, |_, sub| {
+            if !self.closed.load(Ordering::Acquire) {
+                sub.bridge_handle = handle.take();
+            }
         });
+        if let Some(handle) = handle {
+            handle.abort();
+            self.remove(id);
+        }
     }
 
     pub fn remove(&self, id: u64) -> bool {
         if self.subs.remove_sync(&id).is_some() {
-            self.active.fetch_sub(1, Ordering::AcqRel);
+            self.release_reservation();
             true
         } else {
             false
@@ -148,8 +167,11 @@ impl SubscriptionRegistry {
 
     /// Cancel all subscriptions (connection teardown).
     pub fn close_all(&self) {
-        self.subs.retain_sync(|_, _| false);
-        self.active.store(0, Ordering::Release);
+        self.closed.store(true, Ordering::Release);
+        self.subs.retain_sync(|_, _| {
+            self.release_reservation();
+            false
+        });
     }
 
     /// Number of currently-active subscriptions (O(1)).
