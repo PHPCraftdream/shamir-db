@@ -16,6 +16,7 @@
 //!  - **TOFU pin check** — `SHA256(server_pub_key) == pinned_hash`
 //!  - **Ed25519 strict verify** — `verify_strict(server_pub, identity_input, identity_sig)`
 
+use crate::client::rotation::{verify_rotation_in_progress, RotationRecovery};
 use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
 use crate::common::crypto::{constant_time_eq, random_array, sha256};
 use crate::common::error::{Error, Result};
@@ -303,6 +304,58 @@ impl ClientHandshake {
         Ok(HandshakeSuccess {
             session_id: auth_ok.session_id,
             expires_at_ns: auth_ok.expires_at_ns,
+        })
+    }
+
+    /// Verify a changed server identity through the explicit orphan-recovery chain.
+    /// This method never updates or persists the configured pin.
+    pub fn verify_rotation_recovery(
+        &self,
+        ok: &ServerAuthOk,
+        keys: &DerivedKeys,
+        auth_message: &AuthMessage,
+        now_ns: u64,
+    ) -> Result<RotationRecovery> {
+        let expected = build_server_signature(&keys.server_key, auth_message);
+        if !constant_time_eq(&expected, &ok.server_signature) {
+            return Err(Error::ServerAuthFailed);
+        }
+
+        let pinned_hash = self.pinned_hash.ok_or(Error::ServerIdentityChanged)?;
+        let new_pin = sha256(&ok.server_pub_key);
+        if constant_time_eq(&pinned_hash, &new_pin) {
+            return Err(Error::ServerIdentityChanged);
+        }
+
+        let payload = ok
+            .rotation_in_progress
+            .as_ref()
+            .ok_or(Error::ServerIdentityChanged)?;
+        let input = build_identity_input(
+            &ok.server_pub_key,
+            self.transport_kind,
+            self.binding_mode,
+            &self.tls_exporter_or_zeros,
+            auth_message,
+            &ok.session_id,
+            ok.expires_at_ns,
+        );
+        if !verify_identity(&ok.server_pub_key, &input, &ok.identity_sig) {
+            return Err(Error::ServerSignatureInvalid);
+        }
+        let previous_pin = sha256(&payload.previous_pub);
+        let _ = verify_rotation_in_progress(
+            payload,
+            &ok.server_pub_key,
+            &input,
+            &pinned_hash,
+            now_ns,
+            true,
+        )?;
+        Ok(RotationRecovery {
+            previous_pin,
+            new_pin,
+            transition_until_ns: payload.transition_until_ns,
         })
     }
 

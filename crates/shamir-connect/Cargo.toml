@@ -99,6 +99,10 @@ name = "integration_full_auth"
 path = "tests/auth/integration_full_auth.rs"
 
 [[test]]
+name = "rv_client_f20c09bf_rotation_recovery"
+path = "tests/auth/rv_client_f20c09bf_rotation_recovery.rs"
+
+[[test]]
 name = "rv_handshake_0fc58d93_tofu_pin"
 path = "tests/auth/rv_handshake_0fc58d93_tofu_pin_after_identity_verify.rs"
 

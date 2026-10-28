@@ -60,6 +60,13 @@ pub enum ClientError {
     #[error("db error [{code}]: {message}")]
     Db { code: String, message: String },
 
+    #[error("server identity rotation pending: transition until {transition_until_ns}")]
+    IdentityRotationPending {
+        previous_pin: [u8; 32],
+        new_pin: [u8; 32],
+        transition_until_ns: u64,
+    },
+
     #[error("transaction not known committed: {0:?}")]
     TransactionOutcome(Box<shamir_query_types::batch::TransactionInfo>),
 

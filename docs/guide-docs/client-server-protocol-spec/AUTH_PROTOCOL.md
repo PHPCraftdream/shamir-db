@@ -88,6 +88,8 @@
 
 `rotation_in_progress` — **присутствует** в auth_ok только когда `server_ed25519_priv_previous` ещё активен (в течение 7-day overlap после `rotateServerIdentity`). См. §6.5 для процедуры обработки клиентом.
 
+The positional MessagePack `auth_ok` keeps its original 8 fields when neither hint is present. If either hint is present, it has 10 fields: slot 8 is `rotation_in_progress` (payload or `nil`) and slot 9 is `kdf_upgrade_required` (`true` or `nil`). Rust decoders predating #364 that require exactly 8 fields cannot decode hint-bearing replies; this is accepted because `shamir-client` is unpublished alpha.
+
 ### 2.5. `error` (Server → Client)
 
 ```

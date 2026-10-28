@@ -80,6 +80,10 @@ struct WireAuthOk {
     resumption_expires_at_ns: u64,
     #[serde(default)]
     server_query_version: u8,
+    #[serde(default)]
+    _rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    _kdf_upgrade_required: Option<bool>,
 }
 
 async fn roundtrip<R, W>(

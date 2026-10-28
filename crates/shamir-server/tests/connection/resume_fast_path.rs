@@ -80,6 +80,10 @@ struct WireAuthOk {
     pub resumption_expires_at_ns: u64,
     #[serde(default)]
     pub server_query_version: u8,
+    #[serde(default)]
+    pub _rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    pub _kdf_upgrade_required: Option<bool>,
 }
 
 /// Client → server first frame for session resume.

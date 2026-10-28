@@ -24,6 +24,8 @@ pub use handshake::handle_connection;
 #[cfg(test)]
 pub(crate) use handshake::{handshake_budget, CLOCK_OVERRIDE_NS};
 pub use request_loop::request_loop;
+#[cfg(test)]
+pub(crate) use session::auth_ok_hints;
 pub use session::ConnTasks;
 pub use session::ConnectionContext;
 pub(crate) use session::{in_flight_guard, wire};

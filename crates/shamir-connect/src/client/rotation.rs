@@ -19,6 +19,17 @@ use crate::common::rotation::{build_rotate_event_input, build_rotation_proof_inp
 use crate::common::time::ns;
 use crate::common::wire::{IdentityRotationEvent, RotationInProgressPayload};
 
+/// Verified orphan-recovery outcome. Applying `new_pin` requires explicit caller approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationRecovery {
+    /// Hash of the previously pinned public key.
+    pub previous_pin: [u8; 32],
+    /// Hash of the newly verified public key.
+    pub new_pin: [u8; 32],
+    /// End of the overlap window.
+    pub transition_until_ns: u64,
+}
+
 /// Maximum allowed overlap-window length to avoid leaked-priv-key attack
 /// with far-future timestamps (spec §6.5 HIGH-2 fix).
 pub const ROTATION_MAX_TRANSITION_NS: u64 = 7 * ns::DAY + ns::HOUR; // 7d + 1h skew
@@ -135,7 +146,7 @@ pub fn verify_rotation_in_progress(
     if payload.transition_until_ns <= now_ns {
         return Err(Error::ServerSignatureInvalid);
     }
-    if payload.transition_until_ns > now_ns + ROTATION_MAX_TRANSITION_NS {
+    if payload.transition_until_ns > now_ns.saturating_add(ROTATION_MAX_TRANSITION_NS) {
         return Err(Error::ServerSignatureInvalid);
     }
 

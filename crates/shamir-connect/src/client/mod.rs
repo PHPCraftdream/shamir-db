@@ -12,3 +12,4 @@ pub use crate::common::wire::RotationInProgressPayload;
 pub use handshake::{
     AuthInit, ClientHandshake, HandshakeBuilder, HandshakeSuccess, ServerAuthOk, ServerChallenge,
 };
+pub use rotation::RotationRecovery;

@@ -29,6 +29,7 @@ use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
 use crate::framer::Framer;
 
 use super::request_loop::request_loop;
+use super::session::auth_ok_hints::auth_ok_hints;
 use super::session::resume::{run_resume, run_resume_proof};
 use super::wire;
 use super::ConnectionContext;
@@ -676,6 +677,7 @@ async fn run_handshake<F: Framer>(
             }
         };
 
+    let (rotation_hint, kdf_hint) = auth_ok_hints(&hs, &auth_ok, &ctx.identity, kdf);
     let bytes = match rmp_serde::to_vec(&wire::AuthOk {
         server_signature: auth_ok.server_signature.to_vec(),
         server_pub_key: auth_ok.server_pub_key.to_vec(),
@@ -686,6 +688,8 @@ async fn run_handshake<F: Framer>(
         resumption_expires_at_ns: ticket_expires_at_ns,
         server_query_version: checked_query_version(CURRENT_QUERY_LANG_VERSION)
             .map_err(|_| HandshakeError::Io)?,
+        rotation_in_progress: rotation_hint.map(|payload| (&payload).into()),
+        kdf_upgrade_required: kdf_hint,
     }) {
         Ok(b) => b,
         Err(_) => return Err(HandshakeError::Io),
