@@ -6,28 +6,21 @@
 //! allocator untouched. [`realloc`](std::alloc::GlobalAlloc::realloc)
 //! delegates to `std::alloc::System::realloc` — no allocate-copy-deallocate
 //! emulation (unlike `peak_alloc` 0.3.0, whose realloc transiently spikes
-//! `current` to `old + new`).
+//! `current` to `old + new`). The tracking code adds two SeqCst atomic
+//! operations per successful allocation and one per deallocation.
 //!
-//! # Usage with Criterion `iter_custom`
+//! # Usage with bench-scale-tool
+//!
+//! Install the allocator at the binary crate root and measure one workload:
 //!
 //! ```rust,ignore
-//! use shamir_bench_utils::peak_mem;
-//!
-//! // At the binary's crate root, before anything else:
 //! shamir_bench_utils::install_peak_alloc!();
-//!
-//! // Inside iter_custom:
-//! b.to_async(&rt).iter_custom(|iters| async move {
-//!     let mut total_bytes: usize = 0;
-//!     for _ in 0..iters {
-//!         let (_result, peak) = peak_mem::measure(|| {
-//!             // ... your workload ...
-//!         });
-//!         total_bytes += peak;
-//!     }
-//!     // Report as custom measurement or just track max.
-//!     Duration::from_nanos(total_bytes as u64)
+//! let mut h = bench_scale_tool::Harness::new("peak_memory", env!("CARGO_MANIFEST_DIR"));
+//! h.bench("workload", || {
+//!     let measurement = shamir_bench_utils::peak_mem::measure(|| workload());
+//!     std::hint::black_box(measurement);
 //! });
+//! h.run();
 //! ```
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -35,6 +28,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
 static PEAK: AtomicUsize = AtomicUsize::new(0);
+static WINDOW_ACTIVE: AtomicUsize = AtomicUsize::new(0);
 
 /// Install the tracking allocator for THIS binary. Off by default: merely
 /// linking `shamir_bench_utils` never changes the process allocator.
@@ -66,17 +60,15 @@ impl Default for PeakTracker {
     }
 }
 
-// SAFETY (counters): telemetry is best-effort under concurrency — Relaxed
-// ordering means the peak may lag by races, but every update is an atomic
-// read-modify-write, so concurrent updates are never lost and `CURRENT`
-// cannot be corrupted.
+// SAFETY (counters): the operations delegate pointers unchanged to System.
+// SeqCst atomics serialize live-byte updates and peak maxima; an allocation
+// uses fetch_add then fetch_max, while deallocation uses one fetch_sub.
 unsafe impl GlobalAlloc for PeakTracker {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         unsafe {
             let ptr = self.system.alloc(layout);
             if !ptr.is_null() {
-                let cur = CURRENT.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-                PEAK.fetch_max(cur, Ordering::Relaxed);
+                account_alloc(layout.size());
             }
             ptr
         }
@@ -86,8 +78,7 @@ unsafe impl GlobalAlloc for PeakTracker {
         unsafe {
             let ptr = self.system.alloc_zeroed(layout);
             if !ptr.is_null() {
-                let cur = CURRENT.fetch_add(layout.size(), Ordering::Relaxed) + layout.size();
-                PEAK.fetch_max(cur, Ordering::Relaxed);
+                account_alloc(layout.size());
             }
             ptr
         }
@@ -96,7 +87,7 @@ unsafe impl GlobalAlloc for PeakTracker {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe {
             self.system.dealloc(ptr, layout);
-            CURRENT.fetch_sub(layout.size(), Ordering::Relaxed);
+            account_dealloc(layout.size());
         }
     }
 
@@ -116,72 +107,96 @@ unsafe impl GlobalAlloc for PeakTracker {
 /// an `old + new` spike, never a lost concurrent update.
 pub(crate) fn account_realloc(old_size: usize, new_size: usize) {
     if new_size >= old_size {
-        let grow = new_size - old_size;
-        let cur = CURRENT.fetch_add(grow, Ordering::Relaxed) + grow;
-        PEAK.fetch_max(cur, Ordering::Relaxed);
+        account_alloc(new_size - old_size);
     } else {
-        CURRENT.fetch_sub(old_size - new_size, Ordering::Relaxed);
+        account_dealloc(old_size - new_size);
     }
 }
 
-/// Reset the peak watermark to the current allocation level.
-///
-/// Call immediately before the workload you want to measure; subsequent
-/// [`current_peak`] deltas are then relative to this point without needing
-/// live allocations to be zero.
-pub fn reset() {
-    PEAK.store(CURRENT.load(Ordering::Relaxed), Ordering::Relaxed);
+fn account_alloc(size: usize) {
+    PEAK.fetch_max(
+        CURRENT.fetch_add(size, Ordering::SeqCst) + size,
+        Ordering::SeqCst,
+    );
 }
 
-/// Return the current peak memory (bytes) since the last [`reset`].
+fn account_dealloc(size: usize) {
+    CURRENT.fetch_sub(size, Ordering::SeqCst);
+}
+
+fn reset_peak_owned() {
+    PEAK.store(CURRENT.load(Ordering::SeqCst), Ordering::SeqCst);
+    PEAK.fetch_max(CURRENT.load(Ordering::SeqCst), Ordering::SeqCst);
+}
+
+/// Reset the raw watermark when no measurement is active.
+///
+/// Raw reset is unsupported concurrently with allocation or measurement;
+/// prefer [`measure`] or [`measure_async`] for an exclusive window.
+/// Returns `false` while an owned window is active.
+#[must_use = "reset is unsupported during an active measurement window"]
+pub fn reset() -> bool {
+    let Some(_window) = MeasurementWindow::acquire() else {
+        return false;
+    };
+    reset_peak_owned();
+    true
+}
+
+/// Return the raw peak watermark since the last [`reset`].
+///
+/// This unowned snapshot is unsupported concurrently with allocation or reset;
+/// use [`measure`] or [`measure_async`] for an exclusive measurement.
 pub fn current_peak() -> usize {
-    PEAK.load(Ordering::Relaxed)
+    PEAK.load(Ordering::SeqCst)
 }
 
-/// Return the current total allocated bytes (not peak — live).
+/// Return the current live allocated byte count.
 pub fn current_allocated() -> usize {
-    CURRENT.load(Ordering::Relaxed)
+    CURRENT.load(Ordering::SeqCst)
 }
 
-/// Measure peak allocation of a synchronous closure.
-///
-/// Resets the peak counter, runs `f`, then captures the peak.
-/// Returns `(result_of_f, peak_bytes)`.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let (result, peak_bytes) = peak_mem::measure(|| {
-///     let v: Vec<u8> = vec![0u8; 1024];
-///     v.len()
-/// });
-/// assert!(peak_bytes >= 1024);
-/// ```
-pub fn measure<F, R>(f: F) -> (R, usize)
+/// Measure a synchronous workload with an exclusively owned process window.
+/// Nested/concurrent windows return `None` without running `f`; the token
+/// releases on unwind.
+pub fn measure<F, R>(f: F) -> Option<(R, usize)>
 where
     F: FnOnce() -> R,
 {
-    reset();
-    let r = f();
-    let peak = current_peak();
-    (r, peak)
+    let _window = MeasurementWindow::acquire()?;
+    reset_peak_owned();
+    let result = f();
+    Some((result, current_peak()))
 }
 
-/// Async version of [`measure`] — resets peak, awaits the future,
-/// captures peak.
-///
-/// Note: because Rust's async tasks may interleave on the same thread,
-/// the peak may include allocations from other tasks if the executor is
-/// multi-threaded. For accurate per-task measurement, use a
-/// single-threaded runtime or `current_thread` flavor.
-pub async fn measure_async<F, R>(f: F) -> (R, usize)
+/// Async measurement owns a token rather than a lock guard across await.
+/// Nested/concurrent windows return `None` without polling `f`. Cancellation
+/// and unwinding release the window; other task allocations count.
+pub async fn measure_async<F, R>(f: F) -> Option<(R, usize)>
 where
     F: std::future::Future<Output = R>,
 {
-    reset();
-    let r = f.await;
-    let peak = current_peak();
-    (r, peak)
+    let _window = MeasurementWindow::acquire()?;
+    reset_peak_owned();
+    let result = f.await;
+    Some((result, current_peak()))
+}
+
+struct MeasurementWindow;
+
+impl MeasurementWindow {
+    fn acquire() -> Option<Self> {
+        WINDOW_ACTIVE
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for MeasurementWindow {
+    fn drop(&mut self) {
+        WINDOW_ACTIVE.store(0, Ordering::Release);
+    }
 }
 
 #[cfg(test)]

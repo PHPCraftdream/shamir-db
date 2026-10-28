@@ -16,7 +16,7 @@
 //! `seed=42`. Clustered data is harder for ANN than a uniform cloud — in high
 //! dimensions uniform points are nearly equidistant, flattering recall — so
 //! the numbers here are a sterner test than the old local uniform-LCG. The
-//! `(n, dim, k=64, σ=0.1, seed=42)` triple is the reproducibility key; surface
+//! `(GENERATOR_REVISION, n, dim, k=64, σ=0.1, seed=42)` tuple is the reproducibility key; surface
 //! it in any report built off these numbers.
 //!
 //! ## Build path — batched
@@ -51,7 +51,7 @@
 use std::sync::Arc;
 
 use bench_scale_tool::Harness;
-use shamir_bench_utils::vector_data::clustered_vectors;
+use shamir_bench_utils::vector_data::{clustered_vectors, GENERATOR_REVISION};
 use shamir_engine::index2::kind::VectorMetric;
 use shamir_engine::index2::vector::adapter::{SearchOpts, VectorAdapter};
 use shamir_engine::index2::vector::brute_force::BruteForceAdapter;
@@ -122,12 +122,13 @@ fn register_cell(
         .vectors
         .iter()
         .enumerate()
-        .map(|(i, v)| (rid_from(i), v.clone()))
+        .map(|(i, v)| (rid_from(i), v.to_vec()))
         .collect();
 
     // A fixed query drawn from the same generator lineage (seed+1 so it is
     // deterministic but distinct from the dataset seed). Dim matches.
-    let query: Vec<f32> = clustered_vectors(1, dim, K_CLUSTERS, SIGMA, SEED + 1).vectors[0].clone();
+    let query: Vec<f32> =
+        clustered_vectors(1, dim, K_CLUSTERS, SIGMA, SEED + 1).vectors[0].to_vec();
 
     // ── Build HNSW via one batched upsert ──────────────────────────────────
     let hnsw = Arc::new(HnswAdapter::new(
@@ -196,6 +197,7 @@ fn register_cell(
 
 fn main() {
     let mut h = Harness::new("vector_search", env!("CARGO_MANIFEST_DIR"));
+    eprintln!("dataset generator revision: {GENERATOR_REVISION}");
 
     let setup_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

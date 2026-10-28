@@ -23,42 +23,39 @@
 //!
 //! NOTE: this bench installs the `#[global_allocator]` explicitly via
 //! `shamir_bench_utils::install_peak_alloc!` (merely linking bench-utils never
-//! changes the allocator), which adds one atomic op per alloc/free
-//! process-wide, so the Harness wall-time cells carry that constant per-alloc
-//! overhead — but it is identical for OLD and NEW, so the old-vs-new RATIO is
-//! unaffected (only the absolute ns/op is inflated). The headline signal here
-//! is the peak-heap delta, which is allocator-independent.
+//! changes the allocator). Each successful allocation performs two SeqCst
+//! counter operations (`CURRENT.fetch_add` and `PEAK.fetch_max`); each free
+//! performs one (`CURRENT.fetch_sub`). This changes measured wall time, and
+//! allocator accounting can affect OLD and NEW paths differently; the timing
+//! ratio and peak delta should be interpreted with this instrumentation in mind.
 //!
 //! Run:
 //!   CARGO_TARGET_DIR=D:\dev\rust\.cargo-target-bench cargo bench -p shamir-index --bench create_index_streaming
 //! First run / when counts drift, calibrate:
 //!   ... -- --calibrate 2
 //!
-//! ## Measured results (F-78, Windows, release + peak_mem global allocator)
+//! ## Historical results (measured with peak_alloc; current instrumentation differs)
 //!
 //! Peak heap (peak_alloc max-live-byte watermark; raw includes the shared
-//! `data_store` baseline — the OLD→NEW *delta* is the eliminated O(table)
-//! transient):
+//! `data_store` baseline — historical OLD→NEW delta):
 //!
 //! | N rows | OLD materialize | NEW stream   | delta eliminated | NEW/OLD |
 //! |--------|-----------------|--------------|------------------|---------|
 //! | 50_000 | 49.6 MiB        | 21.1 MiB     | −28.5 MiB        | 0.43×   |
 //! | 200_000| 175.2 MiB       | 83.3 MiB     | −91.9 MiB        | 0.48×   |
 //!
-//! The eliminated transient grows 3.23× when N grows 4× (50k→200k) → ~linear,
-//! confirming the O(table)→O(batch) change (sub-4× only because the index's own
-//! O(n) postings, present in BOTH shapes, eat into the ratio).
+//! The historical eliminated transient grows 3.23× when N grows 4× (50k→200k) → ~linear,
+//! consistent with the O(table)→O(batch) change (sub-4× because the index's own
+//! O(n) postings, present in BOTH shapes, contribute to the peak).
 //!
-//! Wall time (Harness; both paths decode every row once, so decode-bound and
-//! ~equal — the fix is a MEMORY optimization, not a speed one):
-//!
+//! Wall time (historical Harness results; original peak_alloc overhead):
 //! | N rows | OLD materialize | NEW stream |
 //! |--------|-----------------|------------|
 //! | 50_000 | 361 ms/op       | 330 ms/op  |
 //! | 200_000| 1932 ms/op      | 2054 ms/op |
 //!
-//! (Wall-time carries peak_alloc's per-alloc atomic overhead equally for both
-//! paths, so the ratio is meaningful; absolute ns/op is inflated.)
+//! (Historical wall-time results from peak_alloc; current SeqCst accounting
+//! may change both absolute timings and path ratios.)
 
 use std::hint::black_box;
 use std::sync::Arc;
@@ -180,15 +177,16 @@ fn rt() -> tokio::runtime::Runtime {
 /// fixtures isolates the build's own transient).
 fn measure_peak(label: &str, n: usize, data_store: &Arc<dyn Store>, new_path: bool) -> usize {
     let runtime = rt();
-    shamir_bench_utils::peak_mem::reset();
-    runtime.block_on(async {
-        if new_path {
-            new_build(data_store, n as u64 + 1).await;
-        } else {
-            old_build(data_store, n as u64).await;
-        }
-    });
-    let peak = shamir_bench_utils::peak_mem::current_peak();
+    let (_, peak) = shamir_bench_utils::peak_mem::measure(|| {
+        runtime.block_on(async {
+            if new_path {
+                new_build(data_store, n as u64 + 1).await;
+            } else {
+                old_build(data_store, n as u64).await;
+            }
+        });
+    })
+    .expect("exclusive peak-memory window");
     eprintln!(
         "  F-78 peak-heap  n={n:<7} {label:<14} = {peak:>12} bytes ({:>8.1} MiB)",
         peak as f64 / (1u64 << 20) as f64,

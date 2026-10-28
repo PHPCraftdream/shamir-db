@@ -150,3 +150,37 @@ fn lcg_streams_differ_for_different_seeds() {
     let sb: u64 = (0..4).map(|_| b.next_u64()).fold(0u64, u64::wrapping_add);
     assert_ne!(sa, sb);
 }
+
+#[test]
+fn zero_dimension_is_rejected() {
+    assert!(std::panic::catch_unwind(|| clustered_vectors(1, 0, 1, 0.1, 1)).is_err());
+}
+
+#[test]
+fn rv_bench_utils_2caf36ea_negative_sigma_is_rejected() {
+    assert!(std::panic::catch_unwind(|| clustered_vectors(1, 1, 1, -0.1, 1)).is_err());
+}
+
+#[test]
+fn rv_bench_utils_2caf36ea_non_finite_sigma_is_rejected() {
+    assert!(std::panic::catch_unwind(|| clustered_vectors(1, 1, 1, f32::NAN, 1)).is_err());
+}
+
+#[test]
+fn rv_bench_utils_2f1d995c_rows_are_contiguous_and_keep_slice_semantics() {
+    let ds = clustered_vectors(3, 2, 1, 0.0, 9);
+    assert_eq!(ds.vectors.len(), 3);
+    assert_eq!(ds.vectors[0].len(), 2);
+    assert_eq!(
+        ds.vectors.iter().map(<[f32]>::len).collect::<Vec<_>>(),
+        [2, 2, 2]
+    );
+    assert_eq!(
+        ds.vectors[0].as_ptr().wrapping_add(2),
+        ds.vectors[1].as_ptr()
+    );
+    assert_eq!(
+        ds.vectors[1].as_ptr().wrapping_add(2),
+        ds.vectors[2].as_ptr()
+    );
+}

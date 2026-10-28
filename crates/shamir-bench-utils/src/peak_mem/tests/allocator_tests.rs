@@ -13,12 +13,13 @@ use crate::peak_mem::{current_allocated, current_peak, reset, PeakTracker};
 /// final `fetch_sub`s then underflow the counter).
 #[test]
 fn rv_bench_utils_e6177532_realloc_accounting_is_atomic_and_has_no_spike() {
+    let _test_window = crate::peak_mem::tests::measurement_tests::test_window_lock();
     let tracker = PeakTracker::new();
     let small = Layout::from_size_align(100, 8).unwrap();
 
     // Single thread: grow 100 -> 300 must peak at base + 300, not base + 400.
     let base = current_allocated();
-    reset();
+    assert!(reset());
     unsafe {
         let p = tracker.alloc(small);
         assert!(!p.is_null());
