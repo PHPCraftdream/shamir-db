@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use futures_util::{SinkExt, StreamExt};
 use shamir_connect::client::handshake::{ClientHandshake, HandshakeBuilder, ServerChallenge};
 use shamir_connect::common::crypto::Ed25519Keypair;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -164,7 +165,9 @@ fn handshake_ctx_with_users(
     )
 }
 
-fn handshake_ctx(auth_init_timeout: Duration) -> Arc<crate::connection::ConnectionContext> {
+pub(super) fn heartbeat_test_context(
+    auth_init_timeout: Duration,
+) -> Arc<crate::connection::ConnectionContext> {
     handshake_ctx_with_users(
         auth_init_timeout,
         &[],
@@ -172,10 +175,103 @@ fn handshake_ctx(auth_init_timeout: Duration) -> Arc<crate::connection::Connecti
     )
 }
 
-// ---------------------------------------------------------------------------
-// Scripted framer: deterministic reads/writes with optional stall points,
-// for paused-clock tests (no real transport, no sleeps).
-// ---------------------------------------------------------------------------
+fn handshake_ctx(auth_init_timeout: Duration) -> Arc<crate::connection::ConnectionContext> {
+    heartbeat_test_context(auth_init_timeout)
+}
+
+#[tokio::test]
+async fn rv_transport_ws_b0f1151c_preauth_close_codes() {
+    use tokio::io::duplex;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::WebSocketStream;
+
+    for (message, expected) in [
+        (
+            tokio_tungstenite::tungstenite::Message::Text("bad".into()),
+            1003u16,
+        ),
+        (
+            tokio_tungstenite::tungstenite::Message::Binary(vec![0, 0, 0, 3, 7].into()),
+            1002,
+        ),
+        (
+            tokio_tungstenite::tungstenite::Message::Binary({
+                let mut bytes = 4097u32.to_be_bytes().to_vec();
+                bytes.resize(4 + 4097, 0);
+                bytes.into()
+            }),
+            1009,
+        ),
+    ] {
+        let (server_io, client_io) = duplex(32 * 1024);
+        let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+        let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+        let task = tokio::spawn(crate::connection::handle_connection(
+            handshake_ctx(Duration::from_secs(2)),
+            "127.0.0.1:1234".parse().unwrap(),
+            crate::framer::WsFramer::new(server),
+            [0; 32],
+        ));
+        let mut client = client;
+        client.send(message).await.unwrap();
+        let code = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match client.next().await {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(Some(frame)))) => {
+                        break u16::from(frame.code)
+                    }
+                    Some(Err(error)) => panic!("client codec error before Close: {error}"),
+                    None => panic!("client stream ended before Close"),
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(code, expected);
+        task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn rv_transport_ws_b0f1151c_codec_overflow_lifecycle_close_1009() {
+    use tokio::io::duplex;
+    use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
+
+    let (server_io, client_io) = duplex(32 * 1024);
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(32))
+        .max_frame_size(Some(32));
+    let server = WebSocketStream::from_raw_socket(server_io, Role::Server, Some(config)).await;
+    let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    let task = tokio::spawn(crate::connection::handle_connection(
+        handshake_ctx(Duration::from_secs(2)),
+        "127.0.0.1:1234".parse().unwrap(),
+        crate::framer::WsFramer::new(server),
+        [0; 32],
+    ));
+    let mut client = client;
+    client
+        .send(Message::Binary(vec![0x55; 64].into()))
+        .await
+        .unwrap();
+    let code = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match client.next().await {
+                Some(Ok(Message::Close(Some(frame)))) => break u16::from(frame.code),
+                Some(Err(error)) => panic!("client codec error before Close: {error}"),
+                None => panic!("client stream ended before Close"),
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(code, 1009);
+    task.await.unwrap();
+}
 
 struct DeadReader;
 impl FrameReader for DeadReader {
@@ -188,6 +284,20 @@ impl FrameReader for DeadReader {
     }
 }
 
+#[tokio::test]
+async fn rv_transport_ws_a3b8161a_tcp_does_not_send_heartbeat() {
+    use tokio::io::duplex;
+
+    let (tcp, peer) = duplex(64);
+    let framer = TcpFramer::new(tcp);
+    let (_, mut writer) = framer.split();
+    assert!(writer.heartbeat_state().is_none());
+    assert!(writer.send_heartbeat([0; 8]).await.is_err());
+    writer.shutdown().await;
+    let (reader, _writer) = tokio::io::split(peer);
+    drop(reader);
+}
+
 struct DeadWriter;
 impl FrameWriter for DeadWriter {
     fn write_frame_into<'a>(
@@ -197,11 +307,15 @@ impl FrameWriter for DeadWriter {
     ) -> impl Future<Output = Result<(), FramerError>> + Send + 'a {
         std::future::pending()
     }
-
     fn shutdown<'a>(&'a mut self) -> impl Future<Output = ()> + Send + 'a {
         std::future::pending()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Scripted framer: deterministic reads/writes with optional stall points,
+// for paused-clock tests (no real transport, no sleeps).
+// ---------------------------------------------------------------------------
 
 /// Serves queued frames as reads; the SECOND read (the proof) optionally
 /// resolves only after a virtual delay, and shutdown optionally never

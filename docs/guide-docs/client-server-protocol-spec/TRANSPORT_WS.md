@@ -71,10 +71,13 @@ WS close 1000 ИЛИ logout
 | 4000 | `authentication_failed` |
 | 4001 | `unsupported_version` |
 | 4002 | `server_busy` |
+| 4003 | `heartbeat_timeout` |
 
 ## 7. Heartbeat
 
-WS ping/pong каждые 30 секунд (server-initiated). Client должен отвечать pong в течение 10 секунд. Иначе server close 1006.
+The server sends a Ping with an opaque 8-byte payload every 30 seconds. A Pong counts only when its payload matches the latest Ping; the 10-second deadline begins after that Ping has been written. If no matching Pong arrives while the reader is reading the socket, the server sends Close 4003 (`heartbeat_timeout`) and drops the socket. Pongs do not reset the authenticated idle timer.
+
+
 
 Не заменяет SESSION_IDLE_TTL (30 минут) — это для detection мёртвого TCP без RST.
 
