@@ -82,6 +82,10 @@ struct WireAuthOk {
     #[serde(default)]
     #[allow(dead_code)]
     pub server_query_version: u8,
+    #[serde(default)]
+    pub _rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    pub _kdf_upgrade_required: Option<bool>,
 }
 
 fn fast_kdf() -> KdfConfig {
