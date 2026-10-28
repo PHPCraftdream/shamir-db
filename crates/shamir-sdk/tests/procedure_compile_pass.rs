@@ -10,7 +10,8 @@ pub async fn get_users(
     params: shamir_sdk::Params,
 ) -> shamir_sdk::Result<shamir_sdk::Value> {
     let _limit: i64 = params.i64("limit").unwrap_or(10);
-    // In a real procedure: _ctx.db().table("users").query(None)
+    let _db = _ctx.db();
+    let _rows = _db.table("users").query(None)?;
     Ok(shamir_sdk::Value::Null)
 }
 

@@ -16,15 +16,15 @@ use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 pub fn decode_params(bytes: &[u8]) -> Result<Params> {
     match rmp_serde::from_slice::<Value>(bytes) {
         Ok(Value::Map(entries)) => Ok(Params::from_map(entries)),
-        Ok(_) => Err(Error::user("decode params: expected a string-keyed map")),
-        Err(e) => Err(Error::user(format!("decode params: {e}"))),
+        Ok(_) => Err(Error::codec("decode params: expected a string-keyed map")),
+        Err(e) => Err(Error::codec(format!("decode params: {e}"))),
     }
 }
 
 /// Encode a `Value` to msgpack bytes. Codec failures surface as errors
 /// instead of an empty-byte fallback.
 pub fn encode_value(value: &Value) -> Result<Vec<u8>> {
-    rmp_serde::to_vec(value).map_err(|e| Error::user(format!("encode value: {e}")))
+    rmp_serde::to_vec(value).map_err(|e| Error::codec(format!("encode value: {e}")))
 }
 
 /// An owned request buffer handed to a host import.
@@ -182,7 +182,7 @@ pub(crate) fn live_response_bytes() -> usize {
 /// Pure core of host-import response decoding: fail closed with the codec
 /// cause instead of a plausible fallback value.
 pub fn decode_value_bytes(bytes: &[u8]) -> Result<Value> {
-    rmp_serde::from_slice(bytes).map_err(|e| Error::user(format!("decode host response: {e}")))
+    rmp_serde::from_slice(bytes).map_err(|e| Error::codec(format!("decode host response: {e}")))
 }
 
 /// Decode a packed `i64` host-import return into `(ptr, len)`.
@@ -217,7 +217,7 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
     let mut future = core::pin::pin!(future);
     match future.as_mut().poll(&mut cx) {
         Poll::Ready(out) => Ok(out),
-        Poll::Pending => Err(Error::user(
+        Poll::Pending => Err(Error::host(
             "guest future returned Pending; suspension is not supported in guest ABI",
         )),
     }

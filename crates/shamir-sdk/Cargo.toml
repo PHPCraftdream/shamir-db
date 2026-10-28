@@ -27,5 +27,13 @@ num-bigint = "0.4"
 # live as illustration; behavioural coverage is in unit/integration tests.
 doctest = false
 
+[[test]]
+name = "function_rooted_result_853fc350"
+path = "tests/h9/function_rooted_result_853fc350.rs"
+
+[[test]]
+name = "validator_rooted_return_853fc350"
+path = "tests/h9/validator_rooted_return_853fc350.rs"
+
 [lints]
 workspace = true

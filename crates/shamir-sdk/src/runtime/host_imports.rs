@@ -16,12 +16,64 @@
 //! Zero-length filter means "no filter" (return all).
 //! Return is packed `((ptr as i64) << 32) | (len as i64)` (0 = absent).
 
+#[cfg(any(target_arch = "wasm32", test))]
+use crate::error::Error;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn missing_result(operation: &str) -> Error {
+    Error::host(format!("{operation}: host returned no result"))
+}
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn required_result(packed: i64, operation: &str) -> crate::error::Result<(i32, i32)> {
+    crate::__rt::unpack_ptr_len(packed).ok_or_else(|| missing_result(operation))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) enum NativeReply {
+    Packed(i64, Vec<u8>),
+    #[cfg(feature = "query-builder")]
+    Raw(Vec<u8>),
+}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+type NativeImportHandler = Box<dyn FnMut(&str, &str, &[u8]) -> NativeReply>;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    static NATIVE_IMPORT_HANDLER: std::cell::RefCell<Option<NativeImportHandler>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn with_native_imports<T>(
+    handler: impl FnMut(&str, &str, &[u8]) -> NativeReply + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NATIVE_IMPORT_HANDLER.with(|slot| {
+                slot.borrow_mut().take();
+            });
+        }
+    }
+    NATIVE_IMPORT_HANDLER.with(|slot| *slot.borrow_mut() = Some(Box::new(handler)));
+    let reset = Reset;
+    let out = run();
+    drop(reset);
+    out
+}
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn native_reply(op: &str, table: &str, request: &[u8]) -> NativeReply {
+    NATIVE_IMPORT_HANDLER.with(|slot| {
+        slot.borrow_mut()
+            .as_mut()
+            .expect("native test import handler installed")(op, table, request)
+    })
+}
+
 // ── WASM target: real imports ────────────────────────────────────────
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
+    use super::required_result;
     use crate::__rt::{decode_value_bytes, unpack_ptr_len, ResponseBytes};
-    use crate::error::{Error, Result};
+    use crate::error::Result;
     use crate::Value;
 
     // The four host-import trampolines. Keys are passed as raw UTF-8 bytes;
@@ -123,10 +175,8 @@ mod imp {
         let np = name.as_ptr() as i32;
         let nl = name.len() as i32;
         let packed = with_request(&args, |pp, pl| unsafe { host_call(np, nl, pp, pl) })?;
-        let (ptr, len) = match unpack_ptr_len(packed) {
-            Some(pair) => pair,
-            None => return Err(Error::user("call: host returned no result")),
-        };
+        // Classification lives in required_result (tested natively); do not branch here.
+        let (ptr, len) = required_result(packed, "call")?;
         // Safety: the host wrote the msgpack bytes into guest memory for this call.
         unsafe { decode_response(ptr, len) }
     }
@@ -134,7 +184,7 @@ mod imp {
     /// Read a record from a table by key.
     ///
     /// `table` is the table name. `key` is a `Value::Map` of primary-key
-    /// fields (e.g. `{\"id\": 1}`) or a scalar (treated as filter on \"id\").
+    /// fields (e.g. `{"id": 1}`) or a scalar (treated as filter on "id").
     /// Returns `Ok(None)` if no record matches.
     pub fn db_get(table: &str, key: &Value) -> Result<Option<Value>> {
         let tp = table.as_ptr() as i32;
@@ -155,10 +205,8 @@ mod imp {
         let tp = table.as_ptr() as i32;
         let tl = table.len() as i32;
         let packed = with_request(doc, |dp, dl| unsafe { host_db_insert(tp, tl, dp, dl) })?;
-        let (ptr, len) = match unpack_ptr_len(packed) {
-            Some(pair) => pair,
-            None => return Err(Error::user("db_insert: host returned no record")),
-        };
+        // Classification lives in required_result (tested natively); do not branch here.
+        let (ptr, len) = required_result(packed, "db_insert")?;
         // Safety: the host wrote the msgpack bytes into guest memory for this call.
         unsafe { decode_response(ptr, len) }
     }
@@ -175,10 +223,8 @@ mod imp {
             Some(v) => with_request(v, |fp, fl| unsafe { host_db_query(tp, tl, fp, fl) })?,
             None => unsafe { host_db_query(tp, tl, core::ptr::null::<u8>() as i32, 0i32) },
         };
-        let (ptr, len) = match unpack_ptr_len(packed) {
-            Some(pair) => pair,
-            None => return Err(Error::user("db_query: host returned no result")),
-        };
+        // Classification lives in required_result (tested natively); do not branch here.
+        let (ptr, len) = required_result(packed, "db_query")?;
         // Safety: the host wrote the msgpack bytes into guest memory for this call.
         unsafe { decode_response(ptr, len) }
     }
@@ -198,10 +244,8 @@ mod imp {
     /// Traps only if egress is not configured at all (config bug).
     pub fn http_fetch(req: &Value) -> Result<Value> {
         let packed = with_request(req, |rp, rl| unsafe { host_http_fetch(rp, rl) })?;
-        let (ptr, len) = match unpack_ptr_len(packed) {
-            Some(pair) => pair,
-            None => return Err(Error::user("http_fetch: host returned no result")),
-        };
+        // Classification lives in required_result (tested natively); do not branch here.
+        let (ptr, len) = required_result(packed, "http_fetch")?;
         // Safety: the host wrote the msgpack bytes into guest memory for this call.
         unsafe { decode_response(ptr, len) }
     }
@@ -226,10 +270,94 @@ mod imp {
     }
 }
 
-// ── Non-WASM target: stubs that panic ────────────────────────────────
+#[cfg(target_arch = "wasm32")]
+pub(crate) use imp::*;
 
-#[cfg(not(target_arch = "wasm32"))]
-mod imp {
+// ── Non-WASM target: stubs that panic ─────────────────────────────────
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+mod test_imp {
+    use crate::error::{Error, Result};
+    use crate::Value;
+
+    fn host_only() -> ! {
+        panic!("host import not provided by native test seam")
+    }
+
+    fn reply(op: &str, table: &str, request: &[u8], required: bool) -> Result<Option<Value>> {
+        match super::native_reply(op, table, request) {
+            super::NativeReply::Packed(packed, bytes) => {
+                if let Err(error) = super::required_result(packed, op) {
+                    if !required {
+                        return Ok(None);
+                    }
+                    return Err(error);
+                }
+                rmp_serde::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|error| Error::codec(error.to_string()))
+            }
+            #[cfg(feature = "query-builder")]
+            super::NativeReply::Raw(bytes) => rmp_serde::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| Error::codec(error.to_string())),
+        }
+    }
+
+    pub fn batch_put(_key: &str, _value: Value) -> Result<()> {
+        host_only()
+    }
+    pub fn batch_get(_key: &str) -> Result<Option<Value>> {
+        host_only()
+    }
+    pub fn global_get(_key: &str) -> Result<Option<Value>> {
+        host_only()
+    }
+    pub fn global_set(_key: &str, _value: Value) -> Result<()> {
+        host_only()
+    }
+    pub fn call(_name: &str, _args: Value) -> Result<Value> {
+        host_only()
+    }
+    pub fn db_get(table: &str, key: &Value) -> Result<Option<Value>> {
+        let bytes = rmp_serde::to_vec(key).map_err(|error| Error::codec(error.to_string()))?;
+        reply("db_get", table, &bytes, false)
+    }
+    pub fn db_insert(table: &str, doc: &Value) -> Result<Value> {
+        let bytes = rmp_serde::to_vec(doc).map_err(|error| Error::codec(error.to_string()))?;
+        reply("db_insert", table, &bytes, true)?.ok_or_else(|| super::missing_result("db_insert"))
+    }
+    pub fn db_query(table: &str, filter: Option<&Value>) -> Result<Value> {
+        let bytes = filter
+            .map(rmp_serde::to_vec)
+            .transpose()
+            .map_err(|error| Error::codec(error.to_string()))?
+            .unwrap_or_default();
+        reply("db_query", table, &bytes, true)?.ok_or_else(|| super::missing_result("db_query"))
+    }
+    pub fn http_fetch(_request: &Value) -> Result<Value> {
+        host_only()
+    }
+    #[cfg(feature = "query-builder")]
+    pub fn db_execute(request: &[u8]) -> Vec<u8> {
+        #[cfg(feature = "query-builder")]
+        match super::native_reply("db_execute", "", request) {
+            super::NativeReply::Raw(bytes) => bytes,
+            super::NativeReply::Packed(_, _) => host_only(),
+        }
+        #[cfg(not(feature = "query-builder"))]
+        {
+            let _ = request;
+            host_only()
+        }
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
+pub(crate) use test_imp::*;
+
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
+mod native_stubs {
     use crate::error::Result;
     use crate::Value;
 
@@ -240,49 +368,35 @@ mod imp {
     pub fn batch_put(_key: &str, _value: Value) -> Result<()> {
         host_only()
     }
-
     pub fn batch_get(_key: &str) -> Result<Option<Value>> {
         host_only()
     }
-
     pub fn global_get(_key: &str) -> Result<Option<Value>> {
         host_only()
     }
-
     pub fn global_set(_key: &str, _value: Value) -> Result<()> {
         host_only()
     }
-
-    /// Invoke another registered function by name (host-only).
     pub fn call(_name: &str, _args: Value) -> Result<Value> {
         host_only()
     }
-
-    /// Read a record by key (host-only).
     pub fn db_get(_table: &str, _key: &Value) -> Result<Option<Value>> {
         host_only()
     }
-
-    /// Insert a document (host-only).
     pub fn db_insert(_table: &str, _doc: &Value) -> Result<Value> {
         host_only()
     }
-
-    /// Query records (host-only).
     pub fn db_query(_table: &str, _filter: Option<&Value>) -> Result<Value> {
         host_only()
     }
-
-    /// HTTP egress: send a request and get a response (host-only).
-    pub fn http_fetch(_req: &Value) -> Result<Value> {
+    pub fn http_fetch(_request: &Value) -> Result<Value> {
         host_only()
     }
-
-    /// Execute a full batch (host-only stub).
     #[cfg(feature = "query-builder")]
     pub fn db_execute(_request: &[u8]) -> Vec<u8> {
         host_only()
     }
 }
 
-pub(crate) use imp::*;
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
+pub(crate) use native_stubs::*;

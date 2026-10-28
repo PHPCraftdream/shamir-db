@@ -11,11 +11,23 @@
 //! catch a revert of `Db::execute`'s routing line alone (the guest-only host
 //! call cannot run in a unit test); the routing is covered by CI e2e.
 
-use crate::api::db::batch_request;
+use crate::api::db::{batch_request, with_execute_encoding_error};
+use crate::{Db, ErrorKind};
 use shamir_query_builder::batch::{Batch, BuildError};
 use shamir_query_builder::query::Query;
 
-// rv_query_builder_63b52b5c_sdk_execute_surfaces_duplicate_alias
+#[test]
+fn rv_sdk_6d2497ca_execute_maps_production_encoding_failure_to_codec() {
+    let mut batch = Batch::new();
+    batch.id("q");
+    batch.query("rows", Query::from("items"));
+    with_execute_encoding_error(|| {
+        let error = Db::new().execute(&batch).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::Codec);
+        assert!(error.message().contains("execute: encode batch"));
+    });
+}
+
 #[test]
 fn rv_query_builder_63b52b5c_sdk_execute_surfaces_duplicate_alias() {
     let mut b = Batch::new();

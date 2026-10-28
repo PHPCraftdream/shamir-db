@@ -4,13 +4,19 @@
 //!
 //! # Key convention
 //!
-//! `Table::get` accepts a `Value::Map` whose entries are the primary-key
-//! fields: `Value::Map(vec![("id".to_string(), Value::Int(1))])`.
-//! A scalar value is treated as a filter on a default `"id"` field.
+//! `Table::get` accepts a scalar key as `id`, or a map of equality-key
+//! fields. The empty map intentionally matches all rows and get returns
+//! the first result.
+//! `Table::get` and `Table::query` accept the WASM-bridge exception: equality
+//! keys as scalars (on `id`) or maps of scalar values (`Null`, `Bool`, `Int`,
+//! `F64`, `Str`, `Bin`). Any other shape fails the invocation. Use
+//! `Db::execute` (feature `query-builder`) for anything beyond equality keys.
 
 use crate::error::{Error, Result};
 use crate::host_imports;
 use crate::Value;
+#[cfg(all(test, feature = "query-builder"))]
+use std::cell::Cell;
 
 /// Database access handle (bound to the default repo).
 ///
@@ -25,8 +31,8 @@ use crate::Value;
 /// // Open a table handle
 /// let users = db.table("users");
 ///
-/// // Get a single record by primary key
-/// let rec: Option<Value> = users.get(Value::Int(42));
+/// // Get first matching record (empty map matches all rows)
+/// let rec: Option<Value> = users.get(Value::Int(42))?;
 ///
 /// // Query with optional filter (None = all rows)
 /// let rows: Vec<Value> = users.query(None)?;
@@ -60,7 +66,7 @@ impl Db {
 ///
 /// | Method | Signature | Purpose |
 /// |--------|-----------|---------|
-/// | [`Table::get`] | `(key: Value) -> Option<Value>` | Single-record lookup by primary key |
+/// | [`Table::get`] | `(key: Value) -> Result<Option<Value>>` | First matching record; empty map matches all rows |
 /// | [`Table::insert`] | `(doc: Value) -> Result<Value>` | Insert a `Value::Map` document |
 /// | [`Table::query`] | `(filter: Option<Value>) -> Result<Vec<Value>>` | Query rows (`None` = all) |
 #[derive(Debug, Clone)]
@@ -71,9 +77,12 @@ pub struct Table {
 impl Table {
     /// Read a single record by key.
     ///
-    /// `key` should be a `Value::Map` of the primary-key fields, e.g.
-    /// `Value::Map(vec![("id".into(), Value::Int(1))])`.
-    /// A scalar is treated as a filter on `"id"`.
+    /// Returns the first record matching the key. An empty map removes the
+    /// filter and therefore returns the first row (match-all); this is not
+    /// restricted to primary-key fields.
+    ///
+    /// WASM-bridge exception: guest msgpack `Value` key -> typed `Filter`; use
+    /// `Db::execute` (feature `query-builder`) for builder queries.
     ///
     /// Returns `Ok(None)` if no record matches. A codec failure decoding the
     /// record carries its cause in the returned `Err`.
@@ -94,8 +103,12 @@ impl Table {
 
     /// Query records from this table with an optional filter.
     ///
-    /// `filter = None` returns all records. The filter follows the same
-    /// key convention as `get`.
+    /// `filter = None` returns all records. A map of supported scalar values
+    /// applies equality predicates; a scalar key filters `id`. Unsupported
+    /// key shapes fail the invocation. Use `Db::execute` (feature
+    /// `query-builder`) for anything beyond equality keys.
+    /// WASM-bridge exception: guest msgpack `Value` key -> typed `Filter`; use
+    /// `Db::execute` (feature `query-builder`) for builder queries.
     pub fn query(&self, filter: Option<Value>) -> Result<Vec<Value>> {
         let result = match filter {
             Some(ref f) => host_imports::db_query(&self.name, Some(f))?,
@@ -113,6 +126,26 @@ impl Table {
     pub fn name(&self) -> &str {
         &self.name
     }
+}
+
+#[cfg(all(test, feature = "query-builder"))]
+thread_local! {
+    static EXECUTE_ENCODING_ERROR: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(all(test, feature = "query-builder"))]
+pub(crate) fn with_execute_encoding_error<T>(run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            EXECUTE_ENCODING_ERROR.with(|flag| flag.set(false));
+        }
+    }
+    EXECUTE_ENCODING_ERROR.with(|flag| flag.set(true));
+    let reset = Reset;
+    let result = run();
+    drop(reset);
+    result
 }
 
 /// Builder-in-guest execution (SDK Stage B2). Available with the
@@ -141,18 +174,41 @@ impl Db {
         // alias, unknown after/when handle) and unresolved `$query` refs must
         // surface here, not be sent silently to the host.
         let req = batch_request(batch)?;
-        let bytes = rmp_serde::to_vec_named(&req)
-            .map_err(|e| crate::Error::user(format!("execute: encode batch: {e}")))?;
+        let bytes = map_execute_encoding(execute_encoding_result(&req))?;
         let resp_bytes = crate::host_imports::db_execute(&bytes);
         if resp_bytes.is_empty() {
-            return Err(crate::Error::user("execute: host returned empty response"));
+            return Err(crate::Error::host("execute: host returned empty response"));
         }
-        rmp_serde::from_slice(&resp_bytes)
-            .map_err(|e| crate::Error::user(format!("execute: decode response: {e}")))
+        decode_execute_response(&resp_bytes)
     }
 }
 
-/// Validate a builder [`Batch`] into a wire [`BatchRequest`], mapping
+#[cfg(feature = "query-builder")]
+fn execute_encoding_result<T: serde::Serialize>(
+    value: &T,
+) -> std::result::Result<Vec<u8>, rmp_serde::encode::Error> {
+    #[cfg(test)]
+    if EXECUTE_ENCODING_ERROR.with(|flag| flag.replace(false)) {
+        return Err(rmp_serde::encode::Error::Syntax(
+            "injected execute serialization failure".into(),
+        ));
+    }
+    rmp_serde::to_vec_named(value)
+}
+
+#[cfg(feature = "query-builder")]
+fn map_execute_encoding(
+    result: std::result::Result<Vec<u8>, rmp_serde::encode::Error>,
+) -> crate::Result<Vec<u8>> {
+    result.map_err(|e| crate::Error::codec(format!("execute: encode batch: {e}")))
+}
+
+#[cfg(feature = "query-builder")]
+fn decode_execute_response(bytes: &[u8]) -> crate::Result<shamir_query_builder::BatchResponse> {
+    rmp_serde::from_slice(bytes)
+        .map_err(|e| crate::Error::codec(format!("execute: decode response: {e}")))
+}
+
 /// [`BuildError`] into the SDK's [`Error`] — the testable seam of
 /// [`Db::execute`]'s request-construction step (the host call itself is
 /// guest-only and cannot run in unit tests).
