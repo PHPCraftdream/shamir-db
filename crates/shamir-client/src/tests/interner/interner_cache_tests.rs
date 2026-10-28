@@ -6,15 +6,18 @@
 
 use shamir_collections::{new_map, TFxSet};
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
+use futures::poll;
 use shamir_types::mpack;
 use shamir_types::types::value::Value;
 use tempfile::TempDir;
 use tokio::io::{duplex, split};
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
@@ -700,6 +703,12 @@ async fn rv_client_47644b74_concurrent_cold_dump_single_fetch() {
 
     let dumps_seen = Arc::new(AtomicUsize::new(0));
     let seen = Arc::clone(&dumps_seen);
+    // Withhold the first reply until every caller has been polled once, so
+    // all 8 overlap the in-flight dump (join_all polls sequentially; a reply
+    // landing inside the first caller's first poll would make the rest
+    // legitimate post-population re-dumps).
+    let (release_tx, release_rx) = oneshot::channel::<()>();
+    let mut release_rx = Some(release_rx);
     let server = tokio::spawn(async move {
         loop {
             let frame = match read_frame(&mut c2s_server_side, MAX_FRAME_SIZE_DEFAULT).await {
@@ -721,6 +730,9 @@ async fn rv_client_47644b74_concurrent_cold_dump_single_fetch() {
                 panic!("emulated server: unexpected non-dump request {req:?}");
             };
             seen.fetch_add(1, Ordering::SeqCst);
+            if let Some(rx) = release_rx.take() {
+                rx.await.expect("release gate dropped");
+            }
 
             // Craft a valid `interner_dump` response the client parser
             // accepts: `{ "epoch": u64, "entries": [[id, name], ...] }`.
@@ -759,8 +771,14 @@ async fn rv_client_47644b74_concurrent_cold_dump_single_fetch() {
 
     // 8 concurrent COLD dump_repo callers (futures created BEFORE polling).
     let dumps: Vec<_> = (0..8).map(|_| client.dump_repo("ic", "main")).collect();
-    for r in join_all(dumps).await {
-        r.expect("concurrent cold dump must not fail");
+    {
+        let mut all = pin!(join_all(dumps));
+        // One pass: each caller enters ensure_populated while the reply is withheld.
+        assert!(poll!(all.as_mut()).is_pending());
+        release_tx.send(()).expect("server task alive");
+        for r in all.await {
+            r.expect("concurrent cold dump must not fail");
+        }
     }
 
     // THE frame-count oracle: exactly ONE dump request reached the server.
