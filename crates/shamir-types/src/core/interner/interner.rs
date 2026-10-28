@@ -1,9 +1,20 @@
 use crate::types::common::{new_dash_map_wc, TDashMap};
 use arc_swap::ArcSwap;
+use dashmap::mapref::entry::Entry;
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::TryLockError;
 use std::sync::{Arc, OnceLock};
 
-use super::{InternerKey, TouchInd, UserKey};
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_REVERSE_SET: Cell<bool> = const { Cell::new(false) };
+}
+
+use super::quota::{QuotaCounters, QuotaRejection};
+use super::{InternerError, InternerKey, InternerQuota, TouchInd, UserKey};
 
 /// A thread-safe, two-way map for interning strings into compact binary IDs.
 ///
@@ -53,7 +64,8 @@ use super::{InternerKey, TouchInd, UserKey};
 ///
 /// The forward direction (`UserKey → id`) stays a `TDashMap` —
 /// it's sharded and already scales nearly linearly with thread
-/// count.
+/// count. Every forward write occurs only after the reverse slot is set,
+/// under the same writer mutex used by automatic and explicit IDs.
 #[derive(Debug)]
 pub struct Interner {
     map_user_to_interned: TDashMap<UserKey, InternerKey>,
@@ -71,12 +83,19 @@ pub struct Interner {
     /// reads never touch that lock.
     reverse: ArcSwap<Vec<OnceLock<Arc<str>>>>,
     /// #501: serializes reverse-spine WRITES only (first-touch
-    /// population from `touch_ind`/`touch_with_id`, including growth).
+    /// `touch_ind` and `touch_with_id`, including growth and forward-map
+    /// insertion so readers cannot observe a partially published pair.
     /// See the struct doc for why a single-writer critical section
     /// replaced an earlier fully-lock-free attempt that had a data-loss
     /// race. Never taken by any read path.
     reverse_write_lock: std::sync::Mutex<()>,
     current_id: AtomicU64,
+    published_generation: AtomicU64,
+    quota: Option<InternerQuota>,
+    /// Repo label threaded into `InternerError::QuotaExceeded` so the
+    /// message names the repository (empty for scratch/new interners).
+    quota_label: String,
+    counters: QuotaCounters,
 }
 
 impl Default for Interner {
@@ -94,16 +113,25 @@ impl Interner {
             reverse: ArcSwap::from_pointee(vec![OnceLock::new()]),
             reverse_write_lock: std::sync::Mutex::new(()),
             current_id: AtomicU64::new(0),
+            published_generation: AtomicU64::new(0),
+            quota: None,
+            quota_label: String::new(),
+            counters: QuotaCounters::new(0, 0),
         }
     }
 
     /// Creates a new Interner from a pre-existing state.
     /// This is used to "hydrate" interner from a persistent store.
     pub fn with_state(initial_data: Vec<(InternerKey, UserKey)>) -> Self {
-        if initial_data.is_empty() {
-            return Self::new();
-        }
-
+        // Fx-hashed distinct-name view of the hydrated data — the quota
+        // counters must reflect distinct names, not duplicate tuples.
+        let names: shamir_collections::TFxSet<&str> =
+            initial_data.iter().map(|(_, name)| name.as_str()).collect();
+        let count = u64::try_from(names.len()).unwrap_or(u64::MAX);
+        let published_generation = count;
+        let bytes = names.iter().fold(0u64, |sum, name| {
+            sum.saturating_add(u64::try_from(name.len()).unwrap_or(u64::MAX))
+        });
         let map_user_to_interned = new_dash_map_wc(initial_data.len());
         let mut max_id: u64 = 0;
         for (interned_key, _) in &initial_data {
@@ -131,13 +159,82 @@ impl Interner {
             reverse: ArcSwap::from_pointee(reverse),
             reverse_write_lock: std::sync::Mutex::new(()),
             current_id: AtomicU64::new(max_id),
+            published_generation: AtomicU64::new(published_generation),
+            quota: None,
+            quota_label: String::new(),
+            counters: QuotaCounters::new(count, bytes),
         }
     }
 
-    /// Gets an ID for a string, creating it if it doesn't exist.
-    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, &'static str> {
-        let s = str.as_ref();
+    /// Creates an interner with cumulative admission limits and hydrated counters.
+    pub fn with_quota(initial_data: Vec<(InternerKey, UserKey)>, quota: InternerQuota) -> Self {
+        Self::with_labeled_quota(initial_data, quota, String::new())
+    }
 
+    /// [`Interner::with_quota`] with a repo label embedded in quota errors.
+    pub fn with_labeled_quota(
+        initial_data: Vec<(InternerKey, UserKey)>,
+        quota: InternerQuota,
+        label: String,
+    ) -> Self {
+        let mut interner = Self::with_state(initial_data);
+        interner.quota = Some(quota);
+        interner.quota_label = label;
+        interner
+    }
+
+    /// Returns the admitted distinct-name and UTF-8 byte counters.
+    pub fn quota_usage(&self) -> (u64, u64) {
+        self.counters.snapshot()
+    }
+
+    /// Gets an ID for a string, creating it if it doesn't exist.
+    pub fn touch_ind<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl(str.as_ref(), true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn touch_ind_with_test_hooks(
+        &self,
+        s: &str,
+        after_reservation: impl FnOnce(),
+        after_id_allocation: impl FnOnce(u64),
+        between_publications: impl FnOnce(u64),
+    ) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl_with(
+            s,
+            true,
+            after_reservation,
+            after_id_allocation,
+            between_publications,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn touch_ind_with_test_hook(
+        &self,
+        s: &str,
+        after_reservation: impl FnOnce(),
+    ) -> Result<TouchInd, InternerError> {
+        self.touch_ind_with_test_hooks(s, after_reservation, |_| {}, |_| {})
+    }
+
+    pub fn touch_ind_unmetered<S: AsRef<str>>(&self, str: S) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl(str.as_ref(), false)
+    }
+
+    fn touch_ind_impl(&self, s: &str, enforce_quota: bool) -> Result<TouchInd, InternerError> {
+        self.touch_ind_impl_with(s, enforce_quota, || {}, |_| {}, |_| {})
+    }
+
+    fn touch_ind_impl_with(
+        &self,
+        s: &str,
+        enforce_quota: bool,
+        after_reservation: impl FnOnce(),
+        after_id_allocation: impl FnOnce(u64),
+        between_publications: impl FnOnce(u64),
+    ) -> Result<TouchInd, InternerError> {
         // Fast path: existing entry. `UserKey: Borrow<str>` lets the
         // DashMap lookup take a `&str` directly — no `String` alloc
         // on cache hits (the 99% case once the codec/query has warmed
@@ -146,33 +243,62 @@ impl Interner {
             return Ok(TouchInd::Exists(existing.clone()));
         }
 
+        let bytes = u64::try_from(s.len()).unwrap_or(u64::MAX);
+        // Reserve quota before allocating the key/value, and roll back that
+        // reservation on every failure before the forward entry is inserted.
+        if enforce_quota {
+            if let Some(quota) = self.quota {
+                self.counters
+                    .reserve(quota, bytes)
+                    .map_err(
+                        |QuotaRejection { kind, limit }| InternerError::QuotaExceeded {
+                            label: self.quota_label.clone(),
+                            kind,
+                            limit,
+                        },
+                    )?;
+            } else {
+                self.counters.count_unmetered(bytes);
+            }
+        } else {
+            self.counters.count_unmetered(bytes);
+        }
+
+        // Test seam sits after admission but before ID allocation/map insertion.
+        after_reservation();
+
+        let _publication_guard = self
+            .reverse_write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = UserKey::from_str(s);
-        // Op B: build Arc<str> once for the reverse slot — no extra alloc
-        // vs the String we'd make for UserKey anyway.
         let arc: Arc<str> = Arc::from(s);
-
-        // Reserve a fresh ID lock-free. If the forward-map CAS below
-        // loses the race (Occupied branch), this slot is silently leaked
-        // — the interner is monotonic and small leaks are harmless.
-        let new_id = self.current_id.fetch_add(1, Ordering::Relaxed) + 1;
+        // Automatic IDs and explicit IDs share the reverse-writer lock; publish
+        // reverse first so forward readers cannot observe an unresolved ID.
+        let Some(new_id) = self.current_id.load(Ordering::Relaxed).checked_add(1) else {
+            self.counters.refund(bytes);
+            return Err(InternerError::IdCollision { id: u64::MAX });
+        };
+        after_id_allocation(new_id);
         let new_key = InternerKey::new(new_id);
-
-        // CAS into forward map — another thread may have raced us.
-        use dashmap::mapref::entry::Entry;
         match self.map_user_to_interned.entry(key) {
             Entry::Occupied(existing) => {
-                // Race: another thread inserted between our get() and entry().
-                // `new_id` is wasted (small leaked slot, harmless).
+                self.counters.refund(bytes);
                 Ok(TouchInd::Exists(existing.get().clone()))
             }
             Entry::Vacant(vacant) => {
+                let Some(idx) = usize::try_from(new_id).ok() else {
+                    self.counters.refund(bytes);
+                    return Err(InternerError::IdCollision { id: new_id });
+                };
+                if !self.set_reverse_slot_locked(idx, arc) {
+                    self.counters.refund(bytes);
+                    return Err(InternerError::IdCollision { id: new_id });
+                }
+                between_publications(new_id);
                 vacant.insert(new_key.clone());
-                // #501: two-phase reverse-spine population — ensure
-                // capacity by doubling (rare, O(N) total across N
-                // touches) then `OnceLock::set` the slot in place
-                // (common, no vec clone). Because ids are strictly
-                // monotonic, `new_id` is owned exclusively by this call.
-                self.set_reverse_slot(new_id as usize, arc);
+                self.current_id.store(new_id, Ordering::Relaxed);
+                self.published_generation.fetch_add(1, Ordering::Release);
                 Ok(TouchInd::New(new_key))
             }
         }
@@ -194,17 +320,27 @@ impl Interner {
         rev.get(idx).and_then(|slot| slot.get().cloned())
     }
 
-    /// #501: populate the reverse spine at `idx` with `arc` for
-    /// `touch_ind`'s fresh-insert path. `idx` comes from strictly
-    /// monotonic `current_id` allocation, so it's uniquely owned by
-    /// this call **with respect to other `touch_ind` callers** — the
-    /// `debug_assert!` below only holds under that assumption. It is
-    /// NOT exclusive with respect to `touch_with_id` (WAL-recovery path,
-    /// which assigns caller-supplied ids and does its own collision
-    /// detection inline rather than calling this method) — a `touch_ind`
-    /// racing a concurrent `touch_with_id` for the same id is a
-    /// pre-existing, out-of-scope hazard (WAL recovery is not expected
-    /// to run concurrently with live `touch_ind` traffic).
+    #[cfg(test)]
+    pub(crate) fn publication_lock_held_for_test(&self) -> bool {
+        matches!(
+            self.reverse_write_lock.try_lock(),
+            Err(TryLockError::WouldBlock)
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_current_id_for_test(&self, value: u64) {
+        self.current_id.store(value, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_reverse_set_for_test() {
+        FAIL_NEXT_REVERSE_SET.with(|fail| fail.set(true));
+    }
+
+    /// #501: populate the reverse spine. Both automatic and explicit ID
+    /// publication are serialized by `reverse_write_lock`; conflicting IDs
+    /// are rejected before the forward map is exposed.
     ///
     /// Holds `reverse_write_lock` for the whole ensure-capacity-then-set
     /// step — see the struct doc for why this replaced an earlier
@@ -213,23 +349,18 @@ impl Interner {
     /// total clone work across N monotonic touches is a geometric
     /// series ≈ 2N — O(N), not the old O(N²). The common case (capacity
     /// already present) is a single `OnceLock::set`, no clone.
-    fn set_reverse_slot(&self, idx: usize, arc: Arc<str>) {
-        let _guard = self
-            .reverse_write_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    fn set_reverse_slot_locked(&self, idx: usize, arc: Arc<str>) -> bool {
+        #[cfg(test)]
+        if FAIL_NEXT_REVERSE_SET.with(|fail| fail.replace(false)) {
+            return false;
+        }
         let cur = self.reverse.load_full();
         if idx < cur.len() {
-            let set_ok = cur[idx].set(arc).is_ok();
-            debug_assert!(
-                set_ok,
-                "touch_ind: slot {idx} already set — a concurrent touch_with_id \
-                 raced this id, which the recovery model assumes cannot happen"
-            );
-            return;
+            return cur[idx].set(arc).is_ok();
         }
         self.reverse
             .store(Arc::new(Self::grown_reverse(&cur, idx, arc)));
+        true
     }
 
     /// Build a new reverse vec doubled in capacity to cover `idx`,
@@ -290,18 +421,13 @@ impl Interner {
             .map(|id| id.clone())
     }
 
-    /// Monotonic interning generation: incremented on every successful
-    /// `touch_ind` / `touch_with_id` and only ever grows (the map is
-    /// append-only — there is NO `remove`/`clear`).
-    ///
-    /// This is the O(1) lock-free growth signal for caches that compile a
-    /// derived structure against the interner and need to detect staleness
-    /// (e.g. subscription filter compilation). An unchanged generation
-    /// means no new field was interned, so a filter compiled at that
-    /// generation is still complete.
+    /// Returns the published generation for cache invalidation. It advances
+    /// exactly once after each successful new automatic or explicit ID is
+    /// visible in both maps; rejected operations and existing-key lookups do
+    /// not advance it. The generation is a change counter, not an entry count.
     #[inline]
     pub fn generation(&self) -> u64 {
-        self.current_id.load(Ordering::Relaxed)
+        self.published_generation.load(Ordering::Acquire)
     }
 
     /// Returns the current number of interned keys.
@@ -345,37 +471,67 @@ impl Interner {
     /// - If `name` is mapped to a different id: Err (corrupt state).
     /// - If `id` is already used by a different name: Err (id collision).
     /// - Otherwise: insert atomically.
-    pub fn touch_with_id(&self, name: &str, id: u64) -> Result<(), String> {
-        use dashmap::mapref::entry::Entry;
+    pub fn touch_with_id(&self, name: &str, id: u64) -> Result<(), InternerError> {
+        self.touch_with_id_impl(name, id)
+    }
+
+    fn touch_with_id_impl(&self, name: &str, id: u64) -> Result<(), InternerError> {
+        self.touch_with_id_impl_with(name, id, |_| {})
+    }
+
+    #[cfg(test)]
+    pub(crate) fn touch_with_id_with_test_hook(
+        &self,
+        name: &str,
+        id: u64,
+        hook: impl FnOnce(u64),
+    ) -> Result<(), InternerError> {
+        self.touch_with_id_impl_with(name, id, hook)
+    }
+
+    fn touch_with_id_impl_with(
+        &self,
+        name: &str,
+        id: u64,
+        between_publications: impl FnOnce(u64),
+    ) -> Result<(), InternerError> {
+        let _publication_guard = self
+            .reverse_write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if id == 0 {
-            return Err("touch_with_id: id 0 is reserved (sentinel)".into());
+            return Err(InternerError::ReservedId);
         }
 
         let key = UserKey::from_str(name);
 
-        // Check if name already exists in the forward map.
         if let Some(existing) = self.map_user_to_interned.get(name) {
             let existing_id = existing.id();
             return if existing_id == id {
                 Ok(()) // idempotent
             } else {
-                Err(format!(
-                    "touch_with_id: name '{}' already mapped to id {}, cannot remap to {}",
-                    name, existing_id, id
-                ))
+                return Err(InternerError::NameConflict {
+                    name: name.to_owned(),
+                    existing: existing_id,
+                    requested: id,
+                });
             };
         }
 
+        let Some(idx) = usize::try_from(id).ok() else {
+            return Err(InternerError::IdCollision { id });
+        };
         // Check reverse map for id collision before inserting.
         {
             let rev = self.reverse.load();
-            if let Some(existing_arc) = rev.get(id as usize).and_then(|c| c.get()) {
+            if let Some(existing_arc) = rev.get(idx).and_then(|c| c.get()) {
                 if &**existing_arc != name {
-                    return Err(format!(
-                        "touch_with_id: id {} already used by '{}', cannot assign to '{}'",
-                        id, &**existing_arc, name
-                    ));
+                    return Err(InternerError::IdConflict {
+                        id,
+                        existing: existing_arc.to_string(),
+                        requested: name.to_owned(),
+                    });
                 }
                 // Same name at same id — idempotent (shouldn't normally reach
                 // here since forward map check above would catch it, but
@@ -385,7 +541,6 @@ impl Interner {
         }
 
         let arc: Arc<str> = Arc::from(name);
-
         // CAS into forward map — another thread may have raced us.
         match self.map_user_to_interned.entry(key) {
             Entry::Occupied(existing) => {
@@ -393,60 +548,23 @@ impl Interner {
                 if existing_id == id {
                     Ok(())
                 } else {
-                    Err(format!(
-                        "touch_with_id: name '{}' raced to id {}, cannot assign {}",
-                        name, existing_id, id
-                    ))
+                    Err(InternerError::NameConflict {
+                        name: name.to_owned(),
+                        existing: existing_id,
+                        requested: id,
+                    })
                 }
             }
             Entry::Vacant(vacant) => {
+                let name_bytes = u64::try_from(name.len()).unwrap_or(u64::MAX);
                 let new_key = InternerKey::new(id);
-                vacant.insert(new_key);
-
-                // #501: ensure capacity (doubling) then `OnceLock::set`
-                // the slot in place, under `reverse_write_lock`'s
-                // single-writer critical section — no whole-vec clone
-                // per touch, and no CAS-retry/confirm race (see the
-                // struct doc). Unlike `touch_ind`, `id` here is
-                // arbitrary (WAL-supplied), so a *different* name may
-                // race us for the SAME id: with the lock held, the
-                // slot's state at the moment we look is authoritative —
-                // if a different name already occupies it, roll back
-                // our forward-map entry and report the collision.
-                let idx = id as usize;
-                let collision = {
-                    let _guard = self
-                        .reverse_write_lock
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    let cur = self.reverse.load_full();
-                    if idx < cur.len() {
-                        match cur[idx].get() {
-                            None => {
-                                let _ = cur[idx].set(arc.clone());
-                                None
-                            }
-                            Some(existing) if &**existing == name => None, // idempotent replay
-                            Some(existing) => Some(existing.clone()),
-                        }
-                    } else {
-                        self.reverse
-                            .store(Arc::new(Self::grown_reverse(&cur, idx, arc.clone())));
-                        None
-                    }
-                };
-                if let Some(existing) = collision {
-                    // A different name won this id. Roll back our
-                    // forward-map insert and report the collision.
-                    let msg = format!(
-                        "touch_with_id: id {} raced to '{}', cannot assign '{}'",
-                        id, &*existing, name
-                    );
-                    self.map_user_to_interned.remove(name);
-                    return Err(msg);
+                if !self.set_reverse_slot_locked(idx, arc) {
+                    return Err(InternerError::IdCollision { id });
                 }
-
-                // Bump current_id so subsequent touch_ind won't reuse this id.
+                between_publications(id);
+                vacant.insert(new_key);
+                self.counters.count_unmetered(name_bytes);
+                self.published_generation.fetch_add(1, Ordering::Release);
                 loop {
                     let cur = self.current_id.load(Ordering::Relaxed);
                     if cur >= id {
@@ -548,7 +666,7 @@ impl Interner {
                 Some(None) => {
                     // Unset slot: reserved-but-unswapped (concurrent touch_ind),
                     // a leaked id, or trailing doubling-growth capacity. Keep
-                    // scanning so populated higher ids are still captured, but
+                    // scanning so populated entries above it are still captured, but
                     // freeze new_high so the next persist re-captures this slot
                     // once (if) it fills.
                     gapped = true;

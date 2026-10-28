@@ -4,7 +4,7 @@ use shamir_query_types::batch::tree_visitor::BatchTreeVisitor;
 use shamir_query_types::batch::{BatchOp, ExecPolicy};
 
 use crate::access::Actor;
-use crate::query::batch::{execute_batch, Authorized, BatchError, BatchRequest, BatchResponse};
+use crate::query::batch::{execute_batch, BatchError, BatchRequest, BatchResponse};
 use crate::shamir_db::ports::RepoAdminObserver;
 
 use super::super::shamir_db::ShamirDb;
@@ -69,9 +69,25 @@ impl ShamirDb {
         policy: ExecPolicy,
         repo_admin_observer: Option<std::sync::Arc<dyn RepoAdminObserver>>,
     ) -> Result<BatchResponse, BatchError> {
-        let auth = Authorized::authorize(request, actor, db_name, self)
+        let auth = self
+            .authorize_batch(request, actor, db_name)
             .await?
             .with_policy(policy);
+        let ambient_actor = auth.actor().clone();
+        let mut authorized_interner_repos = Vec::new();
+        for repo_name in request.interner_epochs.keys() {
+            // Boxed: keeps this rarely-taken await out of the batch future's inline state.
+            if Box::pin(self.authorize_access(
+                &ambient_actor,
+                &crate::access::ResourcePath::store(db_name, repo_name),
+                crate::access::Action::Read,
+            ))
+            .await
+            .is_ok()
+            {
+                authorized_interner_repos.push(repo_name.clone());
+            }
+        }
 
         // S5c-X PR8b: ordinary READS of a quarantined (`resync_required`)
         // repo fail closed. Fast path is one `Relaxed` load (empty cache ⇒
@@ -114,14 +130,16 @@ impl ShamirDb {
         };
         let mut response = execute_batch(auth, &resolver, Some(&admin), Some(&invoker)).await?;
 
-        // Ambient interner epoch-delta sync (Stage 5-wire Part A): attach the
-        // server's per-repo delta for each epoch the client advertised. `db`
-        // is cloned above for the resolver; we reuse the original here.
-        // Errors are non-fatal (batch already succeeded) — logged + swallowed.
+        // Interner access has already been pre-authorized; deltas attach only
+        // after execution, so a denied repository cannot cause batch side effects.
         if !request.interner_epochs.is_empty() {
-            if let Err(e) = attach_interner_delta(&mut response, request, &db).await {
-                log::debug!("ambient interner delta attach skipped: {e}");
-            }
+            Box::pin(attach_interner_delta(
+                &mut response,
+                &authorized_interner_repos,
+                request,
+                &db,
+            ))
+            .await;
         }
 
         Ok(response)

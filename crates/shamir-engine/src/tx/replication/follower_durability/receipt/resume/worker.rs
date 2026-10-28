@@ -151,7 +151,7 @@ impl ReceiptLease {
     }
 
     /// Idle count of parked guards, for tests and diagnostics.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) fn parked_count(&self) -> usize {
         self.inner
             .parked
@@ -208,7 +208,7 @@ impl ReceiptLease {
     /// arm-then-check Notify pattern (mirrors `CommitTailBarrier::wait_zero`):
     /// the future is armed BEFORE the counter is checked, so the final
     /// decrement can never race this waiter — no sleeps, no yield loops.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "fjall"))]
     pub(crate) async fn wait_idle(&self) {
         loop {
             let notified = self.inner.idle.notified();

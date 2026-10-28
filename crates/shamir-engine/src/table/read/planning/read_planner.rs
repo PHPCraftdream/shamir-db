@@ -325,6 +325,10 @@ impl TableManager {
 
         match remaining.len() {
             0 => None,
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: remaining.len() == 1 guarantees exactly one residual filter"
+            )]
             1 => Some(remaining.into_iter().next().unwrap()),
             _ => Some(Filter::And { filters: remaining }),
         }
@@ -454,6 +458,10 @@ impl TableManager {
 
                 let residual = match remaining.len() {
                     0 => None,
+                    #[expect(
+                        clippy::unwrap_used,
+                        reason = "guard: remaining.len() == 1 guarantees exactly one residual filter"
+                    )]
                     1 => Some(remaining.into_iter().next().unwrap()),
                     _ => Some(Filter::And { filters: remaining }),
                 };

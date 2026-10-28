@@ -6,6 +6,8 @@
 # idiomatic std/tokio calls.
 absolute-paths-max-segments = 5
 absolute-paths-allowed-crates = ["std", "core", "alloc", "tokio"]
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
 
 # --- disallowed-methods (Fx-only hashing, ideology pillar 4) ------------------
 # Default-hasher (RandomState) constructors are banned: use Fx via

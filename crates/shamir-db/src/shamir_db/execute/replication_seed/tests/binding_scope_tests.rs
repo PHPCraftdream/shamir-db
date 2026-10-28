@@ -78,7 +78,10 @@ async fn seed_row(shamir: &ShamirDb, db: &str, repo: &str, name: &str) {
             .row(doc! { "name" => name, "age" => 30 }),
     );
     shamir
-        .execute(db, &b.to_request_via_msgpack())
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 }
@@ -92,7 +95,12 @@ async fn read_users(
     let mut b = Batch::new();
     b.id(9);
     b.query("r", Query::with_repo(repo, "users"));
-    db_handle.execute(db, &b.to_request_via_msgpack()).await
+    db_handle
+        .execute(
+            db,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
 }
 
 /// Create a Pull profile + ACTIVE subscription whose durable binding is
@@ -113,7 +121,10 @@ async fn quarantine(shamir: &ShamirDb, sub: &str, profile: &str, destinations: &
     b.op("profile", builder);
     b.op("sub", subscription(sub, "tcp://peer:9000", "pub", profile));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     shamir
@@ -325,7 +336,10 @@ async fn binding_scope_overlap_clearing_through_real_reseed_resume() {
     b.try_op("alt", alter_subscription("sub1").resume())
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -364,7 +378,10 @@ async fn binding_scope_resume_removes_quarantine_marker_durably() {
     b.id(3);
     b.try_op("alt", alter_subscription("sub").resume()).unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
 
@@ -429,7 +446,10 @@ async fn binding_scope_resume_marker_removal_survives_reopen() {
         b.id(3);
         b.try_op("alt", alter_subscription("sub").resume()).unwrap();
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
     }
@@ -592,7 +612,12 @@ async fn resume_releases_stale_same_name_claim_after_recovery() {
         .try_op("resume", alter_subscription("sub").resume())
         .unwrap();
     shamir
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     assert!(shamir
@@ -657,7 +682,10 @@ async fn set_profile_alone_preserves_complete_row_through_reopen() {
             subscription("sub", "tcp://peer:9000", "pub", "prof_a"),
         );
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         before = super::super::catalogue::rows(&shamir, "subscriptions")
@@ -677,7 +705,12 @@ async fn set_profile_alone_preserves_complete_row_through_reopen() {
             .try_op("alt", alter_subscription("sub").set_profile("prof_b"))
             .unwrap();
         shamir
-            .execute("testdb", &change.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &change
+                    .to_request_via_msgpack()
+                    .expect("batch request encoding"),
+            )
             .await
             .unwrap();
         let fresh = super::super::catalogue::rows(&shamir, "subscriptions")
@@ -759,7 +792,10 @@ async fn pause_and_set_profile_persist_exact_durable_row() {
             subscription("sub", "tcp://peer:9000", "pub", "prof_a"),
         );
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
 
@@ -769,7 +805,10 @@ async fn pause_and_set_profile_persist_exact_durable_row() {
         b.try_op("alt", alter_subscription("sub").set_profile("prof_b"))
             .unwrap();
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         let rows = super::super::catalogue::rows(&shamir, "subscriptions")
@@ -789,7 +828,10 @@ async fn pause_and_set_profile_persist_exact_durable_row() {
         b.id(4);
         b.try_op("alt", alter_subscription("sub").pause()).unwrap();
         shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute(
+                "testdb",
+                &b.to_request_via_msgpack().expect("batch request encoding"),
+            )
             .await
             .unwrap();
         let rows = super::super::catalogue::rows(&shamir, "subscriptions")

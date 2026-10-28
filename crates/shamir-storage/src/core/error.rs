@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 use shamir_types::codecs::CodecError;
+use shamir_types::core::interner::{InternerError, InternerQuotaKind};
 
 /// A generic error type for all database and storage operations.
 #[derive(Error, Debug)]
@@ -179,6 +180,17 @@ pub enum DbError {
     /// read-path `resync_required`.
     #[error("{detail}")]
     ReplicationDestinationQuarantined { detail: String },
+
+    /// RU8 (P1-FIX-PLAN G10): a metered interner touch exceeded the per-repo
+    /// admission quota. Non-retryable at the same size; the operator raises
+    /// `SHAMIR_INTERNER_MAX_NAMES` / `SHAMIR_INTERNER_MAX_NAME_BYTES`.
+    /// Wire code: `interner_quota_exceeded` (via [`DbError::code`]).
+    #[error("interner quota exceeded for repo {repo}: {kind:?} limit {limit} — raise SHAMIR_INTERNER_MAX_NAMES / SHAMIR_INTERNER_MAX_NAME_BYTES")]
+    InternerQuotaExceeded {
+        repo: String,
+        kind: InternerQuotaKind,
+        limit: u64,
+    },
 }
 
 /// Heap payload of [`DbError::SubscriptionCatalogue`].
@@ -214,7 +226,25 @@ const _: () = assert!(std::mem::size_of::<DbError>() <= 64);
 
 impl From<CodecError> for DbError {
     fn from(err: CodecError) -> Self {
-        DbError::Codec(err.to_string())
+        match err {
+            // Keep the typed quota error (and its wire code) intact through
+            // codec call chains; other codec failures stay stringly Codec.
+            CodecError::Interner(inner) => inner.into(),
+            other => DbError::Codec(other.to_string()),
+        }
+    }
+}
+
+impl From<InternerError> for DbError {
+    fn from(err: InternerError) -> Self {
+        match err {
+            InternerError::QuotaExceeded { label, kind, limit } => DbError::InternerQuotaExceeded {
+                repo: label,
+                kind,
+                limit,
+            },
+            other => DbError::Codec(other.to_string()),
+        }
     }
 }
 
@@ -262,6 +292,7 @@ impl DbError {
             DbError::ReplicationDestinationQuarantined { .. } => {
                 Some("replication_destination_quarantined")
             }
+            DbError::InternerQuotaExceeded { .. } => Some("interner_quota_exceeded"),
             _ => None,
         }
     }

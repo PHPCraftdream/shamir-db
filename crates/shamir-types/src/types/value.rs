@@ -18,13 +18,11 @@ use std::str::FromStr;
 
 /// User-facing value type with string keys
 ///
-/// **DEPRECATED & FOR TESTS ONLY**
-///
-/// This type should only be used in tests for convenience.
-/// Production code should use `InnerValue` directly with interning.
+/// Deprecated alias for `Value<String>`, the same underlying type as
+/// `QueryValue`; it is not a separate type. Prefer `QueryValue` in new code.
 #[deprecated(
     since = "0.1.0",
-    note = "Use InnerValue instead. UserValue is for tests only."
+    note = "UserValue is a deprecated alias for QueryValue; prefer QueryValue in new code."
 )]
 pub type UserValue = Value<String>;
 pub type QueryValue = Value<String>;

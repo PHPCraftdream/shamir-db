@@ -1,11 +1,13 @@
 pub mod interned_key;
 #[allow(clippy::module_inception)]
 pub mod interner;
+pub mod quota;
 pub mod touch_ind;
 pub mod user_key;
 
 pub use interned_key::InternerKey;
 pub use interner::Interner;
+pub use quota::{InternerError, InternerQuota, InternerQuotaKind};
 pub use touch_ind::TouchInd;
 pub use user_key::UserKey;
 

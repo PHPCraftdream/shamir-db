@@ -123,7 +123,7 @@ fn main() {
             .vectors
             .iter()
             .enumerate()
-            .map(|(i, v)| (rid_from(i), v.clone()))
+            .map(|(i, v)| (rid_from(i), v.to_vec()))
             .collect();
         let cell = format!("n{n}");
 
@@ -175,7 +175,7 @@ fn main() {
         .vectors
         .iter()
         .enumerate()
-        .map(|(i, v)| (rid_from(i), v.clone()))
+        .map(|(i, v)| (rid_from(i), v.to_vec()))
         .collect();
 
     for &frac in TOMBSTONE_FRACTIONS {

@@ -150,18 +150,22 @@ impl ShamirAdminExecutor {
 
         // Intern each name idempotently; touch_ind returns New | Exists,
         // both carry the assigned InternerKey. A name already present
-        // returns its existing id (idempotent re-touch).
-        let mappings: Vec<(String, u64)> = op
-            .names
-            .iter()
-            .map(|name| {
-                let key = interner
-                    .touch_ind(name)
-                    .map_err(|e| err(format!("interner touch '{name}': {e}")))?
-                    .into_key();
-                Ok((name.clone(), key.id()))
-            })
-            .collect::<Result<_, BatchError>>()?;
+        // returns its existing id (idempotent re-touch). On quota failure
+        // (acceptance 7) the prefix already interned in THIS request is
+        // persisted, and the failed name yields no mapping.
+        let mut mappings: Vec<(String, u64)> = Vec::with_capacity(op.names.len());
+        for name in &op.names {
+            match interner.touch_ind(name) {
+                Ok(touch) => mappings.push((name.clone(), touch.into_key().id())),
+                Err(e) => {
+                    mgr.persist().await.map_err(|pe| err(pe.to_string()))?;
+                    return Err(err_code(
+                        "interner_quota_exceeded",
+                        format!("interner touch '{name}': {e}"),
+                    ));
+                }
+            }
+        }
 
         // Durability: newly-minted ids must survive a crash. persist()
         // writes the delta since the last chunk as an append-only chunk.

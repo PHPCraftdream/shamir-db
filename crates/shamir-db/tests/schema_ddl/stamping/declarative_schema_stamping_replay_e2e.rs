@@ -60,9 +60,12 @@ async fn exec_set_schema(db: &ShamirDb, rules: Vec<ddl::FieldBuilder>) -> Result
     let mut b = Batch::new();
     b.id(1);
     b.set_table_schema("ss", ddl::set_table_schema("events").rules(rules));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .map_err(|e| e.to_string())?;
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -70,9 +73,12 @@ async fn try_insert(db: &ShamirDb, record: QueryValue) -> Result<(), String> {
     let mut b = Batch::new();
     b.id(1);
     b.insert("ins", insert("events").row(record));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .map_err(|e| e.to_string())?;
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -91,9 +97,12 @@ async fn try_update(
             .set(set_map),
     )
     .unwrap();
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .map_err(|e| e.to_string())?;
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -102,7 +111,10 @@ async fn read_all(db: &ShamirDb) -> Vec<QueryValue> {
     b.id(1);
     b.query("all", Query::from("events"));
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())
         .unwrap();
@@ -152,9 +164,12 @@ async fn auto_now_timestamps_not_restamped_on_durable_reopen() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("main").tables(["events"]));
-        db.execute("testdb", &b.to_request_via_msgpack())
-            .await
-            .unwrap();
+        db.execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
+        .await
+        .unwrap();
 
         exec_set_schema(
             &db,
@@ -268,9 +283,12 @@ async fn default_before_one_of_check_passes_when_default_is_valid() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["events"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Schema: status has default "active" AND one_of ["active", "inactive"].
     // The default "active" is a valid one_of member, so an absent field
@@ -344,9 +362,12 @@ async fn default_before_one_of_check_rejects_when_default_is_invalid() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("main").tables(["events"]));
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Schema: status has default "draft" (not in one_of) + one_of ["active", "inactive"].
     // This is a deliberately invalid schema combination to exercise the ordering.

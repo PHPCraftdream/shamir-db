@@ -211,7 +211,13 @@ impl<'a> QueryRunner<'a> {
             return Ok(QueryResult::with_value(QueryValue::Map(grant_map)));
         }
 
-        let table_ref = entry.op.table_ref().unwrap();
+        let Some(table_ref) = entry.op.table_ref() else {
+            return Err(BatchError::query_coded(
+                alias,
+                "batch_table_ref",
+                "operation requiring a table has no table reference",
+            ));
+        };
         let resource = self.table_resource(table_ref);
 
         let table = self
