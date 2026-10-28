@@ -59,6 +59,8 @@ pub enum ExprError {
     FieldNotFound,
     #[error("division by zero")]
     DivisionByZero,
+    #[error("remainder overflow")]
+    RemainderOverflow,
     #[error("scalar function error: {0}")]
     ScalarError(String),
 }
@@ -149,7 +151,10 @@ impl IndexExpr {
                     return Err(ExprError::DivisionByZero);
                 }
                 match inner.eval_with_scalars(rec, resolver)? {
-                    InnerValue::Int(n) => Ok(InnerValue::Int(n % divisor)),
+                    InnerValue::Int(n) => n
+                        .checked_rem(*divisor)
+                        .map(InnerValue::Int)
+                        .ok_or(ExprError::RemainderOverflow),
                     other => Err(type_err("int", &other)),
                 }
             }
@@ -176,7 +181,7 @@ impl IndexExpr {
                     ExprError::ScalarError("no scalar resolver available".to_string())
                 })?;
                 let result_qv = resolver
-                    .call(name, std::slice::from_ref(&qv_arg))
+                    .call_indexable(name, std::slice::from_ref(&qv_arg))
                     .map_err(|e: ScalarError| ExprError::ScalarError(e.code))?;
                 // Convert QueryValue → InnerValue for the index key.
                 let result_iv = query_value_to_inner(&result_qv, &scratch)

@@ -113,6 +113,7 @@ async fn and_query() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("hello"), token_hash("world")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -144,6 +145,7 @@ async fn or_query() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("hello"), token_hash("baz")],
             mode: FtsMode::OrAny,
+            limit: None,
         })
         .await
         .unwrap();
@@ -175,6 +177,7 @@ async fn update_diff_tokens() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("beta")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -188,6 +191,7 @@ async fn update_diff_tokens() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("delta")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -201,6 +205,7 @@ async fn update_diff_tokens() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("alpha")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -225,6 +230,7 @@ async fn delete_removes_all_tokens() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("hello")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -244,6 +250,7 @@ async fn empty_query_returns_empty() {
         .lookup(IndexQuery::Fts {
             tokens: vec![],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -320,6 +327,7 @@ async fn plan_apply_round_trip() {
             .lookup(IndexQuery::Fts {
                 tokens: vec![token_hash(token)],
                 mode: FtsMode::AndAll,
+                limit: None,
             })
             .await
             .unwrap();

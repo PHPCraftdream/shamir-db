@@ -193,7 +193,9 @@ fn compile_non_pattern(filter: &Filter, interner: &Interner) -> FilterNode {
         Filter::VectorSimilarity { .. } => FilterNode::True,
 
         // FTS brute-force fallback (when no FTS index exists).
-        Filter::Fts { field, query, mode } => match intern_field_path_compact(field, interner) {
+        Filter::Fts {
+            field, query, mode, ..
+        } => match intern_field_path_compact(field, interner) {
             Some(path) => FilterNode::FtsMatch {
                 field_path: path,
                 query_tokens: query.split_whitespace().map(|w| w.to_lowercase()).collect(),
