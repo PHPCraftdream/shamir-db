@@ -2,7 +2,10 @@
 //! these match the shapes used by the transport-tcp e2e test, kept
 //! transport-binding-local.
 
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeStruct;
+use serde::{Deserialize, Serialize, Serializer};
+
+use shamir_connect::common::wire::RotationInProgressWire;
 
 #[derive(Serialize, Deserialize)]
 pub struct AuthInit {
@@ -31,7 +34,7 @@ pub struct ClientProof {
     pub client_proof: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct AuthOk {
     #[serde(with = "serde_bytes")]
     pub server_signature: Vec<u8>,
@@ -59,6 +62,44 @@ pub struct AuthOk {
     /// indices and breaks the client decode).
     #[serde(default)]
     pub server_query_version: u8,
+    /// Orphan recovery payload during an identity-rotation overlap.
+    #[serde(default)]
+    pub rotation_in_progress: Option<RotationInProgressWire>,
+    /// Ask the client to upgrade stored KDF parameters when necessary.
+    #[serde(default)]
+    pub kdf_upgrade_required: Option<bool>,
+}
+
+impl Serialize for AuthOk {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let has_hints = self.rotation_in_progress.is_some() || self.kdf_upgrade_required.is_some();
+        let mut state = serializer.serialize_struct("AuthOk", if has_hints { 10 } else { 8 })?;
+        state.serialize_field(
+            "server_signature",
+            serde_bytes::Bytes::new(&self.server_signature),
+        )?;
+        state.serialize_field(
+            "server_pub_key",
+            serde_bytes::Bytes::new(&self.server_pub_key),
+        )?;
+        state.serialize_field("identity_sig", serde_bytes::Bytes::new(&self.identity_sig))?;
+        state.serialize_field("session_id", serde_bytes::Bytes::new(&self.session_id))?;
+        state.serialize_field("expires_at_ns", &self.expires_at_ns)?;
+        state.serialize_field(
+            "resumption_ticket",
+            serde_bytes::Bytes::new(&self.resumption_ticket),
+        )?;
+        state.serialize_field("resumption_expires_at_ns", &self.resumption_expires_at_ns)?;
+        state.serialize_field("server_query_version", &self.server_query_version)?;
+        if has_hints {
+            state.serialize_field("rotation_in_progress", &self.rotation_in_progress)?;
+            state.serialize_field("kdf_upgrade_required", &self.kdf_upgrade_required)?;
+        }
+        state.end()
+    }
 }
 
 /// Client → server first frame when attempting a session resume.

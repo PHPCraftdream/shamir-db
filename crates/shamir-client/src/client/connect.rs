@@ -4,7 +4,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use rand::RngCore;
 use rustls::crypto::aws_lc_rs::default_provider;
@@ -14,10 +14,14 @@ use tokio::task::JoinHandle;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
+use shamir_connect::client::handshake::{
+    ClientHandshake, HandshakeBuilder, HandshakeSuccess, ServerAuthOk, ServerChallenge,
+};
+use shamir_connect::common::auth_message::AuthMessage;
 use shamir_connect::common::crypto::{ed25519_verify_strict, sha256};
 use shamir_connect::common::identity::resume_proof_message;
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
@@ -72,6 +76,103 @@ pub(crate) struct SessionMeta {
     pub(crate) kdf_upgrade_required: bool,
 }
 
+struct VerifiedAuthOk {
+    auth_ok: ServerAuthOk,
+    resumption_ticket: Option<Vec<u8>>,
+    resumption_expires_at_ns: Option<u64>,
+    success: HandshakeSuccess,
+    pinned_hash: [u8; 32],
+}
+
+fn verify_auth_ok(
+    hs: &mut ClientHandshake,
+    wire: &WireAuthOk,
+    derived: &DerivedKeys,
+    auth_message: &AuthMessage,
+    trusted_pin: Option<[u8; 32]>,
+) -> Result<VerifiedAuthOk, ClientError> {
+    let server_signature: [u8; 32] = wire
+        .server_signature
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientError::Protocol("server_signature size".into()))?;
+    let server_pub_key: [u8; 32] = wire
+        .server_pub_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientError::Protocol("server_pub_key size".into()))?;
+    let identity_sig: [u8; 64] = wire
+        .identity_sig
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientError::Protocol("identity_sig size".into()))?;
+    let session_id: [u8; 32] = wire
+        .session_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientError::Protocol("session_id size".into()))?;
+    let resumption_ticket =
+        (!wire.resumption_ticket.is_empty()).then(|| wire.resumption_ticket.clone());
+    let resumption_expires_at_ns =
+        (wire.resumption_expires_at_ns > 0).then_some(wire.resumption_expires_at_ns);
+    let rotation_in_progress = wire
+        .rotation_in_progress
+        .clone()
+        .map(|payload| {
+            payload
+                .into_payload()
+                .ok_or_else(|| ClientError::Protocol("rotation_in_progress size".into()))
+        })
+        .transpose()?;
+    let auth_ok = ServerAuthOk {
+        server_signature,
+        server_pub_key,
+        identity_sig,
+        session_id,
+        expires_at_ns: wire.expires_at_ns,
+        resumption_ticket: resumption_ticket.clone(),
+        resumption_expires_at_ns,
+        rotation_in_progress,
+        kdf_upgrade_required: wire.kdf_upgrade_required,
+    };
+    let mut pin_capture = trusted_pin;
+    let success = match hs.process_auth_ok(&auth_ok, derived, auth_message, |pin| {
+        pin_capture = Some(*pin);
+    }) {
+        Ok(success) => success,
+        Err(error)
+            if matches!(
+                &error,
+                shamir_connect::common::error::Error::ServerIdentityChanged
+            ) && trusted_pin.is_some()
+                && auth_ok.rotation_in_progress.is_some() =>
+        {
+            let now_ns = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64;
+            let recovery = hs
+                .verify_rotation_recovery(&auth_ok, derived, auth_message, now_ns)
+                .map_err(|error| ClientError::handshake_with(error.to_string(), error))?;
+            return Err(ClientError::IdentityRotationPending {
+                previous_pin: recovery.previous_pin,
+                new_pin: recovery.new_pin,
+                transition_until_ns: recovery.transition_until_ns,
+            });
+        }
+        Err(error) => return Err(ClientError::handshake_with(error.to_string(), error)),
+    };
+    let pinned_hash = pin_capture.expect("either trusted_pin pre-set or TOFU callback fired");
+    Ok(VerifiedAuthOk {
+        auth_ok,
+        resumption_ticket,
+        resumption_expires_at_ns,
+        success,
+        pinned_hash,
+    })
+}
+
 /// Connected, authenticated client.
 ///
 /// Concurrent calls to `execute`/`ping`/`create_scram_user` are fully
@@ -111,9 +212,9 @@ pub struct Client {
     /// [`ConnectOptions::request_timeout`]. `None` = unbounded wait
     /// (prior behaviour). Applied in [`Self::roundtrip`].
     pub(super) request_timeout: Option<std::time::Duration>,
-    /// `auth_ok` orphan-recovery hint (spec §6.5). Informational only; a pin
-    /// change always requires caller-approved recovery, which this API does not
-    /// currently expose.
+    /// `auth_ok` orphan-recovery hint (spec §6.5). A changed pin fails closed;
+    /// a verified pending rotation is returned as `IdentityRotationPending`
+    /// for caller-approved, out-of-band persistence and reconnect.
     pub(super) rotation_in_progress: Option<RotationInProgressPayload>,
     /// `auth_ok` KDF-upgrade request (spec §13).
     pub(super) kdf_upgrade_required: bool,
@@ -366,96 +467,21 @@ impl Client {
             .await
             .map_err(|e| ClientError::transport("read auth_ok", e))?;
         let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
-
-        let server_signature: [u8; 32] = ok_wire
-            .server_signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("server_signature size".into()))?;
-        let server_pub_key: [u8; 32] = ok_wire
-            .server_pub_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("server_pub_key size".into()))?;
-        let identity_sig: [u8; 64] = ok_wire
-            .identity_sig
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("identity_sig size".into()))?;
-        let session_id: [u8; 32] = ok_wire
-            .session_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("session_id size".into()))?;
-
-        let resumption_ticket = if ok_wire.resumption_ticket.is_empty() {
-            None
-        } else {
-            Some(ok_wire.resumption_ticket.clone())
-        };
-        let resumption_expires_at_ns = if ok_wire.resumption_expires_at_ns > 0 {
-            Some(ok_wire.resumption_expires_at_ns)
-        } else {
-            None
-        };
-
-        let rotation_in_progress = ok_wire
-            .rotation_in_progress
-            .map(|wire| {
-                wire.into_payload()
-                    .ok_or_else(|| ClientError::Protocol("rotation_in_progress size".into()))
-            })
-            .transpose()?;
-        let auth_ok = ServerAuthOk {
-            server_signature,
-            server_pub_key,
-            identity_sig,
-            session_id,
-            expires_at_ns: ok_wire.expires_at_ns,
-            resumption_ticket: resumption_ticket.clone(),
-            resumption_expires_at_ns,
-            rotation_in_progress: rotation_in_progress.clone(),
-            kdf_upgrade_required: ok_wire.kdf_upgrade_required,
-        };
-
-        // TOFU pin capture: if user supplied trusted_pin we already
-        // pre-loaded it; otherwise the callback fires once with the
-        // discovered pin.
-        let pin_capture: Arc<StdMutex<Option<[u8; 32]>>> =
-            Arc::new(StdMutex::new(opts.trusted_pin));
-        let pin_for_cb = pin_capture.clone();
-
-        let success = hs
-            .process_auth_ok(&auth_ok, &derived, &auth_message, |pin| {
-                // §B2 audit: poison-tolerant — the mutex is local to
-                // this stack frame, so any poison can only originate
-                // from a panic in this scope; recovering the inner
-                // value is sound and lets the handshake complete its
-                // error path cleanly rather than double-panicking.
-                let mut guard = pin_for_cb
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *guard = Some(*pin);
-            })
-            .map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
-
-        let pinned_hash = pin_capture
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .expect("either trusted_pin pre-set or TOFU callback fired");
+        let verified =
+            verify_auth_ok(&mut hs, &ok_wire, &derived, &auth_message, opts.trusted_pin)?;
 
         Ok(Self::assemble(
             r,
             WriteSink::Tls(w),
             SessionMeta {
-                session_id: success.session_id,
-                pinned_hash,
-                expires_at_ns: success.expires_at_ns,
-                resumption_ticket: resumption_ticket.map(Zeroizing::new),
-                resumption_expires_at_ns,
+                session_id: verified.success.session_id,
+                pinned_hash: verified.pinned_hash,
+                expires_at_ns: verified.success.expires_at_ns,
+                resumption_ticket: verified.resumption_ticket.map(Zeroizing::new),
+                resumption_expires_at_ns: verified.resumption_expires_at_ns,
                 server_query_version: ok_wire.server_query_version,
                 request_timeout: opts.request_timeout,
-                rotation_in_progress,
+                rotation_in_progress: verified.auth_ok.rotation_in_progress,
                 kdf_upgrade_required: ok_wire.kdf_upgrade_required.unwrap_or(false),
             },
             LifecycleHooks::default(),
@@ -551,88 +577,21 @@ impl Client {
             .await
             .map_err(|e| ClientError::transport("read auth_ok", e))?;
         let ok_wire: WireAuthOk = rmp_serde::from_slice(&ok_bytes)?;
-
-        let server_signature: [u8; 32] = ok_wire
-            .server_signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("server_signature size".into()))?;
-        let server_pub_key: [u8; 32] = ok_wire
-            .server_pub_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("server_pub_key size".into()))?;
-        let identity_sig: [u8; 64] = ok_wire
-            .identity_sig
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("identity_sig size".into()))?;
-        let session_id: [u8; 32] = ok_wire
-            .session_id
-            .as_slice()
-            .try_into()
-            .map_err(|_| ClientError::Protocol("session_id size".into()))?;
-
-        let resumption_ticket = if ok_wire.resumption_ticket.is_empty() {
-            None
-        } else {
-            Some(ok_wire.resumption_ticket.clone())
-        };
-        let resumption_expires_at_ns = if ok_wire.resumption_expires_at_ns > 0 {
-            Some(ok_wire.resumption_expires_at_ns)
-        } else {
-            None
-        };
-
-        let rotation_in_progress = ok_wire
-            .rotation_in_progress
-            .map(|wire| {
-                wire.into_payload()
-                    .ok_or_else(|| ClientError::Protocol("rotation_in_progress size".into()))
-            })
-            .transpose()?;
-        let auth_ok = ServerAuthOk {
-            server_signature,
-            server_pub_key,
-            identity_sig,
-            session_id,
-            expires_at_ns: ok_wire.expires_at_ns,
-            resumption_ticket: resumption_ticket.clone(),
-            resumption_expires_at_ns,
-            rotation_in_progress: rotation_in_progress.clone(),
-            kdf_upgrade_required: ok_wire.kdf_upgrade_required,
-        };
-
-        let pin_capture: Arc<StdMutex<Option<[u8; 32]>>> =
-            Arc::new(StdMutex::new(opts.trusted_pin));
-        let pin_for_cb = pin_capture.clone();
-
-        let success = hs
-            .process_auth_ok(&auth_ok, &derived, &auth_message, |pin| {
-                let mut guard = pin_for_cb
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                *guard = Some(*pin);
-            })
-            .map_err(|e| ClientError::handshake_with(e.to_string(), e))?;
-
-        let pinned_hash = pin_capture
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .expect("either trusted_pin pre-set or TOFU callback fired");
+        let verified =
+            verify_auth_ok(&mut hs, &ok_wire, &derived, &auth_message, opts.trusted_pin)?;
 
         Ok(Self::assemble(
             r,
             WriteSink::Ipc(w),
             SessionMeta {
-                session_id: success.session_id,
-                pinned_hash,
-                expires_at_ns: success.expires_at_ns,
-                resumption_ticket: resumption_ticket.map(Zeroizing::new),
-                resumption_expires_at_ns,
+                session_id: verified.success.session_id,
+                pinned_hash: verified.pinned_hash,
+                expires_at_ns: verified.success.expires_at_ns,
+                resumption_ticket: verified.resumption_ticket.map(Zeroizing::new),
+                resumption_expires_at_ns: verified.resumption_expires_at_ns,
                 server_query_version: ok_wire.server_query_version,
                 request_timeout: opts.request_timeout,
-                rotation_in_progress,
+                rotation_in_progress: verified.auth_ok.rotation_in_progress,
                 kdf_upgrade_required: ok_wire.kdf_upgrade_required.unwrap_or(false),
             },
             LifecycleHooks::default(),
