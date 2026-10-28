@@ -87,9 +87,8 @@ impl UserAdminPort for DirectoryPorts {
         // account behind a reported failure (the insert below cannot be
         // rolled back once committed).
         if roles.iter().any(|r| r == "superuser") {
-            return Err(PortError::from(
-                "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke superuser status"
-                    .to_string(),
+            return Err(PortError::other(
+                "\"superuser\" is a reserved role name — use SetSuperuser to grant/revoke superuser status",
             ));
         }
         // Argon2id derivation reuses the shared helper factored out of
@@ -97,18 +96,18 @@ impl UserAdminPort for DirectoryPorts {
         // time). shamir-db never touches SCRAM crypto.
         let record = derive_scram_record(password.to_string(), self.kdf)
             .await
-            .map_err(PortError::from)?;
+            .map_err(|error| PortError::other(error.to_string()))?;
         let user_id = self
             .dir
             .insert_with_scope(name.to_string(), record, database)
-            .map_err(|e| PortError::from(e.to_string()))?;
+            .map_err(|error| PortError::other(error.to_string()))?;
         if !roles.is_empty() {
             // now_ns=0: a brand-new user has no live sessions to invalidate.
             // The reserved-role check above means this can only fail on an
             // internal directory error, not on caller input.
             self.dir
                 .update_roles(name, roles, 0)
-                .map_err(|e| PortError::from(e.to_string()))?;
+                .map_err(|error| PortError::other(error.to_string()))?;
         }
         Ok(user_id)
     }
@@ -116,7 +115,7 @@ impl UserAdminPort for DirectoryPorts {
     async fn drop_user(&self, name: &str) -> Result<bool, PortError> {
         self.dir
             .remove(name)
-            .map_err(|e| PortError::from(e.to_string()))
+            .map_err(|error| PortError::other(error.to_string()))
     }
 
     async fn grant_role(&self, user: &str, role: &str) -> Result<(), PortError> {
@@ -124,7 +123,12 @@ impl UserAdminPort for DirectoryPorts {
         self.dir
             .grant_role(user, role, now_ns)
             .map(|_| ())
-            .map_err(|e| PortError::from(e.to_string()))
+            .map_err(|error| match error {
+                shamir_connect::common::error::Error::UserNotFound => {
+                    PortError::user_not_found(error.to_string())
+                }
+                other => PortError::other(other.to_string()),
+            })
     }
 
     async fn revoke_role(&self, user: &str, role: &str) -> Result<(), PortError> {
@@ -132,7 +136,12 @@ impl UserAdminPort for DirectoryPorts {
         self.dir
             .revoke_role(user, role, now_ns)
             .map(|_| ())
-            .map_err(|e| PortError::from(e.to_string()))
+            .map_err(|error| match error {
+                shamir_connect::common::error::Error::UserNotFound => {
+                    PortError::user_not_found(error.to_string())
+                }
+                other => PortError::other(other.to_string()),
+            })
     }
 
     async fn set_superuser(&self, user: &str, on: bool) -> Result<(), PortError> {
@@ -140,6 +149,6 @@ impl UserAdminPort for DirectoryPorts {
         self.dir
             .set_superuser(user, on, now_ns)
             .map(|_| ())
-            .map_err(|e| PortError::from(e.to_string()))
+            .map_err(|error| PortError::other(error.to_string()))
     }
 }

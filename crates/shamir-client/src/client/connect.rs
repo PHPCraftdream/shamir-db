@@ -21,6 +21,7 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
+use shamir_connect::common::wire::RotationInProgressPayload;
 
 use shamir_transport_tcp::framing::{read_frame, write_frame};
 use shamir_transport_tcp::tls::{
@@ -67,6 +68,8 @@ pub(crate) struct SessionMeta {
     pub(crate) resumption_expires_at_ns: Option<u64>,
     pub(crate) server_query_version: u8,
     pub(crate) request_timeout: Option<std::time::Duration>,
+    pub(crate) rotation_in_progress: Option<RotationInProgressPayload>,
+    pub(crate) kdf_upgrade_required: bool,
 }
 
 /// Connected, authenticated client.
@@ -108,6 +111,12 @@ pub struct Client {
     /// [`ConnectOptions::request_timeout`]. `None` = unbounded wait
     /// (prior behaviour). Applied in [`Self::roundtrip`].
     pub(super) request_timeout: Option<std::time::Duration>,
+    /// `auth_ok` orphan-recovery hint (spec §6.5). Informational only; a pin
+    /// change always requires caller-approved recovery, which this API does not
+    /// currently expose.
+    pub(super) rotation_in_progress: Option<RotationInProgressPayload>,
+    /// `auth_ok` KDF-upgrade request (spec §13).
+    pub(super) kdf_upgrade_required: bool,
     /// Test-only lifecycle hooks (P0 C1). The type is zero-sized in
     /// production; the fields (and this field's readers) are test-only.
     #[cfg(test)]
@@ -148,6 +157,8 @@ impl Client {
             interner_cache: Arc::new(InternerCacheRegistry::new()),
             server_query_version: AtomicU8::new(meta.server_query_version),
             request_timeout: meta.request_timeout,
+            rotation_in_progress: meta.rotation_in_progress,
+            kdf_upgrade_required: meta.kdf_upgrade_required,
             #[cfg(test)]
             hooks,
         }
@@ -388,6 +399,13 @@ impl Client {
             None
         };
 
+        let rotation_in_progress = ok_wire
+            .rotation_in_progress
+            .map(|wire| {
+                wire.into_payload()
+                    .ok_or_else(|| ClientError::Protocol("rotation_in_progress size".into()))
+            })
+            .transpose()?;
         let auth_ok = ServerAuthOk {
             server_signature,
             server_pub_key,
@@ -396,8 +414,8 @@ impl Client {
             expires_at_ns: ok_wire.expires_at_ns,
             resumption_ticket: resumption_ticket.clone(),
             resumption_expires_at_ns,
-            rotation_in_progress: None,
-            kdf_upgrade_required: None,
+            rotation_in_progress: rotation_in_progress.clone(),
+            kdf_upgrade_required: ok_wire.kdf_upgrade_required,
         };
 
         // TOFU pin capture: if user supplied trusted_pin we already
@@ -437,6 +455,8 @@ impl Client {
                 resumption_expires_at_ns,
                 server_query_version: ok_wire.server_query_version,
                 request_timeout: opts.request_timeout,
+                rotation_in_progress,
+                kdf_upgrade_required: ok_wire.kdf_upgrade_required.unwrap_or(false),
             },
             LifecycleHooks::default(),
         ))
@@ -564,6 +584,13 @@ impl Client {
             None
         };
 
+        let rotation_in_progress = ok_wire
+            .rotation_in_progress
+            .map(|wire| {
+                wire.into_payload()
+                    .ok_or_else(|| ClientError::Protocol("rotation_in_progress size".into()))
+            })
+            .transpose()?;
         let auth_ok = ServerAuthOk {
             server_signature,
             server_pub_key,
@@ -572,8 +599,8 @@ impl Client {
             expires_at_ns: ok_wire.expires_at_ns,
             resumption_ticket: resumption_ticket.clone(),
             resumption_expires_at_ns,
-            rotation_in_progress: None,
-            kdf_upgrade_required: None,
+            rotation_in_progress: rotation_in_progress.clone(),
+            kdf_upgrade_required: ok_wire.kdf_upgrade_required,
         };
 
         let pin_capture: Arc<StdMutex<Option<[u8; 32]>>> =
@@ -605,6 +632,8 @@ impl Client {
                 resumption_expires_at_ns,
                 server_query_version: ok_wire.server_query_version,
                 request_timeout: opts.request_timeout,
+                rotation_in_progress,
+                kdf_upgrade_required: ok_wire.kdf_upgrade_required.unwrap_or(false),
             },
             LifecycleHooks::default(),
         ))
@@ -656,6 +685,8 @@ impl Client {
                 resumption_expires_at_ns: resumed.resumption_expires_at_ns,
                 server_query_version: resumed.server_query_version,
                 request_timeout: None,
+                rotation_in_progress: None,
+                kdf_upgrade_required: false,
             },
             LifecycleHooks::default(),
         ))
@@ -812,6 +843,8 @@ impl Client {
                 resumption_expires_at_ns: None,
                 server_query_version: 0,
                 request_timeout: None,
+                rotation_in_progress: None,
+                kdf_upgrade_required: false,
             },
             hooks,
         )

@@ -676,6 +676,11 @@ impl ShamirDb {
         &self.db_create_lock
     }
 
+    /// Namespace lifecycle lock. Lock order for DDL and namespace mutations:
+    /// optional database/repository create lock → this lock → repository write
+    /// admission → schema RMW lock → table write barrier. Never acquire an
+    /// earlier lock while holding a later one.
+    ///
     /// ONE lifecycle interlock shared by replication catalogue writers
     /// (admin subscription/profile handlers, terminal marking, the pending
     /// creation barrier, seed install, and the supervisor's reconcile read
@@ -959,20 +964,12 @@ impl ShamirDb {
         use std::str::FromStr;
 
         // Parse the op_id from the string representation.
-        let op_id = RecordId::from_str(op_id_str).map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!("Invalid op_id format: {}", e))
+        let op_id = RecordId::from_str(op_id_str).map_err(|error| {
+            shamir_storage::error::DbError::Validation(format!("Invalid op_id format: {error}"))
         })?;
 
         // Resolve the specific table's TableManager — op-status log is per-table.
-        let table = self
-            .get_table(db_name, repo_name, table_name)
-            .await
-            .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
-                    "Failed to resolve table '{}.{}.{}': {}",
-                    db_name, repo_name, table_name, e
-                ))
-            })?;
+        let table = self.get_table(db_name, repo_name, table_name).await?;
 
         // Read the op status from this table's info store (read-only view).
         table.info_store_read_view().read_op_status(&op_id).await

@@ -64,8 +64,13 @@ pub enum IndexQuery {
         lo: Bound<Vec<u8>>,
         hi: Bound<Vec<u8>>,
     },
-    /// FTS — interned token IDs + combination mode.
-    Fts { tokens: Vec<u64>, mode: FtsMode },
+    /// FTS — interned token IDs + combination mode. `limit` bounds ranked
+    /// results when set; membership lookups remain complete.
+    Fts {
+        tokens: Vec<u64>,
+        mode: FtsMode,
+        limit: Option<usize>,
+    },
     /// Vector similarity (top-k by `kind`'s metric).
     ///
     /// `opts` carries per-query knobs (`ef_search`, `oversample`). Both

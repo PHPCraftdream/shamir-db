@@ -4,9 +4,8 @@
  * `crates/shamir-query-types/src/admin/types/repl_ops.rs` and the fluent
  * Rust builders in `crates/shamir-query-builder/src/ddl/replication.rs`.
  *
- * All ops are plain functions returning the wire object (no HMAC gating on
- * the replication surface). Mirrors the `ddl.ts` / `admin.ts` pattern: flat
- * named function exports + an aggregate `replication` namespace object.
+ * Profile, publication and subscription drops are HMAC-gated; their builders
+ * require a signer. Other replication constructors preserve wire-only behavior.
  *
  * PLATFORM-AGNOSTIC.
  */
@@ -28,6 +27,8 @@ import type {
   ListSubscriptionsOp,
   ReplicationStatusOp,
 } from '../../types/stream/replication.js';
+import type { HmacSigner } from '../../types/schema/ddl.js';
+import { canonicalBatchOp } from '../../protocol/hmac.js';
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -81,9 +82,10 @@ export function replicationProfile(
   };
 }
 
-/** Drop a named replication profile. Wire shape: `{ drop_replication_profile: name }`. */
-export function dropReplicationProfile(name: string): DropReplicationProfileOp {
-  return { drop_replication_profile: name };
+/** Drop a named replication profile (HMAC-gated). */
+export function dropReplicationProfile(signer: HmacSigner, name: string): DropReplicationProfileOp {
+  const unsigned = { drop_replication_profile: name };
+  return { ...unsigned, hmac: signer.hmacTagHex(canonicalBatchOp('', unsigned)) };
 }
 
 // ── Publication ops ─────────────────────────────────────────────────
@@ -102,9 +104,10 @@ export function publication(
   };
 }
 
-/** Drop a publication by name. Wire shape: `{ drop_publication: name }`. */
-export function dropPublication(name: string): DropPublicationOp {
-  return { drop_publication: name };
+/** Drop a publication (HMAC-gated). */
+export function dropPublication(signer: HmacSigner, name: string): DropPublicationOp {
+  const unsigned = { drop_publication: name };
+  return { ...unsigned, hmac: signer.hmacTagHex(canonicalBatchOp('', unsigned)) };
 }
 
 // ── Subscription ops ────────────────────────────────────────────────
@@ -126,9 +129,10 @@ export function subscription(
   };
 }
 
-/** Drop a subscription by name. Wire shape: `{ drop_subscription: name }`. */
-export function dropSubscription(name: string): DropSubscriptionOp {
-  return { drop_subscription: name };
+/** Drop a subscription (HMAC-gated). */
+export function dropSubscription(signer: HmacSigner, name: string): DropSubscriptionOp {
+  const unsigned = { drop_subscription: name };
+  return { ...unsigned, hmac: signer.hmacTagHex(canonicalBatchOp('', unsigned)) };
 }
 
 /**

@@ -9,6 +9,7 @@
 use crate::codecs::CodecError;
 use crate::core::interner::{Interner, InternerKey};
 use crate::record_view::{RawSeq, RecordValue, RecordView};
+use crate::types::common::TSet;
 use std::sync::{Arc, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -34,12 +35,23 @@ use std::sync::{Arc, OnceLock};
 ///
 /// Returns `Err(CodecError::Decode("unresolved interner key id N"))` on the
 /// FIRST unresolved key. Returns `Ok(())` when all keys resolve.
+///
+/// A key id repeated within one map is rejected (`CodecError::Decode`): the
+/// lens and the decoder would otherwise disagree on which value wins. Repeats
+/// across different (nested) maps are legal and checked per map.
 pub fn validate_keys_resolve(
     view: &RecordView<'_>,
     rev: &[OnceLock<Arc<str>>],
 ) -> Result<(), CodecError> {
+    let mut seen = TSet::default();
     for (key, rv) in view.fields() {
         check_key_resolves(&key, rev)?;
+        if !seen.insert(key.id()) {
+            return Err(CodecError::Decode(format!(
+                "duplicate interner key id {}",
+                key.id()
+            )));
+        }
         check_record_value_keys(&rv, rev)?;
     }
     Ok(())

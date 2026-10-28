@@ -11,13 +11,15 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
-use crate::conn_limiter::ConnLimiter;
 use crate::scheduler::Scheduler;
 use crate::server::store_release_barrier::wait_stores_released;
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for connection tasks to
 /// end once they were told to.
 const CONN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Upper bound for forced connection abort to complete.
+const CONN_ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Upper bound for [`ServerHandle::shutdown`] to wait for the stores to drop
 /// their directory locks (a client that stays connected can hold one).
@@ -110,7 +112,7 @@ pub struct ServerHandle {
     /// Live-connection tracker: shutdown waits on it until every connection
     /// task (told to end through `shutdown_token`) has dropped its handler
     /// context and, with it, its references to the stores.
-    pub(super) conn_limiter: ConnLimiter,
+    pub(super) conn_tasks: crate::connection::ConnTasks,
     /// RAII single-instance guard: an advisory OS file lock on
     /// `<data_dir>/.shamir.lock`. The kernel releases it automatically
     /// when this `File` is dropped (or the process crashes), so a second
@@ -123,6 +125,38 @@ pub struct ServerHandle {
     /// Consumer wiring to accept-loop sleep sites is deferred to a follow-up
     /// slice to keep this slice small and behaviour-identical.
     pub tunables: Arc<RuntimeTunables>,
+}
+
+/// cancel-safe: yes — timeout cancels only the wait; abort_all is idempotent.
+pub(crate) async fn drain_connections(
+    tasks: &crate::connection::ConnTasks,
+    drain: Duration,
+    abort: Duration,
+    report: &mut ShutdownReport,
+) -> bool {
+    if tokio::time::timeout(drain, tasks.wait_idle()).await.is_ok() {
+        return true;
+    }
+
+    let live = tasks.live();
+    tasks.abort_all();
+    let joined = tokio::time::timeout(abort, tasks.wait_idle()).await.is_ok();
+    report.add_error(format!(
+        "connection drain exceeded {drain:?}; aborted {live} connection task(s){}",
+        if joined {
+            ""
+        } else {
+            "; still running after abort bound"
+        },
+    ));
+    tracing::error!(
+        live,
+        joined,
+        ?drain,
+        ?abort,
+        "shutdown: connection drain timed out"
+    );
+    joined
 }
 
 impl ServerHandle {
@@ -148,23 +182,18 @@ impl ServerHandle {
         //    next poll, and any new caller sees the cancelled state
         //    immediately. No subscribe-window race.
         self.shutdown_token.cancel();
-        // 2. Wait for accept loops to finish.
+        // 2. Wait for accept loops to finish, then wait for tracked accepted
+        // tasks to quiesce before any repository flush.
         for task in self.listener_tasks {
             let _ = task.await;
         }
-        // 2a. Connection tasks watch the same token (see
-        //     `run_until_cancelled`); wait until the last one dropped its
-        //     handler context, which holds references to the stores.
-        if tokio::time::timeout(CONN_DRAIN_TIMEOUT, self.conn_limiter.wait_idle())
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                live = self.conn_limiter.live(),
-                timeout = ?CONN_DRAIN_TIMEOUT,
-                "shutdown: connections still alive after the drain timeout",
-            );
-        }
+        let quiesced = drain_connections(
+            &self.conn_tasks,
+            CONN_DRAIN_TIMEOUT,
+            CONN_ABORT_TIMEOUT,
+            report,
+        )
+        .await;
         // 2b. Stop the follower-replication supervisor: cancel every running
         //     follower loop, then join the reconcile-tick task (already told
         //     to stop by the root `shutdown_token.cancel()` above) so it drops
@@ -181,9 +210,17 @@ impl ServerHandle {
         //    commits in the last ~500 ms window are not lost on graceful
         //    stop. Must happen AFTER accept loops have stopped (no new
         //    writes can arrive) and BEFORE redb locks are released.
-        self.shamir
-            .flush_all_report(REPO_FLUSH_BUDGET, report)
-            .await;
+        if !quiesced {
+            report.add_error("repository flush skipped: connection tasks still alive".to_string());
+            tracing::error!(
+                live = self.conn_tasks.live(),
+                "shutdown: repository flush skipped because connection tasks remain",
+            );
+        } else {
+            self.shamir
+                .flush_all_report(REPO_FLUSH_BUDGET, report)
+                .await;
+        }
         // 5. Stop the observability HTTP server (if any).
         if let Some(obs) = self.observability {
             obs.shutdown().await;

@@ -139,6 +139,8 @@ impl SystemStore {
 
     /// Load all repository records.
     pub async fn load_repositories(&self) -> DbResult<Vec<QueryValue>> {
+        #[cfg(test)]
+        self.count_full_catalogue_load();
         let table = self.table(TABLE_REPOSITORIES).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -165,21 +167,7 @@ impl SystemStore {
         db_name: &str,
         repo_name: &str,
     ) -> DbResult<Option<QueryValue>> {
-        let all = self.load_repositories().await?;
-        for rec in all {
-            let matches = rec
-                .get("db_name")
-                .and_then(|v| v.as_str())
-                .is_some_and(|d| d == db_name)
-                && rec
-                    .get("repo_name")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|r| r == repo_name);
-            if matches {
-                return Ok(Some(rec));
-            }
-        }
-        Ok(None)
+        self.load_repository(db_name, repo_name).await
     }
 
     // Table catalogue (per-repo table list — I.2)
@@ -276,6 +264,8 @@ impl SystemStore {
     /// Load every persisted table-catalogue record (across all repos). The
     /// caller filters by `db_name` / `repo_name`.
     pub async fn load_tables(&self) -> DbResult<Vec<QueryValue>> {
+        #[cfg(test)]
+        self.count_table_catalogue_read();
         let table = self.table(TABLE_TABLES).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -369,6 +359,8 @@ impl SystemStore {
         repo_name: &str,
         table_name: &str,
     ) -> DbResult<Option<QueryValue>> {
+        #[cfg(test)]
+        self.count_table_catalogue_read();
         let table = self.table(TABLE_TABLES).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;

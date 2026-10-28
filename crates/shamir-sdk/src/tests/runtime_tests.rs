@@ -9,6 +9,38 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::rc::Rc;
 
+/// RV-SDK-MACROS-D7F6AEC5: trap messages replace control characters and are
+/// capped at 1024 bytes without splitting a UTF-8 code point.
+#[test]
+fn rv_sdk_macros_d7f6aec5_trap_message_sanitizer_bounds_utf8_and_controls() {
+    let sanitized = __rt::sanitize_trap_message("line\n\tbreak\u{7f}");
+    assert_eq!(sanitized, "line\u{fffd}\u{fffd}break\u{fffd}");
+
+    let exact = format!("{}é", "a".repeat(1022));
+    let sanitized = __rt::sanitize_trap_message(&exact);
+    assert_eq!(sanitized.len(), 1024);
+    assert!(sanitized.is_char_boundary(sanitized.len()));
+
+    let oversized = format!("{}é", "a".repeat(1023));
+    let sanitized = __rt::sanitize_trap_message(&oversized);
+    assert_eq!(sanitized.len(), 1023);
+    assert!(sanitized.is_char_boundary(sanitized.len()));
+    assert!(!sanitized.chars().any(char::is_control));
+}
+
+#[test]
+fn rv_sdk_macros_d7f6aec5_trap_panics_with_sanitized_bounded_payload() {
+    let message = format!("line\n{}\tend", "x".repeat(1020));
+    let panic = std::panic::catch_unwind(|| __rt::trap(&message)).expect_err("trap must panic");
+    let payload = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&'static str>().copied())
+        .expect("panic payload is text");
+    let expected = format!("shamir function error: line\u{fffd}{}", "x".repeat(1017));
+    assert_eq!(payload, expected);
+}
+
 /// Future that yields `Pending` for the first `pending_polls` polls, then
 /// `Ready(Value::Int(7))`. Counts every poll into a shared cell.
 struct CountingFuture {

@@ -33,7 +33,7 @@ pub use crate::shamir_db::execute::replication_seed::{
     fence_metadata, validate_seed_hello, ResumeProbe, SeedRefusal,
 };
 pub use crate::shamir_db::{
-    PortError, PrincipalInfo, PrincipalResolver, RepoAdminObserver, UserAdminPort,
+    PortError, PortErrorKind, PrincipalInfo, PrincipalResolver, RepoAdminObserver, UserAdminPort,
 };
 pub use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 

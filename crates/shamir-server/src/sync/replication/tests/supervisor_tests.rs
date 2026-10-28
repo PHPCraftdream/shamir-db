@@ -146,7 +146,10 @@ pub(crate) async fn create_profile_and_subscription(follower: &ShamirDb) {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "prof_a"),
     );
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("create profile+subscription");
 }
@@ -157,7 +160,10 @@ pub(crate) async fn alter(follower: &ShamirDb, op: shamir_query_types::batch::Ba
     b.id(1);
     b.op("as", op);
     follower
-        .execute("app", &b.to_request_via_msgpack())
+        .execute(
+            "app",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("alter subscription");
 }
@@ -333,7 +339,14 @@ async fn drop_stops_and_deregisters() {
     assert!(sup.is_running("sub_a"));
 
     // Drop → reconcile stops + removes from registry.
-    alter(&follower, drop_subscription("sub_a")).await;
+    alter(
+        &follower,
+        drop_subscription("sub_a")
+            .hmac("direct-db-test")
+            .build()
+            .expect("build drop subscription"),
+    )
+    .await;
     sup.notify_changed().await;
     assert!(!sup.is_running("sub_a"), "dropped loop must be gone");
     assert_eq!(sup.active_count(), 0);
@@ -446,7 +459,12 @@ async fn duplicate_destination_refuses_second_source() {
         subscription("sub_b", "tcp://other:9000", "pub_b", "prof_a"),
     );
     follower
-        .execute("app", &batch.to_request_via_msgpack())
+        .execute(
+            "app",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -489,7 +507,12 @@ async fn reopen_required_is_visible_and_resume_refused() {
         alter_subscription("sub_a").resume().build().unwrap(),
     );
     let error = follower
-        .execute("app", &batch.to_request_via_msgpack())
+        .execute(
+            "app",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert!(

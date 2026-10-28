@@ -352,8 +352,6 @@ fn fn_value_for_aggregator(
     interner: &Interner,
 ) -> Option<QueryValue> {
     if all_field {
-        // AggregateField::All: the whole record is the value. Build the
-        // QueryValue via the lens's `to_query_value` (single boundary).
         return Some(record.to_query_value(interner));
     }
     let path = path.as_deref()?;

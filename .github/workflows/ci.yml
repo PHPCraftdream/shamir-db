@@ -678,6 +678,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: tools/rust-guard
+      - name: cache rust-guard binary
+        id: source-guard-bin-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            tools/rust-guard/target/debug/rust-guard
+            tools/rust-guard/target/debug/rust-guard.exe
+          key: rust-guard-bin-${{ runner.os }}-${{ hashFiles('tools/rust-guard/**/*.rs', 'tools/rust-guard/Cargo.toml', 'tools/rust-guard/Cargo.lock', 'rust-toolchain.toml') }}
       # PRs only: on master pushes there is no merge base (HEAD *is*
       # master); the diff-shaped `structure`/`conservation` gates are
       # skipped there, the whole-repo `modules` scan still runs below.
@@ -685,9 +693,12 @@ jobs:
         if: github.event_name == 'pull_request'
         run: echo "MERGE_BASE=$(git merge-base origin/master HEAD)" >> "$GITHUB_ENV"
       - name: build rust-guard
+        if: steps.source-guard-bin-cache.outputs.cache-hit != 'true'
         run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
       - name: rust-guard modules (whole repo)
         run: tools/rust-guard/target/debug/rust-guard modules --repo .
+      - name: rust-guard orderings
+        run: tools/rust-guard/target/debug/rust-guard orderings --repo . --pins .rust-guard/atomic_orderings.toml
       # Selection lives in scripts/ci/rust_guard_select.py (unit-tested in
       # scripts/ci/tests/test_rust_guard_select.py): it reads the changed
       # files on stdin, captures `cargo metadata` to a file ONCE, strips the
@@ -791,6 +802,14 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: cache rust-guard binary
+        id: rust-guard-selftest-bin-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            tools/rust-guard/target/debug/rust-guard
+            tools/rust-guard/target/debug/rust-guard.exe
+          key: rust-guard-bin-${{ runner.os }}-${{ hashFiles('tools/rust-guard/**/*.rs', 'tools/rust-guard/Cargo.toml', 'tools/rust-guard/Cargo.lock', 'rust-toolchain.toml') }}
       # On master pushes there is no merge base (HEAD *is* master); the
       # discovery diff is a PR-shaped gate and is skipped there.
       # shell: bash — windows-latest defaults to PowerShell, where the
@@ -803,6 +822,7 @@ jobs:
       # when a campaign is active, but the format smoke below always needs
       # the binary — one cargo build serves both.
       - name: build rust-guard
+        if: steps.rust-guard-selftest-bin-cache.outputs.cache-hit != 'true'
         run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
       # FORMAT SMOKE — runs BEFORE and independent of the campaign gate:
       # proves the discovery tool round-trips REAL `cargo nextest list`

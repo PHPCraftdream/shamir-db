@@ -6,38 +6,6 @@
 //! The function runs server-side via `invoke_function_in_db_as` and returns
 //! a `QueryResult` with the answer in `value` (object/array/scalar/null).
 
-use serde::{Deserialize, Serialize};
+pub mod call_op;
 
-use crate::filter::FilterValue;
-
-fn default_repo() -> String {
-    "main".to_string()
-}
-
-/// A batch operation that calls a named stored function.
-///
-/// # Wire format
-///
-/// ```text
-/// {
-///     "call": "my_procedure",
-///     "params": [1, "hello", true],
-///     "repo": "main"
-/// }
-/// ```
-///
-/// `params` are positional [`FilterValue`]s — they may be literals or
-/// `$query` references to other batch results (Phase 2 dependency-graph).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CallOp {
-    /// Name of the function to invoke.
-    pub call: String,
-
-    /// Positional parameters passed to the function.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub params: Vec<FilterValue>,
-
-    /// Repository context for the function invocation.
-    #[serde(default = "default_repo")]
-    pub repo: String,
-}
+pub use call_op::CallOp;

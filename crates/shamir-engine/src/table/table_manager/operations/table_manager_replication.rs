@@ -109,8 +109,9 @@ impl TableManager {
         let src_interner = src.interner.get().await?;
         for src_backend in &src_backends {
             let src_desc = src_backend.descriptor();
+            // RU8: table-manager replication is counted but never rejected.
             let name_key = match interner
-                .touch_ind(&src_desc.name)
+                .touch_ind_unmetered(&src_desc.name)
                 .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
             {
                 TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
@@ -127,8 +128,9 @@ impl TableManager {
                                 seg_u64
                             ))
                         })?;
+                    // RU8: counted but never quota-rejected.
                     let dst_key = match interner
-                        .touch_ind(seg_str)
+                        .touch_ind_unmetered(seg_str)
                         .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?
                     {
                         TouchInd::Exists(k) | TouchInd::New(k) => k.id(),

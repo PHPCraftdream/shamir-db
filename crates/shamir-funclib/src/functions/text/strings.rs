@@ -3,7 +3,8 @@
 //!
 //! [`math`]: crate::math
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `strings/` folder prefix:
 //! `lower upper trim ltrim rtrim length byte_length substring concat replace
 //!  split starts_with ends_with contains index_of repeat reverse pad_left
 //!  pad_right` plus the regex family `is_reg_match reg_query reg_query_all
@@ -134,7 +135,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let start = arg_i64(a, 1)?;
                 let len = arg_i64(a, 2)?;
                 if start < 0 || len < 0 {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 let out: String = s.chars().skip(start as usize).take(len as usize).collect();
                 Ok(v_str(out))
@@ -177,7 +178,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let s = arg_str(a, 0)?;
                 let sep = arg_str(a, 1)?;
                 if sep.is_empty() {
-                    return Err(ScalarError::new("empty"));
+                    return Err(ScalarError::builtin("empty"));
                 }
                 let items = s.split(sep).map(|p| v_str(p.to_string())).collect();
                 Ok(v_list(items))
@@ -234,15 +235,15 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let s = arg_str(a, 0)?;
                 let n = arg_i64(a, 1)?;
                 if n < 0 {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 // Byte ceiling before allocation (checked mul first).
                 let total = s
                     .len()
                     .checked_mul(n as usize)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
                 if total > MAX_STRING_OUTPUT_BYTES {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 Ok(v_str(s.repeat(n as usize)))
             },
@@ -284,7 +285,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let re = regex_cache::compile(arg_str(a, 1)?)?;
                 match re.find(s) {
                     Some(m) => Ok(v_str(m.as_str().to_string())),
-                    None => Err(ScalarError::new("no_match")),
+                    None => Err(ScalarError::builtin("no_match")),
                 }
             },
             2,
@@ -323,7 +324,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                             .collect();
                         Ok(v_list(items))
                     }
-                    None => Err(ScalarError::new("no_match")),
+                    None => Err(ScalarError::builtin("no_match")),
                 }
             },
             2,
@@ -400,13 +401,13 @@ fn pad(args: &[QueryValue], side: Pad) -> ScalarResult {
     let s = arg_str(args, 0)?;
     let len = arg_i64(args, 1)?;
     if len < 0 {
-        return Err(ScalarError::new("out_of_range"));
+        return Err(ScalarError::builtin("out_of_range"));
     }
     let ch_str = arg_str(args, 2)?;
     let mut chs = ch_str.chars();
     let ch = match (chs.next(), chs.next()) {
         (Some(c), None) => c,
-        _ => return Err(ScalarError::new("bad_pad")),
+        _ => return Err(ScalarError::builtin("bad_pad")),
     };
     let cur = s.chars().count();
     let target = len as usize;
@@ -421,7 +422,7 @@ fn pad(args: &[QueryValue], side: Pad) -> ScalarResult {
         .saturating_mul(ch.len_utf8())
         .saturating_add(s.len());
     if out_bytes > MAX_STRING_OUTPUT_BYTES {
-        return Err(ScalarError::new("out_of_range"));
+        return Err(ScalarError::builtin("out_of_range"));
     }
     let fill: String = std::iter::repeat_n(ch, target - cur).collect();
     let out = match side {

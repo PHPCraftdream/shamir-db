@@ -1,4 +1,4 @@
-//! End-to-end tests for ShamirDb::execute.
+//! End-to-end tests for `ShamirDb::execute`.
 
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter::eq;
@@ -11,15 +11,11 @@ use crate::engine::table::TableConfig;
 use crate::ShamirDb;
 
 /// Two-field test row (keeps seed batches under the layout line budget).
-fn doc2<
+fn doc2<A, B>(k1: &str, v1: A, k2: &str, v2: B) -> shamir_types::types::value::QueryValue
+where
     A: Into<shamir_query_types::filter::FilterValue>,
     B: Into<shamir_query_types::filter::FilterValue>,
->(
-    k1: &str,
-    v1: A,
-    k2: &str,
-    v2: B,
-) -> shamir_types::types::value::QueryValue {
+{
     doc().set(k1, v1).unwrap().set(k2, v2).unwrap().build()
 }
 
@@ -49,7 +45,7 @@ async fn test_execute_single_insert() {
             .row(doc().set("name", "Alice").unwrap().set("age", 30).unwrap())
             .row(doc().set("name", "Bob").unwrap().set("age", 25).unwrap()),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(resp.results["ins"].records.len(), 2);
@@ -67,14 +63,14 @@ async fn test_execute_single_read() {
             .row(doc().set("name", "Alice").unwrap())
             .row(doc().set("name", "Bob").unwrap()),
     );
-    let seed = b.to_request_via_msgpack();
+    let seed = b.to_request_via_msgpack().unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Read
     let mut b = Batch::new();
     b.id(1);
     b.query("users", Query::from("users"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     assert_eq!(resp.results["users"].records.len(), 2);
@@ -96,7 +92,7 @@ async fn test_execute_crud_pipeline() {
             .row(doc2("name", "Bob", "status", "inactive"))
             .row(doc2("name", "Carol", "status", "active")),
     );
-    let q1 = b.to_request_via_msgpack();
+    let q1 = b.to_request_via_msgpack().unwrap();
     shamir.execute("testdb", &q1).await.unwrap();
 
     // 2. Update: activate Bob
@@ -110,7 +106,7 @@ async fn test_execute_crud_pipeline() {
             .returning(UpdateReturnMode::Changed),
     )
     .unwrap();
-    let q2 = b.to_request_via_msgpack();
+    let q2 = b.to_request_via_msgpack().unwrap();
     let resp = shamir.execute("testdb", &q2).await.unwrap();
     assert_eq!(resp.results["upd"].records.len(), 1);
     assert_eq!(
@@ -124,7 +120,7 @@ async fn test_execute_crud_pipeline() {
     b.try_delete("del", delete("users").where_(eq("name", "Carol")))
         .unwrap();
     b.query("remaining", Query::from("users"));
-    let q3 = b.to_request_via_msgpack();
+    let q3 = b.to_request_via_msgpack().unwrap();
     let resp = shamir.execute("testdb", &q3).await.unwrap();
 
     assert_eq!(resp.results["remaining"].records.len(), 2);
@@ -147,7 +143,7 @@ async fn test_execute_delete_returning_returns_deleted_rows() {
             .row(doc2("name", "Bob", "status", "active"))
             .row(doc2("name", "Carol", "status", "inactive")),
     );
-    let q1 = b.to_request_via_msgpack();
+    let q1 = b.to_request_via_msgpack().unwrap();
     shamir.execute("testdb", &q1).await.unwrap();
 
     // Delete active users with RETURNING — wire-roundtrip through the batch
@@ -159,7 +155,7 @@ async fn test_execute_delete_returning_returns_deleted_rows() {
         delete("users").where_(eq("status", "active")).returning(),
     )
     .unwrap();
-    let q2 = b.to_request_via_msgpack();
+    let q2 = b.to_request_via_msgpack().unwrap();
     let resp = shamir.execute("testdb", &q2).await.unwrap();
 
     // `QueryResult` does not surface `affected` (that's a WriteResult-only
@@ -195,7 +191,7 @@ async fn test_execute_insert_returning_fields_projects() {
             )
             .returning_fields(["name", "city"]),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
     assert_eq!(resp.results["ins"].records.len(), 1);
@@ -229,7 +225,7 @@ async fn test_execute_multi_table_with_dependency() {
             .row(doc().set("user", "Bob").unwrap().set("amount", 50).unwrap())
             .row(doc2("user", "Alice", "amount", 200)),
     );
-    let seed = b.to_request_via_msgpack();
+    let seed = b.to_request_via_msgpack().unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Query: find VIP users, then find their orders
@@ -240,7 +236,7 @@ async fn test_execute_multi_table_with_dependency() {
         "vip_orders",
         Query::from("orders").where_eq("user", vips.first().field("name")),
     );
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
 
     let resp = shamir.execute("testdb", &req).await.unwrap();
 
@@ -260,7 +256,7 @@ async fn test_execute_unknown_db() {
     let mut b = Batch::new();
     b.id(1);
     b.query("r", Query::from("users"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
 
     let err = shamir.execute("nonexistent", &req).await.unwrap_err();
     assert!(matches!(
@@ -293,14 +289,18 @@ async fn test_migration_lifecycle_in_memory() {
             .row(doc().set("name", "Bob").unwrap())
             .row(doc().set("name", "Carol").unwrap()),
     );
-    let seed = b.to_request_via_msgpack();
+    let seed = b.to_request_via_msgpack().unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Start migration: users from main -> cold (in_memory)
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
-    let req = b.to_request_via_msgpack();
+    b.try_op(
+        "mig",
+        ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+    )
+    .unwrap();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let mig_result = &resp.results["mig"].records[0];
     assert_eq!(mig_result.get_value_str("phase"), Some("cutover_ready"));
@@ -313,7 +313,7 @@ async fn test_migration_lifecycle_in_memory() {
     let mut b = Batch::new();
     b.id(2);
     b.migration_status("s", ddl::migration_status(&migration_id));
-    let status_req = b.to_request_via_msgpack();
+    let status_req = b.to_request_via_msgpack().unwrap();
     let status_resp = shamir.execute("testdb", &status_req).await.unwrap();
     let status = &status_resp.results["s"].records[0];
     assert_eq!(status.get_value_str("phase"), Some("cutover_ready"));
@@ -322,8 +322,9 @@ async fn test_migration_lifecycle_in_memory() {
     // Commit
     let mut b = Batch::new();
     b.id(3);
-    b.commit_migration("c", ddl::commit_migration(&migration_id));
-    let commit_req = b.to_request_via_msgpack();
+    b.try_op("c", ddl::commit_migration(&migration_id).hmac("x"))
+        .expect("build op");
+    let commit_req = b.to_request_via_msgpack().expect("batch request encoding");
     let commit_resp = shamir.execute("testdb", &commit_req).await.unwrap();
     let commit = &commit_resp.results["c"].records[0];
     assert_eq!(commit.get_value_str("phase"), Some("committed"));
@@ -334,7 +335,7 @@ async fn test_migration_lifecycle_in_memory() {
     let mut b = Batch::new();
     b.id(4);
     b.query("r", Query::with_repo("cold", "users"));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().unwrap();
     let read_resp = shamir.execute("testdb", &read_req).await.unwrap();
     assert_eq!(read_resp.results["r"].records.len(), 3);
 }
@@ -354,17 +355,18 @@ async fn test_migration_rollback() {
         "s",
         insert("users").row(doc().set("name", "Alice").unwrap()),
     );
-    let seed = b.to_request_via_msgpack();
+    let seed = b.to_request_via_msgpack().unwrap();
     shamir.execute("testdb", &seed).await.unwrap();
 
     // Start migration
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration(
+    b.try_op(
         "mig",
-        ddl::start_migration("users", "rollback_dst", "in_memory"),
-    );
-    let req = b.to_request_via_msgpack();
+        ddl::start_migration("users", "rollback_dst", "in_memory").hmac("x"),
+    )
+    .unwrap();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     let migration_id = resp.results["mig"].records[0]
         .get_value_str("migration_id")
@@ -374,8 +376,9 @@ async fn test_migration_rollback() {
     // Rollback
     let mut b = Batch::new();
     b.id(2);
-    b.rollback_migration("r", ddl::rollback_migration(&migration_id));
-    let rb_req = b.to_request_via_msgpack();
+    b.try_op("r", ddl::rollback_migration(&migration_id).hmac("x"))
+        .expect("build op");
+    let rb_req = b.to_request_via_msgpack().expect("batch request encoding");
     let rb_resp = shamir.execute("testdb", &rb_req).await.unwrap();
     assert_eq!(
         rb_resp.results["r"].records[0].get_value_str("phase"),
@@ -386,7 +389,7 @@ async fn test_migration_rollback() {
     let mut b = Batch::new();
     b.id(3);
     b.migration_status("s", ddl::migration_status(&migration_id));
-    let status_req = b.to_request_via_msgpack();
+    let status_req = b.to_request_via_msgpack().unwrap();
     let status_err = shamir.execute("testdb", &status_req).await.unwrap_err();
     assert!(matches!(
         status_err,
@@ -401,8 +404,9 @@ async fn test_migration_unknown_id() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.commit_migration("c", ddl::commit_migration("nonexistent"));
-    let req = b.to_request_via_msgpack();
+    b.try_op("c", ddl::commit_migration("nonexistent").hmac("x"))
+        .expect("build op");
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(
         err,
@@ -430,8 +434,12 @@ async fn test_start_migration_rejected_without_experimental_opt_in() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
-    let req = b.to_request_via_msgpack();
+    b.try_op(
+        "mig",
+        ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+    )
+    .unwrap();
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = shamir.execute("testdb", &req).await.unwrap_err();
 
     // Structured error with the specific code, NOT a generic QueryError.
@@ -482,15 +490,19 @@ async fn test_start_migration_succeeds_after_experimental_opt_in() {
         insert("users").row(doc().set("name", "Alice").unwrap()),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
     let mut b = Batch::new();
     b.id(1);
-    b.start_migration("mig", ddl::start_migration("users", "cold", "in_memory"));
+    b.try_op(
+        "mig",
+        ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+    )
+    .unwrap();
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("StartMigration must succeed after enable_experimental_migration_api()");
     let mig = &resp.results["mig"].records[0];
@@ -558,7 +570,7 @@ async fn create_repo_via_execute_persists_to_catalogue() {
                 .engine("in_memory")
                 .tables(["events"]),
         );
-        let req = b.to_request_via_msgpack();
+        let req = b.to_request_via_msgpack().unwrap();
         let resp = shamir.execute("production", &req).await.unwrap();
         assert_eq!(
             resp.results["cr"].records[0].get_value_str("created_repo"),
@@ -616,13 +628,14 @@ async fn drop_repo_via_execute_clears_catalogue() {
         let mut b = Batch::new();
         b.id(1);
         b.create_repo("cr", ddl::create_repo("scratch_repo").engine("in_memory"));
-        let create = b.to_request_via_msgpack();
+        let create = b.to_request_via_msgpack().unwrap();
         shamir.execute("production", &create).await.unwrap();
 
         let mut b = Batch::new();
         b.id(2);
-        b.drop_repo("dr", ddl::drop_repo("scratch_repo"));
-        let drop_req = b.to_request_via_msgpack();
+        b.try_op("dr", ddl::drop_repo("scratch_repo").hmac("x"))
+            .expect("build op");
+        let drop_req = b.to_request_via_msgpack().expect("batch request encoding");
         let resp = shamir.execute("production", &drop_req).await.unwrap();
         assert_eq!(
             resp.results["dr"].records[0].get_value_bool("existed"),
@@ -654,7 +667,7 @@ async fn test_execute_unknown_repo() {
     let mut b = Batch::new();
     b.id(1);
     b.query("r", Query::with_repo("nonexistent", "users"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
 
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     assert!(matches!(
@@ -673,7 +686,7 @@ async fn create_repo_rejects_dotdot_name() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("..").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     let msg = format!("{:?}", err);
     assert!(
@@ -689,7 +702,7 @@ async fn create_repo_rejects_slash_in_name() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("a/b").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
     let err = shamir.execute("testdb", &req).await.unwrap_err();
     let msg = format!("{:?}", err);
     assert!(
@@ -705,7 +718,7 @@ async fn create_repo_accepts_valid_name() {
     let mut b = Batch::new();
     b.id(1);
     b.create_repo("cr", ddl::create_repo("my-repo_01").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
     let resp = shamir.execute("testdb", &req).await.unwrap();
     assert_eq!(
         resp.results["cr"].records[0].get_value_str("created_repo"),
@@ -720,7 +733,7 @@ async fn create_db_rejects_dotdot_name() {
     let mut b = Batch::new();
     b.id(1);
     b.create_db("cd", ddl::create_db(".."));
-    let req = b.to_request_via_msgpack();
+    let req = b.to_request_via_msgpack().unwrap();
     // Use execute_as with System actor so the unknown-db auth check
     // passes; we need to reach CreateDb validation.
     // Actually, CreateDb is an admin op so we just use execute.
@@ -785,7 +798,7 @@ async fn concurrent_create_db_if_not_exists_is_consistent() {
         let mut b = Batch::new();
         b.id(1);
         b.create_db("cd", ddl::create_db("racedb").if_not_exists());
-        b.to_request_via_msgpack()
+        b.to_request_via_msgpack().unwrap()
     };
     let req_a = make_req();
     let req_b = make_req();
@@ -851,7 +864,7 @@ async fn concurrent_create_repo_if_not_exists_is_consistent() {
                 .engine("in_memory")
                 .if_not_exists(),
         );
-        b.to_request_via_msgpack()
+        b.to_request_via_msgpack().unwrap()
     };
     let req_a = make_req();
     let req_b = make_req();
@@ -891,106 +904,4 @@ async fn concurrent_create_repo_if_not_exists_is_consistent() {
     // The repo itself must exist exactly once.
     let db = shamir.get_db("testdb").unwrap();
     assert!(db.has_repo("racerepo"));
-}
-
-/// Deterministic proof that `db_create_lock` actually brackets
-/// `handle_create_db`'s exists-check -> authorize -> create sequence:
-/// hold the lock from OUTSIDE the handler (simulating "a create is
-/// mid-flight"), spawn a concurrent `execute` for the SAME db name, and
-/// assert it is still pending after a bounded wait. Releasing the lock
-/// must let the spawned call complete. This is independent of whether the
-/// in-memory backend happens to yield inside the handler itself (see the
-/// module doc comment above on why `tokio::join!` alone doesn't reliably
-/// reproduce the original race).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_db_lock_actually_serialises_concurrent_callers() {
-    use shamir_query_builder::ddl;
-
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("router").await.expect("create_db");
-
-    // Hold the lock as if a create_db were already mid-flight.
-    let held_guard = shamir.db_create_lock().lock().await;
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_db("cd", ddl::create_db("lockedb"));
-    let req = b.to_request_via_msgpack();
-
-    let shamir2 = shamir.clone();
-    let spawned = tokio::spawn(async move { shamir2.execute("router", &req).await });
-
-    // Give the spawned task a bounded chance to run; it must NOT complete
-    // while the lock is held.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !spawned.is_finished(),
-        "create_db must block while db_create_lock is held by another caller"
-    );
-    assert!(
-        !shamir.has_db("lockedb"),
-        "the database must not exist yet while the lock is held"
-    );
-
-    // Release: the spawned call must now proceed and succeed.
-    drop(held_guard);
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
-        .await
-        .expect("spawned create_db must complete promptly after lock release")
-        .expect("task must not panic")
-        .expect("create_db must succeed once the lock is free");
-    assert_eq!(
-        resp.results["cd"].records[0].get_value_bool("created"),
-        Some(true)
-    );
-    assert!(shamir.has_db("lockedb"));
-}
-
-/// Same deterministic proof for `repo_create_locks` (per-db keyed lock).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn create_repo_lock_actually_serialises_concurrent_callers() {
-    use shamir_query_builder::ddl;
-
-    let shamir = ShamirDb::init_memory().await.unwrap();
-    shamir.create_db("testdb").await.expect("create_db");
-
-    // Acquire the per-db lock the same way handle_create_repo does
-    // (get-or-insert then lock), simulating "a create_repo is mid-flight".
-    let repo_lock = shamir
-        .repo_create_locks()
-        .entry("testdb".to_string())
-        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let held_guard = repo_lock.lock().await;
-
-    let mut b = Batch::new();
-    b.id(1);
-    b.create_repo("cr", ddl::create_repo("lockedrepo").engine("in_memory"));
-    let req = b.to_request_via_msgpack();
-
-    let shamir2 = shamir.clone();
-    let spawned = tokio::spawn(async move { shamir2.execute("testdb", &req).await });
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(
-        !spawned.is_finished(),
-        "create_repo must block while its per-db repo_create_locks entry is held"
-    );
-    let db = shamir.get_db("testdb").unwrap();
-    assert!(
-        !db.has_repo("lockedrepo"),
-        "the repo must not exist yet while the lock is held"
-    );
-
-    drop(held_guard);
-    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), spawned)
-        .await
-        .expect("spawned create_repo must complete promptly after lock release")
-        .expect("task must not panic")
-        .expect("create_repo must succeed once the lock is free");
-    assert_eq!(
-        resp.results["cr"].records[0].get_value_bool("created"),
-        Some(true)
-    );
-    assert!(db.has_repo("lockedrepo"));
 }

@@ -18,6 +18,13 @@ fn b(v: &[u8]) -> QueryValue {
 }
 
 #[test]
+fn rv_funclib_0418c20f_nonfinite_json_serializes_as_null() {
+    assert_eq!(
+        serde_json::to_string(&QueryValue::F64(f64::INFINITY)).unwrap(),
+        "null"
+    );
+}
+#[test]
 fn base64_roundtrip_and_error() {
     let r = reg();
     assert_eq!(r.call("base64_enc", &[s("foo")]).unwrap(), s("Zm9v"));

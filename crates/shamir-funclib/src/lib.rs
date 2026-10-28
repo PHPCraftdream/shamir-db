@@ -8,9 +8,8 @@
 //! `math/min` vs `arrays/min`) no longer collide.
 //!
 //! Each category lives in its own module exposing `pub fn register(&mut
-//! ScalarRegistry)`. [`register_builtins`] wires them all into one registry.
-//! [`math`] is the fully-implemented reference; the remaining categories are
-//! stubs to be populated by their owning agents.
+//! ScalarRegistry)`. [`register_builtins`] wires implemented categories into one
+//! registry; category coverage is documented by each module.
 //!
 //! # QueryValue ABI — #61 InnerValue-elimination campaign
 //!
