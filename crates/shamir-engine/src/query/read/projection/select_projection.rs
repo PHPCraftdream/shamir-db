@@ -303,7 +303,9 @@ impl SelectProjection {
                         if id >= shamir_tx::OVERLAY_ID_BASE {
                             overlay.get(&id).cloned()
                         } else {
-                            interner.get_str(&InternerKey::new(id)).map(|name| name.to_string())
+                            interner
+                                .get_str(&InternerKey::new(id))
+                                .map(|name| name.to_string())
                         }
                     },
                 );
@@ -330,7 +332,7 @@ impl SelectProjection {
                     } else {
                         inner_value_to_query_value(&value, interner)?
                     }
-                },
+                }
                 None => QueryValue::Null,
             };
             obj.insert(key.clone(), val);

@@ -16,7 +16,10 @@ fn resolver_codec_matches_interner_codec_and_fails_closed_on_unknown_id() {
     let resolver = |key| (key == id).then(|| "name".to_string());
 
     let expected = inner_value_to_query_value(&value, &interner).unwrap();
-    assert_eq!(inner_value_to_query_value_with(&value, &resolver).unwrap(), expected);
+    assert_eq!(
+        inner_value_to_query_value_with(&value, &resolver).unwrap(),
+        expected
+    );
     assert!(inner_value_to_query_value_with(&value, &|_| None)
         .unwrap_err()
         .to_string()
@@ -29,7 +32,10 @@ fn resolver_codec_matches_interner_codec_and_fails_closed_on_unknown_id() {
     })
     .unwrap();
     let view = RecordView::new(&bytes).unwrap();
-    assert_eq!(record_view_to_query_value_with(&view, &resolver).unwrap(), expected);
+    assert_eq!(
+        record_view_to_query_value_with(&view, &resolver).unwrap(),
+        expected
+    );
     assert!(record_view_to_query_value_with(&view, &|_| None)
         .unwrap_err()
         .to_string()

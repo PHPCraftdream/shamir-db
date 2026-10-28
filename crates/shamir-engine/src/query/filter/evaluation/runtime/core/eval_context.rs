@@ -52,8 +52,7 @@ pub struct FilterContext<'a> {
     pub(crate) interner: &'a Interner,
     /// O(1) reverse resolver snapshot for this transaction's overlay names.
     pub(crate) interner_overlay: Option<Arc<shamir_collections::TFxMap<u64, String>>>,
-    pub(crate) interner_overlay_ids:
-        Option<Arc<shamir_collections::TFxMap<String, u64>>>,
+    pub(crate) interner_overlay_ids: Option<Arc<shamir_collections::TFxMap<String, u64>>>,
     pub resolved_refs: &'a TMap<String, QueryResult>,
     /// Scalar function resolver for `FnCall` dispatch. Defaults to
     /// built-ins only ([`ScalarResolver::builtins_only`]); a per-DB
@@ -138,17 +137,20 @@ impl<'a> FilterContext<'a> {
         value: &shamir_types::types::value::InnerValue,
     ) -> Result<QueryValue, shamir_types::codecs::CodecError> {
         match &self.interner_overlay {
-            Some(overlay) => shamir_types::codecs::interned::inner_value_to_query_value_with(
-                value,
-                &|id| {
+            Some(overlay) => {
+                shamir_types::codecs::interned::inner_value_to_query_value_with(value, &|id| {
                     if id >= OVERLAY_ID_BASE {
                         overlay.get(&id).cloned()
                     } else {
-                        self.interner.get_str(&InternerKey::new(id)).map(|name| name.to_string())
+                        self.interner
+                            .get_str(&InternerKey::new(id))
+                            .map(|name| name.to_string())
                     }
-                },
-            ),
-            None => shamir_types::codecs::interned::inner_value_to_query_value(value, self.interner),
+                })
+            }
+            None => {
+                shamir_types::codecs::interned::inner_value_to_query_value(value, self.interner)
+            }
         }
     }
 
@@ -205,9 +207,10 @@ impl<'a> FilterContext<'a> {
     }
 
     pub(crate) fn resolve_interner_id(&self, name: &str) -> Option<u64> {
-        self.interner.get_ind(name).map(|key| key.id()).or_else(|| {
-            self.interner_overlay_ids.as_ref()?.get(name).copied()
-        })
+        self.interner
+            .get_ind(name)
+            .map(|key| key.id())
+            .or_else(|| self.interner_overlay_ids.as_ref()?.get(name).copied())
     }
 
     pub fn new(interner: &'a Interner, resolved_refs: &'a TMap<String, QueryResult>) -> Self {

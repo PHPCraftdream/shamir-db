@@ -582,13 +582,123 @@ async fn read_tx_resolves_interactive_overlay_projection_and_order_path() {
         .order_by_asc("overlay_field")
         .build();
     let result = table.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
-    assert_eq!(result.records.len(), 5);
+    assert_eq!(result.records.len(), 1);
     let overlay_rows: Vec<_> = result
         .records
         .iter()
         .filter_map(|record| record.get_value_i64("overlay_field"))
         .collect();
-    assert_eq!(overlay_rows, vec![7, 42]);
+    assert_eq!(overlay_rows, vec![7]);
+}
+
+#[tokio::test]
+async fn read_tx_interactive_overlay_filter_and_order_paths_cover_plain_and_directions() {
+    let (repo, table, _) = fixture(false).await;
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tx.set_implicit(false);
+    let write = write::insert("t")
+        .rows([
+            write::doc().set("overlay_field", 29).unwrap(),
+            write::doc().set("overlay_field", 4).unwrap(),
+            write::doc().set("overlay_field", 17).unwrap(),
+        ])
+        .build();
+    table
+        .execute_insert_tx(
+            &write,
+            &mut tx,
+            false,
+            None,
+            &shamir_types::access::Actor::System,
+        )
+        .await
+        .unwrap();
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let plain = Query::from("t")
+        .select(["overlay_field"])
+        .where_(filter::exists("overlay_field"))
+        .build();
+    let plain_result = table.read_tx(&plain, &ctx, Some(&tx)).await.unwrap();
+    let plain_values = plain_result
+        .records
+        .iter()
+        .filter_map(|r| r.get_value_i64("overlay_field"))
+        .collect::<Vec<_>>();
+    let mut plain_values = plain_values;
+    plain_values.sort_unstable();
+    assert_eq!(plain_result.records.len(), 3);
+    assert_eq!(plain_values, vec![4, 17, 29]);
+    for (query, expected) in [
+        (
+            Query::from("t")
+                .select(["overlay_field"])
+                .where_(filter::exists("overlay_field"))
+                .order_by_asc("overlay_field")
+                .build(),
+            vec![4, 17, 29],
+        ),
+        (
+            Query::from("t")
+                .select(["overlay_field"])
+                .where_(filter::exists("overlay_field"))
+                .order_by_desc("overlay_field")
+                .build(),
+            vec![29, 17, 4],
+        ),
+    ] {
+        let result = table.read_tx(&query, &ctx, Some(&tx)).await.unwrap();
+        let values = result
+            .records
+            .iter()
+            .filter_map(|r| r.get_value_i64("overlay_field"))
+            .collect::<Vec<_>>();
+        assert_eq!(values, expected);
+    }
+}
+
+#[tokio::test]
+async fn read_tx_snapshot_keyset_filter_resolves_overlay_field() {
+    let (repo, table, _) = fixture(false).await;
+    let (mut tx, _guard) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tx.set_implicit(false);
+    let write = write::insert("t")
+        .rows([
+            write::doc().set("overlay_rank", 23).unwrap(),
+            write::doc().set("overlay_rank", 5).unwrap(),
+        ])
+        .build();
+    table
+        .execute_insert_tx(
+            &write,
+            &mut tx,
+            false,
+            None,
+            &shamir_types::access::Actor::System,
+        )
+        .await
+        .unwrap();
+    let interner = table.interner().get().await.unwrap();
+    let refs = new_map();
+    let ctx = FilterContext::new(interner, &refs);
+    let q = Query::from("t")
+        .select(["overlay_rank"])
+        .where_(filter::and([
+            filter::in_("overlay_rank", [5, 23]),
+            filter::exists("overlay_rank"),
+        ]))
+        .order_by_asc("overlay_rank")
+        .after(vec![QueryValue::Int(0)], Some(5))
+        .build();
+    let result = table.read_tx(&q, &ctx, Some(&tx)).await.unwrap();
+    assert_eq!(result.records.len(), 2);
+    let values = result
+        .records
+        .iter()
+        .filter_map(|r| r.get_value_i64("overlay_rank"))
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![5, 23]);
 }
 
 #[tokio::test]

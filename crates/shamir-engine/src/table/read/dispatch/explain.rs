@@ -386,12 +386,8 @@ pub(in crate::table::read) fn apply_select_value_bytes(
     table: &str,
     corrupt: &mut Vec<CorruptRecordRef>,
 ) -> DbResult<Vec<QueryValue>> {
-    let proj = exec::SelectProjection::new_with_context(
-        select,
-        interner,
-        ctx.scalars.clone(),
-        Some(ctx),
-    )?;
+    let proj =
+        exec::SelectProjection::new_with_context(select, interner, ctx.scalars.clone(), Some(ctx))?;
     matched
         .iter()
         .map(

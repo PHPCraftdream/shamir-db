@@ -111,7 +111,23 @@ pub(in crate::query::filter) fn intern_field_path_compact(
     Some(keys)
 }
 
-/// Lossy numeric → `f64` for cross-type comparison (NaN on overflow). Works
+pub(in crate::query::filter) fn intern_field_path_compact_with(
+    field: &[String],
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> Option<CompactPath> {
+    let mut keys: CompactPath = SmallVec::with_capacity(field.len());
+    for part in field {
+        let key = interner.get_ind(part).or_else(|| {
+            overlay_ids
+                .and_then(|ids| ids.get(part).copied())
+                .map(InternerKey::new)
+        })?;
+        keys.push(key);
+    }
+    Some(keys)
+}
+
 /// for both `Decimal` and `BigInt` via the shared `ToPrimitive` trait.
 ///
 /// CR-C5 (#780): this remains the deliberate, ACCEPTED-approximation path

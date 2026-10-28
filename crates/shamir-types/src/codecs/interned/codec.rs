@@ -84,7 +84,11 @@ pub fn inner_value_to_query_value(
     let rev = interner.reverse_snapshot();
     inner_value_to_query_value_with_resolver(
         value,
-        &|id| rev.get(id as usize).and_then(|slot| slot.get()).map(ToString::to_string),
+        &|id| {
+            rev.get(id as usize)
+                .and_then(|slot| slot.get())
+                .map(ToString::to_string)
+        },
         &|id| format!("Interned key not found: {:?}", InternerKey::new(id)),
     )
 }
@@ -159,7 +163,11 @@ pub fn record_view_to_query_value(
     let rev = interner.reverse_snapshot();
     record_view_to_query_value_with_resolver(
         view,
-        &|id| rev.get(id as usize).and_then(|slot| slot.get()).map(ToString::to_string),
+        &|id| {
+            rev.get(id as usize)
+                .and_then(|slot| slot.get())
+                .map(ToString::to_string)
+        },
         &|id| format!("Interned key not found: {:?}", InternerKey::new(id)),
     )
 }
@@ -239,4 +247,3 @@ where
 {
     record_view_to_query_value_with(view, resolve)
 }
-

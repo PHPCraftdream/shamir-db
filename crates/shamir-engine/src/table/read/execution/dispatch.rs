@@ -281,8 +281,13 @@ impl TableManager {
     ) -> DbResult<QueryResult> {
         let overlay_tx = tx.filter(|tx| !tx.implicit && !tx.interner_overlay.is_empty());
         if let Some(tx_ref) = overlay_tx {
-            let overlay_ctx = ctx.clone_with_read_overlay(&tx_ref.interner_overlay);
-            self.read_impl_with_context(query, &overlay_ctx, tx, encoding).await
+            if ctx.interner_overlay_ids.is_some() {
+                self.read_impl_with_context(query, ctx, tx, encoding).await
+            } else {
+                let overlay_ctx = ctx.clone_with_read_overlay(&tx_ref.interner_overlay);
+                self.read_impl_with_context(query, &overlay_ctx, tx, encoding)
+                    .await
+            }
         } else {
             self.read_impl_with_context(query, ctx, tx, encoding).await
         }

@@ -33,9 +33,9 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
         "insert-1",
         write::insert("users").row(
             doc()
-                .set("name", "overlay-name")
+                .set("name", "overlay-name-12")
                 .unwrap()
-                .set("qty", 37)
+                .set("qty", 12)
                 .unwrap(),
         ),
     );
@@ -43,9 +43,19 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
         "insert-2",
         write::insert("users").row(
             doc()
-                .set("name", "overlay-name-2")
+                .set("name", "overlay-name-37")
                 .unwrap()
-                .set("qty", 12)
+                .set("qty", 37)
+                .unwrap(),
+        ),
+    );
+    insert_batch.insert(
+        "insert-3",
+        write::insert("users").row(
+            doc()
+                .set("name", "overlay-name-25")
+                .unwrap()
+                .set("qty", 25)
                 .unwrap(),
         ),
     );
@@ -78,15 +88,36 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
     .await
     .unwrap();
     let plain = &response.results["plain"].records;
-    assert_eq!(plain.len(), 2);
-    assert_eq!(plain[0].get_value_str("name"), Some("overlay-name"));
-    assert_eq!(plain[0].get_value_i64("qty"), Some(37));
-    assert_eq!(plain[1].get_value_str("name"), Some("overlay-name-2"));
-    assert_eq!(plain[1].get_value_i64("qty"), Some(12));
+    assert_eq!(plain.len(), 3);
+    let mut plain_rows = plain
+        .iter()
+        .map(|record| {
+            (
+                record.get_value_str("name").unwrap_or_default().to_owned(),
+                record.get_value_i64("qty").unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>();
+    plain_rows.sort_unstable();
+    assert_eq!(
+        plain_rows,
+        vec![
+            ("overlay-name-12".to_string(), 12),
+            ("overlay-name-25".to_string(), 25),
+            ("overlay-name-37".to_string(), 37),
+        ]
+    );
 
     let mut ordered = Batch::new();
     ordered.query(
         "ordered",
+        Query::from("users")
+            .select(["name", "qty"])
+            .order_by(shamir_query_types::read::OrderByItem::asc("qty"))
+            .build(),
+    );
+    ordered.query(
+        "descending",
         Query::from("users")
             .select(["name", "qty"])
             .order_by(shamir_query_types::read::OrderByItem::desc("qty"))
@@ -104,11 +135,21 @@ async fn interactive_tx_read_resolves_overlay_interned_field_names() {
     .await
     .unwrap();
     let rows = &response.results["ordered"].records;
-    assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].get_value_str("name"), Some("overlay-name"));
-    assert_eq!(rows[0].get_value_i64("qty"), Some(37));
-    assert_eq!(rows[1].get_value_str("name"), Some("overlay-name-2"));
-    assert_eq!(rows[1].get_value_i64("qty"), Some(12));
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].get_value_str("name"), Some("overlay-name-12"));
+    assert_eq!(rows[0].get_value_i64("qty"), Some(12));
+    assert_eq!(rows[1].get_value_str("name"), Some("overlay-name-25"));
+    assert_eq!(rows[1].get_value_i64("qty"), Some(25));
+    assert_eq!(rows[2].get_value_str("name"), Some("overlay-name-37"));
+    assert_eq!(rows[2].get_value_i64("qty"), Some(37));
+    let descending = &response.results["descending"].records;
+    assert_eq!(descending.len(), 3);
+    assert_eq!(descending[0].get_value_str("name"), Some("overlay-name-37"));
+    assert_eq!(descending[0].get_value_i64("qty"), Some(37));
+    assert_eq!(descending[1].get_value_str("name"), Some("overlay-name-25"));
+    assert_eq!(descending[1].get_value_i64("qty"), Some(25));
+    assert_eq!(descending[2].get_value_str("name"), Some("overlay-name-12"));
+    assert_eq!(descending[2].get_value_i64("qty"), Some(12));
 
     drop(tx);
     drop(guard);
