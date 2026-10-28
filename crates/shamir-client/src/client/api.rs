@@ -31,6 +31,41 @@ pub(crate) fn request_scratch_len_for_test() -> usize {
     REQ_BUF.with(|cell| cell.borrow().len())
 }
 
+#[cfg(test)]
+pub(crate) fn fill_request_scratch_capacity_for_test() -> usize {
+    REQ_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let len = buf.len();
+        let capacity = buf.capacity();
+        buf.resize(capacity, 0xA5);
+        buf.fill(0xA5);
+        buf.truncate(len);
+        capacity
+    })
+}
+
+/// Reads the entire allocation after its bytes have been initialized by the
+/// test fill helper.
+///
+/// # Safety
+/// The caller must have initialized every byte up to capacity with
+/// `fill_request_scratch_capacity_for_test`, and must ensure no operation has
+/// written beyond the original capacity (which could reallocate the buffer).
+#[cfg(test)]
+pub(crate) unsafe fn request_scratch_capacity_bytes_for_test(expected_capacity: usize) -> Vec<u8> {
+    REQ_BUF.with(|cell| {
+        let buf = cell.borrow();
+        assert_eq!(
+            buf.capacity(),
+            expected_capacity,
+            "scratch capacity changed"
+        );
+        // SAFETY: upheld by this function's caller: every byte in this allocation
+        // was initialized, and no operation wrote beyond its original capacity.
+        unsafe { std::slice::from_raw_parts(buf.as_ptr(), buf.capacity()) }.to_vec()
+    })
+}
+
 /// Cancellation-safety guard for a registered pending entry (P0 write-phase):
 /// created right after the locked insert; its `Drop` removes the entry IF it
 /// is still present — a no-op once the reader resolved/drained it or the
@@ -89,6 +124,26 @@ impl Client {
         request_scratch_len_for_test()
     }
 
+    #[cfg(test)]
+    pub(crate) fn fill_request_scratch_capacity_for_test(&self) -> usize {
+        fill_request_scratch_capacity_for_test()
+    }
+
+    /// Reads request scratch allocation bytes after the test fill helper ran.
+    ///
+    /// # Safety
+    /// The caller must have initialized all capacity bytes with
+    /// `fill_request_scratch_capacity_for_test` and prevent writes past the
+    /// original capacity until this read.
+    #[cfg(test)]
+    pub(crate) unsafe fn request_scratch_capacity_bytes_for_test(
+        &self,
+        expected_capacity: usize,
+    ) -> Vec<u8> {
+        // SAFETY: forwarded caller obligations are the helper's safety contract.
+        unsafe { request_scratch_capacity_bytes_for_test(expected_capacity) }
+    }
+
     /// 32-byte session id assigned by the server.
     pub fn session_id(&self) -> [u8; 32] {
         self.session_id
@@ -128,7 +183,9 @@ impl Client {
     }
 
     /// `auth_ok.rotation_in_progress` (spec §6.5), when the server sent one.
-    /// Surfaced as a hint only; no identity recovery is performed here.
+    /// Surfaced as a hint when unchanged; a verified changed identity returns
+    /// `ClientError::IdentityRotationPending`. The caller must approve out of
+    /// band and reconnect with the new pin; no pin is updated automatically.
     pub fn rotation_in_progress(&self) -> Option<&RotationInProgressPayload> {
         self.rotation_in_progress.as_ref()
     }

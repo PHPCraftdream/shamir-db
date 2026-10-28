@@ -25,7 +25,9 @@ use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::server::config::{ListenerPolicy, ServerSecrets};
 use crate::server::resume::ResumeConfig;
-use crate::server::rotation::{RotationInProgressPayload, ServerIdentityState};
+use crate::server::rotation::{
+    build_rotation_in_progress_payload, RotationInProgressPayload, ServerIdentityState,
+};
 use crate::server::user_record::UserRecord;
 
 /// Server's `auth_init` view — what arrived from the wire.
@@ -256,6 +258,29 @@ impl<'a> ServerHandshake<'a> {
         } else {
             Ok(ProofOutcome::Rejected)
         }
+    }
+
+    /// Build the optional orphan-recovery payload matching this auth_ok identity.
+    pub fn rotation_in_progress_payload(
+        &self,
+        view: &AuthOkView,
+        state: &ServerIdentityState,
+    ) -> Result<Option<RotationInProgressPayload>> {
+        let now_ns = UnixNanos::now().as_u64();
+        if !state.rotation_in_progress(now_ns) || state.current_pub() != view.server_pub_key {
+            return Ok(None);
+        }
+        let auth_message = self.build_auth_message()?;
+        let identity_input = build_identity_input(
+            &view.server_pub_key,
+            self.transport_kind,
+            self.auth_init.binding_mode,
+            &self.tls_exporter_or_zeros,
+            &auth_message,
+            &view.session_id,
+            view.expires_at_ns,
+        );
+        build_rotation_in_progress_payload(state, &identity_input).map(Some)
     }
 
     /// Build the canonical `auth_message` from accumulated handshake state.

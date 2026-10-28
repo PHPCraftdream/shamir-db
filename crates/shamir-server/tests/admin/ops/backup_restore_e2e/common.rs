@@ -72,6 +72,10 @@ pub(crate) struct WireAuthOk {
     pub(crate) resumption_expires_at_ns: u64,
     #[serde(default)]
     pub(crate) server_query_version: u8,
+    #[serde(default)]
+    pub(crate) _rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    pub(crate) _kdf_upgrade_required: Option<bool>,
 }
 
 pub(crate) fn fast_kdf() -> KdfConfig {
