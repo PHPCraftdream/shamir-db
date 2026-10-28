@@ -55,6 +55,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
       - name: affected_crates.py unit tests
         run: python3 -I -m unittest discover -s scripts/ci/tests
@@ -190,6 +198,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   # CI-03b: rustdoc gate. Docs are code: a broken intra-doc link or an
@@ -209,6 +225,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine --no-deps --document-private-items --locked
@@ -255,6 +279,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: feature-resolution assertion
         run: python3 -I scripts/ci/gates/features_matrix_check.py --expected ${{ matrix.cell.id }} --flags="${{ matrix.cell.flags }}"
       - run: cargo check -p shamir-engine --lib --locked ${{ matrix.cell.flags }}
@@ -284,6 +316,14 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: Determine affected crates
         id: affected
         run: |
@@ -345,6 +385,14 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # bash on every runner (Git Bash on Windows) — `./scripts/test.sh` is
       # a bash script; without this, GitHub Actions defaults `run:` steps
       # to PowerShell on windows-latest, which cannot execute it directly.
@@ -422,6 +470,14 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
       # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
       # filterset equivalent of cargo's `--test '*'` target selector; it
@@ -626,6 +682,14 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # The `loom` feature triggers build.rs to emit `cfg(loom)` for THIS
       # crate only (not globally), so dependencies aren't dragged into
       # incompatible loom code paths. The `-E 'test(loom_model)'` filter
@@ -678,6 +742,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: tools/rust-guard
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: cache rust-guard binary
         id: source-guard-bin-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -802,6 +874,14 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: cache rust-guard binary
         id: rust-guard-selftest-bin-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
@@ -962,6 +1042,14 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           workspaces: tools/rust-guard
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+      # Cache workspace-crate compilation across runs (rust-cache keeps only
+      # third-party deps); a crate whose inputs did not change is not rebuilt.
+      - name: enable sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - working-directory: tools/rust-guard
         run: cargo nextest run --locked --no-fail-fast
       - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
