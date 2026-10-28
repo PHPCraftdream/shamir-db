@@ -97,21 +97,23 @@ fn child_entrypoint_w2d() {
 }
 
 /// Spawn the W2d crash child.
-fn spawn_child_w2d(phase: &str, repo_path: &Path, implicit: bool) -> std::process::ExitStatus {
+async fn spawn_child_w2d(
+    phase: &str,
+    repo_path: &Path,
+    implicit: bool,
+) -> (std::process::ExitStatus, String) {
     let exe = std::env::current_exe().expect("current_exe");
-    std::process::Command::new(exe)
-        .args([
-            "--exact",
-            "write_to_data::child_entrypoint_w2d",
-            "--nocapture",
-        ])
-        .env(CHILD_SENTINEL_W2D, "1")
-        .env(CRASH_AFTER, phase)
-        .env(W2D_IMPLICIT_FLAG, if implicit { "1" } else { "0" })
-        .env(REPO_PATH, repo_path)
-        .output()
-        .expect("spawn w2d crash child")
-        .status
+    let mut cmd = tokio::process::Command::new(exe);
+    cmd.args([
+        "--exact",
+        "write_to_data::child_entrypoint_w2d",
+        "--nocapture",
+    ])
+    .env(CHILD_SENTINEL_W2D, "1")
+    .env(CRASH_AFTER, phase)
+    .env(W2D_IMPLICIT_FLAG, if implicit { "1" } else { "0" })
+    .env(REPO_PATH, repo_path);
+    super::child_proc::run_crash_child(phase, cmd).await
 }
 
 /// Read back all records from a table after recovery and return them as
@@ -139,10 +141,10 @@ async fn w2d_implicit_crash_phase4_recovers_diverse_record() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_w2d("phase4", &repo_path, true);
+    let (status, child_output) = spawn_child_w2d("phase4", &repo_path, true).await;
     assert!(
         !status.success(),
-        "w2d implicit child must die abnormally at phase4; got {status:?}"
+        "w2d implicit child must die abnormally at phase4; got {status:?}\n{child_output}"
     );
 
     // Reopen + recover.
@@ -183,10 +185,10 @@ async fn w2d_interactive_new_field_crash_phase4_recovers() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo_path = dir.path().join("repo.redb");
 
-    let status = spawn_child_w2d("phase4", &repo_path, false);
+    let (status, child_output) = spawn_child_w2d("phase4", &repo_path, false).await;
     assert!(
         !status.success(),
-        "w2d interactive child must die abnormally at phase4; got {status:?}"
+        "w2d interactive child must die abnormally at phase4; got {status:?}\n{child_output}"
     );
 
     // Reopen + recover.

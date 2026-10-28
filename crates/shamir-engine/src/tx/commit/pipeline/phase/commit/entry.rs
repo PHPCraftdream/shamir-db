@@ -294,11 +294,13 @@ pub(in crate::tx) async fn maybe_crash(phase: &str, repo: &RepoInstance) {
     // torn-mid-commit state the reopened repo must recover. `pre_commit`
     // skips this — nothing tx-related should be durable yet.
     if phase != "pre_commit" {
+        eprintln!("maybe_crash: flushing before abort at {phase}");
         if let Ok(store) = repo.tx_info_store().await {
             let _ = store.flush().await;
         }
     }
     // HARD crash: no unwind, no Drop, no in-memory reconciliation.
+    eprintln!("maybe_crash: abort at {phase}");
     std::process::abort();
 }
 
