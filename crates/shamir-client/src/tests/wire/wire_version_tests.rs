@@ -6,6 +6,7 @@
 //! defaulting to `0`, so new clients treat the connection as v1.
 
 use crate::client::transport::{WireAuthOk, WireResumeOk};
+use shamir_connect::common::wire::RotationInProgressWire;
 
 // ── WireAuthOk ────────────────────────────────────────────────────────────────
 
@@ -127,16 +128,78 @@ fn wire_resume_ok_old_payload_defaults_server_query_version_to_zero() {
     );
 }
 
-// ── Client field plumbing unit test ──────────────────────────────────────────
-
-/// Verify the AtomicU8 plumbing: a Client whose WireAuthOk carries
-/// server_query_version=2 should expose that via server_query_version().
-/// We test the field directly since spinning up a real TLS server is an e2e concern.
 #[test]
-fn atomic_u8_plumbing_stores_and_reads_correctly() {
-    use std::sync::atomic::{AtomicU8, Ordering};
-    let field = AtomicU8::new(2);
-    assert_eq!(field.load(Ordering::Relaxed), 2);
-    let field2 = AtomicU8::new(0);
-    assert_eq!(field2.load(Ordering::Relaxed), 0);
+fn rv_client_f20c09bf_auth_ok_hints_survive_wire_decode() {
+    #[derive(serde::Serialize)]
+    struct AuthOkWithHints {
+        #[serde(with = "serde_bytes")]
+        server_signature: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        server_pub_key: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        identity_sig: Vec<u8>,
+        #[serde(with = "serde_bytes")]
+        session_id: Vec<u8>,
+        expires_at_ns: u64,
+        #[serde(with = "serde_bytes")]
+        resumption_ticket: Vec<u8>,
+        resumption_expires_at_ns: u64,
+        server_query_version: u8,
+        rotation_in_progress: Option<RotationInProgressWire>,
+        kdf_upgrade_required: Option<bool>,
+    }
+
+    let expected = RotationInProgressWire {
+        previous_pub: vec![0x11; 32],
+        identity_sig_previous: vec![0x22; 64],
+        transition_until_ns: 42,
+        rotation_proof: vec![0x33; 64],
+    };
+    let mut invalid = expected.clone();
+    invalid.previous_pub.pop();
+    let invalid_encoded = rmp_serde::to_vec_named(&AuthOkWithHints {
+        server_signature: vec![1; 32],
+        server_pub_key: vec![2; 32],
+        identity_sig: vec![3; 64],
+        session_id: vec![4; 32],
+        expires_at_ns: 99,
+        resumption_ticket: Vec::new(),
+        resumption_expires_at_ns: 0,
+        server_query_version: 2,
+        rotation_in_progress: Some(invalid),
+        kdf_upgrade_required: Some(false),
+    })
+    .expect("encode malformed rotation hint");
+    let invalid_decoded: WireAuthOk =
+        rmp_serde::from_slice(&invalid_encoded).expect("decode malformed rotation hint");
+    assert!(invalid_decoded
+        .rotation_in_progress
+        .expect("rotation hint retained")
+        .into_payload()
+        .is_none());
+
+    let encoded = rmp_serde::to_vec_named(&AuthOkWithHints {
+        server_signature: vec![1; 32],
+        server_pub_key: vec![2; 32],
+        identity_sig: vec![3; 64],
+        session_id: vec![4; 32],
+        expires_at_ns: 99,
+        resumption_ticket: Vec::new(),
+        resumption_expires_at_ns: 0,
+        server_query_version: 2,
+        rotation_in_progress: Some(expected.clone()),
+        kdf_upgrade_required: Some(true),
+    })
+    .expect("encode auth_ok hints");
+    let decoded: WireAuthOk = rmp_serde::from_slice(&encoded).expect("decode auth_ok hints");
+    let rotation = decoded
+        .rotation_in_progress
+        .expect("rotation hint retained")
+        .into_payload()
+        .expect("fixed-size rotation fields");
+    assert_eq!(rotation.previous_pub, [0x11; 32]);
+    assert_eq!(rotation.identity_sig_previous, [0x22; 64]);
+    assert_eq!(rotation.transition_until_ns, 42);
+    assert_eq!(rotation.rotation_proof, [0x33; 64]);
+    assert_eq!(decoded.kdf_upgrade_required, Some(true));
 }

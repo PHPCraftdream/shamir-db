@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod client;
 pub mod interner;
 pub mod receipts;

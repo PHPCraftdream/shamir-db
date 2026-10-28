@@ -6,22 +6,18 @@ use tokio::sync::OnceCell;
 
 /// One name↔id mirror for a single `(db, repo)` interner.
 ///
-/// Both directions are kept lock-free via `scc::HashMap`. The epoch is the
-/// highest gap-free id the cache has observed from the server; it is the
-/// cursor passed to `interner_dump(since=epoch)` for delta refreshes.
+/// `epoch` is the contiguous completeness watermark; sparse touch responses
+/// do not advance it. `observed_epoch` tracks individual observed IDs.
 ///
-/// `populated` is set once the first full `interner_dump` succeeds. Concurrent
-/// callers that reach `ensure_populated` before the first dump completes await
-/// the same `OnceCell` future rather than each firing their own dump
-/// (stampede guard).
+/// `populated` coalesces concurrent initial dumps. Once populated, each call
+/// may run its supplied operation (dump_repo promises unconditional re-dump).
 pub struct FieldMap {
     name_to_id: scc::HashMap<String, u64, THasher>,
     id_to_name: scc::HashMap<u64, String, THasher>,
     epoch: AtomicU64,
-    /// Set once the first full dump has merged. Held across the dump
-    /// roundtrip `.await`, so `tokio::sync` is the sanctioned primitive
-    /// (see module docs). `()` carries no data — the maps themselves are
-    /// the state.
+    complete_epoch: AtomicU64,
+    /// Set once the first full dump has merged. Concurrent first dump callers
+    /// share one initializer, and failures leave it available for retry.
     populated: OnceCell<()>,
 }
 
@@ -32,24 +28,52 @@ impl FieldMap {
             name_to_id: scc::HashMap::with_hasher(THasher::default()),
             id_to_name: scc::HashMap::with_hasher(THasher::default()),
             epoch: AtomicU64::new(0),
+            complete_epoch: AtomicU64::new(0),
             populated: OnceCell::new(),
         }
     }
 
-    /// Highest gap-free id the cache has observed.
-    pub fn epoch(&self) -> u64 {
-        self.epoch.load(Ordering::Acquire)
+    pub fn complete_epoch(&self) -> u64 {
+        self.complete_epoch.load(Ordering::Acquire)
     }
 
-    /// Explicitly set the epoch (e.g. from a server dump/touch response's
-    /// `epoch` field, which is the gap-free high-water mark and may exceed
-    /// individual ids). CAS-maxes so it never decreases.
-    pub fn set_epoch(&self, candidate: u64) {
+    /// Advance the completeness watermark only on a full or delta server response.
+    pub fn set_complete_epoch(&self, candidate: u64) {
+        let mut current = self.complete_epoch.load(Ordering::Acquire);
+        while candidate > current {
+            match self.complete_epoch.compare_exchange(
+                current,
+                candidate,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
         self.advance_epoch(candidate);
     }
 
-    /// CAS-max the epoch: advance to `candidate` only if it is greater than
-    /// the current value. Monotonic — never decreases.
+    /// Return the contiguous completeness watermark used for delta refresh.
+    pub fn epoch(&self) -> u64 {
+        self.complete_epoch()
+    }
+
+    /// Highest observed id from any source.
+    pub fn observed_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+
+    pub fn set_observed_epoch(&self, candidate: u64) {
+        self.advance_epoch(candidate);
+    }
+
+    /// Explicitly set the completeness watermark from a full dump or delta.
+    pub fn set_epoch(&self, candidate: u64) {
+        self.set_complete_epoch(candidate);
+    }
+
+    /// CAS-max the observed high-water from any server mapping.
     fn advance_epoch(&self, candidate: u64) {
         let mut current = self.epoch.load(Ordering::Acquire);
         while candidate > current {
@@ -72,11 +96,15 @@ impl FieldMap {
     /// monotonic + append-only, so a conflict is a server contract violation
     /// that we surface by keeping the stable first-seen value.
     pub fn insert_entry(&self, name: &str, id: u64) {
-        // Forward direction. Ignore the (name, id) return on collision —
-        // first writer wins (see doc comment).
         let _ = self.name_to_id.insert_sync(name.to_string(), id);
         let _ = self.id_to_name.insert_sync(id, name.to_string());
         self.advance_epoch(id);
+    }
+
+    /// Insert a pair from a sparse server response without advancing the epoch.
+    pub fn insert_sparse_entry(&self, name: &str, id: u64) {
+        let _ = self.name_to_id.insert_sync(name.to_string(), id);
+        let _ = self.id_to_name.insert_sync(id, name.to_string());
     }
 
     /// Look up the interner id for a field name. Returns `None` if the name
@@ -136,21 +164,18 @@ impl FieldMap {
         self.populated.initialized()
     }
 
-    /// Stampede guard for the first dump.
-    ///
-    /// Returns a `&OnceCell<()>` the caller initials with the dump
-    /// roundtrip: `fieldmap.ensure_populated(|| async { dump }).await`.
-    /// The first caller runs the closure; concurrent callers await the same
-    /// future. After it resolves, `is_populated()` is `true`.
-    pub async fn ensure_populated<F, Fut>(&self, dump: F)
+    /// Run a full dump, coalescing concurrent first callers while allowing
+    /// subsequent calls to fetch again. Failed first attempts remain retryable.
+    pub async fn ensure_populated<F, Fut>(&self, dump: F) -> Result<(), crate::error::ClientError>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = ()>,
+        Fut: std::future::Future<Output = Result<(), crate::error::ClientError>>,
     {
-        // OnceCell::get_or_init takes the closure; the closure must NOT
-        // borrow `self` (it would create a self-referential future). The
-        // caller-owned closure performs the roundtrip + merge.
-        self.populated.get_or_init(dump).await;
+        if !self.populated.initialized() {
+            self.populated.get_or_try_init(dump).await?;
+            return Ok(());
+        }
+        dump().await
     }
 }
 

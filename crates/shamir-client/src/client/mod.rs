@@ -21,6 +21,8 @@ pub use connect::Client;
 pub use options::{bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions};
 
 #[cfg(test)]
+pub(crate) use api::should_advertise_interner_epochs;
+#[cfg(test)]
 pub(crate) use connect::{resume_wire_exchange, verify_resume_identity_proof};
 
 #[cfg(test)]

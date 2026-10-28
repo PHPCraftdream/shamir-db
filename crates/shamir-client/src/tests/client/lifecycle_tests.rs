@@ -445,6 +445,25 @@ async fn rv_client_e38be183_early_buffer_then_eof_subscribe() {
     assert_eq!(handle.termination(), Some(CloseCause::PeerEof));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_2d08f353_successful_subscription_flushes_early_push_variant() {
+    let (client, mut ends) = setup(LifecycleHooks::default());
+    write_push(&mut ends.server_out, &push(71, 1)).await;
+    // The reader handles frames in order: once the first ping (rid 1) resolves,
+    // the push above is already in the early buffer.
+    let pong = pong_payload();
+    let (ping, _) = tokio::join!(
+        client.ping(),
+        write_response(&mut ends.server_out, 1, &pong)
+    );
+    ping.expect("ping");
+    let mut subscription = client.subscribe_push(71);
+    let received = subscription.next().await.expect("buffered push flushed");
+    assert_eq!(received.sub, 71);
+    assert_eq!(received.seq, 1);
+    client.close().await;
+}
+
 /// A reader that parks forever on its first poll — keeps `reader_task`
 /// suspended at a known point for the abort test.
 struct FirstPollSignal {
@@ -631,7 +650,7 @@ async fn rv_client_b42b8576_no_write_midframe_after_close() {
 fn rv_client_e16a04e5_roundtrip_serialize_uses_borrowed_request_bytes() {
     let source = include_str!("../../client/api.rs");
     let start = source
-        .find("thread_local! {")
+        .find("REQ_BUF.with(|cell| -> Result")
         .expect("scratch serializer exists");
     let end = source[start..]
         .find("let (tx, rx)")

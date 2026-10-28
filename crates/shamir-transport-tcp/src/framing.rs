@@ -10,6 +10,7 @@
 
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use zeroize::Zeroizing;
 
 /// Default upper bound on frame size — 16 MiB per spec §8 `MAX_FRAME_SIZE_DATA`.
 pub const MAX_FRAME_SIZE_DEFAULT: usize = 16 * 1024 * 1024;
@@ -193,7 +194,8 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
         return Err(FrameError::EmptyPayload);
     }
     let len = payload.len() as u32;
-    let mut buf = Vec::with_capacity(4 + payload.len());
+    // Holds the secret-bearing envelope copy: wiped on drop.
+    let mut buf = Zeroizing::new(Vec::with_capacity(4 + payload.len()));
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(payload);
     writer.write_all(&buf).await?;

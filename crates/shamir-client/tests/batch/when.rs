@@ -257,6 +257,85 @@ async fn when_sufficient_balance_runs_debit_and_skips_decline_over_real_wire() {
     handle.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_2d08f353_smart_when_guard_executes_over_execute_with_touch() {
+    let (handle, client, _password) = boot().await;
+    let db = "whendb_smart_sufficient";
+    make_db(&client, db).await;
+    let mut seed = Batch::new();
+    seed.id("seed");
+    seed.insert(
+        "acc",
+        insert("accounts").rows([doc! { "owner" => "alice", "balance" => 100_i64 }]),
+    );
+    client.execute(db, seed.build()).await.expect("seed");
+
+    let mut b = Batch::new();
+    b.id("txn-sufficient");
+    b.transactional();
+    let balance_check = b.query(
+        "balance_check",
+        Query::from("accounts").where_eq("owner", "alice"),
+    );
+    let debit = b.insert(
+        "debit",
+        insert("ledger").rows([doc! { "owner" => "alice", "kind" => "debit", "amount" => 40_i64 }]),
+    );
+    b.when(
+        &debit,
+        value_gte(balance_check.first().field("balance"), 40_i64),
+    );
+
+    let decline = b.insert(
+        "decline",
+        insert("ledger")
+            .rows([doc! { "owner" => "alice", "kind" => "decline", "amount" => 40_i64 }]),
+    );
+    b.when(
+        &decline,
+        value_lt(balance_check.first().field("balance"), 40_i64),
+    );
+
+    let resp = client
+        .execute_with_touch(db, b.build())
+        .await
+        .expect("txn-sufficient");
+    let debit_result = resp.results.get("debit").expect("debit alias");
+    assert!(
+        !debit_result.skipped,
+        "debit must run (balance 100 >= amount 40 via ValueCompare): {debit_result:?}"
+    );
+    let decline_result = resp.results.get("decline").expect("decline alias");
+    assert!(
+        decline_result.skipped,
+        "decline must be skipped (balance 100 < amount 40 is false via ValueCompare): {decline_result:?}"
+    );
+    let mut q = Batch::new();
+    q.id("verify");
+    q.query(
+        "ledger_rows",
+        Query::from("ledger").where_eq("owner", "alice"),
+    );
+    let vresp = client
+        .execute_with_touch(db, q.build())
+        .await
+        .expect("verify read");
+    let rows = &vresp
+        .results
+        .get("ledger_rows")
+        .expect("ledger_rows")
+        .records;
+    assert_eq!(rows.len(), 1, "exactly one ledger row must exist: {rows:?}");
+    assert_eq!(
+        rows[0].get_value_str("kind"),
+        Some("debit"),
+        "the surviving ledger row must be the debit, not the decline: {rows:?}"
+    );
+
+    client.close().await;
+    handle.shutdown().await;
+}
+
 /// Scenario 2: insufficient-balance branch — mirror of Scenario 1 with the
 /// guards swapped, proving both directions round-trip correctly over the
 /// real wire (not just "always true wins" by coincidence).

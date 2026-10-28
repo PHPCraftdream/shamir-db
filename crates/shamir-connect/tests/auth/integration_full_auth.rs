@@ -8,8 +8,10 @@ use shamir_connect::client::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
+use shamir_connect::server::rotation::{build_rotation_in_progress_payload, ServerIdentityState};
 use shamir_connect::server::{
     AuthInitView, ListenerPolicy, ProofOutcome, ServerHandshake, ServerSecrets, UserRecord,
     SESSION_MAX_AGE_NS,
@@ -352,6 +354,97 @@ fn verify_nonces_distinct_accepts_different_nonces() {
     let cn = [0x33u8; 32];
     let sn = [0x44u8; 32];
     verify_nonces_distinct(&cn, &sn).expect("differing nonces must be accepted");
+}
+
+#[test]
+fn rv_client_f20c09bf_rotation_hint_never_auto_repins() {
+    let username = "alice";
+    let password = b"secret password";
+    let secrets = fixed_secrets();
+    let policy = ListenerPolicy::new(BindingMode::TlsExporter);
+    let now_ns = UnixNanos::now().as_u64();
+    let transition_until_ns = now_ns + 1_000_000_000;
+    let identity = ServerIdentityState::from_material(
+        &[0x31; 32],
+        Some(&[0x42; 32]),
+        Some(transition_until_ns),
+        1,
+    );
+    let wrong_pin = sha256(&identity.previous_pub().expect("previous rotation key"));
+    let params = fast_kdf();
+    let exporter = [0x77u8; 32];
+    let server_user_db = make_user_record(password, [0x55u8; 16], params);
+    let current_key = Ed25519Keypair::from_seed(&[0x31; 32]);
+    let client = HandshakeBuilder::new(
+        NormalizedUsername::from_raw(username).unwrap(),
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+    )
+    .tls_exporter(exporter)
+    .pinned_hash(wrong_pin)
+    .build()
+    .unwrap();
+    let auth_init = client.auth_init();
+    let server = ServerHandshake::new(
+        policy,
+        TransportKind::Tcp,
+        &secrets,
+        AuthInitView {
+            user: NormalizedUsername::from_raw(&auth_init.user).unwrap(),
+            client_nonce: auth_init.client_nonce,
+            binding_mode: BindingMode::from_u8(auth_init.binding_mode).unwrap(),
+            version: auth_init.version,
+        },
+        exporter,
+        params,
+        |_| Some(server_user_db.clone()),
+    )
+    .unwrap();
+    let challenge = server.challenge();
+    let (proof, derived, auth_message) = client
+        .process_challenge(
+            &ServerChallenge {
+                salt: challenge.salt,
+                kdf_params: challenge.kdf_params,
+                server_nonce: challenge.server_nonce,
+            },
+            &mut password.to_vec(),
+        )
+        .unwrap();
+    let accepted = match server
+        .verify_proof(&proof, &current_key, SESSION_MAX_AGE_NS)
+        .unwrap()
+    {
+        ProofOutcome::Accepted(ok) => ok,
+        ProofOutcome::Rejected => panic!("expected valid password"),
+    };
+    let identity_input = shamir_connect::common::identity::build_identity_input(
+        &accepted.server_pub_key,
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &exporter,
+        &auth_message,
+        &accepted.session_id,
+        accepted.expires_at_ns,
+    );
+    let rotation = build_rotation_in_progress_payload(&identity, &identity_input).unwrap();
+    let auth_ok = ServerAuthOk {
+        server_signature: accepted.server_signature,
+        server_pub_key: accepted.server_pub_key,
+        identity_sig: accepted.identity_sig,
+        session_id: accepted.session_id,
+        expires_at_ns: accepted.expires_at_ns,
+        resumption_ticket: None,
+        resumption_expires_at_ns: None,
+        rotation_in_progress: Some(rotation),
+        kdf_upgrade_required: None,
+    };
+    assert!(matches!(
+        client.process_auth_ok(&auth_ok, &derived, &auth_message, |_| {
+            panic!("pin must not auto-repin")
+        }),
+        Err(shamir_connect::Error::ServerIdentityChanged)
+    ));
 }
 
 #[test]

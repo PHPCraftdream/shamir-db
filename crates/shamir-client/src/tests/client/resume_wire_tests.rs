@@ -319,8 +319,12 @@ async fn rv_client_de75addd_substituted_identity_never_receives_ticket() {
     .await
     .expect("resume_wire_exchange must not hang");
     assert!(
-        res.is_err(),
-        "exchange must fail on the pinned-hash mismatch"
+        matches!(
+            res,
+            Err(ClientError::Handshake { ref context, .. })
+                if context.contains("identity does not match pinned hash")
+        ),
+        "substituted identity must fail specifically with ServerIdentityChanged"
     );
 
     // Release the test-held halves so the server's read sees the true EOF.
