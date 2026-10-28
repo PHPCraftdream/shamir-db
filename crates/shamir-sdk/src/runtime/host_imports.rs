@@ -70,6 +70,9 @@ fn native_reply(op: &str, table: &str, request: &[u8]) -> NativeReply {
 // ── WASM target: real imports ────────────────────────────────────────
 
 #[cfg(target_arch = "wasm32")]
+pub(crate) use imp::raise_error;
+
+#[cfg(target_arch = "wasm32")]
 mod imp {
     use super::required_result;
     use crate::__rt::{decode_value_bytes, unpack_ptr_len, ResponseBytes};
@@ -82,6 +85,8 @@ mod imp {
 
     #[link(wasm_import_module = "shamir_host")]
     extern "C" {
+        #[link_name = "raise_error"]
+        pub fn raise_error(kind: i32, ptr: i32, len: i32);
         #[link_name = "batch_put"]
         fn host_batch_put(kp: i32, kl: i32, vp: i32, vl: i32);
         #[link_name = "batch_get"]

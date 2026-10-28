@@ -243,6 +243,11 @@ path = "tests/e2e/core/interactive_tx_e2e.rs"
 harness = true
 
 [[test]]
+name = "auth_ok_hints_e2e"
+path = "tests/admin/identity/auth_ok_hints_e2e.rs"
+harness = true
+
+[[test]]
 name = "plain_tcp_e2e"
 path = "tests/e2e/transport/plain_tcp_e2e.rs"
 harness = true
