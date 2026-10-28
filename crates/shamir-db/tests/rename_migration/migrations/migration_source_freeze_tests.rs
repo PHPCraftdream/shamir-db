@@ -43,16 +43,24 @@ fn insert(body: &str) -> BatchRequest {
         "write",
         Insert::with_repo("src", "docs").row(doc! { "body" => body }),
     );
-    batch.to_request_via_msgpack()
+    batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding")
 }
 
 fn start_request() -> BatchRequest {
     let mut batch = Batch::new();
     batch.start_migration(
         "migration",
-        ddl::start_migration("docs", "dst", "in_memory").repo("src"),
+        ddl::start_migration("docs", "dst", "in_memory")
+            .repo("src")
+            .hmac("dummy")
+            .build()
+            .expect("build StartMigration"),
     );
-    batch.to_request_via_msgpack()
+    batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding")
 }
 
 async fn start(db: &ShamirDb) -> String {
@@ -64,8 +72,20 @@ async fn start(db: &ShamirDb) -> String {
 
 async fn commit(db: &ShamirDb, id: &str) {
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(id));
-    let response = exec(db, batch.to_request_via_msgpack()).await;
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
+    let response = exec(
+        db,
+        batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         response.results["commit"].records[0].get_value_str("phase"),
         Some("committed"),
@@ -75,7 +95,13 @@ async fn commit(db: &ShamirDb, id: &str) {
 async fn rows(db: &ShamirDb, repo: &str) -> BatchResponse {
     let mut batch = Batch::new();
     batch.query("rows", Query::with_repo(repo, "docs").order_by_asc("body"));
-    exec(db, batch.to_request_via_msgpack()).await
+    exec(
+        db,
+        batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await
 }
 
 async fn assert_frozen(db: &ShamirDb, request: BatchRequest) {
@@ -155,7 +181,13 @@ async fn r3_update_is_rejected_without_changing_original_data() {
             .build()
             .unwrap(),
     );
-    assert_frozen(&db, batch.to_request_via_msgpack()).await;
+    assert_frozen(
+        &db,
+        batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await;
     assert_eq!(
         rows(&db, "src").await.results["rows"].records,
         baseline.results["rows"].records,
@@ -174,8 +206,20 @@ async fn r4_rollback_releases_source_freeze() {
     let id = start(&db).await;
     assert_frozen(&db, insert("during migration")).await;
     let mut batch = Batch::new();
-    batch.rollback_migration("rollback", ddl::rollback_migration(&id));
-    exec(&db, batch.to_request_via_msgpack()).await;
+    batch.rollback_migration(
+        "rollback",
+        ddl::rollback_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build RollbackMigration"),
+    );
+    exec(
+        &db,
+        batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await;
     assert!(!db.active_migrations().contains_key(&id));
     exec(&db, insert("after rollback")).await;
     assert_eq!(rows(&db, "src").await.results["rows"].records.len(), 2);
@@ -195,7 +239,13 @@ async fn r4_failed_start_releases_source_freeze() {
             .index_type("fts")
             .fts_tokenizer("whitespace"),
     );
-    exec(&db, batch.to_request_via_msgpack()).await;
+    exec(
+        &db,
+        batch
+            .to_request_via_msgpack()
+            .expect("batch request encoding"),
+    )
+    .await;
     let database = db.get_db("testdb").unwrap();
     let source = database.get_table("src", "docs").await.unwrap();
     let registry = source.index2_registry_for_test();
@@ -257,9 +307,20 @@ async fn r5_commit_error_after_final_drain_releases_source_freeze() {
         .unwrap();
     let coord = db.active_migrations().get(&id).unwrap().value().clone();
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
     let error = db
-        .execute("testdb", &batch.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -298,8 +359,16 @@ async fn concurrent_commit_waiters_share_serialized_freeze_and_receipt() {
     let coord = db.active_migrations().get(&id).unwrap().value().clone();
     let held = coord.lock_finalisation().await;
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
-    let request = batch.to_request_via_msgpack();
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     let mut first = Box::pin(db.execute("testdb", &request));
     let mut second = Box::pin(db.execute("testdb", &request));
     assert!(futures::poll!(first.as_mut()).is_pending());
@@ -330,8 +399,16 @@ async fn cancelled_commit_waiter_does_not_steal_successors_freeze() {
     let coord = db.active_migrations().get(&id).unwrap().value().clone();
     let held = coord.lock_finalisation().await;
     let mut batch = Batch::new();
-    batch.commit_migration("commit", ddl::commit_migration(&id));
-    let request = batch.to_request_via_msgpack();
+    batch.commit_migration(
+        "commit",
+        ddl::commit_migration(&id)
+            .hmac("dummy")
+            .build()
+            .expect("build CommitMigration"),
+    );
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
     let mut first = Box::pin(db.execute("testdb", &request));
     let mut second = Box::pin(db.execute("testdb", &request));
     assert!(futures::poll!(first.as_mut()).is_pending());

@@ -61,7 +61,10 @@ async fn exec_set_schema(
     }
     b.set_table_schema(alias, builder);
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
     Ok(resp.results[alias].records[0].as_value().as_ref().clone())
@@ -84,7 +87,10 @@ async fn try_insert_tx(
     b.transactional();
     b.insert("ins", insert(table).row(record));
     let resp = db
-        .execute(db_name, &b.to_request_via_msgpack())
+        .execute(
+            db_name,
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
@@ -117,9 +123,12 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
         "cr",
         ddl::create_repo("main").tables(["departments", "employees"]),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Create an index on departments.dept_id.
     let mut b = Batch::new();
@@ -128,9 +137,12 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
         "idx",
         ddl::create_index("dept_id_idx", "departments").field("dept_id"),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Insert a parent row.
     let mut b = Batch::new();
@@ -142,9 +154,12 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
             "name": "Engineering"
         })),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     db
 }
@@ -242,9 +257,12 @@ async fn fk_without_index_rejected_at_ddl() {
         "cr",
         ddl::create_repo("main").tables(["departments", "employees"]),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Try to set FK schema without an index on the parent field.
     let result = exec_set_schema(

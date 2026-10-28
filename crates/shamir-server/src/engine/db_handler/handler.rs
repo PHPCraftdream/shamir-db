@@ -76,6 +76,7 @@ use shamir_db::access::Actor;
 use shamir_db::query::batch::{BatchError, BatchOp, BatchRequest};
 use shamir_db::ShamirDb;
 use shamir_query_types::batch::BatchTreeVisitor;
+use shamir_query_types::hmac as canon;
 
 use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudget};
 
@@ -356,7 +357,9 @@ impl RequestHandler for ShamirDbHandler {
         conn: &'a ConnectionServices,
     ) -> shamir_connect::server::dispatch::HandlerFuture<'a> {
         Box::pin(async move {
-            let request: DbRequest = match rmp_serde::from_slice(req) {
+            let request: DbRequest = match shamir_query_types::validate_request_alias_caps(req)
+                .and_then(|()| rmp_serde::from_slice(req))
+            {
                 Ok(request) => request,
                 Err(e) => {
                     let response = DbResponse::Error {
@@ -368,6 +371,18 @@ impl RequestHandler for ShamirDbHandler {
                 }
             };
 
+            let top_level_canonical = match canon::canonical_db_request(&request) {
+                Ok(bytes) => Some(bytes),
+                Err(canon::CanonicalOpError::UnsupportedOperation) => None,
+                Err(canon::CanonicalOpError::Encoding(_)) => {
+                    let response = DbResponse::Error {
+                        code: "hmac_required".into(),
+                        message: "request canonical encoding failed".into(),
+                    };
+                    return rmp_serde::to_vec_named(&response)
+                        .map_err(|encode_err| format!("response encode: {}", encode_err));
+                }
+            };
             let response = match request {
                 DbRequest::Ping => DbResponse::Pong,
                 DbRequest::WaitForVisibility {
@@ -398,14 +413,38 @@ impl RequestHandler for ShamirDbHandler {
                     roles,
                     hmac,
                 } => {
-                    create_scram_user(self.admin.as_ref(), session, name, password, roles, hmac)
-                        .await
+                    create_scram_user(
+                        self.admin.as_ref(),
+                        session,
+                        name,
+                        password,
+                        roles,
+                        hmac,
+                        top_level_canonical,
+                    )
+                    .await
                 }
                 DbRequest::SetSuperuser { user, on, hmac } => {
-                    set_superuser(self.admin.as_ref(), session, user, on, hmac).await
+                    set_superuser(
+                        self.admin.as_ref(),
+                        session,
+                        user,
+                        on,
+                        hmac,
+                        top_level_canonical,
+                    )
+                    .await
                 }
                 DbRequest::SetReplicator { user, on, hmac } => {
-                    set_replicator(self.admin.as_ref(), session, user, on, hmac).await
+                    set_replicator(
+                        self.admin.as_ref(),
+                        session,
+                        user,
+                        on,
+                        hmac,
+                        top_level_canonical,
+                    )
+                    .await
                 }
 
                 // --- Phase B: interactive (multi-call) transactions ---
@@ -623,12 +662,14 @@ impl ShamirDbHandler {
             }
         }
 
-        // Destructive-op HMAC gate. Every drop_* op must carry an
-        // `hmac` field whose tag covers the canonical bytes for
-        // that op, keyed by the per-session derived key. This is
-        // not an authentication gate — TLS+SCRAM already proves
-        // the caller — it's a "did you mean it" guard: the client
-        // could not produce the tag by accident.
+        // HMAC policy gate. Every operation classified as gated by the
+        // canonical HMAC policy must carry a tag covering its canonical
+        // bytes, keyed by the per-session derived key. This is not an
+        // authentication gate — TLS+SCRAM already proves the caller — it's
+        // a "did you mean it" guard: the client could not produce the tag
+        // by accident. BatchTreeVisitor checks static ForEach template bodies
+        // before execution; signatures cover unresolved template operations,
+        // not per-iteration values injected through bind_row.
         if let Err((alias, code, message)) = check_destructive_hmacs(session, db_name, &batch) {
             return DbResponse::Error {
                 code: code.into(),
@@ -893,7 +934,12 @@ impl ShamirDbHandler {
         match self.db.get_ddl_op_status(db, repo, table, op_id_str).await {
             Ok(status) => DbResponse::DdlOpStatus { status },
             Err(e) => DbResponse::Error {
-                code: "query".to_string(),
+                code: match e {
+                    shamir_db::DbError::Validation(_) => "validation",
+                    shamir_db::DbError::NotFound(_) => "not_found",
+                    _ => "query",
+                }
+                .to_string(),
                 message: format!("Failed to read DDL op status: {}", e),
             },
         }

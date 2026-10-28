@@ -1,7 +1,8 @@
 //! `/math` scalar category — the **reference implementation** every other
 //! category module copies.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `math/` folder prefix:
 //! `abs ceil floor round trunc sign neg pow sqrt exp ln log mod clamp
 //!  min max between`.
 //!
@@ -49,7 +50,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let v = if a.len() >= 2 {
                     let dp = crate::registry::arg_i64(a, 1)?;
                     if !(0..=28).contains(&dp) {
-                        return Err(ScalarError::new("out_of_range"));
+                        return Err(ScalarError::builtin("out_of_range"));
                     }
                     x.round_dp_with_strategy(dp as u32, RoundingStrategy::MidpointAwayFromZero)
                 } else {
@@ -97,7 +98,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 if r.is_finite() {
                     v_f64(r)
                 } else {
-                    Err(ScalarError::new("domain"))
+                    Err(ScalarError::builtin("domain"))
                 }
             },
             2,
@@ -110,7 +111,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let x = arg_f64(a, 0)?;
                 if x < 0.0 {
-                    return Err(ScalarError::new("domain"));
+                    return Err(ScalarError::builtin("domain"));
                 }
                 v_f64(x.sqrt())
             },
@@ -126,7 +127,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 if r.is_finite() {
                     v_f64(r)
                 } else {
-                    Err(ScalarError::new("domain"))
+                    Err(ScalarError::builtin("domain"))
                 }
             },
             1,
@@ -139,7 +140,7 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let x = arg_f64(a, 0)?;
                 if x <= 0.0 {
-                    return Err(ScalarError::new("domain"));
+                    return Err(ScalarError::builtin("domain"));
                 }
                 v_f64(x.ln())
             },
@@ -154,12 +155,12 @@ pub fn register(reg: &mut ScalarRegistry) {
                 // log(x) base 10, or log(x, base) with explicit base.
                 let x = arg_f64(a, 0)?;
                 if x <= 0.0 {
-                    return Err(ScalarError::new("domain"));
+                    return Err(ScalarError::builtin("domain"));
                 }
                 if a.len() >= 2 {
                     let base = arg_f64(a, 1)?;
                     if base <= 0.0 || base == 1.0 {
-                        return Err(ScalarError::new("domain"));
+                        return Err(ScalarError::builtin("domain"));
                     }
                     v_f64(x.log(base))
                 } else {
@@ -177,7 +178,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let x = arg_dec(a, 0)?;
                 let m = arg_dec(a, 1)?;
                 if m.is_zero() {
-                    return Err(ScalarError::new("div_by_zero"));
+                    return Err(ScalarError::builtin("div_by_zero"));
                 }
                 Ok(v_dec(x % m))
             },
@@ -191,18 +192,18 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let x = a
                     .first()
-                    .ok_or_else(|| ScalarError::new("missing_arg"))?
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?
                     .clone();
                 let lo = a
                     .get(1)
-                    .ok_or_else(|| ScalarError::new("missing_arg"))?
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?
                     .clone();
                 let hi = a
                     .get(2)
-                    .ok_or_else(|| ScalarError::new("missing_arg"))?
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?
                     .clone();
                 if compare(&lo, &hi) == Ordering::Greater {
-                    return Err(ScalarError::new("bad_bounds"));
+                    return Err(ScalarError::builtin("bad_bounds"));
                 }
                 if compare(&x, &lo) == Ordering::Less {
                     Ok(lo)
@@ -222,11 +223,17 @@ pub fn register(reg: &mut ScalarRegistry) {
         "between",
         FnEntry::pure(
             |a| {
-                let x = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
-                let lo = a.get(1).ok_or_else(|| ScalarError::new("missing_arg"))?;
-                let hi = a.get(2).ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let x = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
+                let lo = a
+                    .get(1)
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
+                let hi = a
+                    .get(2)
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 if compare(lo, hi) == Ordering::Greater {
-                    return Err(ScalarError::new("bad_bounds"));
+                    return Err(ScalarError::builtin("bad_bounds"));
                 }
                 Ok(v_bool(
                     compare(x, lo) != Ordering::Less && compare(x, hi) != Ordering::Greater,
@@ -248,7 +255,7 @@ enum Reduce {
 fn reduce(args: &[QueryValue], kind: Reduce) -> ScalarResult {
     let mut acc = args
         .first()
-        .ok_or_else(|| ScalarError::new("missing_arg"))?
+        .ok_or_else(|| ScalarError::builtin("missing_arg"))?
         .clone();
     for v in &args[1..] {
         let ord = compare(&acc, v);

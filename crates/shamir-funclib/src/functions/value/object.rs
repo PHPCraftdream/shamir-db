@@ -1,6 +1,8 @@
 //! `/object` scalar category — map (object) introspection and reshaping.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names): direct category
+//! registration stores these names verbatim; `register_builtins` dispatches them
+//! under the production `object/` folder prefix.
 //! `keys values entries has_key get_path merge pick omit`.
 //!
 //! Value-model notes (mirrors `math.rs` conventions):
@@ -10,9 +12,8 @@
 //! - `has_key` returns a `Bool`; `get_path` walks nested maps and yields
 //!   `ScalarError("missing_key")` if any step is absent or a non-map is
 //!   traversed.
-//! - `merge` / `pick` / `omit` return a fresh `Map`, preserving insertion order
-//!   (the left/source order); `merge` lets the right-hand value win on key
-//!   collisions.
+//! - `merge` / `pick` / `omit` return a fresh `Map`, preserving source
+//!   insertion order; `merge` lets the right-hand value win on key collisions.
 //! - Every function here is pure + deterministic.
 
 use crate::registry::{
@@ -24,9 +25,12 @@ use shamir_types::types::value::QueryValue;
 /// Extract a `&TMap<String, QueryValue>` from the `i`-th argument or
 /// `ScalarError("type_mismatch")`.
 fn arg_map(args: &[QueryValue], i: usize) -> Result<&TMap<String, QueryValue>, ScalarError> {
-    match args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))? {
+    match args
+        .get(i)
+        .ok_or_else(|| ScalarError::builtin("missing_arg"))?
+    {
         QueryValue::Map(m) => Ok(m),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -95,23 +99,27 @@ pub fn register(reg: &mut ScalarRegistry) {
         "get_path",
         FnEntry::pure(
             |a| {
-                let mut cur = a.first().ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let mut cur = a
+                    .first()
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 let path = arg_list(a, 1)?;
                 for step in path {
                     let m = match cur {
                         QueryValue::Map(m) => m,
-                        _ => return Err(ScalarError::new("missing_key")),
+                        _ => return Err(ScalarError::builtin("missing_key")),
                     };
                     let key = match step {
                         QueryValue::Str(s) => s.as_str(),
-                        _ => return Err(ScalarError::new("type_mismatch")),
+                        _ => return Err(ScalarError::builtin("type_mismatch")),
                     };
-                    cur = m.get(key).ok_or_else(|| ScalarError::new("missing_key"))?;
+                    cur = m
+                        .get(key)
+                        .ok_or_else(|| ScalarError::builtin("missing_key"))?;
                 }
                 // The head must itself be a map (validated only if a step ran;
                 // validate explicitly so a 0-length path still type-checks).
                 if !matches!(a[0], QueryValue::Map(_)) {
-                    return Err(ScalarError::new("type_mismatch"));
+                    return Err(ScalarError::builtin("type_mismatch"));
                 }
                 Ok(cur.clone())
             },
@@ -144,14 +152,18 @@ pub fn register(reg: &mut ScalarRegistry) {
             |a| {
                 let m = arg_map(a, 0)?;
                 let keys = arg_list(a, 1)?;
-                let mut out = new_map_wc(keys.len());
+                let mut requested = shamir_collections::new_fx_set();
                 for step in keys {
                     let key = match step {
-                        QueryValue::Str(s) => s.as_str(),
-                        _ => return Err(ScalarError::new("type_mismatch")),
+                        QueryValue::Str(key) => key,
+                        _ => return Err(ScalarError::builtin("type_mismatch")),
                     };
-                    if let Some(v) = m.get(key) {
-                        out.insert(key.to_owned(), v.clone());
+                    requested.insert(key.as_str());
+                }
+                let mut out = new_map_wc(m.len().min(requested.len()));
+                for (source_key, value) in m.iter() {
+                    if requested.contains(source_key.as_str()) {
+                        out.insert(source_key.clone(), value.clone());
                     }
                 }
                 Ok(v_map(out))
@@ -170,7 +182,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 for step in keys {
                     let key = match step {
                         QueryValue::Str(s) => s.clone(),
-                        _ => return Err(ScalarError::new("type_mismatch")),
+                        _ => return Err(ScalarError::builtin("type_mismatch")),
                     };
                     drop.insert(key, ());
                 }

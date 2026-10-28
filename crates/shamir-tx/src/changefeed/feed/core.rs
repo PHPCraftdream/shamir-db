@@ -10,6 +10,7 @@ use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio::time::{sleep_until, timeout_at, Instant};
 
+use super::error::ChangelogError;
 use super::events::{
     clean_horizon_key, encode_clean_horizon, encode_gap_marker, gap_marker_key, version_key,
     ChangelogEvent, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
@@ -31,10 +32,11 @@ pub trait ChangelogStore: Send + Sync {
     /// Clean-horizon puts must flush prior events BEFORE set, then flush the
     /// metadata AFTER set. Success certifies both boundaries, not just set.
     /// Marker success must include the backend's explicit durability boundary.
-    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), String>;
+    async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError>;
     /// Range-read serialized events with keys in
     /// `[from_key, ..)` ascending, up to `limit` entries, excluding metadata.
-    async fn range_from(&self, from_key: Bytes, limit: usize) -> Result<Vec<Bytes>, String>;
+    async fn range_from(&self, from_key: Bytes, limit: usize)
+        -> Result<Vec<Bytes>, ChangelogError>;
 }
 
 /// Barriers share the bounded channel's 4096 slots with events.
@@ -45,18 +47,18 @@ pub(crate) enum JournalMsg {
     CleanHorizon {
         through: u64,
         horizon: Arc<AtomicU64>,
-        ack: oneshot::Sender<Result<(), String>>,
+        ack: oneshot::Sender<Result<(), ChangelogError>>,
     },
     RecoveryGap {
         interval: (u64, u64),
-        ack: oneshot::Sender<Result<(), String>>,
+        ack: oneshot::Sender<Result<(), ChangelogError>>,
     },
     /// Serialized durable install (S5c-X PR6b-2): exact pre-encoded journal
     /// records for the follower receipt path. Rides the SAME FIFO as normal
     /// events (ordering kept); the sender awaits, so this path is never lossy.
     InstallRecords {
         records: Vec<(u64, Bytes)>,
-        ack: oneshot::Sender<Result<(), String>>,
+        ack: oneshot::Sender<Result<(), ChangelogError>>,
     },
 }
 
@@ -329,7 +331,7 @@ impl RepoChangefeed {
         result
             .await
             .map_err(|_| DbError::Storage("changefeed repair acknowledgement lost".into()))?
-            .map_err(DbError::Storage)
+            .map_err(|e| DbError::Storage(e.to_string()))
     }
 
     /// Construct from strictly loaded durable metadata. One writer per store.
@@ -362,7 +364,7 @@ impl RepoChangefeed {
         result
             .await
             .map_err(|_| DbError::Storage("clean horizon acknowledgement lost".into()))?
-            .map_err(DbError::Storage)
+            .map_err(|e| DbError::Storage(e.to_string()))
     }
 
     /// CF-1: the lowest known journal hole; zero means none.
@@ -472,7 +474,7 @@ impl GapMarker {
         }
     }
 
-    async fn persist_current(&self, store: &Arc<dyn ChangelogStore>) -> Result<(), String> {
+    async fn persist_current(&self, store: &Arc<dyn ChangelogStore>) -> Result<(), ChangelogError> {
         loop {
             let current = *self.current.load_full();
             if current == *self.persisted.load_full() {
@@ -494,7 +496,7 @@ impl GapMarker {
         &self,
         store: &Arc<dyn ChangelogStore>,
         interval: (u64, u64),
-    ) -> Result<(), String> {
+    ) -> Result<(), ChangelogError> {
         let merged = merge_gap(*self.current.load_full(), interval);
         // Do NOT put the proposed repair into RAM until put's flush succeeds.
         // On error the store may have staged bytes, but no speculative repair
@@ -509,10 +511,10 @@ impl GapMarker {
 }
 
 /// Serialise an event to msgpack for the journal store.
-fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, String> {
+fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, ChangelogError> {
     rmp_serde::to_vec(ev)
         .map(Bytes::from)
-        .map_err(|e| format!("changefeed serialize: {e}"))
+        .map_err(|e| ChangelogError::Serialize(e.to_string()))
 }
 
 /// Background journal writer. Drains the channel in batches, persists each
@@ -689,7 +691,7 @@ async fn process_journal_msg(
             let result = async {
                 gap.persist_current(store).await?;
                 if ack.is_closed() {
-                    return Err("clean horizon caller cancelled".into());
+                    return Err(ChangelogError::Cancelled);
                 }
                 let through = through.max(horizon.load(Ordering::Acquire));
                 store

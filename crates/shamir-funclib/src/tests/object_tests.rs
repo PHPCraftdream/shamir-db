@@ -31,6 +31,23 @@ fn s(v: &str) -> QueryValue {
 }
 
 #[test]
+fn rv_funclib_e5a20918_pick_retains_source_order() {
+    let source = map(&[
+        ("first", QueryValue::Int(1)),
+        ("second", QueryValue::Int(2)),
+    ]);
+    let requested = QueryValue::List(vec![s("second"), s("first")]);
+    let picked = reg().call("pick", &[source, requested]).unwrap();
+    let QueryValue::Map(result) = picked else {
+        panic!("pick must return a map")
+    };
+    assert_eq!(
+        result.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+}
+
+#[test]
 fn keys_ok_and_type_error() {
     let r = reg();
     // NOTE: Under QueryValue ABI, keys returns string names.

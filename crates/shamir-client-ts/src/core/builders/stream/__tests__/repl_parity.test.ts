@@ -79,7 +79,8 @@ function encodeToHex(op: unknown): string {
   return Buffer.from(bytes).toString('hex');
 }
 
-// ── Canonical inputs (mirror Rust `canonical_ops` 1:1) ──────────────
+// Fixed tag matching the Rust fixture builder's `.hmac("aa")`.
+const fixtureSigner = { hmacTagHex: () => 'aa' };
 
 /**
  * The 10 canonical repl-DDL ops, built through the TS builders with the EXACT
@@ -103,7 +104,7 @@ function canonicalTsOps(): Array<{ label: string; op: unknown }> {
     },
     {
       label: 'drop_replication_profile',
-      op: dropReplicationProfile('cluster'),
+      op: dropReplicationProfile(fixtureSigner, 'cluster'),
     },
     {
       label: 'create_publication',
@@ -111,7 +112,7 @@ function canonicalTsOps(): Array<{ label: string; op: unknown }> {
     },
     {
       label: 'drop_publication',
-      op: dropPublication('pub_all'),
+      op: dropPublication(fixtureSigner, 'pub_all'),
     },
     {
       label: 'create_subscription',
@@ -123,7 +124,7 @@ function canonicalTsOps(): Array<{ label: string; op: unknown }> {
     },
     {
       label: 'drop_subscription',
-      op: dropSubscription('sub1'),
+      op: dropSubscription(fixtureSigner, 'sub1'),
     },
     {
       label: 'alter_subscription_set_profile',

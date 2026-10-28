@@ -138,20 +138,26 @@ impl BatchPlanner {
         // at plan time — the planner is a pure DTO crate with no I/O — so
         // it is gated only by the runtime check immediately before
         // iteration 0 (`BatchLimits::max_iterations`, engine-side).
+        // Units are summed across all sibling nodes before the single check,
+        // so two literal `ForEach` products accumulate into the same budget.
+        let mut static_units = 0usize;
         for entry in queries.values() {
-            if let BatchOp::ForEach(fe) = &entry.op {
-                if let crate::filter::FilterValue::Array(items) = &fe.over {
-                    let iterations = items.len();
-                    let body_len = fe.batch.queries.len();
-                    let virtual_units = iterations.saturating_mul(body_len);
-                    if virtual_units > limits.max_queries {
-                        return Err(BatchError::TooManyQueries {
-                            count: virtual_units,
-                            max: limits.max_queries,
-                        });
+            let units = match &entry.op {
+                BatchOp::ForEach(fe) => match &fe.over {
+                    crate::filter::FilterValue::Array(items) => {
+                        items.len().saturating_mul(fe.batch.queries.len()).max(1)
                     }
-                }
-            }
+                    _ => 1,
+                },
+                _ => 1,
+            };
+            static_units = static_units.saturating_add(units);
+        }
+        if static_units > limits.max_queries {
+            return Err(BatchError::TooManyQueries {
+                count: static_units,
+                max: limits.max_queries,
+            });
         }
 
         let mut total_queries = 0u64;

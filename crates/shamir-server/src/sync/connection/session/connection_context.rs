@@ -75,6 +75,8 @@ pub struct ConnectionContext {
     /// outstanding bootstrap token on the first successful login for the
     /// username it was issued to (RI-9 bootstrap-token lifecycle).
     pub meta: Arc<ServerMetaStore>,
+    /// Per-listener task scope and shutdown signals.
+    pub(crate) tasks: crate::connection::ConnTasks,
 }
 
 impl ConnectionContext {
@@ -116,6 +118,7 @@ impl ConnectionContext {
         idle_timeout: Duration,
         max_in_flight: usize,
         meta: Arc<ServerMetaStore>,
+        tasks: crate::connection::ConnTasks,
     ) -> Arc<Self> {
         Arc::new(Self {
             identity,
@@ -140,6 +143,7 @@ impl ConnectionContext {
             ws_pong_timeout: shamir_tunables::instance_defaults::WS_PONG_TIMEOUT,
             max_in_flight,
             meta,
+            tasks,
         })
     }
 }

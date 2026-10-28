@@ -1,0 +1,30 @@
+[package]
+name = "shamir-proc-tree"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "Bounded process-tree teardown for guest compiler processes."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/shamir-db"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", default-features = false, features = ["std", "process"] }
+
+[dependencies]
+log = "0.4"
+wait-timeout = "0.2.1"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

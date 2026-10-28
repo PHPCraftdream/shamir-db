@@ -91,7 +91,8 @@ pub(super) async fn accept_loop_tcp(
                 };
                 let acceptor = acceptor.clone();
                 let ctx = ctx.clone();
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;  // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     // Bound the TLS handshake — without this a client that
@@ -188,7 +189,8 @@ pub(super) async fn accept_loop_plain(
                     }
                 };
                 let ctx = ctx.clone();
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard; // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     let framer = TcpFramer::new(tcp);
@@ -252,7 +254,8 @@ pub(super) async fn accept_loop_ipc(
                     }
                 };
                 let ctx = ctx.clone();
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard; // keep alive for the lifetime of this task
                     let _per_ip_guard = per_ip_guard;
                     let framer = TcpFramer::new(stream);
@@ -323,7 +326,8 @@ pub(super) async fn accept_loop_ws_native(
                     path: params.path.clone(),
                     policy: params.policy.clone(),
                 };
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
                     let tls = match tokio::time::timeout(
@@ -438,7 +442,8 @@ pub(super) async fn accept_loop_ws_browser(
                     path: params.path.clone(),
                     policy: params.policy.clone(),
                 };
-                tokio::spawn(run_until_cancelled(shutdown.clone(), async move {
+                let tasks = ctx.tasks.clone();
+                tasks.spawn(run_until_cancelled(shutdown.clone(), async move {
                     let _guard = guard;
                     let _per_ip_guard = per_ip_guard;
                     let tls = match tokio::time::timeout(

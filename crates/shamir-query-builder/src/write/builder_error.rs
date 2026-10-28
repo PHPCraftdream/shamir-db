@@ -46,6 +46,11 @@ pub enum BuilderError {
     /// in the expression-marker msgpack round-trip fallback
     /// (RV-QUERY-BUILDER-20D9732A).
     FieldValueCodec(String),
+    /// An HMAC-gated builder's `build()` was called without `.hmac(tag)`
+    /// (or the conditional gate — definer security, replace, secret grants —
+    /// fired without one). The server rejects such ops with `hmac_required`;
+    /// the builder now fails closed client-side (RV-QUERY-BUILDER-E6F53E38).
+    MissingHmac,
 }
 
 impl std::fmt::Display for BuilderError {
@@ -82,6 +87,9 @@ impl std::fmt::Display for BuilderError {
                 f,
                 "Doc::set() could not convert the field value to a QueryValue: {detail}"
             ),
+            BuilderError::MissingHmac => {
+                write!(f, "this op is HMAC-gated — call .hmac(tag) before .build()")
+            }
         }
     }
 }

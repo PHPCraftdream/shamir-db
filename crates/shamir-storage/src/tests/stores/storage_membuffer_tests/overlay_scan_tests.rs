@@ -4,6 +4,7 @@ use crate::storage_in_memory::InMemoryRepo;
 use crate::storage_membuffer::{MemBufferConfig, MemBufferStore};
 use crate::types::{RecordKey, Repo, Store};
 use bytes::Bytes;
+use futures::StreamExt;
 use std::sync::Arc;
 
 use super::common::{no_flush_config, rk};
@@ -14,6 +15,37 @@ async fn collect_stream(mut s: crate::types::RecordStream) -> Vec<(RecordKey, By
         out.extend(batch.unwrap());
     }
     out
+}
+
+#[tokio::test]
+async fn rv_storage_5e99bede_membuffer_zero_batch_is_empty_with_dirty_overlay() {
+    let repo = InMemoryRepo::new();
+    let inner = repo.store_get("zero-batch").await.unwrap();
+    inner
+        .set(rk(b"persisted"), Bytes::from_static(b"inner"))
+        .await
+        .unwrap();
+    let buffered = MemBufferStore::new(inner, no_flush_config());
+    buffered
+        .set(rk(b"dirty"), Bytes::from_static(b"overlay"))
+        .await
+        .unwrap();
+    assert!(buffered.iter_stream(0).next().await.is_none());
+    assert!(buffered
+        .scan_prefix_stream(Bytes::from_static(b"d"), 0)
+        .next()
+        .await
+        .is_none());
+    assert!(buffered
+        .iter_range_stream(None, None, 0)
+        .next()
+        .await
+        .is_none());
+    assert!(buffered
+        .iter_range_stream_reverse(None, None, 0)
+        .next()
+        .await
+        .is_none());
 }
 
 #[tokio::test]

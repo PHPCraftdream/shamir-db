@@ -124,9 +124,20 @@ impl ScalarResolver {
         dispatch_entry(
             self.builtin
                 .get(name)
-                .ok_or_else(|| ScalarError::new("unknown_function"))?,
+                .ok_or_else(|| ScalarError::builtin("unknown_function"))?,
             args,
         )
+    }
+
+    /// Call a resolved entry only when it is trusted for functional indexing.
+    pub fn call_indexable(&self, name: &str, args: &[QueryValue]) -> ScalarResult {
+        let entry = self
+            .get(name)
+            .ok_or_else(|| ScalarError::new("unknown_function"))?;
+        if !entry.is_indexable() {
+            return Err(ScalarError::new("not_indexable"));
+        }
+        dispatch_entry(&entry, args)
     }
 
     /// Look up an entry by name (user layer first, builtin second).
@@ -142,11 +153,11 @@ impl ScalarResolver {
 #[inline]
 fn dispatch_entry(entry: &FnEntry, args: &[QueryValue]) -> ScalarResult {
     if args.len() < entry.min_args {
-        return Err(ScalarError::new("arity"));
+        return Err(ScalarError::builtin("arity"));
     }
     if let Some(max) = entry.max_args {
         if args.len() > max {
-            return Err(ScalarError::new("arity"));
+            return Err(ScalarError::builtin("arity"));
         }
     }
     (entry.f)(args)

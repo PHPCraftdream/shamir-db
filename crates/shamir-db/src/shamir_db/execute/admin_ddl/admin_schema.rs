@@ -44,7 +44,7 @@ use shamir_types::types::record_id::RecordId;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
 use super::schema_codec::{
-    dto_list_from_catalogue, map_insert, serialise_rules, serialise_rules_flat,
+    dto_list_from_catalogue, map_insert, schema_version_of, serialise_rules, serialise_rules_flat,
 };
 
 #[path = "../repo_admin/admin_schema_admission.rs"]
@@ -374,6 +374,7 @@ impl ShamirAdminExecutor {
         let table = &op.set_table_schema;
         let repo = &op.repo;
         let db = &self.db_name;
+        let _namespace_guard = self.shamir.lock_replication_control().await;
         let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         // Authz: Action::Write on the table.
@@ -386,7 +387,6 @@ impl ShamirAdminExecutor {
             .await
             .map_err(err_access)?;
 
-        // Per-table RMW lock.
         let _guard = lock_schema_rmw(&self.shamir, db, repo, table).await;
 
         // Read the current catalogue record.
@@ -485,7 +485,9 @@ impl ShamirAdminExecutor {
         .await?;
 
         // Serialise the DTO rules into the catalogue form (interning paths).
-        let schema_qv = serialise_rules(&stamped_rules, interner);
+        // RU8: propagate the typed quota code from a base-intern over cap.
+        let schema_qv = serialise_rules(&stamped_rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
 
         // schema_validator_id: reuse if present (ALTER), else mint a new one.
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
@@ -592,6 +594,7 @@ impl ShamirAdminExecutor {
         let table = &op.add_schema_rule;
         let repo = &op.repo;
         let db = &self.db_name;
+        let _namespace_guard = self.shamir.lock_replication_control().await;
         let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         self.shamir
@@ -696,8 +699,9 @@ impl ShamirAdminExecutor {
         )
         .await?;
 
-        // Re-serialise + persist.
-        let schema_qv = serialise_rules(&rules, interner);
+        // Re-serialise + persist. RU8: propagate the typed quota code.
+        let schema_qv = serialise_rules(&rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
             Some(id_str) => id_str
@@ -795,6 +799,7 @@ impl ShamirAdminExecutor {
         let table = &op.remove_schema_rule;
         let repo = &op.repo;
         let db = &self.db_name;
+        let _namespace_guard = self.shamir.lock_replication_control().await;
         let permit = schema_repo_permit(&self.shamir, db, repo).await?;
 
         self.shamir
@@ -836,8 +841,16 @@ impl ShamirAdminExecutor {
         let before = rules.len();
         rules.retain(|r| r.path != op.path);
         let removed = rules.len() < before;
+        if !removed {
+            return Ok(admin_result(mpack!({
+                "removed": false,
+                "schema_version": @(QueryValue::Int(schema_version_of(&rec) as i64)),
+            })));
+        }
 
-        let schema_qv = serialise_rules(&rules, interner);
+        // RU8: propagate the typed quota code.
+        let schema_qv = serialise_rules(&rules, interner)
+            .map_err(|e| err_code(e.code().unwrap_or("internal_error"), e.to_string()))?;
         let schema_validator_id = match rec.get(SCHEMA_VALIDATOR_ID_FIELD).and_then(|v| v.as_str())
         {
             Some(id_str) => id_str
@@ -845,11 +858,7 @@ impl ShamirAdminExecutor {
                 .unwrap_or_else(|_| RecordId::new()),
             None => RecordId::new(),
         };
-        let current_version = rec
-            .get(SCHEMA_VERSION_FIELD)
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as u64;
-        let new_version = current_version + 1;
+        let new_version = schema_version_of(&rec) + 1;
 
         // Recompile (even if empty — an empty schema validator accepts all).
         // F-4 — precompile gate BEFORE we touch the catalogue (see

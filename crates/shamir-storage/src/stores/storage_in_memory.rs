@@ -134,12 +134,7 @@ impl AtomicBatch for InMemoryAtomicBatch {
                 .clone();
             match op {
                 KvOp::Set(k, v) => {
-                    // TreeIndex has no update-in-place; mirror `set`'s
-                    // insert-or-remove+insert fallback.
-                    if store.data.insert_sync(k.clone(), v.clone()).is_err() {
-                        store.data.remove_sync(k);
-                        let _ = store.data.insert_sync(k.clone(), v.clone());
-                    }
+                    store.data.upsert_sync(k.clone(), v.clone());
                 }
                 KvOp::Remove(k) => {
                     store.data.remove_sync(k);
@@ -207,25 +202,13 @@ impl Store for InMemoryStore {
     }
 
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
-        // Optimistic single-traversal path: try insert first (1 B+ tree
-        // walk). On collision, fall back to remove+insert — 2 traversals
-        // only when the key already exists. Avoids always-2-traversal of
-        // the prior remove+insert pattern.
-        let existed = match self.data.insert_sync(key.clone(), value.clone()) {
-            Ok(()) => false, // new key — done in one traversal
-            Err((k, v)) => {
-                // Key already exists (insert rejected): remove then re-insert.
-                // scc::TreeIndex has no update-in-place API so 2 traversals
-                // are unavoidable for the update case. Concurrent readers
-                // may observe a brief absence between remove and insert;
-                // InMemoryStore is a single-session in-memory backend where
-                // this window is acceptable (no durability guarantee).
-                self.data.remove_sync(&k);
-                let _ = self.data.insert_sync(k, v);
-                true
+        match self.data.insert_sync(key.clone(), value.clone()) {
+            Ok(()) => Ok(true),
+            Err(_) => {
+                self.data.upsert_sync(key, value);
+                Ok(false)
             }
-        };
-        Ok(!existed)
+        }
     }
 
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -247,22 +230,25 @@ impl Store for InMemoryStore {
         &self,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // Snapshot under an epoch guard; the stream then yields without
-        // holding the guard. TreeIndex iter is already sorted.
-        let entries: Vec<(RecordKey, Bytes)> = {
-            let g = scc::Guard::new();
-            self.data
-                .iter(&g)
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-
+        let data = Arc::clone(&self.data);
         Box::pin(stream! {
-            let mut entries = entries;
-            while !entries.is_empty() {
-                let take = std::cmp::min(batch_size, entries.len());
-                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
+            if batch_size == 0 { return; }
+            let mut last_key: Option<RecordKey> = None;
+            loop {
+                let cursor = last_key.clone();
+                let batch = {
+                    let guard = scc::Guard::new();
+                    let iter = match cursor {
+                        Some(key) => data.range((std::ops::Bound::Excluded(key), std::ops::Bound::Unbounded), &guard),
+                        None => data.range((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded), &guard),
+                    };
+                    iter.take(batch_size).map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>()
+                };
+                if batch.is_empty() { break; }
+                last_key = batch.last().map(|(key, _)| key.clone());
+                let done = batch.len() < batch_size;
                 yield Ok(batch);
+                if done { break; }
             }
         })
     }
@@ -273,59 +259,72 @@ impl Store for InMemoryStore {
         end_inclusive: Option<Bytes>,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // O(log N + K) via TreeIndex::range — seek to start, yield one
-        // batch at a time. Each batch grabs a fresh guard, collects up to
-        // `batch_size` entries starting from a resumption key, then drops
-        // the guard before yielding. This keeps memory proportional to
-        // batch_size and allows callers that stop early (lookup_first_k)
-        // to avoid scanning the entire range.
         let data = Arc::clone(&self.data);
         Box::pin(stream! {
-            let mut resume_key: Option<Bytes> = start_inclusive.clone();
+            if batch_size == 0 { return; }
             let mut first_batch = true;
+            let mut resume_key: Option<RecordKey> = start_inclusive.clone().map(RecordKey::from);
             loop {
+                let cursor = resume_key.clone();
                 let batch: Vec<(RecordKey, Bytes)> = {
-                    let g = scc::Guard::new();
-                    let iter: Box<dyn Iterator<Item = (&RecordKey, &Bytes)> + '_> =
-                        match &resume_key {
-                            // Query type is `RecordKey` (the tree's key type);
-                            // convert the `Bytes` resume cursor into a
-                            // byte-identical `RecordKey` lower bound.
-                            Some(lo) => {
-                                Box::new(data.range(RecordKey::from(lo.clone()).., &g))
-                            }
-                            None => Box::new(data.iter(&g)),
-                        };
-                    let mut collected = Vec::with_capacity(batch_size);
-                    let mut skip_first = !first_batch;
-                    for (k, v) in iter {
-                        // After the first batch, resume_key points to the last
-                        // key we already yielded — skip it to avoid duplicates.
-                        if skip_first {
-                            skip_first = false;
-                            continue;
-                        }
-                        if let Some(ref hi) = end_inclusive {
-                            if k.as_ref() > hi.as_ref() {
-                                break;
-                            }
-                        }
-                        collected.push((k.clone(), v.clone()));
-                        if collected.len() == batch_size {
-                            break;
-                        }
+                    let guard = scc::Guard::new();
+                    let iter = match (&cursor, first_batch) {
+                        (Some(key), true) => data.range((std::ops::Bound::Included(key.clone()), std::ops::Bound::Unbounded), &guard),
+                        (Some(key), false) => data.range((std::ops::Bound::Excluded(key.clone()), std::ops::Bound::Unbounded), &guard),
+                        (None, _) => data.range((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded), &guard),
+                    };
+                    let mut items = Vec::with_capacity(batch_size.min(256));
+                    for (key, value) in iter {
+                        if let Some(hi) = &end_inclusive { if key.as_ref() > hi.as_ref() { break; } }
+                        items.push((key.clone(), value.clone()));
+                        if items.len() == batch_size { break; }
                     }
-                    collected
+                    items
                 };
-                if batch.is_empty() {
-                    break;
-                }
-                // Set resume key to last entry in this batch for next iteration.
-                // Boundary conversion KeyBytes -> Bytes to feed the next range's
-                // lower bound (resume_key is the Bytes-typed range cursor).
-                resume_key = Some(Bytes::from(batch.last().unwrap().0.clone()));
+                if batch.is_empty() { break; }
+                resume_key = batch.last().map(|(key, _)| key.clone());
                 first_batch = false;
+                let done = batch.len() < batch_size;
                 yield Ok(batch);
+                if done { break; }
+            }
+        })
+    }
+
+    fn iter_range_stream_reverse(
+        &self,
+        start_inclusive: Option<Bytes>,
+        end_inclusive: Option<Bytes>,
+        batch_size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let data = Arc::clone(&self.data);
+        Box::pin(stream! {
+            if batch_size == 0 { return; }
+            let mut first_batch = true;
+            let mut resume_key: Option<RecordKey> = end_inclusive.clone().map(RecordKey::from);
+            loop {
+                let cursor = resume_key.clone();
+                let batch: Vec<(RecordKey, Bytes)> = {
+                    let guard = scc::Guard::new();
+                    let iter = match (&cursor, first_batch) {
+                        (Some(key), true) => data.range((std::ops::Bound::Unbounded, std::ops::Bound::Included(key.clone())), &guard).rev(),
+                        (Some(key), false) => data.range((std::ops::Bound::Unbounded, std::ops::Bound::Excluded(key.clone())), &guard).rev(),
+                        (None, _) => data.range((std::ops::Bound::Unbounded, std::ops::Bound::Unbounded), &guard).rev(),
+                    };
+                    let mut items = Vec::with_capacity(batch_size.min(256));
+                    for (key, value) in iter {
+                        if let Some(lo) = &start_inclusive { if key.as_ref() < lo.as_ref() { break; } }
+                        items.push((key.clone(), value.clone()));
+                        if items.len() == batch_size { break; }
+                    }
+                    items
+                };
+                if batch.is_empty() { break; }
+                resume_key = batch.last().map(|(key, _)| key.clone());
+                first_batch = false;
+                let done = batch.len() < batch_size;
+                yield Ok(batch);
+                if done { break; }
             }
         })
     }
@@ -335,22 +334,34 @@ impl Store for InMemoryStore {
         prefix: Bytes,
         batch_size: usize,
     ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
-        // O(log N + matches) via TreeIndex::range from the prefix start.
-        let entries: Vec<(RecordKey, Bytes)> = {
-            let g = scc::Guard::new();
-            self.data
-                .range(RecordKey::from(prefix.clone()).., &g)
-                .take_while(|(k, _)| k.starts_with(&prefix[..]))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect()
-        };
-
+        let data = Arc::clone(&self.data);
         Box::pin(stream! {
-            let mut entries = entries;
-            while !entries.is_empty() {
-                let take = std::cmp::min(batch_size, entries.len());
-                let batch: Vec<(RecordKey, Bytes)> = entries.drain(..take).collect();
+            if batch_size == 0 { return; }
+            let mut first_batch = true;
+            let mut resume_key: Option<RecordKey> = None;
+            loop {
+                let cursor = resume_key.clone();
+                let batch: Vec<(RecordKey, Bytes)> = {
+                    let guard = scc::Guard::new();
+                    let iter = match (&cursor, first_batch) {
+                        (Some(key), false) => data.range((std::ops::Bound::Excluded(key.clone()), std::ops::Bound::Unbounded), &guard),
+                        (Some(key), true) => data.range((std::ops::Bound::Included(key.clone()), std::ops::Bound::Unbounded), &guard),
+                        (None, _) => data.range((std::ops::Bound::Included(RecordKey::from(prefix.clone())), std::ops::Bound::Unbounded), &guard),
+                    };
+                    let mut items = Vec::with_capacity(batch_size.min(256));
+                    for (key, value) in iter {
+                        if !key.starts_with(&prefix[..]) { break; }
+                        items.push((key.clone(), value.clone()));
+                        if items.len() == batch_size { break; }
+                    }
+                    items
+                };
+                if batch.is_empty() { break; }
+                resume_key = batch.last().map(|(key, _)| key.clone());
+                first_batch = false;
+                let done = batch.len() < batch_size;
                 yield Ok(batch);
+                if done { break; }
             }
         })
     }

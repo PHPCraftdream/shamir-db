@@ -39,7 +39,7 @@ pub use validation::{IntoFieldPath, Validation, ValidationError};
 
 pub use context::{Batch, Ctx};
 pub use db::{Db, Table};
-pub use error::{Error, Result};
+pub use error::{Error, ErrorKind, Result};
 pub use http::{HttpRequest, HttpResponse};
 pub use params::Params;
 pub use value::Value;

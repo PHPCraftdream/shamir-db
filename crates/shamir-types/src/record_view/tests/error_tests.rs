@@ -3,6 +3,7 @@
 //! reserved-marker input.
 
 use crate::core::interner::{Interner, InternerKey};
+use crate::record_view::lens::read_str_len;
 use crate::record_view::{RecordView, RecordViewError};
 
 #[test]
@@ -95,8 +96,14 @@ fn err_truncated_during_skip() {
 }
 
 #[test]
+fn rv_types_12eeffa6_invalid_string_marker_reports_string_error() {
+    assert!(matches!(
+        read_str_len(&[0xc4], &mut 0usize),
+        Err(RecordViewError::NonString(0))
+    ));
+}
+#[test]
 fn err_reserved_marker_in_value() {
-    // fixmap{1}: key = bin8 len 1 + byte 0x00, value = reserved marker 0xc1.
     let buf = &[0x81, 0xc4, 0x01, 0x00, 0xc1];
     let lens = RecordView::new(buf).unwrap();
     let key = InternerKey::new(0);
