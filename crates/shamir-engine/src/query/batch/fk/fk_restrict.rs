@@ -62,7 +62,7 @@ use futures::StreamExt;
 use shamir_query_types::admin::FkAction;
 use shamir_query_types::batch::BatchError;
 use shamir_query_types::filter::Filter;
-use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, RecordView, ScalarRef};
+use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::batch::TableResolver;
@@ -266,7 +266,7 @@ async fn collect_parent_values(
         for (_id, cow) in batch {
             let bytes: Bytes = cow_to_bytes(cow)?;
 
-            if !filter_matches(&bytes, &callback, ctx) {
+            if !filter_matches(&bytes, &callback, ctx)? {
                 continue;
             }
 
@@ -280,6 +280,10 @@ async fn collect_parent_values(
                     // set (decode-error twin of the F-65/#891 read-error
                     // fix — see `extract_ref_field_value`'s doc).
                     if let Some(qv) = extract_ref_field_value(&bytes, path)? {
+                        #[expect(
+                            clippy::unwrap_used,
+                            reason = "guard: result is initialized for every ref_field before this scan"
+                        )]
                         result.get_mut(field).unwrap().insert(qv);
                     }
                 }
@@ -296,25 +300,19 @@ async fn collect_parent_values(
 ///
 /// Returns `Ok(None)` when the record decodes fine but the field is absent
 /// at `path` — a legitimate "this row doesn't have that field" outcome, not
-/// corruption. Returns `Err(DbError::Codec)` only when BOTH decode attempts
-/// fail on the raw bytes: a genuinely corrupt parent row must abort the
-/// RESTRICT scan, not be silently dropped from the candidate value set — the
-/// decode-error twin of the F-65/#891 read-error fail-closed fix (see
+/// corruption. Returns `Err(DbError::Codec)` when the value body cannot be
+/// decoded: a genuinely corrupt parent row must abort the RESTRICT scan,
+/// not be silently dropped from the candidate value set — the decode-error
+/// twin of the F-65/#891 read-error fail-closed fix (see
 /// `fk_indexed_action_read_error_tests.rs`).
 fn extract_ref_field_value(
     bytes: &Bytes,
     path: &[shamir_types::core::interner::InternerKey],
 ) -> shamir_storage::error::DbResult<Option<QueryValue>> {
-    if let Ok(view) = RecordView::new(bytes) {
-        return Ok(view.scalar_at(path).map(scalar_ref_to_qv));
-    }
-    match InnerValue::from_bytes(bytes.clone()) {
-        Ok(tree) => Ok(tree.scalar_at(path).map(scalar_ref_to_qv)),
-        Err(e) => Err(shamir_storage::error::DbError::Codec(format!(
-            "fk_restrict: parent row decode failed (RecordView and InnerValue \
-             both failed): {e}"
-        ))),
-    }
+    let tree = InnerValue::from_bytes(bytes.clone()).map_err(|e| {
+        shamir_storage::error::DbError::Codec(format!("fk_restrict: parent row decode failed: {e}"))
+    })?;
+    Ok(tree.scalar_at(path).map(scalar_ref_to_qv))
 }
 
 /// Check whether any row in `child_table` has `field` equal to ANY member of
@@ -405,7 +403,7 @@ async fn any_child_references(
                         // staged-overlay fallback.
                         if let Some(field_id) = field_id {
                             let key = shamir_types::core::interner::InternerKey::new(field_id);
-                            if staged_field_matches(tx, table.table_token(), &key, value) {
+                            if staged_field_matches(tx, table.table_token(), &key, value)? {
                                 return Ok(true);
                             }
                         }
@@ -459,7 +457,7 @@ async fn any_child_references(
         let batch = batch_result?;
         for (_, cow) in batch {
             let bytes: Bytes = cow_to_bytes(cow)?;
-            if record_field_matches_any_by_id(bytes.as_ref(), &key, values) {
+            if record_field_matches_any_by_id(bytes.as_ref(), &key, values)? {
                 return Ok(true);
             }
         }
@@ -496,20 +494,17 @@ fn staged_field_matches(
     target_token: u64,
     field_id: &shamir_types::core::interner::InternerKey,
     value: &QueryValue,
-) -> bool {
+) -> shamir_storage::error::DbResult<bool> {
     let Some(staging) = tx.write_set.get(&target_token) else {
-        return false;
+        return Ok(false);
     };
-    // P1 perf fix: called once PER RECORD in a batch FK-restrict check —
-    // `iter_ops()` avoids materializing a fresh `Vec<KvOp>` on every call
-    // (`snapshot_ops()` would make this O(staged²) across the batch) and lets
-    // `.any()` short-circuit on the first match.
-    staging.iter_ops().any(|op| match op {
-        shamir_storage::types::KvOp::Set(_, ref bytes) => {
-            record_field_matches_by_id(bytes.as_ref(), field_id, value)
+    // The field index narrows staged candidates; exact recheck preserves semantics.
+    for (_, bytes) in staging.probe_field(field_id, value) {
+        if record_field_matches_by_id(bytes.as_ref(), field_id, value)? {
+            return Ok(true);
         }
-        shamir_storage::types::KvOp::Remove(_) => false,
-    })
+    }
+    Ok(false)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -523,16 +518,16 @@ fn cow_to_bytes(cow: RecordCow) -> shamir_storage::error::DbResult<Bytes> {
     }
 }
 
-fn filter_matches(bytes: &Bytes, callback: &FilterNode, ctx: &FilterContext<'_>) -> bool {
-    match RecordView::new(bytes) {
-        Ok(view) => callback.matches(&view, ctx),
-        Err(_) => {
-            if let Ok(tree) = InnerValue::from_bytes(bytes.clone()) {
-                callback.matches(&tree, ctx)
-            } else {
-                false
-            }
-        }
+fn filter_matches(
+    bytes: &Bytes,
+    callback: &FilterNode,
+    ctx: &FilterContext<'_>,
+) -> shamir_storage::error::DbResult<bool> {
+    match InnerValue::from_bytes(bytes.clone()) {
+        Ok(tree) => Ok(callback.matches(&tree, ctx)),
+        Err(error) => Err(shamir_storage::error::DbError::Codec(format!(
+            "fk_restrict row decode failed: {error}"
+        ))),
     }
 }
 
@@ -558,19 +553,14 @@ fn record_field_matches_by_id(
     record_bytes: &[u8],
     field_id: &shamir_types::core::interner::InternerKey,
     value: &QueryValue,
-) -> bool {
+) -> shamir_storage::error::DbResult<bool> {
     let path = std::slice::from_ref(field_id);
-    if let Ok(view) = RecordView::new(record_bytes) {
-        if let Some(actual) = view.scalar_at(path) {
-            return scalar_ref_matches_qv(&actual, value);
-        }
-    }
-    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-        if let Some(actual) = tree.scalar_at(path) {
-            return scalar_ref_matches_qv(&actual, value);
-        }
-    }
-    false
+    let tree = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)).map_err(|e| {
+        shamir_storage::error::DbError::Codec(format!("fk_restrict child row decode failed: {e}"))
+    })?;
+    Ok(tree
+        .scalar_at(path)
+        .is_some_and(|actual| scalar_ref_matches_qv(&actual, value)))
 }
 
 /// Like [`record_field_matches_by_id`], but tests a SINGLE decoded row
@@ -581,19 +571,14 @@ fn record_field_matches_any_by_id(
     record_bytes: &[u8],
     field_id: &shamir_types::core::interner::InternerKey,
     values: &[&QueryValue],
-) -> bool {
+) -> shamir_storage::error::DbResult<bool> {
     let path = std::slice::from_ref(field_id);
-    if let Ok(view) = RecordView::new(record_bytes) {
-        if let Some(actual) = view.scalar_at(path) {
-            return values.iter().any(|v| scalar_ref_matches_qv(&actual, v));
-        }
-    }
-    if let Ok(tree) = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)) {
-        if let Some(actual) = tree.scalar_at(path) {
-            return values.iter().any(|v| scalar_ref_matches_qv(&actual, v));
-        }
-    }
-    false
+    let tree = InnerValue::from_bytes(Bytes::copy_from_slice(record_bytes)).map_err(|e| {
+        shamir_storage::error::DbError::Codec(format!("fk_restrict child row decode failed: {e}"))
+    })?;
+    Ok(tree
+        .scalar_at(path)
+        .is_some_and(|actual| values.iter().any(|v| scalar_ref_matches_qv(&actual, v))))
 }
 
 pub(crate) fn scalar_ref_matches_qv(actual: &ScalarRef<'_>, value: &QueryValue) -> bool {

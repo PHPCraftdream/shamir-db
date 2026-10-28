@@ -75,8 +75,15 @@ async fn drop_index_refuses_pre_existing_cross_family_collision() {
 
     let mut b = Batch::new();
     b.id(1);
-    b.drop_index("d", ddl::drop_index("shared_name", "items").repo("main"));
-    let req = b.to_request_via_msgpack();
+    b.drop_index(
+        "d",
+        ddl::drop_index("shared_name", "items")
+            .repo("main")
+            .hmac("test-tag")
+            .build()
+            .expect("valid DROP INDEX operation"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
 
     let err = shamir
         .execute("testdb", &req)
@@ -124,4 +131,96 @@ async fn rename_index_refuses_pre_existing_cross_family_collision() {
     assert!(table.sorted_index_exists("shared_name").await);
     assert!(!table.index_exists("renamed").await);
     assert!(!table.sorted_index_exists("renamed").await);
+}
+
+#[tokio::test]
+async fn rv_db_9257b8e1_removing_missing_rule_keeps_schema_version() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.unwrap();
+    shamir
+        .add_repo(
+            "testdb",
+            RepoConfig::new("main", crate::engine::repo::BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("items")),
+        )
+        .await
+        .unwrap();
+    let mut persisted = shamir_types::types::common::new_map();
+    persisted.insert(
+        "db_name".into(),
+        crate::types::value::QueryValue::Str("testdb".into()),
+    );
+    persisted.insert(
+        "repo_name".into(),
+        crate::types::value::QueryValue::Str("main".into()),
+    );
+    persisted.insert(
+        "table_name".into(),
+        crate::types::value::QueryValue::Str("items".into()),
+    );
+    persisted.insert(
+        "enable_indexes".into(),
+        crate::types::value::QueryValue::Bool(false),
+    );
+    persisted.insert(
+        "schema_version".into(),
+        crate::types::value::QueryValue::Int(0),
+    );
+    let persisted_value = crate::types::value::QueryValue::Map(persisted);
+    shamir
+        .system_store()
+        .save_table_meta(&persisted_value)
+        .await
+        .unwrap();
+    let initial = shamir
+        .system_store()
+        .load_table_record("testdb", "main", "items")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        initial
+            .get("schema_version")
+            .and_then(|value| value.as_i64()),
+        Some(0)
+    );
+
+    let mut batch = Batch::new();
+    batch.id("remove");
+    batch.remove_schema_rule(
+        "remove",
+        ddl::remove_schema_rule("items", ["does_not_exist"]).repo("main"),
+    );
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    let response = shamir.execute("testdb", &request).await.unwrap();
+    let result = &response.results["remove"];
+    let record = &result.records[0];
+    let crate::query::read::QueryRecord::Direct(record) = record else {
+        panic!("DDL result should be a direct record");
+    };
+    assert_eq!(
+        record.get("removed").and_then(|value| value.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        record
+            .get("schema_version")
+            .and_then(|value| value.as_i64()),
+        Some(0)
+    );
+
+    let schema = shamir
+        .system_store()
+        .load_table_record("testdb", "main", "items")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        schema
+            .get("schema_version")
+            .and_then(|value| value.as_i64()),
+        Some(0)
+    );
 }

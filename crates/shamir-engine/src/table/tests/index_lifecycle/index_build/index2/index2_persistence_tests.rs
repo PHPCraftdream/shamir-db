@@ -283,6 +283,7 @@ async fn fts_ranked_index_survives_reopen() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("rust")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();
@@ -346,6 +347,7 @@ async fn fts_ranked_index_survives_reopen() {
         .lookup(IndexQuery::Fts {
             tokens: vec![token_hash("rust")],
             mode: FtsMode::AndAll,
+            limit: None,
         })
         .await
         .unwrap();

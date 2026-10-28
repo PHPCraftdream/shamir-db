@@ -67,7 +67,7 @@ async fn execute_as_user_denied_on_restricted_database() {
     let mut b = Batch::new();
     b.id("gw_read");
     b.query("r", Query::from("items"));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // System bypasses — must succeed.
     assert!(
@@ -122,7 +122,7 @@ async fn execute_as_user_denied_on_restricted_table() {
     let mut b = Batch::new();
     b.id("gw_read");
     b.query("r", Query::from("items"));
-    let read_req = b.to_request_via_msgpack();
+    let read_req = b.to_request_via_msgpack().expect("batch request encoding");
 
     // System bypasses.
     assert!(
@@ -213,7 +213,7 @@ fn rv_wasm_host_df4ad1da_batch_error_classification() {
         code: None,
     });
     assert!(
-        matches!(uncoded, DbGatewayError::ExecutionSource { ref message, .. } if message.starts_with("QueryError") && message.contains("boom"))
+        matches!(uncoded, DbGatewayError::ExecutionSource { ref message, .. } if message == "Query 'r' failed: boom")
     );
     let source = uncoded
         .source()
@@ -230,7 +230,7 @@ fn rv_wasm_host_df4ad1da_batch_error_classification() {
         code: Some("validation".into()),
     });
     assert!(
-        matches!(validation, DbGatewayError::ExecutionSource { ref message, .. } if message.starts_with("QueryError"))
+        matches!(validation, DbGatewayError::ExecutionSource { ref message, .. } if message == "Query 'r' failed [validation]: invalid value")
     );
     let source = validation
         .source()

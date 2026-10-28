@@ -143,6 +143,20 @@ where
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rv_client_e5d2a811_connect_stores_negotiated_query_version() {
+    with_client(|client: Client| async move {
+        assert_eq!(
+            u32::from(client.server_query_version()),
+            shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION
+        );
+        assert!(client.rotation_in_progress().is_none());
+        assert!(!client.kdf_upgrade_required());
+        client
+    })
+    .await;
+}
+
 /// E2E round-trip: a v2 client INSERTs a record id-keyed (via records_idmsgpack)
 /// and READs it back (id-keyed, de-interned client-side). The read result must
 /// equal the inserted fields.
@@ -153,10 +167,10 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn v2_e2e_roundtrip_insert_read() {
     with_client(|client: Client| async move {
-        // Skip if server is not v2 — the test exercises the new code path.
-        if client.server_query_version() < 2 {
-            return client;
-        }
+        assert!(
+            client.server_query_version() >= 2,
+            "in-tree test server must negotiate query v2"
+        );
 
         // INSERT via execute_with_touch (v2 path: encodes id-keyed internally).
         let mut b = Batch::new();
@@ -224,9 +238,10 @@ async fn v2_e2e_roundtrip_insert_read() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn v2_section_9_4_numeric_string_field_name() {
     with_client(|client: Client| async move {
-        if client.server_query_version() < 2 {
-            return client;
-        }
+        assert!(
+            client.server_query_version() >= 2,
+            "in-tree test server must negotiate query v2"
+        );
 
         // Insert a record with field name "42".
         let mut b = Batch::new();
@@ -290,9 +305,10 @@ async fn v2_section_9_4_numeric_string_field_name() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn v2_new_field_pre_touch_and_roundtrip() {
     with_client(|client: Client| async move {
-        if client.server_query_version() < 2 {
-            return client;
-        }
+        assert!(
+            client.server_query_version() >= 2,
+            "in-tree test server must negotiate query v2"
+        );
 
         // Use a field name that has NOT been touched before in this fresh server.
         let unique_field = "brand_new_field_xyz";
@@ -364,11 +380,10 @@ async fn v2_deintern_unknown_id_refresh() {
     let client_a = connect_client(addr, password.clone()).await;
     provision_db_table(&client_a, "rfdb").await;
 
-    if client_a.server_query_version() < 2 {
-        client_a.close().await;
-        handle.shutdown().await;
-        return;
-    }
+    assert!(
+        client_a.server_query_version() >= 2,
+        "in-tree test server must negotiate query v2"
+    );
 
     {
         let mut b = Batch::new();

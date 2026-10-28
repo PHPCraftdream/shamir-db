@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;
@@ -601,4 +602,178 @@ async fn string_prefix_does_not_match_longer_value() {
         .unwrap();
     assert_eq!(r.len(), 1);
     assert!(r.contains(&rid_aa));
+}
+
+// ---------------------------------------------------------------------------
+// RV-INDEX-0577E3C4 / RV-INDEX-8F977BF5
+// ---------------------------------------------------------------------------
+
+/// Wraps a store and counts direct per-key writes vs batched transacts.
+struct CountingStore {
+    inner: Arc<dyn Store>,
+    transacts: std::sync::atomic::AtomicUsize,
+    direct_sets: std::sync::atomic::AtomicUsize,
+    direct_removes: std::sync::atomic::AtomicUsize,
+}
+
+impl CountingStore {
+    fn new(inner: Arc<dyn Store>) -> Self {
+        Self {
+            inner,
+            transacts: std::sync::atomic::AtomicUsize::new(0),
+            direct_sets: std::sync::atomic::AtomicUsize::new(0),
+            direct_removes: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+type TestStream = std::pin::Pin<
+    Box<
+        dyn futures::Stream<
+                Item = shamir_storage::error::DbResult<
+                    Vec<(shamir_storage::types::RecordKey, bytes::Bytes)>,
+                >,
+            > + Send,
+    >,
+>;
+
+#[async_trait::async_trait]
+impl Store for CountingStore {
+    async fn insert(
+        &self,
+        value: Bytes,
+    ) -> shamir_storage::error::DbResult<shamir_storage::types::RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(
+        &self,
+        key: shamir_storage::types::RecordKey,
+        value: Bytes,
+    ) -> shamir_storage::error::DbResult<bool> {
+        self.direct_sets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.set(key, value).await
+    }
+    async fn get(
+        &self,
+        key: shamir_storage::types::RecordKey,
+    ) -> shamir_storage::error::DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(
+        &self,
+        key: shamir_storage::types::RecordKey,
+    ) -> shamir_storage::error::DbResult<bool> {
+        self.direct_removes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.remove(key).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> TestStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> TestStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+    async fn set_many(
+        &self,
+        items: Vec<(shamir_storage::types::RecordKey, Bytes)>,
+    ) -> shamir_storage::error::DbResult<Vec<bool>> {
+        self.inner.set_many(items).await
+    }
+    async fn remove_many(
+        &self,
+        keys: Vec<shamir_storage::types::RecordKey>,
+    ) -> shamir_storage::error::DbResult<Vec<bool>> {
+        self.inner.remove_many(keys).await
+    }
+    async fn transact(
+        &self,
+        ops: Vec<shamir_storage::types::KvOp>,
+    ) -> shamir_storage::error::DbResult<()> {
+        self.transacts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.transact(ops).await
+    }
+}
+
+/// Old-code failure: the direct update path awaited one `set` and one
+/// `remove` per changed key (two per-key round-trips, zero transacts).
+/// The fix collapses the mixed remove-then-set batch into ONE `transact`.
+#[tokio::test]
+async fn rv_index_0577e3c4_direct_update_batches_into_one_transact() {
+    let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let counting = Arc::new(CountingStore::new(Arc::clone(&inner)));
+    let mgr = SortedIndexManager::new(Arc::clone(&counting) as Arc<dyn Store>)
+        .await
+        .unwrap();
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+
+    let id = RecordId::new();
+    let old = record_with_int(201, 10);
+    let new = record_with_int(201, 100);
+    mgr.on_record_created(&id, &old, 1).await.unwrap();
+    let sets_after_create = counting
+        .direct_sets
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let transacts_after_create = counting.transacts.load(std::sync::atomic::Ordering::SeqCst);
+
+    mgr.on_record_updated(&id, &old, &new, 2).await.unwrap();
+
+    assert_eq!(
+        counting.transacts.load(std::sync::atomic::Ordering::SeqCst),
+        transacts_after_create + 1,
+        "the update must apply as ONE transact batch"
+    );
+    assert_eq!(
+        counting
+            .direct_sets
+            .load(std::sync::atomic::Ordering::SeqCst),
+        sets_after_create,
+        "no per-key direct set may bypass the batch"
+    );
+    assert_eq!(
+        counting
+            .direct_removes
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no per-key direct remove may bypass the batch"
+    );
+
+    // Correctness: old slot empty, new slot present.
+    let r_old = mgr
+        .lookup_range(101, Some(&enc_i64(10)), Some(&enc_i64(10)))
+        .await
+        .unwrap();
+    assert!(r_old.is_empty());
+    let r_new = mgr
+        .lookup_range(101, Some(&enc_i64(100)), Some(&enc_i64(100)))
+        .await
+        .unwrap();
+    assert!(r_new.contains(&id));
+}
+
+/// Old-code failure: singular planners consumed `iter_indexes()`, which
+/// deep-cloned every `SortedIndexDefinition` on every row. The borrowed
+/// snapshot returns the shared node-local Arc with one refcount bump.
+#[tokio::test]
+async fn rv_index_8f977bf5_sorted_snapshot_shares_arc_without_cloning_defs() {
+    let (_, mgr) = fresh_mgr().await;
+    mgr.register(SortedIndexDefinition::new(101, vec![201]))
+        .await
+        .unwrap();
+    mgr.register(SortedIndexDefinition::new(102, vec![202]))
+        .await
+        .unwrap();
+
+    let snap = mgr.snapshot();
+    let snap_again = mgr.snapshot();
+    assert!(
+        Arc::ptr_eq(&snap, &snap_again),
+        "snapshot() must return the shared Arc, not a rebuilt Vec"
+    );
+    assert_eq!(snap.len(), 2);
+    let names: Vec<u64> = snap.iter().map(|d| d.name_interned).collect();
+    assert!(names.contains(&101) && names.contains(&102));
 }

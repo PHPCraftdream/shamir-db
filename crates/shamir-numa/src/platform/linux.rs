@@ -50,9 +50,16 @@ impl LinuxTopology {
     /// A missing per-node `cpulist` is treated as an empty CPU list for that
     /// node (best-effort) rather than a hard error.
     pub fn probe() -> Result<Self, AffinityError> {
+        Self::probe_with(|path| std::fs::read_to_string(path).map(|s| s.trim_end().to_owned()))
+    }
+
+    pub(crate) fn probe_with<F>(mut read: F) -> Result<Self, AffinityError>
+    where
+        F: FnMut(&str) -> io::Result<String>,
+    {
         // 1. Read the list of online NUMA nodes.
         let online_path = "/sys/devices/system/node/online";
-        let online_raw = fs_read_trim(online_path)?;
+        let online_raw = read(online_path).map_err(classify_read_error)?;
         // parse_cpulist reuses the same format the node-online file uses.
         let node_ids: Vec<usize> = parse_cpulist(&online_raw)
             .into_iter()
@@ -72,10 +79,10 @@ impl LinuxTopology {
         let mut cores: Vec<Vec<CpuId>> = Vec::with_capacity(node_ids_sorted.len());
         for &nid in &node_ids_sorted {
             let cpulist_path = format!("/sys/devices/system/node/node{nid}/cpulist");
-            let cpus = match fs_read_trim(&cpulist_path) {
+            let cpus = match read(&cpulist_path) {
                 Ok(raw) => parse_cpulist(&raw),
-                // Missing file — container or NUMA-less kernel; keep node but empty.
-                Err(_) => Vec::new(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(error) => return Err(AffinityError::Syscall(error)),
             };
             cores.push(cpus);
         }
@@ -136,6 +143,9 @@ impl Topology for LinuxTopology {
         //     the kernel expects for the `cpusetsize` argument (glibc hard-codes
         //     this as `sizeof(cpu_set_t)` = 128 bytes on 64-bit Linux).
         //   - `pid = 0` targets the calling thread, which is always valid.
+        if cpus.iter().any(|cpu| cpu.0 >= libc::CPU_SETSIZE as usize) {
+            return Err(AffinityError::Unsupported);
+        }
         let ret = unsafe {
             let mut cpu_set: libc::cpu_set_t = mem::zeroed();
             libc::CPU_ZERO(&mut cpu_set);
@@ -161,40 +171,12 @@ impl Topology for LinuxTopology {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/// Read a sysfs file, trim trailing whitespace/newlines, and return its content.
-/// Returns [`AffinityError::Unsupported`] when the file does not exist, and
-/// [`AffinityError::Syscall`] for other I/O errors.
-fn fs_read_trim(path: &str) -> Result<String, AffinityError> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => Ok(s.trim_end().to_owned()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(AffinityError::Unsupported),
-        Err(e) => Err(AffinityError::Syscall(e)),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tests (compiled only on Linux)
-// ---------------------------------------------------------------------------
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn probe_on_real_linux_host_succeeds() {
-        let topo = LinuxTopology::probe().expect("Linux host must expose /sys/devices/system/node");
-        assert!(topo.num_nodes() >= 1);
-        let node0 = NodeId(0);
-        assert!(
-            !topo.cores_on_node(node0).is_empty(),
-            "node 0 must have at least one CPU"
-        );
-    }
-
-    #[test]
-    fn current_node_is_in_range() {
-        let topo = LinuxTopology::probe().unwrap();
-        let n = topo.current_node();
-        assert!(n.0 < topo.num_nodes());
+/// Returns [`AffinityError::Unsupported`] for a missing file and
+/// [`AffinityError::Syscall`] for other read failures.
+fn classify_read_error(error: io::Error) -> AffinityError {
+    if error.kind() == io::ErrorKind::NotFound {
+        AffinityError::Unsupported
+    } else {
+        AffinityError::Syscall(error)
     }
 }

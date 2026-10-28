@@ -6,10 +6,8 @@
  *
  * Non-HMAC ops are plain functions returning the wire object.
  * HMAC-gated ops (`drop_user`, `chmod`, `chown`, `chgrp`,
- * `create_user`, `grant_role`, `revoke_role`,
- * `create_group`, `drop_group`, `rename_group`, `add_group_member`,
- * `remove_group_member`, `set_superuser`) take a `signer: HmacSigner`,
- * build the canonical input via `../hmac.ts`, and attach the HMAC tag.
+ * HMAC-gated operation builders take a `signer: HmacSigner`, encode the full
+ * v2 operation DTO, and attach the resulting tag.
  *
  * PLATFORM-AGNOSTIC.
  */
@@ -42,22 +40,7 @@ import type {
 import type { Filter } from '../../types/read/filter.js';
 import type { WireValue } from '../../types/write/write.js';
 
-import {
-  canonicalDropUser,
-  canonicalChmod,
-  canonicalChown,
-  canonicalChgrp,
-  canonicalCreateUser,
-  canonicalGrantRole,
-  canonicalRevokeRole,
-  canonicalSetSuperuser,
-  canonicalSetReplicator,
-  canonicalCreateGroup,
-  canonicalDropGroup,
-  canonicalRenameGroup,
-  canonicalAddGroupMember,
-  canonicalRemoveGroupMember,
-} from '../../protocol/hmac.js';
+import { canonicalBatchOp, canonicalDbRequest } from '../../protocol/hmac.js';
 
 // ── ResourceRef constructors (access.rs, untagged, single-key) ──────
 
@@ -115,15 +98,15 @@ export function groupId(id: number): GroupRef {
 
 // ── ACL ops (chmod / chown / chgrp — HMAC-gated) ────────────────────
 
-/** Change mode bits on a resource (HMAC-gated). canonical = `canonicalChmod(resource, mode)`. */
+/** Change mode bits on a resource (HMAC-gated). canonical = the complete op DTO passed to `canonicalBatchOp`. */
 export function chmod(signer: HmacSigner, resource: ResourceRef, mode: number): ChmodOp {
-  const canonical = canonicalChmod(resource, mode);
+  const canonical = canonicalBatchOp('', { chmod: resource, mode });
   return { chmod: resource, mode, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
  * Transfer ownership of a resource (HMAC-gated).
- * canonical = `canonicalChown(resource, owner)`.
+ * canonical = the complete v2 chown DTO.
  *
  * `owner` accepts:
  *   - `bigint` — pre-computed principal id.
@@ -139,29 +122,29 @@ export function chown(
   resource: ResourceRef,
   owner: bigint | number,
 ): ChownOp {
-  const canonical = canonicalChown(resource, owner);
+  const canonical = canonicalBatchOp('', { chown: resource, owner });
   return { chown: resource, owner, hmac: signer.hmacTagHex(canonical) };
 }
 
-/** Change group on a resource (HMAC-gated). canonical = `canonicalChgrp(resource, group)`. */
+/** Change group on a resource (HMAC-gated); canonical v2 encodes its complete DTO. */
 export function chgrp(signer: HmacSigner, resource: ResourceRef, group: number | null): ChgrpOp {
-  const canonical = canonicalChgrp(resource, group);
+  const canonical = canonicalBatchOp('', { chgrp: resource, group });
   return { chgrp: resource, group, hmac: signer.hmacTagHex(canonical) };
 }
 
-/** Create a new group (HMAC-gated). canonical = `canonicalCreateGroup(name)`. */
+/** Create a new group (HMAC-gated), signed over the complete v2 DTO. */
 export function createGroup(signer: HmacSigner, name: string): CreateGroupOp {
-  const canonical = canonicalCreateGroup(name);
+  const canonical = canonicalBatchOp('', { create_group: name });
   return { create_group: name, hmac: signer.hmacTagHex(canonical) };
 }
 
-/** Drop a group by reference (HMAC-gated). canonical = `canonicalDropGroup(ref)`. */
+/** Drop a group by reference (HMAC-gated), signed over the complete v2 DTO. */
 export function dropGroup(
   signer: HmacSigner,
   ref: GroupRef,
   opts?: { if_exists?: boolean },
 ): DropGroupOp {
-  const canonical = canonicalDropGroup(ref);
+  const canonical = canonicalBatchOp('', { drop_group: ref, if_exists: opts?.if_exists ?? false });
   const op: DropGroupOp = { drop_group: ref, hmac: signer.hmacTagHex(canonical) };
   if (opts?.if_exists) op.if_exists = true;
   return op;
@@ -170,16 +153,16 @@ export function dropGroup(
 /**
  * Rename a group (HMAC-gated). Groups are id-keyed, so this only updates
  * the display name; members and resource references (which store the
- * group id) are unaffected. canonical = `canonicalRenameGroup(ref, to)`.
+ * group id) are unaffected. The complete operation DTO is encoded by `canonicalBatchOp`.
  */
 export function renameGroup(signer: HmacSigner, ref: GroupRef, to: string): RenameGroupOp {
-  const canonical = canonicalRenameGroup(ref, to);
+  const canonical = canonicalBatchOp('', { rename_group: ref, to });
   return { rename_group: ref, to, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
  * Add a user to a group (HMAC-gated).
- * canonical = `canonicalAddGroupMember(ref, user)`.
+ * canonical v2 encodes the full add-group-member DTO.
  *
  * `user` accepts:
  *   - `bigint` — pre-computed principal id.
@@ -195,13 +178,13 @@ export function addGroupMember(
   ref: GroupRef,
   user: bigint | number,
 ): AddGroupMemberOp {
-  const canonical = canonicalAddGroupMember(ref, user);
+  const canonical = canonicalBatchOp('', { add_group_member: ref, user });
   return { add_group_member: ref, user, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
  * Remove a user from a group (HMAC-gated).
- * canonical = `canonicalRemoveGroupMember(ref, user)`.
+ * canonical v2 encodes the full remove-group-member DTO.
  *
  * `user` accepts:
  *   - `bigint` — pre-computed principal id.
@@ -217,7 +200,7 @@ export function removeGroupMember(
   ref: GroupRef,
   user: bigint | number,
 ): RemoveGroupMemberOp {
-  const canonical = canonicalRemoveGroupMember(ref, user);
+  const canonical = canonicalBatchOp('', { remove_group_member: ref, user });
   return { remove_group_member: ref, user, hmac: signer.hmacTagHex(canonical) };
 }
 
@@ -245,8 +228,7 @@ export function permission(
  * Create a user (HMAC-gated). `roles` is `#[serde(default)]` WITHOUT skip
  * → always present on the wire. Emits `roles: []` when none provided.
  * `password` is a SecretString on the Rust side → plain string on wire.
- * canonical = `canonicalCreateUser(username)` — the password is NEVER
- * part of the canonical input.
+ * canonical v2 input covers all supplied fields except `hmac` and password.
  */
 export function createUser(
   signer: HmacSigner,
@@ -254,7 +236,7 @@ export function createUser(
   password: string,
   opts?: { roles?: string[]; profile?: WireValue; database?: string },
 ): CreateUserOp {
-  const canonical = canonicalCreateUser(name);
+  const canonical = canonicalBatchOp('', { create_user: name, password, roles: opts?.roles ?? [], database: opts?.database });
   const op: CreateUserOp = {
     create_user: name,
     password,
@@ -266,13 +248,13 @@ export function createUser(
   return op;
 }
 
-/** Drop a user (HMAC-gated). canonical = `canonicalDropUser(username)`. */
+/** Drop a user (HMAC-gated), signed over the full v2 operation DTO. */
 export function dropUser(
   signer: HmacSigner,
   username: string,
   opts?: { if_exists?: boolean },
 ): DropUserOp {
-  const canonical = canonicalDropUser(username);
+  const canonical = canonicalBatchOp('', { drop_user: username, if_exists: opts?.if_exists ?? false });
   const op: DropUserOp = {
     drop_user: username,
     hmac: signer.hmacTagHex(canonical),
@@ -285,7 +267,7 @@ export function dropUser(
  * Grant or revoke superuser status on an existing SCRAM-directory account
  * (top-level `DbRequest::SetSuperuser`, NOT a `BatchOp`). Requires an
  * already-superuser session. The HMAC tag is UNCONDITIONAL — every call
- * signs it. canonical = `canonicalSetSuperuser(user, on)`.
+ * signs it using the complete v2 operation DTO.
  *
  * This is the first standalone (non-batch) admin op modelled as a builder
  * in this module: the other top-level `DbRequest` variant the TS client
@@ -301,7 +283,7 @@ export function setSuperuser(
   user: string,
   on: boolean,
 ): SetSuperuserOp {
-  const canonical = canonicalSetSuperuser(user, on);
+  const canonical = canonicalDbRequest({ op: 'set_superuser', user, on });
   return { op: 'set_superuser', user, on, hmac: signer.hmacTagHex(canonical) };
 }
 
@@ -309,7 +291,7 @@ export function setSuperuser(
  * Grant or revoke replicator status on an existing SCRAM-directory account
  * (top-level `DbRequest::SetReplicator`, task #621, NOT a `BatchOp`).
  * Requires an already-superuser session. The HMAC tag is UNCONDITIONAL —
- * every call signs it. canonical = `canonicalSetReplicator(user, on)`.
+ * every call signs it using the complete v2 operation DTO.
  *
  * Mirrors `setSuperuser`'s builder shape exactly (signer + canonical +
  * `.hmac` field), emitting the top-level wire shape
@@ -321,27 +303,27 @@ export function setReplicator(
   user: string,
   on: boolean,
 ): SetReplicatorOp {
-  const canonical = canonicalSetReplicator(user, on);
+  const canonical = canonicalDbRequest({ op: 'set_replicator', user, on });
   return { op: 'set_replicator', user, on, hmac: signer.hmacTagHex(canonical) };
 }
 
 /**
  * Grant a role to a user (HMAC-gated) — the single most dangerous op in
  * the system (e.g. granting `superuser` to an attacker-controlled account).
- * canonical = `canonicalGrantRole(role, user)`.
+ * canonical v2 input encodes the full operation DTO.
  *
  * "Role" is now a plain string label attached to a directory user (task
  * #549); there is no "role object" to create/drop/rename. `grantRole` /
  * `revokeRole` are the only role-mutating ops.
  */
 export function grantRole(signer: HmacSigner, role: string, user: string): GrantRoleOp {
-  const canonical = canonicalGrantRole(role, user);
+  const canonical = canonicalBatchOp('', { grant_role: role, user });
   return { grant_role: role, user, hmac: signer.hmacTagHex(canonical) };
 }
 
-/** Revoke a role from a user (HMAC-gated). canonical = `canonicalRevokeRole(role, user)`. */
+/** Revoke a role from a user (HMAC-gated); canonical v2 encodes the full DTO. */
 export function revokeRole(signer: HmacSigner, role: string, user: string): RevokeRoleOp {
-  const canonical = canonicalRevokeRole(role, user);
+  const canonical = canonicalBatchOp('', { revoke_role: role, user });
   return { revoke_role: role, user, hmac: signer.hmacTagHex(canonical) };
 }
 

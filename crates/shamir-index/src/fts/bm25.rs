@@ -35,6 +35,11 @@ pub fn term_score(
 ) -> f64 {
     let tf = tf as f64;
     let dl = doc_len as f64;
+    let avg_doc_len = if avg_doc_len.is_finite() && avg_doc_len > 0.0 {
+        avg_doc_len
+    } else {
+        1.0
+    };
     let norm = 1.0 - params.b + params.b * dl / avg_doc_len;
     idf_val * (params.k1 + 1.0) * tf / (tf + params.k1 * norm)
 }
@@ -49,10 +54,15 @@ pub struct FtsPostingValue {
     pub doc_len: u32,
 }
 
-/// Global FTS index stats. Updated atomically on insert/delete.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FtsStatsSnapshot {
+    pub doc_count: u64,
+    pub sum_doc_len: u64,
+}
+
+/// Global FTS index stats. Each update publishes a coherent count/length pair.
 pub struct FtsStats {
-    pub doc_count: std::sync::atomic::AtomicU64,
-    pub sum_doc_len: std::sync::atomic::AtomicU64,
+    state: arc_swap::ArcSwap<FtsStatsSnapshot>,
 }
 
 impl Default for FtsStats {
@@ -64,30 +74,64 @@ impl Default for FtsStats {
 impl FtsStats {
     pub fn new() -> Self {
         Self {
-            doc_count: std::sync::atomic::AtomicU64::new(0),
-            sum_doc_len: std::sync::atomic::AtomicU64::new(0),
+            state: arc_swap::ArcSwap::from_pointee(FtsStatsSnapshot::default()),
         }
+    }
+
+    pub fn snapshot(&self) -> FtsStatsSnapshot {
+        **self.state.load()
+    }
+
+    pub fn doc_count(&self) -> u64 {
+        self.snapshot().doc_count
+    }
+
+    pub fn sum_doc_len(&self) -> u64 {
+        self.snapshot().sum_doc_len
+    }
+
+    pub fn reset(&self) {
+        self.update(|_| Some(FtsStatsSnapshot::default()));
     }
 
     pub fn avg_doc_len(&self) -> f64 {
-        let count = self.doc_count.load(std::sync::atomic::Ordering::Relaxed);
-        if count == 0 {
+        let snapshot = self.snapshot();
+        if snapshot.doc_count == 0 || snapshot.sum_doc_len == 0 {
             return 1.0;
         }
-        self.sum_doc_len.load(std::sync::atomic::Ordering::Relaxed) as f64 / count as f64
+        snapshot.sum_doc_len as f64 / snapshot.doc_count as f64
     }
 
     pub fn on_insert(&self, doc_len: u32) {
-        self.doc_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.sum_doc_len
-            .fetch_add(doc_len as u64, std::sync::atomic::Ordering::Relaxed);
+        self.update(|current| {
+            Some(FtsStatsSnapshot {
+                doc_count: current.doc_count.checked_add(1)?,
+                sum_doc_len: current.sum_doc_len.checked_add(doc_len as u64)?,
+            })
+        });
     }
 
     pub fn on_delete(&self, doc_len: u32) {
-        self.doc_count
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        self.sum_doc_len
-            .fetch_sub(doc_len as u64, std::sync::atomic::Ordering::Relaxed);
+        self.update(|current| {
+            Some(FtsStatsSnapshot {
+                doc_count: current.doc_count.checked_sub(1)?,
+                sum_doc_len: current.sum_doc_len.checked_sub(doc_len as u64)?,
+            })
+        });
+    }
+
+    fn update(&self, update: impl Fn(FtsStatsSnapshot) -> Option<FtsStatsSnapshot>) {
+        loop {
+            let current = self.state.load_full();
+            let Some(next) = update(*current) else {
+                return;
+            };
+            let previous = self
+                .state
+                .compare_and_swap(&current, std::sync::Arc::new(next));
+            if std::sync::Arc::ptr_eq(&previous, &current) {
+                return;
+            }
+        }
     }
 }

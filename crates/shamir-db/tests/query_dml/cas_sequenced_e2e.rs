@@ -87,7 +87,7 @@ impl RecordValidator for CasValidator {
                 // canonical_hash excludes the top-level _prev_hash, so it hashes
                 // the *content* of the current version — exactly what the writer
                 // must have based its update on.
-                let current = canonical_hash(&old_val);
+                let current = canonical_hash(&old_val).expect("canonical hash serialization");
                 // Non-secret content hashes; a plain compare is fine (no
                 // timing-attack surface — anyone holding the record can
                 // recompute the hash).
@@ -150,7 +150,7 @@ fn insert_request(id: &str, record: QueryValue) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.insert("ins", insert("docs").row(record));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 /// Update the single `docs` row matched by `key`, applying `set`.
@@ -159,7 +159,7 @@ fn update_request(id: &str, key: &str, set: QueryValue) -> BatchRequest {
     b.id(id);
     b.try_update("upd", update("docs").where_(eq("key", key)).set(set))
         .unwrap();
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 /// Read all `docs` rows.
@@ -167,7 +167,7 @@ fn read_all_request(id: &str) -> BatchRequest {
     let mut b = Batch::new();
     b.id(id);
     b.query("all", Query::from("docs"));
-    b.to_request_via_msgpack()
+    b.to_request_via_msgpack().expect("batch request encoding")
 }
 
 /// Read the single stored `docs` row back and compute its canonical content
@@ -179,7 +179,7 @@ async fn current_hash(db: &ShamirDb) -> String {
         .unwrap();
     let records = &resp.results["all"].records;
     assert_eq!(records.len(), 1, "expected exactly one stored row");
-    canonical_hash(&records[0].as_value())
+    canonical_hash(&records[0].as_value()).expect("canonical hash serialization")
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -40,9 +40,12 @@ async fn setup(sys_path: std::path::PathBuf) -> ShamirDb {
         "cr",
         ddl::create_repo("main").tables(["departments", "employees"]),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Index on departments.dept_id (FK target) + employees.dept_id (FK field).
     let mut b = Batch::new();
@@ -55,9 +58,12 @@ async fn setup(sys_path: std::path::PathBuf) -> ShamirDb {
         "idx_c",
         ddl::create_index("emp_dept_idx", "employees").field("dept_id"),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     // Parent row.
     let mut b = Batch::new();
@@ -66,9 +72,12 @@ async fn setup(sys_path: std::path::PathBuf) -> ShamirDb {
         "ins",
         insert("departments").row(mpack!({ "dept_id": 100, "name": "Engineering" })),
     );
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .unwrap();
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .unwrap();
 
     db
 }
@@ -91,7 +100,10 @@ async fn set_child_fk_schema(db: &ShamirDb, action: FkAction, nullable: bool) {
         ddl::set_table_schema("employees").rules(vec![field.build()]),
     );
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("set_table_schema execute");
     // Surface a DDL-level rejection (e.g. fk_requires_index) loudly.
@@ -115,7 +127,10 @@ async fn insert_child_tx(db: &ShamirDb, dept_id: i64, name: &str) {
         })),
     );
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("child insert execute");
     if let Some(ref tx) = resp.transaction {
@@ -137,7 +152,10 @@ async fn count_employees(db: &ShamirDb, dept_id: Option<i64>) -> usize {
     };
     b.query("q", q);
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .expect("count query execute");
     resp.results["q"].records.len()
@@ -159,9 +177,12 @@ async fn delete_parent(
         delete("departments").where_(shamir_query_builder::filter::eq("dept_id", 100)),
     )
     .unwrap();
-    db.execute("testdb", &b.to_request_via_msgpack())
-        .await
-        .map_err(|e| e.to_string())
+    db.execute(
+        "testdb",
+        &b.to_request_via_msgpack().expect("batch request encoding"),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -281,11 +302,20 @@ async fn drop_guard_refuses_referenced_parent() {
 
     let mut b = Batch::new();
     b.id(50);
-    b.drop_table("dt", ddl::drop_table("departments"));
+    b.drop_table(
+        "dt",
+        ddl::drop_table("departments")
+            .hmac("direct-db-test")
+            .build()
+            .unwrap(),
+    );
     // The drop must be refused with drop_refused_fk. The refusal surfaces as a
     // top-level Err from `execute` (a coded BatchError).
     let resp = db
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .map_err(|e| e.to_string());
     let refused = format!("{resp:?}").contains("drop_refused_fk");

@@ -43,7 +43,7 @@ async fn create_publication_then_list_contains_it() {
         publication("pub_a").scope(repl_scope("app").repo("main").build()),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -51,7 +51,7 @@ async fn create_publication_then_list_contains_it() {
     b.id(2);
     b.op("lp", list_publications());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -82,7 +82,7 @@ async fn create_subscription_stores_fields_and_lists() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -90,7 +90,7 @@ async fn create_subscription_stores_fields_and_lists() {
     b.id(2);
     b.op("ls", list_subscriptions());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -137,7 +137,7 @@ async fn alter_subscription_pause_resume_set_profile() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -147,7 +147,7 @@ async fn alter_subscription_pause_resume_set_profile() {
     b.try_op("alt", alter_subscription("sub_a").pause())
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -161,7 +161,7 @@ async fn alter_subscription_pause_resume_set_profile() {
     b.try_op("alt", alter_subscription("sub_a").resume())
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -175,7 +175,7 @@ async fn alter_subscription_pause_resume_set_profile() {
     b.try_op("alt", alter_subscription("sub_a").set_profile("profile_b"))
         .unwrap();
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -204,16 +204,28 @@ async fn drop_publication_and_subscription_remove_from_list() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
     let mut b = Batch::new();
     b.id(2);
-    b.op("dp", drop_publication("pub_a"));
-    b.op("ds", drop_subscription("sub_a"));
+    b.op(
+        "dp",
+        drop_publication("pub_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop publication builder"),
+    );
+    b.op(
+        "ds",
+        drop_subscription("sub_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop subscription builder"),
+    );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -222,7 +234,7 @@ async fn drop_publication_and_subscription_remove_from_list() {
     b.op("lp", list_publications());
     b.op("ls", list_subscriptions());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -255,7 +267,7 @@ async fn create_replication_profile_persists_streams() {
         ),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -309,7 +321,7 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
         subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -329,7 +341,7 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
     b.id(2);
     b.op("ls", list_subscriptions());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let subs = result_value(&resp, "ls");
@@ -348,7 +360,7 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
     b.id(3);
     b.op("rs", replication_status());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let status = result_value(&resp, "rs");
@@ -377,7 +389,7 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
         b.id(4);
         b.try_op(alias, action).unwrap();
         let error = shamir
-            .execute("testdb", &b.to_request_via_msgpack())
+            .execute("testdb", &b.to_request_via_msgpack().unwrap())
             .await
             .unwrap_err();
         assert_eq!(error.code(), Some("resync_required"), "{error}");
@@ -397,9 +409,15 @@ async fn resync_required_round_trips_through_status_and_list_then_refuses_recove
     // COUNTERFACTUAL: `resync_required` here is the stale round-5 oracle.
     let mut b = Batch::new();
     b.id(5);
-    b.op("drop", drop_subscription("sub_a"));
+    b.op(
+        "drop",
+        drop_subscription("sub_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop subscription builder"),
+    );
     let error = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(
@@ -465,7 +483,7 @@ async fn resync_marking_keeps_bound_destinations_blocked_without_profile() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -505,9 +523,15 @@ async fn resync_marking_keeps_bound_destinations_blocked_without_profile() {
     // DELETE the profile: the binding, not the profile, is the authority.
     let mut b = Batch::new();
     b.id(2);
-    b.op("drp", drop_replication_profile("profile_a"));
+    b.op(
+        "drp",
+        drop_replication_profile("profile_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop replication profile builder"),
+    );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -532,14 +556,14 @@ async fn resync_marking_keeps_bound_destinations_blocked_without_profile() {
             .row(doc! { "name" => "Bob", "age" => 7 }),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let mut b = Batch::new();
     b.id(4);
     b.query("r", Query::with_repo("side", "users"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     assert_eq!(resp.results["r"].records.len(), 1);
@@ -550,7 +574,7 @@ async fn resync_marking_keeps_bound_destinations_blocked_without_profile() {
     b.op("ls", list_subscriptions());
     b.op("rs", replication_status());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     for alias in ["ls", "rs"] {
@@ -591,7 +615,7 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
     b.id(1);
     b.op("cr", create_repo("r1"));
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -603,7 +627,7 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
         publication("pub_x").scope(repl_scope("testdb").repo("r1").build()),
     );
     let error = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap_err();
     assert_eq!(
@@ -622,7 +646,7 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
     b.id(3);
     b.op("lp", list_publications());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let pubs = result_value(&resp, "lp");
@@ -643,7 +667,7 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
         }),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -654,7 +678,7 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
         publication("pub_y").scope(repl_scope("testdb").repo("r2").build()),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("explicit completed_reseed override must allow publication");
 
@@ -662,7 +686,7 @@ async fn publication_over_ephemeral_backend_requires_completed_reseed() {
     b.id(6);
     b.op("lp", list_publications());
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let pubs = result_value(&resp, "lp")
@@ -704,7 +728,7 @@ async fn resync_required_subscription_covering_predicate() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "cluster"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -793,7 +817,7 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
         subscription("sub_a", "tcp://leader:9000", "pub_a", "profile_a"),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     shamir
@@ -806,9 +830,15 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
     // recreating it with DIFFERENT scopes SUCCEEDS now.
     let mut b = Batch::new();
     b.id(2);
-    b.op("drp", drop_replication_profile("profile_a"));
+    b.op(
+        "drp",
+        drop_replication_profile("profile_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop replication profile builder"),
+    );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
 
@@ -823,7 +853,7 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
         ),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .expect("recreating an UNREFERENCED profile with new scopes must succeed");
 
@@ -861,14 +891,14 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
             .row(doc! { "name" => "Side", "age" => 2 }),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let mut b = Batch::new();
     b.id(5);
     b.query("r", Query::with_repo("side", "users"));
     let resp = shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let served = resp.results["r"].records[0].as_value().into_owned();
@@ -878,9 +908,15 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
     // STILL holds (same-scopes recreation never lifts a quarantine).
     let mut b = Batch::new();
     b.id(6);
-    b.op("drp2", drop_replication_profile("profile_a"));
+    b.op(
+        "drp2",
+        drop_replication_profile("profile_a")
+            .hmac("dummy")
+            .build()
+            .expect("drop replication profile builder"),
+    );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let mut b = Batch::new();
@@ -894,7 +930,7 @@ async fn recreating_profile_with_different_scopes_keeps_original_binding() {
         ),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute("testdb", &b.to_request_via_msgpack().unwrap())
         .await
         .unwrap();
     let outcome = shamir.read_changelog_bounded("testdb", "main", 0, 10).await;

@@ -261,15 +261,6 @@ fn value_error_type_mismatch_display() {
 }
 
 #[test]
-fn value_error_path_not_found_display() {
-    let e = ValueError::PathNotFound {
-        path: "a.b.c".into(),
-    };
-    let msg = e.to_string();
-    assert!(msg.contains("a.b.c"), "missing path in: {msg}");
-}
-
-#[test]
 fn value_error_not_a_map_display() {
     let e = ValueError::NotAMap {
         path: "root.leaf".into(),

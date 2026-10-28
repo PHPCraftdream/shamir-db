@@ -1,7 +1,8 @@
 //! `/arrays` scalar category — list operations over a single record's `List`
 //! value.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `arrays/` folder prefix:
 //! `length get slice contains index_of first last flatten distinct sort
 //!  sort_desc join sum min max avg`.
 //!
@@ -50,7 +51,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let arr = arg_list(a, 0)?;
                 let i = arg_i64(a, 1)?;
                 if i < 0 || i as usize >= arr.len() {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 Ok(arr[i as usize].clone())
             },
@@ -66,7 +67,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let start = arg_i64(a, 1)?;
                 let len = arg_i64(a, 2)?;
                 if start < 0 || len < 0 {
-                    return Err(ScalarError::new("out_of_range"));
+                    return Err(ScalarError::builtin("out_of_range"));
                 }
                 let start = (start as usize).min(arr.len());
                 let end = start.saturating_add(len as usize).min(arr.len());
@@ -81,7 +82,9 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let arr = arg_list(a, 0)?;
-                let needle = a.get(1).ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let needle = a
+                    .get(1)
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 Ok(v_bool(arr.iter().any(|e| e == needle)))
             },
             2,
@@ -93,7 +96,9 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let arr = arg_list(a, 0)?;
-                let needle = a.get(1).ok_or_else(|| ScalarError::new("missing_arg"))?;
+                let needle = a
+                    .get(1)
+                    .ok_or_else(|| ScalarError::builtin("missing_arg"))?;
                 let idx = arr
                     .iter()
                     .position(|e| e == needle)
@@ -112,7 +117,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 let arr = arg_list(a, 0)?;
                 arr.first()
                     .cloned()
-                    .ok_or_else(|| ScalarError::new("empty"))
+                    .ok_or_else(|| ScalarError::builtin("empty"))
             },
             1,
             Some(1),
@@ -123,7 +128,9 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 let arr = arg_list(a, 0)?;
-                arr.last().cloned().ok_or_else(|| ScalarError::new("empty"))
+                arr.last()
+                    .cloned()
+                    .ok_or_else(|| ScalarError::builtin("empty"))
             },
             1,
             Some(1),
@@ -138,7 +145,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 for e in arr {
                     match e {
                         QueryValue::List(inner) => out.extend(inner.iter().cloned()),
-                        _ => return Err(ScalarError::new("type_mismatch")),
+                        _ => return Err(ScalarError::builtin("type_mismatch")),
                     }
                 }
                 Ok(v_list(out))
@@ -213,7 +220,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                 for e in arr {
                     match e {
                         QueryValue::Str(s) => parts.push(s.as_str()),
-                        _ => return Err(ScalarError::new("type_mismatch")),
+                        _ => return Err(ScalarError::builtin("type_mismatch")),
                     }
                 }
                 Ok(v_str(parts.join(sep)))
@@ -243,7 +250,7 @@ enum Reduce {
 fn reduce(args: &[QueryValue], kind: Reduce) -> crate::registry::ScalarResult {
     let arr = arg_list(args, 0)?;
     if arr.is_empty() {
-        return Err(ScalarError::new("empty"));
+        return Err(ScalarError::builtin("empty"));
     }
     match kind {
         Reduce::Min | Reduce::Max => {
@@ -277,12 +284,12 @@ fn reduce(args: &[QueryValue], kind: Reduce) -> crate::registry::ScalarResult {
             for i in 1..arr.len() {
                 acc = acc
                     .checked_add(arg_dec(arr, i)?)
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
             }
             if let Reduce::Avg = kind {
                 acc = acc
                     .checked_div(Decimal::from(arr.len()))
-                    .ok_or_else(|| ScalarError::new("out_of_range"))?;
+                    .ok_or_else(|| ScalarError::builtin("out_of_range"))?;
             }
             Ok(v_dec(acc))
         }

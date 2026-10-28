@@ -1,6 +1,7 @@
 //! `/cast` scalar category — type-conversion functions.
 //!
-//! Functions registered (plain names, no folder prefix):
+//! Functions registered locally by `register` (plain names); `register_builtins`
+//! dispatches them under the production `cast/` folder prefix:
 //! `to_int to_float to_dec to_string to_bool parse_int parse_float try_cast`.
 //!
 //! Conventions (mirroring [`crate::math`]):
@@ -80,7 +81,7 @@ pub fn register(reg: &mut ScalarRegistry) {
                     "dec" => cast_to_dec(value),
                     "string" => Ok(v_str(stringify(value))),
                     "bool" => cast_to_bool(value),
-                    _ => Err(ScalarError::new("unknown_type")),
+                    _ => Err(ScalarError::builtin("unknown_type")),
                 }
             },
             2,
@@ -91,14 +92,15 @@ pub fn register(reg: &mut ScalarRegistry) {
 
 /// Fetch the `i`-th argument by reference or `ScalarError("missing_arg")`.
 fn arg(args: &[QueryValue], i: usize) -> Result<&QueryValue, ScalarError> {
-    args.get(i).ok_or_else(|| ScalarError::new("missing_arg"))
+    args.get(i)
+        .ok_or_else(|| ScalarError::builtin("missing_arg"))
 }
 
 /// Borrow a `&str` from a `Str` value, else `"type_mismatch"`.
 fn as_str(v: &QueryValue) -> Result<&str, ScalarError> {
     match v {
         QueryValue::Str(s) => Ok(s.as_str()),
-        _ => Err(ScalarError::new("type_mismatch")),
+        _ => Err(ScalarError::builtin("type_mismatch")),
     }
 }
 
@@ -112,9 +114,9 @@ fn cast_to_int(v: &QueryValue) -> Result<QueryValue, ScalarError> {
             if d.fract().is_zero() {
                 d.to_i64()
                     .map(v_int)
-                    .ok_or_else(|| ScalarError::new("cast_failed"))
+                    .ok_or_else(|| ScalarError::builtin("cast_failed"))
             } else {
-                Err(ScalarError::new("cast_failed"))
+                Err(ScalarError::builtin("cast_failed"))
             }
         }
         QueryValue::F64(f) => {
@@ -124,15 +126,15 @@ fn cast_to_int(v: &QueryValue) -> Result<QueryValue, ScalarError> {
             if f.fract() == 0.0 && f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64 {
                 Ok(v_int(*f as i64))
             } else {
-                Err(ScalarError::new("cast_failed"))
+                Err(ScalarError::builtin("cast_failed"))
             }
         }
         QueryValue::Big(b) => b
             .to_i64()
             .map(v_int)
-            .ok_or_else(|| ScalarError::new("cast_failed")),
+            .ok_or_else(|| ScalarError::builtin("cast_failed")),
         QueryValue::Str(s) => parse_int_str(s),
-        _ => Err(ScalarError::new("cast_failed")),
+        _ => Err(ScalarError::builtin("cast_failed")),
     }
 }
 
@@ -145,7 +147,7 @@ fn cast_to_dec(v: &QueryValue) -> Result<QueryValue, ScalarError> {
         QueryValue::Bool(b) => Ok(v_dec(Decimal::from(*b as i64))),
         QueryValue::F64(f) => Decimal::from_f64_retain(*f)
             .map(v_dec)
-            .ok_or_else(|| ScalarError::new("cast_failed")),
+            .ok_or_else(|| ScalarError::builtin("cast_failed")),
         QueryValue::Big(b) => {
             // Mirror agg::to_dec: i64 first (exact), then f64 fallback (lossy),
             // then error. BigInt has arbitrary precision so only values that
@@ -155,13 +157,13 @@ fn cast_to_dec(v: &QueryValue) -> Result<QueryValue, ScalarError> {
             } else if let Some(f) = b.to_f64() {
                 Decimal::from_f64_retain(f)
                     .map(v_dec)
-                    .ok_or_else(|| ScalarError::new("cast_failed"))
+                    .ok_or_else(|| ScalarError::builtin("cast_failed"))
             } else {
-                Err(ScalarError::new("cast_failed"))
+                Err(ScalarError::builtin("cast_failed"))
             }
         }
         QueryValue::Str(s) => parse_dec_str(s),
-        _ => Err(ScalarError::new("cast_failed")),
+        _ => Err(ScalarError::builtin("cast_failed")),
     }
 }
 
@@ -176,9 +178,9 @@ fn cast_to_bool(v: &QueryValue) -> Result<QueryValue, ScalarError> {
         QueryValue::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
             "true" | "1" => Ok(v_bool(true)),
             "false" | "0" => Ok(v_bool(false)),
-            _ => Err(ScalarError::new("cast_failed")),
+            _ => Err(ScalarError::builtin("cast_failed")),
         },
-        _ => Err(ScalarError::new("cast_failed")),
+        _ => Err(ScalarError::builtin("cast_failed")),
     }
 }
 
@@ -201,12 +203,12 @@ fn parse_int_str(s: &str) -> Result<QueryValue, ScalarError> {
     s.trim()
         .parse::<i64>()
         .map(v_int)
-        .map_err(|_| ScalarError::new("cast_failed"))
+        .map_err(|_| ScalarError::builtin("cast_failed"))
 }
 
 /// Parse a decimal string into a `Dec`.
 fn parse_dec_str(s: &str) -> Result<QueryValue, ScalarError> {
     Decimal::from_str(s.trim())
         .map(v_dec)
-        .map_err(|_| ScalarError::new("cast_failed"))
+        .map_err(|_| ScalarError::builtin("cast_failed"))
 }

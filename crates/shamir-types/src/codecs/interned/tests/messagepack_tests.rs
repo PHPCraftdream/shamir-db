@@ -8,10 +8,28 @@ use rust_decimal::Decimal;
 use std::str::FromStr;
 
 #[test]
+fn rv_types_58e7e6dc_map_key_decode_interns_borrowed_text() {
+    let interner = Interner::new();
+    let key = "borrowed-key";
+    let mut bytes = vec![0x81, 0xdb];
+    bytes.extend_from_slice(&(key.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(key.as_bytes());
+    bytes.push(0x01);
+    let decoded = msgpack_to_inner(&interner, &bytes).unwrap();
+    let InnerValue::Map(decoded_map) = decoded else {
+        panic!("expected map");
+    };
+    assert_eq!(decoded_map.len(), 1);
+    let id = interner.get_ind(key).unwrap();
+    assert_eq!(interner.get_str(&id).as_deref(), Some(key));
+    assert_eq!(
+        crate::codecs::interned::common::last_intern_key_ptr(),
+        bytes[6..].as_ptr() as usize
+    );
+}
+#[test]
 fn test_msgpack_to_inner_simple() {
     let interner = Interner::new();
-
-    // Create test data via rmpv
     let map = rmpv::Value::Map(vec![
         (rmpv::Value::from("name"), rmpv::Value::from("Alice")),
         (rmpv::Value::from("age"), rmpv::Value::from(30i64)),

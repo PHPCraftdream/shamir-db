@@ -1,5 +1,6 @@
-use crate::bm25::{idf, term_score, Bm25Params, FtsPostingValue, FtsStats};
-use std::sync::atomic::Ordering;
+use crate::bm25::{idf, term_score, Bm25Params, FtsPostingValue, FtsStats, FtsStatsSnapshot};
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 #[test]
 fn idf_basic() {
@@ -53,9 +54,10 @@ fn stats_avg_doc_len() {
     let stats = FtsStats::new();
     stats.on_insert(100);
     stats.on_insert(200);
-    assert_eq!(stats.doc_count.load(Ordering::Relaxed), 2);
+    assert_eq!(stats.doc_count(), 2);
     assert!((stats.avg_doc_len() - 150.0).abs() < 0.001);
     stats.on_delete(100);
+    assert_eq!(stats.doc_count(), 1);
     assert!((stats.avg_doc_len() - 200.0).abs() < 0.001);
 }
 
@@ -63,6 +65,72 @@ fn stats_avg_doc_len() {
 fn stats_empty_returns_1() {
     let stats = FtsStats::new();
     assert_eq!(stats.avg_doc_len(), 1.0);
+}
+
+#[test]
+fn rv_index_cf7d545b_delete_from_zero_does_not_underflow() {
+    let stats = FtsStats::new();
+    stats.on_delete(5);
+    assert_eq!(stats.snapshot(), FtsStatsSnapshot::default());
+}
+
+#[test]
+fn rv_index_aeedb51b_zero_length_documents_keep_average_positive() {
+    let stats = FtsStats::new();
+    stats.on_insert(0);
+    assert_eq!(stats.doc_count(), 1);
+    assert_eq!(stats.sum_doc_len(), 0);
+    assert_eq!(stats.avg_doc_len(), 1.0);
+}
+
+#[test]
+fn rv_index_cf7d545b_rejected_and_double_deletes_preserve_pair() {
+    let stats = FtsStats::new();
+    stats.on_insert(3);
+    stats.on_delete(9);
+    assert_eq!(
+        stats.snapshot(),
+        FtsStatsSnapshot {
+            doc_count: 1,
+            sum_doc_len: 3,
+        }
+    );
+    stats.on_delete(3);
+    assert_eq!(stats.snapshot(), FtsStatsSnapshot::default());
+    stats.on_insert(4);
+    stats.on_delete(4);
+    stats.on_delete(4);
+    assert_eq!(stats.snapshot(), FtsStatsSnapshot::default());
+}
+
+#[test]
+fn rv_index_aeedb51b_snapshot_stays_paired_across_updates() {
+    let stats = Arc::new(FtsStats::new());
+    let barrier = Arc::new(Barrier::new(2));
+    let writer_stats = Arc::clone(&stats);
+    let writer_barrier = Arc::clone(&barrier);
+    let writer = thread::spawn(move || {
+        writer_barrier.wait();
+        for _ in 0..10_000 {
+            writer_stats.on_insert(3);
+            writer_stats.on_delete(3);
+        }
+    });
+    barrier.wait();
+    for _ in 0..10_000 {
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.sum_doc_len, snapshot.doc_count * 3);
+        assert!(stats.avg_doc_len().is_finite() && stats.avg_doc_len() > 0.0);
+    }
+    writer.join().unwrap();
+    assert_eq!(stats.snapshot(), FtsStatsSnapshot::default());
+}
+
+#[test]
+fn rv_index_aeedb51b_term_score_guards_nonpositive_average() {
+    let params = Bm25Params::default();
+    let score = term_score(&params, 2, 3, 0.0, idf(4, 1));
+    assert!(score.is_finite() && score > 0.0);
 }
 
 #[test]

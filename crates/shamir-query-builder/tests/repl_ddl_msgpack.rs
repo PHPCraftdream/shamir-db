@@ -50,7 +50,10 @@ fn canonical_ops() -> Vec<(&'static str, BatchOp)> {
         ),
         (
             "drop_replication_profile",
-            ddl::drop_replication_profile("cluster"),
+            ddl::drop_replication_profile("cluster")
+                .hmac("aa")
+                .build()
+                .unwrap(),
         ),
         (
             "create_publication",
@@ -58,12 +61,18 @@ fn canonical_ops() -> Vec<(&'static str, BatchOp)> {
                 .scope(ddl::repl_scope("app").build())
                 .build(),
         ),
-        ("drop_publication", ddl::drop_publication("pub_all")),
+        (
+            "drop_publication",
+            ddl::drop_publication("pub_all").hmac("aa").build().unwrap(),
+        ),
         (
             "create_subscription",
             ddl::subscription("sub1", "leader:9above", "pub_all", "cluster"),
         ),
-        ("drop_subscription", ddl::drop_subscription("sub1")),
+        (
+            "drop_subscription",
+            ddl::drop_subscription("sub1").hmac("aa").build().unwrap(),
+        ),
         (
             "alter_subscription_set_profile",
             ddl::alter_subscription("sub1")

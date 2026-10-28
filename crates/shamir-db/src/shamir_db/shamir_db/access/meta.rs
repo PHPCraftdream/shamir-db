@@ -18,6 +18,25 @@ fn checked_meta(record: &QueryValue, kind: &str) -> DbResult<ResourceMeta> {
 }
 
 impl ShamirDb {
+    pub(crate) async fn set_table_resource_meta_locked(
+        &self,
+        db: &str,
+        store: &str,
+        table: &str,
+        meta: &ResourceMeta,
+        _control: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
+    ) -> DbResult<()> {
+        let mut record = self
+            .system_store
+            .load_table_record(db, store, table)
+            .await?
+            .ok_or_else(|| {
+                DbError::NotFound(format!("table '{}/{}/{}' not found", db, store, table))
+            })?;
+        meta.inject_into(&mut record);
+        self.system_store.save_table_meta(&record).await
+    }
+
     // ========================================================================
     // Resource metadata resolver + groups (P3 metadata plates)
     // ========================================================================
@@ -274,16 +293,9 @@ impl ShamirDb {
                 self.system_store.save_repository_meta(&rec).await
             }
             ResourcePath::Table { db, store, table } => {
-                let rec = self
-                    .system_store
-                    .load_table_record(db, store, table)
-                    .await?
-                    .ok_or_else(|| {
-                        DbError::NotFound(format!("table '{}/{}/{}' not found", db, store, table))
-                    })?;
-                let mut rec = rec;
-                meta.inject_into(&mut rec);
-                self.system_store.save_table_meta(&rec).await
+                let _control = self.lock_replication_control().await;
+                self.set_table_resource_meta_locked(db, store, table, meta, &_control)
+                    .await
             }
             ResourcePath::Function { name } => {
                 let rec = self

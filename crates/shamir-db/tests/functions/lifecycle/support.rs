@@ -108,7 +108,10 @@ pub(crate) async fn setup_db_with_people_table() -> ShamirDb {
             .tables(["people"]),
     );
     shamir
-        .execute("testdb", &b.to_request_via_msgpack())
+        .execute(
+            "testdb",
+            &b.to_request_via_msgpack().expect("batch request encoding"),
+        )
         .await
         .unwrap();
     shamir

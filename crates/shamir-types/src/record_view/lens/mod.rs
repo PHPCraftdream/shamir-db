@@ -35,10 +35,15 @@ mod read_value;
 mod skip;
 mod view;
 
+/// Test-only direct marker error oracle for the string header parser.
+#[cfg(test)]
+pub(crate) use cursor::read_str_len;
 pub use error::{RecordViewError, MAX_MSGPACK_DEPTH};
 pub use field_index::FieldIndex;
+
 pub(crate) use read_value::read_value;
 pub(crate) use skip::skip_value;
+
 pub use view::RecordView;
 
 #[cfg(test)]

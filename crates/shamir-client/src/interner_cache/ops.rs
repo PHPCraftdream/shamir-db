@@ -10,11 +10,7 @@
 //! (`as_value()` / `QueryValue::get` / `as_u64` / `as_str` / `as_array`);
 //! no deserialisation is involved on the read path — only QueryValue accessors.
 //!
-//! §9.4 discipline (single source of truth): ids enter the cache ONLY via
-//! [`FieldMap::insert_entry`](crate::interner_cache::FieldMap::insert_entry),
-//! which is called exclusively from the server-response parsers below. The
-//! resolve fn [`Client::resolve_field`] never parses a numeric-looking name
-//! into an id — `"42"` is the STRING "42".
+//! Full dumps and ambient deltas establish completeness; touches add sparse mappings.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -180,14 +176,8 @@ impl Client {
     pub async fn dump_repo(&self, db: &str, repo: &str) -> Result<(), ClientError> {
         let fm = self.interner_cache().get_or_create(db, repo);
 
-        // The OnceCell closure may borrow `self` (Client) and `fm` (Arc) by
-        // reference — `get_or_init` holds `&FieldMap` and the closure holds
-        // `&Client`; these do not alias. The closure runs at most once per
-        // FieldMap; concurrent first-callers await the same future (stampede
-        // guard). Per tokio's OnceCell contract: if this future is cancelled
-        // or the closure returns early (it cannot — it swallows errors and
-        // resolves `()`), the cell stays uninitialized and a later call
-        // retries.
+        // The OnceCell coalesces concurrent initial dumps; later callers run
+        // this operation unconditionally, as required by dump_repo's contract.
         fm.ensure_populated(|| {
             let fm = Arc::clone(&fm);
             let db = db.to_string();
@@ -196,17 +186,7 @@ impl Client {
                 let alias = "_ic_dump";
                 let mut batch = Batch::new();
                 batch.op(alias, ddl::interner_dump().repo(&repo));
-                // Errors are logged + swallowed so the OnceCell still resolves
-                // with `()`; the maps stay empty until a successful retry.
-                let req = match batch.try_build() {
-                    Ok(req) => req,
-                    // Errors are logged + swallowed so the OnceCell still
-                    // resolves with `()`; a later retry revalidates.
-                    Err(e) => {
-                        tracing::warn!("interner dump_repo batch invalid: {e}");
-                        return;
-                    }
-                };
+                let req = batch.try_build().map_err(client_batch_error)?;
                 match self.execute(&db, req).await {
                     Ok(resp) => match first_record_value(&resp, alias)
                         .and_then(|v| parse_dump_payload(&v, alias))
@@ -215,24 +195,21 @@ impl Client {
                             for (id, name) in &payload.entries {
                                 fm.insert_entry(name, *id);
                             }
-                            fm.set_epoch(payload.epoch);
+                            fm.set_complete_epoch(payload.epoch);
                         }
-                        Err(e) => {
-                            tracing::warn!("interner dump_repo parse failed: {e}");
-                        }
+                        Err(e) => return Err(e),
                     },
-                    Err(e) => {
-                        tracing::warn!("interner dump_repo roundtrip failed: {e}");
-                    }
+                    Err(e) => return Err(e),
                 }
+                Ok(())
             }
         })
-        .await;
+        .await?;
         Ok(())
     }
 
-    /// Delta refresh: pull only entries with id > the cache's current epoch and
-    /// merge them. CAS-maxes the epoch from the response.
+    /// Delta refresh: pull only entries with id > the cache's completeness watermark
+    /// and merge them. The response establishes the next complete watermark.
     pub async fn refresh_repo(&self, db: &str, repo: &str) -> Result<(), ClientError> {
         let fm = self.interner_cache().get_or_create(db, repo);
         let epoch = fm.epoch();
@@ -247,13 +224,13 @@ impl Client {
         for (id, name) in &payload.entries {
             fm.insert_entry(name, *id);
         }
-        fm.set_epoch(payload.epoch.max(epoch));
+        fm.set_complete_epoch(payload.epoch.max(epoch));
         Ok(())
     }
 
     /// Register `names` against the server's interner for `(db, repo)` and
-    /// merge the returned `(name, id)` mappings into the cache. Returns the
-    /// resolved mappings in input order.
+    /// Returns mappings in input order. Sparse mappings are cached but do not
+    /// establish completeness; incomplete server responses return a protocol error.
     ///
     /// Idempotent: the server returns the existing id for a name already
     /// interned, so re-touching is a cache-confirming no-op.
@@ -285,10 +262,22 @@ impl Client {
             .await?;
         let payload_value = first_record_value(&resp, alias)?;
         let payload = parse_touch_payload(&payload_value, alias)?;
+        // Cache all received pairs without moving the completeness watermark.
         for (name, id) in &payload.mappings {
-            fm.insert_entry(name, *id);
+            fm.insert_sparse_entry(name, *id);
         }
-        fm.set_epoch(payload.epoch);
+        let missing: Vec<&str> = unknown
+            .iter()
+            .filter(|name| fm.id_of(name).is_none())
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            return Err(ClientError::Protocol(format!(
+                "interner_touch omitted requested names: {}",
+                missing.join(", ")
+            )));
+        }
+        fm.set_observed_epoch(payload.epoch);
         // Return the full input set's resolved mappings (touches + already-known).
         Ok(names
             .iter()
@@ -313,18 +302,14 @@ impl Client {
 
     /// Merge a response's `interner_delta` into the per-`(db, repo)` cache.
     ///
-    /// Ambient sync path (Stage 5-wire Part A): called from [`Client::execute`]
-    /// after every batch response. For each `(repo, delta)`: get-or-create the
-    /// FieldMap, `insert_entry(name, id)` for each entry (idempotent), then
-    /// `set_epoch(delta.epoch)` (CAS-max). §9.4-safe — ids come only from the
-    /// server response.
+    /// Cold-v2 requests advertise completeness cursors; response deltas fill maps.
     pub(crate) fn merge_interner_delta(&self, db: &str, response: &BatchResponse) {
         for (repo, delta) in &response.interner_delta {
             let fm = self.interner_cache().get_or_create(db, repo);
             for (id, name) in &delta.entries {
                 fm.insert_entry(name, *id);
             }
-            fm.set_epoch(delta.epoch);
+            fm.set_complete_epoch(delta.epoch);
         }
     }
 
@@ -388,30 +373,20 @@ impl Client {
             }
         }
 
-        // Collect field names per repo (write ops only — INSERT/SET/UPDATE).
-        // Each repo gets ONE aggregated touch. The repo is read straight off
-        // each op's table-ref. TFxMap = HashMap with the workspace THasher
-        // (`HashMap::new` is banned — SipHash).
+        let mut result_repos: TFxMap<String, String> = TFxMap::default();
+        for (alias, entry) in &batch.queries {
+            if let Some(table) = entry.op.table_ref() {
+                result_repos.insert(alias.clone(), table.repo.clone());
+            }
+        }
+
+        // Field names are pre-touched per repo; preserve result alias provenance.
         let mut per_repo: TFxMap<String, Vec<String>> = TFxMap::default();
         for entry in batch.queries.values() {
             collect_field_names(&entry.op, &mut per_repo);
         }
 
-        // Collect the FULL set of repos referenced by ANY data op (read OR
-        // write). This wider set is what deintern_response consults: a
-        // read-only batch has no write ops (per_repo empty), but its SELECT
-        // results may come back as IdBytes rows that need a FieldMap to
-        // de-intern. Using table_ref() covers Read, Insert, Update, Set, Delete.
-        let mut all_repos: TFxMap<String, ()> = TFxMap::default();
-        for entry in batch.queries.values() {
-            if let Some(tr) = entry.op.table_ref() {
-                all_repos.insert(tr.repo.clone(), ());
-            }
-        }
-        let repos: Vec<String> = all_repos.into_keys().collect();
-
-        // Touch each repo's unknown fields. The touch fn short-circuits when
-        // every name is already cached, so a warm cache adds no roundtrip.
+        // Touch each repo's unknown fields; warm cache adds no roundtrip.
         for (repo, mut names) in per_repo {
             names.sort_unstable();
             names.dedup();
@@ -464,14 +439,11 @@ impl Client {
             }
         }
 
+        // Track source repos per alias; row decoding must not probe peers.
         let response = self.execute(db, batch).await?;
 
-        // De-intern any IdBytes rows back to name-keyed QueryValues. The repos
-        // slice tells deintern_response which FieldMaps to consult. Only called
-        // on v2 (result_encoding = Id was set above), but safe to call on v1
-        // responses too since deintern_response is a no-op when no IdBytes rows
-        // are present.
-        deintern_response(self, db, response, &repos).await
+        // De-intern using the dictionary associated with each result alias.
+        deintern_response(self, db, response, &result_repos).await
     }
 }
 
@@ -673,30 +645,34 @@ fn encode_record_idmsgpack(
         .map_err(|e| ClientError::Protocol(format!("id-keyed record encode: {e}")))
 }
 
-/// De-intern all `QueryRecord::IdBytes` rows in `response` using the FieldMaps
-/// for `repos` under `db`. Returns the response with all IdBytes rows replaced
-/// by name-keyed `QueryRecord::Direct(QueryValue)`.
-///
-/// This function is only called from `execute_with_touch` on v2 responses.
-/// It is a no-op if no IdBytes rows are present (v1 responses, or responses
-/// from non-insert ops that return name-keyed rows).
-///
-/// **Repo selection:** the caller passes the repos that were targeted by the
-/// batch — these are exactly the repos whose FieldMaps are pre-warmed by
-/// `touch_fields`. For each IdBytes row we try each repo's FieldMap; the
-/// correct repo's map fully resolves all ids. If no repo resolves the row,
-/// we call `refresh_repo` ONCE per repo and retry.
+/// `result_repos` is indexed by batch alias, so shared numeric ID spaces cannot cross repositories.
 async fn deintern_response(
     client: &Client,
     db: &str,
     mut response: BatchResponse,
-    repos: &[String],
+    result_repos: &TFxMap<String, String>,
 ) -> Result<BatchResponse, ClientError> {
     // Track which repos have been refreshed in this call to avoid double-refresh.
     let mut refreshed: TFxMap<String, ()> = TFxMap::default();
 
-    for result in response.results.values_mut() {
-        deintern_query_result(client, db, result, repos, &mut refreshed).await?;
+    // Pre-resolve maps once per alias. This avoids constructing owned cache
+    // keys for every encoded row while preserving repository provenance.
+    let field_maps: TFxMap<String, (String, Arc<crate::interner_cache::FieldMap>)> = result_repos
+        .iter()
+        .map(|(alias, repo)| {
+            (
+                alias.clone(),
+                (
+                    repo.clone(),
+                    client.interner_cache().get_or_create(db, repo),
+                ),
+            )
+        })
+        .collect();
+    for (alias, result) in &mut response.results {
+        if let Some((repo, field_map)) = field_maps.get(alias) {
+            deintern_query_result(client, db, repo, result, field_map, &mut refreshed).await?;
+        }
     }
     Ok(response)
 }
@@ -705,92 +681,36 @@ async fn deintern_response(
 async fn deintern_query_result(
     client: &Client,
     db: &str,
+    repo: &str,
     result: &mut QueryResult,
-    repos: &[String],
+    field_map: &Arc<crate::interner_cache::FieldMap>,
     refreshed: &mut TFxMap<String, ()>,
 ) -> Result<(), ClientError> {
     for record in &mut result.records {
         if let QueryRecord::IdBytes(ref bytes) = *record {
-            let bytes_snapshot = bytes.clone();
-            let qv =
-                deintern_id_bytes(client, db, bytes_snapshot.as_ref(), repos, refreshed).await?;
+            let mut value = try_deintern_map(bytes.as_ref(), field_map);
+            if value.is_none() && !refreshed.contains_key(repo) {
+                client.refresh_repo(db, repo).await?;
+                refreshed.insert(repo.to_string(), ());
+                value = try_deintern_map(bytes.as_ref(), field_map);
+            }
+            let qv = value.ok_or_else(|| {
+                ClientError::Protocol(format!(
+                    "de-intern: id-keyed row could not be resolved after refresh_repo (db={db})"
+                ))
+            })?;
             *record = QueryRecord::Direct(qv);
         }
     }
     Ok(())
 }
-
-/// De-intern a single `IdBytes` payload using the FieldMaps for `repos`.
-///
-/// Attempt 1: try each repo's FieldMap. Return the first successful de-intern.
-/// Attempt 2 (if all fail): refresh repos once, then retry.
-/// If still failing after refresh, return a protocol error.
-async fn deintern_id_bytes(
-    client: &Client,
-    db: &str,
+fn try_deintern_map(
     bytes: &[u8],
-    repos: &[String],
-    refreshed: &mut TFxMap<String, ()>,
-) -> Result<QueryValue, ClientError> {
-    // Attempt 1: try all known repos without any refresh.
-    if let Some(qv) = try_deintern_repos(client, db, bytes, repos) {
-        return Ok(qv);
-    }
-
-    // Attempt 2: refresh all not-yet-refreshed repos, then retry.
-    for repo in repos {
-        if !refreshed.contains_key(repo) {
-            client.refresh_repo(db, repo).await?;
-            refreshed.insert(repo.clone(), ());
-        }
-    }
-
-    try_deintern_repos(client, db, bytes, repos).ok_or_else(|| {
-        ClientError::Protocol(format!(
-            "de-intern: id-keyed row could not be resolved after refresh_repo (db={db})"
-        ))
-    })
-}
-
-/// Try to de-intern `bytes` using each repo's FieldMap in turn. Returns the
-/// first successful de-intern, or `None` if all repos fail.
-///
-/// A repo's de-intern succeeds when EVERY id in the row is present in that
-/// repo's FieldMap. If any id is missing, `record_view_deintern_with` returns
-/// an error and we try the next repo.
-///
-/// **Assumption:** field-id namespaces are per-repo; a given id maps to the
-/// same field name within a single repo and is not shared across repos. The
-/// caller must pass only the repos targeted by the batch — `touch_fields`
-/// ensures their FieldMaps are pre-warmed. In the common single-repo case
-/// there is exactly one candidate and this is unconditionally correct. In a
-/// multi-repo batch this is a best-effort first-match: if two repos happen to
-/// assign the same id to different field names the result may come from the
-/// wrong repo. Avoid mixing repos that share id-space in one batch.
-fn try_deintern_repos(
-    client: &Client,
-    db: &str,
-    bytes: &[u8],
-    repos: &[String],
+    field_map: &crate::interner_cache::FieldMap,
 ) -> Option<QueryValue> {
-    // Single-repo batches are the overwhelmingly common case and are always
-    // correct. Multi-repo batches rely on the per-repo id-namespace assumption
-    // above; assert that callers don't silently pass an unbounded repo set.
-    debug_assert!(
-        !repos.is_empty(),
-        "try_deintern_repos: repos must not be empty"
-    );
-
     let view = RecordView::new(bytes)
         .map_err(|e| tracing::warn!("de-intern: RecordView::new failed: {:?}", e))
         .ok()?;
-
-    for repo in repos {
-        let fm = client.interner_cache().get_or_create(db, repo);
-        let resolver = |id: u64| fm.name_of(id);
-        if let Ok(qv) = record_view_deintern_with(&view, &resolver) {
-            return Some(qv);
-        }
-    }
-    None
+    let resolver = |id: u64| field_map.name_of(id);
+    record_view_deintern_with(&view, &resolver).ok()
 }

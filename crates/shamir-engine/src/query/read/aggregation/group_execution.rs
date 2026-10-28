@@ -33,12 +33,11 @@ pub fn apply_group_by(
     select: &Select,
     interner: &Interner,
     ctx: &FilterContext<'_>,
-) -> Vec<QueryValue> {
+) -> DbResult<Vec<QueryValue>> {
     try_apply_group_by(records, group_by, select, interner, ctx)
-        .expect("apply_group_by: aggregate execution failed")
 }
 
-/// Fallible grouped execution; legacy callers retain their Vec-returning helper.
+/// Fallible grouped execution.
 pub(crate) fn try_apply_group_by(
     records: &[(RecordId, Bytes)],
     group_by: &GroupBy,
@@ -150,7 +149,9 @@ pub(crate) fn try_apply_group_by(
     // `RecordRef` adapter that re-keys String → `InternerKey` once and
     // serves leaves as `ScalarRef` straight off the `QueryValue`.
     if let Some(having_filter) = &group_by.having {
-        pre_intern_select_keys(select, interner);
+        // RU8: a HAVING on a new alias at the quota cap must surface the
+        // typed error, not silently absorb the failed intern.
+        pre_intern_select_keys(select, interner)?;
         let having_cb = compile_filter(having_filter, interner);
         result.retain(|qv| {
             let view = HavingView::new(qv, interner);
@@ -224,11 +225,10 @@ pub fn apply_aggregate_all(
     select: &Select,
     interner: &Interner,
     scalars: ScalarResolver,
-) -> Vec<QueryValue> {
+) -> DbResult<Vec<QueryValue>> {
     let empty_refs: TMap<String, QueryResult> = new_map_wc(0);
     let ctx = FilterContext::new(interner, &empty_refs).with_scalars(scalars);
     apply_aggregate_all_with_context(records, select, interner, &ctx)
-        .expect("apply_aggregate_all: aggregate execution failed")
 }
 
 /// Aggregate one execution with its resolved references and parameters.
