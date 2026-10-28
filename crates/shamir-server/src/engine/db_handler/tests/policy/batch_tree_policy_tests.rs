@@ -15,8 +15,9 @@ use shamir_query_builder::doc;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::val::lit;
 use shamir_query_builder::write::insert;
-use shamir_query_types::batch::BatchRequest;
-use shamir_query_types::hmac::{canonical_drop_table, compute_tag_hex};
+use shamir_query_types::admin::DropTableOp;
+use shamir_query_types::batch::{BatchOp, BatchRequest};
+use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex};
 use shamir_types::types::value::QueryValue;
 
 use crate::db_handler::config::NodeMode;
@@ -55,10 +56,27 @@ async fn fixture(mode: NodeMode) -> (Arc<ShamirDb>, ShamirDbHandler) {
 
 fn destructive(tag: Option<&str>) -> BatchRequest {
     let mut batch = Batch::new();
-    let mut op = drop_table("items").repo("main");
-    if let Some(tag) = tag {
-        op = op.hmac(tag);
-    }
+    let op = if let Some(tag) = tag {
+        drop_table("items")
+            .repo("main")
+            .hmac(tag)
+            .build()
+            .expect("build drop table")
+    } else {
+        // Unsigned on purpose: the builder requires a tag, so strip it.
+        match drop_table("items")
+            .repo("main")
+            .hmac("unused")
+            .build()
+            .expect("build drop table")
+        {
+            shamir_query_types::batch::BatchOp::DropTable(mut unsigned) => {
+                unsigned.hmac = None;
+                shamir_query_types::batch::BatchOp::DropTable(unsigned)
+            }
+            other => other,
+        }
+    };
     batch.drop_table("destroy", op);
     batch.build()
 }
@@ -218,9 +236,16 @@ async fn superuser_nested_drop_requires_correct_hmac_and_executes_body() {
         "destroy",
     );
     assert!(db.get_table("app", "main", "items").await.is_ok());
+    let wrong_op = BatchOp::DropTable(DropTableOp {
+        drop_table: "different_table".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    });
     let wrong = compute_tag_hex(
         &session.hmac_key(),
-        &canonical_drop_table("app", "main", "different_table"),
+        &canonical_batch_op("app", &wrong_op).expect("drop-table canonical form"),
     );
     for tag in ["not-hex", wrong.as_str()] {
         error(
@@ -230,9 +255,16 @@ async fn superuser_nested_drop_requires_correct_hmac_and_executes_body() {
         );
         assert!(db.get_table("app", "main", "items").await.is_ok());
     }
+    let op = BatchOp::DropTable(DropTableOp {
+        drop_table: "items".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    });
     let tag = compute_tag_hex(
         &session.hmac_key(),
-        &canonical_drop_table("app", "main", "items"),
+        &canonical_batch_op("app", &op).expect("drop-table canonical form"),
     );
     accepted(
         execute(&handler, &session, nested(destructive(Some(&tag)), 3)).await,
@@ -304,6 +336,81 @@ fn non_superuser_nested_admin_rejected_at_one_and_three_levels() {
 #[test]
 fn tx_execute_rejects_nested_admin_before_execution() {
     on_big_stack(tx_execute_rejects_nested_admin_before_execution_body);
+}
+
+fn foreach_drop(tag: Option<&str>) -> BatchRequest {
+    let mut body = Batch::new();
+    let op = if let Some(tag) = tag {
+        drop_table("items")
+            .repo("main")
+            .hmac(tag)
+            .build()
+            .expect("build drop table")
+    } else {
+        BatchOp::DropTable(DropTableOp {
+            drop_table: "items".into(),
+            repo: "main".into(),
+            hmac: None,
+            if_exists: false,
+            cascade: false,
+        })
+    };
+    body.drop_table("destroy", op);
+    let mut outer = Batch::new();
+    outer.for_each("loop", vec![lit(1)], "row", body.build());
+    outer.build()
+}
+
+async fn superuser_foreach_drop_requires_unresolved_template_hmac_body() {
+    let (db, handler) = fixture(NodeMode::ReadWrite).await;
+    let session = session(true);
+    error(
+        execute(&handler, &session, foreach_drop(None)).await,
+        "hmac_required",
+        "destroy",
+    );
+    assert!(db.get_table("app", "main", "items").await.is_ok());
+
+    let wrong_op = BatchOp::DropTable(DropTableOp {
+        drop_table: "other".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    });
+    let wrong = compute_tag_hex(
+        &session.hmac_key(),
+        &canonical_batch_op("app", &wrong_op).expect("canonical drop table"),
+    );
+    error(
+        execute(&handler, &session, foreach_drop(Some(&wrong))).await,
+        "hmac_mismatch",
+        "destroy",
+    );
+    assert!(db.get_table("app", "main", "items").await.is_ok());
+
+    let op = BatchOp::DropTable(DropTableOp {
+        drop_table: "items".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    });
+    let valid = compute_tag_hex(
+        &session.hmac_key(),
+        &canonical_batch_op("app", &op).expect("canonical drop table"),
+    );
+    accepted(
+        execute(&handler, &session, foreach_drop(Some(&valid))).await,
+        "loop",
+        &["destroy"],
+    );
+    assert!(db.get_table("app", "main", "items").await.is_err());
+}
+
+#[test]
+fn rv_query_types_a3d93402_foreach_template_hmac_checked_before_iteration() {
+    on_big_stack(superuser_foreach_drop_requires_unresolved_template_hmac_body);
 }
 
 #[test]

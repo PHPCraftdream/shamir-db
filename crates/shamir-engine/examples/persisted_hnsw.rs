@@ -209,7 +209,7 @@ fn run_cell(
         .vectors
         .iter()
         .enumerate()
-        .map(|(i, v)| (rid_from(i), v.clone()))
+        .map(|(i, v)| (rid_from(i), v.to_vec()))
         .collect();
 
     // ── build a live graph via one batched upsert, then dump it ─────

@@ -44,7 +44,12 @@ impl TableManager {
         let registry = self.index2_registry();
 
         match filter {
-            Filter::Fts { field, query, mode } => {
+            Filter::Fts {
+                field,
+                query,
+                mode,
+                limit,
+            } => {
                 let Some(interned) = intern_field_path(field, interner) else {
                     return Ok(None);
                 };
@@ -63,10 +68,14 @@ impl TableManager {
                 } else {
                     FtsMode::AndAll
                 };
+                // Forward only the filter-level cap: materialization and validation drop
+                // candidates before pagination, so pushing the query limit here could
+                // leave too few matches.
                 let result = backend
                     .lookup(IndexQuery::Fts {
                         tokens,
                         mode: fts_mode,
+                        limit: limit.map(|k| k as usize),
                     })
                     .await
                     .ok();
@@ -316,6 +325,10 @@ impl TableManager {
 
         match remaining.len() {
             0 => None,
+            #[expect(
+                clippy::unwrap_used,
+                reason = "guard: remaining.len() == 1 guarantees exactly one residual filter"
+            )]
             1 => Some(remaining.into_iter().next().unwrap()),
             _ => Some(Filter::And { filters: remaining }),
         }
@@ -445,6 +458,10 @@ impl TableManager {
 
                 let residual = match remaining.len() {
                     0 => None,
+                    #[expect(
+                        clippy::unwrap_used,
+                        reason = "guard: remaining.len() == 1 guarantees exactly one residual filter"
+                    )]
                     1 => Some(remaining.into_iter().next().unwrap()),
                     _ => Some(Filter::And { filters: remaining }),
                 };

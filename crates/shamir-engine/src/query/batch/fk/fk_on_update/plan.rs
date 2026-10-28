@@ -136,9 +136,15 @@ pub(crate) async fn plan_fk_on_update(
         shamir_collections::TFxMap::default();
     for rref in &relevant_refs {
         if !new_values.contains_key(&rref.parent_ref_field) {
-            let new = set_fields
-                .get(&rref.parent_ref_field)
-                .expect("filtered above");
+            let new = {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "guard: this field was filtered into relevant_refs from set_fields"
+                )]
+                set_fields
+                    .get(&rref.parent_ref_field)
+                    .expect("filtered above")
+            };
             if !qv_is_supported_scalar(new) {
                 return Err(BatchError::query_coded(
                     alias,

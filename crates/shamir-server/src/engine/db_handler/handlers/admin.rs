@@ -91,7 +91,7 @@ pub(crate) async fn derive_scram_record(
 ///      otherwise; checked FIRST, before the HMAC gate, so a missing/wrong
 ///      hmac on a non-superuser session still returns `permission_denied`).
 ///   2. The op must carry a hex HMAC-SHA256 tag over
-///      [`shamir_query_types::hmac::canonical_create_scram_user`] keyed by
+///      [`shamir_query_types::hmac::canonical_db_request`] keyed by
 ///      the session's HMAC key (`hmac_required` if missing, `hmac_mismatch`
 ///      if wrong). Same "did-you-mean-it" mechanism as `SetSuperuser` and
 ///      destructive `BatchOp`s — inlined here (NOT routed through
@@ -105,6 +105,7 @@ pub(crate) async fn create_scram_user(
     password: SecretString,
     roles: Vec<String>,
     hmac: Option<String>,
+    request_canonical: Option<Vec<u8>>,
 ) -> DbResponse {
     // 1. Permission gate FIRST (mirrors `set_superuser`'s ordering — a
     //    non-superuser session gets `permission_denied` regardless of the
@@ -118,7 +119,12 @@ pub(crate) async fn create_scram_user(
 
     // 2. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
     //    `check_destructive_hmacs`).
-    let canonical = canon::canonical_create_scram_user(&name, &roles);
+    let Some(canonical) = request_canonical else {
+        return DbResponse::Error {
+            code: "hmac_required".into(),
+            message: "missing canonical encoding for required request".into(),
+        };
+    };
     let Some(tag) = hmac.as_ref() else {
         return DbResponse::Error {
             code: "hmac_required".into(),
@@ -237,7 +243,7 @@ pub(crate) async fn create_scram_user(
 ///      hmac on a non-superuser session still returns `permission_denied`).
 ///   2. Handler must be built with `AdminGlue` (`not_supported` otherwise).
 ///   3. The op must carry a hex HMAC-SHA256 tag over
-///      [`canonical_set_superuser`] keyed by the session's HMAC key
+///      [`canonical_db_request`] keyed by
 ///      (`hmac_required` if missing, `hmac_mismatch` if wrong). This is the
 ///      same "did-you-mean-it" mechanism as destructive `BatchOp`s
 ///      (tasks #542/#551/#554) — see `check_destructive_hmacs`'s doc
@@ -269,6 +275,7 @@ pub(crate) async fn set_superuser(
     user: String,
     on: bool,
     hmac: Option<String>,
+    request_canonical: Option<Vec<u8>>,
 ) -> DbResponse {
     // 1. Permission gate FIRST (mirrors `create_scram_user`'s ordering — a
     //    non-superuser session gets `permission_denied` regardless of the
@@ -292,7 +299,12 @@ pub(crate) async fn set_superuser(
 
     // 3. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
     //    `check_destructive_hmacs`).
-    let canonical = canon::canonical_set_superuser(&user, on);
+    let Some(canonical) = request_canonical else {
+        return DbResponse::Error {
+            code: "hmac_required".into(),
+            message: "missing canonical encoding for required request".into(),
+        };
+    };
     let Some(tag) = hmac.as_ref() else {
         return DbResponse::Error {
             code: "hmac_required".into(),
@@ -343,7 +355,7 @@ pub(crate) async fn set_superuser(
 ///      otherwise; checked FIRST, before the HMAC gate).
 ///   2. Handler must be built with `AdminGlue` (`not_supported` otherwise).
 ///   3. The op must carry a hex HMAC-SHA256 tag over
-///      [`canonical_set_replicator`] keyed by the session's HMAC key
+///      [`canonical_db_request`] keyed by
 ///      (`hmac_required` if missing, `hmac_mismatch` if wrong).
 pub(crate) async fn set_replicator(
     admin: Option<&AdminGlue>,
@@ -351,6 +363,7 @@ pub(crate) async fn set_replicator(
     user: String,
     on: bool,
     hmac: Option<String>,
+    request_canonical: Option<Vec<u8>>,
 ) -> DbResponse {
     // 1. Permission gate FIRST (mirrors `set_superuser`'s ordering).
     if !session.permissions.is_superuser {
@@ -372,7 +385,12 @@ pub(crate) async fn set_replicator(
 
     // 3. Inline HMAC gate (this op is NOT a BatchOp, so it bypasses
     //    `check_destructive_hmacs`).
-    let canonical = canon::canonical_set_replicator(&user, on);
+    let Some(canonical) = request_canonical else {
+        return DbResponse::Error {
+            code: "hmac_required".into(),
+            message: "missing canonical encoding for required request".into(),
+        };
+    };
     let Some(tag) = hmac.as_ref() else {
         return DbResponse::Error {
             code: "hmac_required".into(),
@@ -612,24 +630,15 @@ fn as_array_16(bytes: &[u8]) -> Option<[u8; limits::SALT_BYTES]> {
     <[u8; limits::SALT_BYTES]>::try_from(bytes).ok()
 }
 
-/// Walk the batch and verify the `hmac` tag on every destructive op.
+/// Walk the complete static batch tree and verify each operation gated by the
+/// canonical HMAC policy. ForEach bodies are checked as unresolved templates,
+/// before iteration; the same operation tag covers that template operation.
 ///
-/// Covers: `DropDb`/`DropRepo`/`DropTable`/`DropIndex`/`DropUser`,
-/// `Start/Commit/RollbackMigration`, `GrantRole`/`RevokeRole`
-/// (the single most dangerous op class — privilege escalation),
-/// `Chmod`/`Chown`/`Chgrp` (ownership/permission changes),
-/// `CreateUser`, `SetRetention`/`PurgeHistory`
-/// (irreversible audit-trail loss), and the group-mutating ops
-/// (`CreateGroup`/`DropGroup`/`RenameGroup`/`Add|RemoveGroupMember`).
-///
-/// Returns `Err((alias, code, message))` on the first failure
-/// where `code` is one of:
-///   * `"hmac_required"` — the field is missing on a destructive op,
-///   * `"hmac_mismatch"` — the field is present but the tag doesn't
-///     match the recomputed value for this op + this session.
-///
-/// Non-destructive ops pass through untouched. Auth check has
-/// already happened above; this gate runs strictly after that.
+/// Covers every Required operation classified by `canon::hmac_policy`,
+/// including newly gated function, validator, and replication drops. Errors
+/// use `hmac_required` for missing canonical/tag data and `hmac_mismatch` for
+/// an invalid tag. Authentication has already happened; this is a
+/// confirmation gate.
 pub(crate) fn check_destructive_hmacs(
     session: &Session,
     db_name: &str,
@@ -646,115 +655,30 @@ pub(crate) fn check_destructive_hmacs(
         derived
     };
 
-    for visit in BatchTreeVisitor::new(&batch.queries).filter(|visit| visit.body_depth().is_none())
-    {
-        let (alias, entry) = (visit.alias, visit.entry);
-        let (canonical, supplied): (Vec<u8>, Option<&String>) = match &entry.op {
-            BatchOp::DropDb(op) => (canon::canonical_drop_db(&op.drop_db), op.hmac.as_ref()),
-            BatchOp::DropRepo(op) => (
-                canon::canonical_drop_repo(db_name, &op.drop_repo),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::DropTable(op) => (
-                canon::canonical_drop_table(db_name, &op.repo, &op.drop_table),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::DropIndex(op) => (
-                canon::canonical_drop_index(db_name, &op.repo, &op.table, &op.drop_index),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::DropUser(op) => (canon::canonical_drop_user(&op.drop_user), op.hmac.as_ref()),
-            BatchOp::StartMigration(op) => (
-                canon::canonical_start_migration(
-                    db_name,
-                    &op.repo,
-                    &op.start_migration,
-                    &op.dst_repo,
-                    &op.dst_engine,
-                ),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::CommitMigration(op) => (
-                canon::canonical_commit_migration(db_name, &op.commit_migration),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::RollbackMigration(op) => (
-                canon::canonical_rollback_migration(db_name, &op.rollback_migration),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::GrantRole(op) => (
-                canon::canonical_grant_role(&op.grant_role, &op.user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::RevokeRole(op) => (
-                canon::canonical_revoke_role(&op.revoke_role, &op.user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::Chmod(op) => (canon::canonical_chmod(&op.chmod, op.mode), op.hmac.as_ref()),
-            BatchOp::Chown(op) => (
-                canon::canonical_chown(&op.chown, op.owner),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::Chgrp(op) => (
-                canon::canonical_chgrp(&op.chgrp, op.group),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::CreateUser(op) => (
-                canon::canonical_create_user(&op.create_user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::SetRetention(op) => (
-                canon::canonical_set_retention(db_name, &op.repo, &op.set_retention, &op.retention),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::PurgeHistory(op) => (
-                canon::canonical_purge_history(db_name, &op.repo, &op.purge_history, &op.scope),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::CreateGroup(op) => (
-                canon::canonical_create_group(&op.create_group),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::DropGroup(op) => (
-                canon::canonical_drop_group(&op.drop_group),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::RenameGroup(op) => (
-                canon::canonical_rename_group(&op.rename_group, &op.to),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::AddGroupMember(op) => (
-                canon::canonical_add_group_member(&op.add_group_member, op.user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::RemoveGroupMember(op) => (
-                canon::canonical_remove_group_member(&op.remove_group_member, op.user),
-                op.hmac.as_ref(),
-            ),
-            BatchOp::CreateFunction(op) => {
-                // CONDITIONAL HMAC (unique among the arms): the tag is
-                // required IFF `security == "definer"` or `secret_grants`
-                // is non-empty. A plain create_function (the common case)
-                // needs no tag at all — `continue` skips it exactly like
-                // the `_ => continue` fallthrough for non-destructive ops.
-                let needs_hmac =
-                    op.security.as_deref() == Some("definer") || !op.secret_grants.is_empty();
-                if !needs_hmac {
-                    continue;
-                }
-                (
-                    canon::canonical_create_function(
-                        &op.create_function,
-                        op.security.as_deref().unwrap_or("invoker"),
-                        &op.secret_grants,
-                    ),
-                    op.hmac.as_ref(),
-                )
+    for visit in BatchTreeVisitor::new(&batch.queries) {
+        let alias = visit.alias;
+        let op = &visit.entry.op;
+        if canon::hmac_policy(op) == canon::HmacPolicy::NotGated {
+            continue;
+        }
+        let canonical = match canon::canonical_batch_op(db_name, op) {
+            Ok(canonical) => canonical,
+            Err(canon::CanonicalOpError::UnsupportedOperation) => {
+                return Err((
+                    alias.to_owned(),
+                    "hmac_required",
+                    "required HMAC operation has no canonical encoding".to_string(),
+                ));
             }
-            _ => continue, // non-destructive — pass.
+            Err(canon::CanonicalOpError::Encoding(_)) => {
+                return Err((
+                    alias.to_owned(),
+                    "hmac_required",
+                    "required HMAC operation canonical encoding failed".to_string(),
+                ));
+            }
         };
-
-        let Some(tag) = supplied else {
+        let Some(tag) = canon::supplied_hmac(op) else {
             return Err((
                 alias.to_owned(),
                 "hmac_required",

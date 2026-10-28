@@ -155,6 +155,10 @@ impl TableManager {
             std::cmp::Ordering::Equal
         };
         let compare_ids = |a: &RecordId, b: &RecordId| {
+            #[expect(
+                clippy::expect_used,
+                reason = "guard: keyset validation above requires at least one ORDER BY item"
+            )]
             if order.items.last().expect("nonempty order").direction
                 == shamir_query_types::read::OrderDirection::Desc
             {

@@ -3,7 +3,10 @@
 use crate::types::value::UserValue;
 use serde::{Deserialize, Serialize};
 
-/// Represents all possible operations that can be performed on the database.
+/// Compatibility-only DTOs retained for source compatibility.
+///
+/// This legacy API is not used by the production client/server transport;
+/// new integrations should use the query and wire types instead.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Command {
     /// Inserts or updates a value for a given key.
@@ -19,7 +22,7 @@ pub enum Command {
     Execute { func: String, args: Vec<UserValue> },
 }
 
-/// A request sent from a client to the server.
+/// Compatibility-only request DTO; no production transport sends this type.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Request {
     /// A unique ID to correlate requests with responses.
@@ -28,7 +31,7 @@ pub struct Request {
     pub command: Command,
 }
 
-/// A response sent from the server back to the client.
+/// Compatibility-only response DTO; no production transport sends this type.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Response {
     /// The ID of the request this response corresponds to.

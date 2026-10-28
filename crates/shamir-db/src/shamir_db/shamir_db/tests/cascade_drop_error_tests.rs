@@ -62,7 +62,14 @@ async fn rv_db_42e3530e_drop_repo_cascade_reports_table_drop_failure() {
 
     let mut drop = Batch::new();
     drop.id(2);
-    drop.drop_repo("dr", ddl::drop_repo("main").cascade());
+    drop.drop_repo(
+        "dr",
+        ddl::drop_repo("main")
+            .hmac("test-hmac")
+            .cascade()
+            .build()
+            .expect("build DropRepo"),
+    );
     let err = shamir
         .execute(
             "t",
@@ -103,7 +110,14 @@ async fn rv_db_42e3530e_drop_db_cascade_reports_table_drop_failure() {
 
     let mut drop = Batch::new();
     drop.id(2);
-    drop.drop_db("dd", ddl::drop_db("u").cascade());
+    drop.drop_db(
+        "dd",
+        ddl::drop_db("u")
+            .hmac("test-hmac")
+            .cascade()
+            .build()
+            .expect("build DropDb"),
+    );
     let err = shamir
         .execute(
             "u",
