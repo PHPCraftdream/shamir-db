@@ -225,6 +225,21 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
 
 /// Abort with a WASM trap. The host maps a trap to `FunctionError::Compute`.
 pub fn trap(msg: &str) -> ! {
+    let sanitized = sanitize_trap_message(msg);
     // The guest SDK is built with std available, so panic is fine.
-    panic!("shamir function error: {msg}");
+    panic!("shamir function error: {sanitized}");
+}
+
+const MAX_TRAP_MESSAGE_BYTES: usize = 1024;
+
+pub(crate) fn sanitize_trap_message(msg: &str) -> String {
+    let mut sanitized = String::with_capacity(msg.len().min(MAX_TRAP_MESSAGE_BYTES));
+    for ch in msg.chars() {
+        let ch = if ch.is_control() { '\u{fffd}' } else { ch };
+        if sanitized.len() + ch.len_utf8() > MAX_TRAP_MESSAGE_BYTES {
+            break;
+        }
+        sanitized.push(ch);
+    }
+    sanitized
 }
