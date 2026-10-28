@@ -5,6 +5,8 @@
 use shamir_collections::TFxMap;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
+use shamir_storage::types::Repo;
+use shamir_types::core::interner::InternerQuota;
 use shamir_types::types::value::QueryValue;
 
 use crate::engine::repo::repo_types::BoxRepoFactory;
@@ -15,11 +17,42 @@ use crate::ShamirDb;
 async fn setup_shamir() -> ShamirDb {
     let shamir = ShamirDb::init_memory().await.unwrap();
     let db = shamir.create_db("testdb").await.expect("create_db");
-
     let repo_config =
         RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
-
     db.add_repo(repo_config).await.unwrap();
+    shamir
+}
+
+/// Like [`setup_shamir`], but registers the repo through `ShamirDb::add_repo`
+/// so its Store catalogue row (and therefore its ACL meta) exists.
+async fn setup_catalogued_shamir() -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("testdb").await.expect("create_db");
+    shamir
+        .add_repo(
+            "testdb",
+            RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    shamir
+}
+
+async fn setup_shamir_with_quota(quota: InternerQuota) -> ShamirDb {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let db = shamir.create_db("testdb").await.expect("create_db");
+    let instance = shamir_engine::repo::RepoInstance::from_factory_with_interner_quota_for_test(
+        "main".to_string(),
+        BoxRepoFactory::in_memory(),
+        Vec::new(),
+        quota,
+    )
+    .await
+    .unwrap();
+    let permit = instance.write_domain().admit().await.unwrap();
+    db.publish_repo_admitted(instance, &permit).unwrap();
+    drop(permit);
     shamir
 }
 
@@ -35,6 +68,115 @@ async fn run_one(
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let resp = shamir.execute("testdb", &req).await.unwrap();
     resp.results["r"].records[0].as_value().into_owned()
+}
+
+#[tokio::test]
+async fn rv_db_4d93f623_ambient_delta_requires_store_read() {
+    let shamir = setup_catalogued_shamir().await;
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::database("testdb"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let denied_meta = crate::access::ResourceMeta {
+        owner: crate::access::Actor::User(1),
+        group: None,
+        mode: 0o700,
+    };
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::store("testdb", "main"),
+            &denied_meta,
+        )
+        .await
+        .unwrap();
+    let mut request = shamir_query_builder::batch::Batch::new();
+    request.id("ambient-denied");
+    let mut request = request
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    request.interner_epochs.insert("main".into(), 0);
+
+    let response = shamir
+        .execute_as(crate::access::Actor::User(99), "testdb", &request)
+        .await
+        .expect("denied ambient repositories are skipped");
+    assert!(!response.interner_delta.contains_key("main"));
+}
+
+#[tokio::test]
+async fn rv_db_4d93f623_ambient_delta_succeeds_with_store_read() {
+    let shamir = setup_catalogued_shamir().await;
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::database("testdb"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    shamir
+        .set_resource_meta(
+            &crate::access::ResourcePath::store("testdb", "main"),
+            &crate::access::ResourceMeta::open(),
+        )
+        .await
+        .unwrap();
+    let mut batch = shamir_query_builder::batch::Batch::new();
+    batch.id("ambient-allowed");
+    let mut request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    request.interner_epochs.insert("main".into(), 0);
+    let response = shamir
+        .execute_as(crate::access::Actor::User(99), "testdb", &request)
+        .await
+        .unwrap();
+    assert!(response.interner_delta.contains_key("main"));
+}
+
+#[tokio::test]
+async fn rv_types_2eb39dfd_touch_quota_persists_prefix_without_rejected_id() {
+    let shamir = setup_shamir_with_quota(InternerQuota {
+        max_names: 1,
+        max_bytes: 1024,
+    })
+    .await;
+    let repo = shamir
+        .get_db("testdb")
+        .and_then(|db| db.get_repo("main"))
+        .expect("repo exists");
+    let backing = repo.seed_backing_repo();
+    let interner_store = backing
+        .store_get("__interner__")
+        .await
+        .expect("interner store");
+
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.op(
+        "touch",
+        ddl::interner_touch(["accepted_prefix", "rejected_suffix"]),
+    );
+    let request = batch
+        .to_request_via_msgpack()
+        .expect("batch request encoding");
+    let error = shamir
+        .execute("testdb", &request)
+        .await
+        .expect_err("touch must reject the over-quota suffix");
+    assert!(
+        error.to_string().contains("interner_quota_exceeded"),
+        "{error:?}"
+    );
+
+    // Hydrating through a second manager exercises the persisted dictionary.
+    let reopened = shamir_engine::table::InternerManager::new(interner_store);
+    let interner = reopened.get().await.expect("reopen dictionary");
+    assert!(interner.get_ind("accepted_prefix").is_some());
+    assert!(interner.get_ind("rejected_suffix").is_none());
+    assert_eq!(interner.generation(), 1, "rejected suffix consumes no id");
 }
 
 #[tokio::test]

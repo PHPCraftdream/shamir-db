@@ -156,6 +156,10 @@ pub(super) async fn collect_parent_values(
                     // F-65/#891 read-error fix — see
                     // `extract_ref_field_value`'s doc).
                     if let Some(qv) = extract_ref_field_value(&bytes, path)? {
+                        #[expect(
+                            clippy::unwrap_used,
+                            reason = "guard: result entry is pre-populated for every field in ref_fields"
+                        )]
                         result.get_mut(field).unwrap().insert(qv);
                     }
                 }
@@ -182,6 +186,8 @@ fn extract_ref_field_value(
     path: &[shamir_types::core::interner::InternerKey],
 ) -> shamir_storage::error::DbResult<Option<QueryValue>> {
     if let Ok(view) = RecordView::new(bytes) {
+        view.get_with_err(path[0].clone())
+            .map_err(|error| shamir_storage::error::DbError::Codec(error.to_string()))?;
         return Ok(view.scalar_at(path).map(scalar_ref_to_qv));
     }
     match InnerValue::from_bytes(bytes.clone()) {
@@ -343,14 +349,9 @@ fn staged_field_matches(
     let Some(staging) = tx.write_set.get(&target_token) else {
         return false;
     };
-    // P1 perf fix: called once PER RECORD in a batch FK on-update check —
-    // `iter_ops()` avoids materializing a fresh `Vec<KvOp>` on every call
-    // (`snapshot_ops()` would make this O(staged²) across the batch) and lets
-    // `.any()` short-circuit on the first match.
-    staging.iter_ops().any(|op| match op {
-        shamir_storage::types::KvOp::Set(_, ref bytes) => {
-            record_field_matches_by_id(bytes.as_ref(), field_id, value)
-        }
-        shamir_storage::types::KvOp::Remove(_) => false,
-    })
+    // The field index narrows staged candidates; exact recheck preserves semantics.
+    staging
+        .probe_field(field_id, value)
+        .iter()
+        .any(|(_, bytes)| record_field_matches_by_id(bytes.as_ref(), field_id, value))
 }

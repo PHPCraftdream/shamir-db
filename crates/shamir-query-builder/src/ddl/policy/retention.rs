@@ -3,7 +3,8 @@ use shamir_query_types::admin::{
 };
 use shamir_query_types::batch::BatchOp;
 
-use crate::batch::IntoBatchOp;
+use crate::batch::{IntoBatchOp, TryIntoBatchOp};
+use crate::write::BuilderError;
 
 /// Change a live table's history-retention policy. `repo` defaults to
 /// `"main"`. Returns a builder (HMAC-gated, see [`SetRetention::hmac`]).
@@ -38,25 +39,21 @@ impl SetRetention {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::SetRetention(SetRetentionOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::SetRetention(SetRetentionOp {
             set_retention: self.table,
             repo: self.repo,
             retention: self.retention,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<SetRetention> for BatchOp {
-    fn from(b: SetRetention) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for SetRetention {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for SetRetention {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }
@@ -100,25 +97,21 @@ impl PurgeHistory {
         self
     }
 
-    /// Finalize into a [`BatchOp`].
-    pub fn build(self) -> BatchOp {
-        BatchOp::PurgeHistory(PurgeHistoryOp {
+    /// Finalize into a [`BatchOp`]. Fails with [`BuilderError::MissingHmac`]
+    /// when no `.hmac(tag)` was attached.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        let hmac = self.hmac.ok_or(BuilderError::MissingHmac)?;
+        Ok(BatchOp::PurgeHistory(PurgeHistoryOp {
             purge_history: self.table,
             repo: self.repo,
             scope: self.scope,
-            hmac: self.hmac,
-        })
+            hmac: Some(hmac),
+        }))
     }
 }
 
-impl From<PurgeHistory> for BatchOp {
-    fn from(b: PurgeHistory) -> Self {
-        b.build()
-    }
-}
-
-impl IntoBatchOp for PurgeHistory {
-    fn into_batch_op(self) -> BatchOp {
+impl TryIntoBatchOp for PurgeHistory {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
         self.build()
     }
 }

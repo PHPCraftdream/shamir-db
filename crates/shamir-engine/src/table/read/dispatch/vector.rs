@@ -107,6 +107,10 @@ impl TableManager {
             // every candidate in bounded chunks so no nonfinite distance or
             // equal-distance id tie is lost before our total-order ranking.
             for chunk in vectors.chunks(MAX_TOPK as usize) {
+                #[expect(
+                    clippy::expect_used,
+                    reason = "guard: each score chunk is bounded by MAX_TOPK, which fits u32"
+                )]
                 let chunk_len =
                     u32::try_from(chunk.len()).expect("scoring chunks are bounded by MAX_TOPK");
                 let scores = hnsw

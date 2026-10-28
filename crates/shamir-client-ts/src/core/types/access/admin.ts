@@ -47,7 +47,7 @@ export type ResourceRef =
  * Reference to a group — by name or numeric id.
  * `#[serde(untagged)]`: `{name}` | `{id}`.
  */
-export type GroupRef = { name: string } | { id: number };
+export type GroupRef = { name: string } | { id: number | bigint };
 
 // ── Resource (auth/types.rs, tag="scope") ────────────────────────────
 
@@ -200,7 +200,7 @@ export interface AccessTreeOp {
  * - `roles` is `#[serde(default)]` WITHOUT skip → **always present** on the
  *   wire (emit `roles: []` when none).
  * - `profile` / `database` / `hmac` are `skip_serializing_if = "Option::is_none"`.
- * - `hmac` canonical is username-only — the password is NEVER part of it.
+ * - HMAC canonical v2 covers name, roles, and database, but excludes password.
  */
 export interface CreateUserOp {
   create_user: string;
@@ -217,7 +217,7 @@ export interface CreateUserOp {
  */
 export interface DropUserOp {
   drop_user: string;
-  hmac: string;
+  hmac?: string;
   if_exists?: boolean;
 }
 
@@ -252,14 +252,13 @@ export interface RevokeRoleOp {
  * session AND an HMAC confirmation tag. The tag is UNCONDITIONAL — always
  * present, unlike the conditional gate on `CreateFunctionOp`.
  *
- * `hmac` is `Option<String>` on the Rust side; the client builder always
- * supplies the signed tag, so it is typed `string` here.
+ * `hmac` is optional on the wire; the client builder always supplies the signed tag.
  */
 export interface SetSuperuserOp {
   op: 'set_superuser';
   user: string;
   on: boolean;
-  hmac: string;
+  hmac?: string;
 }
 
 /**
@@ -269,14 +268,13 @@ export interface SetSuperuserOp {
  * session AND an HMAC confirmation tag, unconditional (no "last remaining"
  * guard).
  *
- * `hmac` is `Option<String>` on the Rust side; the client builder always
- * supplies the signed tag, so it is typed `string` here.
+ * `hmac` is optional on the wire; the client builder always supplies the signed tag.
  */
 export interface SetReplicatorOp {
   op: 'set_replicator';
   user: string;
   on: boolean;
-  hmac: string;
+  hmac?: string;
 }
 
 // ── Union ───────────────────────────────────────────────────────────

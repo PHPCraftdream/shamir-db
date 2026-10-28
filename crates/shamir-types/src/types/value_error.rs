@@ -16,14 +16,6 @@ pub enum ValueError {
         got: &'static str,
     },
 
-    /// No value exists at the given dotted path.
-    #[error("path not found: '{path}'")]
-    PathNotFound {
-        /// The full dotted path that was requested.
-        path: String,
-    },
-
-    /// A non-Map node was encountered mid-path when traversal required a Map.
     #[error("intermediate node at '{path}' is not a map")]
     NotAMap {
         /// The dotted path prefix up to (and including) the non-Map node.

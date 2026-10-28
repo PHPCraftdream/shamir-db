@@ -14,7 +14,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { canonicalBatchOp } from '../../../protocol/hmac.js';
 import { replication } from '../replication.js';
+
 import {
   replScope,
   replStream,
@@ -144,10 +146,10 @@ describe('replicationProfile', () => {
 });
 
 describe('dropReplicationProfile', () => {
-  it('emits {drop_replication_profile: name}', () => {
-    expect(dropReplicationProfile('cluster')).toEqual({
-      drop_replication_profile: 'cluster',
-    });
+  it('emits signed drop with the full canonical DTO (rv-query-types-a3d93402)', () => {
+    const signer = { hmacTagHex: (canonical: Uint8Array) => `signed:${Array.from(canonical).join(',')}` };
+    const canonical = canonicalBatchOp('', { drop_replication_profile: 'cluster' });
+    expect(dropReplicationProfile(signer, 'cluster')).toEqual({ drop_replication_profile: 'cluster', hmac: signer.hmacTagHex(canonical) });
   });
 });
 
@@ -180,10 +182,10 @@ describe('publication', () => {
 });
 
 describe('dropPublication', () => {
-  it('emits {drop_publication: name}', () => {
-    expect(dropPublication('pub_main')).toEqual({
-      drop_publication: 'pub_main',
-    });
+  it('emits a signed drop_publication (rv-query-types-a3d93402)', () => {
+    const signer = { hmacTagHex: (canonical: Uint8Array) => `signed:${Array.from(canonical).join(',')}` };
+    const canonical = canonicalBatchOp('', { drop_publication: 'pub_main' });
+    expect(dropPublication(signer, 'pub_main')).toEqual({ drop_publication: 'pub_main', hmac: signer.hmacTagHex(canonical) });
   });
 });
 
@@ -206,10 +208,10 @@ describe('subscription', () => {
 });
 
 describe('dropSubscription', () => {
-  it('emits {drop_subscription: name}', () => {
-    expect(dropSubscription('sub1')).toEqual({
-      drop_subscription: 'sub1',
-    });
+  it('emits a signed drop_subscription (rv-query-types-a3d93402)', () => {
+    const signer = { hmacTagHex: (canonical: Uint8Array) => `signed:${Array.from(canonical).join(',')}` };
+    const canonical = canonicalBatchOp('', { drop_subscription: 'sub1' });
+    expect(dropSubscription(signer, 'sub1')).toEqual({ drop_subscription: 'sub1', hmac: signer.hmacTagHex(canonical) });
   });
 });
 

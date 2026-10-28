@@ -301,11 +301,22 @@ fn chmod_req(
         _ => shamir_query_builder::ddl::res::database(db),
     };
     let key = shamir_query_types::hmac::derive_session_hmac_key(&session_id);
+    let op = shamir_query_types::batch::BatchOp::Chmod(shamir_query_types::admin::ChmodOp {
+        chmod: res.clone(),
+        mode,
+        hmac: None,
+    });
     let tag = shamir_query_types::hmac::compute_tag_hex(
         &key,
-        &shamir_query_types::hmac::canonical_chmod(&res, mode),
+        &shamir_query_types::hmac::canonical_batch_op(db, &op).expect("chmod canonical form"),
     );
-    b.chmod("cm", shamir_query_builder::ddl::chmod(res, mode).hmac(tag));
+    b.chmod(
+        "cm",
+        shamir_query_builder::ddl::chmod(res, mode)
+            .hmac(tag)
+            .build()
+            .expect("build signed chmod"),
+    );
     DbRequest::Execute {
         query_version: CURRENT_QUERY_LANG_VERSION,
         db: db.into(),
@@ -366,9 +377,16 @@ async fn repl_deny_by_default_no_replicator_role() {
 
     let plain_pw = b"plain-password".to_vec();
     let plain_roles: Vec<String> = vec![];
+    let unsigned = DbRequest::CreateScramUser {
+        name: "plain".into(),
+        password: String::from_utf8(plain_pw.clone()).expect("utf8").into(),
+        roles: plain_roles.clone(),
+        hmac: None,
+    };
     let plain_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("plain", &plain_roles),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
@@ -526,9 +544,16 @@ async fn repl_hello_and_pull_with_events() {
     //     reserved role string; `CreateScramUser`/`update_roles` reject it,
     //     so the flag must be granted through its own wire op). ---
     let repl_pw = b"repl-password".to_vec();
+    let unsigned = DbRequest::CreateScramUser {
+        name: "repl".into(),
+        password: String::from_utf8(repl_pw.clone()).expect("utf8").into(),
+        roles: Vec::new(),
+        hmac: None,
+    };
     let create_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("repl", &[]),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
@@ -548,9 +573,15 @@ async fn repl_hello_and_pull_with_events() {
         "create repl user: {resp:?}",
     );
 
+    let unsigned = DbRequest::SetReplicator {
+        user: "repl".into(),
+        on: true,
+        hmac: None,
+    };
     let set_repl_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_set_replicator("repl", true),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("set-replicator canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::SetReplicator {
@@ -757,9 +788,16 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
     //     reserved role string; `CreateScramUser`/`update_roles` reject it,
     //     so the flag must be granted through its own wire op). ---
     let repl_pw = b"repl-password".to_vec();
+    let unsigned = DbRequest::CreateScramUser {
+        name: "repl".into(),
+        password: String::from_utf8(repl_pw.clone()).expect("utf8").into(),
+        roles: Vec::new(),
+        hmac: None,
+    };
     let create_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_create_scram_user("repl", &[]),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("create-scram canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::CreateScramUser {
@@ -779,9 +817,15 @@ async fn repl_long_poll_empty_tail_does_not_hang() {
         "create repl user: {resp:?}",
     );
 
+    let unsigned = DbRequest::SetReplicator {
+        user: "repl".into(),
+        on: true,
+        hmac: None,
+    };
     let set_repl_tag = shamir_query_types::hmac::compute_tag_hex(
         &shamir_query_types::hmac::derive_session_hmac_key(&admin_sid),
-        &shamir_query_types::hmac::canonical_set_replicator("repl", true),
+        &shamir_query_types::hmac::canonical_db_request(&unsigned)
+            .expect("set-replicator canonical form"),
     );
     let resp = roundtrip(
         &DbRequest::SetReplicator {
