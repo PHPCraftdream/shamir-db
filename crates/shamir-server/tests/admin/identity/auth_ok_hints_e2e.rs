@@ -30,6 +30,9 @@ fn client_options(addr: std::net::SocketAddr, pin: Option<[u8; 32]>) -> ConnectO
 async fn launch(temp: &TempDir, kdf_defaults: KdfConfig) -> ServerHandle {
     let mut config = common::make_test_config(temp, "127.0.0.1:0");
     config.kdf_defaults = kdf_defaults;
+    // The boot warmup quarters the pre-auth bucket (2 tokens) and shutdown
+    // persists it, so a relaunch plus several reconnects would be rate limited.
+    config.security.auth_init_rate_per_second = 1_000;
     ServerLauncher {
         config,
         bootstrap: BootstrapMode::Password {
