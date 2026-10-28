@@ -145,8 +145,16 @@
 //! This does not reintroduce a lock-then-drain window: the drain always
 //! completes strictly BEFORE this caller (or any other) holds the lock.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+#[cfg(loom)]
+use loom::sync::{
+    atomic::{fence, AtomicUsize, Ordering},
+    Arc,
+};
+#[cfg(not(loom))]
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 /// Reusable drain barrier for a table's non-tx write path.
 ///
@@ -257,6 +265,16 @@ use std::sync::Arc;
 /// counter provides temporal drain, mirroring the role `unique_write_lock`
 /// plays on the slow path.
 ///
+/// The loom implementation uses the SC fence rule: if fence X (after writer
+/// increment A) precedes fence Y (after the drainer's flag store) in S, the
+/// counter load sees A or a later counter modification (including the
+/// writer's completed decrement). If Y precedes X, the writer's flag load
+/// sees the drainer's store or a later flag modification. Thus the modeled
+/// protocol cannot miss an in-flight writer. Production SeqCst accesses
+/// provide the same guarantee without production fences. The ordering-pin
+/// gate is `rust-guard orderings` and its pin file is
+/// `.rust-guard/atomic_orderings.toml`.
+///
 /// # Reusability
 ///
 /// This primitive is barrier-agnostic: [`drain`](Self::drain) waits for ALL
@@ -289,14 +307,28 @@ impl WriterDrainBarrier {
     /// must not.
     #[must_use]
     pub fn enter_writer(&self) -> WriterDrainGuard {
-        // SeqCst (not Relaxed): see the struct-level memory-model proof — the
-        // cross-atomic dependency on `needs_write_barrier`'s flag load requires
-        // a single SeqCst total order, which Relaxed/Acquire/Release cannot
-        // provide across two independent atomics.
+        #[cfg(not(loom))]
         self.active.fetch_add(1, Ordering::SeqCst);
+        #[cfg(loom)]
+        {
+            self.active.fetch_add(1, Ordering::Relaxed);
+            fence(Ordering::SeqCst);
+        }
         WriterDrainGuard {
             active: Arc::clone(&self.active),
         }
+    }
+
+    /// Starts the drain observation phase. The fence is modeling-only: the
+    /// production SeqCst loads themselves participate in the global order.
+    #[cfg(loom)]
+    pub fn begin_drain(&self) {
+        fence(Ordering::SeqCst);
+    }
+
+    #[cfg(loom)]
+    pub fn is_drained(&self) -> bool {
+        self.active.load(Ordering::Acquire) == 0
     }
 
     /// Drain: wait until every in-flight fast-path writer has exited the
@@ -319,6 +351,7 @@ impl WriterDrainBarrier {
     /// concern from the drain wait itself.
     ///
     /// When no writers are active, returns after a single `SeqCst` load.
+    #[cfg(not(loom))]
     pub async fn drain(&self) {
         // F-68 (#895) cluster D / task #124 diagnostic instrumentation.
         // NOT a behavior change: this is timestamped logging only, no new
@@ -368,6 +401,14 @@ impl WriterDrainBarrier {
         );
     }
 
+    #[cfg(loom)]
+    pub async fn drain(&self) {
+        self.begin_drain();
+        while !self.is_drained() {
+            tokio::task::yield_now().await;
+        }
+    }
+
     /// Test-only: current active-writer count (for assertions). Not part of
     /// the drain protocol; a plain `Acquire` load suffices for assertions.
     #[cfg(test)]
@@ -403,187 +444,13 @@ pub struct WriterDrainGuard {
 
 impl Drop for WriterDrainGuard {
     fn drop(&mut self) {
+        #[cfg(not(loom))]
         self.active.fetch_sub(1, Ordering::SeqCst);
+        #[cfg(loom)]
+        self.active.fetch_sub(1, Ordering::Release);
     }
 }
 
-// ============================================================================
-// F-56 (#882) — loom model of the writer-drain barrier's interleaving contract.
-//
-// RUN (NOT part of `./scripts/test.sh` — loom is opt-in via the `loom` cargo
-// feature, which the `build.rs` translates into a crate-local `cfg(loom)` so
-// the dependency tree is not pulled into its own loom code paths; this module
-// is compiled away from every normal build):
-//
-//   cargo nextest run -p shamir-engine --features loom --lib \
-//       -E 'test(loom_model)' --nocapture
-//
-// (`cargo test` is blocked outright by this workspace's perimeter guard —
-// see CLAUDE.md's "Centralised test entry point" section. `cargo nextest`
-// is the only invocation that passes.)
-//
-// ## Honest scope — what this model does and does NOT prove
-//
-// F-84 (#912) correction: the claim that PRECEDED this one — "loom explores
-// all SEQUENTIALLY-CONSISTENT thread interleavings" — is false for loom
-// 0.7.x. loom's `Thread::seq_cst()` (the SeqCst-specific behavior of a
-// SeqCst-ordered ACCESS, as opposed to an explicit `fence(SeqCst)`) is a
-// documented no-op in this version ("the previous implementation ... was
-// incorrect ... as a quick fix, just disable it ... may fail to model
-// correct code, but will not silently allow bugs" — `loom::rt::thread`).
-// Concretely: a plain `store(SeqCst)`/`load(SeqCst)` pair in this loom
-// version behaves like `Release`/`Acquire`, NOT full SC — it can still
-// exhibit the classic store-buffering (SB/Dekker) outcome that real SeqCst
-// forbids. Only an explicit `loom::sync::atomic::fence(Ordering::SeqCst)`
-// gets loom's real SC enforcement. The two `fence(SeqCst)` calls below exist
-// SOLELY to compensate for this loom limitation — they have NO counterpart
-// in the real (non-model) code, which uses plain SeqCst accesses throughout
-// and needs no fence, because on a REAL C11/Rust implementation
-// `store(SeqCst); load(SeqCst)` already forbids SB. Do not read the
-// fences as implying production needs them; they are a modeling-only
-// device. (Confirmed via an isolated loom SB litmus-test probe: the same
-// two-thread store/load shape run under loom fails without fences and
-// passes with one `fence(SeqCst)` per thread between its two accesses.)
-//
-// Because of this, the fenced model still does NOT red/green the F-56
-// weak-memory fix itself (an SC fence forbids SB regardless of what
-// ordering the surrounding accesses use, so the model would "pass" whether
-// or not the accesses below were SeqCst, Acquire/Release, or even Relaxed)
-// — that argument continues to rest entirely on the worked proof in the
-// [`WriterDrainBarrier`] doc comment above, NOT on this model.
-//
-// What this model IS (and always was) good for: guarding the protocol's
-// INTERLEAVING/structural contract against future regressions — a broken
-// `drain` loop (e.g. one that exits while `active != 0`), a missing guard
-// decrement, or a reordering of `enter_writer` AFTER the flag read. Any of
-// those shows up here as a violation of the invariant "after `drain()`
-// returns, every fast-path writer that entered the drain set has completed
-// its write" — PROVIDED the assertion actually samples state at drain-return
-// time, not after the caller separately joins the writer thread (see
-// `wrote_at_drain_return`'s doc below for why the ORIGINAL assertion here
-// was tautological and could not witness any violation, including the SB
-// outcome above, until F-84 fixed both the sampling point and added the
-// fences needed to make loom actually enforce the ordering the real code
-// relies on).
-// ============================================================================
-// The `loom` crate is an optional dependency enabled by the `loom` feature.
-// The model is gated on `test` too: it only runs as a test, and the loom CI
-// job runs nextest on the `--lib` test target, where `cfg(test)` holds.
-#[cfg(all(loom, test))]
-mod loom_model {
-    use loom::sync::atomic::{fence, AtomicBool, AtomicUsize, Ordering};
-    use loom::sync::Arc;
-    use loom::thread;
-
-    /// Minimal model of the two-atomics that matter: the `active` drain counter
-    /// and the intent `flag` (one of `index2_create_barrier` /
-    /// `schema_activation_barrier`). `writer_wrote` models the fast-path
-    /// writer's data-store write landing — it is the thing the drain exists to
-    /// make visible to the drainer's post-drain snapshot.
-    ///
-    /// `wrote_at_drain_return` is a snapshot of `writer_wrote` taken at the
-    /// exact instant the drainer's spin loop observes `active == 0` and
-    /// returns — i.e. the moment `drain()` returns in the real code. Asserting
-    /// against THIS field (rather than against `writer_wrote` after the caller
-    /// later joins the writer thread) is what makes the invariant meaningful:
-    /// `join()` always blocks until the writer thread has fully finished and
-    /// stored `writer_wrote`, so a post-`join` read of `writer_wrote` is true
-    /// by construction and proves nothing about the drain protocol. Sampling
-    /// at drain-return time is the only point at which the contract can
-    /// actually be violated.
-    struct Model {
-        active: AtomicUsize,
-        flag: AtomicBool,
-        writer_wrote: AtomicBool,
-        /// Snapshot of `writer_wrote` captured inside `run_drainer` at the
-        /// instant its spin loop exits (i.e. when `drain()` returns).
-        wrote_at_drain_return: AtomicBool,
-    }
-
-    impl Model {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                active: AtomicUsize::new(0),
-                flag: AtomicBool::new(false),
-                writer_wrote: AtomicBool::new(false),
-                wrote_at_drain_return: AtomicBool::new(false),
-            })
-        }
-    }
-
-    /// Writer thread (fast path only — the drain contract concerns fast-path
-    /// writers): `enter_writer` (SeqCst fetch_add) → read `flag` (SeqCst) → if
-    /// `false`, model the write → drop the guard (SeqCst fetch_sub). Returns
-    /// whether it took the fast path.
-    fn run_writer(m: Arc<Model>) -> bool {
-        m.active.fetch_add(1, Ordering::SeqCst);
-        // Modeling-only fence (F-84, #912): compensates for loom 0.7's
-        // no-op SeqCst-access enforcement — see this module's top-level doc.
-        // No counterpart in the real code.
-        fence(Ordering::SeqCst);
-        let fast = !m.flag.load(Ordering::SeqCst);
-        if fast {
-            m.writer_wrote.store(true, Ordering::SeqCst);
-        }
-        m.active.fetch_sub(1, Ordering::SeqCst);
-        fast
-    }
-
-    /// Drainer thread: raise `flag` (SeqCst store) → drain (spin on `active`
-    /// until 0, SeqCst) → take the post-drain snapshot.
-    ///
-    /// The snapshot MUST be taken HERE — at the instant the spin loop exits and
-    /// `drain()` returns — not by the caller after `join()`ing the writer. A
-    /// post-`join` read of `writer_wrote` is trivially true whenever the writer
-    /// took the fast path (the thread has fully returned), so it cannot witness
-    /// the interleaving hole it is meant to detect.
-    fn run_drainer(m: &Model) {
-        m.flag.store(true, Ordering::SeqCst);
-        // Modeling-only fence (F-84, #912): compensates for loom 0.7's
-        // no-op SeqCst-access enforcement — see this module's top-level doc.
-        // No counterpart in the real code.
-        fence(Ordering::SeqCst);
-        while m.active.load(Ordering::SeqCst) != 0 {
-            thread::yield_now();
-        }
-        // drain() has returned — every fast-path writer is out of the drain
-        // set. Snapshot writer_wrote RIGHT HERE, at the instant of return, so
-        // the assertion samples the state the drainer actually observed at
-        // return time rather than the strictly-later post-join state.
-        m.wrote_at_drain_return
-            .store(m.writer_wrote.load(Ordering::SeqCst), Ordering::SeqCst);
-    }
-
-    #[test]
-    fn drain_returns_only_after_fast_path_writer_completes() {
-        loom::model(|| {
-            let m = Model::new();
-            let m_w = Arc::clone(&m);
-            let writer = thread::spawn(move || run_writer(m_w));
-            run_drainer(&m);
-            let took_fast = writer.join().unwrap();
-
-            // THE INVARIANT (interleaving contract): once the drainer's drain
-            // returns (active hit 0), a fast-path writer that entered the drain
-            // set has completed its modeled write — the guard decrement, which
-            // is what drove active back to 0, is sequenced AFTER the write.
-            //
-            // Assert against `wrote_at_drain_return` (sampled inside
-            // `run_drainer` at the instant its spin loop exits), NOT against a
-            // fresh read of `writer_wrote` here. Reading `writer_wrote` after
-            // `join()` is tautological: `join()` blocks until the writer thread
-            // has fully returned, and `run_writer` stores `writer_wrote` before
-            // returning, so the value is always true — the assertion would pass
-            // even if `drain()` were broken to a no-op. The snapshot at
-            // drain-return time is the only observation point that can actually
-            // witness a violation.
-            if took_fast {
-                assert!(
-                    m.wrote_at_drain_return.load(Ordering::SeqCst),
-                    "drain returned before the fast-path writer's write landed — \
-                     an interleaving hole in the drain contract"
-                );
-            }
-        });
-    }
-}
+// F-56/F-84: loom 0.7's SeqCst access behavior does not provide the SC-order
+// guarantee, so explicit fences model it. Production uses the real SeqCst
+// accesses and does not need fences.
