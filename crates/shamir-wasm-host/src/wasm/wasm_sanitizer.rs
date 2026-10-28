@@ -94,6 +94,7 @@ pub const SANCTIONED_HOST_IMPORTS: &[(&str, &str)] = &[
     ("shamir_host", "db_insert"),
     ("shamir_host", "db_query"),
     ("shamir_host", "db_execute"),
+    ("shamir_host", "raise_error"),
     ("shamir_host", "http_fetch"),
 ];
 
