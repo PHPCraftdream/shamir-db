@@ -5,8 +5,8 @@ use bytes::Bytes;
 
 use futures::StreamExt;
 
-use crate::query::filter::eval::{compile_filter, intern_field_path, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
+use crate::query::filter::{compile_filter_with_context, eval::FilterNode};
 use crate::query::read::{exec, CorruptRecordRef, QueryRecord, QueryResult, QueryStats, ReadQuery};
 use crate::table::table_manager::TableManager;
 
@@ -41,7 +41,7 @@ impl TableManager {
         let filter_cb: Option<Arc<FilterNode>> = query
             .r#where
             .as_ref()
-            .map(|f| Arc::new(compile_filter(f, interner)));
+            .map(|f| Arc::new(compile_filter_with_context(f, ctx)));
 
         let needs_full_collect = has_group_by || has_agg || has_order || has_distinct;
 
@@ -138,7 +138,12 @@ impl TableManager {
         let paths: Vec<_> = order
             .items
             .iter()
-            .map(|item| intern_field_path(&item.field, interner))
+            .map(|item| {
+                item.field
+                    .iter()
+                    .map(|name| ctx.resolve_interner_id(name))
+                    .collect::<Option<Vec<_>>>()
+            })
             .collect();
         let compare = |left: &[Vec<u8>], right: &[Vec<u8>]| {
             for ((a, b), item) in left.iter().zip(right).zip(&order.items) {
@@ -167,7 +172,10 @@ impl TableManager {
                 a.cmp(b)
             }
         };
-        let filter = query.r#where.as_ref().map(|f| compile_filter(f, interner));
+        let filter = query
+            .r#where
+            .as_ref()
+            .map(|f| compile_filter_with_context(f, ctx));
         let mut rows: Vec<(Vec<Vec<u8>>, RecordId, Bytes)> = Vec::new();
         let mut scanned = 0;
         let mut corrupt = Vec::new();

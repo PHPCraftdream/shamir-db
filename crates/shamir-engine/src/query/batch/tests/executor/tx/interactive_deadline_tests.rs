@@ -87,6 +87,10 @@ async fn fast_interactive_batch_keeps_tx_usable_and_rollback_discards_writes() {
     .unwrap();
     assert!(response.transaction.is_none(), "the same tx stays open");
     assert_eq!(response.results["rows"].records.len(), 1);
+    assert_eq!(
+        response.results["rows"].records[0].get_value_str("name"),
+        Some("alice")
+    );
 
     let (mut observer, observer_guard) =
         open_interactive_tx(&repo, shamir_tx::IsolationLevel::Snapshot)
@@ -214,6 +218,10 @@ async fn expired_interactive_deadline_returns_timeout_and_allows_caller_rollback
     .unwrap();
     assert!(response.transaction.is_none());
     assert_eq!(response.results["rows"].records.len(), 1);
+    assert_eq!(
+        response.results["rows"].records[0].get_value_str("name"),
+        Some("alice")
+    );
     drop(tx);
     drop(guard);
 

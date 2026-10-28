@@ -5,7 +5,7 @@ use num_bigint::BigInt;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use shamir_funclib::scalar_resolver::ScalarResolver;
-use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner_with};
+use shamir_types::codecs::interned::query_value_to_inner_with;
 use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
@@ -107,6 +107,23 @@ pub(in crate::query::filter) fn intern_field_path_compact(
         // `matches()` arms can pass `field_path` to `RecordRef` methods
         // without re-wrapping each segment per row (F10).
         keys.push(interner.get_ind(part)?);
+    }
+    Some(keys)
+}
+
+pub(in crate::query::filter) fn intern_field_path_compact_with(
+    field: &[String],
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> Option<CompactPath> {
+    let mut keys: CompactPath = SmallVec::with_capacity(field.len());
+    for part in field {
+        let key = interner.get_ind(part).or_else(|| {
+            overlay_ids
+                .and_then(|ids| ids.get(part).copied())
+                .map(InternerKey::new)
+        })?;
+        keys.push(key);
     }
     Some(keys)
 }
@@ -333,21 +350,19 @@ pub fn resolve_filter_query(
             let owned_ipath;
             let ipath: &[InternerKey] =
                 match ctx.field_path_cache.and_then(|c| c.get(&field_ref_key(fv))) {
-                    Some(cached) => cached.as_slice(),
-                    None => {
-                        let keys = intern_field_path(path, ctx.interner)?;
-                        owned_ipath = keys
+                    Some(cached) if ctx.interner_overlay.is_none() => cached.as_slice(),
+                    Some(_) | None => {
+                        let keys = path
                             .iter()
-                            .map(|&id| InternerKey::new(id))
-                            .collect::<SmallVec<[InternerKey; 4]>>();
+                            .map(|name| ctx.resolve_interner_id(name).map(InternerKey::new))
+                            .collect::<Option<SmallVec<[InternerKey; 4]>>>()?;
+                        owned_ipath = keys;
                         owned_ipath.as_slice()
                     }
                 };
-            // Single lens→QueryValue boundary (replaces the old lens→InnerValue
-            // materialization). NOT a net-new round-trip — see fn doc.
             record
                 .materialize_at(ipath)
-                .and_then(|iv| inner_value_to_query_value(&iv, ctx.interner).ok())
+                .and_then(|iv| ctx.resolve_query_value(&iv).ok())
         }
         FilterValue::QueryRef { alias, path } => {
             // F2: check the lazy per-scan cache first (slot RESERVED once by
@@ -423,12 +438,21 @@ pub fn resolve_filter_query(
         // `$cond`'s condition is not special-cased; it inherits this
         // behaviour rather than introducing a new error path.
         FilterValue::Cond { cond } => {
-            let node = match ctx
-                .cond_cache
-                .and_then(|cache| cond_cache_get(cache, &cond.condition))
-            {
-                Some(node) => Some(Arc::clone(node)),
-                None => compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner),
+            let node = if ctx.interner_overlay_ids.is_some() {
+                Some(Arc::new(
+                    crate::query::filter::try_compile_filter_with_context(&cond.condition, ctx)
+                        .ok()?,
+                ))
+            } else {
+                match ctx
+                    .cond_cache
+                    .and_then(|cache| cond_cache_get(cache, &cond.condition))
+                {
+                    Some(node) => Some(Arc::clone(node)),
+                    None => {
+                        compile_cond_cached(&ctx.local_cond_cache, &cond.condition, ctx.interner)
+                    }
+                }
             }?;
             let matched = node.matches(record, ctx);
             if matched {
