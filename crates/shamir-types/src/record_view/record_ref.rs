@@ -102,7 +102,6 @@ pub trait RecordRef {
 
     /// De-intern and convert the whole record to a [`QueryValue::Map`] with
     /// string keys. `InnerValue` delegates to the existing tree de-intern;
-    /// `RecordView` uses the new O(N) lens walker.
     ///
     /// Returns `QueryValue::Null` on a de-intern error (missing key in interner).
     fn to_query_value(&self, interner: &Interner) -> QueryValue;
@@ -515,22 +514,12 @@ impl<'a> RecordRef for HavingView<'a> {
             QueryValue::Map(m) => m.get(key_str.as_str())?,
             _ => return None,
         };
-        // Single-leaf conversion at the boundary (§5b: the RecordRef contract
-        // returns InnerValue; the filter's InSet/Contains nodes consume it
-        // and immediately convert it back to QueryValue). This is NOT the
-        // forbidden whole-result `query_value_to_inner` — it is one leaf,
-        // only when HAVING probes a container/InSet output (very rare).
-        // The interner is not available here, so we use the no-intern form
-        // via a best-effort conversion. For scalar leaves the filter uses
-        // scalar_at (above) and never crosses this seam.
-        //
-        // We cannot call query_value_to_inner (needs &Interner, not available
-        // in the trait method). Instead, reconstruct the InnerValue directly
-        // for scalar leaves (the only case where this is needed in practice);
-        // containers return None (the filter's InSet/Contains on a container
-        // HAVING output is vanishingly rare and the safe "no match" fallback
-        // applies).
-        Some(query_value_to_inner_value(val))
+        match val {
+            // Containers: no interner here to re-intern their keys, so `None`
+            // (the documented contract), not a fabricated `Null`.
+            QueryValue::Map(_) | QueryValue::List(_) | QueryValue::Set(_) => None,
+            _ => Some(query_value_to_inner_value(val)),
+        }
     }
 
     fn for_each_field(&self, f: &mut dyn FnMut(InternerKey, InnerValue)) {
@@ -546,7 +535,7 @@ impl<'a> RecordRef for HavingView<'a> {
     }
 
     fn to_query_value(&self, _interner: &Interner) -> QueryValue {
-        // The row IS already a QueryValue — return a clone.
+        // The row is already a QueryValue; return a clone without conversion.
         self.row.clone()
     }
 }

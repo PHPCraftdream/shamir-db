@@ -22,6 +22,22 @@ pub enum InternerError {
         kind: InternerQuotaKind,
         limit: u64,
     },
+    #[error("interner id collision at {id}")]
+    IdCollision { id: u64 },
+    #[error("interner name {name:?} is already assigned to id {existing}, not {requested}")]
+    NameConflict {
+        name: String,
+        existing: u64,
+        requested: u64,
+    },
+    #[error("interner id {id} is already assigned to {existing:?}, not {requested:?}")]
+    IdConflict {
+        id: u64,
+        existing: String,
+        requested: String,
+    },
+    #[error("interner id 0 is reserved")]
+    ReservedId,
 }
 
 /// Internal, label-free rejection from `QuotaCounters::reserve` — the

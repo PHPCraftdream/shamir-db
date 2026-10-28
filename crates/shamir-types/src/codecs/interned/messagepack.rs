@@ -126,18 +126,18 @@ fn read_f64_be(cur: &mut std::io::Cursor<&[u8]>) -> Result<f64, CodecError> {
     Ok(f64::from_bits(read_u64_be(cur)?))
 }
 
-/// Read `len` bytes as a UTF-8 string.
 #[inline]
-fn read_str(cur: &mut std::io::Cursor<&[u8]>, len: usize) -> Result<String, CodecError> {
+fn read_str<'a>(cur: &mut std::io::Cursor<&'a [u8]>, len: usize) -> Result<&'a str, CodecError> {
     let pos = cur.position() as usize;
     let data = cur.get_ref();
-    if pos + len > data.len() {
-        return Err(CodecError::Decode("unexpected EOF reading string".into()));
-    }
-    let s = std::str::from_utf8(&data[pos..pos + len])
+    let bytes = pos
+        .checked_add(len)
+        .and_then(|end| data.get(pos..end))
+        .ok_or_else(|| CodecError::Decode("unexpected EOF reading string".into()))?;
+    let s = std::str::from_utf8(bytes)
         .map_err(|_| CodecError::Decode("Invalid UTF-8 in string".to_string()))?;
     cur.set_position((pos + len) as u64);
-    Ok(s.to_string())
+    Ok(s)
 }
 
 /// Read `len` bytes as binary.
@@ -198,24 +198,21 @@ fn decode_value(
         Marker::F64 => Ok(InnerValue::F64(read_f64_be(cur)?)),
 
         // Strings
-        Marker::FixStr(len) => {
-            let s = read_str(cur, len as usize)?;
-            Ok(InnerValue::Str(s))
-        }
+        Marker::FixStr(len) => Ok(InnerValue::Str(read_str(cur, len as usize)?.to_string())),
         Marker::Str8 => {
             let len = read_u8_from(cur)? as usize;
             let s = read_str(cur, len)?;
-            Ok(InnerValue::Str(s))
+            Ok(InnerValue::Str(s.to_string()))
         }
         Marker::Str16 => {
             let len = read_u16_be(cur)? as usize;
             let s = read_str(cur, len)?;
-            Ok(InnerValue::Str(s))
+            Ok(InnerValue::Str(s.to_string()))
         }
         Marker::Str32 => {
             let len = read_u32_be(cur)? as usize;
             let s = read_str(cur, len)?;
-            Ok(InnerValue::Str(s))
+            Ok(InnerValue::Str(s.to_string()))
         }
 
         // Binary
@@ -345,7 +342,7 @@ fn decode_map(
             _ => return Err(CodecError::Decode("Map keys must be strings".to_string())),
         };
 
-        let interned_key = intern_string_key(interner, &key_str)?;
+        let interned_key = intern_string_key(interner, key_str)?;
         let val = decode_value(cur, interner, depth + 1)?;
         map.insert(interned_key, val);
     }

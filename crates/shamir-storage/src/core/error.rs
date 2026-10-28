@@ -243,6 +243,7 @@ impl From<InternerError> for DbError {
                 kind,
                 limit,
             },
+            other => DbError::Codec(other.to_string()),
         }
     }
 }

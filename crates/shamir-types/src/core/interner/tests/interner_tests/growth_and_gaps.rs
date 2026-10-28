@@ -1,9 +1,105 @@
 //! Concurrent growth, gap semantics, and `entries_after` capacity tests.
 
-use crate::core::interner::{Interner, InternerKey, UserKey};
+use crate::core::interner::{Interner, InternerError, InternerKey, InternerQuota, UserKey};
 use shamir_collections::TFxSet;
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use std::thread;
+
+#[test]
+fn rv_types_056200a9_generation_tracks_explicit_hole_publication() {
+    let interner = Interner::new();
+    interner.touch_with_id("upper", 2).unwrap();
+    let sampled = interner.generation();
+    let (initial, high_water) = interner.entries_after(0);
+    assert_eq!(initial.len(), 1);
+    assert_eq!(high_water, 0);
+    interner.touch_with_id("lower-hole", 1).unwrap();
+    assert!(interner.generation() > sampled);
+    let (published, high_water) = interner.entries_after(high_water);
+    assert_eq!(published.len(), 2);
+    assert_eq!(high_water, 2);
+}
+
+#[test]
+fn rv_types_1eba1d8a_forward_publication_and_collision_rollback_are_atomic() {
+    let interner = Interner::new();
+    let id = InternerKey::new(7);
+    interner.touch_with_id("stable", 7).unwrap();
+    assert_eq!(interner.get_ind("stable"), Some(id.clone()));
+    assert_eq!(interner.get_str(&id).as_deref(), Some("stable"));
+    assert!(matches!(
+        interner.touch_with_id("loser", 7),
+        Err(InternerError::IdConflict { .. })
+    ));
+    assert_eq!(interner.get_ind("loser"), None);
+    assert_eq!(interner.get_str(&id).as_deref(), Some("stable"));
+}
+
+#[test]
+fn rv_types_3cfa3fb6_paused_automatic_touch_observes_explicit_high_water() {
+    let interner = Arc::new(Interner::new());
+    let admitted = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    let automatic = {
+        let interner = Arc::clone(&interner);
+        let admitted = Arc::clone(&admitted);
+        let resume = Arc::clone(&resume);
+        thread::spawn(move || {
+            interner
+                .touch_ind_with_test_hooks(
+                    "automatic",
+                    || {
+                        admitted.wait();
+                        resume.wait();
+                    },
+                    |_| {},
+                    |_| {},
+                )
+                .unwrap()
+                .into_key()
+        })
+    };
+    admitted.wait();
+    interner.touch_with_id("explicit", 1).unwrap();
+    resume.wait();
+    let automatic = automatic.join().unwrap();
+    assert_ne!(automatic.id(), 1);
+    assert_eq!(interner.get_str(&automatic).as_deref(), Some("automatic"));
+    assert_eq!(
+        interner.get_str(&InternerKey::new(1)).as_deref(),
+        Some("explicit")
+    );
+}
+
+#[test]
+fn rv_types_5dd242f6_rejected_collision_leaves_quota_unchanged() {
+    let interner = Interner::with_quota(
+        Vec::new(),
+        InternerQuota {
+            max_names: 2,
+            max_bytes: 32,
+        },
+    );
+    interner.touch_with_id("fixed", 1).unwrap();
+    assert!(matches!(
+        interner.touch_with_id("other", 1),
+        Err(InternerError::IdConflict { .. })
+    ));
+    assert_eq!(interner.quota_usage(), (1, 5));
+    interner.touch_ind("free").unwrap();
+}
+
+#[test]
+fn rv_types_86e037b2_explicit_and_automatic_publications_resolve() {
+    let interner = Interner::new();
+    let automatic = interner.touch_ind("auto").unwrap().into_key();
+    interner.touch_with_id("explicit", 20).unwrap();
+    assert_eq!(interner.get_str(&automatic).as_deref(), Some("auto"));
+    assert_eq!(
+        interner.get_str(&InternerKey::new(20)).as_deref(),
+        Some("explicit")
+    );
+}
 
 /// #501 concurrent-growth stress: many threads each touch a large batch of
 /// DISTINCT fresh names concurrently. This forces reverse-spine population —
@@ -150,8 +246,26 @@ fn test_entries_after_trailing_doubling_capacity_is_a_gap() {
     );
 }
 
+/// A later-filled gap below the saved cursor is visible when the caller
+/// recaptures from before the hole.
+#[test]
+fn entries_after_recaptures_filled_gap_below_cursor() {
+    let interner = Interner::with_state(vec![(InternerKey::new(2), UserKey::from_str("upper"))]);
+    let (initial, initial_cursor) = interner.entries_after(0);
+    assert_eq!(
+        initial.iter().map(|(k, _)| k.id()).collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(initial_cursor, 0);
+
+    interner.touch_with_id("hole", 1).unwrap();
+    let (filled, next_cursor) = interner.entries_after(initial_cursor);
+    assert!(filled.iter().any(|(k, _)| k.id() == 1));
+    assert!(filled.iter().any(|(k, _)| k.id() == 2));
+    assert_eq!(next_cursor, 2);
+}
+
 /// Regression test for the silent data-loss bug in `entries_after`:
-/// a `None` gap in the reverse vec caused the loop to `break`,
 /// dropping every populated entry above the gap (never persisted →
 /// missing after restart). The fix keeps scanning past gaps but
 /// freezes the high-water mark so the gap is re-captured by the
