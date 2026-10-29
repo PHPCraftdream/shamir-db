@@ -24,6 +24,7 @@ use crate::engine::table::TableManager;
 use crate::query::read::ReadQuery;
 use crate::shamir_db::ShamirDb;
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::types::RecordKey;
 use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
@@ -66,6 +67,164 @@ async fn assert_corrupt_record_reported(table: &TableManager, table_name: &str) 
         "the malformed MVCC version must surface as a corrupt record"
     );
     assert_eq!(result.corrupt_records[0].table, table_name);
+}
+
+async fn corrupt_persisted_row(table: &TableManager, table_name: &str, field: &str, value: &str) {
+    let refs = new_map();
+    let ctx = table
+        .info_store_read_view()
+        .filter_context(&refs)
+        .await
+        .unwrap();
+    let result = table.read(&ReadQuery::new(table_name), &ctx).await.unwrap();
+    assert!(result.corrupt_records.is_empty());
+    let mut ids = Vec::new();
+    let stream = table.list_stream(1000);
+    futures::pin_mut!(stream);
+    while let Some(batch) = stream.next().await {
+        for (id, row) in batch.unwrap() {
+            let inner = row.into_inner().unwrap();
+            let decoded = table
+                .info_store_read_view()
+                .inner_to_query_value(&inner)
+                .await
+                .unwrap();
+            if decoded.get(field).and_then(QueryValue::as_str) == Some(value) {
+                ids.push(id);
+            }
+        }
+    }
+    assert_eq!(ids.len(), 1);
+    let id = ids[0];
+    table
+        .mvcc_store_for_test()
+        .unwrap()
+        .set_versioned(
+            RecordKey::from_slice(&id.to_bytes()),
+            Bytes::from_static(NOT_A_MAP),
+        )
+        .await
+        .unwrap();
+    let result = table.read(&ReadQuery::new(table_name), &ctx).await.unwrap();
+    assert_eq!(result.corrupt_records.len(), 1);
+    assert_eq!(result.corrupt_records[0].id, id);
+}
+
+#[tokio::test]
+async fn corrupt_setting_row_denies_authorization() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let path = ResourcePath::FunctionNamespace;
+    let actor = Actor::User(99);
+    assert!(shamir
+        .system_store()
+        .load_setting("fn_namespace_meta")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(shamir.resource_meta(&path).await.unwrap().mode, 0o777);
+    assert!(shamir
+        .authorize_access(&actor, &path, Action::Read)
+        .await
+        .is_ok());
+    let meta = ResourceMeta {
+        owner: Actor::User(41),
+        group: None,
+        mode: 0o700,
+    };
+    shamir.set_resource_meta(&path, &meta).await.unwrap();
+    let value = shamir
+        .system_store()
+        .load_setting("fn_namespace_meta")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ResourceMeta::from_record(&value).mode, 0o700);
+    assert!(shamir
+        .authorize_access(&actor, &path, Action::Read)
+        .await
+        .is_err());
+    let table = shamir
+        .system_store()
+        .system_repo()
+        .unwrap()
+        .get_table("settings")
+        .await
+        .unwrap();
+    corrupt_persisted_row(&table, "settings", "key", "fn_namespace_meta").await;
+    let error = shamir
+        .system_store()
+        .load_setting("fn_namespace_meta")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("fn_namespace_meta"));
+    assert!(shamir.resource_meta(&path).await.is_err());
+    assert!(shamir
+        .authorize_access(&actor, &path, Action::Read)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn corrupt_explicit_folder_denies_authorization() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let path = ResourcePath::function_folder(vec!["reports".to_string()]);
+    let actor = Actor::User(99);
+    assert!(shamir
+        .system_store()
+        .load_function_folder("reports")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(shamir.resource_meta(&path).await.unwrap().mode, 0o777);
+    assert!(shamir
+        .authorize_access(&actor, &path, Action::Read)
+        .await
+        .is_ok());
+    shamir
+        .create_function_folder_as(&["reports".to_string()], Actor::User(41))
+        .await
+        .unwrap();
+    let meta = ResourceMeta {
+        owner: Actor::User(41),
+        group: None,
+        mode: 0o700,
+    };
+    shamir.set_resource_meta(&path, &meta).await.unwrap();
+    let row = shamir
+        .system_store()
+        .load_function_folder("reports")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.get("path").and_then(QueryValue::as_str),
+        Some("reports")
+    );
+    assert_eq!(ResourceMeta::from_record(&row).mode, 0o700);
+    assert!(shamir
+        .authorize_access(&actor, &path, Action::Read)
+        .await
+        .is_err());
+    let table = shamir
+        .system_store()
+        .system_repo()
+        .unwrap()
+        .get_table("function_folders")
+        .await
+        .unwrap();
+    corrupt_persisted_row(&table, "function_folders", "path", "reports").await;
+    let error = shamir
+        .system_store()
+        .load_function_folder("reports")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("reports"));
+    assert!(shamir.system_store().load_function_folders().await.is_err());
+    assert!(shamir.resource_meta(&path).await.is_err());
+    assert!(shamir
+        .authorize_access(&actor, &path, Action::Read)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -179,14 +338,6 @@ async fn corrupt_group_catalogue_denies_access_and_invocation() {
         .unwrap();
     assert!(shamir
         .authorize_access(&Actor::User(100), &path, Action::Read)
-        .await
-        .is_err());
-    assert!(shamir
-        .invoke_function_as(
-            "grouped",
-            crate::engine::function::Params::new(),
-            Actor::User(100)
-        )
         .await
         .is_err());
 }

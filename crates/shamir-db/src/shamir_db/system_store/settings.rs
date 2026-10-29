@@ -82,6 +82,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(crate::DbError::Internal(format!(
+                "corrupt setting {key} catalogue: {} corrupt records",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
