@@ -30,12 +30,12 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
 `shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*` glob doesn't try to load it). The default workspace ships
-**27 crates** under `crates/` (including the `shamir-client-node` napi-rs
+**28 crates** under `crates/` (including the `shamir-client-node` napi-rs
 binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
 `shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
-`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`,
+`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-query`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
 `shamir-server`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
@@ -216,7 +216,7 @@ cargo tl -p shamir-tx                      # one-crate lib
 
 ```
 ./scripts/test.sh @tx                      # shamir-tx
-./scripts/test.sh @engine                  # shamir-engine
+./scripts/test.sh @engine                  # shamir-engine + shamir-engine-query
 ./scripts/test.sh @oracle                  # tx + engine (Version Oracle area)
 ./scripts/test.sh @types                   # shamir-types + shamir-collections
 ./scripts/test.sh @storage                 # shamir-storage + shamir-wal
@@ -471,7 +471,9 @@ self-tests run in the `rust-guard self-test` job, CI only):
   `.rust-guard/atomic_orderings.toml`. Changing a pinned ordering requires
   editing its pin with `owner` and `reason`.
 
-CI caches the rust-guard binary using a source-hash key.
+CI caches the rust-guard binary using a source-hash key. A campaign is evaluated
+only when its PR touches its `delta` or `discovery_delta` and a campaign
+package; landed entries are inert and removed by the next campaign's PR.
 
 Adding an exception: `.rust-guard/exceptions.toml` (`[[exception]]` /
 `[[producer]]`) or `.rust-guard/owned_impl.toml` — exact path/name plus
@@ -488,21 +490,22 @@ and `#[ignore]` changes are never declarable**.
 * `rustdoc` (full tier; mirrored in the fast tier when `shamir-engine` is
   affected) — `cargo doc -p shamir-engine --no-deps --document-private-items
   --locked` with broken/private intra-doc links promoted to errors, once with
-  default features and once with `--no-default-features`. Docs are code.
+  default features and once with `--no-default-features`; also documents `shamir-engine-query` with and without `test-util`. Docs are code.
 * `engine-features` / `engine-features-fast` — isolated `-p shamir-engine`
   feature cells (check + clippy per cell), each asserting via
   `scripts/ci/gates/features_matrix_check.py` that the ENABLED feature set
   matches the cell exactly, so "no defaults" is proven, not just labelled.
-  Fast tier runs cells 1 and 5 on ubuntu, drafts only.
+  The full matrix also checks isolated query-crate features. Fast tier runs cells 1 and 5 on ubuntu, drafts only.
 * `loom-model` discovery — fails before running when
   `cargo nextest list -E 'test(loom_model)'` finds zero tests (plus
   `--no-tests=fail` at run time), so a renamed/gated-away model cannot
   silently turn the gate into a vacuous pass.
-* `test-discovery` — `cargo nextest list --message-format json` diff at the
-  merge base vs head via `rust-guard discovery` (lost test, duplicate,
-  newly ignored, empty list, blocked comparison all fail); campaign-gated
-  through
-  `scripts/ci/rust_guard_select.py`, a no-op pass with no active campaign.
+* `test-discovery` — `cargo nextest list --message-format json` diff for every
+  selected campaign package at head and those present at the merge base, via
+  `rust-guard discovery` and the campaign's `discovery_delta` (lost test,
+  duplicate, newly ignored, empty list, blocked comparison all fail); selected
+  by `scripts/ci/rust_guard_select.py`, a no-op without a campaign. Drafts run
+  ubuntu × default only.
 * `node-binding` (full tier, windows-latest) — builds the `shamir-client`
   napi binding (`npm ci` + `npm run build:debug`), checks the generated
   `native/index.js`/`index.d.ts` for drift, packs the tarball and installs

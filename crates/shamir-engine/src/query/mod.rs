@@ -369,7 +369,7 @@
 //! ## Auth (Roles & Permissions)
 //!
 //! Реализовано: пользователи, роли, permissions с row-level security через
-//! `SessionPermissions`. Подробная документация: [auth/README.md](./auth/README.md).
+//! `SessionPermissions`. Подробная документация: `crates/shamir-engine-query/src/query/auth/README.md`.
 //!
 //! ### Users
 //!
@@ -431,12 +431,11 @@
 //! }
 //! ```text
 
-pub mod admin;
-pub mod auth;
 pub mod batch;
-pub mod filter;
-pub mod read;
-pub mod write;
+// #1548 S1: the evaluation leaf lives in `shamir-engine-query`; re-exported
+// so every `crate::query::{admin, auth, filter, read, write}::…` path holds.
+#[doc(no_inline)]
+pub use shamir_engine_query::query::{admin, auth, filter, read, write};
 
 pub use batch::{
     execute_batch, BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest,

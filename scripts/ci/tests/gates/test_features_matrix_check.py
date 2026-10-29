@@ -46,6 +46,12 @@ def tree_text(engine_features):
         # no-default cell: the probe root, the engine's bare dependency
         # edge (present, but zero feature lines), and another package
         lines.extend(["shamir-engine v0.1.0", "shamir-storage v0.1.0"])
+    # the engine forwards `test-util` to its query crate; the probe tree
+    # always lists that dependency edge
+    lines.append("shamir-engine-query v0.1.0")
+    lines.append('shamir-engine-query feature "default"')
+    if "test-util" in engine_features:
+        lines.append('shamir-engine-query feature "test-util"')
     return "\n".join(lines) + "\n"
 
 
@@ -274,6 +280,25 @@ class MainCellTests(unittest.TestCase):
         self.assertIn('shamir-storage feature "fjall"', err)
 
 
+class ForwardedFeatureTests(unittest.TestCase):
+    def test_missing_query_package_exits_2(self):
+        tree = "".join(
+            line + "\n"
+            for line in tree_text([]).splitlines()
+            if not line.startswith("shamir-engine-query")
+        )
+        code, _, err = run_main(["--expected", "no-default"], tree=tree)
+        self.assertEqual(code, 2)
+        self.assertIn("shamir-engine-query does not appear", err)
+
+    def test_forwarded_mismatch_exits_1(self):
+        tree = tree_text(["test-util"]).replace('shamir-engine-query feature "test-util"\n', "")
+        code, _, err = run_main(["--expected", "test-util"], tree=tree)
+        self.assertEqual(code, 1)
+        self.assertIn("shamir-engine-query", err)
+        self.assertIn("complete cargo tree stdout", err)
+
+
 class MainErrorTests(unittest.TestCase):
     def test_unknown_cell_exits_2(self):
         code, _, err = run_main(["--expected", "bogus"], tree=tree_text([]))
@@ -322,7 +347,7 @@ class MainErrorTests(unittest.TestCase):
         # feature lines while a non-empty set is expected
         code, _, err = run_main(
             ["--expected", "fjall"],
-            tree="shamir-engine v0.1.0\nshamir-storage feature \"fjall\" (*)\n",
+            tree="shamir-engine v0.1.0\nshamir-engine-query v0.1.0\nshamir-storage feature \"fjall\" (*)\n",
         )
         self.assertEqual(code, 2)
         self.assertIn("no shamir-engine feature lines", err)

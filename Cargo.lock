@@ -3474,6 +3474,7 @@ dependencies = [
  "serial_test",
  "shamir-bench-utils",
  "shamir-collections",
+ "shamir-engine-query",
  "shamir-funclib",
  "shamir-index",
  "shamir-query-builder",
@@ -3487,6 +3488,30 @@ dependencies = [
  "smallvec",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "shamir-engine-query"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "bytes",
+ "indexmap",
+ "num-bigint",
+ "regex",
+ "rmp-serde",
+ "rust_decimal",
+ "scc",
+ "serde",
+ "shamir-collections",
+ "shamir-funclib",
+ "shamir-index",
+ "shamir-query-builder",
+ "shamir-query-types",
+ "shamir-storage",
+ "shamir-tx",
+ "shamir-types",
+ "smallvec",
  "tokio",
 ]
 
