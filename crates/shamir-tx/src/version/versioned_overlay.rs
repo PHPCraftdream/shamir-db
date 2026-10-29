@@ -6,10 +6,10 @@
 //! and the on-disk version log, giving instant ack-path visibility while the
 //! background drain-leader flushes batches asynchronously.
 //!
-//! **Lock-free.** The backing structure is [`scc::TreeIndex`] — a lock-free
-//! B+ tree that keeps `(key, version)` tuples sorted lexicographically, then
-//! by version within each key. This gives O(log N + k) range scans for
-//! `newest_visible` and contiguous iteration for GC.
+//! **Indexes and concurrency.** A key-major [`scc::TreeIndex`] supports
+//! reads and ordered scans; a version-major tree supports GC. An
+//! [`scc::HashMap`] coordinates mutations using synchronous bucket guards,
+//! serializing mutations that share a bucket across all three indexes.
 //!
 //! **Wired in (P1a built it; P1b–P1e integrated it).** [`MvccStore`]
 //! (`mvcc_store/mod.rs`) holds this overlay and consults it on both the
@@ -19,10 +19,13 @@
 //! `iter_all_le`/`snapshot_le`. See also
 //! `crates/shamir-tx/src/tests/versioned_overlay_tests.rs`.
 
+use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use bytes::Bytes;
-use scc::TreeIndex;
+use scc::{HashMap, TreeIndex};
+use shamir_collections::THasher;
 use shamir_storage::types::RecordKey;
 
 /// Composite key for the overlay B+ tree: `(record_key, version)`.
@@ -39,6 +42,11 @@ use shamir_storage::types::RecordKey;
 /// `Repr` (#503 rule).
 type OverlayKey = (RecordKey, u64);
 
+struct OverlayEntry {
+    value: Bytes,
+    bytes: usize,
+}
+
 /// In-memory versioned overlay.
 ///
 /// Holds `(key, version) → value` entries for the window
@@ -47,21 +55,20 @@ type OverlayKey = (RecordKey, u64);
 /// `Some(Bytes::new())` means "deleted at that version" — the caller
 /// (resolve_read) decides semantics.
 ///
-/// All methods are **lock-free** (no `Mutex` / `RwLock`).
+/// Readers use the key-major tree; mutations coordinate via synchronous bucket guards.
 pub struct VersionedOverlay {
     /// Lock-free B+ tree: `(record_key, version) → value`.
-    tree: TreeIndex<OverlayKey, Bytes>,
-    /// Approximate byte footprint maintained atomically on insert/gc for O(1)
-    /// backpressure queries. Not exact — concurrent insert+gc may drift by a
-    /// few entries, but monotonic-enough for soft thresholds.
+    tree: TreeIndex<OverlayKey, Arc<OverlayEntry>>,
+    by_version: TreeIndex<(u64, RecordKey), Arc<OverlayEntry>>,
+    mutations: HashMap<OverlayKey, Arc<OverlayEntry>, THasher>,
+    /// Estimated footprint, accounted once per live entry.
     byte_size: AtomicUsize,
     /// Entry count maintained atomically (TreeIndex has no O(1) len).
     count: AtomicUsize,
 }
 
-// Per-entry overhead estimate: two Arc bumps (key+value Bytes), tree node
-// bookkeeping. Conservative 64 bytes covers the B+ tree node fraction and
-// the two fat pointers.
+// Nominal per-entry overhead for the shared entry and three indexes; this is
+// an estimate, not an exact accounting of allocations or index capacity.
 const PER_ENTRY_OVERHEAD: usize = 64;
 
 impl VersionedOverlay {
@@ -70,6 +77,8 @@ impl VersionedOverlay {
     pub fn new() -> Self {
         Self {
             tree: TreeIndex::new(),
+            by_version: TreeIndex::new(),
+            mutations: HashMap::with_hasher(THasher::default()),
             byte_size: AtomicUsize::new(0),
             count: AtomicUsize::new(0),
         }
@@ -82,14 +91,21 @@ impl VersionedOverlay {
     /// The first writer wins; this is correct because the same version
     /// always carries the same payload (WAL determinism).
     pub fn insert(&self, key: RecordKey, version: u64, value: Bytes) {
-        let entry_bytes = key.len() + value.len() + PER_ENTRY_OVERHEAD;
         let composite = (key, version);
-        if self.tree.insert_sync(composite, value).is_ok() {
-            // New entry — update counters.
-            self.byte_size.fetch_add(entry_bytes, Ordering::Relaxed);
+        if let scc::hash_map::Entry::Vacant(slot) = self.mutations.entry_sync(composite.clone()) {
+            let entry = Arc::new(OverlayEntry {
+                bytes: composite.0.len() + value.len() + PER_ENTRY_OVERHEAD,
+                value,
+            });
+            let _guard = slot.insert_entry(Arc::clone(&entry));
+            self.byte_size.fetch_add(entry.bytes, Ordering::Relaxed);
             self.count.fetch_add(1, Ordering::Relaxed);
+            assert!(self
+                .by_version
+                .insert_sync((version, composite.0.clone()), Arc::clone(&entry))
+                .is_ok());
+            assert!(self.tree.insert_sync(composite, entry).is_ok());
         }
-        // Err ⇒ key already present (idempotent replay) — no-op.
     }
 
     /// Exact-version point lookup: returns the value at `(key, version)`.
@@ -109,24 +125,26 @@ impl VersionedOverlay {
     /// that history has dropped, breaking the overlay-mirrors-history invariant.
     ///
     /// Idempotent: removing an absent entry is a no-op (the value was already
-    /// drained or never inserted). Lock-free.
+    /// drained or never inserted).
     pub fn remove(&self, key: &[u8], version: u64) {
-        // Inline-cheap for the 16-byte `RecordId` shape (no heap alloc);
-        // constructs the tree's `(RecordKey, version)` probe key.
         let composite = (RecordKey::from_slice(key), version);
-        // `peek` the value first to recover its byte length for the counters,
-        // then remove. The window between peek and remove is benign: counters
-        // are advisory (Relaxed) and a concurrent insert of the same version is
-        // impossible (versions are globally unique).
-        let entry_bytes = self
-            .tree
-            .peek_with(&composite, |_, v| v.len())
-            .map(|vlen| composite.0.len() + vlen + PER_ENTRY_OVERHEAD);
-        if self.tree.remove_sync(&composite) {
-            if let Some(bytes) = entry_bytes {
-                self.byte_size.fetch_sub(bytes, Ordering::Relaxed);
+        self.remove_if_current(&composite, None);
+    }
+
+    fn remove_if_current(&self, composite: &OverlayKey, expected: Option<&Arc<OverlayEntry>>) {
+        if let scc::hash_map::Entry::Occupied(slot) = self.mutations.entry_sync(composite.clone()) {
+            let entry = slot.get();
+            if expected.is_some_and(|candidate| !Arc::ptr_eq(candidate, entry)) {
+                return;
             }
+            let bytes = entry.bytes;
+            assert!(self.tree.remove_sync(composite));
+            assert!(self
+                .by_version
+                .remove_sync(&(composite.1, composite.0.clone())));
+            self.byte_size.fetch_sub(bytes, Ordering::Relaxed);
             self.count.fetch_sub(1, Ordering::Relaxed);
+            let _ = slot.remove_entry();
         }
     }
 
@@ -149,7 +167,7 @@ impl VersionedOverlay {
         self.tree
             .range(lo..=hi, &guard)
             .last()
-            .map(|(k, v)| (k.1, v.clone()))
+            .map(|(k, v)| (k.1, v.value.clone()))
     }
 
     /// Every `(version, value)` held for `key`, ascending by version.
@@ -165,7 +183,7 @@ impl VersionedOverlay {
         let guard = scc::Guard::new();
         self.tree
             .range(lo..=hi, &guard)
-            .map(|(k, v)| (k.1, v.clone()))
+            .map(|(k, v)| (k.1, v.value.clone()))
             .collect()
     }
 
@@ -178,45 +196,43 @@ impl VersionedOverlay {
     /// snapshots or by the overlay-aware read path; removing them would
     /// cause data loss.
     ///
-    /// Implementation: iterates the tree (entries are version-sorted within
-    /// each key) and removes qualifying entries. The overlay is bounded by
-    /// the `(durable_wm, visibility_wm]` window — typically small.
-    ///
-    /// P1e may optimise this with a version-major secondary index to avoid
-    /// a full scan when the tree is large relative to the GC batch.
+    /// Scans the version-major range one candidate at a time.
     pub fn gc_upto(&self, durable_watermark: u64, floor: u64) {
         let threshold = durable_watermark.min(floor);
         if threshold == 0 {
             return;
         }
 
-        // Collect keys to remove. Entries are sorted by (key, version) — not
-        // by version alone — so we must filter (not take_while).
-        let to_remove: Vec<(OverlayKey, usize)> = {
-            let guard = scc::Guard::new();
-            self.tree
-                .iter(&guard)
-                .filter(|(k, _)| k.1 <= threshold)
-                .map(|(k, v)| {
-                    let entry_bytes = k.0.len() + v.len() + PER_ENTRY_OVERHEAD;
-                    (k.clone(), entry_bytes)
-                })
-                .collect()
-        };
+        self.gc_candidates(threshold, |_, _| {});
+    }
 
-        let mut removed_bytes = 0usize;
-        let mut removed_count = 0usize;
-        for (key, entry_bytes) in to_remove {
-            if self.tree.remove_sync(&key) {
-                removed_bytes += entry_bytes;
-                removed_count += 1;
-            }
+    fn gc_candidates(&self, threshold: u64, mut visit: impl FnMut(u64, &RecordKey)) {
+        let mut cursor: Option<(u64, RecordKey)> = None;
+        loop {
+            let candidate = {
+                let guard = scc::Guard::new();
+                let lower = cursor.clone().map_or(Unbounded, Excluded);
+                let upper = threshold
+                    .checked_add(1)
+                    .map(|v| Excluded((v, RecordKey::from_slice(b""))))
+                    .unwrap_or(Unbounded);
+                self.by_version
+                    .range((lower, upper), &guard)
+                    .next()
+                    .map(|(key, entry)| (key.clone(), Arc::clone(entry)))
+            };
+            let Some(((version, key), entry)) = candidate else {
+                break;
+            };
+            visit(version, &key);
+            cursor = Some((version, key.clone()));
+            self.remove_if_current(&(key, version), Some(&entry));
         }
+    }
 
-        if removed_count > 0 {
-            self.byte_size.fetch_sub(removed_bytes, Ordering::Relaxed);
-            self.count.fetch_sub(removed_count, Ordering::Relaxed);
-        }
+    #[cfg(test)]
+    pub(crate) fn gc_inspect_for_test(&self, threshold: u64, visit: impl FnMut(u64, &RecordKey)) {
+        self.gc_candidates(threshold, visit);
     }
 
     /// Materialise the per-key winner `≤ floor` across the WHOLE overlay.
@@ -253,10 +269,10 @@ impl VersionedOverlay {
                 // supersedes it (ascending order guarantees this is newer).
                 Some((prev_key, prev_v, prev_val)) if prev_key == k => {
                     *prev_v = *v;
-                    *prev_val = val.clone();
+                    *prev_val = val.value.clone();
                 }
                 // New key — push its first (so-far winning) version.
-                _ => out.push((k.clone(), *v, val.clone())),
+                _ => out.push((k.clone(), *v, val.value.clone())),
             }
         }
         out
@@ -284,7 +300,7 @@ impl VersionedOverlay {
         self.tree
             .iter(&guard)
             .filter(|((_, v), _)| *v <= floor)
-            .map(|((k, v), val)| (k.clone(), *v, val.clone()))
+            .map(|((k, v), val)| (k.clone(), *v, val.value.clone()))
             .collect()
     }
 
@@ -302,10 +318,8 @@ impl VersionedOverlay {
 
     /// Approximate total byte footprint (keys + values + per-entry overhead).
     ///
-    /// Maintained via `AtomicUsize` for O(1) backpressure checks. May drift
-    /// slightly under concurrent insert+gc but never goes negative (saturates
-    /// at 0 on underflow via `fetch_sub` with `Relaxed` ordering — the
-    /// counter is advisory).
+    /// Maintained via `AtomicUsize` for O(1) backpressure checks. The
+    /// counter is advisory and may reflect concurrent mutations.
     #[inline]
     pub fn approx_bytes(&self) -> usize {
         self.byte_size.load(Ordering::Relaxed)
@@ -320,7 +334,9 @@ impl VersionedOverlay {
         // Inline-cheap for the 16-byte `RecordId` shape; probes the tree with
         // a `(RecordKey, version)` key.
         self.tree
-            .peek_with(&(RecordKey::from_slice(key), version), |_, v| v.clone())
+            .peek_with(&(RecordKey::from_slice(key), version), |_, v| {
+                v.value.clone()
+            })
     }
 }
 

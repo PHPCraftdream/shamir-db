@@ -4,7 +4,7 @@ use std::sync::Arc;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::RecordKey;
 
-use super::key_lock::{Holder, KeyLock, LockMode};
+use super::key_lock::{Holder, LockLease, LockMode};
 use super::MvccStore;
 use super::RecordCell;
 
@@ -50,37 +50,10 @@ impl MvccStore {
         wound_notify: Arc<tokio::sync::Notify>,
         mode: LockMode,
     ) -> DbResult<()> {
-        // Get-or-insert the KeyLock for this key. The Arc is shared between
-        // concurrent requesters so they coordinate on the same Mutex/Notify.
-        //
-        // DEADLOCK FIX (same class as #589 / `cells` map, commit `7a4abf62`):
-        // `entry_sync`, NOT `entry_async`. The `locks` map is read on EVERY
-        // Level-3 commit AND abort via the SYNCHRONOUS `release_locks` →
-        // `self.locks.get_sync(key)` (`get_sync` takes a shared bucket lock
-        // and PARKS the calling OS thread while the bucket is exclusively
-        // owned). `entry_async`'s wait path is lock-HANDOFF: on release,
-        // saa GRANTS the exclusive bucket lock to the suspended waiter
-        // TASK, which then holds it while sitting in tokio's run queue
-        // until next polled. The pessimistic-locking hot-key case — many
-        // txs contending for the SAME `RecordKey` — funnels onto ONE
-        // bucket by construction. If, in the lock-handoff window, every
-        // runtime worker thread runs `release_locks` → `get_sync(k)` on
-        // that same bucket, all workers park and the lock-owning
-        // `lock_key` task can never be polled again → whole-runtime
-        // deadlock. With `entry_sync` the exclusive lock is only ever
-        // held by a RUNNING thread for a few instructions (an
-        // `Arc::clone`-or-insert), so every `get_sync` wait is bounded.
-        // The fn stays `async` to keep its call sites unchanged; this
-        // particular call no longer suspends (the rest of the fn still
-        // legitimately awaits the per-key `state` Mutex / Notify).
-        let lock = match self.locks.entry_sync(key) {
-            scc::hash_map::Entry::Occupied(e) => Arc::clone(e.get()),
-            scc::hash_map::Entry::Vacant(e) => {
-                let arc = Arc::new(KeyLock::new());
-                e.insert_entry(Arc::clone(&arc));
-                arc
-            }
-        };
+        // The lease is acquired under the registry entry lock before any await.
+        let lease = LockLease::acquire(&self.locks, key, true)
+            .expect("inserting a lock always returns a lease");
+        let lock = &lease.lock;
 
         loop {
             // (4) Abort early if this tx was already wounded by an older tx.
@@ -129,6 +102,7 @@ impl MvccStore {
                 } else if mode == LockMode::Exclusive {
                     state.mode = Some(LockMode::Exclusive);
                 }
+                lock.holders.store(state.holders.len(), Ordering::Release);
                 return Ok(());
             }
 
@@ -172,6 +146,7 @@ impl MvccStore {
             if wounded_any {
                 // Recompute the aggregate mode from surviving holders.
                 state.recompute_mode();
+                lock.holders.store(state.holders.len(), Ordering::Release);
                 // Wake any waiters so they observe the wounds / freed slots.
                 lock.notify.notify_waiters();
             }
@@ -217,18 +192,19 @@ impl MvccStore {
     ///
     /// Called on BOTH commit and abort/drop of a Level-3 tx. For each key,
     /// locks the state, removes all holders with the given `tx_version`,
-    /// recomputes the mode, and wakes waiters. Leftover empty entries are
-    /// kept in the map (cheap; GC is intentionally not done here).
+    /// recomputes the mode, wakes waiters, and retires unused entries.
     pub async fn release_locks(&self, tx_version: u64, keys: &[RecordKey]) {
         for key in keys {
-            let Some(lock) = self.locks.get_sync(key).map(|e| Arc::clone(e.get())) else {
+            let Some(lease) = LockLease::acquire(&self.locks, key.clone(), false) else {
                 continue;
             };
+            let lock = &lease.lock;
             let mut state = lock.state.lock().await;
             let before = state.holders.len();
             state.holders.retain(|h| h.tx_version != tx_version);
             if state.holders.len() != before {
                 state.recompute_mode();
+                lock.holders.store(state.holders.len(), Ordering::Release);
                 // Wake waiters so a blocked tx can re-evaluate.
                 lock.notify.notify_waiters();
             }

@@ -10,10 +10,11 @@ use shamir_storage::error::{DbError, DbResult};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 use tokio::time::{sleep_until, timeout_at, Instant};
 
+use super::batch::EventBatch;
 use super::error::ChangelogError;
 use super::events::{
-    clean_horizon_key, encode_clean_horizon, encode_gap_marker, gap_marker_key, version_key,
-    ChangelogEvent, BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
+    clean_horizon_key, encode_clean_horizon, encode_gap_marker, gap_marker_key, ChangelogEvent,
+    BROADCAST_CAPACITY, JOURNAL_CHANNEL_CAPACITY,
 };
 use crate::changefeed::install;
 use crate::changefeed::journal_read::JournalRead;
@@ -33,6 +34,16 @@ pub trait ChangelogStore: Send + Sync {
     /// metadata AFTER set. Success certifies both boundaries, not just set.
     /// Marker success must include the backend's explicit durability boundary.
     async fn put(&self, key: Bytes, value: Bytes) -> Result<(), ChangelogError>;
+    /// Persist event records only, in input order, returning one outcome per input.
+    /// Metadata keys must never be passed here. Implementations must not report
+    /// success for a write whose outcome is unknown.
+    async fn put_many(&self, items: Vec<(Bytes, Bytes)>) -> Vec<Result<(), ChangelogError>> {
+        let mut results = Vec::with_capacity(items.len());
+        for (key, value) in items {
+            results.push(self.put(key, value).await);
+        }
+        results
+    }
     /// Range-read serialized events with keys in
     /// `[from_key, ..)` ascending, up to `limit` entries, excluding metadata.
     async fn range_from(&self, from_key: Bytes, limit: usize)
@@ -84,7 +95,7 @@ pub struct RepoChangefeed {
     pub(crate) journal_dropped: AtomicU64,
     /// CF-2 heartbeat/durability-watermark: the highest `commit_version`
     /// successfully persisted by the background writer (updated via
-    /// `fetch_max` after every `persist_one`). A reader can compare this
+    /// `fetch_max` after each successful batch result). A reader can compare this
     /// against the highest emitted version to detect a stalled/dead writer.
     /// `0` means "nothing persisted yet".
     pub(crate) last_persisted_version: Arc<AtomicU64>,
@@ -119,9 +130,14 @@ impl std::fmt::Debug for RepoChangefeed {
 impl RepoChangefeed {
     /// Build a changefeed bound to `store` and spawn its background writer.
     ///
-    /// The writer holds only a `Weak` to nothing — it owns the receiver and
-    /// the `Arc<dyn ChangelogStore>`; it exits when the `journal_tx` sender
-    /// is dropped (channel closed) or `shutdown` is set + `notify` fired.
+    /// The detached writer owns the receiver and store, not the feed. It exits
+    /// when all senders are dropped, or after shutdown and draining. Use
+    /// [`shutdown_and_wait`](Self::shutdown_and_wait) to observe completion;
+    /// dropping the feed does not join the writer, and runtime shutdown can
+    /// stop it before draining finishes.
+    ///
+    /// # Panics
+    /// Panics if called without an entered Tokio runtime.
     pub fn new(store: Arc<dyn ChangelogStore>) -> Arc<Self> {
         Self::new_with_gap(store, 0)
     }
@@ -130,6 +146,9 @@ impl RepoChangefeed {
     /// Existing `new` callers must only use it for stores without a prior marker.
     /// Exactly one live feed may own a given store's marker writer at a time;
     /// stop/drain the old writer before re-opening the same store.
+    ///
+    /// # Panics
+    /// Panics without an entered Tokio runtime; the writer is detached as in [`Self::new`].
     pub fn new_with_gap(store: Arc<dyn ChangelogStore>, restored_gap: u64) -> Arc<Self> {
         Self::new_with_gap_interval(
             store,
@@ -139,6 +158,10 @@ impl RepoChangefeed {
 
     /// Seed ONLY an interval loaded from durable storage or successfully flushed
     /// before construction. Exactly one live feed owns the store's marker writer.
+    ///
+    /// # Panics
+    /// Panics without an entered Tokio runtime or for an invalid interval.
+    /// The writer is detached as in [`Self::new`].
     pub fn new_with_gap_interval(
         store: Arc<dyn ChangelogStore>,
         restored_gap: Option<(u64, u64)>,
@@ -335,6 +358,10 @@ impl RepoChangefeed {
     }
 
     /// Construct from strictly loaded durable metadata. One writer per store.
+    ///
+    /// # Panics
+    /// Panics without an entered Tokio runtime or for an invalid gap interval.
+    /// The writer is detached as in [`Self::new`].
     pub fn new_with_metadata(
         store: Arc<dyn ChangelogStore>,
         restored_gap: Option<(u64, u64)>,
@@ -461,7 +488,7 @@ impl GapMarker {
             .rcu(|current| Some(merge_gap(**current, interval)));
     }
 
-    fn mark_gap(&self, version: u64) {
+    pub(super) fn mark_gap(&self, version: u64) {
         let version = version.max(1);
         self.merge((version, version));
         // Also wake for unchanged marks: a prior marker put may have failed.
@@ -511,7 +538,7 @@ impl GapMarker {
 }
 
 /// Serialise an event to msgpack for the journal store.
-fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, ChangelogError> {
+pub(super) fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, ChangelogError> {
     rmp_serde::to_vec(ev)
         .map(Bytes::from)
         .map_err(|e| ChangelogError::Serialize(e.to_string()))
@@ -521,7 +548,7 @@ fn serialize_event(ev: &ChangelogEvent) -> Result<Bytes, ChangelogError> {
 /// event to the store keyed by its `commit_version` (BE bytes), and exits
 /// on shutdown after a final drain.
 ///
-/// After every successful `persist_one` it advances `last_persisted_version`
+/// After each successful batch result it advances `last_persisted_version`
 /// monotonically via `fetch_max` (CF-2 heartbeat/durability-watermark).
 ///
 /// Crash-window: an event acked into the channel but not yet persisted when
@@ -598,36 +625,37 @@ pub(crate) async fn journal_writer_loop(
             break;
         };
 
-        process_journal_msg(
-            &store,
-            first,
-            &last_persisted_version,
-            &gap,
-            &confirmed_through,
-            &barrier_notify,
-            &repair_pending,
-        )
-        .await;
-        // Opportunistically batch any already-queued events.
-        let mut batched = 0usize;
-        while batched < WRITER_BATCH {
-            match rx.try_recv() {
-                Ok(ev) => {
-                    process_journal_msg(
-                        &store,
-                        ev,
+        let mut batch = EventBatch::default();
+        batch
+            .push(
+                &store,
+                first,
+                (
+                    &last_persisted_version,
+                    &gap,
+                    &confirmed_through,
+                    &barrier_notify,
+                    &repair_pending,
+                ),
+            )
+            .await;
+        for _ in 1..WRITER_BATCH {
+            let Ok(msg) = rx.try_recv() else { break };
+            batch
+                .push(
+                    &store,
+                    msg,
+                    (
                         &last_persisted_version,
                         &gap,
                         &confirmed_through,
                         &barrier_notify,
                         &repair_pending,
-                    )
-                    .await;
-                    batched += 1;
-                }
-                Err(_) => break,
-            }
+                    ),
+                )
+                .await;
         }
+        batch.flush(&store, &last_persisted_version, &gap).await;
 
         if shutdown.load(Ordering::SeqCst) {
             drain_and_persist(
@@ -655,22 +683,27 @@ pub(crate) async fn drain_and_persist(
     barrier_notify: &Notify,
     repair_pending: &RepairPendingInner,
 ) {
-    while let Ok(ev) = rx.try_recv() {
-        process_journal_msg(
-            store,
-            ev,
-            last_persisted_version,
-            gap,
-            confirmed_through,
-            barrier_notify,
-            repair_pending,
-        )
-        .await;
+    let mut batch = EventBatch::default();
+    while let Ok(msg) = rx.try_recv() {
+        batch
+            .push(
+                store,
+                msg,
+                (
+                    last_persisted_version,
+                    gap,
+                    confirmed_through,
+                    barrier_notify,
+                    repair_pending,
+                ),
+            )
+            .await;
     }
+    batch.flush(store, last_persisted_version, gap).await;
     gap.persist(store).await;
 }
 
-async fn process_journal_msg(
+pub(super) async fn process_journal_msg(
     store: &Arc<dyn ChangelogStore>,
     msg: JournalMsg,
     last_persisted_version: &Arc<AtomicU64>,
@@ -680,7 +713,7 @@ async fn process_journal_msg(
     repair_pending: &RepairPendingInner,
 ) {
     match msg {
-        JournalMsg::Event(ev) => persist_one(store, &ev, last_persisted_version, gap).await,
+        JournalMsg::Event(_) => unreachable!("events are handled by the batch"),
         JournalMsg::CleanHorizon {
             through,
             horizon,
@@ -717,38 +750,5 @@ async fn process_journal_msg(
             confirmed_through.fetch_max(w, Ordering::Release);
             barrier_notify.notify_waiters();
         }
-    }
-}
-
-/// Persist a single event. Failures are logged, never propagated — the
-/// journal is best-effort and must not stall the writer loop.
-///
-/// On success, advances `last_persisted_version` monotonically (CF-2
-/// heartbeat/durability-watermark).
-async fn persist_one(
-    store: &Arc<dyn ChangelogStore>,
-    ev: &ChangelogEvent,
-    last_persisted_version: &Arc<AtomicU64>,
-    gap: &GapMarker,
-) {
-    let value = match serialize_event(ev) {
-        Ok(v) => v,
-        Err(e) => {
-            gap.mark_gap(ev.commit_version);
-            log::warn!("changefeed writer: {e}; dropping journal entry");
-            return;
-        }
-    };
-    let key = version_key(ev.commit_version);
-    if let Err(e) = store.put(key, value).await {
-        gap.mark_gap(ev.commit_version);
-        log::warn!(
-            "changefeed writer: journal put failed for repo {} commit_version {}: {e}",
-            ev.repo,
-            ev.commit_version
-        );
-    } else {
-        // CF-2: advance the watermark monotonically.
-        last_persisted_version.fetch_max(ev.commit_version, Ordering::Release);
     }
 }

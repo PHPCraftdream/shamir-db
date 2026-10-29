@@ -3,6 +3,7 @@
 //! See `docs/dev-artifacts/pre-transactional/03-repo-coordinator.md` §2.3 and D5 in
 //! `architectural-decisions.md` for rationale.
 
+use scc::hash_map::Entry::{Occupied, Vacant};
 use scc::HashMap as SccHashMap;
 use shamir_collections::{TFxMap, THasher};
 use shamir_storage::error::DbResult;
@@ -88,7 +89,6 @@ impl<'a> LayeredInterner<'a> {
                     return Ok(ik.id());
                 }
                 let entry = overlay.entry_sync(key.to_string());
-                use scc::hash_map::Entry::{Occupied, Vacant};
                 match entry {
                     Occupied(oe) => Ok(*oe.get()),
                     Vacant(ve) => {

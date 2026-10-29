@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::version_codec::encode_version_key;
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use shamir_collections::TMap;
 use shamir_storage::error::DbError;
 use shamir_storage::types::RecordKey;
@@ -625,37 +625,28 @@ impl MvccStore {
             self.history.get_many(miss_keys).await?
         };
 
-        // Phase 3: assemble the output vector in input order.
-        let mut out: Vec<Option<Bytes>> = Vec::with_capacity(len);
-        for (i, slot) in slots.iter().enumerate() {
-            match slot {
-                Slot::Resolved(val) => {
-                    out.push(val.clone());
-                }
-                Slot::HistoryMiss { miss_idx, cur_v } => {
-                    match &miss_results[*miss_idx] {
-                        Some(val) if val.is_empty() => out.push(None), // tombstone
-                        Some(val) => out.push(Some(val.clone())),
-                        // RV-TX-2CB455A7: exact-version miss ⇒ that version
-                        // was attempted and aborted — fall back below it.
-                        None if *cur_v > 0 => {
-                            let val = self.resolve_read(&keys[i], floor.min(cur_v - 1), 0).await?;
-                            out.push(val);
+        // Ordered buffering preserves slot and error order. Cold reads re-probe
+        // the cell and floor after the batch await to retain race semantics.
+        futures::stream::iter(slots.into_iter().enumerate().map(|(i, slot)| {
+            let miss_results = &miss_results;
+            async move {
+                match slot {
+                    Slot::Resolved(val) => Ok(val),
+                    Slot::HistoryMiss { miss_idx, cur_v } => match &miss_results[miss_idx] {
+                        Some(val) if val.is_empty() => Ok(None),
+                        Some(val) => Ok(Some(val.clone())),
+                        None if cur_v > 0 => {
+                            self.resolve_read(&keys[i], floor.min(cur_v - 1), 0).await
                         }
-                        None => out.push(None), // not found
-                    }
-                }
-                Slot::FloorExceeded => {
-                    let val = self.get_at(&keys[i], floor).await?;
-                    out.push(val);
-                }
-                Slot::Cold => {
-                    let val = self.get_current_bytes(&keys[i]).await?;
-                    out.push(val);
+                        None => Ok(None),
+                    },
+                    Slot::FloorExceeded => self.get_at(&keys[i], floor).await,
+                    Slot::Cold => self.get_current_bytes(&keys[i]).await,
                 }
             }
-        }
-
-        Ok(out)
+        }))
+        .buffered(16)
+        .try_collect()
+        .await
     }
 }

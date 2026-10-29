@@ -13,11 +13,14 @@
 //! Snapshot reads via [`MvccStore::get_at`]: if the cached version ≤ snapshot,
 //! read the log at `key‖0xFF‖version`; otherwise range-scan the log for the
 //! newest version ≤ snapshot (see [`MvccStore::resolve_read`]).
+#[path = "history/drain.rs"]
 mod drain;
 mod history;
 pub mod key_lock;
 pub mod mvcc_locks;
 mod store;
+#[cfg(test)]
+mod tests;
 pub mod write_receipt;
 
 pub use history::{mvcc_gc, mvcc_history, retention, version_entry};

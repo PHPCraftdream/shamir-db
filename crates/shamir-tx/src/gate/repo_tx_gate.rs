@@ -367,7 +367,7 @@ impl RepoTxGate {
             version_counter: AtomicU64::new(last_committed),
             last_committed_version: Arc::new(AtomicU64::new(last_committed)),
             receipt_native: AtomicBool::new(false),
-            next_tx_id: AtomicU64::new(next_tx_id_seed),
+            next_tx_id: AtomicU64::new(next_tx_id_seed.max(1)),
             active_snapshots: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             snapshot_versions: Arc::new(scc::TreeIndex::new()),
             active_serializable_count: Arc::new(AtomicU64::new(0)),
