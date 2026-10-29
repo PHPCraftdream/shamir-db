@@ -26,8 +26,4 @@
 # delta   = ".rust-guard/stages/split-repo-instance.toml"
 # discovery_delta = ".rust-guard/stages/split-repo-instance-discovery.toml"
 
-[[campaigns]]
-name = "engine-split-validator"
-packages = ["shamir-engine", "shamir-engine-validator"]
-delta = ".rust-guard/stages/engine-split-validator.toml"
-discovery_delta = ".rust-guard/stages/engine-split-validator.discovery.toml"
+campaigns = []
