@@ -113,6 +113,11 @@ pub enum IndexError {
 pub trait IndexBackend: Send + Sync {
     fn descriptor(&self) -> &IndexDescriptor;
 
+    /// Descriptor to persist, including backend-derived durable settings.
+    fn persisted_descriptor(&self) -> IndexDescriptor {
+        self.descriptor().clone()
+    }
+
     /// Downcast to concrete type for specialised access (e.g. VectorBackend
     /// pre-filter / co-filter paths in V3.2). Each impl returns `self` erased.
     fn as_any(&self) -> &dyn Any;

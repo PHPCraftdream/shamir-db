@@ -76,6 +76,15 @@ pub async fn load_snapshot(
     store: &Arc<dyn Store>,
     keyspace: &str,
 ) -> Result<HnswAdapter, SnapshotError> {
+    load_snapshot_with_intent(store, keyspace, None).await
+}
+
+/// Load a snapshot while preserving the descriptor's quantization intent.
+pub(crate) async fn load_snapshot_with_intent(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    quantization: Option<crate::kind::VectorQuantization>,
+) -> Result<HnswAdapter, SnapshotError> {
     // ---- 1. manifest -----------------------------------------------------
     let manifest = read_manifest(store, keyspace).await?;
     let gen = manifest.gen;
@@ -367,6 +376,7 @@ pub async fn load_snapshot(
         vectors,
         deleted,
         next_id,
+        quantization,
     );
     Ok(adapter)
 }

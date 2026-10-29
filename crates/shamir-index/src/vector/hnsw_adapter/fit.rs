@@ -418,7 +418,6 @@ impl HnswAdapter {
     /// `None` = legacy f32 path, bit-for-bit. Used by the background
     /// compaction path (#428) to decide whether the compaction target
     /// should be a quantization-enabled adapter.
-    #[allow(dead_code)]
     pub(crate) fn quantization_mode(&self) -> Option<VectorQuantization> {
         self.quantization
     }
