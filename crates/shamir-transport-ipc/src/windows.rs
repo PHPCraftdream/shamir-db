@@ -9,8 +9,8 @@
 //! current logon session" (a service account has no stable logon SID
 //! across restarts, so the user SID — not `OWNER RIGHTS`/`OW` and not the
 //! logon SID — is the correct, stable anchor for a long-lived daemon).
-//! `ServerOptions::reject_remote_clients` (tokio's own default: `true`) is
-//! left at its default, which additionally blocks the pipe from being
+//! `ServerOptions::reject_remote_clients` is explicitly set to `true`,
+//! which additionally blocks the pipe from being
 //! reachable over SMB from a remote host at all, regardless of DACL.
 //!
 //! A `NamedPipeServer` handle serves exactly ONE client, unlike a socket
@@ -88,7 +88,16 @@ impl IpcListener {
         crate::validate_endpoint(name)?;
         let name = name.to_owned();
         let sec_desc = OwnerOnlySecurityDescriptor::for_current_user()?;
-        let first = create_instance(&name, &sec_desc, /* first_pipe_instance */ true)?;
+        let first =
+            create_instance(&name, &sec_desc, /* first_pipe_instance */ true).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    FirstInstanceError {
+                        name: name.clone(),
+                        error,
+                    },
+                )
+            })?;
         Ok(Self {
             name,
             sec_desc,
@@ -166,5 +175,27 @@ fn create_instance(
                 name,
                 sec_desc.as_security_attributes() as *mut c_void,
             )
+    }
+}
+
+#[derive(Debug)]
+struct FirstInstanceError {
+    name: String,
+    error: io::Error,
+}
+
+impl std::fmt::Display for FirstInstanceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "failed to create first named pipe instance {:?}: {}",
+            self.name, self.error
+        )
+    }
+}
+
+impl std::error::Error for FirstInstanceError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }

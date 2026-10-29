@@ -119,6 +119,7 @@ pub(crate) async fn persist_terminal_with_retry(
     let (state, message) = match error {
         ReplError::Seed(reason) => (reason.code(), error.to_string()),
         ReplError::IdentityMismatch { code, .. } => (code.code(), error.to_string()),
+        ReplError::UpstreamKeyMismatch { .. } => ("upstream_key_mismatch", error.to_string()),
         _ => return,
     };
     mark_with_retry(home, name, "persist_terminal", tok, generation, || {
@@ -153,6 +154,7 @@ pub(crate) async fn persist_terminal(
     let (state, message) = match error {
         ReplError::Seed(reason) => (reason.code(), error.to_string()),
         ReplError::IdentityMismatch { code, .. } => (code.code(), error.to_string()),
+        ReplError::UpstreamKeyMismatch { .. } => ("upstream_key_mismatch", error.to_string()),
         _ => return,
     };
     if let Err(mark_error) = home

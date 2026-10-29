@@ -154,6 +154,7 @@ pub fn supervisor(home: &Arc<ShamirDb>) -> SubscriptionSupervisor {
         Some(child::REPLICATOR.to_string()),
         Some(ReplicatorPassword::from(child::REPLICATOR_PW.to_string())),
         "localhost".to_string(),
+        Default::default(),
     )
     .expect("replicator credentials resolve");
     SubscriptionSupervisor::new(home.clone(), factory, "seed-e2e-follower")

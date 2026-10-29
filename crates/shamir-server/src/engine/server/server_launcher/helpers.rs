@@ -56,7 +56,7 @@ pub(super) fn browser_origin_policy_from(
             "browser_origin_allowlist must not be empty for tls_no_export ws listeners".into(),
         ));
     }
-    Ok(BrowserOriginPolicy::allow(allowlist.iter().cloned()))
+    BrowserOriginPolicy::try_allow(allowlist.iter().cloned()).map_err(BootError::Bind)
 }
 
 /// Build a per-listener `ConnectionContext`. Each listener gets its own

@@ -16,6 +16,7 @@
 //! - Allowlist supports exact match (`https://app.example.com`) and
 //!   wildcard for subdomains (`https://*.example.com`).
 
+use std::net::{Ipv4Addr, Ipv6Addr};
 use thiserror::Error;
 
 /// Operator-configured origin policy for the browser endpoint.
@@ -25,8 +26,7 @@ pub struct BrowserOriginPolicy {
 }
 
 impl BrowserOriginPolicy {
-    /// Empty allowlist — rejects everything except the explicit
-    /// `accept_no_origin = true` mode (which is for testing only).
+    /// Empty allowlist — rejects every origin, including missing headers.
     pub fn empty() -> Self {
         Self { allowed: vec![] }
     }
@@ -34,23 +34,108 @@ impl BrowserOriginPolicy {
     /// Construct from a list of allowed origins. Each entry can be either:
     /// - exact: `https://app.example.com`
     /// - wildcard: `https://*.example.com` (matches one subdomain level)
+    ///
+    /// Malformed entries are ignored. Prefer `try_allow` for configuration.
     pub fn allow(origins: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
-            allowed: origins.into_iter().map(Into::into).collect(),
+            allowed: origins
+                .into_iter()
+                .map(Into::into)
+                .filter(|s| valid_origin(s, true))
+                .collect(),
         }
+    }
+
+    /// Reject malformed origin patterns instead of silently ignoring them.
+    pub fn try_allow(origins: impl IntoIterator<Item = impl Into<String>>) -> Result<Self, String> {
+        let allowed: Vec<String> = origins.into_iter().map(Into::into).collect();
+        if let Some(bad) = allowed.iter().find(|s| !valid_origin(s, true)) {
+            return Err(format!("invalid origin pattern: {bad}"));
+        }
+        Ok(Self { allowed })
     }
 
     /// Test whether an `Origin` header value is allowed by this policy.
     pub fn allows(&self, origin: &str) -> bool {
-        self.allowed
-            .iter()
-            .any(|pattern| origin_matches(pattern, origin))
+        valid_origin(origin, false)
+            && self
+                .allowed
+                .iter()
+                .any(|pattern| origin_matches(pattern, origin))
     }
 
     /// Number of configured allowed origins.
     pub fn allowed_count(&self) -> usize {
         self.allowed.len()
     }
+}
+
+// Validate only serialized HTTP(S) tuple origins; preserve their exact spelling.
+fn valid_origin(value: &str, pattern: bool) -> bool {
+    let authority = match value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    {
+        Some(authority) => authority,
+        None => return false,
+    };
+    if !authority.is_ascii()
+        || authority
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control() || b"/@?#,\\".contains(&b))
+    {
+        return false;
+    }
+    let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
+        let Some((ip, suffix)) = rest.split_once(']') else {
+            return false;
+        };
+        if ip.parse::<Ipv6Addr>().is_err() {
+            return false;
+        }
+        ("", suffix)
+    } else {
+        match authority.split_once(':') {
+            Some((host, _)) => (host, &authority[host.len()..]),
+            None => (authority, ""),
+        }
+    };
+    if !port.is_empty() {
+        let Some(port) = port.strip_prefix(':') else {
+            return false;
+        };
+        if port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+            || port.parse::<u16>().is_err()
+        {
+            return false;
+        }
+    }
+    if authority.starts_with('[') {
+        return true;
+    }
+    let (host, wildcard) = match host.strip_prefix("*.") {
+        Some(host) if pattern => (host, true),
+        _ => (host, false),
+    };
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    if !wildcard && host.parse::<Ipv4Addr>().is_ok() {
+        return true;
+    }
+    if wildcard && host.parse::<Ipv4Addr>().is_ok() {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
 }
 
 fn origin_matches(pattern: &str, origin: &str) -> bool {

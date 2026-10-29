@@ -484,6 +484,7 @@ impl ServerLauncher {
             repl_cfg.replicator_user.clone(),
             repl_cfg.replicator_password.clone(),
             repl_cfg.server_name.clone(),
+            repl_cfg.upstream_pins.clone(),
         )
         .unwrap_or_else(|| {
             // No creds → a stub factory that yields a never-connecting source.
@@ -538,6 +539,7 @@ impl ServerLauncher {
             meta.identity_state()
                 .map_err(|e| BootError::ServerMeta(e.to_string()))?,
         );
+        tracing::info!(pin = %hex::encode(shamir_connect::common::crypto::sha256(&identity.current_pub())), "server Ed25519 identity SHA-256 pin");
         let identity_seed = meta
             .current_identity_seed()
             .map_err(|e| BootError::ServerMeta(e.to_string()))?;
@@ -813,8 +815,10 @@ impl ServerLauncher {
                     let limiter = conn_limiter.clone();
                     let per_ip = per_ip_limiter.clone();
                     let path = l.path.clone().unwrap_or_else(|| NATIVE_WS_PATH.to_string());
-                    let policy =
-                        BrowserOriginPolicy::allow(l.browser_origin_allowlist.iter().cloned());
+                    let policy = Arc::new(
+                        BrowserOriginPolicy::try_allow(l.browser_origin_allowlist.iter().cloned())
+                            .map_err(BootError::Bind)?,
+                    );
                     listener_tasks.push(tokio::spawn(accept_loop_ws_native(
                         listener,
                         acceptor,
@@ -870,7 +874,10 @@ impl ServerLauncher {
                         token,
                         limiter,
                         per_ip,
-                        WsAcceptParams { path, policy },
+                        WsAcceptParams {
+                            path,
+                            policy: Arc::new(policy),
+                        },
                     )));
                     local_addr
                 }

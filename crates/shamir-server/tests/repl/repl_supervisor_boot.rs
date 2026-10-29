@@ -49,6 +49,7 @@ async fn boot_and_shutdown_with_replication_config() {
         replicator_password: Some("repl-secret".into()),
         server_name: "localhost".into(),
         validate_replicated_payload: false,
+        upstream_pins: Default::default(),
     });
 
     let bootstrap = shamir_server::server::BootstrapMode::Password {

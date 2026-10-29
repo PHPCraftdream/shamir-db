@@ -165,12 +165,22 @@ pub fn set_mask(mask: LogMask) {
 
 /// Change the level for a single namespace/target at runtime.
 ///
-/// Loads the current mask, clones it, applies the override, and stores it
-/// back — all without any `Mutex`/`RwLock` on the read path.
+/// Retries concurrent updates without taking a lock on the read path.
 pub fn set_namespace_level(target: &str, level: LevelFilter) {
-    let current = GLOBAL_MASK.load();
-    let updated = Arc::unwrap_or_clone(Arc::clone(&current)).with_override(target, level);
-    GLOBAL_MASK.store(Arc::new(updated));
+    update_namespace_level(&GLOBAL_MASK, target, level, || {});
+}
+
+fn update_namespace_level(
+    mask: &ArcSwap<LogMask>,
+    target: &str,
+    level: LevelFilter,
+    mut hook: impl FnMut(),
+) {
+    mask.rcu(|current| {
+        let next = (**current).clone().with_override(target, level);
+        hook();
+        Arc::new(next)
+    });
 }
 
 /// Obtain a snapshot of the current mask. Lock-free single atomic load.

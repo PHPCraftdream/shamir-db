@@ -60,25 +60,10 @@ fn negotiate_subprotocol(req: &Request, resp: Response) -> Result<Response, Erro
 
 /// Build the [`WebSocketConfig`] applied to every accepted server stream.
 ///
-/// **NEW-1 (pre-auth buffering cap).** Tungstenite's defaults are
-/// `max_message_size = 64 MiB` and `max_frame_size = 16 MiB`. Without an
-/// explicit config an *unauthenticated* WSS peer can force the server to
-/// buffer a whole 64 MiB `Message::Binary` before the framing layer's 4 KiB
-/// pre-auth logical check (HIGH-1, enforced in [`crate::framing::ws_recv_into`])
-/// ever runs — 10 000 such peers ≈ 640 GiB. We pin both ceilings to the
-/// spec §8 `MAX_FRAME_SIZE_DATA` value (16 MiB) so the per-connection
-/// buffering ceiling drops 4× (64 → 16 MiB) and a single WS message can
-/// never exceed one frame.
-///
-/// **Residual.** This config is fixed at accept time — there is no
-/// per-phase hook on the accept call to apply a *tighter* (e.g. 4 KiB) cap
-/// during the handshake only. So an unauthenticated peer can still buffer up
-/// to 16 MiB before the framing layer's 4 KiB logical reject fires. 16 MiB is
-/// the practical floor for this transport; the logical 4 KiB pre-auth budget
-/// (HIGH-1) still rejects oversized handshake frames immediately after
-/// tungstenite hands them up. A future hardening could accept with a 4 KiB
-/// cap and use tungstenite's `set_config` to relax it to 16 MiB only *after*
-/// `auth_ok`, but that is out of scope here.
+/// Tungstenite's accept-time message and frame ceilings bound wire buffering
+/// to 16 MiB plus the four-byte prefix, including fragmented messages.
+/// The framing adapter enforces the limit supplied by its caller only after
+/// message assembly; callers select any tighter pre-authentication limit.
 pub(crate) fn server_ws_config() -> WebSocketConfig {
     // `WebSocketConfig` is `#[non_exhaustive]`: build from `Default` via the
     // setters so any other field keeps its default.
@@ -131,7 +116,6 @@ where
     // NEW-1: cap tungstenite's per-connection buffering at the 16 MiB frame
     // ceiling (vs. the 64 MiB default) so an unauthenticated peer can't force
     // 64 MiB of buffering before the 4 KiB pre-auth logical check.
-    let policy = policy.clone();
     let path = path.to_string();
     // Not a hot path: once-per-handshake capture, the callback and the
     // single awaiting task are the only users.
@@ -156,7 +140,7 @@ where
             if let Some(origin_val) = req.headers().get(http::header::ORIGIN) {
                 let supplied = origin_val.to_str().ok();
                 let rejected = match supplied {
-                    Some(origin) => validate_origin(&policy, Some(origin)).err(),
+                    Some(origin) => validate_origin(policy, Some(origin)).err(),
                     // supplied but non-text: never treat as absent
                     None => Some(OriginRejected::NotAllowed("<non-utf8>".into())),
                 };
@@ -220,7 +204,6 @@ where
     // We need to validate Origin *during* the handshake, BEFORE returning
     // 101 Switching Protocols. Tungstenite gives us a callback hook for
     // exactly this.
-    let policy = policy.clone();
     let path = path.to_string();
     // NEW-1: same buffering cap as the native path (see `server_ws_config`).
     // Not a hot path: once-per-handshake capture, the callback and the
@@ -241,11 +224,14 @@ where
                 *err.status_mut() = http::StatusCode::NOT_FOUND;
                 return Err(err);
             }
-            let origin = req
-                .headers()
-                .get(http::header::ORIGIN)
-                .and_then(|v| v.to_str().ok());
-            match validate_origin(&policy, origin) {
+            let result = match req.headers().get(http::header::ORIGIN) {
+                None => validate_origin(policy, None),
+                Some(value) => match value.to_str() {
+                    Ok(origin) => validate_origin(policy, Some(origin)),
+                    Err(_) => Err(OriginRejected::NotAllowed("<invalid header>".into())),
+                },
+            };
+            match result {
                 Ok(()) => negotiate_subprotocol(req, resp),
                 Err(rej) => {
                     // Preserve the typed rejection for the caller
@@ -256,9 +242,9 @@ where
                             http::StatusCode::BAD_REQUEST,
                             "origin required: use the native endpoint".to_string(),
                         ),
-                        other => (
+                        OriginRejected::NotAllowed(_) => (
                             http::StatusCode::FORBIDDEN,
-                            format!("origin rejected: {}", other),
+                            "origin not allowed".to_string(),
                         ),
                     };
                     let mut err = ErrorResponse::new(Some(msg));
