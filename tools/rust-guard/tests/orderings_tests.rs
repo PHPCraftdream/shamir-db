@@ -219,6 +219,108 @@ fn fences_are_detected() {
     assert_clean(&out);
 }
 #[test]
+fn ufcs_drain_fixture_detects_weakened_loop_with_diagnostic_loads() {
+    let repo = TempRepo::with_fixture("orderings/base");
+    let source_path = repo.root.join("crates/fix/src/drain.rs");
+    let source = fs::read_to_string(&source_path).unwrap();
+    let pins = repo.root.join("pins.toml");
+    fs::write(&pins, "[[pin]]\npath = \"crates/fix/src/drain.rs\"\nitem = \"WriterDrainBarrier::drain\"\nowner = \"test-owner\"\nreason = \"drain ordering\"\ncalls = [{ method = \"load\", min = \"SeqCst\" }]\n").unwrap();
+    let args = ["orderings", "--pins", pins.to_str().unwrap()];
+    assert_clean(&repo.run_guard(&args));
+
+    let original = "AtomicUsize::load(&self.active, Ordering::SeqCst)";
+    assert_eq!(source.matches(original).count(), 1);
+    fs::write(
+        &source_path,
+        source.replace(
+            original,
+            "AtomicUsize::load(&self.active, Ordering::Relaxed)",
+        ),
+    )
+    .unwrap();
+    assert_finding_exact(&repo.run_guard(&args), &["WEAKENED_ORDERING"]);
+}
+
+#[test]
+fn ufcs_paths_and_ordering_arguments_are_checked() {
+    let load = "[{ method = \"load\", min = \"SeqCst\" }]";
+    for ty in [
+        "AtomicUsize",
+        "atomic::AtomicUsize",
+        "std::sync::atomic::AtomicUsize",
+    ] {
+        let source = format!("fn f() {{ {ty}::load(&mut self.active, Ordering::Relaxed); }}");
+        fails(&source, load, "", "WEAKENED_ORDERING");
+        let source = format!("fn f() {{ {ty}::load(&self.active, Ordering::SeqCst); }}");
+        let (_repo, out) = run(&source, load, "");
+        assert_clean(&out);
+    }
+    fails(
+        "fn f() { AtomicBool::load(&a, order); }",
+        load,
+        "",
+        "NON_LITERAL_ORDERING",
+    );
+    fails("fn f() { AtomicUsize::load(&a, Ordering::SeqCst); AtomicUsize::swap(&a, 0, Ordering::SeqCst); }", load, "", "UNPINNED_CALL");
+    let (_repo, out) = run("fn f() { Other::load(&a, Ordering::Relaxed); }", "[]", "");
+    assert_clean(&out);
+}
+
+#[test]
+fn ufcs_qself_and_same_file_aliases_are_checked() {
+    let load = "[{ method = \"load\", min = \"SeqCst\" }]";
+    fails(
+        "fn f() { <AtomicUsize>::load(&a, Ordering::Relaxed); }",
+        load,
+        "",
+        "WEAKENED_ORDERING",
+    );
+    let (_repo, out) = run(
+        "fn f() { <AtomicUsize>::load(&a, Ordering::SeqCst); }",
+        load,
+        "",
+    );
+    assert_clean(&out);
+    for import in [
+        "use std::sync::atomic::AtomicUsize as Counter;",
+        "use std::{sync::{atomic::{AtomicUsize as Counter, Ordering}}};",
+    ] {
+        let source = format!("{import} fn f() {{ Counter::load(&a, Ordering::Relaxed); }}");
+        fails(&source, load, "", "WEAKENED_ORDERING");
+        let source = format!("{import} fn f() {{ <Counter>::load(&a, Ordering::SeqCst); }}");
+        let (_repo, out) = run(&source, load, "");
+        assert_clean(&out);
+    }
+    let (_repo, out) = run(
+        "use other::Thing as Counter; fn f() { Counter::load(&a, Ordering::Relaxed); }",
+        "[]",
+        "",
+    );
+    assert_clean(&out);
+}
+
+#[test]
+fn ufcs_cas_and_fetch_update_failure_orderings_are_checked() {
+    for method in ["compare_exchange", "compare_exchange_weak"] {
+        let pins = format!("[{{ method = \"{method}\", min = \"SeqCst\" }}]");
+        for (success, failure) in [
+            ("Relaxed", "Acquire"),
+            ("SeqCst", "Relaxed"),
+            ("SeqCst", "Release"),
+        ] {
+            let source = format!("fn f() {{ AtomicUsize::{method}(&a, 0, 1, Ordering::{success}, Ordering::{failure}); }}");
+            fails(&source, &pins, "", "WEAKENED_ORDERING");
+        }
+        let source = format!(
+            "fn f() {{ AtomicUsize::{method}(&a, 0, 1, Ordering::SeqCst, Ordering::Acquire); }}"
+        );
+        let (_repo, out) = run(&source, &pins, "");
+        assert_clean(&out);
+    }
+    fails("fn f() { atomic::AtomicUsize::fetch_update(&a, Ordering::SeqCst, Ordering::Relaxed, |_| None); }", "[{ method = \"fetch_update\", min = \"SeqCst\" }]", "", "WEAKENED_ORDERING");
+}
+
+#[test]
 fn real_pin_file_passes_real_source() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
