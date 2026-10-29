@@ -161,7 +161,13 @@ fn to_json_map_produces_valid_json() {
 fn parse_json_object_produces_map() {
     let r = reg();
     let result = r
-        .call("parse_json", &[s(r#"{"x": 1, "y": "hello"}"#)])
+        .call(
+            "parse_json",
+            &[s(r#"{
+            "x": 1,
+            "y": "hello"
+        }"#)],
+        )
         .unwrap();
     match result {
         QueryValue::Map(m) => {

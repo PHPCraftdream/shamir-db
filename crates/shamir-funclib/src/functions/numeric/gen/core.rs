@@ -12,7 +12,7 @@
 //!   `datetime::now`/`age` do.
 //! - `uuid_v4()` takes 0 args and returns a canonical lowercase hyphenated
 //!   RFC-4122 v4 UUID `Str` (16 random bytes with version/variant fixups).
-//! - `random()` takes 0 args and returns an `F64` in `[0.0, 1.0)`.
+//! - `random()` takes 0 args and returns a `Dec` in `[0.0, 1.0)`.
 //! - `random_bytes(n)` takes 1 arg (`n` bytes) and returns a `Bin` of `n`
 //!   random bytes; `n == 0` returns an empty `Bin`.
 

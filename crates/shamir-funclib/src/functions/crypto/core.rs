@@ -134,6 +134,11 @@ pub(crate) struct CountingSemaphore {
     /// release path deterministically instead of racing a scheduler.
     #[cfg(test)]
     released_with_notify_lock_held: AtomicBool,
+    // Per-instance observer; only the isolated test gate installs a sender.
+    #[cfg(test)]
+    waiting_observer: Mutex<Option<std::sync::mpsc::Sender<bool>>>,
+    #[cfg(test)]
+    poisoned_waits: AtomicU32,
 }
 
 impl CountingSemaphore {
@@ -143,6 +148,10 @@ impl CountingSemaphore {
             notify: (Mutex::new(()), Condvar::new()),
             #[cfg(test)]
             released_with_notify_lock_held: AtomicBool::new(false),
+            #[cfg(test)]
+            waiting_observer: Mutex::new(None),
+            #[cfg(test)]
+            poisoned_waits: AtomicU32::new(0),
         }
     }
 
@@ -155,9 +164,24 @@ impl CountingSemaphore {
         }
         // Contended path: park on the condvar until a release wakes us.
         let (lock, cvar) = &self.notify;
-        let mut guard = lock.lock().expect("semaphore mutex poisoned");
+        let mut guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
         while !try_take(&self.available) {
-            guard = cvar.wait(guard).expect("semaphore condvar poisoned");
+            // The observer fires under the notification lock, immediately before
+            // wait atomically registers and unlocks it. It never blocks the waiter.
+            #[cfg(test)]
+            if let Some(sender) = self
+                .waiting_observer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                let _ = sender.send(true);
+            }
+            guard = cvar.wait(guard).unwrap_or_else(|poison| {
+                #[cfg(test)]
+                self.poisoned_waits.fetch_add(1, Ordering::Relaxed);
+                poison.into_inner()
+            });
         }
     }
 
@@ -167,7 +191,7 @@ impl CountingSemaphore {
         // mutex from its predicate check until it is registered on the
         // condvar inside `wait`, so it cannot miss the wakeup.
         let (lock, cvar) = &self.notify;
-        let _guard = lock.lock().expect("semaphore mutex poisoned");
+        let _guard = lock.lock().unwrap_or_else(|poison| poison.into_inner());
         cvar.notify_one();
         // Test observation only (kept separate from the release algorithm
         // above): while we still hold the mutex, a try_lock must fail —
@@ -236,6 +260,38 @@ impl Drop for SemaphorePermit<'_> {
     }
 }
 
+/// The count tracks work admitted to the gated region even during unwinding.
+struct InFlight<'a>(&'a AtomicU32);
+
+impl<'a> InFlight<'a> {
+    fn enter(current: &'a AtomicU32, peak: &AtomicU32) -> Self {
+        let prev = current.fetch_add(1, Ordering::Relaxed);
+        peak.fetch_max(prev + 1, Ordering::Relaxed);
+        Self(current)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+fn with_argon2_permit<T>(
+    gate: &CountingSemaphore,
+    current: &AtomicU32,
+    peak: &AtomicU32,
+    work: impl FnOnce() -> T,
+) -> T {
+    let _permit = SemaphorePermit::acquire(gate);
+    let _in_flight = InFlight::enter(current, peak);
+    work()
+}
+
+#[cfg(test)]
+#[path = "tests/argon2_gate_tests.rs"]
+mod argon2_gate_tests;
+
 /// Read an optional `u32` argument at index `i`, falling back to `default`
 /// when absent. Out-of-`u32`-range integers are `"out_of_range"`.
 fn opt_u32(a: &[QueryValue], i: usize, default: u32) -> Result<u32, ScalarError> {
@@ -273,17 +329,16 @@ fn argon2id_fn(a: &[QueryValue]) -> Result<QueryValue, ScalarError> {
     // call does not consume a permit. Blocking-acquire is safe w.r.t. the
     // KDF's determinism: the semaphore affects *scheduling* only, never the
     // (password, salt, params) → digest mapping.
-    let _permit = SemaphorePermit::acquire(&ARGON2ID_CONCURRENCY_GATE);
-    // Observability: track in-flight and peak concurrency so the regression
-    // test can assert the cap deterministically. Two relaxed atomics —
-    // negligible vs. the KDF. Does NOT gate behaviour.
-    let prev = A2_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-    A2_PEAK_IN_FLIGHT.fetch_max(prev + 1, Ordering::Relaxed);
-    let res = argon
-        .hash_password_into(password, salt, &mut out)
-        .map_err(|_| ScalarError::builtin("compute"));
-    A2_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-    res?;
+    with_argon2_permit(
+        &ARGON2ID_CONCURRENCY_GATE,
+        &A2_IN_FLIGHT,
+        &A2_PEAK_IN_FLIGHT,
+        || {
+            argon
+                .hash_password_into(password, salt, &mut out)
+                .map_err(|_| ScalarError::builtin("compute"))
+        },
+    )?;
     Ok(v_bytes(out))
 }
 

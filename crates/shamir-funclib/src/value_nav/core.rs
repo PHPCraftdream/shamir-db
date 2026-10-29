@@ -118,8 +118,25 @@ fn navigate<'a>(
                         // Integer step into a map: look up by the stringified
                         // integer (back-compat with callers that pass numeric
                         // keys).
-                        let key = idx.to_string();
-                        match m.get(&key) {
+                        let mut buffer = [0_u8; 20];
+                        let mut pos = buffer.len();
+                        let mut magnitude = idx.unsigned_abs();
+                        loop {
+                            pos -= 1;
+                            buffer[pos] = b'0' + (magnitude % 10) as u8;
+                            magnitude /= 10;
+                            if magnitude == 0 {
+                                break;
+                            }
+                        }
+                        if idx < 0 {
+                            pos -= 1;
+                            buffer[pos] = b'-';
+                        }
+                        // Only ASCII digits and an optional minus sign were written.
+                        let key = std::str::from_utf8(&buffer[pos..])
+                            .expect("integer formatting is ASCII");
+                        match m.get(key) {
                             Some(v) => cur = v,
                             None => return Ok(None),
                         }

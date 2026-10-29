@@ -576,8 +576,7 @@ fn rv_funclib_a1b1a620_count_distinct_hash_equivalence() {
     // The hash-based dedup must preserve `compare` equality exactly:
     // Int(1)/Dec(1.0)/F64(1.0)/Dec(1.00) are one distinct value, Str("1")
     // is another. 2^53 and 2^53+1 are distinct (exact Int↔Int compare),
-    // while F64(2^53) equals both via the lossy f64 path (first-match
-    // dedup keeps it collapsed).
+    // while F64(2^53) equals only the first integer exactly.
     let two_pow_53: i64 = 9_007_199_254_740_992;
     let vals = [
         int(1),

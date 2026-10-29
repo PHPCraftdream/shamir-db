@@ -306,3 +306,27 @@ fn rv_funclib_1ef53ab4_f64_to_i64_exclusive_upper_bound() {
         v_int(i64::MIN)
     );
 }
+
+#[test]
+fn to_bool_trimmed_ascii_case_and_invalid_unicode() {
+    let r = reg();
+    for (input, expected) in [
+        ("  TrUe\t", true),
+        ("\u{2003}FaLsE\u{2003}", false),
+        (" 1 ", true),
+        (" 0 ", false),
+    ] {
+        assert_eq!(
+            r.call("to_bool", &[QueryValue::Str(input.into())]).unwrap(),
+            QueryValue::Bool(expected)
+        );
+    }
+    for input in ["", "yes", "trué", "ＦＡＬＳＥ"] {
+        assert_eq!(
+            r.call("to_bool", &[QueryValue::Str(input.into())])
+                .unwrap_err()
+                .code,
+            "cast_failed"
+        );
+    }
+}
