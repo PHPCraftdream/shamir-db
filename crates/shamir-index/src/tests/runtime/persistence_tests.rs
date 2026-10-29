@@ -129,6 +129,7 @@ async fn rv_index_cf86432e_allows_unchanged_legacy_credential_on_rewrite() {
     original.created_at_nanos = 1;
     let mut legacy = legacy;
     legacy.created_at_nanos = 1;
+    legacy.options = vec![2, 42];
     let bytes = MetaEnvelope::new(PersistedIndexes {
         next_id: 42,
         descriptors: vec![original],

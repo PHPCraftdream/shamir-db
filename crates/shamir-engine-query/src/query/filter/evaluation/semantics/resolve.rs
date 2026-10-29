@@ -22,32 +22,17 @@ use crate::query::filter::evaluation::semantics::numeric_cmp::cmp_i64_f64;
 use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
 use crate::query::read::QueryResult;
 
-/// Dispatch a scalar, offloading a call named argon2id. Name-based selection
-/// also applies to a user scalar shadowing that builtin; all other scalars run
-/// inline. On a multi-thread runtime, block_in_place permits worker handoff.
-/// Outside a multi-thread runtime it stays inline: the sync evaluator cannot
-/// offload there without a wider async-path redesign.
+/// Dispatch a scalar with runtime-aware argon2 offloading. Multi-thread Tokio
+/// runtimes hand off the worker, not the call to the blocking pool; do not call
+/// from a LocalSet driven by Runtime::block_on or Handle::block_on on a
+/// multi-thread runtime. Current-thread runtimes run inline and report the stall.
+/// Outside a runtime, calls run inline without a warning.
 pub(crate) fn call_scalar_offloaded(
     resolver: ScalarResolver,
     name: &str,
     args: Vec<QueryValue>,
 ) -> Option<QueryValue> {
-    if name != "crypto/argon2id" && name != "argon2id" {
-        return resolver.call(name, &args).ok();
-    }
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            let name = name.to_owned();
-            tokio::task::block_in_place(|| {
-                handle.block_on(tokio::task::spawn_blocking(move || {
-                    resolver.call(&name, &args).ok()
-                }))
-            })
-            .ok()
-            .flatten()
-        }
-        _ => resolver.call(name, &args).ok(),
-    }
+    resolver.call_offloaded(name, &args).ok()
 }
 
 /// Extract a value from an InnerValue by a path of interned keys.

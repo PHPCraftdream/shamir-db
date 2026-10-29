@@ -42,7 +42,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use shamir_storage::error::{DbError, DbResult};
+use crate::wal_segment::wal_io_error;
+use shamir_storage::error::DbResult;
 
 #[cfg(test)]
 use std::sync::atomic::Ordering;
@@ -103,17 +104,14 @@ pub(crate) fn write_blocking(seg_path: &Path, max_version: u64) -> DbResult<()> 
             .write(true)
             .truncate(true)
             .open(&tmp)
-            .map_err(|e| DbError::Storage(format!("segment meta open {tmp:?}: {e}")))?;
+            .map_err(|e| wal_io_error(format!("segment meta open {tmp:?}"), e))?;
         f.write_all(&bytes)
-            .map_err(|e| DbError::Storage(format!("segment meta write {tmp:?}: {e}")))?;
+            .map_err(|e| wal_io_error(format!("segment meta write {tmp:?}"), e))?;
         f.sync_all()
-            .map_err(|e| DbError::Storage(format!("segment meta fsync {tmp:?}: {e}")))?;
+            .map_err(|e| wal_io_error(format!("segment meta fsync {tmp:?}"), e))?;
     }
-    std::fs::rename(&tmp, &final_path).map_err(|e| {
-        DbError::Storage(format!(
-            "segment meta rename {tmp:?} -> {final_path:?}: {e}"
-        ))
-    })
+    std::fs::rename(&tmp, &final_path)
+        .map_err(|e| wal_io_error(format!("segment meta rename {tmp:?} -> {final_path:?}"), e))
 }
 
 /// Read the sidecar for `seg_path`, returning `Some(max_version)` iff a
@@ -132,11 +130,11 @@ pub(crate) fn read_blocking(seg_path: &Path) -> DbResult<Option<u64>> {
         // A torn atomic rename cannot produce this, but on Windows a
         // delete-pending sidecar can. Treat as absent → replay fallback.
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
-        Err(e) => return Err(DbError::Storage(format!("segment meta open {path:?}: {e}"))),
+        Err(e) => return Err(wal_io_error(format!("segment meta open {path:?}"), e)),
     };
     let mut buf = Vec::with_capacity(META_TOTAL_LEN + 1);
     f.read_to_end(&mut buf)
-        .map_err(|e| DbError::Storage(format!("segment meta read {path:?}: {e}")))?;
+        .map_err(|e| wal_io_error(format!("segment meta read {path:?}"), e))?;
     Ok(decode(&buf))
 }
 

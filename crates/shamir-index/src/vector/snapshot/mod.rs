@@ -78,6 +78,7 @@ pub use load::append_delta;
 pub use load::flip_generation;
 pub use load::highest_delta_index;
 pub use load::load_snapshot;
+pub(crate) use load::load_snapshot_with_intent;
 pub use load::read_manifest;
 pub use load::replay_delta;
 pub use load::DeltaOp;

@@ -346,7 +346,7 @@ async fn delete_with_invalid_regex_under_not_is_rejected_not_delete_all() {
     );
 }
 
-/// Same mechanism, `Filter::Like` — `like_pattern_to_regex` escapes every
+/// Same mechanism, `Filter::Like` — `build_like_regex` escapes every
 /// regex metacharacter so a LIKE pattern can only fail to compile for a
 /// resource-limit reason, not a syntax one; this is the length-cap arm's
 /// paired proof that an over-cap LIKE pattern is rejected as invalid, not

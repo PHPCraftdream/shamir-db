@@ -190,14 +190,11 @@ fn exec_insert(keyspace: &Keyspace, value: Bytes) -> DbResult<RecordKey> {
 /// Execute `transact` synchronously on the worker thread — native atomic
 /// `OwnedWriteBatch` commit.
 ///
-/// RV-STORAGE-EC3A171B (upstream-blocked): fjall 3.1.6
-/// `WriteBatch::commit` discards `journal_writer.write_batch`'s Result
-/// (fjall-3.1.6 src/batch/mod.rs:117) before persist + memtable apply, so
-/// a transient partial journal write followed by a successful persist
-/// returns Ok — the batch can be acknowledged with an incomplete journal
-/// suffix. `Keyspace::insert`/`remove` DO propagate the journal error but
-/// are per-op; no multi-op atomic batch API exposes it. Fix requires an
-/// upstream fjall change or a version bump.
+/// RV-STORAGE-EC3A171B: fjall < 3.1.7 discarded `journal_writer.write_batch`'s
+/// Result inside `WriteBatch::commit`, so a batch could be acknowledged with
+/// an incomplete journal suffix. fjall >= 3.1.7 propagates the error and
+/// poisons the database; the locked version is pinned by
+/// `journal_error_lock_tests` so a lockfile downgrade fails CI.
 fn exec_transact(db: &Arc<Database>, keyspace: &Keyspace, ops: Vec<KvOp>) -> DbResult<()> {
     let mut batch = db.batch();
     for op in ops {

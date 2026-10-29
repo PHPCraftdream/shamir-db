@@ -6,6 +6,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use futures::StreamExt;
 
@@ -14,6 +15,7 @@ use crate::query::filter::eval::{compile_filter, FilterNode};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::{Filter, FilterValue};
 use shamir_funclib::registry::ScalarRegistry;
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::scalar_ref_cmp;
@@ -311,9 +313,20 @@ pub(super) fn eval_write_value(
                 let qv = eval_write_value(a, literal, scalars)?;
                 qv_args.push(qv);
             }
-            scalars
-                .call(call.name(), &qv_args)
-                .map_err(|e| format!("{}: {}", call.name(), e.code))
+            // Preserve the supplied registry, including shadowing, while giving
+            // the blocking task an owned entry rather than a borrowed registry.
+            let result = if matches!(call.name(), "crypto/argon2id" | "argon2id") {
+                if let Some(entry) = scalars.get(call.name()) {
+                    let layer = Arc::new(UserScalarLayer::new());
+                    layer.register(call.name(), entry.clone());
+                    ScalarResolver::new(layer).call_offloaded(call.name(), &qv_args)
+                } else {
+                    scalars.call(call.name(), &qv_args)
+                }
+            } else {
+                scalars.call(call.name(), &qv_args)
+            };
+            result.map_err(|e| format!("{}: {}", call.name(), e.code))
         }
         _ => Err("unsupported computed value variant".to_string()),
     }

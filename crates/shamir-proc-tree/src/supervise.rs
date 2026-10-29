@@ -5,6 +5,54 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const GRACE: Duration = Duration::from_secs(5);
+
+pub(super) fn poll_until<T>(
+    mut poll: impl FnMut() -> io::Result<Option<T>>,
+) -> io::Result<Option<T>> {
+    let deadline = Instant::now() + GRACE;
+    loop {
+        if let Some(value) = poll()? {
+            return Ok(Some(value));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        thread::sleep(remaining.min(Duration::from_millis(5)));
+    }
+}
+
+pub(super) fn bounded_reap(child: &mut Child) -> io::Result<Option<std::process::ExitStatus>> {
+    poll_until(|| child.try_wait())
+}
+
+pub(super) fn startup_cleanup(
+    child: &mut Child,
+    error: io::Error,
+    tree_kill: io::Result<()>,
+    child_kill: io::Result<()>,
+) -> io::Error {
+    let mut problems = Vec::new();
+    if let Err(error) = tree_kill {
+        problems.push(format!("tree kill: {error}"));
+    }
+    if let Err(error) = child_kill {
+        problems.push(format!("child kill: {error}"));
+    }
+    match bounded_reap(child) {
+        Ok(Some(_)) => {}
+        Ok(None) => problems.push("leader could not be reaped within 5s".into()),
+        Err(error) => problems.push(format!("leader reap: {error}")),
+    }
+    if problems.is_empty() {
+        error
+    } else {
+        io::Error::new(
+            error.kind(),
+            format!("{error}; teardown incomplete: {}", problems.join("; ")),
+        )
+    }
+}
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TeardownFaults {
     pub fail_tree_kill: bool,

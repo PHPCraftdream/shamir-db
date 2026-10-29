@@ -8,6 +8,96 @@ use tempfile::TempDir;
 use crate::wal_entry_v2::{WalEntryV2, WalOpV2};
 use crate::wal_segment::WalSegment;
 
+fn assert_io_cause(error: &shamir_storage::error::DbError, kind: std::io::ErrorKind) {
+    let shamir_storage::error::DbError::Io(io) = error else {
+        panic!("expected I/O error, got {error}");
+    };
+    assert_eq!(io.kind(), kind);
+    let original = io
+        .get_ref()
+        .unwrap()
+        .source()
+        .unwrap()
+        .downcast_ref::<std::io::Error>()
+        .unwrap();
+    assert_eq!(original.kind(), kind);
+}
+
+#[tokio::test]
+async fn rv_wal_5839ff0d_append_preserves_io_cause() {
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    seg.inject_partial_write_failure(7);
+    let err = seg
+        .append_batch(Arc::new(vec![entry(1, 10).encode().unwrap()]), 10)
+        .await
+        .unwrap_err();
+    assert_io_cause(&err, std::io::ErrorKind::StorageFull);
+    assert!(seg.is_poisoned());
+}
+
+#[tokio::test]
+async fn rv_wal_5839ff0d_append_ticket_preserves_io_cause_after_retry() {
+    let dir = TempDir::new().unwrap();
+    let set = crate::segment_set::SegmentSet::open(dir.path().to_path_buf(), u64::MAX)
+        .await
+        .unwrap();
+    let first = set.active_segment_for_test();
+    first.inject_partial_write_failure(7);
+    set.inject_retry_write_failure();
+    let sink = Arc::new(crate::wal_sink::WalSink::File(set));
+    let group = crate::wal_group_commit::WalGroupCommit::new(sink);
+    let (ticket, completion) = group.append_ticketed(
+        entry(1, 10).encode().unwrap(),
+        10,
+        crate::wal_group_commit::WalDurability::Buffered,
+    );
+    assert_eq!(
+        completion.await,
+        Err(crate::wal_ticket::WalAppendError::Unknown)
+    );
+    assert_io_cause(
+        &ticket.failure_cause().unwrap(),
+        std::io::ErrorKind::StorageFull,
+    );
+    assert!(first.is_poisoned());
+}
+
+#[tokio::test]
+async fn rv_wal_5839ff0d_sync_ticket_preserves_io_cause() {
+    let dir = TempDir::new().unwrap();
+    let set = crate::segment_set::SegmentSet::open(dir.path().to_path_buf(), u64::MAX)
+        .await
+        .unwrap();
+    let active = set.active_segment_for_test();
+    active.inject_sync_failure();
+    let sink = Arc::new(crate::wal_sink::WalSink::File(set));
+    let group = crate::wal_group_commit::WalGroupCommit::new(sink);
+    let (ticket, completion) = group.append_ticketed(
+        entry(1, 10).encode().unwrap(),
+        10,
+        crate::wal_group_commit::WalDurability::Synced,
+    );
+    assert_eq!(
+        completion.await,
+        Err(crate::wal_ticket::WalAppendError::WrittenNotDurable)
+    );
+    assert_io_cause(
+        &ticket.failure_cause().unwrap(),
+        std::io::ErrorKind::PermissionDenied,
+    );
+    assert!(active.is_poisoned());
+}
+
+#[tokio::test]
+async fn rv_wal_5839ff0d_replay_read_preserves_io_cause() {
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+    seg.inject_replay_read_failure();
+    let err = seg.replay_at_startup().await.unwrap_err();
+    assert_io_cause(&err, std::io::ErrorKind::PermissionDenied);
+}
+
 fn rid(n: u8) -> RecordId {
     let mut a = [0u8; 16];
     a[15] = n;

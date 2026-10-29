@@ -11,22 +11,38 @@ pub struct ProcessTree {
     status: Option<ExitStatus>,
 }
 
+pub(super) fn finish_setup(
+    child: &mut Child,
+    setup: impl FnOnce(&Child) -> io::Result<()>,
+    kill: impl FnOnce(&mut Child) -> (io::Result<()>, io::Result<()>),
+) -> io::Result<()> {
+    if let Err(error) = setup(child) {
+        let (tree_kill, child_kill) = kill(child);
+        return Err(crate::supervise::startup_cleanup(
+            child, error, tree_kill, child_kill,
+        ));
+    }
+    Ok(())
+}
+
 impl ProcessTree {
     pub fn spawn(cmd: &mut Command) -> io::Result<(Child, Self)> {
         let job = JobObject::kill_on_close()?;
-        let child = cmd
+        let mut child = cmd
             .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED)
             .spawn()?;
-        let setup = job
-            .assign(&child)
-            .and_then(|()| job.resume_primary_thread(child.id()));
-        if let Err(error) = setup {
-            let _ = job.terminate();
-            let mut child = child;
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
-        }
+        finish_setup(
+            &mut child,
+            |child| {
+                job.assign(child)
+                    .and_then(|()| job.resume_primary_thread(child.id()))
+            },
+            |child| {
+                let tree_kill = job.terminate();
+                let child_kill = child.kill();
+                (tree_kill, child_kill)
+            },
+        )?;
         Ok((child, Self { job, status: None }))
     }
     pub(crate) fn wait_exit(&mut self, child: &mut Child, timeout: Duration) -> io::Result<bool> {

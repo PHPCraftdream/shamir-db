@@ -1,8 +1,16 @@
+//! Concurrent replacement sampling starts after at least 1,000 reader lookups.
+//! During the old function's drop, a remove-then-insert gap permits 1,000 more
+//! lookups; a held bucket instead stalls the reader until 500 ms without progress.
+//! Drop also has an absolute 10-second limit. This overwhelmingly exposes a gap,
+//! but is not deterministic: a 500 ms reader deschedule can hide it.
+
 use crate::{FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::{Arc, Barrier, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// A trivial function that ignores its inputs and returns a constant.
 struct Const(i64);
@@ -19,27 +27,124 @@ impl ShamirFunction for Const {
     }
 }
 
+// The reader never owns the registered function, so replacement drops Gate
+// while a remove-then-insert implementation would expose the missing name.
+struct Gate {
+    lookups: Arc<AtomicU64>,
+}
+
+#[async_trait]
+impl ShamirFunction for Gate {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        Ok(QueryValue::Null)
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        let before = self.lookups.load(Ordering::SeqCst);
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut last = before;
+        loop {
+            let current = self.lookups.load(Ordering::SeqCst);
+            let now = Instant::now();
+            if current != last {
+                last = current;
+                last_progress = now;
+            }
+            if current.wrapping_sub(before) >= 1_000
+                || now.duration_since(last_progress) >= Duration::from_millis(500)
+                || now.duration_since(start) >= Duration::from_secs(10)
+            {
+                break;
+            }
+            thread::yield_now();
+        }
+    }
+}
+
 #[test]
 fn rv_wasm_host_c51052df_replace_never_exposes_missing_name() {
     let registry = Arc::new(FunctionRegistry::new());
-    registry.register("key", Arc::new(Const(0))).unwrap();
-    let start = Arc::new(Barrier::new(2));
-    let writer_registry = Arc::clone(&registry);
-    let writer_start = Arc::clone(&start);
-    let writer = thread::spawn(move || {
-        writer_start.wait();
-        for value in 1..=100_000 {
-            writer_registry.replace("key", Arc::new(Const(value)));
+    let lookups = Arc::new(AtomicU64::new(0));
+    let saw_missing = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    registry
+        .register(
+            "key",
+            Arc::new(Gate {
+                lookups: Arc::clone(&lookups),
+            }),
+        )
+        .unwrap();
+    let reader_registry = Arc::clone(&registry);
+    let reader_lookups = Arc::clone(&lookups);
+    let reader_missing = Arc::clone(&saw_missing);
+    let reader_stop = Arc::clone(&stop);
+    let reader = thread::spawn(move || {
+        while !reader_stop.load(Ordering::SeqCst) {
+            if !reader_registry.contains("key") {
+                reader_missing.store(true, Ordering::SeqCst);
+            }
+            reader_lookups.fetch_add(1, Ordering::SeqCst);
         }
+        let _ = done_tx.send(());
     });
-    start.wait();
-    for _ in 0..100_000 {
-        assert!(
-            registry.get("key").is_some(),
-            "replace exposed a missing name"
-        );
-    }
-    writer.join().expect("writer thread panicked");
+    let wait_for = |threshold: u64| {
+        let start = Instant::now();
+        while lookups.load(Ordering::SeqCst) < threshold {
+            if start.elapsed() >= Duration::from_secs(5) {
+                return false;
+            }
+            thread::yield_now();
+        }
+        true
+    };
+    let ready = wait_for(1_000);
+    let replacement: Arc<dyn ShamirFunction> = Arc::new(Const(1));
+    let progressed = if ready {
+        registry.replace("key", Arc::clone(&replacement));
+        let after_return = lookups.load(Ordering::SeqCst);
+        wait_for(after_return.saturating_add(1))
+    } else {
+        false
+    };
+    stop.store(true, Ordering::SeqCst);
+    let done = done_rx.recv_timeout(Duration::from_secs(5));
+    let joined = if done.is_ok() {
+        Some(reader.join())
+    } else {
+        None
+    };
+    assert!(
+        ready,
+        "reader did not complete 1000 lookups before replacement"
+    );
+    assert!(
+        progressed,
+        "reader did not advance after replacement returned"
+    );
+    assert!(done.is_ok(), "reader did not finish: {done:?}");
+    assert!(
+        joined.is_some_and(|result| result.is_ok()),
+        "reader panicked"
+    );
+    let found = registry.get("key").expect("replacement is missing");
+    assert!(std::ptr::addr_eq(
+        Arc::as_ptr(&found),
+        Arc::as_ptr(&replacement)
+    ));
+    assert!(
+        !saw_missing.load(Ordering::SeqCst),
+        "reader saw a missing name"
+    );
 }
 
 #[test]

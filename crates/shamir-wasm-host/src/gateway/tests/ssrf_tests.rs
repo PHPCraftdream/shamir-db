@@ -10,9 +10,9 @@ fn rv_wasm_host_e62f8e2c_zero_addr_blocked_by_wildcard() {
     assert!(check_host_allowed("0.0.0.0", &wildcard).is_err());
     assert!(check_url_allowed("http://0.0.0.0:8080/", &wildcard).is_err());
 
-    // Operator opt-in via an EXACT entry is still honoured.
+    // Unspecified addresses are forbidden even with an exact entry.
     let exact = vec!["0.0.0.0".to_string()];
-    assert!(check_host_allowed("0.0.0.0", &exact).is_ok());
+    assert!(check_host_allowed("0.0.0.0", &exact).is_err());
 
     // Regression guard: IPv6 unspecified stays blocked under a wildcard.
     assert!(check_host_allowed("::", &wildcard).is_err());

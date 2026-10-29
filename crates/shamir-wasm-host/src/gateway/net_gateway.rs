@@ -11,18 +11,14 @@
 //!
 //! 1. **Scheme** — only `http` and `https` are permitted.
 //! 2. **Allowlist match** — the host must match at least one allowlist entry.
-//! 3. **SSRF hygiene** — loopback / private / unspecified IPs (`0.0.0.0`,
-//!    `127.0.0.0/8`, `::`, `::1`, `10/8`, `172.16/12`, `192.168/16`,
-//!    `169.254/16`) are permitted ONLY
-//!    by an EXACT (non-wildcard) allowlist entry. A wildcard like
-//!    `*.example.com` must NOT cover a private IP that happens to resolve
-//!    from that domain. This lets tests allow `127.0.0.1` explicitly while
-//!    preventing a wildcard from being tricked into hitting internal IPs.
+//! 3. **SSRF hygiene** — forbidden IPs are always denied; internal IPs
+//!    require an exact allowlist entry. DNS answers are validated and pinned.
 
 use async_trait::async_trait;
 use std::net::{IpAddr, Ipv4Addr};
 
 use super::env_policy::glob_matches;
+use super::ip_policy::{classify_ip, IpClass};
 
 /// Typed error for [`NetGateway`] and the egress guards
 /// (RV-WASM-HOST-DF4AD1DA). Replaces the previous stringly-typed errors so
@@ -123,12 +119,13 @@ pub fn check_host_allowed(host: &str, allowlist: &[String]) -> Result<(), NetGat
         )));
     }
 
-    // SSRF hygiene: if the host looks like a loopback / private IP,
-    // it must be matched by an EXACT (non-wildcard) entry.
-    if is_private_or_loopback_host(host) && !matched_exact {
-        return Err(NetGatewayError::NotAllowed(format!(
-            "egress to {host} not allowed (private/loopback IP requires exact allowlist entry)"
-        )));
+    if let Some(ip) = canonicalize_ip(host) {
+        let class = classify_ip(ip);
+        if class == IpClass::Forbidden || (class == IpClass::Internal && !matched_exact) {
+            return Err(NetGatewayError::NotAllowed(format!(
+                "egress to {host} not allowed (IP policy)"
+            )));
+        }
     }
 
     Ok(())
@@ -139,8 +136,7 @@ pub fn check_host_allowed(host: &str, allowlist: &[String]) -> Result<(), NetGat
 /// NOTE: this is the *string-level* check only. It does NOT resolve DNS, so a
 /// hostname on the allowlist that resolves to a private IP still passes here.
 /// Callers performing real network egress MUST additionally run
-/// [`check_url_allowed_resolved`] (which resolves DNS and rejects
-/// private/loopback resolution results) before connecting — see finding 2c.
+/// [`check_url_allowed_resolved`] to validate DNS answers before connecting.
 pub fn check_url_allowed(url: &str, allowlist: &[String]) -> Result<(), NetGatewayError> {
     let parsed = parse_url(url)?;
     check_host_allowed(&parsed.host, allowlist)
@@ -158,16 +154,13 @@ pub struct ResolvedPin {
     pub port: u16,
     /// The validated IP(s) to pin curl's connection to via
     /// `--resolve host:port:ip`. EMPTY means "do not pin": this is the
-    /// exact-allowlist-match path, where no DNS resolution happened (the
-    /// operator opted into the literal host explicitly), so there is no
-    /// rebind window to close and pinning would be meaningless.
+    /// exact IP-literal path, where no DNS resolution is necessary.
     pub pinned_ips: Vec<IpAddr>,
 }
 
 /// Full egress guard for real network I/O (finding 2c / SSRF): runs the
 /// string-level allowlist check AND resolves the host via DNS, rejecting if
-/// ANY resolved address is a private/loopback IP unless the literal host was
-/// itself an EXACT allowlist entry.
+/// ANY forbidden address, or an internal address without an exact host entry.
 ///
 /// This closes the `meta.attacker.com → 169.254.169.254` bypass: an attacker
 /// can put a wildcard-matched hostname on the allowlist (or a domain they
@@ -175,9 +168,8 @@ pub struct ResolvedPin {
 /// would pass, but the resolved IP would not.
 ///
 /// An exact allowlist entry (e.g. an operator explicitly allowing an internal
-/// `127.0.0.1` test target) is honoured — DNS resolution of a literal IP
-/// yields that IP and the exact-match escape hatch in [`check_host_allowed`]
-/// already applies.
+/// `127.0.0.1` test target) is honoured — literal IPs need no DNS lookup,
+/// and the exact-match rule in [`check_host_allowed`] already applies.
 ///
 /// # DNS-rebind TOCTOU (finding 2c)
 ///
@@ -192,15 +184,30 @@ pub async fn check_url_allowed_resolved(
     url: &str,
     allowlist: &[String],
 ) -> Result<ResolvedPin, NetGatewayError> {
+    check_url_allowed_resolved_with(url, allowlist, |host, port| async move {
+        tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map(|addrs| addrs.collect())
+    })
+    .await
+}
+
+pub(crate) async fn check_url_allowed_resolved_with<F, Fut>(
+    url: &str,
+    allowlist: &[String],
+    resolver: F,
+) -> Result<ResolvedPin, NetGatewayError>
+where
+    F: FnOnce(String, u16) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>>,
+{
     let parsed = parse_url(url)?;
     // 1. String-level allowlist + SSRF-on-literal-host check.
     check_host_allowed(&parsed.host, allowlist)?;
 
-    // 2. If the literal host is an EXACT allowlist entry, the operator has
-    //    opted into it explicitly (incl. deliberately-internal targets); the
-    //    string check above already enforced private-IP hygiene for it. No DNS
-    //    resolution happened, so there is nothing to pin (empty `pinned_ips`).
-    if host_has_exact_match(&parsed.host, allowlist) {
+    // Exact IP literals need no DNS; hostnames always resolve and are pinned.
+    let matched_exact = host_has_exact_match(&parsed.host, allowlist);
+    if matched_exact && canonicalize_ip(&parsed.host).is_some() {
         return Ok(ResolvedPin {
             host: parsed.host,
             port: parsed.port,
@@ -208,22 +215,20 @@ pub async fn check_url_allowed_resolved(
         });
     }
 
-    // 3. Otherwise resolve DNS and reject if ANY address is private/loopback.
-    //    `lookup_host` needs a port; use the real one so the pin matches.
-    let addrs: Vec<std::net::SocketAddr> =
-        tokio::net::lookup_host((parsed.host.as_str(), parsed.port))
-            .await
-            .map_err(|e| NetGatewayError::Dns {
-                host: parsed.host.clone(),
-                source: e,
-            })?
-            .collect();
+    // Resolve using the connection port so the pin matches.
+    let addrs = resolver(parsed.host.clone(), parsed.port)
+        .await
+        .map_err(|source| NetGatewayError::Dns {
+            host: parsed.host.clone(),
+            source,
+        })?;
     let mut pinned_ips: Vec<IpAddr> = Vec::with_capacity(addrs.len());
     for addr in &addrs {
-        if is_private_or_loopback_ip(addr.ip()) {
+        let class = classify_ip(addr.ip());
+        if class == IpClass::Forbidden || (class == IpClass::Internal && !matched_exact) {
             // GUARD DENIAL, not a DNS failure: classification reworked.
             return Err(NetGatewayError::NotAllowed(format!(
-                "egress to {} not allowed (resolves to private/loopback IP {})",
+                "egress to {} not allowed (resolves to disallowed IP {})",
                 parsed.host,
                 addr.ip()
             )));
@@ -323,20 +328,6 @@ pub(crate) fn parse_url(url: &str) -> Result<ParsedUrl, NetGatewayError> {
     };
 
     Ok(ParsedUrl { host, port })
-}
-
-/// Whether the host string looks like a loopback or private IP address.
-///
-/// Recognises NON-CANONICAL IP forms (finding 2c MEDIUM sub-finding) that an
-/// attacker could use to slip an internal address past a naive
-/// `str::parse::<IpAddr>()` — bare decimal (`2130706433` → `127.0.0.1`), hex
-/// (`0x7f000001`), and IPv4-mapped IPv6 (`::ffff:169.254.169.254`,
-/// `[::ffff:a9fe:a9fe]`) — by canonicalising to an `IpAddr` first.
-fn is_private_or_loopback_host(host: &str) -> bool {
-    match canonicalize_ip(host) {
-        Some(ip) => is_private_or_loopback_ip(ip),
-        None => false,
-    }
 }
 
 /// Normalise a host string that denotes an IP literal (in any of the
@@ -480,7 +471,7 @@ fn parse_inet_component(part: &str) -> Option<u64> {
 /// Only the `::ffff:0:0/96` mapped range is folded — NOT the deprecated
 /// IPv4-compatible range (`::a.b.c.d`), which would wrongly fold `::` / `::1`
 /// (unspecified / loopback) into IPv4 forms and is handled by the IPv6 arm of
-/// [`is_private_or_loopback_ip`] anyway.
+/// the IP policy anyway.
 fn unmap_v4(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
@@ -488,37 +479,5 @@ fn unmap_v4(ip: IpAddr) -> IpAddr {
             None => IpAddr::V6(v6),
         },
         v4 => v4,
-    }
-}
-
-/// Whether an IP address is loopback, private, unspecified, or link-local.
-fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
-    // Fold IPv4-mapped/compatible IPv6 down to IPv4 so the v4 ranges apply
-    // to forms like `::ffff:169.254.169.254`.
-    match unmap_v4(ip) {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 127.0.0.0/8
-            octets[0] == 127
-            // 10.0.0.0/8
-            || octets[0] == 10
-            // 172.16.0.0/12
-            || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
-            // 192.168.0.0/16
-            || (octets[0] == 192 && octets[1] == 168)
-            // 169.254.0.0/16
-            || (octets[0] == 169 && octets[1] == 254)
-            // 0.0.0.0 (unspecified) — a wildcard must not reach it
-            // (RV-WASM-HOST-E62F8E2C)
-            || octets == [0, 0, 0, 0]
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-            || v6.is_unspecified()
-            // fe80::/10 (link-local) — not standard private but worth guarding.
-            || (v6.segments()[0] & 0xffc0) == 0xfe80
-            // fc00::/7 unique-local.
-            || (v6.segments()[0] & 0xfe00) == 0xfc00
-        }
     }
 }

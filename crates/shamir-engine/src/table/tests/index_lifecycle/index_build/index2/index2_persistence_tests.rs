@@ -6,6 +6,8 @@
 //! the same similarity query returns the same top-k after a full drop +
 //! reopen cycle.
 
+use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
+use crate::index2::tokenizer::token_hash;
 use crate::table::table_manager::TableManager;
 use shamir_query_types::admin::types::CreateIndexOp;
 use shamir_storage::storage_in_memory::InMemoryStore;
@@ -95,7 +97,6 @@ async fn vector_index_survives_reopen() {
     mgr1.interner().persist().await.unwrap();
 
     // Query vector similarity via index2 registry.
-    use crate::index2::backend::{IndexQuery, IndexResult};
     let registry = mgr1.index2_registry();
     let backends = registry.all_backends().await;
     assert_eq!(backends.len(), 1, "expected exactly 1 index2 backend");
@@ -272,8 +273,6 @@ async fn fts_ranked_index_survives_reopen() {
     mgr1.interner().persist().await.unwrap();
 
     // Query FTS for "rust" via index2 registry.
-    use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
-    use crate::index2::tokenizer::token_hash;
     let registry = mgr1.index2_registry();
     let backends = registry.all_backends().await;
     assert_eq!(backends.len(), 1, "expected exactly 1 index2 backend");
@@ -377,5 +376,45 @@ async fn fts_ranked_index_survives_reopen() {
             );
         }
         _ => panic!("phase2: expected Ranked result"),
+    }
+}
+
+#[tokio::test]
+async fn sq8_index_intent_survives_reopen() {
+    let (data, info) = make_stores();
+    let manager = TableManager::create("sq8_table".into(), Arc::clone(&data), Arc::clone(&info))
+        .await
+        .unwrap();
+    let op = CreateIndexOp {
+        create_index: "sq8_idx".into(),
+        table: "sq8_table".into(),
+        fields: vec![vec!["embedding".into()]],
+        unique: false,
+        sorted: false,
+        repo: "main".into(),
+        index_type: Some("vector".into()),
+        fts_tokenizer: None,
+        fts_language: None,
+        functional_op: None,
+        functional_args: None,
+        vector_dim: Some(3),
+        vector_metric: Some("l2".into()),
+        vector_quantization: Some("sq8".into()),
+        include: Vec::new(),
+        if_not_exists: false,
+    };
+    manager.create_index_v2(&op).await.unwrap();
+    drop(manager);
+    let reopened = TableManager::create("sq8_table".into(), data, info)
+        .await
+        .unwrap();
+    let backends = reopened.index2_registry().all_backends().await;
+    assert_eq!(backends.len(), 1);
+    match &backends[0].descriptor().kind {
+        crate::index2::kind::IndexKind::Vector(config) => assert_eq!(
+            config.quantization,
+            Some(crate::index2::kind::VectorQuantization::Sq8)
+        ),
+        _ => panic!("expected vector index"),
     }
 }

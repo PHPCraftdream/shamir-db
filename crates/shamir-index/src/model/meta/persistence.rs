@@ -95,11 +95,7 @@ pub async fn save_index2_metadata_with_pending(
     // This fallback intentionally rewrites existing cleartext bytes; references
     // are not implemented.
     let existing = match info_store.get(meta_key_indexes().to_bytes().into()).await {
-        Ok(bytes) => Some(decode_persisted_indexes(&bytes).map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
-                "cannot verify existing index metadata before credential persistence: {e}"
-            ))
-        })?),
+        Ok(bytes) => Some(decode_persisted_indexes(&bytes)?),
         Err(shamir_storage::error::DbError::NotFound(_)) => None,
         Err(error) => return Err(error),
     };
@@ -117,6 +113,11 @@ pub async fn save_index2_metadata_with_pending(
             return Err(shamir_storage::error::DbError::Internal(
                 "cannot persist new or changed external vector credential; secret references are not supported".into(),
             ));
+        }
+    }
+    for descriptor in &mut descriptors {
+        if let crate::kind::IndexKind::Vector(config) = &descriptor.kind {
+            super::index_options::write(&mut descriptor.options, config.quantization)?;
         }
     }
     let p = PersistedIndexes {
@@ -172,6 +173,7 @@ fn descriptor_matches_ignoring_credential(old: &IndexDescriptor, new: &IndexDesc
     fn normalized(descriptor: &IndexDescriptor) -> Option<Vec<u8>> {
         let mut copy = descriptor.clone();
         copy.state = crate::state::IndexState::default();
+        copy.options.clear();
         if let crate::kind::IndexKind::Vector(config) = &mut copy.kind {
             if let crate::kind::VectorBackendRef::External { api_key_secret, .. } =
                 &mut config.backend
@@ -215,7 +217,7 @@ pub async fn load_index2_metadata(
 pub(crate) fn decode_persisted_indexes(
     bytes: &[u8],
 ) -> Result<PersistedIndexes, shamir_storage::error::DbError> {
-    match MetaEnvelope::<PersistedIndexes>::open(bytes) {
+    let mut persisted = match MetaEnvelope::<PersistedIndexes>::open(bytes) {
         Ok(p) => Ok(p),
         Err(MetaError::Decode(new_err)) => {
             // Possible pre-`state` blob — try the legacy shadow shape.
@@ -240,7 +242,13 @@ pub(crate) fn decode_persisted_indexes(
             }
         }
         Err(e) => Err(shamir_storage::error::DbError::Internal(e.to_string())),
+    }?;
+    for descriptor in &mut persisted.descriptors {
+        if let crate::kind::IndexKind::Vector(config) = &mut descriptor.kind {
+            config.quantization = super::index_options::decode(&descriptor.options)?;
+        }
     }
+    Ok(persisted)
 }
 
 /// Pre-`state` on-disk shadow shapes used ONLY by the forward-compat

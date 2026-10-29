@@ -1,48 +1,23 @@
 //! FilterValue — value types supported in filters.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use shamir_types::types::value::QueryValue;
 
 use super::{Cond, FieldPath, FilterExpr, FnCall};
 
+#[path = "../filter_value_decoder.rs"]
+mod decoder;
+
 /// Value types supported in filters
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum FilterValue {
     Null,
     Bool(bool),
     Int(i64),
-    Float(#[serde(deserialize_with = "de_float_strict")] f64),
-    // `Binary` MUST be declared before `String`: this enum is
-    // `#[serde(untagged)]`, so variants are tried in declaration order and
-    // the first successful match wins. The stdlib `String` Deserialize impl
-    // is lenient toward raw bytes (accepts `visit_bytes`/`visit_byte_buf` as
-    // a fallback), so a genuine msgpack bin8/16/32 payload whose bytes
-    // happen to form valid UTF-8 (e.g. `[1, 2, 3]`) would be silently
-    // captured by `String` before ever reaching `Binary` if the order were
-    // left unchanged.
-    //
-    // Reordering alone is NOT sufficient, though: `serde_bytes`'s `Vec<u8>`
-    // Deserialize (`ByteBufVisitor`) is ALSO lenient the other way — it
-    // accepts `visit_str`/`visit_string` AND `visit_seq` as fallbacks (see
-    // `serde_bytes::bytebuf::ByteBufVisitor`), so simply swapping the order
-    // while keeping `#[serde(with = "serde_bytes")]` would make `Binary`
-    // silently swallow genuine `String` and `Array` values instead (verified
-    // empirically — both directions reproduced with a minimal standalone
-    // enum before landing this). `de_binary_strict` below closes that hole:
-    // it only accepts `visit_bytes`/`visit_byte_buf`/`visit_borrowed_bytes`
-    // (the actual msgpack bin8/16/32 wire shapes), so on a `String`/`Array`
-    // wire payload this variant genuinely fails and the untagged-enum trial
-    // falls through to `String`/`Array` as expected. See #983 (round 2) for
-    // the full investigation.
-    Binary(
-        #[serde(
-            serialize_with = "serde_bytes::serialize",
-            deserialize_with = "de_binary_strict"
-        )]
-        Vec<u8>,
-    ),
-    String(#[serde(deserialize_with = "de_string_or_large_u64")] String),
+    Float(f64),
+    Binary(#[serde(serialize_with = "serde_bytes::serialize")] Vec<u8>),
+    String(String),
     Array(Vec<FilterValue>),
     /// Reference to another field in the same document
     FieldRef {
@@ -78,121 +53,6 @@ pub enum FilterValue {
         #[serde(rename = "$param")]
         name: String,
     },
-}
-
-/// Deserialize only floating-point wire values; integer coercion is lossy.
-fn de_float_strict<'de, D>(deserializer: D) -> Result<f64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct FloatVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for FloatVisitor {
-        type Value = f64;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a floating-point value")
-        }
-
-        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<f64, E> {
-            Ok(value)
-        }
-
-        fn visit_f32<E: serde::de::Error>(self, value: f32) -> Result<f64, E> {
-            Ok(f64::from(value))
-        }
-    }
-
-    deserializer.deserialize_any(FloatVisitor)
-}
-
-/// Deserialize strings and project oversized unsigned integers as decimal text.
-fn de_string_or_large_u64<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct StringVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for StringVisitor {
-        type Value = String;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a string or unsigned integer above i64::MAX")
-        }
-
-        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
-            Ok(value.to_owned())
-        }
-
-        fn visit_string<E: serde::de::Error>(self, value: String) -> Result<String, E> {
-            Ok(value)
-        }
-
-        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<String, E> {
-            if value > i64::MAX as u64 {
-                Ok(value.to_string())
-            } else {
-                Err(E::invalid_value(
-                    serde::de::Unexpected::Unsigned(value),
-                    &self,
-                ))
-            }
-        }
-    }
-
-    deserializer.deserialize_any(StringVisitor)
-}
-
-/// Strict byte-buffer deserializer for `FilterValue::Binary`'s payload.
-///
-/// Unlike `serde_bytes::Vec<u8>` (whose `ByteBufVisitor` also accepts
-/// `visit_str`/`visit_string`/`visit_seq` as lenient fallbacks — see
-/// `serde_bytes::bytebuf::ByteBufVisitor`), this visitor accepts ONLY the
-/// genuine byte-buffer callbacks (`visit_bytes`, `visit_byte_buf`,
-/// `visit_borrowed_bytes`). Every other wire shape (string, sequence, ...)
-/// is rejected with an error, which is exactly what's needed for `Binary`
-/// to sit *before* `String`/`Array` in this `#[serde(untagged)]` enum
-/// without swallowing them: serde's untagged-enum machinery tries each
-/// variant in order and moves on to the next on any deserialize error, so a
-/// genuine `String`/`Array` wire payload now correctly falls through to
-/// those variants instead of being misdecoded as `Binary`. See #983
-/// (round 2) for the full investigation.
-fn de_binary_strict<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    struct StrictBytesVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for StrictBytesVisitor {
-        type Value = Vec<u8>;
-
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("a byte buffer (msgpack bin8/16/32)")
-        }
-
-        fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v.to_vec())
-        }
-
-        fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v)
-        }
-
-        fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E>
-        where
-            E: serde::de::Error,
-        {
-            Ok(v.to_vec())
-        }
-    }
-
-    deserializer.deserialize_bytes(StrictBytesVisitor)
 }
 
 impl FilterValue {

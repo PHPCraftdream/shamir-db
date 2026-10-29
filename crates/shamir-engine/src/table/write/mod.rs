@@ -6,3 +6,6 @@ mod set;
 mod update;
 
 pub(crate) mod write_helpers;
+
+#[cfg(test)]
+mod tests;

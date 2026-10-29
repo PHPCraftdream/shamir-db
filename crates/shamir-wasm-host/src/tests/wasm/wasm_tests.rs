@@ -5,6 +5,7 @@ use crate::{
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
+use wasmtime::Module;
 
 /// WAT module implementing the identity echo ABI.
 ///
@@ -377,6 +378,12 @@ async fn rv_wasm_host_91385be0_global_set_env_namespace_traps() {
         }
         other => panic!("expected host-import trap, got {other:?}"),
     }
+    let chain = import_error_for_export(GLOBAL_SET_FAILURE_WAT, "shamir_call").await;
+    assert!(
+        chain
+            .contains("global_set: writes to the `env.*` namespace are not permitted (key: env.x)"),
+        "{chain}"
+    );
 }
 
 #[tokio::test]
@@ -394,6 +401,11 @@ async fn rv_wasm_host_91385be0_batch_put_out_of_bounds_traps() {
         }
         other => panic!("expected host-import trap, got {other:?}"),
     }
+    let chain = import_error_for_export(BATCH_PUT_OOB_WAT, "shamir_call").await;
+    assert!(
+        chain.contains("host import read past end of guest memory"),
+        "{chain}"
+    );
 }
 #[test]
 fn rv_wasm_host_b1a78b5b_guest_params_colon_key_round_trips() {
@@ -408,4 +420,155 @@ fn rv_wasm_host_b1a78b5b_guest_params_colon_key_round_trips() {
     let params = crate::wasm::bindings::decode_guest_params(&encoded).unwrap();
     let got = params.get("i:count").unwrap();
     assert_eq!(got, &QueryValue::Int(7));
+}
+
+// Invoke through the production linker and inspect Wasmtime's full error chain;
+// the public error mapping uses Display, which may show only outer context.
+async fn import_error(wat: &str) -> String {
+    import_error_for_export(wat, "run").await
+}
+
+async fn import_error_for_export(wat: &str, export: &str) -> String {
+    let engine = WasmEngine::new().unwrap();
+    let (linker, mut store) = crate::test_linker_and_store(&engine).unwrap();
+    store.set_fuel(1_000_000).unwrap();
+    store.set_epoch_deadline(100);
+    let bytes = wat::parse_str(wat).unwrap();
+    let module = Module::new(engine.engine(), bytes).unwrap();
+    let instance = linker.instantiate_async(&mut store, &module).await.unwrap();
+    let error = if export == "run" {
+        let call = instance
+            .get_typed_func::<(), ()>(&mut store, export)
+            .unwrap();
+        call.call_async(&mut store, ()).await.unwrap_err()
+    } else {
+        let call = instance
+            .get_typed_func::<(i32, i32), i64>(&mut store, export)
+            .unwrap();
+        call.call_async(&mut store, (0, 0)).await.unwrap_err()
+    };
+    format!("{error:#}")
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_missing_call_export_is_reported() {
+    let wat = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "shamir_alloc") (param i32) (result i32)
+            (i32.const 1024)))
+    "#;
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let function = WasmFunction::from_wat(engine, wat, WasmLimits::default()).unwrap();
+    let error = function
+        .call(&FnCtx::new(), &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, FunctionError::Compute(message) if message.contains("missing export `shamir_call`")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_result_range_outside_memory_is_rejected() {
+    let wat = r#"
+        (module
+          (memory (export "memory") 1)
+          (func (export "shamir_alloc") (param i32) (result i32)
+            (i32.const 1024))
+          (func (export "shamir_call") (param i32 i32) (result i64)
+            (i64.or (i64.shl (i64.const 65535) (i64.const 32)) (i64.const 2))))
+    "#;
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let function = WasmFunction::from_wat(engine, wat, WasmLimits::default()).unwrap();
+    let error = function
+        .call(&FnCtx::new(), &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, FunctionError::Compute(message) if message == "result pointer outside memory bounds"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_db_get_without_gateway_traps() {
+    let wat = r#"
+        (module
+          (import "shamir_host" "db_get" (func $get (param i32 i32 i32 i32) (result i64)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "t\c0")
+          (func (export "run")
+            (drop (call $get (i32.const 0) (i32.const 1) (i32.const 1) (i32.const 1)))))
+    "#;
+    let error = import_error(wat).await;
+    assert!(error.contains("db_get: no db gateway"), "{error}");
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_http_malformed_request_traps() {
+    let wat = r#"
+        (module
+          (import "shamir_host" "http_fetch" (func $fetch (param i32 i32) (result i64)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "\c0")
+          (func (export "run")
+            (drop (call $fetch (i32.const 0) (i32.const 1)))))
+    "#;
+    let error = import_error(wat).await;
+    assert!(
+        error.contains("http_fetch: request must be a Map"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_depth_limit_traps() {
+    let wat = r#"
+        (module
+          (import "shamir_host" "call" (func $call (param i32 i32 i32 i32) (result i64)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "f\80")
+          (func (export "run")
+            (drop (call $call (i32.const 0) (i32.const 1) (i32.const 1) (i32.const 1)))))
+    "#;
+    let error = import_error(wat).await;
+    assert!(
+        error.contains("call depth limit exceeded: 1 > 0"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_global_env_write_guard_traps() {
+    let wat = r#"
+        (module
+          (import "shamir_host" "global_set" (func $set (param i32 i32 i32 i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 0) "env.x\c0")
+          (func (export "run")
+            (call $set (i32.const 0) (i32.const 5) (i32.const 5) (i32.const 1))))
+    "#;
+    let error = import_error(wat).await;
+    assert!(
+        error.contains("global_set: writes to the `env.*` namespace are not permitted"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_batch_input_range_guard_traps() {
+    let wat = r#"
+        (module
+          (import "shamir_host" "batch_put" (func $put (param i32 i32 i32 i32)))
+          (memory (export "memory") 1)
+          (func (export "run")
+            (call $put (i32.const 65535) (i32.const 2) (i32.const 0) (i32.const 1))))
+    "#;
+    let error = import_error(wat).await;
+    assert!(
+        error.contains("host import read past end of guest memory"),
+        "{error}"
+    );
 }

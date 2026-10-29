@@ -1,9 +1,11 @@
 //! [`BatchOp`] — the dispatch enum for all supported batch operations.
 
-use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::de::{Deserializer, Error as DeError, MapAccess, Visitor};
 use serde::ser::Serializer;
 use serde::{Deserialize, Serialize};
 use shamir_types::access::{Action, ResourcePath};
+use shamir_types::types::common::TMap;
+use shamir_types::types::value::{QueryValue, Value};
 
 use crate::admin::{
     AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterRepoOp,
@@ -25,6 +27,9 @@ use crate::call::CallOp;
 use crate::read::ReadQuery;
 use crate::subscribe::{SubscribeOp, UnsubscribeOp};
 use crate::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
+
+use super::op_kind::{op_kind, OpKind};
+use super::query_value_deserializer::QueryValueDeserializer;
 
 use crate::batch::for_each_op::ForEachOp;
 use crate::batch::req::options::assert_nested_batch_caps;
@@ -267,94 +272,6 @@ impl Serialize for BatchOp {
 }
 impl<'de> Deserialize<'de> for BatchOp {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::Error as DeError;
-        use shamir_types::types::common::TMap;
-        use shamir_types::types::value::{QueryValue, Value};
-
-        /// Every key that can discriminate a `BatchOp` variant, in dispatch
-        /// order. RV-QUERY-TYPES-77BFC767: any key outside this set is now a
-        /// decode error, and a map carrying more than one discriminator is
-        /// rejected as ambiguous — except `update` + `set`, where `set` is a
-        /// legitimate payload field of `UpdateOp`.
-        const DISCRIMINATORS: &[&str] = &[
-            "from",
-            "insert_into",
-            "update",
-            "delete_from",
-            "create_db",
-            "drop_db",
-            "create_repo",
-            "drop_repo",
-            "rename_repo",
-            "alter_repo",
-            "rename_db",
-            "create_table",
-            "drop_table",
-            "rename_table",
-            "create_index",
-            "drop_index",
-            "rename_index",
-            "set_buffer_config",
-            "get_buffer_config",
-            "alter_buffer_config",
-            "start_migration",
-            "commit_migration",
-            "rollback_migration",
-            "migration_status",
-            "create_user",
-            "drop_user",
-            "grant_role",
-            "revoke_role",
-            "list",
-            "chmod",
-            "chown",
-            "chgrp",
-            "create_group",
-            "drop_group",
-            "rename_group",
-            "add_group_member",
-            "remove_group_member",
-            "access_tree",
-            "create_function",
-            "drop_function",
-            "rename_function",
-            "create_validator",
-            "drop_validator",
-            "rename_validator",
-            "bind_validator",
-            "unbind_validator",
-            "list_validators",
-            "set_table_schema",
-            "add_schema_rule",
-            "remove_schema_rule",
-            "get_table_schema",
-            "describe_table",
-            "describe_repo",
-            "create_function_folder",
-            "rename_function_folder",
-            "interner_dump",
-            "interner_touch",
-            "purge_history",
-            "set_retention",
-            "changes_since",
-            "create_replication_profile",
-            "drop_replication_profile",
-            "create_publication",
-            "drop_publication",
-            "create_subscription",
-            "drop_subscription",
-            "alter_subscription",
-            "list_publications",
-            "list_subscriptions",
-            "replication_status",
-            "call",
-            "for_each",
-            "batch",
-            "subscribe",
-            "unsubscribe",
-            "set",
-        ];
-
         struct OpVisitor;
         impl<'de> Visitor<'de> for OpVisitor {
             type Value = BatchOp;
@@ -364,209 +281,199 @@ impl<'de> Deserialize<'de> for BatchOp {
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<BatchOp, A::Error> {
-                // Single decode pass: keys are moved straight into the
-                // buffered map, no separate key-clone vector (part of
-                // RV-QUERY-TYPES-1EC04E32).
-                let mut entries: Vec<(String, QueryValue)> = Vec::new();
-                while let Some(key) = map.next_key::<String>()? {
-                    let value = map.next_value::<QueryValue>()?;
-                    entries.push((key, value));
-                }
                 let mut qv_map = TMap::default();
-                for (k, v) in entries {
-                    qv_map.insert(k, v);
+                while let Some((key, value)) = map.next_entry::<String, QueryValue>()? {
+                    qv_map.insert(key, value);
                 }
                 let qv = QueryValue::Map(qv_map);
                 assert_nested_batch_caps(&qv).map_err(DeError::custom)?;
-
-                let is_marker = |k: &str| DISCRIMINATORS.contains(&k);
-                let markers: Vec<&str> = {
-                    let Value::Map(m) = &qv else {
-                        return Err(DeError::custom("BatchOp must be a map"));
-                    };
-                    m.keys()
-                        .map(|k| k.as_str())
-                        .filter(|k| is_marker(k))
-                        .collect()
-                };
-                match markers.len() {
-                    0 => return Err(DeError::custom("Unknown operation type")),
-                    1 => {}
-                    // `update` legitimately carries `set` as a payload field.
-                    _ if markers == ["update", "set"] || markers == ["set", "update"] => {}
-                    _ => return Err(DeError::custom("ambiguous BatchOp discriminators")),
-                }
-                // Re-encode once so each typed op struct can use its own
-                // serde::Deserialize impl (byte-identical to the wire for
-                // msgpack callers).
-                let bytes = rmp_serde::to_vec_named(&qv).map_err(DeError::custom)?;
-                fn qv_to<T: serde::de::DeserializeOwned, E: serde::de::Error>(
-                    bytes: &[u8],
-                ) -> Result<T, E> {
-                    rmp_serde::from_slice(bytes).map_err(serde::de::Error::custom)
-                }
                 let Value::Map(m) = &qv else {
                     return Err(DeError::custom("BatchOp must be a map"));
                 };
-                let has = |k: &str| m.contains_key(k);
-
-                if has("from") {
-                    qv_to::<ReadQuery, _>(&bytes).map(BatchOp::Read)
-                } else if has("insert_into") {
-                    qv_to::<InsertOp, _>(&bytes).map(BatchOp::Insert)
-                } else if has("update") {
-                    qv_to::<UpdateOp, _>(&bytes).map(BatchOp::Update)
-                } else if has("delete_from") {
-                    qv_to::<DeleteOp, _>(&bytes).map(BatchOp::Delete)
-                } else if has("create_db") {
-                    qv_to::<CreateDbOp, _>(&bytes).map(BatchOp::CreateDb)
-                } else if has("drop_db") {
-                    qv_to::<DropDbOp, _>(&bytes).map(BatchOp::DropDb)
-                } else if has("create_repo") {
-                    qv_to::<CreateRepoOp, _>(&bytes).map(BatchOp::CreateRepo)
-                } else if has("drop_repo") {
-                    qv_to::<DropRepoOp, _>(&bytes).map(BatchOp::DropRepo)
-                } else if has("rename_repo") {
-                    qv_to::<RenameRepoOp, _>(&bytes).map(BatchOp::RenameRepo)
-                } else if has("alter_repo") {
-                    qv_to::<AlterRepoOp, _>(&bytes).map(BatchOp::AlterRepo)
-                } else if has("rename_db") {
-                    qv_to::<RenameDbOp, _>(&bytes).map(BatchOp::RenameDb)
-                } else if has("create_table") {
-                    qv_to::<CreateTableOp, _>(&bytes).map(BatchOp::CreateTable)
-                } else if has("drop_table") {
-                    qv_to::<DropTableOp, _>(&bytes).map(BatchOp::DropTable)
-                } else if has("rename_table") {
-                    qv_to::<RenameTableOp, _>(&bytes).map(BatchOp::RenameTable)
-                } else if has("create_index") {
-                    qv_to::<CreateIndexOp, _>(&bytes).map(BatchOp::CreateIndex)
-                } else if has("drop_index") {
-                    qv_to::<DropIndexOp, _>(&bytes).map(BatchOp::DropIndex)
-                } else if has("rename_index") {
-                    qv_to::<RenameIndexOp, _>(&bytes).map(BatchOp::RenameIndex)
-                } else if has("set_buffer_config") {
-                    qv_to::<SetBufferConfigOp, _>(&bytes).map(BatchOp::SetBufferConfig)
-                } else if has("get_buffer_config") {
-                    qv_to::<GetBufferConfigOp, _>(&bytes).map(BatchOp::GetBufferConfig)
-                } else if has("alter_buffer_config") {
-                    qv_to::<AlterBufferConfigOp, _>(&bytes).map(BatchOp::AlterBufferConfig)
-                } else if has("start_migration") {
-                    qv_to::<StartMigrationOp, _>(&bytes).map(BatchOp::StartMigration)
-                } else if has("commit_migration") {
-                    qv_to::<CommitMigrationOp, _>(&bytes).map(BatchOp::CommitMigration)
-                } else if has("rollback_migration") {
-                    qv_to::<RollbackMigrationOp, _>(&bytes).map(BatchOp::RollbackMigration)
-                } else if has("migration_status") {
-                    qv_to::<MigrationStatusOp, _>(&bytes).map(BatchOp::MigrationStatus)
-                } else if has("create_user") {
-                    qv_to::<CreateUserOp, _>(&bytes).map(BatchOp::CreateUser)
-                } else if has("drop_user") {
-                    qv_to::<DropUserOp, _>(&bytes).map(BatchOp::DropUser)
-                } else if has("grant_role") {
-                    qv_to::<GrantRoleOp, _>(&bytes).map(BatchOp::GrantRole)
-                } else if has("revoke_role") {
-                    qv_to::<RevokeRoleOp, _>(&bytes).map(BatchOp::RevokeRole)
-                } else if has("list") {
-                    qv_to::<ListOp, _>(&bytes).map(BatchOp::List)
-                } else if has("chmod") {
-                    qv_to::<ChmodOp, _>(&bytes).map(BatchOp::Chmod)
-                } else if has("chown") {
-                    qv_to::<ChownOp, _>(&bytes).map(BatchOp::Chown)
-                } else if has("chgrp") {
-                    qv_to::<ChgrpOp, _>(&bytes).map(BatchOp::Chgrp)
-                } else if has("create_group") {
-                    qv_to::<CreateGroupOp, _>(&bytes).map(BatchOp::CreateGroup)
-                } else if has("drop_group") {
-                    qv_to::<DropGroupOp, _>(&bytes).map(BatchOp::DropGroup)
-                } else if has("rename_group") {
-                    qv_to::<RenameGroupOp, _>(&bytes).map(BatchOp::RenameGroup)
-                } else if has("add_group_member") {
-                    qv_to::<AddGroupMemberOp, _>(&bytes).map(BatchOp::AddGroupMember)
-                } else if has("remove_group_member") {
-                    qv_to::<RemoveGroupMemberOp, _>(&bytes).map(BatchOp::RemoveGroupMember)
-                } else if has("access_tree") {
-                    qv_to::<AccessTreeOp, _>(&bytes).map(BatchOp::AccessTree)
-                } else if has("create_function") {
-                    qv_to::<CreateFunctionOp, _>(&bytes).map(BatchOp::CreateFunction)
-                } else if has("drop_function") {
-                    qv_to::<DropFunctionOp, _>(&bytes).map(BatchOp::DropFunction)
-                } else if has("rename_function") {
-                    qv_to::<RenameFunctionOp, _>(&bytes).map(BatchOp::RenameFunction)
-                } else if has("create_validator") {
-                    qv_to::<CreateValidatorOp, _>(&bytes).map(BatchOp::CreateValidator)
-                } else if has("drop_validator") {
-                    qv_to::<DropValidatorOp, _>(&bytes).map(BatchOp::DropValidator)
-                } else if has("rename_validator") {
-                    qv_to::<RenameValidatorOp, _>(&bytes).map(BatchOp::RenameValidator)
-                } else if has("bind_validator") {
-                    qv_to::<BindValidatorOp, _>(&bytes).map(BatchOp::BindValidator)
-                } else if has("unbind_validator") {
-                    qv_to::<UnbindValidatorOp, _>(&bytes).map(BatchOp::UnbindValidator)
-                } else if has("list_validators") {
-                    qv_to::<ListValidatorsOp, _>(&bytes).map(BatchOp::ListValidators)
-                } else if has("set_table_schema") {
-                    qv_to::<SetTableSchemaOp, _>(&bytes).map(BatchOp::SetTableSchema)
-                } else if has("add_schema_rule") {
-                    qv_to::<AddSchemaRuleOp, _>(&bytes).map(BatchOp::AddSchemaRule)
-                } else if has("remove_schema_rule") {
-                    qv_to::<RemoveSchemaRuleOp, _>(&bytes).map(BatchOp::RemoveSchemaRule)
-                } else if has("get_table_schema") {
-                    qv_to::<GetTableSchemaOp, _>(&bytes).map(BatchOp::GetTableSchema)
-                } else if has("describe_table") {
-                    qv_to::<DescribeTableOp, _>(&bytes).map(BatchOp::DescribeTable)
-                } else if has("describe_repo") {
-                    qv_to::<DescribeRepoOp, _>(&bytes).map(BatchOp::DescribeRepo)
-                } else if has("create_function_folder") {
-                    qv_to::<CreateFunctionFolderOp, _>(&bytes).map(BatchOp::CreateFunctionFolder)
-                } else if has("rename_function_folder") {
-                    qv_to::<RenameFunctionFolderOp, _>(&bytes).map(BatchOp::RenameFunctionFolder)
-                } else if has("interner_dump") {
-                    qv_to::<InternerDumpOp, _>(&bytes).map(BatchOp::InternerDump)
-                } else if has("interner_touch") {
-                    qv_to::<InternerTouchOp, _>(&bytes).map(BatchOp::InternerTouch)
-                } else if has("purge_history") {
-                    qv_to::<PurgeHistoryOp, _>(&bytes).map(BatchOp::PurgeHistory)
-                } else if has("set_retention") {
-                    qv_to::<SetRetentionOp, _>(&bytes).map(BatchOp::SetRetention)
-                } else if has("changes_since") {
-                    qv_to::<ChangesSinceOp, _>(&bytes).map(BatchOp::ChangesSince)
-                } else if has("create_replication_profile") {
-                    qv_to::<CreateReplicationProfileOp, _>(&bytes)
-                        .map(BatchOp::CreateReplicationProfile)
-                } else if has("drop_replication_profile") {
-                    qv_to::<DropReplicationProfileOp, _>(&bytes)
-                        .map(BatchOp::DropReplicationProfile)
-                } else if has("create_publication") {
-                    qv_to::<CreatePublicationOp, _>(&bytes).map(BatchOp::CreatePublication)
-                } else if has("drop_publication") {
-                    qv_to::<DropPublicationOp, _>(&bytes).map(BatchOp::DropPublication)
-                } else if has("create_subscription") {
-                    qv_to::<CreateSubscriptionOp, _>(&bytes).map(BatchOp::CreateSubscription)
-                } else if has("drop_subscription") {
-                    qv_to::<DropSubscriptionOp, _>(&bytes).map(BatchOp::DropSubscription)
-                } else if has("alter_subscription") {
-                    qv_to::<AlterSubscriptionOp, _>(&bytes).map(BatchOp::AlterSubscription)
-                } else if has("list_publications") {
-                    qv_to::<ListPublicationsOp, _>(&bytes).map(BatchOp::ListPublications)
-                } else if has("list_subscriptions") {
-                    qv_to::<ListSubscriptionsOp, _>(&bytes).map(BatchOp::ListSubscriptions)
-                } else if has("replication_status") {
-                    qv_to::<ReplicationStatusOp, _>(&bytes).map(BatchOp::ReplicationStatus)
-                } else if has("call") {
-                    qv_to::<CallOp, _>(&bytes).map(BatchOp::Call)
-                } else if has("for_each") {
-                    qv_to::<ForEachOp, _>(&bytes).map(BatchOp::ForEach)
-                } else if has("batch") {
-                    qv_to::<SubBatchOp, _>(&bytes).map(BatchOp::Batch)
-                } else if has("subscribe") {
-                    qv_to::<SubscribeOp, _>(&bytes).map(BatchOp::Subscribe)
-                } else if has("unsubscribe") {
-                    qv_to::<UnsubscribeOp, _>(&bytes).map(BatchOp::Unsubscribe)
-                } else if has("set") {
-                    qv_to::<SetOp, _>(&bytes).map(BatchOp::Set)
-                } else {
-                    Err(DeError::custom("Unknown operation type"))
+                let mut selected = None;
+                for kind in m.keys().filter_map(|key| op_kind(key)) {
+                    selected = Some(match (selected, kind) {
+                        (None, kind) => kind,
+                        (Some(OpKind::Update), OpKind::Set)
+                        | (Some(OpKind::Set), OpKind::Update) => OpKind::Update,
+                        _ => return Err(DeError::custom("ambiguous BatchOp discriminators")),
+                    });
                 }
+                let kind = selected.ok_or_else(|| DeError::custom("Unknown operation type"))?;
+                let value = QueryValueDeserializer(qv);
+                match kind {
+                    OpKind::Read => ReadQuery::deserialize(value).map(BatchOp::Read),
+                    OpKind::Insert => InsertOp::deserialize(value).map(BatchOp::Insert),
+                    OpKind::Update => UpdateOp::deserialize(value).map(BatchOp::Update),
+                    OpKind::Delete => DeleteOp::deserialize(value).map(BatchOp::Delete),
+                    OpKind::CreateDb => CreateDbOp::deserialize(value).map(BatchOp::CreateDb),
+                    OpKind::DropDb => DropDbOp::deserialize(value).map(BatchOp::DropDb),
+                    OpKind::CreateRepo => CreateRepoOp::deserialize(value).map(BatchOp::CreateRepo),
+                    OpKind::DropRepo => DropRepoOp::deserialize(value).map(BatchOp::DropRepo),
+                    OpKind::RenameRepo => RenameRepoOp::deserialize(value).map(BatchOp::RenameRepo),
+                    OpKind::AlterRepo => AlterRepoOp::deserialize(value).map(BatchOp::AlterRepo),
+                    OpKind::RenameDb => RenameDbOp::deserialize(value).map(BatchOp::RenameDb),
+                    OpKind::CreateTable => {
+                        CreateTableOp::deserialize(value).map(BatchOp::CreateTable)
+                    }
+                    OpKind::DropTable => DropTableOp::deserialize(value).map(BatchOp::DropTable),
+                    OpKind::RenameTable => {
+                        RenameTableOp::deserialize(value).map(BatchOp::RenameTable)
+                    }
+                    OpKind::CreateIndex => {
+                        CreateIndexOp::deserialize(value).map(BatchOp::CreateIndex)
+                    }
+                    OpKind::DropIndex => DropIndexOp::deserialize(value).map(BatchOp::DropIndex),
+                    OpKind::RenameIndex => {
+                        RenameIndexOp::deserialize(value).map(BatchOp::RenameIndex)
+                    }
+                    OpKind::SetBufferConfig => {
+                        SetBufferConfigOp::deserialize(value).map(BatchOp::SetBufferConfig)
+                    }
+                    OpKind::GetBufferConfig => {
+                        GetBufferConfigOp::deserialize(value).map(BatchOp::GetBufferConfig)
+                    }
+                    OpKind::AlterBufferConfig => {
+                        AlterBufferConfigOp::deserialize(value).map(BatchOp::AlterBufferConfig)
+                    }
+                    OpKind::StartMigration => {
+                        StartMigrationOp::deserialize(value).map(BatchOp::StartMigration)
+                    }
+                    OpKind::CommitMigration => {
+                        CommitMigrationOp::deserialize(value).map(BatchOp::CommitMigration)
+                    }
+                    OpKind::RollbackMigration => {
+                        RollbackMigrationOp::deserialize(value).map(BatchOp::RollbackMigration)
+                    }
+                    OpKind::MigrationStatus => {
+                        MigrationStatusOp::deserialize(value).map(BatchOp::MigrationStatus)
+                    }
+                    OpKind::CreateUser => CreateUserOp::deserialize(value).map(BatchOp::CreateUser),
+                    OpKind::DropUser => DropUserOp::deserialize(value).map(BatchOp::DropUser),
+                    OpKind::GrantRole => GrantRoleOp::deserialize(value).map(BatchOp::GrantRole),
+                    OpKind::RevokeRole => RevokeRoleOp::deserialize(value).map(BatchOp::RevokeRole),
+                    OpKind::List => ListOp::deserialize(value).map(BatchOp::List),
+                    OpKind::Chmod => ChmodOp::deserialize(value).map(BatchOp::Chmod),
+                    OpKind::Chown => ChownOp::deserialize(value).map(BatchOp::Chown),
+                    OpKind::Chgrp => ChgrpOp::deserialize(value).map(BatchOp::Chgrp),
+                    OpKind::CreateGroup => {
+                        CreateGroupOp::deserialize(value).map(BatchOp::CreateGroup)
+                    }
+                    OpKind::DropGroup => DropGroupOp::deserialize(value).map(BatchOp::DropGroup),
+                    OpKind::RenameGroup => {
+                        RenameGroupOp::deserialize(value).map(BatchOp::RenameGroup)
+                    }
+                    OpKind::AddGroupMember => {
+                        AddGroupMemberOp::deserialize(value).map(BatchOp::AddGroupMember)
+                    }
+                    OpKind::RemoveGroupMember => {
+                        RemoveGroupMemberOp::deserialize(value).map(BatchOp::RemoveGroupMember)
+                    }
+                    OpKind::AccessTree => AccessTreeOp::deserialize(value).map(BatchOp::AccessTree),
+                    OpKind::CreateFunction => {
+                        CreateFunctionOp::deserialize(value).map(BatchOp::CreateFunction)
+                    }
+                    OpKind::DropFunction => {
+                        DropFunctionOp::deserialize(value).map(BatchOp::DropFunction)
+                    }
+                    OpKind::RenameFunction => {
+                        RenameFunctionOp::deserialize(value).map(BatchOp::RenameFunction)
+                    }
+                    OpKind::CreateValidator => {
+                        CreateValidatorOp::deserialize(value).map(BatchOp::CreateValidator)
+                    }
+                    OpKind::DropValidator => {
+                        DropValidatorOp::deserialize(value).map(BatchOp::DropValidator)
+                    }
+                    OpKind::RenameValidator => {
+                        RenameValidatorOp::deserialize(value).map(BatchOp::RenameValidator)
+                    }
+                    OpKind::BindValidator => {
+                        BindValidatorOp::deserialize(value).map(BatchOp::BindValidator)
+                    }
+                    OpKind::UnbindValidator => {
+                        UnbindValidatorOp::deserialize(value).map(BatchOp::UnbindValidator)
+                    }
+                    OpKind::ListValidators => {
+                        ListValidatorsOp::deserialize(value).map(BatchOp::ListValidators)
+                    }
+                    OpKind::SetTableSchema => {
+                        SetTableSchemaOp::deserialize(value).map(BatchOp::SetTableSchema)
+                    }
+                    OpKind::AddSchemaRule => {
+                        AddSchemaRuleOp::deserialize(value).map(BatchOp::AddSchemaRule)
+                    }
+                    OpKind::RemoveSchemaRule => {
+                        RemoveSchemaRuleOp::deserialize(value).map(BatchOp::RemoveSchemaRule)
+                    }
+                    OpKind::GetTableSchema => {
+                        GetTableSchemaOp::deserialize(value).map(BatchOp::GetTableSchema)
+                    }
+                    OpKind::DescribeTable => {
+                        DescribeTableOp::deserialize(value).map(BatchOp::DescribeTable)
+                    }
+                    OpKind::DescribeRepo => {
+                        DescribeRepoOp::deserialize(value).map(BatchOp::DescribeRepo)
+                    }
+                    OpKind::CreateFunctionFolder => CreateFunctionFolderOp::deserialize(value)
+                        .map(BatchOp::CreateFunctionFolder),
+                    OpKind::RenameFunctionFolder => RenameFunctionFolderOp::deserialize(value)
+                        .map(BatchOp::RenameFunctionFolder),
+                    OpKind::InternerDump => {
+                        InternerDumpOp::deserialize(value).map(BatchOp::InternerDump)
+                    }
+                    OpKind::InternerTouch => {
+                        InternerTouchOp::deserialize(value).map(BatchOp::InternerTouch)
+                    }
+                    OpKind::PurgeHistory => {
+                        PurgeHistoryOp::deserialize(value).map(BatchOp::PurgeHistory)
+                    }
+                    OpKind::SetRetention => {
+                        SetRetentionOp::deserialize(value).map(BatchOp::SetRetention)
+                    }
+                    OpKind::ChangesSince => {
+                        ChangesSinceOp::deserialize(value).map(BatchOp::ChangesSince)
+                    }
+                    OpKind::CreateReplicationProfile => {
+                        CreateReplicationProfileOp::deserialize(value)
+                            .map(BatchOp::CreateReplicationProfile)
+                    }
+                    OpKind::DropReplicationProfile => DropReplicationProfileOp::deserialize(value)
+                        .map(BatchOp::DropReplicationProfile),
+                    OpKind::CreatePublication => {
+                        CreatePublicationOp::deserialize(value).map(BatchOp::CreatePublication)
+                    }
+                    OpKind::DropPublication => {
+                        DropPublicationOp::deserialize(value).map(BatchOp::DropPublication)
+                    }
+                    OpKind::CreateSubscription => {
+                        CreateSubscriptionOp::deserialize(value).map(BatchOp::CreateSubscription)
+                    }
+                    OpKind::DropSubscription => {
+                        DropSubscriptionOp::deserialize(value).map(BatchOp::DropSubscription)
+                    }
+                    OpKind::AlterSubscription => {
+                        AlterSubscriptionOp::deserialize(value).map(BatchOp::AlterSubscription)
+                    }
+                    OpKind::ListPublications => {
+                        ListPublicationsOp::deserialize(value).map(BatchOp::ListPublications)
+                    }
+                    OpKind::ListSubscriptions => {
+                        ListSubscriptionsOp::deserialize(value).map(BatchOp::ListSubscriptions)
+                    }
+                    OpKind::ReplicationStatus => {
+                        ReplicationStatusOp::deserialize(value).map(BatchOp::ReplicationStatus)
+                    }
+                    OpKind::Call => CallOp::deserialize(value).map(BatchOp::Call),
+                    OpKind::ForEach => ForEachOp::deserialize(value).map(BatchOp::ForEach),
+                    OpKind::Batch => SubBatchOp::deserialize(value).map(BatchOp::Batch),
+                    OpKind::Subscribe => SubscribeOp::deserialize(value).map(BatchOp::Subscribe),
+                    OpKind::Unsubscribe => {
+                        UnsubscribeOp::deserialize(value).map(BatchOp::Unsubscribe)
+                    }
+                    OpKind::Set => SetOp::deserialize(value).map(BatchOp::Set),
+                }
+                .map_err(DeError::custom)
             }
         }
 

@@ -287,6 +287,17 @@ impl IndexBackend for VectorBackend {
         &self.descriptor
     }
 
+    fn persisted_descriptor(&self) -> IndexDescriptor {
+        let mut descriptor = self.descriptor.clone();
+        let adapter = self.adapter.load_full();
+        if let (crate::kind::IndexKind::Vector(config), Some(hnsw)) =
+            (&mut descriptor.kind, adapter.adapter.as_hnsw_adapter())
+        {
+            config.quantization = hnsw.quantization_mode();
+        }
+        descriptor
+    }
+
     // HNSW mutation goes through the adapter. The non-tx variants
     // (`plan_insert` / `plan_update` / `plan_delete`) commit to the
     // live HNSW graph immediately. The tx-aware overrides below
@@ -729,7 +740,11 @@ impl IndexBackend for VectorBackend {
                 None
             }
         };
-        match snapshot::load_snapshot(&info_store, &keyspace).await {
+        let intent = match &self.descriptor.kind {
+            crate::kind::IndexKind::Vector(config) => config.quantization,
+            _ => None,
+        };
+        match snapshot::load_snapshot_with_intent(&info_store, &keyspace, intent).await {
             Ok(loaded) => {
                 // O(load) fast path. P0 RV-INDEX-4651AA00: replay runs on
                 // the FRESH adapter BEFORE it is stored live — a failure
