@@ -282,7 +282,11 @@ class MainCellTests(unittest.TestCase):
 
 class ForwardedFeatureTests(unittest.TestCase):
     def test_missing_query_package_exits_2(self):
-        tree = tree_text([]).replace("shamir-engine-query v0.1.0\n", "")
+        tree = "".join(
+            line + "\n"
+            for line in tree_text([]).splitlines()
+            if not line.startswith("shamir-engine-query")
+        )
         code, _, err = run_main(["--expected", "no-default"], tree=tree)
         self.assertEqual(code, 2)
         self.assertIn("shamir-engine-query does not appear", err)
