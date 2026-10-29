@@ -73,6 +73,20 @@ impl Store for FailingSource {
 #[tokio::test]
 async fn rv_storage_995fd07d_partial_copy_failure_preserves_completed_batch() {
     let destination: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    destination
+        .set(
+            Bytes::from_static(b"first").into(),
+            Bytes::from_static(b"old"),
+        )
+        .await
+        .unwrap();
+    destination
+        .set(
+            Bytes::from_static(b"unrelated").into(),
+            Bytes::from_static(b"keep"),
+        )
+        .await
+        .unwrap();
     let repo = CopyRepo {
         source: Arc::new(FailingSource),
         destination: Arc::clone(&destination),
@@ -85,5 +99,12 @@ async fn rv_storage_995fd07d_partial_copy_failure_preserves_completed_batch() {
             .await
             .unwrap(),
         Bytes::from_static(b"v")
+    );
+    assert_eq!(
+        destination
+            .get(Bytes::from_static(b"unrelated").into())
+            .await
+            .unwrap(),
+        Bytes::from_static(b"keep")
     );
 }

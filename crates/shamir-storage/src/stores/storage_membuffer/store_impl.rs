@@ -125,7 +125,7 @@ impl Store for MemBufferStore {
         if let Some(slot) = self.state.dirty_probe(&key) {
             return match slot {
                 Slot::Live(v) => Ok(v),
-                Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
+                Slot::Tombstone => Err(DbError::missing_key(&key)),
             };
         }
         // Not dirty — validated cache probe against the stamp captured
@@ -134,7 +134,7 @@ impl Store for MemBufferStore {
         if let Some(slot) = self.state.validated_cache_get(&key, s0).await {
             return match slot {
                 Slot::Live(v) => Ok(v),
-                Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
+                Slot::Tombstone => Err(DbError::missing_key(&key)),
             };
         }
         // Capture the fallback stamp BEFORE the authoritative dirty re-probe:
@@ -148,7 +148,7 @@ impl Store for MemBufferStore {
         if let Some(slot) = self.state.dirty_probe(&key) {
             return match slot {
                 Slot::Live(v) => Ok(v),
-                Slot::Tombstone => Err(DbError::NotFound(format!("{:?}", key))),
+                Slot::Tombstone => Err(DbError::missing_key(&key)),
             };
         }
         // Fall through to inner; populate cache only (NOT dirty —

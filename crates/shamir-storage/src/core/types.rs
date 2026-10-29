@@ -2,7 +2,7 @@ use crate::error::{DbError, DbResult};
 use crate::key_bytes::KeyBytes;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::Stream;
+use futures::{stream::Stream, StreamExt};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -215,7 +215,7 @@ pub trait Store: Send + Sync {
     /// state (in-memory) or that already fsync per write at a lower
     /// layer.
     ///
-    /// Backends that buffer (sled, fjall, cached) MUST override.
+    /// Buffered backends and wrappers MUST override.
     async fn flush(&self) -> DbResult<()> {
         Ok(())
     }
@@ -274,10 +274,7 @@ pub trait Store: Send + Sync {
 
     /// Insert many records in one logical batch — for backends that
     /// expose a transactional write API, this collapses N×fsync into
-    /// one. For backends that already amortise durability per write
-    /// (sled with `flush()`, redb with `Durability::None`), the
-    /// win is smaller — and falling through to the default loop is
-    /// fine.
+    /// one. Backends without such an override use the default loop.
     ///
     /// **Atomicity.** When a backend overrides this with a
     /// transactional impl, the batch is all-or-nothing. The default
@@ -322,20 +319,12 @@ pub trait Store: Send + Sync {
     /// concurrent read landing between two ops, can observe a
     /// partially-applied state. Empty `ops` is a no-op.
     ///
-    /// Backends with a native write-transaction API (redb, sled, fjall,
-    /// persy, nebari, canopy) OVERRIDE this to collapse N per-key writes
-    /// into one write-tx (one fsync) and — where the underlying engine
-    /// publishes the whole batch atomically — to deliver genuine
-    /// whole-batch atomicity. Whether a given override actually does so
-    /// is **opt-in, queryable via [`Self::supports_atomic_transact`]**
-    /// (see that method's contract). `FjallStore` reports `true`; both
-    /// the default per-op loop below AND overrides that apply at least
-    /// one subset per-key to a lock-free primary with no multi-key
-    /// publish primitive (notably `MirroredStore`, whose ephemeral
-    /// subset is per-op) report `false`. Callers whose correctness
-    /// genuinely DEPENDS on whole-batch visibility atomicity SHOULD
-    /// check the flag before assuming it; when it is `false`, partial
-    /// state MAY be observable to a concurrent reader mid-batch.
+    /// Backends may override this to use a native batch. Whether an
+    /// override delivers whole-batch visibility atomicity is opt-in and
+    /// queryable via [`Self::supports_atomic_transact`]. FjallStore and
+    /// MirroredStore report `false`; partial state may be observable to
+    /// a concurrent reader mid-batch. Callers whose correctness depends
+    /// on whole-batch visibility atomicity should check the flag.
     ///
     /// Used by the transactional engine layer to bundle a tx commit into
     /// one apply (data + index postings + version-log + counter updates).
@@ -403,10 +392,9 @@ pub trait Store: Send + Sync {
     /// per-op `transact` loop (no cross-op atomicity) or — like
     /// `MirroredStore` — override `transact` but still apply at least
     /// one subset per-key to a lock-free primary with no multi-key
-    /// publish primitive. Genuinely atomic backends (`FjallStore` via
-    /// a native write batch) override to `true`. Wrapper backends
-    /// (`CachedStore`, `MemBufferStore`) delegate to their inner
-    /// backend's answer.
+    /// publish primitive. FjallStore also reports `false`: its raw reads
+    /// can observe a partially applied native batch. Wrappers report their
+    /// own capability; consult the implementation before assuming it.
     ///
     /// **Callers whose correctness DEPENDS on whole-batch visibility
     /// atomicity should check this flag** before assuming every
@@ -438,7 +426,7 @@ pub trait Store: Send + Sync {
 
     /// Returns an async stream that yields batches of records.
     /// Like PHP generators but with batching - yields Vec of size batch_size.
-    /// Uses concurrent prefetching: while yielding current batch, fetches next batch in background.
+    /// Batches are fetched as the stream is polled; prefetching is not guaranteed.
     ///
     /// # Ordering guarantee
     ///
@@ -491,13 +479,9 @@ pub trait Store: Send + Sync {
     /// `[start_inclusive ..= end_inclusive]` (lexicographic byte
     /// order). `None` on either side = unbounded.
     ///
-    /// Used by sorted-index range / order / min queries. Disk-backed
-    /// backends (redb, sled, fjall, persy, nebari, canopy) override
-    /// this with their native `range()` API → genuine
-    /// `O(log N + K)`. The default impl below leans on
-    /// `iter_stream` + filter — correct everywhere but
-    /// `O(N)` (used as fallback for `in_memory` / `cached` whose
-    /// hash-keyed storage can't seek).
+    /// The in-memory backend overrides this with a native range scan.
+    /// The default implementation, also used by Fjall, filters `iter_stream`, scanning until the
+    /// upper bound is passed (or the source ends).
     ///
     /// # Arguments
     /// * `start_inclusive` — lower bound. `None` = scan from the start.
@@ -527,8 +511,7 @@ pub trait Store: Send + Sync {
     /// `batch_size == 0` yields an empty stream.
     /// Default impl: collect the forward-range stream and reverse
     /// it in memory. Correct for any backend, but O(N) memory.
-    /// Disk B-tree backends (sled, redb, …) override with a true
-    /// native reverse cursor.
+    /// Fjall and in-memory backends override with native reverse scans.
     fn iter_range_stream_reverse(
         &self,
         start_inclusive: Option<Bytes>,
@@ -551,7 +534,6 @@ fn default_reverse(
     mut inner: RecordStream,
     batch_size: usize,
 ) -> impl Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send {
-    use futures::StreamExt;
     async_stream::stream! {
         let mut all: Vec<(RecordKey, Bytes)> = Vec::new();
         while let Some(batch) = inner.next().await {
@@ -580,26 +562,25 @@ fn default_range_filter(
     start: Option<Bytes>,
     end: Option<Bytes>,
 ) -> impl Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send {
-    use futures::StreamExt;
     async_stream::stream! {
         while let Some(batch) = inner.next().await {
             let batch = batch?;
-            let filtered: Vec<(RecordKey, Bytes)> = batch
-                .into_iter()
-                .filter(|(k, _)| {
-                    let after_start = match &start {
-                        Some(s) => k.as_ref() >= s.as_ref(),
-                        None => true,
-                    };
-                    let before_end = match &end {
-                        Some(e) => k.as_ref() <= e.as_ref(),
-                        None => true,
-                    };
-                    after_start && before_end
-                })
-                .collect();
+            let mut filtered = Vec::new();
+            let mut past_end = false;
+            for (key, value) in batch {
+                if end.as_ref().is_some_and(|e| key.as_ref() > e.as_ref()) {
+                    past_end = true;
+                    break;
+                }
+                if start.as_ref().is_none_or(|s| key.as_ref() >= s.as_ref()) {
+                    filtered.push((key, value));
+                }
+            }
             if !filtered.is_empty() {
                 yield Ok(filtered);
+            }
+            if past_end {
+                break;
             }
         }
     }
@@ -642,11 +623,12 @@ pub trait Repo: Send + Sync {
     /// orphans `__data__` since the catalogue is the source of truth).
     ///
     /// Default impl streams the source in batches of 256 and calls
-    /// `set_many` on the destination. Backends with a native copy/rename
-    /// primitive may override.
+    /// `set_many` on the destination. This is a merge/upsert: matching keys
+    /// are overwritten and unrelated destination keys remain. It is not a
+    /// snapshot and does not roll back on error or cancellation; completed
+    /// batches, and possibly part of the current batch, may remain applied.
+    /// Backends with a native copy/rename primitive may override.
     async fn copy_store(&self, from: &str, to: &str) -> DbResult<()> {
-        use futures::StreamExt;
-
         const BATCH: usize = 256;
         let src = self.store_get(from).await?;
         let dst = self.store_get(to).await?;

@@ -1,16 +1,138 @@
 #![allow(deprecated)]
 
-use crate::error::DbResult;
-use crate::types::{RecordKey, Store};
+use crate::error::{DbError, DbResult};
+use crate::types::{RecordKey, RecordStream, Store};
+use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::Stream;
 use futures::stream::StreamExt;
 use shamir_types::types::record_id::RecordId;
-use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-type RecordStream =
-    Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, crate::error::DbError>> + Send>>;
+struct RangeProbe {
+    polls: Arc<AtomicUsize>,
+    batches: Vec<Vec<u8>>,
+    fail_after_batches: bool,
+}
+
+#[async_trait]
+impl Store for RangeProbe {
+    async fn insert(&self, _: Bytes) -> DbResult<RecordKey> {
+        unreachable!()
+    }
+
+    async fn set(&self, _: RecordKey, _: Bytes) -> DbResult<bool> {
+        unreachable!()
+    }
+
+    async fn get(&self, _: RecordKey) -> DbResult<Bytes> {
+        unreachable!()
+    }
+
+    async fn remove(&self, _: RecordKey) -> DbResult<bool> {
+        unreachable!()
+    }
+
+    fn iter_stream(&self, _: usize) -> RecordStream {
+        let polls = Arc::clone(&self.polls);
+        let mut batches = self.batches.clone().into_iter();
+        let fail_after_batches = self.fail_after_batches;
+        Box::pin(futures::stream::poll_fn(move |_| {
+            polls.fetch_add(1, Ordering::SeqCst);
+            let item = batches
+                .next()
+                .map(|batch| {
+                    Ok(batch
+                        .into_iter()
+                        .map(|key| {
+                            (
+                                RecordKey::from_slice(&[key]),
+                                Bytes::copy_from_slice(&[key]),
+                            )
+                        })
+                        .collect())
+                })
+                .or_else(|| {
+                    fail_after_batches.then(|| Err(DbError::Storage("after bound".into())))
+                });
+            std::task::Poll::Ready(item)
+        }))
+    }
+
+    fn scan_prefix_stream(&self, _: Bytes, _: usize) -> RecordStream {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn default_range_stops_polling_after_upper_bound() {
+    for (batches, expected_polls, expected) in [
+        (vec![vec![1, 2, 3, 4]], 1, vec![2, 3]),
+        (vec![vec![1, 2, 3], vec![4]], 2, vec![2, 3]),
+        (vec![vec![4]], 1, vec![]),
+    ] {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let store = RangeProbe {
+            polls: Arc::clone(&polls),
+            batches,
+            fail_after_batches: true,
+        };
+        let mut stream = store.iter_range_stream(
+            Some(Bytes::from_static(&[2])),
+            Some(Bytes::from_static(&[3])),
+            4,
+        );
+        let mut keys = Vec::new();
+        while let Some(batch) = stream.next().await {
+            keys.extend(
+                batch
+                    .expect("no error after upper bound")
+                    .into_iter()
+                    .map(|(key, _)| key.as_ref()[0]),
+            );
+        }
+        assert_eq!(keys, expected);
+        assert_eq!(polls.load(Ordering::SeqCst), expected_polls);
+        assert!(stream.next().await.is_none());
+        assert_eq!(polls.load(Ordering::SeqCst), expected_polls);
+    }
+}
+
+#[tokio::test]
+async fn default_range_preserves_unbounded_and_error_behavior() {
+    let polls = Arc::new(AtomicUsize::new(0));
+    let store = RangeProbe {
+        polls: Arc::clone(&polls),
+        batches: vec![vec![1, 2], vec![3, 4]],
+        fail_after_batches: false,
+    };
+    let records = collect_stream(store.iter_range_stream(Some(Bytes::from_static(&[2])), None, 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        records
+            .into_iter()
+            .map(|(key, _)| key.as_ref()[0])
+            .collect::<Vec<_>>(),
+        vec![2, 3, 4]
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 3);
+
+    let store = RangeProbe {
+        polls: Arc::new(AtomicUsize::new(0)),
+        batches: vec![vec![1]],
+        fail_after_batches: true,
+    };
+    let mut stream = store.iter_range_stream(None, Some(Bytes::from_static(&[3])), 2);
+    assert!(stream.next().await.unwrap().is_ok());
+    assert!(matches!(
+        stream.next().await,
+        Some(Err(DbError::Storage(_)))
+    ));
+
+    let mut empty = store.iter_range_stream(None, None, 0);
+    assert!(empty.next().await.is_none());
+}
 
 /// Collect all records from a stream into a single vector.
 /// Used to convert iter_stream() results to a flat Vec.
