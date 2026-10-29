@@ -274,6 +274,8 @@ pub enum SnapshotError {
     Serde(String),
     #[error("snapshot backend error: {0}")]
     Backend(String),
+    #[error("snapshot storage error: {0}")]
+    Db(#[source] Box<DbError>),
     #[error("snapshot not found (no manifest for keyspace)")]
     NotFound,
 }
@@ -288,7 +290,7 @@ impl From<DbError> for SnapshotError {
     fn from(e: DbError) -> Self {
         match e {
             DbError::NotFound(_) => SnapshotError::NotFound,
-            other => SnapshotError::Backend(other.to_string()),
+            other => SnapshotError::Db(Box::new(other)),
         }
     }
 }

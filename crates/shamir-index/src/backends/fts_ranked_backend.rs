@@ -149,9 +149,21 @@ impl FtsRankedBackend {
         }
     }
 
-    fn tokenize_set(&self, rec: &dyn RecordRef) -> TFxSet<u64> {
-        let (freq, _) = self.tokenize_with_freq(rec);
-        freq.keys().copied().collect()
+    fn try_tokenize_with_freq(
+        &self,
+        rec: &dyn RecordRef,
+    ) -> Result<(TFxMap<u64, u32>, u32), IndexError> {
+        let ipath = self.ipath();
+        let Some(text) = rec.str_at(&ipath) else {
+            return Ok((TFxMap::default(), 0));
+        };
+        let tokens = self.tokenizer.try_tokenize(text)?;
+        let doc_len = tokens.len() as u32;
+        let mut freq = TFxMap::default();
+        for token in tokens {
+            *freq.entry(token_hash(&token)).or_insert(0) += 1;
+        }
+        Ok((freq, doc_len))
     }
 
     fn posting_key_for_token(&self, th: u64, rid: &RecordId) -> Vec<u8> {
@@ -174,15 +186,24 @@ impl FtsRankedBackend {
         let mut stream = self.store.scan_prefix_stream(Bytes::from(prefix), 1024);
         let mut results = Vec::with_capacity(16);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_result.map_err(IndexError::from)?;
             for (key_bytes, val_bytes) in batch {
                 if let Some(pk) = PostingKeyRef::decode(&key_bytes) {
                     if pk.index_id == self.descriptor.id && pk.type_tag == type_tag::FTS {
                         let pv: FtsPostingValue = if val_bytes.is_empty() {
+                            log::warn!("empty legacy FTS posting for index {}", self.descriptor.id);
                             FtsPostingValue { tf: 1, doc_len: 1 }
                         } else {
-                            bincode::deserialize(&val_bytes)
-                                .unwrap_or(FtsPostingValue { tf: 1, doc_len: 1 })
+                            bincode::deserialize(&val_bytes).map_err(|error| {
+                                log::warn!(
+                                    "corrupt FTS posting for index {}: {error}",
+                                    self.descriptor.id
+                                );
+                                IndexError::Backend(format!(
+                                    "corrupt FTS posting for index {}: {error}",
+                                    self.descriptor.id
+                                ))
+                            })?
                         };
                         results.push((pk.record_id_owned(), pv));
                     }
@@ -203,12 +224,13 @@ impl IndexBackend for FtsRankedBackend {
         &self.descriptor
     }
 
-    fn tokenize_query(&self, query: &str) -> Vec<u64> {
-        self.tokenizer
-            .tokenize(query)
+    fn tokenize_query(&self, query: &str) -> Result<Vec<u64>, IndexError> {
+        Ok(self
+            .tokenizer
+            .try_tokenize(query)?
             .iter()
             .map(|t| token_hash(t))
-            .collect()
+            .collect())
     }
 
     async fn plan_insert(
@@ -216,7 +238,7 @@ impl IndexBackend for FtsRankedBackend {
         rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let (freq, doc_len) = self.tokenize_with_freq(rec);
+        let (freq, doc_len) = self.try_tokenize_with_freq(rec)?;
         if doc_len == 0 {
             return Ok(Vec::new());
         }
@@ -246,9 +268,9 @@ impl IndexBackend for FtsRankedBackend {
         old: &(dyn RecordRef + Sync + '_),
         new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let old_set = self.tokenize_set(old);
-        let (new_freq, new_doc_len) = self.tokenize_with_freq(new);
-        let (_, old_doc_len) = self.tokenize_with_freq(old);
+        let (old_freq, old_doc_len) = self.tokenize_with_freq(old);
+        let old_set: TFxSet<u64> = old_freq.keys().copied().collect();
+        let (new_freq, new_doc_len) = self.try_tokenize_with_freq(new)?;
         let new_set: TFxSet<u64> = new_freq.keys().copied().collect();
 
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
@@ -453,11 +475,17 @@ impl IndexBackend for FtsRankedBackend {
         let batch_size = 1000usize;
         let mut stream = source.iter_stream(batch_size);
         while let Some(batch_res) = stream.next().await {
-            let batch = batch_res.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_res.map_err(IndexError::from)?;
             for (_key_bytes, val_bytes) in batch {
                 let rec = match InnerValue::from_bytes(&val_bytes) {
                     Ok(r) => r,
-                    Err(_) => continue,
+                    Err(error) => {
+                        log::warn!(
+                            "skipping malformed FTS rebuild row for index {}: {error}",
+                            self.descriptor.id
+                        );
+                        continue;
+                    }
                 };
                 let (_, doc_len) = self.tokenize_with_freq(&rec);
                 if doc_len > 0 {
@@ -474,12 +502,12 @@ impl IndexBackend for FtsRankedBackend {
             .store
             .scan_prefix_stream(Bytes::copy_from_slice(&prefix), 1024);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_result.map_err(IndexError::from)?;
             for (key_bytes, _) in batch {
                 self.store
                     .remove(key_bytes)
                     .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                    .map_err(IndexError::from)?;
             }
         }
         Ok(())

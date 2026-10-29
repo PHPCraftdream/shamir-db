@@ -305,7 +305,7 @@ async fn fts_quiescent_tx_exactly_one_bumpftsstats_no_double_count() {
     // Sanity: the row's title IS indexed (the quiescent control also confirms
     // the stage-time plan wrote its postings).
     let _ = record_with_str(title_key, "hello world foo bar");
-    let tokens = backend.tokenize_query("hello");
+    let tokens = backend.tokenize_query("hello").unwrap();
     let result = backend
         .lookup(IndexQuery::Fts {
             tokens,

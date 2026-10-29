@@ -124,6 +124,7 @@ impl FtsStats {
         loop {
             let current = self.state.load_full();
             let Some(next) = update(*current) else {
+                log::warn!("rejected FTS statistics update due to arithmetic overflow or underflow: {current:?}");
                 return;
             };
             let previous = self

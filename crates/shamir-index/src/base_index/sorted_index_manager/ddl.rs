@@ -299,13 +299,15 @@ impl super::inner::SortedIndexManager {
         self.sweep_sorted_postings(name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP SORTED INDEX '{name_interned}': a durable drop tombstone \
                  was persisted and the definition was retired from the planner, \
                  but the posting sweep failed: {e}. On restart, recovery will \
                  resume the sweep idempotently and finish the drop. Call \
                  TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         // P0-3a (#1037) step 4.5: the sweep finished — explicitly release the
@@ -332,13 +334,15 @@ impl super::inner::SortedIndexManager {
         // NOTE: Cannot write DdlOpState::Failed here because this layer
         // (SortedIndexManager) does not have op_id in scope.
         self.persist_defs().await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "DROP SORTED INDEX '{name_interned}': a durable drop tombstone \
                  was persisted, the definition was retired, and the posting sweep \
                  completed, but persisting the reduced definitions failed: {e}. \
                  On restart, recovery will finish the drop idempotently. Call \
                  TableManager::verify() to confirm state."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         // #1067: Write terminal Succeeded status BEFORE clearing the
@@ -392,13 +396,15 @@ impl super::inner::SortedIndexManager {
         self.clear_from_dropping_sorted(name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP SORTED INDEX '{name_interned}': the drop is essentially \
                  complete (tombstone persisted, definition retired, sweep done, \
                  reduced definitions persisted), but clearing the drop tombstone \
                  failed: {e}. On restart, recovery will clear the tombstone as \
                  a no-op. Call TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         Ok(true)
@@ -802,13 +808,15 @@ impl super::inner::SortedIndexManager {
         // NOTE: Cannot write DdlOpState::Failed here because this layer
         // (SortedIndexManager) does not have op_id in scope.
         self.rename_definition(old_id, new_id).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): a durable rename \
                  tombstone was persisted, but the definition swap + persist \
                  failed: {e}. The tombstone is left in place — on restart, \
                  recovery will reconcile the rename. Call TableManager::verify() \
                  to confirm state."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         // P0-5b (#962) test seam — park here (definition already swapped +
@@ -826,13 +834,15 @@ impl super::inner::SortedIndexManager {
         // NOTE: Cannot write DdlOpState::Failed here because this layer
         // (SortedIndexManager) does not have op_id in scope.
         self.rekey_postings(old_id, new_id).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): the definition was \
                  swapped and persisted under {new_id}, but rekeying the physical \
                  postings from {old_id} failed: {e}. The tombstone is left in \
                  place — on restart, recovery will finish the rekey. Call \
                  TableManager::verify() to confirm state."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         // #1067: Write terminal Succeeded status AFTER the rekey but BEFORE
@@ -887,13 +897,15 @@ impl super::inner::SortedIndexManager {
         // point, so there is no reachable failure site left in this
         // function to attach a Failed status to.
         self.clear_from_renaming_sorted(old_id).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "RENAME SORTED INDEX ({old_id} → {new_id}): the rename is fully \
                  complete (definition swapped, postings rekeyed), but clearing \
                  the rename tombstone failed: {e}. On restart, recovery will \
                  clear the tombstone as a no-op. Call TableManager::verify() \
                  to confirm state."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         Ok(())

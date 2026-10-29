@@ -92,11 +92,9 @@ async fn fire_post_barrier_pre_write_test_hook() {
 impl TableManager {
     // ---- index2 event hooks (used by crud + replication) ----
 
-    /// Map an `IndexError` to a `DbError::Internal` for propagation.
-    /// This ensures scalar-eval failures (e.g. user scalar not re-registered
-    /// after reopen) surface as LOUD errors instead of being swallowed.
+    /// Preserve storage errors while surfacing backend failures as internal errors.
     fn io_err(e: shamir_index::IndexError) -> DbError {
-        DbError::Internal(e.to_string())
+        e.into()
     }
 
     pub(in crate::table) async fn index2_on_insert(

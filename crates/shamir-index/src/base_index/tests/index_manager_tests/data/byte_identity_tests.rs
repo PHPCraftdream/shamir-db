@@ -34,6 +34,118 @@ use crate::base_index::index_manager::IndexManager;
 
 use crate::base_index::tests::index_manager_tests::helpers::create_manager;
 
+// Derived independently from rustc-hash 2.1.2: wrapping (state + word) * K,
+// finish rotate-left 26, and the 25-byte little-endian IndexRecordKey layout.
+// String bytes use hash_bytes followed by Rust's 0xff str terminator; decimal
+// uses normalized (123456_i128, 3_u32), Big uses positive 2^63 magnitude.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn rv_index_605eec5d_golden_regular_unique_keys() {
+    type GoldenCase = (&'static str, Vec<InnerValue>, [u8; 25], [u8; 25]);
+    let cases: Vec<GoldenCase> = vec![
+        (
+            "Int",
+            vec![InnerValue::Int(-42)],
+            [
+                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x06, 0x61, 0xf3, 0x20, 0x31, 0x97, 0x69, 0xc9,
+                0xf4, 0x58, 0xd8, 0x34, 0x0a, 0x50, 0xf8, 0xfa,
+            ],
+            [
+                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x06, 0x61, 0xf3, 0x20, 0x31, 0x97, 0x69, 0xc9,
+                0xf4, 0x58, 0xd8, 0x34, 0x0a, 0x50, 0xf8, 0xfa,
+            ],
+        ),
+        (
+            "Str",
+            vec![InnerValue::Str("hello".to_string())],
+            [
+                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xf0, 0xea, 0x08, 0xc4, 0x49, 0x82, 0x24, 0xcf,
+                0xc2, 0x1f, 0x50, 0x2a, 0x8a, 0xb7, 0xb1, 0x36,
+            ],
+            [
+                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xf0, 0xea, 0x08, 0xc4, 0x49, 0x82, 0x24, 0xcf,
+                0xc2, 0x1f, 0x50, 0x2a, 0x8a, 0xb7, 0xb1, 0x36,
+            ],
+        ),
+        (
+            "F64 integral",
+            vec![InnerValue::F64(42.0)],
+            [
+                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x5a, 0x92, 0x89, 0xb1, 0x03, 0x16, 0x4b, 0x26,
+                0x48, 0x8a, 0x6e, 0xc5, 0xdc, 0xce, 0xd9, 0x57,
+            ],
+            [
+                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x5a, 0x92, 0x89, 0xb1, 0x03, 0x16, 0x4b, 0x26,
+                0x48, 0x8a, 0x6e, 0xc5, 0xdc, 0xce, 0xd9, 0x57,
+            ],
+        ),
+        (
+            "Dec",
+            vec![InnerValue::Dec(
+                rust_decimal::Decimal::from_str("123.456").unwrap(),
+            )],
+            [
+                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xb9, 0xea, 0x0e, 0x77, 0x21, 0x4e, 0x9e, 0x02,
+                0x5d, 0xe1, 0x69, 0x69, 0xb2, 0x12, 0x0e, 0x47,
+            ],
+            [
+                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xb9, 0xea, 0x0e, 0x77, 0x21, 0x4e, 0x9e, 0x02,
+                0x5d, 0xe1, 0x69, 0x69, 0xb2, 0x12, 0x0e, 0x47,
+            ],
+        ),
+        (
+            "Big",
+            vec![InnerValue::Big(BigInt::from(1_u64) << 63_usize)],
+            [
+                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x61, 0x12, 0xb8, 0xa5, 0xfd, 0x79, 0x50, 0x6c,
+                0x05, 0x09, 0x13, 0x98, 0x8e, 0x3e, 0xc0, 0xb0,
+            ],
+            [
+                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x61, 0x12, 0xb8, 0xa5, 0xfd, 0x79, 0x50, 0x6c,
+                0x05, 0x09, 0x13, 0x98, 0x8e, 0x3e, 0xc0, 0xb0,
+            ],
+        ),
+        (
+            "composite Int,Int",
+            vec![InnerValue::Int(7), InnerValue::Int(-11)],
+            [
+                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xe8, 0xef, 0x9d, 0xc2, 0x57, 0xa3, 0xdd, 0x8f,
+                0x8c, 0xe6, 0xf8, 0xb4, 0xe8, 0x67, 0x4d, 0xd4,
+            ],
+            [
+                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xe8, 0xef, 0x9d, 0xc2, 0x57, 0xa3, 0xdd, 0x8f,
+                0x8c, 0xe6, 0xf8, 0xb4, 0xe8, 0x67, 0x4d, 0xd4,
+            ],
+        ),
+    ];
+
+    for (label, values, regular, unique) in cases {
+        let mut fields = new_map();
+        let mut paths = Vec::new();
+        for (id, value) in [401_u64, 402].into_iter().zip(&values) {
+            fields.insert(InternerKey::new(id), value.clone());
+            paths.push(IndexInfoItem::new(vec![id]));
+        }
+        let record = InnerValue::Map(fields);
+        for (is_unique, expected) in [(false, regular), (true, unique)] {
+            let written = build_index_key_from_record(is_unique, 5000, &record, &paths)
+                .expect("indexed fields exist")
+                .to_bytes();
+            let lookup = build_index_key(is_unique, 5000, &values).to_bytes();
+            assert_eq!(
+                written.as_ref(),
+                expected.as_slice(),
+                "{label} write {is_unique}"
+            );
+            assert_eq!(
+                lookup.as_ref(),
+                expected.as_slice(),
+                "{label} lookup {is_unique}"
+            );
+        }
+    }
+}
+
 // Interned field ids — arbitrary, distinct from each other.
 const F_NULL: u64 = 401;
 const F_BOOL: u64 = 402;

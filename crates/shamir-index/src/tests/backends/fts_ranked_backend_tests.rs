@@ -1,13 +1,17 @@
-use crate::backend::{FtsMode, IndexBackend, IndexQuery, IndexResult};
+use crate::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::bm25::FtsStatsSnapshot;
 use crate::descriptor::IndexDescriptor;
+use crate::fts_backend::FtsBackend;
 use crate::fts_ranked_backend::{ranked_top_k, FtsRankedBackend};
 use crate::kind::{IndexKind, TokenizerKind};
 use crate::tokenizer::token_hash;
 use crate::write_ops::IndexWriteOp;
+use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
+use shamir_tx::{IndexFamily, Provenance};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
+use shamir_types::record_view::RecordRef;
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
@@ -61,6 +65,65 @@ fn make_backend(interner: &Interner, store: Arc<dyn Store>) -> FtsRankedBackend 
         },
     );
     FtsRankedBackend::new(desc, vec![intern(interner, "body")], store)
+}
+
+#[cfg(target_pointer_width = "64")]
+#[tokio::test]
+async fn rv_index_605eec5d_golden_fts_posting() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_backend(&interner, store);
+    let rid = RecordId::try_from_bytes(&[0x11; 16]).unwrap();
+    let ops = backend
+        .plan_insert(rid, &make_rec(&interner, "hello"))
+        .await
+        .unwrap();
+    let postings: Vec<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IndexWriteOp::SetPosting { key, .. } => Some(key.as_ref()),
+            _ => None,
+        })
+        .collect();
+    // Index id 20, FTS tag 1, little-endian hello hash, and the fixed record id.
+    let expected: [u8; 29] = [
+        0x14, 0, 0, 0, 1, 0xe4, 0xe6, 0xbc, 0xc8, 0x07, 0x6c, 0x13, 0x15, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    ];
+    assert_eq!(postings, vec![expected.as_slice()]);
+}
+
+#[tokio::test]
+async fn rv_index_9733f1f3_corrupt_posting_rejected_empty_legacy_accepted() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_backend(&i, Arc::clone(&store));
+    let rid = RecordId::new();
+    let ops = backend
+        .plan_insert(rid, &make_rec(&i, "alpha"))
+        .await
+        .unwrap();
+    let key = ops
+        .iter()
+        .find_map(|op| match op {
+            IndexWriteOp::SetPosting { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let query = || IndexQuery::Fts {
+        tokens: vec![token_hash("alpha")],
+        mode: FtsMode::OrAny,
+        limit: None,
+    };
+    store
+        .set(key.clone().into(), Bytes::from_static(b"bad"))
+        .await
+        .unwrap();
+    assert!(backend.lookup(query()).await.is_err());
+    store.set(key.into(), Bytes::new()).await.unwrap();
+    assert!(
+        matches!(backend.lookup(query()).await.unwrap(), IndexResult::Ranked(rows) if rows.len() == 1)
+    );
 }
 
 #[test]
@@ -346,7 +409,6 @@ async fn apply_in_memory_bumps_stats() {
     let fts = make_backend(&i, Arc::clone(&store));
 
     // Build a placeholder provenance (never checked in this unit test path)
-    use shamir_tx::{IndexFamily, Provenance};
     let provenance = Provenance {
         family: IndexFamily::Index2,
         name_interned: 1,
@@ -522,5 +584,109 @@ async fn rv_index_dc5c642e_limited_backend_matches_unlimited_for_modes_ties_and_
             };
             assert_eq!(limited, unlimited[..count]);
         }
+    }
+}
+
+struct CountedRecord {
+    record: InnerValue,
+    reads: std::sync::atomic::AtomicUsize,
+}
+
+impl RecordRef for CountedRecord {
+    fn scalar_at(&self, path: &[InternerKey]) -> Option<shamir_types::record_view::ScalarRef<'_>> {
+        self.record.scalar_at(path)
+    }
+    fn str_at(&self, path: &[InternerKey]) -> Option<&str> {
+        self.reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.record.str_at(path)
+    }
+    fn present_kind_at(&self, path: &[InternerKey]) -> Option<shamir_types::record_view::Kind> {
+        self.record.present_kind_at(path)
+    }
+    fn any_seq_elem(
+        &self,
+        path: &[InternerKey],
+        f: &mut dyn FnMut(shamir_types::record_view::ScalarRef<'_>) -> bool,
+    ) -> Option<bool> {
+        self.record.any_seq_elem(path, f)
+    }
+    fn materialize_at(&self, path: &[InternerKey]) -> Option<InnerValue> {
+        self.record.materialize_at(path)
+    }
+    fn for_each_field(&self, f: &mut dyn FnMut(InternerKey, InnerValue)) {
+        self.record.for_each_field(f)
+    }
+    fn to_query_value(
+        &self,
+        interner: &Interner,
+    ) -> Result<shamir_types::types::value::QueryValue, shamir_types::codecs::CodecError> {
+        self.record.to_query_value(interner)
+    }
+}
+
+#[tokio::test]
+async fn rv_index_872016d9_ranked_update_reads_old_once() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_backend(&interner, store);
+    let old = CountedRecord {
+        record: make_rec(&interner, "old old text"),
+        reads: std::sync::atomic::AtomicUsize::new(0),
+    };
+    backend
+        .plan_update(RecordId::new(), &old, &make_rec(&interner, "new text"))
+        .await
+        .unwrap();
+    assert_eq!(old.reads.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn rv_index_0695aada_budget_and_legacy_paths() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    for (n, text) in [(2, "a".repeat(1_048_578)), (255, "a".repeat(70_000))] {
+        let desc = IndexDescriptor::new(
+            20,
+            "budget",
+            intern(&interner, "budget"),
+            SmallVec::new(),
+            IndexKind::Fts {
+                tokenizer: TokenizerKind::Ngram { n },
+                language: None,
+            },
+        );
+        let path = vec![intern(&interner, "body")];
+        let simple = FtsBackend::new(desc.clone(), path.clone(), Arc::clone(&store));
+        let ranked = FtsRankedBackend::new(desc, path, Arc::clone(&store));
+        let oversized = make_rec(&interner, &text);
+        let short = make_rec(&interner, "short");
+        let rid = RecordId::new();
+        for backend in [&simple as &dyn IndexBackend, &ranked as &dyn IndexBackend] {
+            assert!(matches!(
+                backend.plan_insert(rid, &oversized).await,
+                Err(IndexError::TokenBudgetExceeded { .. })
+            ));
+            assert!(matches!(
+                backend.plan_update(rid, &short, &oversized).await,
+                Err(IndexError::TokenBudgetExceeded { .. })
+            ));
+            assert!(matches!(
+                backend.tokenize_query(&text),
+                Err(IndexError::TokenBudgetExceeded { .. })
+            ));
+            assert!(backend.plan_update(rid, &oversized, &short).await.is_ok());
+            assert!(backend.plan_delete(rid, &oversized).await.is_ok());
+        }
+        let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        data.set(rid.to_bytes().into(), oversized.to_bytes().unwrap())
+            .await
+            .unwrap();
+        ranked.rebuild(data).await.unwrap();
+        assert_eq!(ranked.doc_count(), 1);
+        assert_eq!(
+            ranked.sum_doc_len(),
+            (text.len() - usize::from(n) + 1) as u64
+        );
     }
 }

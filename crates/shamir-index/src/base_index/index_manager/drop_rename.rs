@@ -188,13 +188,15 @@ impl IndexManager {
         self.sweep_index_postings(false, name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP INDEX '{name_interned}': a durable drop tombstone was \
                  persisted and the definition was retired from the planner, but \
                  the posting sweep failed: {e}. On restart, recovery will resume \
                  the sweep idempotently and finish the drop. Call \
                  TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         // P0-3a (#1011) step 4.5: the sweep finished — explicitly release the
@@ -227,13 +229,15 @@ impl IndexManager {
         // which sits one layer up.
         if was_removed {
             self.save_index_info().await.map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP INDEX '{name_interned}': a durable drop tombstone was \
                      persisted, the definition was retired, and the posting sweep \
                      completed, but persisting the reduced index metadata failed: \
                      {e}. On restart, recovery will finish the drop idempotently. \
                      Call TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
         }
 
@@ -303,13 +307,15 @@ impl IndexManager {
         self.clear_from_dropping(false, name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP INDEX '{name_interned}': the drop is essentially complete \
                  (tombstone persisted, definition retired, sweep done, reduced \
                  metadata persisted), but clearing the drop tombstone failed: {e}. \
                  On restart, recovery will clear the tombstone as a no-op. Call \
                  TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         Ok(was_removed)
