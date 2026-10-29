@@ -966,6 +966,7 @@ jobs:
             echo "campaigns=yes" >> "$GITHUB_OUTPUT"
             echo "name=$name" >> "$GITHUB_OUTPUT"
             echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+            echo "pkgkey=${pkgs//,/_}" >> "$GITHUB_OUTPUT"
             echo "ddelta=$ddelta" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::no active campaign package touched by this diff; test discovery skipped"
@@ -976,7 +977,7 @@ jobs:
         if: steps.select.outputs.campaigns != ''
         with:
           path: base-list.json
-          key: test-discovery-base-${{ matrix.os }}-${{ env.MERGE_BASE }}-${{ matrix.config.id }}-${{ steps.select.outputs.pkgs }}
+          key: test-discovery-base-${{ matrix.os }}-${{ env.MERGE_BASE }}-${{ matrix.config.id }}-${{ steps.select.outputs.pkgkey }}
       # The base list is produced in a worktree of the merge base with a
       # separate CARGO_TARGET_DIR, so base and head never share build
       # artifacts and the toolchain/features stay identical (same

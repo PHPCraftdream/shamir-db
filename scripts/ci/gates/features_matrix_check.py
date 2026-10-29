@@ -111,7 +111,7 @@ EXPECTED: dict[str, set[str]] = {
 
 FORWARDED = {
     "shamir-engine-query": {
-        cell: ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
+        cell: {"default"} | ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
         for cell in EXPECTED
     }
 }

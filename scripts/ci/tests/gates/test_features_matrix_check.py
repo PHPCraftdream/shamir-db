@@ -49,6 +49,7 @@ def tree_text(engine_features):
     # the engine forwards `test-util` to its query crate; the probe tree
     # always lists that dependency edge
     lines.append("shamir-engine-query v0.1.0")
+    lines.append('shamir-engine-query feature "default"')
     if "test-util" in engine_features:
         lines.append('shamir-engine-query feature "test-util"')
     return "\n".join(lines) + "\n"
