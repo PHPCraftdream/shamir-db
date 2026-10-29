@@ -53,6 +53,10 @@ fn make_batch(entries: Entries, batch_min: u64, previous: Head) -> Arc<Batch> {
 
 #[derive(Default)]
 pub(super) struct MemFrames {
+    // Contention model: the sole writer is the group-commit leader (one
+    // `AtomicBool` CAS elects it), so appends never contend with each other;
+    // replay and truncation only snapshot or swap the chain under this lock
+    // and decode outside it, and the lock is never held across an `.await`.
     head: Mutex<Head>,
     min: AtomicU64,
     truncate_gate: Arc<tokio::sync::Mutex<()>>,
