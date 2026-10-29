@@ -75,7 +75,8 @@ fn persist_sync_all(db: &Arc<Database>) -> Result<(), fjall::Error> {
 // ============================================================================
 
 fn validate_store_name(name: &str) -> DbResult<()> {
-    // Fjall 3.1.10 checks UTF-8 byte length, not character classes.
+    // Mirrors fjall 3.1.10 `keyspace::name::is_valid_keyspace_name` (non-empty,
+    // length fits u8): the check is on UTF-8 byte length, not character classes.
     if name.is_empty() || name.len() > u8::MAX as usize {
         return Err(DbError::Validation(
             "store name must contain 1..=255 UTF-8 bytes".into(),
