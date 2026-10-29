@@ -15,6 +15,31 @@ use crate::filter::filter_value::{filter_value_to_query_value, query_value_to_fi
 use crate::filter::FilterValue;
 
 #[test]
+fn filter_value_msgpack_wire_shapes_and_rejections() {
+    let cases: &[(&[u8], FilterValue)] = &[
+        (&[0xc0], FilterValue::Null),
+        (&[0xc3], FilterValue::Bool(true)),
+        (&[0xff], FilterValue::Int(-1)),
+        (&[0x01], FilterValue::Int(1)),
+        (&[0xca, 0x3f, 0xc0, 0x00, 0x00], FilterValue::Float(1.5)),
+        (&[0xa1, b'a'], FilterValue::String("a".into())),
+        (&[0xc4, 0x01, b'a'], FilterValue::Binary(vec![b'a'])),
+        (&[0x91, 0x01], FilterValue::Array(vec![FilterValue::Int(1)])),
+    ];
+    for (wire, expected) in cases {
+        let decoded: FilterValue = rmp_serde::from_slice(wire).unwrap();
+        assert_eq!(&decoded, expected);
+        let encoded = rmp_serde::to_vec_named(expected).unwrap();
+        assert_eq!(
+            rmp_serde::from_slice::<FilterValue>(&encoded).unwrap(),
+            *expected
+        );
+    }
+    assert!(rmp_serde::from_slice::<FilterValue>(&[0x80]).is_err());
+    assert!(rmp_serde::from_slice::<FilterValue>(&[0xc1]).is_err());
+}
+
+#[test]
 fn rv_types_18ac0cfc_filter_value_numeric_wire_parity() {
     let large = u64::MAX;
     let bytes = [0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];

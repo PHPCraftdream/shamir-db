@@ -13,6 +13,12 @@ use shamir_collections::new_map;
 use shamir_query_types::batch::{BatchLimits, BatchPlanner, EdgeKind, QueryEntry};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{GroupBy, ReadQuery};
+use shamir_query_types::ResultEncoding;
+
+#[test]
+fn result_encoding_is_exported_at_crate_root() {
+    assert_eq!(ResultEncoding::default(), ResultEncoding::Name);
+}
 
 /// A read whose only reference to producer alias `a` sits inside a HAVING
 /// filter must plan a DataFlow edge `b -> a`, so the runner's

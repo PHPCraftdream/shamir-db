@@ -47,6 +47,7 @@ pub use security::hmac;
 pub use security::{auth, validator};
 
 pub use batch::options::validate_request_alias_caps;
+pub use batch::ResultEncoding;
 pub use call::CallOp;
 pub use durability::{DurabilityOverride, ReplicationServe, RetentionOverflow, WalCommitTier};
 pub use table_ref::TableRef;
