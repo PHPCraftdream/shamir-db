@@ -96,7 +96,7 @@ impl SelectProjection {
         Self::new_with_context(select, interner, scalars, None)
     }
 
-    pub(crate) fn new_with_context(
+    pub fn new_with_context(
         select: &Select,
         interner: &Interner,
         scalars: ScalarResolver,

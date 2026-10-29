@@ -32,7 +32,7 @@ pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
 }
 
 /// Compile using the overlay snapshot already captured in the read context.
-pub(crate) fn compile_filter_with_context(
+pub fn compile_filter_with_context(
     filter: &Filter,
     ctx: &crate::query::filter::FilterContext<'_>,
 ) -> FilterNode {

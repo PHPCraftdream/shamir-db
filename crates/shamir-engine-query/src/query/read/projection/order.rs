@@ -12,7 +12,7 @@ use crate::query::read::{NullsOrder, OrderBy, OrderByItem, OrderDirection};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-pub(crate) const PREALLOC_CAP: usize = 1024;
+pub const PREALLOC_CAP: usize = 1024;
 
 // ============================================================================
 // QueryValue-based ORDER BY

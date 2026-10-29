@@ -5,7 +5,7 @@ use shamir_types::core::sort_codec;
 
 use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::query::filter::evaluation::semantics::resolve::intern_field_path;
-use crate::query::filter::{Filter, FilterValue};
+use crate::query::filter::{Filter, FilterContext, FilterValue};
 
 /// Encode a literal `FilterValue` into sort-codec bytes.
 ///
@@ -236,4 +236,15 @@ pub fn predicate_to_index_range(
         }
     }
     out
+}
+
+/// [`predicate_to_index_range`] with the interner taken from `ctx`, so callers
+/// outside this crate never reach `FilterContext::interner` (S5c-X Round 7).
+pub fn predicate_to_index_range_in_ctx(
+    f: &Filter,
+    sorted: &SortedIndexManager,
+    ctx: &FilterContext<'_>,
+    table_token: u64,
+) -> smallvec::SmallVec<[PredicateDep; 2]> {
+    predicate_to_index_range(f, sorted, ctx.interner, table_token)
 }

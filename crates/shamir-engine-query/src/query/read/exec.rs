@@ -10,9 +10,7 @@ use crate::query::filter::eval_context::FilterContext;
 pub use crate::query::read::aggregate::{
     apply_aggregate_all, apply_group_by, validate_aggregate_select,
 };
-pub(crate) use crate::query::read::aggregate::{
-    apply_aggregate_all_with_context, try_apply_group_by,
-};
+pub use crate::query::read::aggregate::{apply_aggregate_all_with_context, try_apply_group_by};
 use crate::query::read::hashable_query_value::HashableQueryValue;
 pub use crate::query::read::order::{
     apply_order_by_qv, apply_order_by_qv_with_ids, apply_order_by_topk, TopKHeap,
@@ -127,7 +125,7 @@ fn filter_requires_bindings(filter: &Filter) -> bool {
 }
 
 /// Apply SELECT with the read's execution-local references and parameters.
-pub(crate) fn apply_select_value_with_context(
+pub fn apply_select_value_with_context(
     records: &[(RecordId, InnerValue)],
     select: &Select,
     interner: &Interner,

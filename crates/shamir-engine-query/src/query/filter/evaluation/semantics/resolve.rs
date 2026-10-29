@@ -800,7 +800,7 @@ pub(in crate::query::filter) fn resolve_query_ref_value(
 /// Supports `[].field` pattern — iterates all records, extracts `field` from each.
 ///
 /// C6 (#80): returns `Vec<QueryValue>` (name-keyed).
-pub(crate) fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<QueryValue> {
+pub fn resolve_query_ref_column(qr: &QueryResult, path: Option<&str>) -> Vec<QueryValue> {
     let path = match path {
         Some(p) => p,
         None => return Vec::new(),
@@ -868,6 +868,6 @@ pub(in crate::query::filter) fn resolve_query_value_path<'a>(
     Some(cur)
 }
 
-pub(crate) fn is_column_query_ref(fv: &FilterValue) -> bool {
+pub fn is_column_query_ref(fv: &FilterValue) -> bool {
     matches!(fv, FilterValue::QueryRef { path: Some(p), .. } if p.starts_with("[]"))
 }

@@ -38,7 +38,7 @@ pub fn apply_group_by(
 }
 
 /// Fallible grouped execution.
-pub(crate) fn try_apply_group_by(
+pub fn try_apply_group_by(
     records: &[(RecordId, Bytes)],
     group_by: &GroupBy,
     select: &Select,
@@ -245,7 +245,7 @@ pub fn apply_aggregate_all(
 
 /// Aggregate one execution with its resolved references and parameters.
 /// The scalar-only wrapper remains compatible with existing callers.
-pub(crate) fn apply_aggregate_all_with_context(
+pub fn apply_aggregate_all_with_context(
     records: &[(RecordId, Bytes)],
     select: &Select,
     interner: &Interner,

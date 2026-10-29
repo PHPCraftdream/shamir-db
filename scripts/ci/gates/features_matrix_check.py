@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert the enabled feature set of shamir-engine matches a matrix cell.
+"""Assert engine and forwarded query-crate features match a matrix cell.
 
 Why
     The ``engine-features`` CI job compiles one isolated cell per feature
@@ -107,6 +107,13 @@ EXPECTED: dict[str, set[str]] = {
         "fts_indexed_long",
     },
     "loom": {"default", "all-backends", "fjall", "loom"},
+}
+
+FORWARDED = {
+    "shamir-engine-query": {
+        cell: ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
+        for cell in EXPECTED
+    }
 }
 
 DEFAULT_RUNNER = subprocess.run  # replaced by tests
@@ -286,6 +293,16 @@ def main(
                 "(dependency broken? refusing to pass vacuously)"
                 % PACKAGE_NAME
             )
+        forwarded_resolved = {}
+        for package in FORWARDED:
+            if not re.search(r"^" + re.escape(package) + r"(\s|$)", tree_text, re.M):
+                raise ValueError("%s does not appear in the probe's cargo tree output at all" % package)
+            pattern = re.compile(
+                r"^" + re.escape(package) + r"\s+feature\s+[\"']?([A-Za-z0-9_+.-]+)[\"']?"
+                r"\s*(?:\(\*\))?\s*$"
+            )
+            forwarded_resolved[package] = {m.group(1) for line in tree_text.splitlines()
+                                           if (m := pattern.match(line))}
         resolved = parse_tree_features(tree_text)
         if resolved != expected_set and expected_set and not resolved:
             raise ValueError(
@@ -316,6 +333,17 @@ def main(
         print(tree_text or "(empty)", file=sys.stderr)
         print("--- end cargo tree stdout ---", file=sys.stderr)
         return 1
+    for package, cells in FORWARDED.items():
+        actual, expected = forwarded_resolved[package], cells[args.expected]
+        if actual != expected:
+            print("features_matrix_check.py: feature resolution mismatch for cell "
+                  "%r (flags: %s), package %s\n  resolved: %s\n  expected: %s"
+                  % (args.expected, args.flags or "(none)", package, sorted(actual), sorted(expected)),
+                  file=sys.stderr)
+            print("--- complete cargo tree stdout ---", file=sys.stderr)
+            print(tree_text or "(empty)", file=sys.stderr)
+            print("--- end cargo tree stdout ---", file=sys.stderr)
+            return 1
     print(
         "features_matrix_check.py: cell %r OK (resolved %s)"
         % (args.expected, sorted(resolved))

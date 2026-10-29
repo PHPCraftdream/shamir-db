@@ -26,7 +26,7 @@
 #
 # Available scopes (extend as needed):
 #   @tx       — shamir-tx
-#   @engine   — shamir-engine
+#   @engine   — shamir-engine + shamir-engine-query
 #   @oracle   — shamir-tx + shamir-engine (Version Oracle area)
 #   @types    — shamir-types + shamir-collections
 #   @storage  — shamir-storage + shamir-wal
@@ -99,7 +99,7 @@ fi
 scope_args() {
     case "$1" in
         @tx)       echo "-p shamir-tx" ;;
-        @engine)   echo "-p shamir-engine" ;;
+        @engine)   echo "-p shamir-engine -p shamir-engine-query" ;;
         @oracle)   echo "-p shamir-tx -p shamir-engine" ;;
         @types)    echo "-p shamir-types -p shamir-collections" ;;
         @storage)  echo "-p shamir-storage -p shamir-wal" ;;

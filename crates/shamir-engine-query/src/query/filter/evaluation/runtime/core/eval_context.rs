@@ -43,16 +43,16 @@ use crate::query::read::QueryResult;
 pub struct FilterContext<'a> {
     pub(crate) read_visibility_budget: Option<Duration>,
     pub(crate) read_visibility_scope: Option<&'a dyn ReadVisibilityScope>,
-    pub(crate) row_byte_meter: Option<&'a dyn ReadByteMeter>,
+    pub row_byte_meter: Option<&'a dyn ReadByteMeter>,
     max_accumulator_bytes: Option<usize>,
     /// Interner for resolving field paths. `pub(crate)`, not `pub` (S5c-X
     /// Round 7): the `Interner` is interior-mutable (`touch_ind`), so a
-    /// `pub` field would let read-view holders mutate through it. Engine
-    /// readers use the field directly; no cross-crate reader exists.
+    /// `pub` field would let read-view holders mutate through it.
+    /// shamir-engine reads it only through `predicate_to_index_range_in_ctx`; no accessor by design.
     pub(crate) interner: &'a Interner,
     /// O(1) reverse resolver snapshot for this transaction's overlay names.
     pub(crate) interner_overlay: Option<Arc<shamir_collections::TFxMap<u64, String>>>,
-    pub(crate) interner_overlay_ids: Option<Arc<shamir_collections::TFxMap<String, u64>>>,
+    pub interner_overlay_ids: Option<Arc<shamir_collections::TFxMap<String, u64>>>,
     pub resolved_refs: &'a TMap<String, QueryResult>,
     /// Scalar function resolver for `FnCall` dispatch. Defaults to
     /// built-ins only ([`ScalarResolver::builtins_only`]); a per-DB
@@ -170,7 +170,7 @@ impl<'a> FilterContext<'a> {
         self
     }
 
-    pub(crate) fn with_read_overlay(
+    pub fn with_read_overlay(
         mut self,
         overlay: &scc::HashMap<String, u64, shamir_collections::THasher>,
     ) -> Self {
@@ -189,7 +189,7 @@ impl<'a> FilterContext<'a> {
         self
     }
 
-    pub(crate) fn clone_with_read_overlay(
+    pub fn clone_with_read_overlay(
         &self,
         overlay: &scc::HashMap<String, u64, shamir_collections::THasher>,
     ) -> Self {
@@ -206,7 +206,7 @@ impl<'a> FilterContext<'a> {
         cloned.with_read_overlay(overlay)
     }
 
-    pub(crate) fn resolve_interner_id(&self, name: &str) -> Option<u64> {
+    pub fn resolve_interner_id(&self, name: &str) -> Option<u64> {
         self.interner
             .get_ind(name)
             .map(|key| key.id())
@@ -232,7 +232,7 @@ impl<'a> FilterContext<'a> {
         }
     }
 
-    pub(crate) fn with_row_byte_meter(mut self, meter: Option<&'a dyn ReadByteMeter>) -> Self {
+    pub fn with_row_byte_meter(mut self, meter: Option<&'a dyn ReadByteMeter>) -> Self {
         self.row_byte_meter = meter;
         self
     }
@@ -252,12 +252,12 @@ impl<'a> FilterContext<'a> {
         self
     }
 
-    pub(crate) fn with_read_visibility_scope(mut self, scope: &'a dyn ReadVisibilityScope) -> Self {
+    pub fn with_read_visibility_scope(mut self, scope: &'a dyn ReadVisibilityScope) -> Self {
         self.read_visibility_scope = Some(scope);
         self
     }
 
-    pub(crate) fn remaining_read_visibility_budget(&self) -> Option<Duration> {
+    pub fn remaining_read_visibility_budget(&self) -> Option<Duration> {
         match self.read_visibility_scope {
             Some(scope) => Some(scope.read_visibility_budget()),
             None => self.read_visibility_budget,
