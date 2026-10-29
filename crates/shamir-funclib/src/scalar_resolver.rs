@@ -135,23 +135,21 @@ impl ScalarResolver {
         )
     }
 
-    /// Dispatch argon2-named scalars on the blocking pool on multi-thread Tokio
-    /// runtimes, including user scalars shadowing the builtin. Other scalars run
-    /// inline. Current-thread runtimes run inline with a once-per-process warning
-    /// and counter; calls outside a runtime run inline without either.
+    /// Dispatch argon2-named scalars with a Tokio worker handoff on multi-thread
+    /// runtimes, including user shadows. The call runs on the current thread,
+    /// not the blocking pool. Do not call from a LocalSet driven by
+    /// Runtime::block_on or Handle::block_on on a multi-thread runtime: its
+    /// local tasks cannot be handed off. Other scalars run inline. Current-thread
+    /// runtimes run inline with a once-per-process warning and counter; calls
+    /// outside a runtime run inline without either.
     pub fn call_offloaded(&self, name: &str, args: &[QueryValue]) -> ScalarResult {
         if name != "crypto/argon2id" && name != "argon2id" {
             return self.call(name, args);
         }
         match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                let resolver = self.clone();
-                let name = name.to_owned();
-                let args = args.to_vec();
                 tokio::task::block_in_place(|| {
-                    handle.block_on(tokio::task::spawn_blocking(move || {
-                        resolver.call(&name, &args)
-                    }))
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(name, args)))
                 })
                 .map_err(|_| ScalarError::new("scalar_task_failed"))?
             }

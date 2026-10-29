@@ -1,6 +1,10 @@
 //! Strict aggregate expression inputs and loud legacy wrappers.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
 use bytes::Bytes;
 use num_bigint::BigInt;
@@ -37,32 +41,41 @@ fn rows(interner: &Interner, values: &[QueryValue]) -> Vec<(RecordId, Bytes)> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn aggregate_argon_input_offloads_worker() {
-    let thread = Arc::new(OnceLock::new());
-    let observed = Arc::clone(&thread);
-    let layer = Arc::new(UserScalarLayer::new());
-    layer.register(
-        "crypto/argon2id",
-        FnEntry::pure(
-            move |_| {
-                let _ = observed.set(std::thread::current().id());
-                Ok(QueryValue::Int(1))
-            },
-            0,
-            Some(0),
-        ),
-    );
-    let interner = Interner::default();
-    let refs = new_map_wc(0);
-    let ctx = FilterContext::new(&interner, &refs).with_scalars(ScalarResolver::new(layer));
-    let records = rows(&interner, &[QueryValue::Int(3)]);
-    let select = selection([select::sum_of(val::func("crypto/argon2id", []), "sum")]);
-    let caller = std::thread::current().id();
-    let result = apply_aggregate_all_with_context(&records, &select, &interner, &ctx).unwrap();
-    assert_eq!(result[0].get("sum"), Some(&QueryValue::Int(1)));
-    assert!(thread.get().is_some());
-    assert_ne!(thread.get(), Some(&caller));
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn aggregate_argon_input_keeps_worker_live() {
+    let ticker = Arc::new(AtomicU64::new(0));
+    let ticks = Arc::clone(&ticker);
+    let ticker_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ticks.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let result = tokio::spawn(async move {
+        let layer = Arc::new(UserScalarLayer::new());
+        layer.register(
+            "crypto/argon2id",
+            FnEntry::pure(
+                move |_| {
+                    crate::assert_ticker_progress(&ticker);
+                    Ok(QueryValue::Int(1))
+                },
+                0,
+                Some(0),
+            ),
+        );
+        let interner = Interner::default();
+        let refs = new_map_wc(0);
+        let ctx = FilterContext::new(&interner, &refs).with_scalars(ScalarResolver::new(layer));
+        let records = rows(&interner, &[QueryValue::Int(3)]);
+        let select = selection([select::sum_of(val::func("crypto/argon2id", []), "sum")]);
+        let result = apply_aggregate_all_with_context(&records, &select, &interner, &ctx).unwrap();
+        assert_eq!(result[0].get("sum"), Some(&QueryValue::Int(1)));
+    })
+    .await;
+    ticker_task.abort();
+    let _ = ticker_task.await;
+    result.unwrap();
 }
 
 /// NULL inputs do not count or poison extrema; missing fields are NULL.

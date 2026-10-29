@@ -23,8 +23,10 @@ use crate::query::filter::{FilterExpr, FilterExprOp, FilterValue};
 use crate::query::read::QueryResult;
 
 /// Dispatch a scalar with runtime-aware argon2 offloading. Multi-thread Tokio
-/// runtimes hand off the worker; current-thread runtimes run inline and report
-/// the stall. Outside a runtime, calls run inline without a warning.
+/// runtimes hand off the worker, not the call to the blocking pool; do not call
+/// from a LocalSet driven by Runtime::block_on or Handle::block_on on a
+/// multi-thread runtime. Current-thread runtimes run inline and report the stall.
+/// Outside a runtime, calls run inline without a warning.
 pub(crate) fn call_scalar_offloaded(
     resolver: ScalarResolver,
     name: &str,

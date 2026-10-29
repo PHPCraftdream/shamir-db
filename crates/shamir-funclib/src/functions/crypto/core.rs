@@ -15,9 +15,11 @@
 //!   Argon2id KDF. It is **deterministic** given its inputs (same password +
 //!   salt + params → same digest), so it fits the pure-scalar contract — but
 //!   it is **CPU- and memory-bound** (tens of ms at OWASP defaults). A caller
-//!   dispatching it on a multi-thread async runtime must offload it. On a
-//!   current-thread runtime the synchronous dispatcher runs inline and warns
-//!   because offloading cannot avoid stalling the sole worker.
+//!   dispatching it on a multi-thread Tokio runtime hands off the worker while
+//!   running the call on the current thread, not the blocking pool. Do not call
+//!   from a LocalSet driven by Runtime::block_on or Handle::block_on on a
+//!   multi-thread runtime. On a current-thread runtime the synchronous
+//!   dispatcher runs inline and warns because it can stall the sole worker.
 //! - Every function here is `pure + deterministic` (no randomness, no clock),
 //!   so all use [`FnEntry::pure`]. Non-deterministic procedural crypto
 //!   (random / uuid) and asymmetric / PQC primitives remain out of scope.
@@ -107,9 +109,11 @@ pub(crate) static A2_IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
 /// through `FnEntry` (which is a pure `fn(&[QueryValue]) -> ScalarResult`
 /// contract with no side-channel for shared limiters).
 ///
-/// **Runtime contract:** the engine's scalar dispatcher offloads argon2-named
-/// calls, including gate waits, on multi-thread Tokio runtimes. On a
-/// current-thread runtime it runs inline, potentially stalling the worker, and
+/// **Runtime contract:** the engine's scalar dispatcher hands off the worker
+/// for argon2-named calls, including gate waits, on multi-thread Tokio runtimes;
+/// the call remains on the current thread, not the blocking pool. Do not call
+/// from a LocalSet driven by Runtime::block_on or Handle::block_on on a
+/// multi-thread runtime. On a current-thread runtime it runs inline, potentially stalling the worker, and
 /// records a counter and a once-per-process warning. Plain synchronous calls
 /// run inline without warning. The cap bounds aggregate Argon2 memory in all
 /// cases.
