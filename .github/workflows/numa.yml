@@ -9,6 +9,9 @@ on:
     paths:
       - 'crates/shamir-numa/**'
       - 'crates/shamir-tunables/**'
+      - 'scripts/runners/ci-qemu-numa-test.sh'
+      - 'scripts/runners/numa-smoke-oracle.sh'
+      - 'scripts/runners/test-numa-smoke-oracle.sh'
       - 'Cargo.lock'
       - '.github/workflows/numa.yml'
   pull_request:
@@ -18,6 +21,9 @@ on:
     paths:
       - 'crates/shamir-numa/**'
       - 'crates/shamir-tunables/**'
+      - 'scripts/runners/ci-qemu-numa-test.sh'
+      - 'scripts/runners/numa-smoke-oracle.sh'
+      - 'scripts/runners/test-numa-smoke-oracle.sh'
       - 'Cargo.lock'
       - '.github/workflows/numa.yml'
 
@@ -38,6 +44,14 @@ permissions:
   contents: read
 
 jobs:
+  smoke-oracle-fixtures:
+    name: numa smoke oracle fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Check configured-node smoke oracle fixtures
+        run: bash scripts/runners/test-numa-smoke-oracle.sh
+
   # Tier 3 — QEMU NUMA emulation (smoke level, opt-in). Boots a 2-node QEMU
   # guest and confirms the kernel sees both NUMA nodes via serial-console
   # discovery messages. Full cargo-test-inside-guest is gated by KVM
@@ -52,6 +66,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install QEMU + numactl
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86 qemu-utils numactl
-      - name: Boot 2-node QEMU and run Linux integration tests
+      - name: Boot 2-node QEMU and check NUMA smoke announcements
         timeout-minutes: 30
         run: bash scripts/runners/ci-qemu-numa-test.sh

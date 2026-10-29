@@ -3,7 +3,7 @@ name = "shamir-bench-utils"
 version = "0.1.0-alpha.1"
 publish = false
 edition = "2021"
-description = "Bench helpers shared across the workspace — BENCH_QUICK env-var support for /opti baseline/after pairs."
+description = "Shared benchmark vector fixture generation and peak memory measurement helpers."
 license = "MIT OR Apache-2.0"
 
 [lib]

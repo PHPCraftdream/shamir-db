@@ -23,7 +23,7 @@ use shamir_types::types::record_id::RecordId;
 /// (`register`/`drop_index`/`rename_definition`/`intern_included_paths`)
 /// copy-on-write via `NodeReplicated::rcu` and mirror to all per-node
 /// replicas. On single-socket machines (dev, Windows, CI) there is exactly
-/// one replica, giving identical performance to a bare `ArcSwap`. On
+/// one replica; local reads still perform topology routing. On
 /// multi-socket NUMA machines each node reads its own replica without
 /// crossing a socket interconnect.
 ///
@@ -266,7 +266,7 @@ impl SortedIndexManager {
         let m = Self {
             info_store,
             indexes: Arc::new(shamir_numa::NodeReplicated::new(
-                shamir_numa::detect(),
+                shamir_numa::detect_cached(),
                 Vec::new(),
             )),
             generation: Arc::new(AtomicU64::new(0)),
