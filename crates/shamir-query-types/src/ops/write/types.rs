@@ -34,6 +34,7 @@ pub enum UpdateReturnMode {
 /// `fields`, when present, restricts each returned row to the named fields
 /// (a projection).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateSelect {
     #[serde(default)]
     pub return_mode: UpdateReturnMode,
@@ -49,6 +50,7 @@ pub struct UpdateSelect {
 /// presence of `DeleteSelect` on [`DeleteOp`] opts in) and an optional
 /// field projection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteSelect {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
@@ -63,6 +65,7 @@ pub struct DeleteSelect {
 /// (records already come back by default via `return_result`); it only
 /// matters when `fields` is set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct InsertSelect {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<String>>,
@@ -74,6 +77,7 @@ pub struct InsertSelect {
 
 /// Insert operation - inserts new records into a table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InsertOp {
     /// Target table (optionally qualified with repo).
     pub insert_into: TableRef,
@@ -103,6 +107,7 @@ pub struct InsertOp {
 
 /// Update operation - updates records matching a filter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateOp {
     /// Target table (optionally qualified with repo).
     pub update: TableRef,
@@ -136,6 +141,7 @@ pub struct UpdateOp {
 
 /// Set operation - upsert by key (update if exists, insert if not).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetOp {
     /// Target table (optionally qualified with repo).
     pub set: TableRef,
@@ -149,6 +155,7 @@ pub struct SetOp {
 
 /// Delete operation - deletes records matching a filter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteOp {
     /// Target table (optionally qualified with repo).
     pub delete_from: TableRef,

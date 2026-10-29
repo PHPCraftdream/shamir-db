@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Wire discriminator key: `"unsubscribe"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnsubscribeOp {
     pub unsubscribe: u64,
 }

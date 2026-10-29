@@ -94,3 +94,12 @@ fn rv_query_types_4bae89b5_time_only_limits_map_accepted() {
         }
     );
 }
+
+#[test]
+fn unknown_limit_is_rejected_with_its_name() {
+    let value = serde_json::json!({
+        "max_queris": 10
+    });
+    let error = serde_json::from_value::<BatchLimits>(value).unwrap_err();
+    assert!(error.to_string().contains("max_queris"));
+}

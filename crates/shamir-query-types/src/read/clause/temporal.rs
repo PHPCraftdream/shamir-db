@@ -19,7 +19,7 @@ pub enum At {
 
 /// Temporal selector on a [`super::ReadQuery`]. `Latest` = today's read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Temporal {
     /// Today's read — the default path, byte-identical to pre-temporal
     /// behaviour when skip-serialized.
