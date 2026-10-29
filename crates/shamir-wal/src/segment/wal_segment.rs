@@ -28,6 +28,31 @@ use tokio::task::spawn_blocking;
 
 use crate::wal_entry_v2::WalEntryV2;
 
+#[derive(Debug)]
+struct WalIoContext {
+    context: String,
+    source: std::io::Error,
+}
+
+impl std::fmt::Display for WalIoContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.context, self.source)
+    }
+}
+
+impl std::error::Error for WalIoContext {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+pub(crate) fn wal_io_error(context: String, source: std::io::Error) -> DbError {
+    DbError::Io(std::io::Error::new(
+        source.kind(),
+        WalIoContext { context, source },
+    ))
+}
+
 /// Replay-open retry budget for a transient denial (about 1 s in total).
 const OPEN_DENIED_ATTEMPTS: u32 = 50;
 const OPEN_DENIED_BACKOFF: std::time::Duration = std::time::Duration::from_millis(20);
@@ -152,6 +177,10 @@ pub struct WalSegment {
     /// (`set_len` back to the last good boundary).
     #[cfg(test)]
     fail_next_rollback: AtomicBool,
+    #[cfg(test)]
+    fail_next_sync: AtomicBool,
+    #[cfg(test)]
+    fail_next_replay_read: AtomicBool,
 }
 
 #[allow(dead_code)]
@@ -180,12 +209,7 @@ impl WalSegment {
                 // Preserve the io::ErrorKind across the wrap boundary
                 // (RV-WAL-5839FF0D): DbError::Io keeps the typed cause that
                 // DbError::Storage(format!) destroyed.
-                .map_err(|e| {
-                    DbError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("WalSegment open {p:?}: {e}"),
-                    ))
-                })?;
+                .map_err(|e| wal_io_error(format!("WalSegment open {p:?}"), e))?;
             // Audit §1.9: on first creation, fsync the parent directory so the
             // directory entry is durable. Without this, a power loss on
             // ext4/xfs can lose the freshly-created segment entirely even
@@ -198,12 +222,7 @@ impl WalSegment {
             // segment reports its true length for rotation decisions.
             let len = f
                 .metadata()
-                .map_err(|e| {
-                    DbError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!("WalSegment open metadata {p:?}: {e}"),
-                    ))
-                })?
+                .map_err(|e| wal_io_error(format!("WalSegment open metadata {p:?}"), e))?
                 .len();
             Ok((f, len))
         })
@@ -222,6 +241,10 @@ impl WalSegment {
             fail_startup_open_deny: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             fail_next_rollback: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_sync: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_replay_read: AtomicBool::new(false),
         })
     }
 
@@ -296,8 +319,12 @@ impl WalSegment {
             #[cfg(test)]
             let write_result = if fail_after != u64::MAX {
                 let prefix_len = (fail_after as usize).min(buf.len());
-                f.write_all(&buf[..prefix_len])
-                    .and_then(|()| Err(std::io::Error::other("injected partial WAL write failure")))
+                f.write_all(&buf[..prefix_len]).and_then(|()| {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::StorageFull,
+                        "injected partial WAL write failure",
+                    ))
+                })
             } else {
                 f.write_all(&buf)
             };
@@ -335,9 +362,7 @@ impl WalSegment {
                              in an unknown state; it has been poisoned"
                         );
                     }
-                    Err(DbError::Storage(format!(
-                        "WalSegment append to {path:?}: {e}"
-                    )))
+                    Err(wal_io_error(format!("WalSegment append to {path:?}"), e))
                 }
             }
         })
@@ -392,10 +417,22 @@ impl WalSegment {
     /// by rotating to a new segment rather than retrying on the same fd.
     pub async fn sync(&self) -> DbResult<()> {
         let file = Arc::clone(&self.file);
+        #[cfg(test)]
+        let fail_sync = self.fail_next_sync.swap(false, Ordering::AcqRel);
         let res = spawn_blocking(move || -> DbResult<()> {
             let f = file.lock().expect("WalSegment file mutex poisoned");
-            f.sync_all()
-                .map_err(|e| DbError::Storage(format!("WalSegment sync: {e}")))
+            #[cfg(test)]
+            let result = if fail_sync {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected WAL sync failure",
+                ))
+            } else {
+                f.sync_all()
+            };
+            #[cfg(not(test))]
+            let result = f.sync_all();
+            result.map_err(|e| wal_io_error("WalSegment sync".into(), e))
         })
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
@@ -431,6 +468,16 @@ impl WalSegment {
         self.fail_next_write_after.store(bytes, Ordering::Release);
     }
 
+    #[cfg(test)]
+    pub(crate) fn inject_sync_failure(&self) {
+        self.fail_next_sync.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_replay_read_failure(&self) {
+        self.fail_next_replay_read.store(true, Ordering::Release);
+    }
+
     /// Inject a real `io::ErrorKind::PermissionDenied` at the `File::open`
     /// site of `replay_inner` for the next `times` replay calls. The injected
     /// error flows through the EXISTING `is_transient_open_denial` /
@@ -455,9 +502,9 @@ impl WalSegment {
         let repair_offset: Option<u64> = spawn_blocking(move || -> DbResult<Option<u64>> {
             let mut buf = Vec::new();
             let mut f = File::open(&path)
-                .map_err(|e| DbError::Storage(format!("WalSegment repair read: {e}")))?;
+                .map_err(|e| wal_io_error(format!("WalSegment repair read {path:?}"), e))?;
             f.read_to_end(&mut buf)
-                .map_err(|e| DbError::Storage(format!("WalSegment repair read: {e}")))?;
+                .map_err(|e| wal_io_error(format!("WalSegment repair read {path:?}"), e))?;
             let mut pos = 0usize;
             while pos < buf.len() {
                 if buf.len() - pos < 4 {
@@ -498,9 +545,7 @@ impl WalSegment {
                 g.set_len(pos as u64)
             })();
             if let Err(e) = trunc_res {
-                return Err(DbError::Storage(format!(
-                    "WalSegment repair set_len {path:?}: {e}"
-                )));
+                return Err(wal_io_error(format!("WalSegment repair set_len {path:?}"), e));
             }
             Ok(Some(pos as u64))
         })
@@ -526,7 +571,7 @@ impl WalSegment {
         tolerate_permission_denied: bool,
         fail_open: bool,
     ) -> DbResult<Vec<WalEntryV2>> {
-        Self::replay_inner(path, sealed, tolerate_permission_denied, fail_open).await
+        Self::replay_inner(path, sealed, tolerate_permission_denied, fail_open, false).await
     }
 
     /// Replay the segment from the start. Active incomplete tails are tolerated.
@@ -585,7 +630,11 @@ impl WalSegment {
             .is_ok();
         #[cfg(not(test))]
         let fail_open = false;
-        Self::replay_path(self.path.clone(), false, false, fail_open).await
+        #[cfg(test)]
+        let fail_read = self.fail_next_replay_read.swap(false, Ordering::AcqRel);
+        #[cfg(not(test))]
+        let fail_read = false;
+        Self::replay_inner(self.path.clone(), false, false, fail_open, fail_read).await
     }
 
     /// Like [`replay_sealed`](Self::replay_sealed) but for the startup path:
@@ -615,6 +664,7 @@ impl WalSegment {
         sealed: bool,
         tolerate_permission_denied: bool,
         fail_open: bool,
+        fail_read: bool,
     ) -> DbResult<Vec<WalEntryV2>> {
         spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
             #[cfg(not(test))]
@@ -650,18 +700,32 @@ impl WalSegment {
                         // Audit §2.4: at startup there is no concurrent
                         // truncation, so PermissionDenied is a real ACL denial
                         // or an antivirus/backup-held file — NOT an empty WAL.
-                        return Err(DbError::Storage(format!(
-                            "WalSegment replay open {path:?}: PermissionDenied \
-                         (startup — no concurrent truncation expected; likely \
-                         ACL denial or file held by another process): {e}"
-                        )));
+                        return Err(wal_io_error(
+                            format!("WalSegment replay open {path:?}: PermissionDenied (startup — no concurrent truncation expected; likely ACL denial or file held by another process)"),
+                            e,
+                        ));
                     }
-                    Err(e) => return Err(DbError::Storage(format!("WalSegment replay open: {e}"))),
+                    Err(e) => {
+                        return Err(wal_io_error(format!("WalSegment replay open {path:?}"), e));
+                    }
                 }
             };
             let mut buf = Vec::new();
-            f.read_to_end(&mut buf)
-                .map_err(|e| DbError::Storage(format!("WalSegment replay read: {e}")))?;
+            #[cfg(test)]
+            let read_result = if fail_read {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected WAL replay read failure",
+                ))
+            } else {
+                f.read_to_end(&mut buf)
+            };
+            #[cfg(not(test))]
+            let read_result = {
+                let _ = fail_read;
+                f.read_to_end(&mut buf)
+            };
+            read_result.map_err(|e| wal_io_error(format!("WalSegment replay read {path:?}"), e))?;
             let mut out = Vec::new();
             let mut pos = 0usize;
             while pos < buf.len() {
