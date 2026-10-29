@@ -1,8 +1,11 @@
+//! Setter coverage: concurrent sampling and a bounded, timing-based drop probe.
+
 use crate::{FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::{Arc, Barrier, OnceLock};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread;
+use std::time::Duration;
 
 /// A trivial function that ignores its inputs and returns a constant.
 struct Const(i64);
@@ -19,27 +22,101 @@ impl ShamirFunction for Const {
     }
 }
 
+// Assignment drops the old Arc while the occupied entry guard is held. A
+// remove-then-insert implementation instead lets the reader see the gap;
+// scheduling delays can make this timing-based negative control miss it.
+struct Gate {
+    ready: Mutex<mpsc::Receiver<()>>,
+    release: mpsc::SyncSender<()>,
+    done: Mutex<mpsc::Receiver<bool>>,
+    observed: mpsc::SyncSender<(
+        Result<(), mpsc::RecvTimeoutError>,
+        Result<bool, mpsc::RecvTimeoutError>,
+    )>,
+}
+
+#[async_trait]
+impl ShamirFunction for Gate {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        Ok(QueryValue::Null)
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        let ready = self
+            .ready
+            .get_mut()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            .and_then(|receiver| receiver.recv_timeout(Duration::from_secs(5)));
+        let _ = self.release.send(());
+        let result = self
+            .done
+            .get_mut()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
+            .and_then(|receiver| receiver.recv_timeout(Duration::from_millis(300)));
+        let _ = self.observed.send((ready, result));
+    }
+}
+
 #[test]
 fn rv_wasm_host_c51052df_replace_never_exposes_missing_name() {
     let registry = Arc::new(FunctionRegistry::new());
-    registry.register("key", Arc::new(Const(0))).unwrap();
-    let start = Arc::new(Barrier::new(2));
-    let writer_registry = Arc::clone(&registry);
-    let writer_start = Arc::clone(&start);
-    let writer = thread::spawn(move || {
-        writer_start.wait();
-        for value in 1..=100_000 {
-            writer_registry.replace("key", Arc::new(Const(value)));
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let (done_tx, done_rx) = mpsc::sync_channel(1);
+    let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    registry
+        .register(
+            "key",
+            Arc::new(Gate {
+                ready: Mutex::new(ready_rx),
+                release: release_tx,
+                done: Mutex::new(done_rx),
+                observed: observed_tx,
+            }),
+        )
+        .unwrap();
+    let reader_registry = Arc::clone(&registry);
+    let reader = thread::spawn(move || {
+        let _ = ready_tx.send(());
+        if release_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
+            let present = reader_registry.get("key").is_some();
+            let _ = done_tx.send(present);
+            let _ = finished_tx.send(Some(present));
+        } else {
+            let _ = finished_tx.send(None);
         }
     });
-    start.wait();
-    for _ in 0..100_000 {
-        assert!(
-            registry.get("key").is_some(),
-            "replace exposed a missing name"
-        );
-    }
-    writer.join().expect("writer thread panicked");
+    registry.replace("key", Arc::new(Const(1)));
+    let observed = observed_rx.recv_timeout(Duration::from_secs(5));
+    let finished = finished_rx.recv_timeout(Duration::from_secs(5));
+    let joined = if finished.is_ok() {
+        Some(reader.join())
+    } else {
+        None
+    };
+    let (ready, done) = observed.expect("gate did not drop");
+    assert!(ready.is_ok(), "reader was not ready: {ready:?}");
+    assert!(
+        matches!(done, Err(mpsc::RecvTimeoutError::Timeout)),
+        "reader completed or disconnected during replacement: {done:?}"
+    );
+    assert_eq!(
+        finished.expect("reader did not finish"),
+        Some(true),
+        "reader saw a missing name or was not released"
+    );
+    assert!(
+        joined.expect("reader was not joined").is_ok(),
+        "reader panicked"
+    );
 }
 
 #[test]
