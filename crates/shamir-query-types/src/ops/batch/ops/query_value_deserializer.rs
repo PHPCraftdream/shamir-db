@@ -114,7 +114,7 @@ impl<'de> Deserializer<'de> for QueryValueDeserializer {
                 )))
             }
             _ => Err(serde::de::Error::custom(
-                "expected a string or a one-entry map for enum",
+                "expected a string, a variant index, bytes or a one-entry map for enum",
             )),
         }
     }
