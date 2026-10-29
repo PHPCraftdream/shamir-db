@@ -70,14 +70,10 @@ impl LinuxTopology {
             return Err(AffinityError::Unsupported);
         }
 
-        // 2. For each node read its cpulist.
-        //    `cores` is indexed by a dense 0-based slot (not the raw node id),
-        //    so we sort node_ids first and assign slots in order.
-        let mut node_ids_sorted = node_ids;
-        node_ids_sorted.sort_unstable();
-
-        let mut cores: Vec<Vec<CpuId>> = Vec::with_capacity(node_ids_sorted.len());
-        for &nid in &node_ids_sorted {
+        // 2. For each node read its cpulist. parse_cpulist already sorts node IDs;
+        //    `cores` uses dense 0-based slots in that order.
+        let mut cores: Vec<Vec<CpuId>> = Vec::with_capacity(node_ids.len());
+        for &nid in &node_ids {
             let cpulist_path = format!("/sys/devices/system/node/node{nid}/cpulist");
             let cpus = match read(&cpulist_path) {
                 Ok(raw) => parse_cpulist(&raw),
