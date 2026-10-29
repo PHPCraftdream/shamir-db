@@ -32,7 +32,9 @@ use shamir_transport_tcp::tls::{
     extract_tls_exporter, make_client_config_app_authenticated, AppLayerServerAuth,
 };
 
-use crate::client::options::{ConnectLocalOptions, ConnectOptions, ResumeOptions};
+use crate::client::options::{
+    ConnectLocalOptions, ConnectOptions, ResumeOptions, SecureResumeOptions,
+};
 use crate::client::transport::{
     connect_ipc, connect_tcp, reader_task, Lifecycle, LifecycleHooks, WriteSink,
 };
@@ -42,6 +44,13 @@ use crate::client::transport::{
 };
 use crate::error::ClientError;
 use crate::interner_cache::InternerCacheRegistry;
+
+#[path = "../interner_cache/resume/security.rs"]
+pub(super) mod resume_security;
+pub(super) use resume_security::deserialize_resume_ticket;
+#[cfg(test)]
+pub(crate) use resume_security::take_resume_wipes;
+use resume_security::{read_resume_frame, serialize_resume, ProtectedResumeBuffer};
 
 /// Handshake phases for [`ClientError::HandshakeTimeout`] diagnostics —
 /// stored in a shared atomic and updated before each stage.
@@ -603,14 +612,22 @@ impl Client {
     ///
     /// # Flow
     /// 1. Open a new TLS connection (same as `connect`).
-    /// 2. Send [`WireResumeInit`] with the ticket, a fresh 32-byte nonce, and
-    ///    the TLS-exporter channel-binding mode.
-    /// 3. Read [`WireResumeOk`] — the server validates the ticket and responds
-    ///    with a new session id and optionally a rotated ticket.
-    /// 4. Spawn background reader task; return ready `Client`.
+    /// 2. Verify the server's pinned identity proof over the TLS exporter and a
+    ///    fresh nonce before disclosing the ticket.
+    /// 3. Send [`WireResumeInit`] with the ticket and channel-binding mode.
+    /// 4. Read [`WireResumeOk`] with the new session and optional rotated ticket.
+    /// 5. Spawn the background reader task and return the ready `Client`.
+    ///
+    /// The legacy options contain a raw ticket until this future is polled.
+    /// Prefer [`Self::resume_secure`] for retained or cancellable futures.
     pub async fn resume(opts: ResumeOptions) -> Result<Self, ClientError> {
-        let _ = default_provider().install_default();
+        Self::resume_secure(opts.into()).await
+    }
 
+    /// Resume with a ticket protected even if the future is never polled.
+    pub async fn resume_secure(opts: SecureResumeOptions) -> Result<Self, ClientError> {
+        let ticket = ProtectedResumeBuffer(opts.ticket);
+        let _ = default_provider().install_default();
         // ---- TLS ----
         let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
             .map_err(|e| ClientError::tls("client config", e))?;
@@ -630,8 +647,7 @@ impl Client {
         let (mut r, mut w) = split(tls);
 
         let resumed =
-            resume_wire_exchange(&mut r, &mut w, opts.ticket, opts.pinned_hash, tls_exporter)
-                .await?;
+            resume_wire_exchange(&mut r, &mut w, ticket, opts.pinned_hash, tls_exporter).await?;
 
         Ok(Self::assemble(
             r,
@@ -640,7 +656,7 @@ impl Client {
                 session_id: resumed.session_id,
                 pinned_hash: opts.pinned_hash,
                 expires_at_ns: resumed.expires_at_ns,
-                resumption_ticket: resumed.resumption_ticket.map(Zeroizing::new),
+                resumption_ticket: resumed.resumption_ticket,
                 resumption_expires_at_ns: resumed.resumption_expires_at_ns,
                 server_query_version: resumed.server_query_version,
                 request_timeout: None,
@@ -657,7 +673,7 @@ impl Client {
 pub(crate) struct ResumedHandshake {
     pub(crate) session_id: [u8; 32],
     pub(crate) expires_at_ns: u64,
-    pub(crate) resumption_ticket: Option<Vec<u8>>,
+    pub(crate) resumption_ticket: Option<Zeroizing<Vec<u8>>>,
     pub(crate) resumption_expires_at_ns: Option<u64>,
     pub(crate) server_query_version: u8,
 }
@@ -674,7 +690,7 @@ pub(crate) struct ResumedHandshake {
 pub(crate) async fn resume_wire_exchange<R, W>(
     r: &mut R,
     w: &mut W,
-    ticket: Vec<u8>,
+    ticket: ProtectedResumeBuffer,
     pinned_hash: [u8; 32],
     tls_exporter: [u8; 32],
 ) -> Result<ResumedHandshake, ClientError>
@@ -699,7 +715,7 @@ where
     write_frame(w, &rmp_serde::to_vec(&proof_init)?)
         .await
         .map_err(|e| ClientError::transport("send resume_proof", e))?;
-    let proof_bytes = read_frame(r, MAX_PRE_AUTH_FRAME)
+    let proof_bytes = read_resume_frame(r)
         .await
         .map_err(|e| ClientError::transport("read resume_proof_ok", e))?;
     let proof_ok: WireResumeProofOk = rmp_serde::from_slice(&proof_bytes)?;
@@ -707,16 +723,17 @@ where
 
     // ---- Send ResumeInit ----
     let init_wire = WireResumeInit {
-        ticket,
+        ticket: &ticket,
         client_nonce: client_nonce.to_vec(),
         binding_mode: BindingMode::TlsExporter as u8,
     };
-    write_frame(w, &rmp_serde::to_vec(&init_wire)?)
+    let init_bytes = serialize_resume(&init_wire, ticket.len().saturating_add(128))?;
+    write_frame(w, &init_bytes)
         .await
         .map_err(|e| ClientError::transport("send resume_init", e))?;
 
     // ---- Read ResumeOk ----
-    let ok_bytes = read_frame(r, MAX_PRE_AUTH_FRAME)
+    let ok_bytes = read_resume_frame(r)
         .await
         .map_err(|e| ClientError::transport("read resume_ok", e))?;
     let ok_wire: WireResumeOk = rmp_serde::from_slice(&ok_bytes)?;
@@ -731,7 +748,7 @@ where
         (None, None)
     } else {
         (
-            Some(ok_wire.resumption_ticket),
+            Some(ok_wire.resumption_ticket.into_inner()),
             Some(ok_wire.resumption_expires_at_ns),
         )
     };

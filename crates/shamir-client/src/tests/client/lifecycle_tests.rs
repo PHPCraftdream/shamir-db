@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::io::{duplex, split, AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::sync::oneshot;
 
-use shamir_connect::common::envelope::ResponseEnvelope;
+use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 use shamir_query_types::wire::DbRequest;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
@@ -83,6 +83,82 @@ fn setup(
             server_in: c2s_server_side,
         },
     )
+}
+
+#[tokio::test]
+async fn ddl_unknown_and_unsupported_are_distinct() {
+    let (client, mut server) = setup(LifecycleHooks::default());
+    let client = Arc::new(client);
+    for unsupported in [false, true] {
+        let caller = client.clone();
+        let request =
+            tokio::spawn(
+                async move { caller.get_ddl_op_status("db", "repo", "table", "op").await },
+            );
+        let frame = read_frame(&mut server.server_in, MAX_FRAME_SIZE_DEFAULT)
+            .await
+            .expect("request");
+        let envelope = RequestEnvelope::from_msgpack(&frame).expect("envelope");
+        let response = if unsupported {
+            DbResponse::Error {
+                code: "not_supported".into(),
+                message: "old server".into(),
+            }
+        } else {
+            DbResponse::DdlOpStatus { status: None }
+        };
+        let payload = rmp_serde::to_vec_named(&response).expect("response");
+        write_response(
+            &mut server.server_out,
+            envelope.request_id.unwrap(),
+            &payload,
+        )
+        .await;
+        let result = request.await.expect("task");
+        if unsupported {
+            assert!(matches!(result, Err(ClientError::Db { code, .. }) if code == "not_supported"));
+        } else {
+            assert!(matches!(result, Ok(None)));
+        }
+    }
+}
+
+#[tokio::test]
+async fn request_id_exhaustion_closes_without_reuse() {
+    let (client, mut server) = setup(LifecycleHooks::default());
+    client.set_next_request_id_for_test(u32::MAX - 1);
+    let client = Arc::new(client);
+    let first_client = client.clone();
+    let first = tokio::spawn(async move { first_client.ping().await });
+    let frame = read_frame(&mut server.server_in, MAX_FRAME_SIZE_DEFAULT)
+        .await
+        .expect("request");
+    let request = RequestEnvelope::from_msgpack(&frame).expect("envelope");
+    assert_eq!(request.request_id, Some(u32::MAX - 1));
+    let err = client.ping().await.expect_err("exhaustion must close");
+    assert!(matches!(
+        err,
+        ClientError::ConnectionClosed(CloseCause::RequestIdExhausted)
+    ));
+    assert!(matches!(
+        first.await.unwrap(),
+        Err(ClientError::ConnectionClosed(
+            CloseCause::RequestIdExhausted
+        ))
+    ));
+    let _ = write_frame(
+        &mut server.server_out,
+        &ResponseEnvelope::ok(Some(u32::MAX - 1), pong_payload())
+            .to_msgpack()
+            .unwrap(),
+    )
+    .await;
+    assert!(matches!(
+        client.ping().await,
+        Err(ClientError::ConnectionClosed(
+            CloseCause::RequestIdExhausted
+        ))
+    ));
 }
 
 fn assert_closed(err: &ClientError, cause: &CloseCause) {
