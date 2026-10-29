@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::common::{
+use super::common::{
     decode, encode, execute_built, expect_batch_ok, expect_error, make_db_with_table, root_session,
     session_key,
 };

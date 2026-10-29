@@ -1,6 +1,6 @@
 //! Coarse-grained gate: describe/get_table_schema/access-tree/list
 //! semantics and non-exempted superuser-only ops.
-use crate::common::*;
+use super::common::*;
 use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::server::{BootstrapMode, ServerLauncher};
 use tempfile::TempDir;

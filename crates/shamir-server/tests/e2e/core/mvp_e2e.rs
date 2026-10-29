@@ -19,6 +19,8 @@
 //!      expected records.
 //!   7. Server shuts down cleanly.
 
+use crate::common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,9 +44,6 @@ use shamir_transport_tcp::tls::{
 };
 
 use shamir_server::db_handler::{DbRequest, DbResponse};
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 // --------------------------------------------------------------------------
 // Wire-frame mirrors of the auth_init / challenge / client_proof / auth_ok

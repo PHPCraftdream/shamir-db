@@ -22,14 +22,13 @@
 //! (successful) token login, and that the boot-time TTL sweep rotates an
 //! unused-but-expired token's credential too.
 
+use crate::common;
+
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use shamir_client::{Client, ConnectOptions};
 use shamir_server::server_meta::ServerMetaStore;
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bootstrap_token_file_exists_then_consumed_on_first_login() {
