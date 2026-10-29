@@ -14,7 +14,7 @@ use shamir_query_types::hmac as canon;
 use shamir_server::db_handler::{AdminGlue, DbRequest, DbResponse, ShamirDbHandler};
 use shamir_server::user_directory::FjallUserDirectory;
 
-use crate::common::{decode, encode, root_session, user_session};
+use super::common::{decode, encode, root_session, user_session};
 
 fn fast_kdf() -> KdfParams {
     KdfParams {

@@ -1,4 +1,4 @@
-use crate::common::{assert_records_equal, fixture_record, fresh_dir};
+use super::common::{assert_records_equal, fixture_record, fresh_dir};
 use shamir_collections::TFxSet;
 use shamir_connect::server::admin::UserDirectory;
 use shamir_server::user_directory::FjallUserDirectory;

@@ -11,6 +11,8 @@
 //! against the database — proving the whole plain-transport path works,
 //! not just that the socket accepts.
 
+use crate::common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,9 +31,6 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 
 use shamir_server::db_handler::{DbRequest, DbResponse};
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 // Wire-frame mirrors of the auth_init / challenge / client_proof / auth_ok
 // envelopes — same shapes as `mvp_e2e.rs` (kept transport-binding-local).

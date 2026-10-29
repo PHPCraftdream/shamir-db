@@ -25,7 +25,7 @@ use shamir_server::backup;
 use shamir_server::db_handler::DbResponse;
 use shamir_server::restore;
 
-use crate::common::{
+use super::common::{
     create_table_req, launch, login, read_req, roundtrip, write_req, WireAuthInit, WireAuthOk,
     WireChallenge, WireClientProof,
 };

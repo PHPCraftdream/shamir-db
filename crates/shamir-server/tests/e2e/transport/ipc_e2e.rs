@@ -10,6 +10,8 @@
 //! `binding_mode = 0x00` / zeroed channel binding, and executes one batch
 //! against the database. Mirrors `plain_tcp_e2e.rs`.
 
+use crate::common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,9 +29,6 @@ use shamir_connect::common::username::NormalizedUsername;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 
 use shamir_server::db_handler::{DbRequest, DbResponse};
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 #[cfg(unix)]
 async fn connect_ipc(addr: &str) -> impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin {

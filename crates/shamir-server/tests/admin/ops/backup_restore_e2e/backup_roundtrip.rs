@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use shamir_server::backup;
 use shamir_server::db_handler::DbResponse;
 
-use crate::common::{create_table_req, launch, login, read_req, roundtrip, write_req};
+use super::common::{create_table_req, launch, login, read_req, roundtrip, write_req};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_then_restore_recovers_data() {

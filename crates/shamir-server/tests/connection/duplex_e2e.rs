@@ -14,15 +14,14 @@
 //! 4. **`resume_then_concurrent`** — full auth → ticket → resume → 4 concurrent
 //!    pings on the resumed connection all succeed.
 
+use crate::common;
+
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use shamir_client::{Client, ConnectOptions, ResumeOptions};
-
-#[path = "../common/mod.rs"]
-mod common;
 
 // ---------------------------------------------------------------------------
 // Test 1 — 8 concurrent pings all resolve

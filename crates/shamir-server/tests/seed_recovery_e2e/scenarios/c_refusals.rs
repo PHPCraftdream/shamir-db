@@ -42,10 +42,10 @@ use shamir_server::replication::in_process::InProcessReplSource;
 use shamir_server::replication::source::ReplSource;
 use shamir_server::replication_seed::{self, Manifest};
 
-use crate::harness::child;
-use crate::harness::follower;
-use crate::harness::ops;
-use crate::harness::wire;
+use super::super::harness::child;
+use super::super::harness::follower;
+use super::super::harness::ops;
+use super::super::harness::wire;
 
 /// Adapter: any `ReplSource` (e.g. a REAL freshly recreated leader wrapped
 /// in `InProcessReplSource`) as the resume-validation transport.

@@ -19,10 +19,10 @@ use shamir_db::ShamirDb;
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_server::replication_seed::Manifest;
 
-use crate::harness::child;
-use crate::harness::follower;
-use crate::harness::ops;
-use crate::harness::wire;
+use super::super::harness::child;
+use super::super::harness::follower;
+use super::super::harness::ops;
+use super::super::harness::wire;
 
 const WAIT: Duration = Duration::from_secs(30);
 

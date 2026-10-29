@@ -12,7 +12,7 @@ use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler};
 
-use crate::common::{decode, encode, execute_built, make_db_with_table, user_session};
+use super::common::{decode, encode, execute_built, make_db_with_table, user_session};
 
 // --------------------------------------------------------------------------
 // Health + protocol-level errors

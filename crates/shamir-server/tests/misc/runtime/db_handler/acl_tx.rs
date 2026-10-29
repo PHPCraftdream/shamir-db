@@ -13,7 +13,7 @@ use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::session::{Session, SessionPermissions};
 use shamir_server::db_handler::{DbRequest, DbResponse, ShamirDbHandler, TxLimitsCap};
 
-use crate::common::{
+use super::common::{
     decode, encode, execute_built, make_db_with_table, root_session, user_session,
 };
 

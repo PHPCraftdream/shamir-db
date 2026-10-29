@@ -18,7 +18,7 @@ use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_server::db_handler::{DbResponse, QueryLimitsCap, ShamirDbHandler};
 
-use crate::common::{
+use super::common::{
     decode, encode, execute_built, execute_built_with_version, make_db_with_table, root_session,
     user_session,
 };

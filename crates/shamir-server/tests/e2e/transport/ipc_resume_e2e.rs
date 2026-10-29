@@ -10,6 +10,8 @@
 //! `transport_kind = Unix` routing (added for this transport) doesn't
 //! break it.
 
+use crate::common;
+
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -22,9 +24,6 @@ use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 #[derive(Serialize, Deserialize)]
 struct WireAuthInit {

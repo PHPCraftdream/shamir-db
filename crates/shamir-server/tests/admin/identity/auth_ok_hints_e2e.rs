@@ -1,3 +1,5 @@
+use crate::common;
+
 use std::time::Duration;
 
 use shamir_client::{Client, ClientError, ConnectOptions};
@@ -7,9 +9,6 @@ use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_server::server_meta::ServerMetaStore;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 const PASSWORD: &[u8] = b"auth-ok-hints-e2e-password";
 

@@ -1,8 +1,6 @@
 //! Shared live-server harness for integration tests.
 //!
-//! Cargo treats every `tests/*.rs` file as its own crate, so any code
-//! shared across them must live under `tests/common/mod.rs`. Each test
-//! file pulls it in with `mod common;`.
+//! Mounted once per group binary and used via `use crate::common;`.
 //!
 //! The harness is the dedup of ~10 `*_e2e.rs` files that each inlined
 //! the same `fast_kdf()` + `make_test_config()` + `ServerLauncher { ...

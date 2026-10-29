@@ -1,39 +1,3 @@
-//! End-to-end backup → restore round-trip.
-//!
-//! Strategy:
-//!   1. Boot ServerLauncher#1 against a fresh data_dir.
-//!   2. Real client logs in, writes a row.
-//!   3. Cleanly shutdown.
-//!   4. `backup::backup(data_dir, snapshot_dir)` — copies every file.
-//!   5. **Wipe the original data_dir** (simulating disk loss).
-//!   6. **Restore**: copy the backup back into a fresh data_dir.
-//!   7. Boot ServerLauncher#2 with the restored data_dir.
-//!   8. Same client (same admin password) logs in, reads the row, asserts
-//!      it matches what was written in boot #1.
-//!
-//! This proves the WHOLE backup pipeline is sound — not just the file-copy
-//! mechanics (which `backup::tests` already cover) but every durable
-//! piece the server depends on:
-//!   * server_meta.redb     (Ed25519 identity, audit chain key, ticket key)
-//!   * users.redb           (admin SCRAM credentials)
-//!   * counters.redb        (replay counters)
-//!   * shamir_db_meta.redb  (database / repo metadata)
-//!   * shamir_db_default_main.redb (the data we wrote)
-//!   * wire_tables.mpack    (registry of tables created over the wire)
-//!   * cert.pem / key.pem   (TLS material — without it the second boot
-//!   * cert.pem / key.pem   (TLS material — without it the second boot
-//!     would generate a NEW Ed25519 + new server pub-key,
-//!     breaking client TOFU pin sanity)
-
-mod backup_roundtrip;
-mod common;
-mod restore_cli;
-mod restore_failure;
-
-// NOTE: this test stays at the binary root (not in a submodule) because its
-// body re-spawns itself with `--exact
-// "backup_unclean_server_restore_certifies_before_serving_pull"`, and libtest
-// `--exact` matches the FULL module path — a `mod` prefix would break it.
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -47,7 +11,7 @@ use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::restore;
 use shamir_tx::ChangeOp;
 
-use crate::common::{create_table_req, launch, login, read_req, roundtrip, write_req};
+use super::common::{create_table_req, launch, login, read_req, roundtrip, write_req};
 
 #[test]
 fn backup_unclean_server_restore_certifies_before_serving_pull() {
@@ -92,12 +56,11 @@ fn backup_unclean_server_restore_certifies_before_serving_pull() {
 
     let data = TempDir::new().unwrap();
     let destination = TempDir::new().unwrap();
+    // Libtest omits the crate segment from the full test name.
+    let module = module_path!().split_once("::").map_or("", |(_, m)| m);
+    let exact = format!("{module}::backup_unclean_server_restore_certifies_before_serving_pull");
     let status = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "backup_unclean_server_restore_certifies_before_serving_pull",
-            "--nocapture",
-        ])
+        .args(["--exact", &exact, "--nocapture"])
         .env(CHILD_DIR, data.path())
         .status()
         .unwrap();
