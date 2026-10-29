@@ -32,6 +32,41 @@ struct LegacySubscription {
     profile: &'static str,
 }
 
+#[test]
+fn future_publication_fields_are_ignored_in_replication_response() {
+    let response = serde_json::json!({
+        "repl_kind": "hello",
+        "leader_epoch": 1,
+        "repos": [
+            {
+                "db": "app",
+                "repo": "main",
+                "current_version": 10,
+                "journal_floor": 0,
+                "publications": [
+                    {
+                        "create_publication": "pub",
+                        "scopes": [
+                            {
+                                "db": "app",
+                                "future_scope_field": true
+                            }
+                        ],
+                        "future_publication_field": true
+                    }
+                ]
+            }
+        ]
+    });
+    let bytes = rmp_serde::to_vec_named(&response).unwrap();
+    let decoded: ReplResponse = rmp_serde::from_slice(&bytes).unwrap();
+    let ReplResponse::Hello { repos, .. } = decoded else {
+        panic!("Hello");
+    };
+    assert_eq!(repos[0].publications[0].create_publication, "pub");
+    assert_eq!(repos[0].publications[0].scopes[0].db, "app");
+}
+
 /// Serde round-trip test: the subject is the wire format itself.
 #[test]
 fn legacy_hello_and_subscription_decode_defaults_and_new_metadata_roundtrips() {

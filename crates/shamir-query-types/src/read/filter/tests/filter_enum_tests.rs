@@ -7,6 +7,45 @@ fn roundtrip_filter(f: &Filter) -> Filter {
 }
 
 #[test]
+fn nested_filter_unknown_key_is_a_compatibility_exemption() {
+    let value = serde_json::json!({
+        "op": "and",
+        "filters": [
+            {
+                "op": "is_null",
+                "field": ["x"],
+                "stray": true
+            }
+        ]
+    });
+    let filter: Filter = serde_json::from_value(value).unwrap();
+    assert!(matches!(filter, Filter::And { .. }));
+}
+
+#[test]
+fn persisted_conditional_filter_accepts_future_fields() {
+    let value = serde_json::json!({
+        "$cond": {
+            "if": {
+                "op": "and",
+                "filters": [
+                    {
+                        "op": "is_null",
+                        "field": ["x"],
+                        "future_field": true
+                    }
+                ]
+            },
+            "then": 1,
+            "else": 0
+        }
+    });
+    let bytes = rmp_serde::to_vec_named(&value).unwrap();
+    let decoded: FilterValue = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(matches!(decoded, FilterValue::Cond { .. }));
+}
+
+#[test]
 fn fts_serde_round_trip() {
     let f = Filter::Fts {
         field: vec!["body".to_string()],

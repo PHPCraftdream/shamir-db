@@ -6,6 +6,7 @@ use crate::filter::FieldPath;
 
 /// ORDER BY clause
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderBy {
     pub items: Vec<OrderByItem>,
 }
@@ -34,6 +35,7 @@ impl OrderBy {
 
 /// Single order by item
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OrderByItem {
     pub field: FieldPath,
     #[serde(default)]

@@ -9,6 +9,7 @@ use crate::batch::batch_request::BatchRequest;
 
 /// A sub-batch — a nested BatchRequest with explicit parameter bindings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubBatchOp {
     pub batch: BatchRequest,
     #[serde(default, skip_serializing_if = "TMap::is_empty")]

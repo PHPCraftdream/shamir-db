@@ -15,6 +15,7 @@ fn default_repo() -> String {
 /// { "create_validator": "v_age", "wasm": "<base64>", "replace": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateValidatorOp {
     pub create_validator: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -34,6 +35,7 @@ pub struct CreateValidatorOp {
 /// { "drop_validator": "v_age", "if_exists": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropValidatorOp {
     pub drop_validator: String,
     /// When `true`, dropping a non-existent validator is a silent no-op
@@ -50,6 +52,7 @@ pub struct DropValidatorOp {
 /// { "rename_validator": "old_name", "to": "new_name" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameValidatorOp {
     pub rename_validator: String,
     pub to: String,
@@ -66,6 +69,7 @@ pub struct RenameValidatorOp {
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BindValidatorOp {
     pub bind_validator: String,
     pub db: String,
@@ -82,6 +86,7 @@ pub struct BindValidatorOp {
 /// { "unbind_validator": "v_age", "table": { "db": "testdb", "repo": "main", "table": "users" } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnbindValidatorOp {
     pub unbind_validator: String,
     pub db: String,
@@ -96,6 +101,7 @@ pub struct UnbindValidatorOp {
 /// { "list_validators": "users", "db": "testdb", "repo": "main" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ListValidatorsOp {
     pub list_validators: String,
     pub db: String,

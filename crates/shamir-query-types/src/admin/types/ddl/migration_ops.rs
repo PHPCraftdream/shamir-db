@@ -11,6 +11,7 @@ fn default_repo() -> String {
 /// Requires `hmac` over
 /// `b"start_migration\0<db>\0<src_repo>\0<table>\0<dst_repo>\0<dst_engine>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StartMigrationOp {
     pub start_migration: String,
     #[serde(default = "default_repo")]
@@ -27,6 +28,7 @@ pub struct StartMigrationOp {
 ///
 /// Requires `hmac` over `b"commit_migration\0<db>\0<migration_id>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommitMigrationOp {
     pub commit_migration: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,6 +39,7 @@ pub struct CommitMigrationOp {
 ///
 /// Requires `hmac` over `b"rollback_migration\0<db>\0<migration_id>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RollbackMigrationOp {
     pub rollback_migration: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -45,6 +48,7 @@ pub struct RollbackMigrationOp {
 
 /// Query the status of a migration by ID, or list all active migrations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MigrationStatusOp {
     pub migration_status: String,
 }

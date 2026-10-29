@@ -7,6 +7,7 @@ use super::event_mask::EventMask;
 
 /// A single table source for a subscription.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubscriptionSource {
     pub table: TableRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
