@@ -2,7 +2,6 @@ use shamir_collections::TSet;
 
 use crate::index2::expr::IndexExpr;
 use crate::query::filter::evaluation::filter_node::{CompactPath, CompareOp, FilterNode};
-use crate::query::filter::evaluation::semantics::fts::like_pattern_to_regex;
 use crate::query::filter::evaluation::semantics::pattern_guard::{build_like_regex, build_regex};
 use crate::query::filter::evaluation::semantics::resolve::{
     filter_value_to_query, intern_field_path, intern_field_path_compact,
@@ -73,27 +72,26 @@ fn try_compile_filter_with_overlay(
             interner,
             overlay_ids,
         )?))),
-        Filter::Regex { field, pattern } => match intern_path(field, interner, overlay_ids) {
-            Some(path) => Ok(FilterNode::Regex {
-                field_path: path,
-                regex: build_regex(pattern)?,
-            }),
-            None => Ok(FilterNode::False),
-        },
-        Filter::Like { field, pattern } => match intern_path(field, interner, overlay_ids) {
-            Some(path) => Ok(FilterNode::Like {
-                field_path: path,
-                regex: build_like_regex(pattern, false)?,
-            }),
-            None => Ok(FilterNode::False),
-        },
-        Filter::ILike { field, pattern } => match intern_path(field, interner, overlay_ids) {
-            Some(path) => Ok(FilterNode::Like {
-                field_path: path,
-                regex: build_like_regex(pattern, true)?,
-            }),
-            None => Ok(FilterNode::False),
-        },
+        Filter::Regex { field, pattern } => {
+            let regex = build_regex(pattern)?;
+            Ok(match intern_path(field, interner, overlay_ids) {
+                Some(path) => FilterNode::Regex {
+                    field_path: path,
+                    regex,
+                },
+                None => FilterNode::False,
+            })
+        }
+        Filter::Like { field, pattern } | Filter::ILike { field, pattern } => {
+            let regex = build_like_regex(pattern, matches!(filter, Filter::ILike { .. }))?;
+            Ok(match intern_path(field, interner, overlay_ids) {
+                Some(path) => FilterNode::Like {
+                    field_path: path,
+                    regex,
+                },
+                None => FilterNode::False,
+            })
+        }
         _ => Ok(compile_non_pattern(filter, interner, overlay_ids)),
     }
 }
@@ -145,23 +143,13 @@ fn compile_non_pattern(
             op: value_compare_op_to_compare_op(*cmp),
             right: right.clone(),
         },
-        Filter::And { filters } => FilterNode::And(
-            filters
-                .iter()
-                .map(|f| compile_filter_with_overlay(f, interner, overlay_ids))
-                .collect(),
-        ),
-        Filter::Or { filters } => FilterNode::Or(
-            filters
-                .iter()
-                .map(|f| compile_filter_with_overlay(f, interner, overlay_ids))
-                .collect(),
-        ),
-        Filter::Not { filter } => FilterNode::Not(Box::new(compile_filter_with_overlay(
-            filter,
-            interner,
-            overlay_ids,
-        ))),
+        // These are handled recursively by the checked compiler above.
+        Filter::And { .. }
+        | Filter::Or { .. }
+        | Filter::Not { .. }
+        | Filter::Like { .. }
+        | Filter::ILike { .. }
+        | Filter::Regex { .. } => unreachable!("handled by checked compiler"),
         Filter::IsNull { field } => match intern_path(field, interner, overlay_ids) {
             Some(path) => FilterNode::IsNull { field_path: path },
             None => FilterNode::True,
@@ -177,36 +165,6 @@ fn compile_non_pattern(
         Filter::NotIn { field, values } => match intern_path(field, interner, overlay_ids) {
             Some(path) => compile_in_node(path, values, true),
             None => FilterNode::True,
-        },
-        Filter::Like { field, pattern } => match intern_path(field, interner, overlay_ids) {
-            Some(path) => match like_pattern_to_regex(pattern, false) {
-                Some(regex) => FilterNode::Like {
-                    field_path: path,
-                    regex,
-                },
-                None => FilterNode::False,
-            },
-            None => FilterNode::False,
-        },
-        Filter::ILike { field, pattern } => match intern_path(field, interner, overlay_ids) {
-            Some(path) => match like_pattern_to_regex(pattern, true) {
-                Some(regex) => FilterNode::Like {
-                    field_path: path,
-                    regex,
-                },
-                None => FilterNode::False,
-            },
-            None => FilterNode::False,
-        },
-        Filter::Regex { field, pattern } => match intern_path(field, interner, overlay_ids) {
-            Some(path) => match build_regex(pattern) {
-                Ok(regex) => FilterNode::Regex {
-                    field_path: path,
-                    regex,
-                },
-                Err(_) => FilterNode::False,
-            },
-            None => FilterNode::False,
         },
         Filter::Contains { field, value } => match intern_path(field, interner, overlay_ids) {
             Some(path) => FilterNode::Contains {
@@ -292,14 +250,6 @@ fn compile_non_pattern(
             }
         }
     }
-}
-
-fn compile_filter_with_overlay(
-    filter: &Filter,
-    interner: &Interner,
-    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
-) -> FilterNode {
-    try_compile_filter_with_overlay(filter, interner, overlay_ids).unwrap_or(FilterNode::False)
 }
 
 fn build_index_expr_with_overlay(

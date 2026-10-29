@@ -5,7 +5,7 @@
 //!
 //! 1. **Unbounded pattern length.** `compile_filter`'s `Regex`/`Like`/
 //!    `ILike` arms (`compile.rs`) hand the pattern straight to
-//!    `Regex::new`/`like_pattern_to_regex` with no length cap — a
+//!    `Regex::new`/LIKE conversion with no length cap — a
 //!    pathologically long pattern can build an expensive regex program
 //!    (compile-time and/or matching-time blowup), a query-reachable DoS
 //!    surface.
@@ -233,7 +233,7 @@ fn push_select_expr_children<'a>(
     }
 }
 
-/// the SAME conversion `compile_filter` uses (`like_pattern_to_regex`), so
+/// the SAME conversion `compile_filter` uses (`build_like_regex`), so
 /// "validates" and "will actually compile at execution time" can never
 /// drift apart.
 fn check_like_pattern(pattern: &str, case_insensitive: bool) -> Result<(), String> {
