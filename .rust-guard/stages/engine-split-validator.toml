@@ -1,5 +1,5 @@
 # Campaign engine-split-validator: structure widening; conservation entries come from CI.
-base = "8e870aa0b935947401ebaf1466cc5c70aa05b56f"
+base = "99cc0c17f8e11b87eaa9f518880412dae3d5da13"
 
 [[allow_widen]]
 path = "crates/shamir-engine-validator/src/validator/registry/validator_db_probe.rs"
