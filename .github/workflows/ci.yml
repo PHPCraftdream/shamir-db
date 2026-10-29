@@ -787,25 +787,30 @@ jobs:
                 --metadata metadata.json --root . > campaigns.tsv
           guard="tools/rust-guard/target/debug/rust-guard"
           ran=0
-          while IFS=$'\t' read -r name delta pkgs dirs; do
+          first_rc=0
+          while IFS=$'\t' read -r name delta pkgs dirs ddelta; do
             [ -n "$name" ] || continue
             echo "::notice::structure+conservation campaign '$name' (packages: $pkgs)"
             scope_args=()
             IFS=',' read -ra scope_dirs <<< "$dirs"
             for dir in "${scope_dirs[@]}"; do scope_args+=(--scope "$dir"); done
+            structure_rc=0
+            conservation_rc=0
             "$guard" structure --repo . --changed-since "$MERGE_BASE" "${scope_args[@]}" \
-              --delta "$delta"
-            if "$guard" conservation --repo . \
+              --delta "$delta" || structure_rc=$?
+            "$guard" conservation --repo . \
               --base "$MERGE_BASE" --head HEAD \
-              --packages "$pkgs" --delta "$delta"
-            then :
-            else
-              rc=$?
+              --packages "$pkgs" --delta "$delta" || conservation_rc=$?
+            if [ "$conservation_rc" -ne 0 ]; then
               "$guard" conservation --repo . \
                 --base "$MERGE_BASE" --head HEAD \
                 --packages "$pkgs" --delta "$delta" \
                 --suggest-delta "suggested-$name.toml" || true
-              exit "$rc"
+            fi
+            if [ "$first_rc" -eq 0 ]; then
+              if [ "$structure_rc" -ne 0 ]; then first_rc=$structure_rc
+              elif [ "$conservation_rc" -ne 0 ]; then first_rc=$conservation_rc
+              fi
             fi
             ran=1
           done < campaigns.tsv
@@ -813,6 +818,7 @@ jobs:
           if [ "$ran" -eq 0 ]; then
             echo "::notice::no active campaign package touched by this diff; structure and conservation skipped"
           fi
+          exit "$first_rc"
       - name: upload suggested deltas
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -836,29 +842,20 @@ jobs:
       - run: cargo fmt --manifest-path tools/rust-guard/Cargo.toml -- --check
       - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings
 
-  # CI-03b: compiled test-discovery diff (`rust-guard discovery`).
-  # Compares `cargo nextest list --message-format json` inventories of
-  # shamir-engine at the merge base (built in a throwaway git worktree
-  # under a DIFFERENT CARGO_TARGET_DIR, then cached by base SHA + OS +
-  # config — never across configurations) against the current tree, for
-  # the default configuration and the test-util,fts_indexed_long one.
-  # Runs only when .rust-guard/stages.toml has an active campaign whose
-  # packages the diff touches (scripts/ci/rust_guard_select.py); with
-  # `campaigns = []` the selection step prints a notice and the job
-  # passes (no-op). Full tier on ubuntu + windows (macOS on dispatch/schedule); the merge-gate
-  # wiring arrives with the aggregate-gate chunk.
+  # CI-03b: compare compiled test inventories for every selected campaign
+  # package at head and those present at the merge base, using the campaign's
+  # discovery_delta. Base lists are cached by SHA, OS, config and packages.
+  # Drafts run ubuntu/default only; ready PRs use the full OS/config matrix.
+  # No selected campaign means a no-op; non-PR events run format smoke.
   test-discovery:
     name: test discovery (${{ matrix.os }}, ${{ matrix.config.id }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
-        config:
-          - { id: default, flags: "" }
-          - { id: test-util-fts, flags: "--features test-util,fts_indexed_long" }
+        os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-latest"]' || (contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]')) }}
+        config: ${{ fromJSON(github.event.pull_request.draft && '[{"id":"default","flags":""}]' || '[{"id":"default","flags":""},{"id":"test-util-fts","flags":"--features shamir-engine/test-util,shamir-engine/fts_indexed_long"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -898,9 +895,7 @@ jobs:
         if: github.event_name == 'pull_request'
         shell: bash
         run: echo "MERGE_BASE=$(git merge-base origin/master HEAD)" >> "$GITHUB_ENV"
-      # Always built (un-gated): the campaign-gated steps below need it only
-      # when a campaign is active, but the format smoke below always needs
-      # the binary — one cargo build serves both.
+      # Built for the campaign gate or the non-draft format smoke.
       - name: build rust-guard
         if: steps.rust-guard-selftest-bin-cache.outputs.cache-hit != 'true'
         run: cargo build --manifest-path tools/rust-guard/Cargo.toml --locked
@@ -910,7 +905,7 @@ jobs:
       # no lib tests; shamir-types is the smallest crate that clearly does
       # (#[test] modules under crates/shamir-types/src/**/tests/).
       - name: format smoke (real nextest output must round-trip)
-        if: matrix.os == 'ubuntu-latest' && matrix.config.id == 'default'
+        if: matrix.os == 'ubuntu-latest' && matrix.config.id == 'default' && github.event.pull_request.draft != true
         shell: bash
         run: |
           set -euo pipefail
@@ -935,9 +930,7 @@ jobs:
           fi
           python3 -I scripts/ci/gates/loom_preflight_check.py --list-file .scratch/smoke.json
           rm -rf .scratch
-      # Same selection as the source-integrity job: rows are
-      # name<TAB>delta<TAB>packages<TAB>dirs for touched campaign
-      # packages; an empty file means no-op (notice + pass).
+      # Same selection as source-integrity; discovery supports one campaign.
       - name: campaign selection
         id: select
         if: github.event_name == 'pull_request'
@@ -951,22 +944,26 @@ jobs:
                 --metadata metadata.json --root . > campaigns.tsv
           rm -f metadata.json
           if [ -s campaigns.tsv ]; then
+            if [ "$(wc -l < campaigns.tsv)" -gt 1 ]; then
+              echo "::error::test-discovery supports one campaign per PR"
+              exit 1
+            fi
+            IFS=$'\t' read -r name delta pkgs dirs ddelta < campaigns.tsv
+            echo "::notice::test-discovery campaign '$name' (packages: $pkgs)"
             echo "campaigns=yes" >> "$GITHUB_OUTPUT"
-            while IFS=$'\t' read -r name delta pkgs dirs; do
-              echo "::notice::test-discovery campaign '$name' (packages: $pkgs)"
-            done < campaigns.tsv
+            echo "name=$name" >> "$GITHUB_OUTPUT"
+            echo "pkgs=$pkgs" >> "$GITHUB_OUTPUT"
+            echo "ddelta=$ddelta" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::no active campaign package touched by this diff; test discovery skipped"
           fi
-          rm -f campaigns.tsv
-      # Base list cache, keyed by base SHA + OS + config — NEVER shared
-      # across configurations.
+      # Base list cache is keyed by base SHA, OS, config and packages.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         id: base_list_cache
         if: steps.select.outputs.campaigns != ''
         with:
           path: base-list.json
-          key: test-discovery-base-${{ matrix.os }}-${{ env.MERGE_BASE }}-${{ matrix.config.id }}
+          key: test-discovery-base-${{ matrix.os }}-${{ env.MERGE_BASE }}-${{ matrix.config.id }}-${{ steps.select.outputs.pkgs }}
       # The base list is produced in a worktree of the merge base with a
       # separate CARGO_TARGET_DIR, so base and head never share build
       # artifacts and the toolchain/features stay identical (same
@@ -974,30 +971,48 @@ jobs:
       # on every runner (Git Bash on windows-latest).
       - name: base list (worktree at merge base)
         if: steps.select.outputs.campaigns != '' && steps.base_list_cache.outputs.cache-hit != 'true'
+        env:
+          PKGS: ${{ steps.select.outputs.pkgs }}
         shell: bash
         run: |
           set -euo pipefail
           git worktree add .scratch-ci-base "$MERGE_BASE"
           (
             cd .scratch-ci-base
+            cargo metadata --no-deps --format-version 1 > "$RUNNER_TEMP/base-metadata.json"
+            present=$(python3 -I "$GITHUB_WORKSPACE/scripts/ci/rust_guard_select.py" \
+              --present-in "$RUNNER_TEMP/base-metadata.json" --packages "$PKGS")
+            args=()
+            IFS=',' read -ra packages <<< "$present"
+            for pkg in "${packages[@]}"; do args+=(-p "$pkg"); done
             CARGO_TARGET_DIR="$RUNNER_TEMP/base-target" \
-              cargo nextest list -p shamir-engine ${{ matrix.config.flags }} --message-format json
+              cargo nextest list "${args[@]}" ${{ matrix.config.flags }} --message-format json
           ) > "$GITHUB_WORKSPACE/base-list.json"
           git worktree remove --force .scratch-ci-base
       - name: head list
         if: steps.select.outputs.campaigns != ''
+        env:
+          PKGS: ${{ steps.select.outputs.pkgs }}
         shell: bash
-        run: cargo nextest list -p shamir-engine ${{ matrix.config.flags }} --message-format json > head-list.json
+        run: |
+          set -euo pipefail
+          args=()
+          IFS=',' read -ra packages <<< "$PKGS"
+          for pkg in "${packages[@]}"; do args+=(-p "$pkg"); done
+          cargo nextest list "${args[@]}" ${{ matrix.config.flags }} --message-format json > head-list.json
       # Findings (lost test, duplicate, lost target, empty list, blocked
       # comparison) fail the step — the gate is fail-closed.
       - name: discovery diff (fails on findings)
         if: steps.select.outputs.campaigns != ''
+        env:
+          DDELTA: ${{ steps.select.outputs.ddelta }}
         shell: bash
         run: |
           set -euo pipefail
           if tools/rust-guard/target/debug/rust-guard discovery \
             --base-list base-list.json \
             --head-list head-list.json \
+            --delta "$DDELTA" \
             --kind lib
           then :
           else
@@ -1005,6 +1020,7 @@ jobs:
             tools/rust-guard/target/debug/rust-guard discovery \
               --base-list base-list.json \
               --head-list head-list.json \
+              --delta "$DDELTA" \
               --kind lib \
               --base-sha "$(git rev-parse "$MERGE_BASE")" \
               --suggest-delta suggested-discovery.toml || true

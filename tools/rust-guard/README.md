@@ -436,7 +436,10 @@ campaigns touched by the diff. With `campaigns = []`, neither diff gate is
 invoked and CI emits a notice. Master pushes skip both diff gates. Manual
 `structure` runs may use repeatable `--scope` prefixes, which intersect the
 union of `--paths` and `--changed-since`; omitting scopes preserves legacy
-selection behavior.
+selection behavior. A campaign is evaluated only when its PR touches its
+`delta` or `discovery_delta` as well as a campaign package; landed entries are
+inert and removed by the next campaign's PR. Discovery uses the campaign's
+separate `discovery_delta`.
 
 ## Exceptions: `.rust-guard/exceptions.toml`
 

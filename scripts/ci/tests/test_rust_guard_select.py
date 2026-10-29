@@ -27,11 +27,13 @@ STAGES = b"""
 name = "split-repo-instance"
 packages = ["shamir-db"]
 delta = ".rust-guard/stages/split-repo-instance.toml"
+discovery_delta = ".rust-guard/stages/split-repo-instance-discovery.toml"
 
 [[campaigns]]
 name = "extract-engine"
 packages = ["shamir-engine", "ghost-crate"]
 delta = ".rust-guard/stages/extract-engine.toml"
+discovery_delta = ".rust-guard/stages/extract-engine-discovery.toml"
 """
 
 # Absolute manifest paths as a `cargo metadata` run emits them: rooted
@@ -208,12 +210,13 @@ class SelectTest(unittest.TestCase):
 
 class MainTest(unittest.TestCase):
     def test_matching_diff_prints_tsv_line(self):
-        code, out, _err = run_main(changed=["crates/shamir-db/src/lib.rs", "README.md"])
+        code, out, _err = run_main(changed=["crates/shamir-db/src/lib.rs", "README.md", ".rust-guard/stages/split-repo-instance.toml"])
         self.assertEqual(code, 0)
         self.assertEqual(
             out.splitlines(),
             ["split-repo-instance\t"
-             ".rust-guard/stages/split-repo-instance.toml\tshamir-db\tcrates/shamir-db"],
+             ".rust-guard/stages/split-repo-instance.toml\tshamir-db\tcrates/shamir-db\t"
+             ".rust-guard/stages/split-repo-instance-discovery.toml"],
         )
 
     def test_main_from_temp_cwd_with_root_dot_and_real_stdin(self):
@@ -225,7 +228,7 @@ class MainTest(unittest.TestCase):
             try:
                 os.chdir(tmp)
                 old_stdin = sys.stdin
-                sys.stdin = io.StringIO("crates/shamir-db/src/lib.rs\n")
+                sys.stdin = io.StringIO("crates/shamir-db/src/lib.rs\n.rust-guard/stages/split-repo-instance.toml\n")
                 out = io.StringIO()
                 try:
                     with contextlib.redirect_stdout(out):
@@ -236,7 +239,8 @@ class MainTest(unittest.TestCase):
                 os.chdir(cwd)
         self.assertEqual(code, 0)
         self.assertEqual(out.getvalue().splitlines(), [
-            "split-repo-instance\t.rust-guard/stages/split-repo-instance.toml\tshamir-db\tcrates/shamir-db"
+            "split-repo-instance\t.rust-guard/stages/split-repo-instance.toml\tshamir-db\tcrates/shamir-db\t"
+            ".rust-guard/stages/split-repo-instance-discovery.toml"
         ])
 
     def test_empty_diff_prints_nothing_exit_0(self):
@@ -289,6 +293,55 @@ class MainTest(unittest.TestCase):
                     stages_text=STAGES, metadata_text=METADATA, changed=[],
                 )
         self.assertEqual(cm.exception.code, 2)
+
+    def test_package_without_delta_is_inert(self):
+        code, out, _ = run_main(changed=["crates/shamir-db/src/lib.rs"])
+        self.assertEqual((code, out), (0, ""))
+
+    def test_discovery_delta_selects_with_normalised_separators(self):
+        code, out, _ = run_main(changed=[
+            "crates/shamir-db/src/lib.rs",
+            r".rust-guard\stages\split-repo-instance-discovery.toml",
+        ])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), [
+            "split-repo-instance\t.rust-guard/stages/split-repo-instance.toml\t"
+            "shamir-db\tcrates/shamir-db\t.rust-guard/stages/split-repo-instance-discovery.toml"
+        ])
+
+    def test_missing_discovery_delta_exit_2(self):
+        stages = b'[[campaigns]]\nname = "c"\npackages = ["shamir-db"]\ndelta = "d"\n'
+        code, _, _ = run_main(stages=stages)
+        self.assertEqual(code, 2)
+
+    def test_non_string_discovery_delta_exit_2(self):
+        stages = b'[[campaigns]]\nname = "c"\npackages = ["shamir-db"]\ndelta = "d"\ndiscovery_delta = 1\n'
+        code, _, _ = run_main(stages=stages)
+        self.assertEqual(code, 2)
+
+    def present_in(self, metadata, packages):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = rgs.main(["--present-in", "m.json", "--packages", packages],
+                            metadata_text=metadata)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_present_in_subset_preserves_order(self):
+        code, out, _ = self.present_in(METADATA, "ghost,shamir-engine,shamir-db")
+        self.assertEqual((code, out), (0, "shamir-engine,shamir-db\n"))
+
+    def test_present_in_none_exit_2(self):
+        code, out, _ = self.present_in(METADATA, "ghost")
+        self.assertEqual((code, out), (2, ""))
+
+    def test_present_in_bad_json_exit_2(self):
+        code, out, _ = self.present_in("{", "shamir-db")
+        self.assertEqual((code, out), (2, ""))
+
+    def test_present_in_unreadable_exit_2(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = rgs.main(["--present-in", "no-such-dir/m.json", "--packages", "shamir-db"])
+        self.assertEqual(code, 2)
 
     def test_unreadable_metadata_file_exit_2(self):
         # Real OSError path (metadata_text not injected): a path under a
