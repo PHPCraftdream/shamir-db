@@ -1,11 +1,16 @@
-//! Setter coverage: concurrent sampling and a bounded, timing-based drop probe.
+//! Concurrent replacement sampling starts after at least 1,000 reader lookups.
+//! During the old function's drop, a remove-then-insert gap permits 1,000 more
+//! lookups; a held bucket instead stalls the reader until 500 ms without progress.
+//! Drop also has an absolute 10-second limit. This overwhelmingly exposes a gap,
+//! but is not deterministic: a 500 ms reader deschedule can hide it.
 
 use crate::{FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A trivial function that ignores its inputs and returns a constant.
 struct Const(i64);
@@ -22,17 +27,10 @@ impl ShamirFunction for Const {
     }
 }
 
-// Assignment drops the old Arc while the occupied entry guard is held. A
-// remove-then-insert implementation instead lets the reader see the gap;
-// scheduling delays can make this timing-based negative control miss it.
+// The reader never owns the registered function, so replacement drops Gate
+// while a remove-then-insert implementation would expose the missing name.
 struct Gate {
-    ready: Mutex<mpsc::Receiver<()>>,
-    release: mpsc::SyncSender<()>,
-    done: Mutex<mpsc::Receiver<bool>>,
-    observed: mpsc::SyncSender<(
-        Result<(), mpsc::RecvTimeoutError>,
-        Result<bool, mpsc::RecvTimeoutError>,
-    )>,
+    lookups: Arc<AtomicU64>,
 }
 
 #[async_trait]
@@ -49,73 +47,103 @@ impl ShamirFunction for Gate {
 
 impl Drop for Gate {
     fn drop(&mut self) {
-        let ready = self
-            .ready
-            .get_mut()
-            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-            .and_then(|receiver| receiver.recv_timeout(Duration::from_secs(5)));
-        let _ = self.release.send(());
-        let result = self
-            .done
-            .get_mut()
-            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)
-            .and_then(|receiver| receiver.recv_timeout(Duration::from_millis(300)));
-        let _ = self.observed.send((ready, result));
+        let before = self.lookups.load(Ordering::SeqCst);
+        let start = Instant::now();
+        let mut last_progress = start;
+        let mut last = before;
+        loop {
+            let current = self.lookups.load(Ordering::SeqCst);
+            let now = Instant::now();
+            if current != last {
+                last = current;
+                last_progress = now;
+            }
+            if current.wrapping_sub(before) >= 1_000
+                || now.duration_since(last_progress) >= Duration::from_millis(500)
+                || now.duration_since(start) >= Duration::from_secs(10)
+            {
+                break;
+            }
+            thread::yield_now();
+        }
     }
 }
 
 #[test]
 fn rv_wasm_host_c51052df_replace_never_exposes_missing_name() {
     let registry = Arc::new(FunctionRegistry::new());
-    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
-    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let lookups = Arc::new(AtomicU64::new(0));
+    let saw_missing = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(AtomicBool::new(false));
     let (done_tx, done_rx) = mpsc::sync_channel(1);
-    let (observed_tx, observed_rx) = mpsc::sync_channel(1);
-    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
     registry
         .register(
             "key",
             Arc::new(Gate {
-                ready: Mutex::new(ready_rx),
-                release: release_tx,
-                done: Mutex::new(done_rx),
-                observed: observed_tx,
+                lookups: Arc::clone(&lookups),
             }),
         )
         .unwrap();
     let reader_registry = Arc::clone(&registry);
+    let reader_lookups = Arc::clone(&lookups);
+    let reader_missing = Arc::clone(&saw_missing);
+    let reader_stop = Arc::clone(&stop);
     let reader = thread::spawn(move || {
-        let _ = ready_tx.send(());
-        if release_rx.recv_timeout(Duration::from_secs(5)).is_ok() {
-            let present = reader_registry.get("key").is_some();
-            let _ = done_tx.send(present);
-            let _ = finished_tx.send(Some(present));
-        } else {
-            let _ = finished_tx.send(None);
+        while !reader_stop.load(Ordering::SeqCst) {
+            if !reader_registry.contains("key") {
+                reader_missing.store(true, Ordering::SeqCst);
+            }
+            reader_lookups.fetch_add(1, Ordering::SeqCst);
         }
+        let _ = done_tx.send(());
     });
-    registry.replace("key", Arc::new(Const(1)));
-    let observed = observed_rx.recv_timeout(Duration::from_secs(5));
-    let finished = finished_rx.recv_timeout(Duration::from_secs(5));
-    let joined = if finished.is_ok() {
+    let wait_for = |threshold: u64| {
+        let start = Instant::now();
+        while lookups.load(Ordering::SeqCst) < threshold {
+            if start.elapsed() >= Duration::from_secs(5) {
+                return false;
+            }
+            thread::yield_now();
+        }
+        true
+    };
+    let ready = wait_for(1_000);
+    let replacement: Arc<dyn ShamirFunction> = Arc::new(Const(1));
+    let progressed = if ready {
+        registry.replace("key", Arc::clone(&replacement));
+        let after_return = lookups.load(Ordering::SeqCst);
+        wait_for(after_return.saturating_add(1))
+    } else {
+        false
+    };
+    stop.store(true, Ordering::SeqCst);
+    let done = done_rx.recv_timeout(Duration::from_secs(5));
+    let joined = if done.is_ok() {
         Some(reader.join())
     } else {
         None
     };
-    let (ready, done) = observed.expect("gate did not drop");
-    assert!(ready.is_ok(), "reader was not ready: {ready:?}");
     assert!(
-        matches!(done, Err(mpsc::RecvTimeoutError::Timeout)),
-        "reader completed or disconnected during replacement: {done:?}"
-    );
-    assert_eq!(
-        finished.expect("reader did not finish"),
-        Some(true),
-        "reader saw a missing name or was not released"
+        ready,
+        "reader did not complete 1000 lookups before replacement"
     );
     assert!(
-        joined.expect("reader was not joined").is_ok(),
+        progressed,
+        "reader did not advance after replacement returned"
+    );
+    assert!(done.is_ok(), "reader did not finish: {done:?}");
+    assert!(
+        joined.is_some_and(|result| result.is_ok()),
         "reader panicked"
+    );
+    let found = registry.get("key").expect("replacement is missing");
+    assert!(std::ptr::addr_eq(
+        Arc::as_ptr(&found),
+        Arc::as_ptr(&replacement)
+    ));
+    assert!(
+        !saw_missing.load(Ordering::SeqCst),
+        "reader saw a missing name"
     );
 }
 
