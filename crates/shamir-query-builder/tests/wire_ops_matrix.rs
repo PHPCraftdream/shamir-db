@@ -179,20 +179,44 @@ fn decoded(wire: &Value, request: bool) -> (Value, Value) {
 }
 
 #[test]
-fn unknown_operation_key_is_detected_by_round_trip() {
+fn unknown_operation_key_is_rejected_by_both_decoders() {
     let wire = json!({
         "insert_into": "users",
         "values": [],
         "unexpected_key": 1
     });
+    let bytes = rmp_serde::to_vec_named(&wire).expect("encode fixture");
+    let json_err = serde_json::from_value::<BatchOp>(wire)
+        .unwrap_err()
+        .to_string();
+    let msgpack_err = rmp_serde::from_slice::<BatchOp>(&bytes)
+        .unwrap_err()
+        .to_string();
+    assert!(json_err.contains("unexpected_key"), "{json_err}");
+    assert!(msgpack_err.contains("unexpected_key"), "{msgpack_err}");
+}
+
+// The filter family stays lenient (shared with persisted defaults), so there
+// the round trip is what exposes a key the DTO would silently drop.
+#[test]
+fn unknown_key_in_lenient_filter_is_detected_by_round_trip() {
+    let wire = json!({
+        "from": "users",
+        "where": {
+            "op": "eq",
+            "field": ["id"],
+            "value": 1,
+            "unexpected_key": 1
+        }
+    });
     let (json, msgpack) = decoded(&wire, false);
-    assert_ne!(json, wire);
-    assert_ne!(msgpack, wire);
+    assert_ne!(json["where"], wire["where"]);
     assert_eq!(
-        json,
+        json["where"],
         json!({
-            "insert_into": "users",
-            "values": []
+            "op": "eq",
+            "field": ["id"],
+            "value": 1
         })
     );
     assert_eq!(msgpack, json);
