@@ -17,6 +17,7 @@ Companion of [P2-REVALIDATION-2026-10-29.md](P2-REVALIDATION-2026-10-29.md) (ver
 - Every behavioral fix ships with a regression test that fails on the old code (named after the card id, red first in CI). Documentation-only cards need no test.
 - No new dependency, no `#[allow]`, no visibility widening beyond the card, layout limits (7 entries per folder, 1000 lines per file), `mod.rs` re-exports only, imports at the top, tests in `tests/` dirs, multi-line JSON literals in tests.
 - A card found already fixed or wrong is reported with evidence, not forced.
+- Concurrency cap (owner instruction 2026-10-29, after a host crash that was probably memory exhaustion): at most 5 rush sessions at the same time, counting executors, reviewers and decision readers. Runs already in flight at that moment were left alone; nothing new starts while 5 are running. Wave-2 and later executors wait for a free slot.
 
 ## Pipeline per task
 
