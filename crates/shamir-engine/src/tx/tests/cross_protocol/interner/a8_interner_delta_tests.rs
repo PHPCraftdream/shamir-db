@@ -25,7 +25,9 @@ use shamir_types::access::Actor;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::mpack;
 use shamir_types::types::common::TMap;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use shamir_wal::WalOpV2;
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
@@ -101,6 +103,57 @@ async fn a8_referenced_id_above_hwm_recorded_in_delta() {
         "A8: tx2's WAL interner_delta must include (\"foo\", {foo_id}) \
          since tx2's records reference that id above persisted_high_water. \
          Got: {:?}",
+        entry.interner_delta
+    );
+}
+
+// Before per-row capture, marking B made the table-wide flag hide raw A.
+#[tokio::test]
+async fn rv_engine_905a1f59_mixed_raw_and_captured_rows_persist_raw_id_in_wal() {
+    let repo = make_repo();
+    repo.add_table_for_test(TableConfig::new("items"));
+    let repo_interner = repo.repo_interner().await.unwrap();
+    let interner = repo_interner.get().await.unwrap();
+    let raw_id = interner.touch_ind("raw_only").unwrap().key().id();
+    let captured_id = interner.touch_ind("captured_only").unwrap().key().id();
+    assert_ne!(raw_id, captured_id);
+    assert!(raw_id > repo_interner.persisted_high_water() as u64);
+    let raw_rid = RecordId([1; 16]);
+    let captured_rid = RecordId([2; 16]);
+    let raw_body = map_bytes_with_key(raw_id);
+    let captured_body = map_bytes_with_key(captured_id);
+    let token = table_token_for("items");
+
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mut staging = StagingStore::new(store);
+    staging.set(raw_rid.to_bytes().into(), raw_body.clone());
+    staging.set(captured_rid.to_bytes().into(), captured_body.clone());
+    staging.mark_referenced_ids_captured();
+    let mut tx = TxContext::new(TxId::new(51), 0, 0, IsolationLevel::Snapshot);
+    tx.referenced_interner_ids.insert(captured_id, ());
+    tx.write_set.insert(token, staging);
+
+    let wal = repo.repo_wal().await.unwrap();
+    let outcome = commit_tx(tx, &repo).await.unwrap();
+    assert!(outcome.materialized());
+    let entries = wal.recover().await.unwrap();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.txn_id == outcome.tx_id)
+        .unwrap();
+    for (expected_rid, expected_body) in [(raw_rid, raw_body), (captured_rid, captured_body)] {
+        assert!(entry.ops.iter().any(|op| matches!(
+            op,
+            WalOpV2::Put { table_id_interned, rid, body }
+                if *table_id_interned == token && *rid == expected_rid && *body == expected_body
+        )));
+    }
+    assert!(
+        entry
+            .interner_delta
+            .iter()
+            .any(|(_, name, id)| name == "raw_only" && *id == raw_id),
+        "raw row's above-watermark mapping must survive in WAL: {:?}",
         entry.interner_delta
     );
 }

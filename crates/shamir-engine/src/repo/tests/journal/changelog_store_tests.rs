@@ -30,6 +30,8 @@ type TestStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbEr
 struct RangeItemCountingStore {
     inner: Arc<dyn Store>,
     items_yielded: Arc<AtomicUsize>,
+    batches: AtomicUsize,
+    fail_batch_after_first: std::sync::atomic::AtomicBool,
 }
 
 impl RangeItemCountingStore {
@@ -37,6 +39,8 @@ impl RangeItemCountingStore {
         Self {
             inner,
             items_yielded: Arc::new(AtomicUsize::new(0)),
+            batches: AtomicUsize::new(0),
+            fail_batch_after_first: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -52,6 +56,16 @@ impl Store for RangeItemCountingStore {
     }
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         self.inner.set(key, value).await
+    }
+    async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
+        self.batches.fetch_add(1, SeqCst);
+        if self.fail_batch_after_first.load(SeqCst) {
+            if let Some((key, value)) = items.into_iter().next() {
+                self.inner.set(key, value).await?;
+            }
+            return Err(DbError::Storage("injected partial batch".into()));
+        }
+        self.inner.set_many(items).await
     }
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         self.inner.get(key).await
@@ -140,4 +154,47 @@ async fn range_from_zero_limit_reads_nothing() {
 
     assert!(results.is_empty());
     assert_eq!(counting.items_yielded(), 0);
+}
+
+#[tokio::test]
+async fn rv_56651c4a_adapter_uses_storage_batch() {
+    let backing: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let counting = Arc::new(RangeItemCountingStore::new(backing));
+    let adapter = StoreChangelog::new(counting.clone());
+    let items: Vec<_> = (1u64..=3)
+        .map(|v| {
+            (
+                Bytes::copy_from_slice(&v.to_be_bytes()),
+                Bytes::from(vec![v as u8]),
+            )
+        })
+        .collect();
+    let results = adapter.put_many(items.clone()).await;
+    assert_eq!(results.len(), 3);
+    assert!(results.into_iter().all(|result| result.is_ok()));
+    assert_eq!(counting.batches.load(SeqCst), 1);
+    for (key, value) in items {
+        assert_eq!(counting.get(key.into()).await.unwrap(), value);
+    }
+}
+
+#[tokio::test]
+async fn rv_56651c4a_adapter_unknown_partial_failure_is_conservative() {
+    let counting = Arc::new(RangeItemCountingStore::new(Arc::new(InMemoryStore::new())));
+    counting.fail_batch_after_first.store(true, SeqCst);
+    let adapter = StoreChangelog::new(counting.clone());
+    let items: Vec<_> = (1u64..=3)
+        .map(|v| {
+            (
+                Bytes::copy_from_slice(&v.to_be_bytes()),
+                Bytes::from_static(b"event"),
+            )
+        })
+        .collect();
+    let results = adapter.put_many(items.clone()).await;
+    assert_eq!(results.len(), 3);
+    assert!(results.into_iter().all(|result| result.is_err()));
+    assert!(counting.get(items[0].0.clone().into()).await.is_ok());
+    assert!(counting.get(items[1].0.clone().into()).await.is_err());
+    assert_eq!(counting.batches.load(SeqCst), 1);
 }

@@ -23,6 +23,8 @@ struct BarrierStore {
     hold_ten: AtomicBool,
     fail_ten: AtomicBool,
     release_ten: Notify,
+    batches: Mutex<Vec<Vec<u64>>>,
+    fail_batch_ten: AtomicBool,
 }
 
 #[async_trait::async_trait]
@@ -38,6 +40,24 @@ impl ChangelogStore for BarrierStore {
         }
         self.rows.lock().unwrap().insert(key, value);
         Ok(())
+    }
+
+    async fn put_many(&self, items: Vec<(Bytes, Bytes)>) -> Vec<Result<(), ChangelogError>> {
+        self.batches.lock().unwrap().push(
+            items
+                .iter()
+                .map(|(key, _)| u64::from_be_bytes(key.as_ref().try_into().unwrap()))
+                .collect(),
+        );
+        let mut results = Vec::new();
+        for (key, value) in items {
+            if key == version_key(10) && self.fail_batch_ten.load(Ordering::Acquire) {
+                results.push(Err(ChangelogError::Journal("batch failure".into())));
+            } else {
+                results.push(self.put(key, value).await);
+            }
+        }
+        results
     }
 
     async fn range_from(
@@ -129,7 +149,8 @@ async fn journal_barrier_waits_for_out_of_order_gated_put() {
     tokio::pin!(confirm);
     assert!(poll!(confirm.as_mut()).is_pending());
     assert!(poll!(writer.as_mut()).is_pending());
-    assert_eq!(feed.last_persisted_version(), 11);
+    // Batch outcomes are accounted only after the whole call returns.
+    assert_eq!(feed.last_persisted_version(), 0);
     assert!(poll!(confirm.as_mut()).is_pending());
     assert_eq!(feed.read_from(&store, 10, 8).await.events, vec![event(11)]);
     fake.release_ten.notify_one();
@@ -466,4 +487,143 @@ async fn journal_barrier_split_tracks_and_emit_preserve_event_identity() {
         vec![event(9), event(10), event(11)],
     );
     assert_eq!(feed.last_persisted_version(), 11);
+}
+
+#[tokio::test]
+async fn rv_56651c4a_batches_and_preserves_all_control_boundaries() {
+    let fake = Arc::new(BarrierStore::default());
+    fake.fail_batch_ten.store(true, Ordering::Release);
+    let store: Arc<dyn ChangelogStore> = fake.clone();
+    let (feed, mut rx) = fixture(32);
+    for v in [9, 10, 11] {
+        feed.journal_enqueue(&Arc::new(event(v)));
+    }
+    feed.journal_tx.try_send(JournalMsg::Barrier(11)).unwrap();
+    feed.journal_enqueue(&Arc::new(event(12)));
+    let (ack_j, j) = tokio::sync::oneshot::channel();
+    feed.journal_tx
+        .try_send(JournalMsg::CleanHorizon {
+            through: 12,
+            horizon: feed.clean_horizon.clone(),
+            ack: ack_j,
+        })
+        .unwrap();
+    feed.journal_enqueue(&Arc::new(event(13)));
+    let (ack_gap, gap) = tokio::sync::oneshot::channel();
+    feed.journal_tx
+        .try_send(JournalMsg::RecoveryGap {
+            interval: (20, 20),
+            ack: ack_gap,
+        })
+        .unwrap();
+    feed.journal_enqueue(&Arc::new(event(14)));
+    let (ack_install, install) = tokio::sync::oneshot::channel();
+    feed.journal_tx
+        .try_send(JournalMsg::InstallRecords {
+            records: vec![(15, Bytes::from_static(b"install"))],
+            ack: ack_install,
+        })
+        .unwrap();
+    feed.journal_enqueue(&Arc::new(event(16)));
+    drain_and_persist(
+        &mut rx,
+        &store,
+        &feed.last_persisted_version,
+        &feed.gap,
+        &feed.confirmed_through,
+        &feed.barrier_notify,
+        &feed.repair_pending,
+    )
+    .await;
+    assert!(j.await.unwrap().is_ok());
+    assert!(gap.await.unwrap().is_ok());
+    assert!(install.await.unwrap().is_ok());
+    assert_eq!(
+        *fake.batches.lock().unwrap(),
+        vec![vec![9, 10, 11], vec![12], vec![13], vec![14], vec![16]]
+    );
+    assert_eq!(feed.first_gap_version(), 10);
+    assert_eq!(feed.last_persisted_version(), 16);
+    assert!(!fake.rows.lock().unwrap().contains_key(&version_key(10)));
+    assert!(fake.rows.lock().unwrap().contains_key(&version_key(11)));
+}
+
+#[tokio::test]
+async fn rv_56651c4a_count_limit_splits_drained_events() {
+    let fake = Arc::new(BarrierStore::default());
+    let store: Arc<dyn ChangelogStore> = fake.clone();
+    let (feed, mut rx) = fixture(300);
+    for version in 1..=257 {
+        feed.journal_enqueue(&Arc::new(event(version)));
+    }
+    drain_and_persist(
+        &mut rx,
+        &store,
+        &feed.last_persisted_version,
+        &feed.gap,
+        &feed.confirmed_through,
+        &feed.barrier_notify,
+        &feed.repair_pending,
+    )
+    .await;
+    let batches = fake.batches.lock().unwrap();
+    assert_eq!(
+        batches.iter().map(Vec::len).collect::<Vec<_>>(),
+        vec![256, 1]
+    );
+    assert_eq!(batches[0][0], 1);
+    assert_eq!(batches[1][0], 257);
+    assert_eq!(feed.last_persisted_version(), 257);
+}
+
+#[tokio::test]
+async fn rv_56651c4a_real_serialized_byte_limit_and_oversized_event() {
+    let fake = Arc::new(BarrierStore::default());
+    let store: Arc<dyn ChangelogStore> = fake.clone();
+    let (feed, mut rx) = fixture(8);
+    for (version, size) in [(1, 3_000_000), (2, 2_000_000), (3, 4_200_000), (4, 0)] {
+        let mut ev = event(version);
+        ev.repo = "x".repeat(size);
+        feed.journal_enqueue(&Arc::new(ev));
+    }
+    drain_and_persist(
+        &mut rx,
+        &store,
+        &feed.last_persisted_version,
+        &feed.gap,
+        &feed.confirmed_through,
+        &feed.barrier_notify,
+        &feed.repair_pending,
+    )
+    .await;
+    assert_eq!(
+        *fake.batches.lock().unwrap(),
+        vec![vec![1], vec![2], vec![3], vec![4]]
+    );
+    assert_eq!(feed.last_persisted_version(), 4);
+    assert_eq!(feed.first_gap_version(), 0);
+}
+
+#[tokio::test]
+async fn rv_56651c4a_failed_high_version_does_not_advance_watermark() {
+    let fake = Arc::new(BarrierStore::default());
+    fake.fail_batch_ten.store(true, Ordering::Release);
+    let store: Arc<dyn ChangelogStore> = fake.clone();
+    let (feed, mut rx) = fixture(4);
+    for version in [9, 10] {
+        feed.journal_enqueue(&Arc::new(event(version)));
+    }
+    drain_and_persist(
+        &mut rx,
+        &store,
+        &feed.last_persisted_version,
+        &feed.gap,
+        &feed.confirmed_through,
+        &feed.barrier_notify,
+        &feed.repair_pending,
+    )
+    .await;
+    assert_eq!(*fake.batches.lock().unwrap(), vec![vec![9, 10]]);
+    assert_eq!(feed.last_persisted_version(), 9);
+    assert_eq!(feed.first_gap_version(), 10);
 }

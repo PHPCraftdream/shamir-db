@@ -102,6 +102,21 @@ async fn project_event_carries_put_value_and_delete() {
 }
 
 #[tokio::test]
+async fn rv_tx_ed8562b0_implicit_and_nontx_projection_keep_zero() {
+    let mut tx = tx_with_writes(17).await;
+    assert_eq!(project_event(&tx, "main", 1).unwrap().tx_id, 17);
+    tx.set_implicit(true);
+    let event = project_event(&tx, "main", 2).unwrap();
+    assert_eq!(event.tx_id, 0);
+    assert_eq!(
+        crate::changefeed::nontx_event("main", 3, Actor::System, event.changes)
+            .unwrap()
+            .tx_id,
+        0
+    );
+}
+
+#[tokio::test]
 async fn project_event_empty_tx_is_none() {
     let tx = TxContext::new(TxId::new(9), 0, 0, IsolationLevel::Snapshot);
     assert!(project_event(&tx, "main", 1).is_none());
