@@ -1,0 +1,40 @@
+[package]
+name = "shamir-engine-query"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "ShamirDB query evaluation leaf (filter / read / write / auth / admin), re-exported as shamir_engine::query::*."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+shamir-types = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
+shamir-storage = { path = "../shamir-storage", default-features = false }
+shamir-query-types = { path = "../shamir-query-types" }
+shamir-funclib = { path = "../shamir-funclib" }
+shamir-tx = { path = "../shamir-tx" }
+shamir-index = { path = "../shamir-index" }
+
+tokio = { version = "1.49.0", features = ["full"] }
+bytes = "1.11.0"
+indexmap = { version = "2.7", features = ["serde"] }
+num-bigint = { version = "0.4", features = ["serde"] }
+regex = "1.11.1"        
+rust_decimal = { version = "1.40.0", features = ["serde"] }
+scc = "3.8"             
+serde = { version = "1.0.217", features = ["derive"] }
+smallvec = { version = "1.11", features = ["serde"] }
+
+[features]
+# Exposes test-only RBAC scaffolding to the engine.
+test-util = []
+
+[dev-dependencies]
+rmp-serde = "1.3.0"
+shamir-query-builder = { path = "../shamir-query-builder" }
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

@@ -418,10 +418,10 @@ impl TableManager {
         if let Some(t) = tx {
             if t.isolation == shamir_tx::IsolationLevel::Serializable {
                 let token = self.table_token();
-                let deps = crate::query::filter::eval::predicate_to_index_range(
+                let deps = crate::query::filter::eval::predicate_to_index_range_in_ctx(
                     filter,
                     self.sorted_indexes(),
-                    ctx.interner,
+                    ctx,
                     token,
                 );
                 if deps.is_empty() {
@@ -862,10 +862,10 @@ impl TableManager {
                     );
                 }
                 Some(filter) => {
-                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                    let deps = crate::query::filter::eval::predicate_to_index_range_in_ctx(
                         filter,
                         self.sorted_indexes(),
-                        ctx.interner,
+                        ctx,
                         token,
                     );
                     if deps.is_empty() {
@@ -926,10 +926,10 @@ impl TableManager {
                     );
                 }
                 Some(filter) => {
-                    let deps = crate::query::filter::eval::predicate_to_index_range(
+                    let deps = crate::query::filter::eval::predicate_to_index_range_in_ctx(
                         filter,
                         self.sorted_indexes(),
-                        ctx.interner,
+                        ctx,
                         token,
                     );
                     if deps.is_empty() {

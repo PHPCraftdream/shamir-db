@@ -1,0 +1,687 @@
+//! Pre-computed permission cache for O(1) superadmin / O(n) access checks.
+
+use crate::query::auth::{Action, Effect, Resource, Role};
+use crate::query::filter::Filter;
+use shamir_query_types::batch::{BatchOp, QueryEntry};
+use shamir_types::types::common::TMap;
+
+// ============================================================================
+// Core types
+// ============================================================================
+
+/// Pre-resolved permission decision.
+#[derive(Debug, Clone)]
+struct ResolvedPermission {
+    action: Action,
+    resource: Resource,
+    effect: Effect,
+}
+
+/// Pre-computed permission cache built from a user's roles.
+///
+/// Resolves all role/permission conflicts once at construction time,
+/// then provides fast access checks for individual operations or
+/// entire batches.
+///
+/// **NOTE (architectural status):** This role-matrix RBAC + `row_filter`
+/// RLS path is **test-only scaffolding**. The live access model is the
+/// **Shomer DAC** (owner/group/mode, POSIX-style), enforced via
+/// `ShamirDb::execute_as` -> `authorize_access` -> `permits`.
+/// In the Shomer model, **groups replace roles** for coarse-grained
+/// access; row-level security is a future Shomer feature
+/// (`ResourcePath::Record`-level meta). This type and its companion
+/// `execute_batch_with_permissions` are retained for engine-level unit
+/// tests only and are NOT wired into the server's live request path.
+#[derive(Debug, Clone)]
+pub struct SessionPermissions {
+    /// Fast path: if any role grants Action::All on Resource::Global, this is true.
+    is_superadmin: bool,
+    /// Pre-resolved permission decisions, sorted by specificity (desc).
+    decisions: Vec<ResolvedPermission>,
+    /// Pre-merged row filters per (action, resource).
+    row_filters: Vec<(Action, Resource, Filter)>,
+}
+
+// ============================================================================
+// Build
+// ============================================================================
+
+/// All individual actions (excluding All, which is expanded).
+const EXPANDED_ACTIONS: [Action; 10] = [
+    Action::Read,
+    Action::Insert,
+    Action::Update,
+    Action::Delete,
+    Action::Create,
+    Action::Drop,
+    Action::Alter,
+    Action::Write,
+    Action::ManageUsers,
+    Action::ManageRoles,
+];
+
+impl SessionPermissions {
+    /// Build from a slice of roles. Resolves all conflicts once.
+    ///
+    /// 1. Collects all permissions from all roles.
+    /// 2. Expands `Action::All` into individual actions.
+    /// 3. Stores as flat `Vec<ResolvedPermission>` sorted by specificity (desc).
+    /// 4. Merges row_filters: same resource+action -> OR.
+    /// 5. Detects superadmin (Action::All + Resource::Global + Allow).
+    pub fn build(roles: &[Role]) -> Self {
+        let mut is_superadmin = false;
+        let mut decisions = Vec::new();
+        let mut raw_filters: Vec<(Action, Resource, Option<Filter>)> = Vec::new();
+
+        for role in roles {
+            for perm in &role.permissions {
+                // Check superadmin: Allow + All + Global
+                if perm.effect == Effect::Allow
+                    && perm.actions.contains(&Action::All)
+                    && perm.resource == Resource::Global
+                {
+                    is_superadmin = true;
+                }
+
+                // Expand actions
+                let actions = expand_actions(&perm.actions);
+
+                for action in &actions {
+                    decisions.push(ResolvedPermission {
+                        action: *action,
+                        resource: perm.resource.clone(),
+                        effect: perm.effect,
+                    });
+
+                    // Track row filters for Allow permissions
+                    if perm.effect == Effect::Allow {
+                        raw_filters.push((*action, perm.resource.clone(), perm.row_filter.clone()));
+                    }
+                }
+            }
+        }
+
+        // Sort by specificity descending for early exit in check()
+        decisions.sort_by_key(|b| std::cmp::Reverse(b.resource.specificity()));
+
+        // Merge row filters: group by (action, resource), OR them together.
+        let row_filters = merge_row_filters(raw_filters);
+
+        SessionPermissions {
+            is_superadmin,
+            decisions,
+            row_filters,
+        }
+    }
+
+    // ========================================================================
+    // Check
+    // ========================================================================
+
+    /// Check if an action is allowed on a resource.
+    ///
+    /// Returns `Effect::Allow` for superadmin instantly. For others, scans
+    /// the pre-resolved decisions and picks the most specific match. At
+    /// equal specificity, Deny wins.
+    pub fn check(&self, action: Action, resource: &Resource) -> Effect {
+        if self.is_superadmin {
+            return Effect::Allow;
+        }
+
+        let mut best: Option<(u8, Effect)> = None;
+
+        for resolved in &self.decisions {
+            if resolved.action.matches(action) && resolved.resource.covers(resource) {
+                let spec = resolved.resource.specificity();
+                match &best {
+                    None => best = Some((spec, resolved.effect)),
+                    Some((best_spec, _best_effect)) => {
+                        if spec > *best_spec
+                            || (spec == *best_spec && resolved.effect == Effect::Deny)
+                        {
+                            best = Some((spec, resolved.effect));
+                        }
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, effect)| effect).unwrap_or(Effect::Deny)
+    }
+
+    /// Get the merged row filter for a specific action+resource.
+    ///
+    /// Finds all matching Allow permissions that have row_filters and
+    /// ORs them together. If any matching Allow permission has no
+    /// row_filter, returns `None` (no restriction).
+    pub fn row_filter(&self, action: Action, resource: &Resource) -> Option<Filter> {
+        if self.is_superadmin {
+            return None;
+        }
+
+        // Collect all matching filters from the raw merged list
+        let mut filters = Vec::new();
+        let mut has_unrestricted = false;
+
+        for (rf_action, rf_resource, filter) in &self.row_filters {
+            if *rf_action == action && rf_resource.covers(resource) {
+                match filter {
+                    Filter::And { filters: fs } if fs.is_empty() => {
+                        // Sentinel for "no restriction"
+                        has_unrestricted = true;
+                    }
+                    _ => {
+                        filters.push(filter.clone());
+                    }
+                }
+            }
+        }
+
+        if has_unrestricted {
+            return None;
+        }
+
+        match filters.len() {
+            0 => None,
+            1 => {
+                #[expect(
+                    clippy::unwrap_used,
+                    reason = "guard: filters.len() == 1 guarantees exactly one filter"
+                )]
+                let filter = filters.into_iter().next().unwrap();
+                Some(filter)
+            }
+            _ => Some(Filter::Or { filters }),
+        }
+    }
+
+    // ========================================================================
+    // Batch check
+    // ========================================================================
+
+    /// The merged row-level-security filter that must be AND-ed into this op's
+    /// WHERE clause for the current session, or `None` when unrestricted
+    /// (superadmin, no matching row_filter grant, or an unrestricted Allow).
+    /// Only data ops (Read/Update/Delete/Insert/Set) can be restricted; DDL ops
+    /// naturally yield `None`.
+    pub fn row_filter_for_op(&self, op: &BatchOp, db_name: &str) -> Option<Filter> {
+        let (action, resource) = Self::extract_action_resource(op, db_name);
+        self.row_filter(action, &resource)
+    }
+
+    /// Check all operations in a batch. Returns first denied operation or Ok(()).
+    ///
+    /// The `db_name` parameter provides database context for building
+    /// `Resource::Table` from `TableRef` (which lacks a database field).
+    pub fn check_batch(
+        &self,
+        queries: &TMap<String, QueryEntry>,
+        db_name: &str,
+    ) -> Result<(), (String, Action, Resource)> {
+        for (alias, entry) in queries {
+            let (action, resource) = Self::extract_action_resource(&entry.op, db_name);
+            if self.check(action, &resource) == Effect::Deny {
+                return Err((alias.clone(), action, resource));
+            }
+        }
+        Ok(())
+    }
+
+    /// Extract action and resource from a BatchOp.
+    fn extract_action_resource(op: &BatchOp, db_name: &str) -> (Action, Resource) {
+        match op {
+            // Data operations — use table_ref. All five variants are
+            // guaranteed by `BatchOp::table_ref()` (shamir-query-types) to
+            // return `Some`; see `data_op_action_resource` for how a
+            // violation of that (never-asserted-there) invariant is
+            // handled instead of panicking.
+            BatchOp::Read(_) => Self::data_op_action_resource(op, db_name, Action::Read),
+            BatchOp::Insert(_) => Self::data_op_action_resource(op, db_name, Action::Insert),
+            BatchOp::Update(_) => Self::data_op_action_resource(op, db_name, Action::Update),
+            BatchOp::Delete(_) => Self::data_op_action_resource(op, db_name, Action::Delete),
+            BatchOp::Set(_) => Self::data_op_action_resource(op, db_name, Action::Update),
+
+            // DDL — Create/Drop
+            BatchOp::CreateDb(op) => (
+                Action::Create,
+                Resource::Database {
+                    database: op.create_db.clone(),
+                },
+            ),
+            BatchOp::DropDb(op) => (
+                Action::Drop,
+                Resource::Database {
+                    database: op.drop_db.clone(),
+                },
+            ),
+            BatchOp::CreateRepo(op) => (
+                Action::Create,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.create_repo.clone(),
+                },
+            ),
+            BatchOp::DropRepo(op) => (
+                Action::Drop,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.drop_repo.clone(),
+                },
+            ),
+            // RenameRepo — Write on the source repo (rename mutates the
+            // repo's identity). The live executor re-checks Write in
+            // admin_db_repo::handle_rename_repo.
+            BatchOp::RenameRepo(op) => (
+                Action::Write,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.rename_repo.clone(),
+                },
+            ),
+            // RenameDb — Write on the source database (rename mutates the
+            // db's identity). The live executor re-checks Write in
+            // admin_db_repo::handle_rename_db.
+            BatchOp::RenameDb(op) => (
+                Action::Write,
+                Resource::Database {
+                    database: op.rename_db.clone(),
+                },
+            ),
+            // AlterRepo — Write on the repo itself (settings mutation).
+            BatchOp::AlterRepo(op) => (
+                Action::Write,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.alter_repo.clone(),
+                },
+            ),
+            BatchOp::CreateTable(op) => (
+                Action::Create,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.create_table.clone(),
+                },
+            ),
+            BatchOp::DropTable(op) => (
+                Action::Drop,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.drop_table.clone(),
+                },
+            ),
+            // RenameTable — Write on the source table (rename mutates the
+            // table's identity). The live executor re-checks Write in
+            // admin_table_index::handle_rename_table.
+            BatchOp::RenameTable(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.rename_table.clone(),
+                },
+            ),
+            BatchOp::CreateIndex(op) => (
+                Action::Create,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.table.clone(),
+                },
+            ),
+            BatchOp::DropIndex(op) => (
+                Action::Drop,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.table.clone(),
+                },
+            ),
+            // RenameIndex — Write on the parent table (mutates the index's
+            // identity). The live executor re-checks Write in
+            // admin_table_index::handle_rename_index.
+            BatchOp::RenameIndex(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.table.clone(),
+                },
+            ),
+
+            // Per-table buffer config — read for get, alter/update
+            // for set + alter. The table-level Alter action is
+            // already used by index DDL; reusing keeps the role
+            // matrix small and predictable.
+            BatchOp::GetBufferConfig(op) => (
+                Action::Read,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.get_buffer_config.clone(),
+                },
+            ),
+            BatchOp::SetBufferConfig(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.set_buffer_config.clone(),
+                },
+            ),
+            BatchOp::AlterBufferConfig(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.alter_buffer_config.clone(),
+                },
+            ),
+
+            // Auth management
+            BatchOp::CreateUser(_)
+            | BatchOp::DropUser(_)
+            | BatchOp::GrantRole(_)
+            | BatchOp::RevokeRole(_) => (Action::ManageUsers, Resource::Global),
+
+            // Migration — alter on the source table (destructive DDL)
+            BatchOp::StartMigration(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.start_migration.clone(),
+                },
+            ),
+            BatchOp::CommitMigration(_)
+            | BatchOp::RollbackMigration(_)
+            | BatchOp::MigrationStatus(_) => (Action::Alter, Resource::Global),
+
+            // List + access-tree introspection — read on global
+            BatchOp::List(_) | BatchOp::AccessTree(_) => (Action::Read, Resource::Global),
+
+            // Access-control DDL (S3) — admin manage operations
+            BatchOp::Chmod(_)
+            | BatchOp::Chown(_)
+            | BatchOp::Chgrp(_)
+            | BatchOp::CreateGroup(_)
+            | BatchOp::DropGroup(_)
+            | BatchOp::RenameGroup(_)
+            | BatchOp::AddGroupMember(_)
+            | BatchOp::RemoveGroupMember(_) => (Action::Alter, Resource::Global),
+
+            // Function / validator / folder DDL (DDL-A) — admin alter ops
+            BatchOp::CreateFunction(_)
+            | BatchOp::DropFunction(_)
+            | BatchOp::RenameFunction(_)
+            | BatchOp::CreateValidator(_)
+            | BatchOp::DropValidator(_)
+            | BatchOp::RenameValidator(_)
+            | BatchOp::BindValidator(_)
+            | BatchOp::UnbindValidator(_)
+            | BatchOp::ListValidators(_)
+            | BatchOp::CreateFunctionFolder(_)
+            | BatchOp::RenameFunctionFolder(_) => (Action::Alter, Resource::Global),
+
+            // Imperative history purge — table-scoped alter.
+            BatchOp::PurgeHistory(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.purge_history.clone(),
+                },
+            ),
+
+            // On-the-fly history-retention change — table-scoped alter.
+            // The live DAC path (execute.rs) enforces Action::Manage; this
+            // pre-resolved cache uses the query-types Action enum which has
+            // Alter as the closest admin-class action.
+            BatchOp::SetRetention(op) => (
+                Action::Alter,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.set_retention.clone(),
+                },
+            ),
+
+            // One-shot "changes since version V" journal read — repo-scoped
+            // read. Read-only op: the live DAC path enforces Action::Read on
+            // the repo (Store) resource.
+            BatchOp::ChangesSince(op) => (
+                Action::Read,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                },
+            ),
+
+            // Per-repo interner dump — repo-scoped read (the live DAC path
+            // enforces Action::Read on the repo Store resource).
+            BatchOp::InternerDump(op) => (
+                Action::Read,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.interner_dump.clone(),
+                },
+            ),
+
+            // Per-repo interner touch — mints ids (writes). The live DAC
+            // path enforces Action::Write on the repo Store resource; this
+            // pre-resolved cache uses Alter (the closest admin-class write
+            // action, mirroring SetRetention).
+            BatchOp::InternerTouch(op) => (
+                Action::Alter,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.interner_touch.clone(),
+                },
+            ),
+
+            // Stored procedure call — execute on a function, no table_ref.
+            BatchOp::Call(_) => (Action::Read, Resource::Global),
+
+            // Sub-batch — no direct resource access at this level; the
+            // inner batch's ops are checked recursively at execution time.
+            BatchOp::Batch(_) => (Action::Read, Resource::Global),
+
+            // ForEach loop (Epic04/B, #653) — same as Batch(sub): no direct
+            // resource access at this level; the loop body's ops are
+            // checked recursively at execution time (once per iteration).
+            BatchOp::ForEach(_) => (Action::Read, Resource::Global),
+
+            // Declarative schema DDL — Write on table (doc 05).
+            // Maps to access::Action::Write in the live DAC layer
+            // (admin_schema.rs). Both layers now agree on Write.
+            BatchOp::SetTableSchema(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.set_table_schema.clone(),
+                },
+            ),
+            BatchOp::AddSchemaRule(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.add_schema_rule.clone(),
+                },
+            ),
+            BatchOp::RemoveSchemaRule(op) => (
+                Action::Write,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.remove_schema_rule.clone(),
+                },
+            ),
+            BatchOp::GetTableSchema(op) => (
+                Action::Read,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.get_table_schema.clone(),
+                },
+            ),
+            BatchOp::DescribeTable(op) => (
+                Action::Read,
+                Resource::Table {
+                    database: db_name.to_string(),
+                    repo: op.repo.clone(),
+                    table: op.describe_table.clone(),
+                },
+            ),
+            // DescribeRepo — read-level introspection on the repo itself.
+            BatchOp::DescribeRepo(op) => (
+                Action::Read,
+                Resource::Repo {
+                    database: db_name.to_string(),
+                    repo: op.describe_repo.clone(),
+                },
+            ),
+
+            // Subscriptions — read-level access; actual table checks happen
+            // when the subscription is activated.
+            BatchOp::Subscribe(_) | BatchOp::Unsubscribe(_) => (Action::Read, Resource::Global),
+
+            // Replication DDL (REPLICATION.md §5.5) — admin-cluster surface.
+            // Execution is a separate R1-loop concern; here we only classify
+            // for authorization. Mutating repl-DDL (create/drop/alter) is a
+            // global Alter; the read-only introspection ops (list/status)
+            // are a global Read — same split the rest of the admin surface
+            // uses (e.g. ListValidators vs BindValidator).
+            BatchOp::CreateReplicationProfile(_)
+            | BatchOp::DropReplicationProfile(_)
+            | BatchOp::CreatePublication(_)
+            | BatchOp::DropPublication(_)
+            | BatchOp::CreateSubscription(_)
+            | BatchOp::DropSubscription(_)
+            | BatchOp::AlterSubscription(_) => (Action::Alter, Resource::Global),
+            BatchOp::ListPublications(_)
+            | BatchOp::ListSubscriptions(_)
+            | BatchOp::ReplicationStatus(_) => (Action::Read, Resource::Global),
+        }
+    }
+
+    /// Resolve `(action, resource)` for a data op (Read/Insert/Update/
+    /// Delete/Set) via its `table_ref()`.
+    ///
+    /// Invariant: `BatchOp::table_ref()` (defined in a different match
+    /// statement, in `shamir-query-types`) always returns `Some` for these
+    /// five variants — but nothing enforces the two match statements stay
+    /// in sync. `debug_assert!` catches drift immediately in dev/test
+    /// builds; a release build (debug-assertions off) instead degrades to
+    /// [`Self::deny_by_default`] rather than panicking on a bare
+    /// `.unwrap()`.
+    fn data_op_action_resource(op: &BatchOp, db_name: &str, action: Action) -> (Action, Resource) {
+        match op.table_ref() {
+            Some(tref) => (action, table_ref_to_resource(tref, db_name)),
+            None => {
+                debug_assert!(
+                    false,
+                    "invariant violated: BatchOp::table_ref() returned None \
+                     for a data op variant ({op:?}) that extract_action_resource \
+                     expects to always carry one — table_ref() and this match \
+                     arm list have drifted out of sync"
+                );
+                Self::deny_by_default(action)
+            }
+        }
+    }
+
+    /// Deny-by-default fallback `(action, resource)` for an invariant
+    /// violation in [`Self::data_op_action_resource`]. `Resource::Global`
+    /// is only `covers()`-matched by a decision that is ITSELF
+    /// `Resource::Global` (see `Resource::covers`), so this denies every
+    /// ordinary Table/Repo/Database-scoped grant and only a genuinely
+    /// global-privileged role retains access — a safe fail-closed default.
+    ///
+    /// Kept as its own panic-free function (rather than inlined in the
+    /// `debug_assert!` branch above) so the fallback VALUE is directly
+    /// regression-testable independent of `cfg!(debug_assertions)`.
+    /// `pub(crate)` (not private) purely so `query::auth::tests` — a
+    /// sibling module of `session`, not a descendant — can call it.
+    pub(crate) fn deny_by_default(action: Action) -> (Action, Resource) {
+        (action, Resource::Global)
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Expand `Action::All` into all individual actions.
+fn expand_actions(actions: &[Action]) -> Vec<Action> {
+    let mut result = Vec::new();
+    for action in actions {
+        if *action == Action::All {
+            result.extend_from_slice(&EXPANDED_ACTIONS);
+        } else {
+            result.push(*action);
+        }
+    }
+    result
+}
+
+/// Convert a `TableRef` + db_name into a `Resource::Table`.
+fn table_ref_to_resource(table_ref: &crate::query::TableRef, db_name: &str) -> Resource {
+    Resource::Table {
+        database: db_name.to_string(),
+        repo: table_ref.repo.clone(),
+        table: table_ref.table.clone(),
+    }
+}
+
+/// Merge row filters: group by (action, resource), OR them together.
+///
+/// If any entry in the group has `None` filter (unrestricted), the entire
+/// group is unrestricted. We represent this as an empty `And` sentinel
+/// so that `row_filter()` can detect it.
+fn merge_row_filters(
+    raw: Vec<(Action, Resource, Option<Filter>)>,
+) -> Vec<(Action, Resource, Filter)> {
+    // Group by (action, resource)
+    let mut groups: Vec<(Action, Resource, Vec<Option<Filter>>)> = Vec::new();
+
+    for (action, resource, filter) in raw {
+        let found = groups
+            .iter_mut()
+            .find(|(a, r, _)| *a == action && *r == resource);
+        match found {
+            Some((_, _, filters)) => filters.push(filter),
+            None => groups.push((action, resource, vec![filter])),
+        }
+    }
+
+    let mut result = Vec::new();
+    for (action, resource, filters) in groups {
+        // If any filter is None → unrestricted
+        if filters.iter().any(|f| f.is_none()) {
+            // Sentinel: empty And means unrestricted
+            result.push((action, resource, Filter::And { filters: vec![] }));
+            continue;
+        }
+
+        // All filters are Some — OR them together
+        #[expect(
+            clippy::unwrap_used,
+            reason = "guard: the preceding any(is_none) check proves every filter is Some"
+        )]
+        let concrete: Vec<Filter> = filters.into_iter().map(|f| f.unwrap()).collect();
+        #[expect(
+            clippy::unwrap_used,
+            reason = "guard: concrete.len() == 1 guarantees exactly one filter"
+        )]
+        let merged = match concrete.len() {
+            1 => concrete.into_iter().next().unwrap(),
+            _ => Filter::Or { filters: concrete },
+        };
+        result.push((action, resource, merged));
+    }
+
+    result
+}

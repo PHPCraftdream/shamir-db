@@ -12,6 +12,7 @@ use crate::query::batch::batch_execute::{
 };
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
+use crate::query::filter::read_budget::ReadByteMeter;
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
 
@@ -543,7 +544,7 @@ impl<'a> QueryRunner<'a> {
         // de-interning on the server.
         let meter = crate::query::batch::exec_scope::RowByteMeter::new(self.scope);
         let ctx = ctx
-            .with_row_byte_meter(meter.as_ref())
+            .with_row_byte_meter(meter.as_ref().map(|m| m as &dyn ReadByteMeter))
             .with_read_visibility_scope(self.scope);
         let result = match self.tx.as_deref() {
             Some(tx) => {

@@ -300,7 +300,8 @@ directory unless an explicit `--exceptions` path is given.
   [[moved]]                     # relocation (file or module move)
   path    = "crates/x/src/old.rs"        # base side
   item    = "Plan"
-  to_path = "crates/x/src/planner.rs"    # head side, optional but checked
+  to_path = "crates/x/src/planner.rs"    # head side, optional but checked;
+                                         # may name another package
   to_item = "Plan"                       # head side, optional but checked
   reason  = "moved to planner module"
   owner   = "@alice"
@@ -436,7 +437,10 @@ campaigns touched by the diff. With `campaigns = []`, neither diff gate is
 invoked and CI emits a notice. Master pushes skip both diff gates. Manual
 `structure` runs may use repeatable `--scope` prefixes, which intersect the
 union of `--paths` and `--changed-since`; omitting scopes preserves legacy
-selection behavior.
+selection behavior. A campaign is evaluated only when its PR touches its
+`delta` or `discovery_delta` as well as a campaign package; landed entries are
+inert and removed by the next campaign's PR. Discovery uses the campaign's
+separate `discovery_delta`.
 
 ## Exceptions: `.rust-guard/exceptions.toml`
 
@@ -578,6 +582,7 @@ Fixture → finding map:
 | `conservation/twin_moves` | two identical twins move to two other files: both suggested, the suggestion feeds back to clean |
 | `conservation/declared_moves_sig` | a declared move whose signature changed: `SIGNATURE_CHANGED` without `[[changed]]`, clean with it |
 | `conservation/declared_moves` | `UNPAIRABLE_DUPLICATE` listing base items and head candidates; two `[[moved]]` + `[[changed]]` entries settle it |
+| `conservation/cross_package_move` | an item and its test moved into another package: `ITEM_LOST` + `TEST_LOST` undeclared, clean with one `[[moved]]` per item (the declared pass ignores the package) |
 | `conservation/unpairable_duplicate` | `UNPAIRABLE_DUPLICATE` (one base item, two same-key head candidates) |
 | `conservation/uncond_path_default_ignored` | none (exit 0) — an UNCONDITIONAL `#[path]` mod never inventories the phantom default file |
 | (no fixture — bad rev argument) | `BLOCKED_COMPARISON` |

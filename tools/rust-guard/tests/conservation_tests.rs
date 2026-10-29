@@ -397,6 +397,44 @@ fn declared_moves_settle_an_ambiguous_key() {
     assert_clean(&repo.compare_with_delta(&delta));
 }
 
+#[test]
+fn undeclared_cross_package_move_is_a_loss() {
+    // `carried` and its test leave package `fix` for package `dest`.
+    // Counterfactual: moving across packages needs the same explicit
+    // declaration as a move inside one.
+    let repo = ConsRepo::two_commit("conservation/cross_package_move");
+    let out = repo.compare();
+    assert_finding(&out, "ITEM_LOST");
+    assert_finding(&out, "TEST_LOST");
+}
+
+#[test]
+fn declared_cross_package_move_is_clean() {
+    // Counterfactual: the declared pass keyed items by package, so a
+    // `[[moved]]` entry naming a head item in another package matched
+    // nothing (UNUSED_ALLOWANCE + ITEM_LOST + ITEM_ADDED + TEST_LOST).
+    let repo = ConsRepo::two_commit("conservation/cross_package_move");
+    let delta = format!(
+        "base = \"{}\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/lib.rs\"\n\
+         item = \"fix::lib::carried\"\n\
+         to_path = \"crates/dest/src/lib.rs\"\n\
+         to_item = \"dest::lib::carried\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n\n\
+         [[moved]]\n\
+         path = \"crates/fix/src/lib.rs\"\n\
+         item = \"fix::lib::carried_test\"\n\
+         to_path = \"crates/dest/src/lib.rs\"\n\
+         to_item = \"dest::lib::carried_test\"\n\
+         reason = \"relocated\"\n\
+         owner = \"@rust-guard\"\n",
+        repo.base_sha
+    );
+    assert_clean(&repo.compare_with_delta(&delta));
+}
+
 /// `[[moved]]` for `take` (a.rs -> c.rs), whose signature changed.
 fn moved_take_entry(base_sha: &str) -> String {
     format!(

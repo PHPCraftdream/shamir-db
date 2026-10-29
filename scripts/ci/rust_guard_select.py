@@ -1,33 +1,18 @@
 #!/usr/bin/env python3
-"""Select active rust-guard conservation campaigns touched by a PR diff.
+"""Select rust-guard campaigns or filter packages against cargo metadata.
 
-Why
-    The round-1 inline CI step built package dirs from ABSOLUTE
-    ``cargo metadata`` manifest paths but compared them against
-    REPO-RELATIVE ``git diff --name-only`` paths, so
-    ``f.startswith(d + "/")`` never matched and every campaign was
-    silently skipped.  This script centralises the selection logic,
-    normalises ALL separators to ``/`` and strips the repo root from the
-    metadata capture (``--root``, default ``.``) so both sides are
-    repo-relative posix paths.
+CLI:
+    rust_guard_select.py --stages stages.toml --metadata metadata.json [--root .]
+    rust_guard_select.py --present-in metadata.json --packages a,b
 
-CLI
-    ``rust_guard_select.py --stages .rust-guard/stages.toml
-    --metadata metadata.json [--root .]``
-
-    Changed files are read from stdin, one per line (the natural output
-    of ``git diff --name-only``).  For every campaign in ``stages.toml``
-    whose packages (restricted to those known to the metadata) are
-    touched by the diff, one line is printed::
-
-        <name>\t<delta>\t<comma-separated package names>\t<comma-separated package dirs>
-
-    Nothing is printed (exit 0) when nothing matches.
-
-Exit codes: 0 selection done (possibly no output), 2 usage/parse error
-(malformed stages TOML or campaign entry, unreadable metadata file, bad
-JSON, missing arguments) — the CI step fails closed on 2.
-Python 3 standard library only; ``python3 -I`` compatible.
+Selection reads changed paths from stdin. A campaign is evaluated only when
+its own delta or discovery_delta is touched AND a campaign package is touched;
+landed campaigns are inert until removed by the next campaign. Output columns:
+    <name>\t<delta>\t<packages>\t<dirs>\t<discovery_delta>
+Packages and directories are comma-separated. The present-in mode prints the
+requested packages found in metadata, in input order. Exit 2 on invalid input,
+missing arguments, unreadable files, or an empty present-in result.
+Python standard library only; python3 -I compatible.
 """
 
 from __future__ import annotations
@@ -92,6 +77,12 @@ def load_pkg_dirs(metadata_text: str, root: str) -> dict[str, str]:
     return dirs
 
 
+def touches_own_delta(campaign: dict, changed: list[str]) -> bool:
+    """Whether the diff touches either campaign delta, independent of separators."""
+    paths = {norm(path) for path in changed}
+    return any(norm(campaign[key]) in paths for key in ("delta", "discovery_delta"))
+
+
 def select(
     campaigns: list[dict],
     pkg_dirs: dict[str, str],
@@ -126,7 +117,7 @@ def load_campaigns(stages_text: bytes) -> list[dict]:
     for c in campaigns:
         if not isinstance(c, dict):
             raise ValueError("campaign entries must be tables")
-        for key in ("name", "delta"):
+        for key in ("name", "delta", "discovery_delta"):
             if not isinstance(c.get(key), str):
                 raise ValueError("campaign missing string %r" % key)
         pkgs = c.get("packages")
@@ -148,12 +139,31 @@ def main(
 ) -> int:
     """Entry point; keyword args inject file content / stdin in tests."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--stages", required=True, help="path to stages.toml")
-    parser.add_argument("--metadata", required=True, help="captured cargo metadata JSON")
+    parser.add_argument("--stages", help="path to stages.toml")
+    parser.add_argument("--metadata", help="captured cargo metadata JSON")
+    parser.add_argument("--present-in", help="filter packages against this metadata JSON")
+    parser.add_argument("--packages", help="comma-separated package names for --present-in")
     parser.add_argument("--root", default=".", help="repo root to strip from manifest paths")
     args = parser.parse_args(argv)
+    if args.present_in is not None:
+        if not args.packages or args.stages is not None or args.metadata is not None:
+            parser.error("--present-in requires --packages and cannot be combined with selection")
+    elif not args.stages or not args.metadata or args.packages is not None:
+        parser.error("selection requires --stages and --metadata")
 
     try:
+        if args.present_in is not None:
+            if metadata_text is None:
+                metadata_text = Path(args.present_in).read_text(encoding="utf-8")
+            meta = json.loads(metadata_text)
+            if not isinstance(meta, dict) or not isinstance(meta.get("packages"), list):
+                raise ValueError("metadata must contain a packages list")
+            names = {pkg["name"] for pkg in meta["packages"]}
+            present = [name for name in args.packages.split(",") if name in names]
+            if not present:
+                raise ValueError("none of the requested packages are present")
+            print(",".join(present))
+            return 0
         if stages_text is None:
             stages_text = Path(args.stages).read_bytes()
         campaigns = load_campaigns(stages_text)
@@ -162,9 +172,13 @@ def main(
         pkg_dirs = load_pkg_dirs(metadata_text, resolve_root(args.root))
         if changed is None:
             changed = sys.stdin.read().splitlines()
-        for name, delta, pkgs, dirs in select(campaigns, pkg_dirs, changed):
-            print("%s\t%s\t%s\t%s" % (name, delta, ",".join(pkgs), ",".join(dirs)))
-    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError) as exc:
+        active = [c for c in campaigns if touches_own_delta(c, changed)]
+        for name, delta, pkgs, dirs in select(active, pkg_dirs, changed):
+            campaign = next(c for c in active if c["name"] == name and c["delta"] == delta)
+            print("%s\t%s\t%s\t%s\t%s" % (
+                name, delta, ",".join(pkgs), ",".join(dirs), campaign["discovery_delta"]
+            ))
+    except (OSError, ValueError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
         print("rust_guard_select.py: %s" % exc, file=sys.stderr)
         return 2
     return 0

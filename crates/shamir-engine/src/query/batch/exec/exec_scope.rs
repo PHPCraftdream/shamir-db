@@ -7,6 +7,7 @@ use shamir_storage::error::DbError;
 
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchLimits, ExecutionDeadline};
+use crate::query::filter::read_budget::{ReadByteMeter, ReadVisibilityScope};
 use crate::query::read::{QueryRecord, QueryResult};
 
 /// Per-read credit, never a delta of the shared root counter.
@@ -262,5 +263,25 @@ impl ExecScope {
             }
         }
         Ok(())
+    }
+}
+
+impl ReadVisibilityScope for ExecScope {
+    fn read_visibility_budget(&self) -> Duration {
+        Self::read_visibility_budget(self)
+    }
+}
+
+impl ReadByteMeter for RowByteMeter<'_> {
+    fn charge(&self, bytes: u64) -> Result<(), DbError> {
+        Self::charge(self, bytes)
+    }
+
+    fn charge_record(&self, record: &QueryRecord) -> Result<(), DbError> {
+        Self::charge_record(self, record)
+    }
+
+    fn credit_survivors(&self, records: &[QueryRecord]) {
+        Self::credit_survivors(self, records);
     }
 }
