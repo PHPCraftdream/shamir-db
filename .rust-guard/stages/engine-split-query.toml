@@ -8096,3 +8096,93 @@ path = "crates/shamir-engine/src/table/table_manager/accessors/table_manager_str
 item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming::TableManager::read_tx_with_encoding"
 reason = "call site adapted to the extracted query crate (S0a/S1)"
 owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps::aggregate_expression_input_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::aggregation::legacy_and_caps::aggregate_expression_input_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps::aggregate_null_input_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::aggregation::legacy_and_caps::aggregate_null_input_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps::hashable_query_value_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::aggregation::legacy_and_caps::hashable_query_value_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps::pre_intern_quota_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::aggregation::legacy_and_caps::pre_intern_quota_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+item = "shamir-engine::lib::query::read::tests::aggregation::legacy_and_caps::string_agg_cap_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/aggregation/legacy_and_caps/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::aggregation::legacy_and_caps::string_agg_cap_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::distinct_group_canonical_key_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/query_results/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::query_results::distinct_group_canonical_key_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::pagination_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/query_results/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::query_results::pagination_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_order_page"
+to_path = "crates/shamir-engine-query/src/query/read/tests/query_results/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::query_results::select_order_page"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[moved]]
+path = "crates/shamir-engine/src/query/read/tests/query_results/mod.rs"
+item = "shamir-engine::lib::query::read::tests::query_results::select_projection_tests"
+to_path = "crates/shamir-engine-query/src/query/read/tests/query_results/mod.rs"
+to_item = "shamir-engine-query::lib::query::read::tests::query_results::select_projection_tests"
+reason = "moved with its module into the new crate (#1548 S1)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "shamir-engine::lib::query::filter::evaluation::runtime::core::eval_context::FilterContext"
+reason = "read-budget and visibility seams are trait objects (S0a), field types changed"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "shamir-engine::lib::query::filter::evaluation::runtime::core::eval_context::FilterContext::with_row_byte_meter"
+reason = "takes &dyn ReadByteMeter instead of the engine RowByteMeter (S0a)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "shamir-engine::lib::query::filter::evaluation::runtime::core::eval_context::FilterContext::with_read_visibility_scope"
+reason = "takes &dyn ReadVisibilityScope instead of the engine ExecScope (S0a)"
+owner = "@engine"
