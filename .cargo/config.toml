@@ -18,11 +18,11 @@ debug = false
 # A faster linker (rust-lld) was tried first; it ships with rustup but on
 # the windows-gnu host it cannot link proc-macro DLLs (`_DllMainCRTStartup`
 # undefined — known limitation). On windows-msvc rust-lld works as drop-in
-# for link.exe; if you ever switch the toolchain, add:
-#   [target.x86_64-pc-windows-msvc]
-#   linker = "rust-lld"
-# back into this file.
+# for link.exe and links the test binaries faster than link.exe.
 # ---------------------------------------------------------------------------
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
 
 # Test-binary compilation: spread codegen across CPUs and reuse incremental
 # artefacts so the second `cargo test` finishes in seconds, not minutes.
