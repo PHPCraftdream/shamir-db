@@ -128,7 +128,9 @@ mod imp {
     /// # Safety
     /// The host must have written `len` msgpack bytes at `ptr` for this call.
     unsafe fn decode_response(ptr: i32, len: i32) -> Result<Value> {
-        let guard = ResponseBytes::from_raw(ptr, len);
+        // SAFETY: the host contract transfers a live, uniquely owned allocation
+        // produced by shamir_alloc, initialized for exactly len bytes.
+        let guard = unsafe { ResponseBytes::from_raw(ptr, len)? };
         decode_value_bytes(guard.as_slice())
     }
 
@@ -270,7 +272,10 @@ mod imp {
         // Safety: the host wrote len response bytes at ptr into guest memory
         // via the guest's shamir_alloc for this call; the guard owns and
         // frees that allocation after the copy.
-        let guard = unsafe { ResponseBytes::from_raw(ptr, len) };
+        let guard = match unsafe { ResponseBytes::from_raw(ptr, len) } {
+            Ok(guard) => guard,
+            Err(error) => crate::__rt::raise(&error),
+        };
         guard.as_slice().to_vec()
     }
 }

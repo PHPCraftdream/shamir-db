@@ -2,12 +2,35 @@
 //!
 //! Exports the [`function`] attribute macro that transforms an author's async
 //! function into a WebAssembly module exporting the ShamirDB guest ABI.
+//!
+//! Each attribute accepts `crate = path` to name a renamed SDK dependency;
+//! without it the generated code uses `::shamir_sdk`.
 
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, FnArg, ItemFn, PatType, PathArguments, ReturnType, Type};
+
+struct SdkPath(syn::Path);
+
+impl syn::parse::Parse for SdkPath {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        if input.is_empty() {
+            return Ok(Self(syn::parse_quote!(::shamir_sdk)));
+        }
+        input.parse::<syn::Token![crate]>()?;
+        input.parse::<syn::Token![=]>()?;
+        let path = input.call(syn::Path::parse_mod_style)?;
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+        }
+        if !input.is_empty() {
+            return Err(input.error("unexpected or duplicate SDK attribute option"));
+        }
+        Ok(Self(path))
+    }
+}
 
 fn compile_error(err: syn::Error) -> TokenStream {
     err.to_compile_error().into()
@@ -104,15 +127,16 @@ mod tests;
 /// 5. Calls the author's function → `Validation`.
 /// 6. Encodes `validation.into_value()` as msgpack and returns the packed `(ptr, len)`.
 #[proc_macro_attribute]
-pub fn validator(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn validator(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let SdkPath(sdk) = parse_macro_input!(attr as SdkPath);
     let fn_item = parse_macro_input!(item as ItemFn);
-    match expand_validator(fn_item) {
+    match expand_validator(fn_item, &sdk) {
         Ok(expanded) => expanded.into(),
         Err(err) => compile_error(err),
     }
 }
 
-fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_validator(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
     validate_signature(
@@ -136,23 +160,33 @@ fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         // caller's lifetimes; they are used only in the copied body.
         #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
-            #arg0: shamir_sdk::Value,
-            #arg1: ::core::option::Option<shamir_sdk::Value>,
-            #arg2: shamir_sdk::Ctx,
-        ) -> shamir_sdk::Validation
+            #arg0: #sdk::Value,
+            #arg1: ::core::option::Option<#sdk::Value>,
+            #arg2: #sdk::Ctx,
+        ) -> #sdk::Validation
         #where_clause
         {
             #fn_item
             #fn_name(#arg0, #arg1, #arg2).await
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: () = { let _ = #inner_name; };
+
         /// Guest bump allocator: leak a `Vec<u8>` of `len` bytes, return its
         /// pointer. This memory is never freed — the WASM module is
         /// short-lived.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
+            if len < 0 {
+                #sdk::__rt::trap("invalid shamir_alloc length");
+            }
             let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
+            if ptr as usize > ::core::primitive::i32::MAX as usize || (ptr as u64 + len as u64) > (1u64 << 31) {
+                #sdk::__rt::trap("shamir_alloc outside guest ABI range");
+            }
             ::core::mem::forget(v);
             ptr as i32
         }
@@ -164,10 +198,15 @@ fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         /// `ptr` must be the guest-memory address of `len` initialized bytes
         /// readable for this call; the host must provide the allocation and
         /// keep it live until this function returns. Negative lengths are rejected.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            if len < 0 || (len > 0 && ptr == 0) {
-                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            let end = ptr as i64 + len as i64;
+            let memory_bytes = ::core::arch::wasm32::memory_size(0) as u64 * 65536;
+            if ptr < 0 || len < 0 || (len > 0 && ptr == 0)
+                || end as u64 > (1u64 << 31) || end as u64 > memory_bytes
+            {
+                #sdk::__rt::trap("invalid shamir_call pointer or length");
             }
             let bytes: &[u8] = if len == 0 {
                 &[]
@@ -177,42 +216,42 @@ fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
-            let params = match shamir_sdk::__rt::decode_params(bytes) {
+            let params = match #sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             };
 
             let mut entries = params.into_raw();
-            let record: shamir_sdk::Value = match entries.iter().position(|(key, _)| key == "record") {
+            let record: #sdk::Value = match entries.iter().position(|(key, _)| key == "record") {
                 ::core::option::Option::Some(index) => entries.remove(index).1,
-                ::core::option::Option::None => shamir_sdk::__rt::raise(&shamir_sdk::Error::codec("validator: missing `record` parameter")),
+                ::core::option::Option::None => #sdk::__rt::raise(&#sdk::Error::codec("validator: missing `record` parameter")),
             };
 
             // Extract `old_record` (optional: absent or null → None).
-            let old_record: ::core::option::Option<shamir_sdk::Value> =
+            let old_record: ::core::option::Option<#sdk::Value> =
                 match entries.iter().position(|(key, _)| key == "old_record") {
                     ::core::option::Option::Some(index) => match entries.remove(index).1 {
-                        shamir_sdk::Value::Null => ::core::option::Option::None,
+                        #sdk::Value::Null => ::core::option::Option::None,
                         value => ::core::option::Option::Some(value),
                     },
                     ::core::option::Option::None => ::core::option::Option::None,
                 };
             ::core::mem::drop(entries);
 
-            let ctx = shamir_sdk::Ctx::new();
+            let ctx = #sdk::Ctx::new();
 
-            let validation: shamir_sdk::Validation =
-                match shamir_sdk::__rt::block_on(#inner_name(record, old_record, ctx)) {
+            let validation: #sdk::Validation =
+                match #sdk::__rt::block_on(#inner_name(record, old_record, ctx)) {
                     ::core::result::Result::Ok(validation) => validation,
-                    ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                    ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
                 };
 
             let value = validation.into_value();
-            let encoded = match shamir_sdk::__rt::encode_value(&value) {
+            let encoded = match #sdk::__rt::encode_value(&value) {
                 ::core::result::Result::Ok(bytes) => bytes,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             };
-            shamir_sdk::__rt::leak_result(encoded)
+            #sdk::__rt::leak_result(encoded)
         }
     };
 
@@ -240,15 +279,16 @@ fn expand_validator(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 /// - `#[no_mangle] pub extern "C" fn shamir_alloc(len: i32) -> i32` — guest allocator.
 /// - `#[no_mangle] pub extern "C" fn shamir_call(ptr: i32, len: i32) -> i64` — ABI entry.
 #[proc_macro_attribute]
-pub fn function(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let SdkPath(sdk) = parse_macro_input!(attr as SdkPath);
     let fn_item = parse_macro_input!(item as ItemFn);
-    match expand_function(fn_item) {
+    match expand_function(fn_item, &sdk) {
         Ok(expanded) => expanded.into(),
         Err(err) => compile_error(err),
     }
 }
 
-fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_function(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
     validate_signature(
@@ -272,23 +312,33 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         // caller's lifetimes; they are used only in the copied body.
         #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
-            #arg0: shamir_sdk::Ctx,
-            #arg1: shamir_sdk::Batch,
-            #arg2: shamir_sdk::Params,
-        ) -> shamir_sdk::Result<shamir_sdk::Value>
+            #arg0: #sdk::Ctx,
+            #arg1: #sdk::Batch,
+            #arg2: #sdk::Params,
+        ) -> #sdk::Result<#sdk::Value>
         #where_clause
         {
             #fn_item
             #fn_name(#arg0, #arg1, #arg2).await
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: () = { let _ = #inner_name; };
+
         /// Guest bump allocator: leak a `Vec<u8>` of `len` bytes, return its
         /// pointer. This memory is never freed — the WASM module is
         /// short-lived.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
+            if len < 0 {
+                #sdk::__rt::trap("invalid shamir_alloc length");
+            }
             let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
+            if ptr as usize > ::core::primitive::i32::MAX as usize || (ptr as u64 + len as u64) > (1u64 << 31) {
+                #sdk::__rt::trap("shamir_alloc outside guest ABI range");
+            }
             ::core::mem::forget(v);
             ptr as i32
         }
@@ -302,10 +352,15 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         /// `ptr` must be the guest-memory address of `len` initialized bytes
         /// readable for this call; the host must provide the allocation and
         /// keep it live until this function returns. Negative lengths are rejected.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            if len < 0 || (len > 0 && ptr == 0) {
-                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            let end = ptr as i64 + len as i64;
+            let memory_bytes = ::core::arch::wasm32::memory_size(0) as u64 * 65536;
+            if ptr < 0 || len < 0 || (len > 0 && ptr == 0)
+                || end as u64 > (1u64 << 31) || end as u64 > memory_bytes
+            {
+                #sdk::__rt::trap("invalid shamir_call pointer or length");
             }
             let bytes: &[u8] = if len == 0 {
                 &[]
@@ -315,30 +370,30 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
-            let params = match shamir_sdk::__rt::decode_params(bytes) {
+            let params = match #sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             };
-            let ctx = shamir_sdk::Ctx::new();
-            let batch = shamir_sdk::Batch::new();
+            let ctx = #sdk::Ctx::new();
+            let batch = #sdk::Batch::new();
 
-            let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
-                shamir_sdk::__rt::block_on(#inner_name(ctx, batch, params));
+            let outcome: #sdk::Result<#sdk::Result<#sdk::Value>> =
+                #sdk::__rt::block_on(#inner_name(ctx, batch, params));
 
             match outcome {
                 ::core::result::Result::Ok(result) => match result {
                     ::core::result::Result::Ok(value) => {
-                        let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                        let encoded = match #sdk::__rt::encode_value(&value) {
                             ::core::result::Result::Ok(bytes) => bytes,
-                            ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                            ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
                         };
-                        shamir_sdk::__rt::leak_result(encoded)
+                        #sdk::__rt::leak_result(encoded)
                     }
                     ::core::result::Result::Err(e) => {
-                        shamir_sdk::__rt::raise(&e)
+                        #sdk::__rt::raise(&e)
                     }
                 },
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             }
         }
     };
@@ -357,8 +412,8 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 ///
 /// #[shamir_sdk::procedure]
 /// pub async fn my_proc(ctx: Ctx, params: Params) -> Result<Value> {
-///     let rows = ctx.db().table("users").query(None);
-///     Ok(rows)
+///     let rows = ctx.db().table("users").query(None)?;
+///     Ok(Value::List(rows))
 /// }
 /// ```
 ///
@@ -372,15 +427,16 @@ fn expand_function(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
 /// - Exactly 2 arguments: `(ctx: Ctx, params: Params)`.
 /// - Return type must be `Result<Value>`.
 #[proc_macro_attribute]
-pub fn procedure(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn procedure(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let SdkPath(sdk) = parse_macro_input!(attr as SdkPath);
     let fn_item = parse_macro_input!(item as ItemFn);
-    match expand_procedure(fn_item) {
+    match expand_procedure(fn_item, &sdk) {
         Ok(expanded) => expanded.into(),
         Err(err) => compile_error(err),
     }
 }
 
-fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_procedure(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
     validate_signature(
@@ -402,22 +458,32 @@ fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         // caller's lifetimes; they are used only in the copied body.
         #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
-            #arg0: shamir_sdk::Ctx,
-            #arg1: shamir_sdk::Params,
-        ) -> shamir_sdk::Result<shamir_sdk::Value>
+            #arg0: #sdk::Ctx,
+            #arg1: #sdk::Params,
+        ) -> #sdk::Result<#sdk::Value>
         #where_clause
         {
             #fn_item
             #fn_name(#arg0, #arg1).await
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: () = { let _ = #inner_name; };
+
         /// Guest bump allocator: leak a `Vec<u8>` of `len` bytes, return its
         /// pointer. This memory is never freed — the WASM module is
         /// short-lived.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
+            if len < 0 {
+                #sdk::__rt::trap("invalid shamir_alloc length");
+            }
             let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
+            if ptr as usize > ::core::primitive::i32::MAX as usize || (ptr as u64 + len as u64) > (1u64 << 31) {
+                #sdk::__rt::trap("shamir_alloc outside guest ABI range");
+            }
             ::core::mem::forget(v);
             ptr as i32
         }
@@ -429,10 +495,15 @@ fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         /// `ptr` must be the guest-memory address of `len` initialized bytes
         /// readable for this call; the host must provide the allocation and
         /// keep it live until this function returns. Negative lengths are rejected.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            if len < 0 || (len > 0 && ptr == 0) {
-                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            let end = ptr as i64 + len as i64;
+            let memory_bytes = ::core::arch::wasm32::memory_size(0) as u64 * 65536;
+            if ptr < 0 || len < 0 || (len > 0 && ptr == 0)
+                || end as u64 > (1u64 << 31) || end as u64 > memory_bytes
+            {
+                #sdk::__rt::trap("invalid shamir_call pointer or length");
             }
             let bytes: &[u8] = if len == 0 {
                 &[]
@@ -442,29 +513,29 @@ fn expand_procedure(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
-            let params = match shamir_sdk::__rt::decode_params(bytes) {
+            let params = match #sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             };
-            let ctx = shamir_sdk::Ctx::new();
+            let ctx = #sdk::Ctx::new();
 
-            let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
-                shamir_sdk::__rt::block_on(#inner_name(ctx, params));
+            let outcome: #sdk::Result<#sdk::Result<#sdk::Value>> =
+                #sdk::__rt::block_on(#inner_name(ctx, params));
 
             match outcome {
                 ::core::result::Result::Ok(result) => match result {
                     ::core::result::Result::Ok(value) => {
-                        let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                        let encoded = match #sdk::__rt::encode_value(&value) {
                             ::core::result::Result::Ok(bytes) => bytes,
-                            ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                            ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
                         };
-                        shamir_sdk::__rt::leak_result(encoded)
+                        #sdk::__rt::leak_result(encoded)
                     }
                     ::core::result::Result::Err(e) => {
-                        shamir_sdk::__rt::raise(&e)
+                        #sdk::__rt::raise(&e)
                     }
                 },
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             }
         }
     };
@@ -522,7 +593,7 @@ fn last_ident_is_inner(ty: &Type, ident: &str) -> bool {
 
 /// Returns `true` if the type token-stream contains `Ctx` anywhere.
 ///
-/// Used by `#[scalar]` to reject `Ctx`-typed arguments and guarantee purity.
+/// Used by `#[scalar]` as a best-effort signature diagnostic; aliases are not resolved.
 fn type_contains_ctx(ty: &Type) -> bool {
     let s = quote!(#ty).to_string();
     // Match standalone `Ctx` or fully-qualified `shamir_sdk::Ctx`, `crate::Ctx`
@@ -532,8 +603,7 @@ fn type_contains_ctx(ty: &Type) -> bool {
         .any(|segment| segment == "Ctx")
 }
 
-/// Attribute macro for a **scalar** — a pure value function with no database
-/// access.
+/// Attribute macro for a **scalar** — a guest function receiving `Params`.
 ///
 /// **Only one `#[scalar]` per crate is supported** (single entrypoint).
 ///
@@ -551,9 +621,10 @@ fn type_contains_ctx(ty: &Type) -> bool {
 ///
 /// The macro emits the same guest ABI (`shamir_alloc` + `shamir_call`).
 /// The difference is the fixed 1-argument signature `(params: Params)` —
-/// there is **no `Ctx`** available. This guarantees purity: a scalar
-/// cannot access the database, call other functions, or perform HTTP
-/// requests.
+/// there is no injected `Ctx`. A body may construct `Ctx`; this is not a
+/// purity or security boundary, and host authorization still applies.
+/// The generated wrapper forwards concrete `Params`, so Rust type checking,
+/// not lexical matching, determines signature compatibility.
 ///
 /// Compile-time checks:
 /// - Must be `async`.
@@ -562,15 +633,16 @@ fn type_contains_ctx(ty: &Type) -> bool {
 /// - **No argument type may contain `Ctx`** — compile error if it does.
 ///   Use `#[procedure]` for functions that need database access.
 #[proc_macro_attribute]
-pub fn scalar(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn scalar(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let SdkPath(sdk) = parse_macro_input!(attr as SdkPath);
     let fn_item = parse_macro_input!(item as ItemFn);
-    match expand_scalar(fn_item) {
+    match expand_scalar(fn_item, &sdk) {
         Ok(expanded) => expanded.into(),
         Err(err) => compile_error(err),
     }
 }
 
-fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_scalar(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
     validate_signature(
@@ -585,7 +657,7 @@ fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
             if type_contains_ctx(ty) {
                 return Err(syn::Error::new_spanned(
                     ty,
-                    "#[scalar] must not take Ctx — scalars are pure value functions with no database access. Use #[procedure] for functions that need Ctx.",
+                    "#[scalar] must not take Ctx; its argument must accept Params. Use #[procedure] for an injected Ctx.",
                 ));
             }
         }
@@ -602,35 +674,50 @@ fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
         // caller's lifetimes; they are used only in the copied body.
         #[allow(clippy::extra_unused_lifetimes)]
         async fn #inner_name #impl_generics(
-            #arg0: shamir_sdk::Params,
-        ) -> shamir_sdk::Result<shamir_sdk::Value>
+            #arg0: #sdk::Params,
+        ) -> #sdk::Result<#sdk::Value>
         #where_clause
         {
             #fn_item
             #fn_name(#arg0).await
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        const _: () = { let _ = #inner_name; };
+
         /// Guest bump allocator: leak a `Vec<u8>` of `len` bytes, return its
         /// pointer. This memory is never freed — the WASM module is
         /// short-lived.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn shamir_alloc(len: i32) -> i32 {
+            if len < 0 {
+                #sdk::__rt::trap("invalid shamir_alloc length");
+            }
             let v: ::std::vec::Vec<u8> = ::std::vec![0u8; len as usize];
             let ptr = v.as_ptr();
+            if ptr as usize > ::core::primitive::i32::MAX as usize || (ptr as u64 + len as u64) > (1u64 << 31) {
+                #sdk::__rt::trap("shamir_alloc outside guest ABI range");
+            }
             ::core::mem::forget(v);
             ptr as i32
         }
 
-        /// Guest ABI entry for a scalar: decode params, drive the user's pure
+        /// Guest ABI entry for a scalar: decode params, drive the user's
         /// async function, encode the result, and return a packed `(ptr, len)`.
         /// # Safety
         /// `ptr` must be the guest-memory address of `len` initialized bytes
         /// readable for this call; the host must provide the allocation and
         /// keep it live until this function returns. Negative lengths are rejected.
+        #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub unsafe extern "C" fn shamir_call(ptr: i32, len: i32) -> i64 {
-            if len < 0 || (len > 0 && ptr == 0) {
-                shamir_sdk::__rt::trap("invalid shamir_call pointer or length");
+            let end = ptr as i64 + len as i64;
+            let memory_bytes = ::core::arch::wasm32::memory_size(0) as u64 * 65536;
+            if ptr < 0 || len < 0 || (len > 0 && ptr == 0)
+                || end as u64 > (1u64 << 31) || end as u64 > memory_bytes
+            {
+                #sdk::__rt::trap("invalid shamir_call pointer or length");
             }
             let bytes: &[u8] = if len == 0 {
                 &[]
@@ -640,28 +727,28 @@ fn expand_scalar(fn_item: ItemFn) -> syn::Result<proc_macro2::TokenStream> {
                 unsafe { ::core::slice::from_raw_parts(ptr as *const u8, len as usize) }
             };
 
-            let params = match shamir_sdk::__rt::decode_params(bytes) {
+            let params = match #sdk::__rt::decode_params(bytes) {
                 ::core::result::Result::Ok(p) => p,
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             };
 
-            let outcome: shamir_sdk::Result<shamir_sdk::Result<shamir_sdk::Value>> =
-                shamir_sdk::__rt::block_on(#inner_name(params));
+            let outcome: #sdk::Result<#sdk::Result<#sdk::Value>> =
+                #sdk::__rt::block_on(#inner_name(params));
 
             match outcome {
                 ::core::result::Result::Ok(result) => match result {
                     ::core::result::Result::Ok(value) => {
-                        let encoded = match shamir_sdk::__rt::encode_value(&value) {
+                        let encoded = match #sdk::__rt::encode_value(&value) {
                             ::core::result::Result::Ok(bytes) => bytes,
-                            ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                            ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
                         };
-                        shamir_sdk::__rt::leak_result(encoded)
+                        #sdk::__rt::leak_result(encoded)
                     }
                     ::core::result::Result::Err(e) => {
-                        shamir_sdk::__rt::raise(&e)
+                        #sdk::__rt::raise(&e)
                     }
                 },
-                ::core::result::Result::Err(e) => shamir_sdk::__rt::raise(&e),
+                ::core::result::Result::Err(e) => #sdk::__rt::raise(&e),
             }
         }
     };

@@ -6,7 +6,7 @@
 //! enters the guest WASM binary).
 //!
 //! **Deliberately omitted variants** (the guest sees them on the wire as
-//! simpler types — see conformance tests in `tests/value_tests.rs`):
+//! simpler types — see conformance tests in `src/tests/value/value_tests.rs`):
 //! - `Dec` / `Big` — serialized by the host as strings → decoded here as `Str`.
 //! - `Set` — serialized by the host as a sequence → decoded here as `List`.
 //!
