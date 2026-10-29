@@ -22,6 +22,23 @@
 //! walks every sealed + active segment in order and replays the
 //! entries that have not yet been truncated.
 //!
+//! # Filesystem trust boundary
+//!
+//! WAL checksums detect accidental corruption; CRC does not authenticate
+//! writers. Anyone able to write the WAL can inject transactions that recovery
+//! replays. TLS and volume encryption do not authenticate WAL contents against
+//! local writers.
+//!
+//! The data directory, any sibling WAL directory, WAL segments and sidecars,
+//! and restored copies must be writable only by the database identity and
+//! explicitly trusted operators or tooling. Protect parent directories against
+//! unauthorized rename or replacement of these paths. On Unix, use `0700` for
+//! directories, `0600` for files, and `umask 0077`; grant exceptions only to
+//! trusted operators or tooling using appropriately restricted permissions.
+//! On Windows, restrict ACLs to the database identity and explicitly trusted
+//! operators or tooling, including on parents and restored copies; remove or
+//! restrict inherited broad write, delete, and delete-child permissions.
+//!
 //! # Truncation model
 //!
 //! Entries live in the segments until the background drainer, gated

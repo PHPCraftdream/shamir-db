@@ -1,8 +1,10 @@
 //! Exact replay snapshot for the detached durability worker.
 
-use super::set::*;
 use std::fs::File;
 use std::io::Read;
+
+use super::set::*;
+use crate::segment::frame_reader::{FrameRead, FrameReader};
 
 impl SegmentSet {
     /// The coordinator holds sync_gate through snapshot/fsync; history-backed
@@ -37,22 +39,23 @@ impl SegmentSet {
                 .sealed_error
                 .swap(0, std::sync::atomic::Ordering::AcqRel);
             let records = spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
-                let mut file = std::fs::OpenOptions::new()
+                let file = std::fs::OpenOptions::new()
                     .read(true)
                     .write(!synced)
                     .open(&path)
                     .map_err(|e| wal_io_error("sealed snapshot open".into(), e))?;
-                let mut buffer = Vec::new();
                 #[cfg(test)]
-                let read_result = if injected == 1 {
-                    Err(super::sync_test_seam::injected_error())
-                } else {
-                    file.read_to_end(&mut buffer)
-                };
-                #[cfg(not(test))]
-                let read_result = file.read_to_end(&mut buffer);
-                read_result.map_err(|e| wal_io_error("sealed snapshot read".into(), e))?;
-                let records = decode_snapshot(&buffer)?;
+                if injected == 1 {
+                    return Err(wal_io_error(
+                        "sealed snapshot read".into(),
+                        super::sync_test_seam::injected_error(),
+                    ));
+                }
+                let length = file
+                    .metadata()
+                    .map_err(|e| wal_io_error("sealed snapshot metadata".into(), e))?
+                    .len();
+                let records = decode_snapshot(&file, length)?;
                 if !synced {
                     #[cfg(test)]
                     let sync_result = if injected == 2 {
@@ -79,14 +82,7 @@ impl SegmentSet {
         let captured = spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
             let file = File::open(&path)
                 .map_err(|e| wal_io_error(format!("sync snapshot open {path:?}"), e))?;
-            let mut buffer = Vec::new();
-            file.take(bytes)
-                .read_to_end(&mut buffer)
-                .map_err(|e| wal_io_error("sync snapshot read".into(), e))?;
-            if u64::try_from(buffer.len()).ok() != Some(bytes) {
-                return Err(DbError::Storage("short WAL sync snapshot".into()));
-            }
-            decode_snapshot(&buffer)
+            decode_snapshot(file, bytes)
         })
         .await
         .map_err(|e| DbError::Internal(format!("sync snapshot join: {e}")))??;
@@ -95,31 +91,23 @@ impl SegmentSet {
     }
 }
 
-fn decode_snapshot(buffer: &[u8]) -> DbResult<Vec<WalEntryV2>> {
+fn decode_snapshot(reader: impl Read, length: u64) -> DbResult<Vec<WalEntryV2>> {
+    let mut reader = FrameReader::new(reader, length, "WAL snapshot read".into());
     let mut out = Vec::new();
-    let mut position = 0usize;
-    while position < buffer.len() {
-        let header = buffer
-            .get(position..position.saturating_add(4))
-            .ok_or_else(|| DbError::Storage("torn WAL snapshot header".into()))?;
-        let length = u32::from_le_bytes(header.try_into().expect("four-byte header")) as usize;
-        let start = position + 4;
-        let end = start
-            .checked_add(length)
-            .ok_or_else(|| DbError::Storage("WAL snapshot length overflow".into()))?;
-        let payload = buffer
-            .get(start..end)
-            .ok_or_else(|| DbError::Storage("torn WAL snapshot payload".into()))?;
-        let crc = buffer
-            .get(end..end.saturating_add(4))
-            .ok_or_else(|| DbError::Storage("torn WAL snapshot checksum".into()))?;
-        if crc32fast::hash(payload)
-            != u32::from_le_bytes(crc.try_into().expect("four-byte checksum"))
-        {
-            return Err(DbError::Storage("WAL snapshot checksum mismatch".into()));
+    loop {
+        match reader.next()? {
+            FrameRead::End => return Ok(out),
+            FrameRead::Incomplete { .. } => {
+                return Err(DbError::Storage("torn WAL snapshot frame".into()));
+            }
+            FrameRead::Frame {
+                payload, crc_ok, ..
+            } => {
+                if !crc_ok {
+                    return Err(DbError::Storage("WAL snapshot checksum mismatch".into()));
+                }
+                out.push(WalEntryV2::decode(&payload)?);
+            }
         }
-        out.push(WalEntryV2::decode(payload)?);
-        position = end + 4;
     }
-    Ok(out)
 }
