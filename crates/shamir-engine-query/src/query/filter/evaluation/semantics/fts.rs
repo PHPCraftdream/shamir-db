@@ -1,15 +1,3 @@
-use crate::query::filter::evaluation::semantics::pattern_guard::build_like_regex;
-
-/// Convert a SQL LIKE pattern to a regex pattern.
-/// `%` matches any sequence of characters, `_` matches a single character.
-/// All other regex meta-characters are escaped.
-pub(in crate::query::filter) fn like_pattern_to_regex(
-    pattern: &str,
-    case_insensitive: bool,
-) -> Option<regex::Regex> {
-    build_like_regex(pattern, case_insensitive).ok()
-}
-
 /// Compare `word` (raw, possibly mixed-case) against the pre-lowercased
 /// query token at `idx`. Avoids allocating a fresh `String` per word on
 /// the ASCII-already-lowercase fast path (the common case for English

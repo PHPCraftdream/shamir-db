@@ -3,8 +3,11 @@ use crate::query::filter::eval_context::FilterContext;
 use crate::query::filter::Filter;
 use shamir_types::core::interner::Interner;
 
-use crate::query::filter::compile::try_compile_filter;
+use crate::query::filter::compile::{
+    compile_filter_with_context, try_compile_filter, try_compile_filter_with_context,
+};
 use crate::query::filter::tests::eval_tests::shared::helpers::{empty_refs, make_alice_record};
+use crate::query::filter::FilterNode;
 
 // ============================================================================
 // Like / ILike
@@ -225,4 +228,94 @@ fn rv_engine_2a18b647_try_compile_rejects_nested_invalid_and_oversized_regex() {
     };
     assert!(try_compile_filter(&oversized, &interner).is_err());
     assert!(!compile_filter(&oversized, &interner).matches(&oversized_record, &ctx));
+}
+
+#[test]
+fn unknown_field_patterns_are_validated_before_folding() {
+    let interner = Interner::new();
+    let record = make_alice_record(&interner);
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs)
+        .with_overlay_ids_snapshot(Some(std::sync::Arc::new(shamir_collections::new_fx_map())));
+    let oversized = "a".repeat(crate::query::filter::MAX_FILTER_PATTERN_LENGTH + 1);
+    // LIKE treats regex metacharacters as literals, so its rejection case is the cap.
+    let patterns = [
+        (0, "("),
+        (0, oversized.as_str()),
+        (1, oversized.as_str()),
+        (2, oversized.as_str()),
+    ];
+    for (kind, pattern) in patterns {
+        for field in ["missing", "name"] {
+            let field = vec![field.to_string()];
+            let pattern = pattern.to_string();
+            let leaf = match kind {
+                0 => Filter::Regex { field, pattern },
+                1 => Filter::Like { field, pattern },
+                _ => Filter::ILike { field, pattern },
+            };
+            let wrappers = [
+                leaf.clone(),
+                Filter::Not {
+                    filter: Box::new(leaf.clone()),
+                },
+                Filter::And {
+                    filters: vec![
+                        Filter::IsNull {
+                            field: vec!["missing".into()],
+                        },
+                        leaf.clone(),
+                    ],
+                },
+                Filter::Or {
+                    filters: vec![
+                        Filter::IsNull {
+                            field: vec!["missing".into()],
+                        },
+                        leaf,
+                    ],
+                },
+            ];
+            for filter in wrappers {
+                let direct_error = try_compile_filter(&filter, &interner).err();
+                let overlay_error = try_compile_filter_with_context(&filter, &ctx).err();
+                assert!(direct_error.is_some(), "expected rejection for {filter:?}");
+                assert_eq!(direct_error, overlay_error);
+                assert!(!compile_filter(&filter, &interner).matches(&record, &ctx));
+                assert!(!compile_filter_with_context(&filter, &ctx).matches(&record, &ctx));
+            }
+        }
+    }
+}
+
+#[test]
+fn valid_unknown_field_patterns_fold_to_false() {
+    let interner = Interner::new();
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs)
+        .with_overlay_ids_snapshot(Some(std::sync::Arc::new(shamir_collections::new_fx_map())));
+    let field = vec!["missing".to_string()];
+    for filter in [
+        Filter::Regex {
+            field: field.clone(),
+            pattern: "abc".into(),
+        },
+        Filter::Like {
+            field: field.clone(),
+            pattern: "abc%".into(),
+        },
+        Filter::ILike {
+            field: field.clone(),
+            pattern: "abc%".into(),
+        },
+    ] {
+        assert!(matches!(
+            try_compile_filter(&filter, &interner),
+            Ok(FilterNode::False)
+        ));
+        assert!(matches!(
+            try_compile_filter_with_context(&filter, &ctx),
+            Ok(FilterNode::False)
+        ));
+    }
 }
