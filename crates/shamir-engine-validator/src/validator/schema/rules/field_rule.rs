@@ -474,7 +474,7 @@ impl FieldRule {
                 return;
             }
         };
-        match resolver.call(name, &[arg]) {
+        match resolver.call_offloaded(name, &[arg]) {
             Ok(QueryValue::Bool(true)) => {
                 // Predicate passed.
             }

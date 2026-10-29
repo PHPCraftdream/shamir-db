@@ -3584,6 +3584,7 @@ dependencies = [
  "data-encoding",
  "hex",
  "hmac",
+ "log",
  "num-bigint",
  "percent-encoding",
  "rand 0.9.4",
@@ -3599,6 +3600,7 @@ dependencies = [
  "shamir-types",
  "strsim",
  "subtle",
+ "tokio",
  "unicode-normalization",
 ]
 

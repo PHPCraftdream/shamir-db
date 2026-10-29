@@ -1,9 +1,12 @@
 //! Strict aggregate expression inputs and loud legacy wrappers.
 
+use std::sync::{Arc, OnceLock};
+
 use bytes::Bytes;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
-use shamir_funclib::scalar_resolver::ScalarResolver;
+use shamir_funclib::registry::FnEntry;
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_query_builder::{filter, select, val, Query};
 use shamir_query_types::read::{GroupBy, Select, SelectItem};
 use shamir_storage::error::DbError;
@@ -32,6 +35,34 @@ fn rows(interner: &Interner, values: &[QueryValue]) -> Vec<(RecordId, Bytes)> {
             (RecordId::new(), inner.to_bytes().unwrap())
         })
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn aggregate_argon_input_offloads_worker() {
+    let thread = Arc::new(OnceLock::new());
+    let observed = Arc::clone(&thread);
+    let layer = Arc::new(UserScalarLayer::new());
+    layer.register(
+        "crypto/argon2id",
+        FnEntry::pure(
+            move |_| {
+                let _ = observed.set(std::thread::current().id());
+                Ok(QueryValue::Int(1))
+            },
+            0,
+            Some(0),
+        ),
+    );
+    let interner = Interner::default();
+    let refs = new_map_wc(0);
+    let ctx = FilterContext::new(&interner, &refs).with_scalars(ScalarResolver::new(layer));
+    let records = rows(&interner, &[QueryValue::Int(3)]);
+    let select = selection([select::sum_of(val::func("crypto/argon2id", []), "sum")]);
+    let caller = std::thread::current().id();
+    let result = apply_aggregate_all_with_context(&records, &select, &interner, &ctx).unwrap();
+    assert_eq!(result[0].get("sum"), Some(&QueryValue::Int(1)));
+    assert!(thread.get().is_some());
+    assert_ne!(thread.get(), Some(&caller));
 }
 
 /// NULL inputs do not count or poison extrema; missing fields are NULL.

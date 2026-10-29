@@ -11,6 +11,10 @@ license = "MIT OR Apache-2.0"
 shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 
+# Runtime-aware scalar dispatch and one-time inline-runtime warning.
+tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread"] }
+log = "0.4"
+
 # Lock-free concurrent hashmap for the user-scalar layer (ScalarResolver).
 scc = "3.8"
 

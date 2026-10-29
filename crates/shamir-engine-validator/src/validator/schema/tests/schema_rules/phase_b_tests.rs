@@ -4,7 +4,10 @@
 //! Each check has an accept + reject case; the scalar-bridge `None`-resolver
 //! path (silent skip) is covered explicitly.
 
-use shamir_funclib::scalar_resolver::ScalarResolver;
+use std::sync::{Arc, OnceLock};
+
+use shamir_funclib::registry::FnEntry;
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -65,6 +68,39 @@ fn rule_with(path: &str, ty: TypeTag, constraints: Constraints) -> FieldRule {
 // ═══════════════════════════════════════════════════════════════════════
 // 1. SCALAR-BRIDGE
 // ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn scalar_bridge_argon_dispatch_offloads_worker() {
+    let thread = Arc::new(OnceLock::new());
+    let observed = Arc::clone(&thread);
+    let layer = Arc::new(UserScalarLayer::new());
+    layer.register(
+        "crypto/argon2id",
+        FnEntry::pure(
+            move |_| {
+                let _ = observed.set(std::thread::current().id());
+                Ok(QueryValue::Bool(true))
+            },
+            1,
+            Some(1),
+        ),
+    );
+    let resolver = ScalarResolver::new(layer);
+    let rule = rule_with(
+        "x",
+        TypeTag::String,
+        Constraints {
+            scalar: Some("crypto/argon2id".into()),
+            ..Default::default()
+        },
+    );
+    let qv = fields_from(vec![("x", QueryValue::Str("value".into()))]);
+    let caller = std::thread::current().id();
+    let result = check_extended_with_resolver(&rule, &qv, &resolver);
+    assert!(result.is_ok(), "{:?}", result.errors);
+    assert_ne!(thread.get(), Some(&caller));
+    assert!(thread.get().is_some());
+}
 
 #[test]
 fn scalar_bridge_accepts_valid_email() {
