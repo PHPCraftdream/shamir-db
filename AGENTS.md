@@ -29,12 +29,12 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 
 `Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
 `shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*` glob
-must not try to load it). The default workspace ships **28 crates** under `crates/` (including
+must not try to load it). The default workspace ships **29 crates** under `crates/` (including
 the `shamir-client-node` napi-rs binding, a regular member; MSVC-only on
 Windows) plus the vendored `vendor/hnsw_rs` member:
 
 `shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
-`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-query`,
+`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
 `shamir-server`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,

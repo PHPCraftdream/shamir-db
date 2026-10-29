@@ -46,12 +46,12 @@ def tree_text(engine_features):
         # no-default cell: the probe root, the engine's bare dependency
         # edge (present, but zero feature lines), and another package
         lines.extend(["shamir-engine v0.1.0", "shamir-storage v0.1.0"])
-    # the engine forwards `test-util` to its query crate; the probe tree
-    # always lists that dependency edge
-    lines.append("shamir-engine-query v0.1.0")
-    lines.append('shamir-engine-query feature "default"')
-    if "test-util" in engine_features:
-        lines.append('shamir-engine-query feature "test-util"')
+    # Both forwarded dependencies appear with defaults, and optionally test-util.
+    for package in ("shamir-engine-query", "shamir-engine-validator"):
+        lines.append(package + " v0.1.0")
+        lines.append('%s feature "default"' % package)
+        if "test-util" in engine_features:
+            lines.append('%s feature "test-util"' % package)
     return "\n".join(lines) + "\n"
 
 
@@ -291,6 +291,23 @@ class ForwardedFeatureTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("shamir-engine-query does not appear", err)
 
+    def test_missing_validator_package_exits_2(self):
+        tree = "".join(
+            line + "\n"
+            for line in tree_text([]).splitlines()
+            if not line.startswith("shamir-engine-validator")
+        )
+        code, _, err = run_main(["--expected", "no-default"], tree=tree)
+        self.assertEqual(code, 2)
+        self.assertIn("shamir-engine-validator does not appear", err)
+
+    def test_validator_forwarded_mismatch_exits_1(self):
+        tree = tree_text(["test-util"]).replace('shamir-engine-validator feature "test-util"\n', "")
+        code, _, err = run_main(["--expected", "test-util"], tree=tree)
+        self.assertEqual(code, 1)
+        self.assertIn("shamir-engine-validator", err)
+        self.assertIn("complete cargo tree stdout", err)
+
     def test_forwarded_mismatch_exits_1(self):
         tree = tree_text(["test-util"]).replace('shamir-engine-query feature "test-util"\n', "")
         code, _, err = run_main(["--expected", "test-util"], tree=tree)
@@ -347,7 +364,7 @@ class MainErrorTests(unittest.TestCase):
         # feature lines while a non-empty set is expected
         code, _, err = run_main(
             ["--expected", "fjall"],
-            tree="shamir-engine v0.1.0\nshamir-engine-query v0.1.0\nshamir-storage feature \"fjall\" (*)\n",
+            tree='shamir-engine v0.1.0\n' + tree_text([]) + 'shamir-storage feature "fjall" (*)\n',
         )
         self.assertEqual(code, 2)
         self.assertIn("no shamir-engine feature lines", err)

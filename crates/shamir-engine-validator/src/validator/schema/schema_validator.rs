@@ -8,10 +8,10 @@ use async_trait::async_trait;
 use shamir_query_types::filter::FilterValue;
 use smallvec::SmallVec;
 
-use crate::query::TableRef;
 use crate::validator::encode::Validation;
 use crate::validator::record_fields::RecordFields;
 use crate::validator::record_validator::{RecordValidator, ValidatorCtx};
+use shamir_query_types::TableRef;
 
 use shamir_types::types::value::QueryValue;
 
