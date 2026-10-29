@@ -17,6 +17,7 @@ Companion of [P2-REVALIDATION-2026-10-29.md](P2-REVALIDATION-2026-10-29.md) (ver
 - Every behavioral fix ships with a regression test that fails on the old code (named after the card id, red first in CI). Documentation-only cards need no test.
 - No new dependency, no `#[allow]`, no visibility widening beyond the card, layout limits (7 entries per folder, 1000 lines per file), `mod.rs` re-exports only, imports at the top, tests in `tests/` dirs, multi-line JSON literals in tests.
 - A card found already fixed or wrong is reported with evidence, not forced.
+- Concurrency cap (owner instruction 2026-10-29, after a host crash that was probably memory exhaustion): at most 5 rush sessions at the same time, counting executors, reviewers and decision readers. Runs already in flight at that moment were left alone; nothing new starts while 5 are running. Wave-2 and later executors wait for a free slot.
 
 ## Pipeline per task
 
@@ -465,12 +466,12 @@ Derived from the evidence paths of the cards at the verification commit; an exec
 - Wave 1; after: none. Cards 21 (medium 1, low 11, nit 9), effort 43, owner-decision cards 7.
 - Shares files with: P2-12, P2-19.
 
-**Goal.** Stop the default range filter at the upper bound, recover from a partial copy on the production rename path, remove the environmental thread-start panic, and tidy storage docs and tests.
+**Goal.** Stop the default range filter at the upper bound, define the partial-copy contract of copy_store (rename retry recovery is deferred), remove the environmental thread-start panic, validate Fjall store names, and tidy storage docs and tests.
 
 **Acceptance.**
 
 - The default range filter stops polling after the first key above the end bound (oracle: no further polls).
-- A partial copy on the production rename path is recovered or rolled back with a test; thread-start failure no longer panics.
+- copy_store has an explicit documented partial-copy contract (incremental merge/upsert, no rollback) pinned by a contract test; rename retry contamination stays unremediated and is deferred to a separately scoped engine/database change; Fjall worker-start failure no longer panics.
 - Documentation and test-organization cards are closed without behavior change.
 
 **Coordination.**
