@@ -1,9 +1,12 @@
 //! Node.js native binding for `shamir-client`.
 //!
-//! Mirrors the Rust SDK 1:1 in Node API. JavaScript sees:
+//! The Node API supports connecting, ping, batch execution, replication and
+//! user administration. It does not expose Rust subscription, cursor, local
+//! connection or resumption APIs; ticket getters have no Node resume input.
+//! JavaScript sees:
 //!
 //! ```js
-//! const { ShamirClient } = require('shamir-client-node');
+//! const { ShamirClient } = require('shamir-client');
 //!
 //! const client = await ShamirClient.connect({
 //!   host: '127.0.0.1',
@@ -16,13 +19,18 @@
 //!
 //! await client.ping();
 //!
-//! const resp = await client.execute('prod', {
-//!   id: 'rw',
-//!   queries: { rd: { from: 'items' } },
-//! });
+//! const { Batch, Query } = require('@shamir/client');
+//! const batch = Batch.create('rw')
+//!   .add('rd', Query.from('items').asOfVersion(4294967296))
+//!   .build();
+//! const resp = await client.execute('prod', batch);
 //!
 //! await client.close();
 //! ```
+//!
+//! `execute` is the low-level object FFI; use the TS builder's `.build()`.
+//! `Batch.execute(client, db)` is not supported by this Node client: it requires
+//! `executeWithTouch`. DTO reexports and a full adapter are deferred.
 //!
 //! All TLS / SCRAM / Argon2id / Ed25519 verification happens in the
 //! native binary via `shamir-client` — JS never touches crypto. Drift
@@ -36,10 +44,11 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use tokio::sync::{watch, RwLock};
-use zeroize::Zeroizing;
 
 mod request_state;
+mod secrets;
 use request_state::{Closed, State};
+use secrets::Snapshots;
 
 use shamir_client as core;
 use shamir_query_types::wire::repl::ReplRequest;
@@ -60,8 +69,8 @@ pub struct ConnectOptions {
     pub server_name: String,
     /// Username (raw — server-side normalisation applies).
     pub username: String,
-    /// Plaintext password. Zeroised in the native side after the
-    /// handshake completes.
+    /// Plaintext password. The owned native buffer is zeroized on drop;
+    /// JavaScript strings and copies outside this buffer are not erased.
     pub password: String,
     /// Trust-on-first-use: accept whatever Ed25519 pubkey the server
     /// presents on first connection. `true` for first connect; once you
@@ -99,9 +108,8 @@ pub struct ShamirClient {
     /// Cached at connect time so JS callers can read it without the
     /// async lock — useful for persisting the TOFU pin.
     pin: [u8; 32],
-    session_id: [u8; 32],
+    secrets: Snapshots<Vec<u8>>,
     expires_at_ns: u64,
-    resumption_ticket: Option<Vec<u8>>,
     resumption_expires_at_ns: Option<u64>,
     /// Cached at connect time: the terminal per-request deadline — bounds
     /// each JS call (lock wait + write + response wait) from the moment it
@@ -118,8 +126,10 @@ impl ShamirClient {
         env: &'env Env,
         opts: ConnectOptions,
     ) -> Result<PromiseRaw<'env, ShamirClient>> {
-        let port = u16::try_from(opts.port)
-            .map_err(|_| Error::from_reason(format!("port out of range: {}", opts.port)))?;
+        let (password, port) = secrets::protect_before(opts.password.into_bytes(), || {
+            u16::try_from(opts.port)
+                .map_err(|_| Error::from_reason(format!("port out of range: {}", opts.port)))
+        })?;
         let req_timeout = opts
             .request_timeout_ms
             .map(|ms| std::time::Duration::from_millis(u64::from(ms)));
@@ -143,7 +153,7 @@ impl ShamirClient {
             ),
             server_name: opts.server_name,
             username: opts.username,
-            password: Zeroizing::new(opts.password.into_bytes()),
+            password,
             accept_new_host: opts.accept_new_host.unwrap_or(false),
             trusted_pin,
             connect_timeout: opts
@@ -158,7 +168,7 @@ impl ShamirClient {
                 .map_err(infra_error)?;
 
             let pin = client.server_pub_key_pin();
-            let session_id = client.session_id();
+            let session_id = client.session_id().to_vec();
             let expires_at_ns = client.expires_at_ns();
             let resumption_ticket = client.resumption_ticket().map(|s| s.to_vec());
             let resumption_expires_at_ns = client.resumption_expires_at_ns();
@@ -168,9 +178,8 @@ impl ShamirClient {
                 inner: Arc::new(RwLock::new(Some(client))),
                 shutdown,
                 pin,
-                session_id,
+                secrets: Snapshots::new(session_id, resumption_ticket),
                 expires_at_ns,
-                resumption_ticket,
                 resumption_expires_at_ns,
                 request_timeout: req_timeout,
             })
@@ -184,10 +193,12 @@ impl ShamirClient {
         Buffer::from(self.pin.to_vec())
     }
 
-    /// 32-byte session id assigned by the server.
+    /// 32-byte session id assigned by the server; empty after close.
     #[napi]
     pub fn session_id(&self) -> Buffer {
-        Buffer::from(self.session_id.to_vec())
+        self.secrets
+            .session()
+            .map_or_else(|| Buffer::from(Vec::new()), |id| Buffer::from(id.to_vec()))
     }
 
     /// Absolute session expiry (unix nanoseconds). Returned as `BigInt`
@@ -197,12 +208,13 @@ impl ShamirClient {
         BigInt::from(self.expires_at_ns)
     }
 
-    /// Resumption ticket bytes (if the server issued one).
+    /// Resumption ticket bytes (if issued). Node has no resume input.
+    /// Returns null after close; previously returned JS copies are not erased.
     #[napi]
     pub fn resumption_ticket(&self) -> Option<Buffer> {
-        self.resumption_ticket
-            .as_ref()
-            .map(|b| Buffer::from(b.clone()))
+        self.secrets
+            .ticket()
+            .map(|ticket| Buffer::from(ticket.to_vec()))
     }
 
     /// Resumption expiry (paired with [`Self::resumption_ticket`]).
@@ -240,6 +252,8 @@ impl ShamirClient {
         // this call returns but before the worker reads it (067017c8).
         let batch = snapshot_bytes(&batch);
         env.spawn_future(async move {
+            // Sanctioned FFI boundary: deserialize caller-supplied wire bytes,
+            // rather than constructing a query in the binding.
             let request: core::BatchRequest = rmp_serde::from_slice(&batch)
                 .map_err(|error| Error::from_reason(format!("invalid batch payload: {error}")))?;
             let result: std::result::Result<core::BatchResponse, core::ClientError> =
@@ -268,6 +282,8 @@ impl ShamirClient {
         let state = Arc::clone(&self.inner);
         let mut shutdown = self.shutdown.subscribe();
         env.spawn_future(async move {
+            // Sanctioned FFI boundary: deserialize caller-supplied wire bytes,
+            // rather than constructing a query in the binding.
             let request: ReplRequest = rmp_serde::from_slice(&req)
                 .map_err(|error| Error::from_reason(format!("invalid repl payload: {error}")))?;
             let result = run_request(&state, &mut shutdown, deadline, timeout, |client| {
@@ -293,17 +309,14 @@ impl ShamirClient {
         password: String,
         roles: Vec<String>,
     ) -> Result<PromiseRaw<'env, Buffer>> {
+        let password = secrets::protect(password);
         let deadline = self.request_deadline();
         let timeout = self.request_timeout;
         let state = Arc::clone(&self.inner);
         let mut shutdown = self.shutdown.subscribe();
         env.spawn_future(async move {
             let result = run_request(&state, &mut shutdown, deadline, timeout, |client| {
-                Box::pin(async move {
-                    client
-                        .create_scram_user(&name, Zeroizing::new(password), roles)
-                        .await
-                })
+                Box::pin(async move { client.create_scram_user(&name, password, roles).await })
             })
             .await?;
             match result {
@@ -360,9 +373,10 @@ impl ShamirClient {
     /// Close the TLS write half cleanly. Idempotent — second call is
     /// a no-op.
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn close<'env>(&self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
+    pub fn close<'env>(&mut self, env: &'env Env) -> Result<PromiseRaw<'env, ()>> {
         let deadline = self.request_deadline();
         self.shutdown.send_replace(true);
+        self.secrets.clear();
         let timeout = self.request_timeout;
         let state = Arc::clone(&self.inner);
         env.spawn_future(async move {

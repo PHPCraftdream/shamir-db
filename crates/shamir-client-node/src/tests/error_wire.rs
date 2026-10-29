@@ -1,0 +1,18 @@
+use shamir_query_types::wire::DbResponse;
+
+#[test]
+fn native_db_error_named_messagepack_matches_wrapper_discriminator() {
+    let error = DbResponse::Error {
+        code: "x".to_owned(),
+        message: "y".to_owned(),
+    };
+    let bytes = rmp_serde::to_vec_named(&error).expect("encode native error");
+    assert_eq!(
+        bytes,
+        [
+            0x83, 0xa4, 0x6b, 0x69, 0x6e, 0x64, 0xa5, 0x65, 0x72, 0x72, 0x6f, 0x72, 0xa4, 0x63,
+            0x6f, 0x64, 0x65, 0xa1, 0x78, 0xa7, 0x6d, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65, 0xa1,
+            0x79,
+        ]
+    );
+}
