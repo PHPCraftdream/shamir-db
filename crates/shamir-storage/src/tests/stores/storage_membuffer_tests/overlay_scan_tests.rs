@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use super::common::{no_flush_config, rk};
 async fn collect_stream(mut s: crate::types::RecordStream) -> Vec<(RecordKey, Bytes)> {
-    use futures::StreamExt;
     let mut out = Vec::new();
     while let Some(batch) = s.next().await {
         out.extend(batch.unwrap());

@@ -131,7 +131,7 @@ pub(super) struct MemBufferState {
     /// for CLEAN fills only — writers never republish into it (dirty is
     /// the authority), and every hit is validated against the striped
     /// revision state.
-    pub(super) cache: ArcSwap<MokaCache<RecordKey, CacheEntry>>,
+    pub(super) cache: ArcSwap<MokaCache<RecordKey, CacheEntry, THasher>>,
     /// Pending writes (write-back buffer). Holds VALUES — not
     /// just keys — so that a moka cache eviction never loses
     /// data: even if the cache silently drops an entry, dirty
@@ -294,7 +294,7 @@ pub struct MemBufferStore {
 
 /// Build a fresh moka cache configured from `cfg`. Values are tagged
 /// `CacheEntry`s.
-pub(super) fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, CacheEntry> {
+pub(super) fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, CacheEntry, THasher> {
     // moka cannot express two independent limits. Scale each positive entry's
     // weight to ceil(max_bytes / max_entries), preserving byte weight except
     // where the count cap requires conservative rounding. Zero disables cache.
@@ -331,7 +331,7 @@ pub(super) fn build_cache(cfg: &MemBufferConfig) -> MokaCache<RecordKey, CacheEn
     if let Some(ttl) = cfg.ttl_ms {
         builder = builder.time_to_live(Duration::from_millis(ttl));
     }
-    builder.build()
+    builder.build_with_hasher(THasher::default())
 }
 
 impl MemBufferStore {
@@ -346,9 +346,8 @@ impl MemBufferStore {
         }
     }
 
-    /// Task #535: test-only constructor that installs a `ClearRaceHook` fired
-    /// inside `drain_once` at the sentinel-clear window, so a regression test
-    /// can deterministically drive the racing writer insert into the gap.
+    /// Test-only constructor installing a hook before `drain_once` removes
+    /// its snapshot, allowing a test to inject a racing dirty write.
     #[cfg(test)]
     pub(crate) fn new_with_clear_race_hook(
         inner: Arc<dyn Store>,
@@ -572,11 +571,8 @@ impl MemBufferStore {
         self.state.dirty_count.load(Ordering::Acquire)
     }
 
-    /// Task #535 test seam (updated #539 for the counter redesign): perform
-    /// the SYNCHRONOUS writer publish+insert used by the clear-race
-    /// regression test's hook to simulate a writer whose insert lands in the
-    /// drainer's clear window, WITHOUT touching the moka cache or notifying
-    /// the flusher.
+    /// Test seam: synchronously inject a dirty write before the drainer's
+    /// snapshot-removal loop, without touching the cache or notifying the flusher.
     #[cfg(test)]
     pub(crate) fn inject_racing_dirty_write(&self, key: RecordKey, value: Bytes) {
         if self

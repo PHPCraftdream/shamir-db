@@ -551,7 +551,11 @@ shape of the access pattern, in this order of preference:
    `scc::HashMap::with_hasher(THasher::default())`,
    `HashMap::<K, V, THasher>::default()`. `RandomState` (Rust default)
    is DOS-protection traded against 2–5× speed on cache-friendly
-   short keys — and we don't accept untrusted hash inputs here.
+   short keys. `THasher` is deterministic and unseeded, so this is an
+   accepted trade-off bounded by frame-size, rate-limit and decode-cap
+   limits, not an absence of client-controlled keys: see the HashDoS
+   threat model on `THasher` (binding ruling RU8) and do not seed
+   individual maps.
    `TMap`/`TSet` (IndexMap/IndexSet with `THasher`) already cover
    ordered cases.
 5. **`scc`/`dashmap` for concurrent maps** — `scc::HashMap`,

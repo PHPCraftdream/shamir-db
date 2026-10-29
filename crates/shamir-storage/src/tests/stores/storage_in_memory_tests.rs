@@ -8,6 +8,7 @@ use futures::StreamExt;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
+use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
 
 async fn run_store_tests(store: Arc<dyn Store>) {
@@ -399,8 +400,6 @@ async fn test_inmemory_iter_range_stream_batching() {
 
 #[tokio::test]
 async fn test_inmemory_concurrent_access() {
-    use tokio::task::JoinSet;
-
     let store = Arc::new(InMemoryStore::new());
     let mut join_set = JoinSet::new();
 

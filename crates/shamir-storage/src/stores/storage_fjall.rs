@@ -7,6 +7,8 @@ use bytes::Bytes;
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use futures::stream::Stream;
 use shamir_types::types::record_id::RecordId;
+use std::io;
+use std::ops::Bound;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::mpsc::{Receiver, SyncSender};
@@ -72,6 +74,35 @@ fn persist_sync_all(db: &Arc<Database>) -> Result<(), fjall::Error> {
 // So `set`/`remove` stay on `spawn_blocking`, unchanged from before this task.
 // ============================================================================
 
+fn validate_store_name(name: &str) -> DbResult<()> {
+    // Mirrors fjall 3.1.10 `keyspace::name::is_valid_keyspace_name` (non-empty,
+    // length fits u8): the check is on UTF-8 byte length, not character classes.
+    if name.is_empty() || name.len() > u8::MAX as usize {
+        return Err(DbError::Validation(
+            "store name must contain 1..=255 UTF-8 bytes".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+type WorkerSpawn = dyn Fn(Keyspace, Arc<Database>) -> io::Result<WriteWorker> + Send + Sync;
+
+#[derive(Debug)]
+struct WorkerStartError(Arc<io::Error>);
+
+impl std::fmt::Display for WorkerStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for WorkerStartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 /// A unit of write work submitted to the [`WriteWorker`]. Each variant
 /// carries the op parameters plus a oneshot sender the worker uses to return
 /// the result to the awaiting async caller.
@@ -84,7 +115,7 @@ enum WriteJob {
         value: Bytes,
         reply: oneshot::Sender<DbResult<RecordKey>>,
     },
-    /// `transact(ops)` — atomic mixed-op batch.
+    /// `transact(ops)` — mixed-op batch.
     Transact {
         ops: Vec<KvOp>,
         reply: oneshot::Sender<DbResult<()>>,
@@ -105,14 +136,16 @@ struct WriteWorker {
 
 impl WriteWorker {
     /// Spawn the worker thread. It owns one clone of the keyspace + database
-    /// handle and drains jobs strictly one-at-a-time, so submitted writes
-    /// execute in submission order.
+    /// handle and drains jobs one-at-a-time in channel admission order.
+    /// Concurrent invocation order is not guaranteed; await preceding writes
+    /// when ordering matters. Other handles, write routes, and repository
+    /// batches are not sequenced by this worker.
     ///
     /// The channel is bounded (`sync_channel`) so a burst of submitters
     /// applies natural backpressure instead of letting an unbounded queue
     /// grow without limit — the depth is generous enough that steady-state
     /// submitters never block, but a pathological fan-out can't OOM the queue.
-    fn spawn(keyspace: Keyspace, db: Arc<Database>) -> Self {
+    fn spawn(keyspace: Keyspace, db: Arc<Database>) -> io::Result<Self> {
         // Bound chosen well above realistic in-flight write fan-out; a full
         // queue simply parks the submitting task until the worker drains one.
         let (tx, rx): (SyncSender<WriteJob>, Receiver<WriteJob>) =
@@ -120,13 +153,12 @@ impl WriteWorker {
 
         let handle = std::thread::Builder::new()
             .name("fjall-write-worker".to_string())
-            .spawn(move || Self::run(rx, keyspace, db))
-            .expect("spawn fjall write worker thread");
+            .spawn(move || Self::run(rx, keyspace, db))?;
 
-        Self {
+        Ok(Self {
             tx: Some(tx),
             handle: Some(handle),
-        }
+        })
     }
 
     /// The live sender. `tx` is only ever `None` transiently inside `Drop`,
@@ -176,9 +208,11 @@ impl Drop for WriteWorker {
 /// Execute `insert` synchronously on the worker thread. Mirrors the exact
 /// logic the old per-op `spawn_blocking` closure ran.
 fn exec_insert(keyspace: &Keyspace, value: Bytes) -> DbResult<RecordKey> {
-    // §1.2 (audit 2026-07-06-perf-radical-o-notation): no pre-insert
-    // `contains_key` — `RecordId::new()` is a fresh random 128-bit id, so a
-    // collision probe is provably pointless (~2⁻¹²⁸). See the trait doc.
+    // RecordId::new uses a timestamp and 64-bit Xoshiro random tail; see
+    // the canonical RecordId type. No collision probe is made: uniqueness is
+    // probabilistic and a collision overwrites the existing value. Under an
+    // equal-timestamp, independent uniform-tail model, a pair collides with
+    // probability 2^-64; this is not a uniform random 128-bit identifier.
     let id = RecordId::new();
     let key = RecordKey::from_slice(id.as_bytes());
     keyspace
@@ -223,11 +257,7 @@ fn exec_atomic_commit(
 
     // Fail fast BEFORE any write on an invalid store name.
     for (name, _) in &ops {
-        if name.is_empty() {
-            return Err(DbError::Validation(
-                "atomic batch: store name must not be empty".into(),
-            ));
-        }
+        validate_store_name(name)?;
     }
 
     // Test seam: injected failure BEFORE any write is staged into a batch —
@@ -309,21 +339,13 @@ struct FjallAtomicBatch {
 #[async_trait]
 impl AtomicBatch for FjallAtomicBatch {
     fn set(&mut self, store: &str, key: RecordKey, value: Bytes) -> DbResult<()> {
-        if store.is_empty() {
-            return Err(DbError::Validation(
-                "atomic batch: store name must not be empty".into(),
-            ));
-        }
+        validate_store_name(store)?;
         self.ops.push((store.to_string(), KvOp::Set(key, value)));
         Ok(())
     }
 
     fn delete(&mut self, store: &str, key: RecordKey) -> DbResult<()> {
-        if store.is_empty() {
-            return Err(DbError::Validation(
-                "atomic batch: store name must not be empty".into(),
-            ));
-        }
+        validate_store_name(store)?;
         self.ops.push((store.to_string(), KvOp::Remove(key)));
         Ok(())
     }
@@ -397,6 +419,7 @@ impl FjallRepo {
 #[async_trait]
 impl Repo for FjallRepo {
     async fn store_get<S: AsRef<str> + Send>(&self, name: S) -> DbResult<Arc<dyn Store>> {
+        validate_store_name(name.as_ref())?;
         let db = self.db.clone();
         let table_name = name.as_ref().to_string();
 
@@ -411,10 +434,13 @@ impl Repo for FjallRepo {
             keyspace,
             db: self.db.clone(),
             worker: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            spawn_worker: None,
         }))
     }
 
     async fn store_delete<S: AsRef<str> + Send>(&self, name: S) -> DbResult<bool> {
+        validate_store_name(name.as_ref())?;
         let db = self.db.clone();
         let table_name = name.as_ref().to_string();
 
@@ -488,7 +514,9 @@ pub struct FjallStore {
     /// Dedicated write thread (task #536), spawned LAZILY on first
     /// `insert`/`transact` submission — not eagerly in `store_get`. Point-
     /// writes with NO embedded read — `insert`, `transact` — are submitted
-    /// here and executed one at a time in submission order. `set`/`remove`
+    /// here and executed one at a time in channel admission order. Concurrent
+    /// invocation order and ordering across handles or routes are not guaranteed.
+    /// Await preceding operations when ordering matters. `set`/`remove`
     /// stay on `spawn_blocking` (their embedded `contains_key` read measured
     /// a net regression when routed through the worker); reads stay on
     /// `spawn_blocking` too. See the worker's module comment for the
@@ -504,28 +532,38 @@ pub struct FjallStore {
     /// caught (the bench couldn't see it: it constructs each store once).
     /// `OnceLock` makes the spawn a one-time cost per store instance, paid
     /// only by callers that actually submit a job.
-    worker: std::sync::OnceLock<WriteWorker>,
+    worker: std::sync::OnceLock<Result<WriteWorker, Arc<io::Error>>>,
+    #[cfg(test)]
+    spawn_worker: Option<Box<WorkerSpawn>>,
 }
 
 impl FjallStore {
     /// Lazily spawn (on first call) or return the already-spawned write
     /// worker for this store. See the `worker` field's doc comment for why
     /// this must be lazy rather than eager.
-    fn worker(&self) -> &WriteWorker {
-        self.worker
-            .get_or_init(|| WriteWorker::spawn(self.keyspace.clone(), self.db.clone()))
+    fn worker(&self) -> DbResult<&WriteWorker> {
+        let result = self.worker.get_or_init(|| {
+            #[cfg(test)]
+            if let Some(spawn) = &self.spawn_worker {
+                return spawn(self.keyspace.clone(), self.db.clone()).map_err(Arc::new);
+            }
+            WriteWorker::spawn(self.keyspace.clone(), self.db.clone()).map_err(Arc::new)
+        });
+        result.as_ref().map_err(|error| {
+            DbError::Io(io::Error::new(
+                error.kind(),
+                WorkerStartError(Arc::clone(error)),
+            ))
+        })
     }
 }
 
 #[async_trait]
 impl Store for FjallStore {
     async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
-        // §1.2 (audit 2026-07-06-perf-radical-o-notation): no pre-insert
-        // `contains_key` — `RecordId::new()` is a fresh random 128-bit id, so a
-        // collision probe would be provably pointless (~2⁻¹²⁸). The actual
-        // insert runs on the dedicated write worker (task #536), replacing the
-        // former per-op `spawn_blocking` hop — see `exec_insert`.
-        submit(self.worker().sender(), |reply| WriteJob::Insert {
+        // No collision probe is made; see exec_insert for the probabilistic
+        // uniqueness and overwrite contract.
+        submit(self.worker()?.sender(), |reply| WriteJob::Insert {
             value,
             reply,
         })
@@ -614,7 +652,7 @@ impl Store for FjallStore {
                 // refcounted byte buffers). The previous `copy_from_slice`
                 // did a full memcpy + alloc per point-read.
                 Some(slice) => Ok(Bytes::from(slice)),
-                None => Err(DbError::NotFound(format!("record not found: {:?}", key))),
+                None => Err(DbError::missing_key(&key)),
             }
         })
         .await
@@ -647,7 +685,6 @@ impl Store for FjallStore {
                 let upper_init = end_bytes.clone();
 
                 let batch: DbResult<Vec<(RecordKey, Bytes)>> = task::spawn_blocking(move || {
-                    use std::ops::Bound;
                     let lower: Bound<Vec<u8>> = match &lower_init {
                         Some(s) => Bound::Included(s.clone()),
                         None => Bound::Unbounded,
@@ -681,18 +718,17 @@ impl Store for FjallStore {
         })
     }
 
-    /// Native atomic `transact` via fjall `OwnedWriteBatch`.
+    /// Submit a mixed batch via fjall `OwnedWriteBatch`.
     ///
-    /// `Database::batch()` returns an `OwnedWriteBatch` that collects
-    /// insert/remove ops across keyspaces. `commit()` applies them
-    /// atomically — all succeed or none are visible.
+    /// Raw concurrent reads can observe a partially applied batch; see
+    /// [`Store::supports_atomic_transact`].
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
         if ops.is_empty() {
             return Ok(());
         }
-        // Routed through the write worker (task #536) so the atomic batch
-        // commit is ordered against every other point-write on this store.
-        submit(self.worker().sender(), |reply| WriteJob::Transact {
+        // This worker orders jobs by channel admission, not against writes
+        // through other routes or handles.
+        submit(self.worker()?.sender(), |reply| WriteJob::Transact {
             ops,
             reply,
         })
@@ -824,7 +860,6 @@ impl Store for FjallStore {
                 let start_key = last_key;
 
                 let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
-                    use std::ops::Bound;
                     let lower: Bound<Vec<u8>> = match &start_key {
                         Some(c) => Bound::Excluded(c.clone()),
                         None => Bound::Unbounded,
@@ -869,7 +904,7 @@ impl Store for FjallStore {
     /// first matching key using the LSM-tree index, then `take_while` stops
     /// at the first key that no longer starts with the prefix. Subsequent
     /// batches use `Bound::Excluded(last_key)` to resume at exactly the right
-    /// position — same pattern as `iter_stream` above (lines ~323).
+    /// position — same pattern as `iter_stream`.
     fn scan_prefix_stream(
         &self,
         prefix: Bytes,
@@ -888,7 +923,6 @@ impl Store for FjallStore {
                 let pfx = prefix_vec.clone();
 
                 let batch: DbResult<(Vec<_>, Option<Vec<u8>>)> = task::spawn_blocking(move || {
-                    use std::ops::Bound;
 
                     // Seek directly to the prefix boundary (or just past the cursor).
                     let lower: Bound<Vec<u8>> = match cur_last {
@@ -941,9 +975,9 @@ impl Store for FjallStore {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
+#[cfg(test)]
+#[path = "../tests/stores/storage_fjall_tests/owner_decision_tests.rs"]
+mod owner_decision_tests;
 
 #[cfg(test)]
 #[path = "../tests/stores/storage_fjall_tests/write_worker_seam.rs"]

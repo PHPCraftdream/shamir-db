@@ -1,20 +1,19 @@
 #![allow(deprecated)]
 
-use crate::error::{DbError, DbResult};
+use crate::error::DbResult;
 use crate::storage_cached::CachedStore;
 use crate::storage_cached::COMMAND_CHANNEL_CAPACITY;
 use crate::storage_cached::QUEUED_PAYLOAD_BUDGET_BYTES;
 use crate::storage_in_memory::InMemoryStore;
 use crate::tests::types_tests::{collect_stream, run_batch_store_tests};
-use crate::types::{KvOp, RecordKey, Store};
+use crate::types::{KvOp, RecordKey, RecordStream, Store};
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::stream::Stream;
 use futures::StreamExt;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
-use std::pin::Pin;
 use std::sync::Arc;
+use tokio::task::JoinSet;
 use tokio::time::{sleep, Duration};
 /// Regression: `flush` must work through `Arc<dyn Store>`. The
 /// inherent `CachedStore::flush` was reachable on a concrete
@@ -318,8 +317,6 @@ async fn test_cached_iter_stream_from_cache() {
 
 #[tokio::test]
 async fn test_cached_concurrent_access() {
-    use tokio::task::JoinSet;
-
     let inner = Arc::new(InMemoryStore::new()) as Arc<dyn Store>;
     let cached = Arc::new(CachedStore::new_sync(inner.clone()).await.unwrap());
     let mut join_set = JoinSet::new();
@@ -614,8 +611,6 @@ async fn test_transact_set_many_populates_all() {
 struct AtomicTransactInner {
     inner: Arc<InMemoryStore>,
 }
-
-type RecordStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>>;
 
 #[async_trait]
 impl Store for AtomicTransactInner {
