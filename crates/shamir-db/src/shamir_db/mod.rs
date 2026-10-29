@@ -6,6 +6,7 @@ mod tests;
 pub(crate) mod execute;
 #[path = "execute/repo_admin/repo_durability/mod.rs"]
 pub(crate) mod repo_durability;
+// Preserve the existing public shamir_db::shamir_db module path.
 #[allow(clippy::module_inception)]
 pub mod shamir_db;
 

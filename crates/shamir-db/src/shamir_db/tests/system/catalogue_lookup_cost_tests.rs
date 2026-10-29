@@ -1,4 +1,5 @@
 use crate::access::{Actor, ResourceMeta, ResourcePath};
+use crate::engine::function::Params;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::query::admin::GroupRef;
@@ -6,6 +7,63 @@ use crate::shamir_db::shamir_db::ShamirDb;
 use crate::shamir_db::system_store::{SystemStore, SystemStoreConfig};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::Query;
+
+#[tokio::test]
+async fn invocation_reads_one_function_and_one_settings_snapshot() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.register_fn("sample", false, |_, _, _| async {
+        Ok(shamir_types::types::value::QueryValue::Null)
+    })
+    .unwrap();
+    let store = db.system_store();
+    let batch = db.new_batch_context();
+    for variant in 0..4 {
+        store.reset_function_catalogue_reads();
+        store.reset_invocation_settings_reads();
+        match variant {
+            0 => {
+                db.invoke_function_as("sample", Params::new(), Actor::User(7))
+                    .await
+            }
+            1 => {
+                db.invoke_function_with_batch_as("sample", Params::new(), &batch, Actor::User(7))
+                    .await
+            }
+            2 => {
+                db.invoke_function_in_db_as("db", "main", "sample", Params::new(), Actor::User(7))
+                    .await
+            }
+            _ => {
+                db.invoke_function_in_db_with_batch_as(
+                    "db",
+                    "main",
+                    "sample",
+                    Params::new(),
+                    &batch,
+                    Actor::User(7),
+                )
+                .await
+            }
+        }
+        .unwrap();
+        assert_eq!(store.function_catalogue_read_count(), 1);
+        assert_eq!(store.invocation_settings_read_count(), 1);
+    }
+    db.set_resource_meta(
+        &ResourcePath::FunctionNamespace,
+        &ResourceMeta {
+            owner: Actor::System,
+            group: None,
+            mode: 0o700,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(db
+        .invoke_function_as("sample", Params::new(), Actor::User(7))
+        .await
+        .is_err());
+}
 
 #[tokio::test]
 async fn rv_db_5977a782_group_name_resolution_is_keyed() {

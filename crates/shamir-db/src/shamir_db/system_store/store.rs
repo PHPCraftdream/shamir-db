@@ -86,6 +86,9 @@ pub struct SystemStore {
     /// Test-only count of function-catalogue reads.
     #[cfg(test)]
     function_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only count of settings-catalogue reads.
+    #[cfg(test)]
+    pub(super) invocation_settings_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Test-only count of validator-catalogue reads.
     #[cfg(test)]
     validator_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -122,7 +125,14 @@ impl SystemStore {
 
         let factory = match config {
             SystemStoreConfig::InMemory => BoxRepoFactory::in_memory(),
+            #[cfg(feature = "fjall")]
             SystemStoreConfig::Fjall(path) => BoxRepoFactory::fjall(path),
+            #[cfg(not(feature = "fjall"))]
+            SystemStoreConfig::Fjall(_) => {
+                return Err(DbError::Storage(
+                    "system store requires unavailable fjall backend".into(),
+                ))
+            }
         };
 
         let repo_config = RepoConfig::new(SYSTEM_REPO, factory)
@@ -157,10 +167,24 @@ impl SystemStore {
             group_names: Arc::new(ArcSwapOption::empty()),
             group_names_rebuild: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
+            invocation_settings_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
             validator_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         store.rebuild_group_names().await;
         Ok(store)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invocation_settings_read_count(&self) -> usize {
+        self.invocation_settings_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_invocation_settings_reads(&self) {
+        self.invocation_settings_reads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
     #[cfg(test)]

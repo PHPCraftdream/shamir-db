@@ -3444,7 +3444,6 @@ name = "shamir-db"
 version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
- "argon2",
  "async-trait",
  "base64",
  "bench-scale-tool",
@@ -3455,10 +3454,8 @@ dependencies = [
  "futures",
  "log",
  "rand 0.9.4",
- "rcgen",
  "rmp-serde",
  "rustc-hash 2.1.2",
- "rustls",
  "sefer-alloc",
  "serde",
  "serial_test",
@@ -3473,7 +3470,6 @@ dependencies = [
  "shamir-types",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "wat",
 ]
 

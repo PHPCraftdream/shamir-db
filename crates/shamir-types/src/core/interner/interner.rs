@@ -96,6 +96,8 @@ pub struct Interner {
     /// message names the repository (empty for scratch/new interners).
     quota_label: String,
     counters: QuotaCounters,
+    #[cfg(test)]
+    all_entries_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for Interner {
@@ -117,6 +119,8 @@ impl Interner {
             quota: None,
             quota_label: String::new(),
             counters: QuotaCounters::new(0, 0),
+            #[cfg(test)]
+            all_entries_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -163,6 +167,8 @@ impl Interner {
             quota: None,
             quota_label: String::new(),
             counters: QuotaCounters::new(count, bytes),
+            #[cfg(test)]
+            all_entries_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -446,12 +452,28 @@ impl Interner {
         InternerKey::new(id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn all_entries_call_count(&self) -> usize {
+        self.all_entries_calls.load(Ordering::Relaxed)
+    }
+
+    /// Highest currently published reverse ID, or zero when empty.
+    pub fn max_published_id(&self) -> u64 {
+        self.reverse
+            .load()
+            .iter()
+            .rposition(|slot| slot.get().is_some())
+            .unwrap_or(0) as u64
+    }
+
     /// Returns all interned entries as (InternerKey, UserKey) pairs.
     ///
     /// UserKey is reconstructed from the `Arc<str>` slot — this is a
     /// cold path (persistence / diagnostics), so the String allocation
     /// is acceptable.
     pub fn all_entries(&self) -> Vec<(InternerKey, UserKey)> {
+        #[cfg(test)]
+        self.all_entries_calls.fetch_add(1, Ordering::Relaxed);
         let rev = self.reverse.load();
         rev.iter()
             .enumerate()

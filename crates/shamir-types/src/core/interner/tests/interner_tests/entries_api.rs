@@ -10,6 +10,28 @@ fn test_with_state_empty() {
 }
 
 #[test]
+fn max_published_id_does_not_materialize_entries() {
+    let interner = Interner::new();
+    interner.touch_with_id("sparse", 100).unwrap();
+    assert_eq!(interner.all_entries_call_count(), 0);
+    assert_eq!(interner.max_published_id(), 100);
+    assert_eq!(interner.all_entries_call_count(), 0);
+    assert_eq!(interner.all_entries().len(), 1);
+    assert_eq!(interner.all_entries_call_count(), 1);
+}
+
+#[test]
+fn max_published_id_handles_empty_gaps_explicit_ids_and_retouch() {
+    let interner = Interner::new();
+    assert_eq!(interner.max_published_id(), 0);
+    interner.touch_with_id("high", 100).unwrap();
+    assert_eq!(interner.max_published_id(), 100);
+    interner.touch_with_id("low", 3).unwrap();
+    interner.touch_with_id("high", 100).unwrap();
+    assert_eq!(interner.max_published_id(), 100);
+}
+
+#[test]
 fn test_all_entries() {
     let interner = Interner::new();
     interner.touch_ind("alpha").unwrap();

@@ -88,14 +88,13 @@ impl ShamirAdminExecutor {
             .unwrap_or_default()
             .as_nanos();
         let rand_suffix: u32 = rand::random();
-        let migration_id = format!("mig_{}_{}_{:08x}", table_name, now_ns, rand_suffix);
+        let db_prefix = format!("mig_{}_{}_", self.db_name.len(), self.db_name);
+        let migration_id = format!("{db_prefix}{}_{:x}_{:08x}", table_name, now_ns, rand_suffix);
 
         // Reject if any active migration already targets this table.
-        let table_already_migrating = self
-            .shamir
-            .active_migrations()
-            .iter()
-            .any(|e| e.value().targets_table(&op.repo, table_name));
+        let table_already_migrating = self.shamir.active_migrations().iter().any(|e| {
+            e.key().starts_with(&db_prefix) && e.value().targets_table(&op.repo, table_name)
+        });
         if table_already_migrating {
             return Err(err(format!(
                 "migration already in progress for table '{}/{}'",

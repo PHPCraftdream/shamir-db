@@ -757,10 +757,12 @@ async fn mixed_kind_list_reports_correct_kind_and_count() {
 //         for a WASM validator (not just the unit from_record test)
 // ============================================================================
 
+#[cfg(feature = "fjall")]
 use shamir_db::shamir_db::SystemStoreConfig;
 
 /// Re-open the system store, retrying briefly while the previous session's
 /// fjall file lock is released.
+#[cfg(feature = "fjall")]
 async fn init_fjall_retry(path: &std::path::Path) -> ShamirDb {
     for _ in 0..50 {
         match ShamirDb::init(SystemStoreConfig::Fjall(path.to_path_buf())).await {
@@ -789,6 +791,7 @@ async fn init_fjall_retry(path: &std::path::Path) -> ShamirDb {
 /// in `artifact_kind_tests.rs` — it exercises the real persist→boot→reload
 /// path, proving the `kind` field survives the fjall write cycle and is
 /// correctly decoded on reopen.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn wasm_validator_kind_survives_reopen_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();

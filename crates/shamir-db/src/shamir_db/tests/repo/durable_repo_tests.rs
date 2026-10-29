@@ -4,19 +4,27 @@
 //! survive a `ShamirDb` restart when the system store is durable, and that
 //! explicit `engine: "in_memory"` remains ephemeral even in a durable home.
 
+#[cfg(feature = "fjall")]
 use shamir_query_builder::batch::Batch;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::ddl;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::doc;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::write;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::Query;
 
+#[cfg(feature = "fjall")]
 use crate::shamir_db::SystemStoreConfig;
+#[cfg(feature = "fjall")]
 use crate::ShamirDb;
 
 /// Re-open the system store, retrying briefly while the previous session's
 /// store still holds the redb file lock (the MemBuffer-wrapped store releases
 /// the lock a few ms after the owning `ShamirDb` is dropped). Mirrors the
 /// helper in `execute_tests`.
+#[cfg(feature = "fjall")]
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
@@ -33,6 +41,40 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// durable home must survive a full drop-and-reopen cycle. Data inserted in
 /// session 1 must be readable in session 2 — proving both that the redb file
 /// was created on disk *and* the catalogue record was persisted correctly.
+#[cfg(feature = "fjall")]
+#[tokio::test]
+async fn boot_groups_tables_by_database_and_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta");
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        for (db, table) in [("alpha", "one"), ("beta", "two")] {
+            shamir.create_db(db).await.unwrap();
+            let mut batch = Batch::new();
+            batch.id(1);
+            batch.create_repo(
+                "create",
+                ddl::create_repo("shared")
+                    .engine("in_memory")
+                    .tables([table]),
+            );
+            shamir
+                .execute(db, &batch.to_request_via_msgpack().unwrap())
+                .await
+                .unwrap();
+        }
+    }
+    let reopened = reinit_with_retry(sys_path).await;
+    for (db, present, absent) in [("alpha", "one", "two"), ("beta", "two", "one")] {
+        let tables = reopened.get_db(db).unwrap().list_tables("shared").unwrap();
+        assert!(tables.iter().any(|table| table == present));
+        assert!(!tables.iter().any(|table| table == absent));
+    }
+}
+
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn wire_created_repo_is_durable_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -96,6 +138,7 @@ async fn wire_created_repo_is_durable_across_reopen() {
 /// When the caller explicitly requests `engine: "in_memory"` inside a durable
 /// home, the repo is ephemeral: data does NOT survive a restart. This test
 /// verifies the opt-in ephemeral escape hatch works correctly.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn explicit_in_memory_repo_is_ephemeral() {
     let dir = tempfile::tempdir().unwrap();
@@ -155,6 +198,7 @@ async fn explicit_in_memory_repo_is_ephemeral() {
 /// A durable wire-created repo "data" in db "appdb" must produce a directory at
 /// `<data_root>/appdb/data` on disk (fjall is directory-based),
 /// mirroring the db→repo tree.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn durable_repo_file_mirrors_db_repo_tree() {
     let dir = tempfile::tempdir().unwrap();
