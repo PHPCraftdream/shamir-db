@@ -5,8 +5,9 @@
 #
 # With `campaigns = []` (the default state) conservation is a no-op:
 # the CI `source-integrity` job reads this file and simply finds no
-# campaigns to run. Add an entry ONLY when a refactor stage starts, and
-# remove it (and its delta) when the stage lands.
+# campaigns to run. A campaign runs only on a PR touching its delta or
+# discovery_delta and a campaign package. A landed entry is inert; the next
+# campaign's PR removes it (and its delta files).
 #
 # Fields (all required):
 #   name    = short campaign label, used in CI log messages
@@ -14,11 +15,15 @@
 #              [package] name) whose Rust sources are conserved
 #   delta   = repo-relative path to the stage's delta TOML
 #             (shape: see tools/rust-guard/README.md, "Delta file")
+#   discovery_delta = repo-relative path to a separate delta of the same shape;
+#             path/item identify the base binary id/test name, and explicit
+#             to_path/to_item identify the head binary id/test name
 #
 # Examples (do not uncomment; illustration only):
 # [[campaigns]]
 # name    = "split-repo-instance"
 # packages = ["shamir-db"]
 # delta   = ".rust-guard/stages/split-repo-instance.toml"
+# discovery_delta = ".rust-guard/stages/split-repo-instance-discovery.toml"
 
 campaigns = []

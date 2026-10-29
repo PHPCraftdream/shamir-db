@@ -471,7 +471,9 @@ self-tests run in the `rust-guard self-test` job, CI only):
   `.rust-guard/atomic_orderings.toml`. Changing a pinned ordering requires
   editing its pin with `owner` and `reason`.
 
-CI caches the rust-guard binary using a source-hash key.
+CI caches the rust-guard binary using a source-hash key. A campaign is evaluated
+only when its PR touches its `delta` or `discovery_delta` and a campaign
+package; landed entries are inert and removed by the next campaign's PR.
 
 Adding an exception: `.rust-guard/exceptions.toml` (`[[exception]]` /
 `[[producer]]`) or `.rust-guard/owned_impl.toml` — exact path/name plus
@@ -498,11 +500,12 @@ and `#[ignore]` changes are never declarable**.
   `cargo nextest list -E 'test(loom_model)'` finds zero tests (plus
   `--no-tests=fail` at run time), so a renamed/gated-away model cannot
   silently turn the gate into a vacuous pass.
-* `test-discovery` — `cargo nextest list --message-format json` diff at the
-  merge base vs head via `rust-guard discovery` (lost test, duplicate,
-  newly ignored, empty list, blocked comparison all fail); campaign-gated
-  through
-  `scripts/ci/rust_guard_select.py`, a no-op pass with no active campaign.
+* `test-discovery` — `cargo nextest list --message-format json` diff for every
+  selected campaign package at head and those present at the merge base, via
+  `rust-guard discovery` and the campaign's `discovery_delta` (lost test,
+  duplicate, newly ignored, empty list, blocked comparison all fail); selected
+  by `scripts/ci/rust_guard_select.py`, a no-op without a campaign. Drafts run
+  ubuntu × default only.
 * `node-binding` (full tier, windows-latest) — builds the `shamir-client`
   napi binding (`npm ci` + `npm run build:debug`), checks the generated
   `native/index.js`/`index.d.ts` for drift, packs the tarball and installs
