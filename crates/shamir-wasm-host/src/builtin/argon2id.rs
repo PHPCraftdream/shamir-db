@@ -31,6 +31,19 @@ const DEFAULT_TIME: u32 = 2;
 const DEFAULT_PARALLELISM: u32 = 1;
 const DEFAULT_LENGTH: u32 = 32;
 
+pub(crate) fn map_argon2_join_error(error: tokio::task::JoinError) -> FunctionError {
+    if error.is_cancelled() {
+        return FunctionError::Cancelled;
+    }
+    let payload = error.into_panic();
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("non-string panic payload");
+    FunctionError::Compute(format!("argon2id blocking task panicked: {message}"))
+}
+
 #[async_trait]
 impl ShamirFunction for Argon2idFunction {
     async fn call(&self, _ctx: &FnCtx, _batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
@@ -77,7 +90,7 @@ impl ShamirFunction for Argon2idFunction {
             }
         })
         .await
-        .map_err(|_| FunctionError::Cancelled)??;
+        .map_err(map_argon2_join_error)??;
 
         Ok(QueryValue::Bin(digest))
     }
