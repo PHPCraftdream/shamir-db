@@ -34,11 +34,10 @@ pub(super) use crate::wal_segment::{wal_io_error, WalSegment};
 pub(super) struct SealedMeta {
     pub(super) seq: u64,
     pub(super) path: PathBuf,
-    /// Highest `commit_version` in this segment — the truncation key. A
-    /// sealed segment is reclaimable once `max_version <= durable_watermark`.
-    /// `0` means "no versioned record" (legacy / non-versioned) and pins the
-    /// segment: it is NEVER truncated by version (I5).
+    /// Highest commit version, independent of retention eligibility.
     pub(super) max_version: u64,
+    /// Any zero-version record pins the whole segment.
+    pub(super) pinned: bool,
     pub(super) synced: bool,
 }
 
@@ -50,6 +49,12 @@ pub(super) struct Inner {
     pub(super) active: Arc<WalSegment>,
     pub(super) active_seq: u64,
 }
+
+#[cfg(test)]
+type TruncatePause = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
 
 /// Segmented WAL sink over a directory of numbered segments.
 ///
@@ -65,7 +70,12 @@ pub(super) struct Inner {
 pub struct SegmentSet {
     pub(super) dir: PathBuf,
     pub(super) max_bytes: u64,
-    pub(super) inner: Mutex<Inner>,
+    pub(super) inner: Arc<Mutex<Inner>>,
+    truncate_gate: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    truncate_fail_seq: Mutex<Option<u64>>,
+    #[cfg(test)]
+    truncate_pause: Mutex<Option<TruncatePause>>,
     // Cold sync/rotation exclusion only; ordinary appends never acquire it.
     pub(crate) sync_gate: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
@@ -85,6 +95,13 @@ fn parse_seg_seq(name: &str) -> Option<u64> {
     let stem = name.strip_suffix(".wal")?;
     let seq = stem.parse::<u64>().ok()?;
     (seg_file_name(seq) == name).then_some(seq)
+}
+
+fn retention_summary(entries: &[WalEntryV2]) -> (u64, bool) {
+    (
+        entries.iter().map(|e| e.commit_version).max().unwrap_or(0),
+        entries.iter().any(|e| e.commit_version == 0),
+    )
 }
 
 impl SegmentSet {
@@ -144,11 +161,16 @@ impl SegmentSet {
                 sync_test: super::sync_test_seam::SyncTestSeam::default(),
                 #[cfg(test)]
                 fail_retry_write: std::sync::atomic::AtomicBool::new(false),
-                inner: Mutex::new(Inner {
+                truncate_gate: Arc::new(tokio::sync::Mutex::new(())),
+                #[cfg(test)]
+                truncate_fail_seq: Mutex::new(None),
+                #[cfg(test)]
+                truncate_pause: Mutex::new(None),
+                inner: Arc::new(Mutex::new(Inner {
                     sealed: Vec::new(),
                     active,
                     active_seq,
-                }),
+                })),
             });
         }
 
@@ -169,28 +191,24 @@ impl SegmentSet {
                     .await
                     .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
             };
-            let max_version = match meta_probe {
-                Some(mv) => mv,
-                None => {
-                    // Fallback: compute max_version via a one-shot replay
-                    // (old-format segment, or an interrupted sidecar write).
-                    // Audit §1.8: sealed segments use replay_sealed_at_startup
-                    // so a CRC failure (corruption in a fully-fsync'd segment)
-                    // is a loud open error. Audit §2.4: PermissionDenied is a
-                    // hard error at startup (no concurrent truncation expected).
+            let (max_version, pinned) = match meta_probe {
+                Some((mv, Some(pinned))) => (mv, pinned),
+                _ => {
+                    // Missing, corrupt, or legacy WMT2: replay to establish the pin.
                     let entries = WalSegment::replay_path(path.clone(), true, false, false).await?;
-                    entries.iter().map(|e| e.commit_version).max().unwrap_or(0)
+                    retention_summary(&entries)
                 }
             };
             sealed.push(SealedMeta {
                 seq,
                 path,
                 max_version,
+                pinned,
                 synced: false,
             });
         }
         // RV-WAL-A025886E — rule: "a segment that has a sidecar never changes."
-        // If the highest segment has a VALID WMT2 sidecar it is sealed (its
+        // If the highest segment has a VALID WMT2 or WMT3 sidecar it is sealed (its
         // data was fsync'd before the sidecar was written) and must never be
         // re-activated: create seq+1 as the new active instead. A WMT1
         // (legacy) sidecar reads as absent here, so the replay fallback runs
@@ -202,11 +220,20 @@ impl SegmentSet {
                 .await
                 .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??
         };
-        if let Some(max_version) = highest_meta {
+        if let Some((cached_max, cached_pin)) = highest_meta {
+            let (max_version, pinned) = match cached_pin {
+                Some(pinned) => (cached_max, pinned),
+                None => {
+                    let entries =
+                        WalSegment::replay_path(active_path.clone(), true, false, false).await?;
+                    retention_summary(&entries)
+                }
+            };
             sealed.push(SealedMeta {
                 seq: active_seq,
                 path: active_path.clone(),
                 max_version,
+                pinned,
                 synced: true,
             });
             active_seq += 1;
@@ -220,14 +247,9 @@ impl SegmentSet {
         // only one that can have one. Removing it now keeps the next
         // `append_batch` window from being stranded behind it on replay.
         active.repair_torn_tail().await?;
-        let active_max = active
-            .replay_at_startup()
-            .await?
-            .iter()
-            .map(|entry| entry.commit_version)
-            .max()
-            .unwrap_or(0);
-        active.restore_max_committed(active_max);
+        let active_entries = active.replay_at_startup().await?;
+        let (active_max, active_pin) = retention_summary(&active_entries);
+        active.restore_retention(active_max, active_pin);
 
         // Cleanup only (RV-WAL-A025886E): with the sidecar-never-changes rule
         // the active segment can no longer carry a VALID sidecar (a highest
@@ -252,12 +274,35 @@ impl SegmentSet {
             sync_test: super::sync_test_seam::SyncTestSeam::default(),
             #[cfg(test)]
             fail_retry_write: std::sync::atomic::AtomicBool::new(false),
-            inner: Mutex::new(Inner {
+            truncate_gate: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            truncate_fail_seq: Mutex::new(None),
+            #[cfg(test)]
+            truncate_pause: Mutex::new(None),
+            inner: Arc::new(Mutex::new(Inner {
                 sealed,
                 active,
                 active_seq,
-            }),
+            })),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_truncate_failure(&self, seq: u64) {
+        *self.truncate_fail_seq.lock().unwrap() = Some(seq);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_next_truncate(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *self.truncate_pause.lock().unwrap() = Some((entered_tx, resume_rx));
+        (entered_rx, resume_tx)
     }
 
     #[cfg(test)]
@@ -356,9 +401,14 @@ impl SegmentSet {
     /// tail, if any, was already truncated by `WalSegment::append_batch`'s
     /// rollback (or will be healed by `repair_torn_tail` on next open).
     async fn rotate_after_poison(&self) -> DbResult<()> {
-        let (sealed_seq, sealed_max, next_seq) = {
+        let (sealed_seq, sealed_max, sealed_pin, next_seq) = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
-            (g.active_seq, g.active.max_committed(), g.active_seq + 1)
+            (
+                g.active_seq,
+                g.active.max_committed(),
+                g.active.retention_pinned(),
+                g.active_seq + 1,
+            )
         };
         let sealed_path = self.dir.join(seg_file_name(sealed_seq));
         // Task #500 (found in @fl review): this segment may carry a STALE
@@ -392,6 +442,7 @@ impl SegmentSet {
             seq: sealed_seq,
             path: sealed_path,
             max_version: sealed_max,
+            pinned: sealed_pin,
             synced: false,
         });
         g.active = new_active;
@@ -410,12 +461,12 @@ impl SegmentSet {
     /// keeps the invariant exact).
     ///
     /// Binding order (RV-WAL-A025886E): fsync → open the new active → swap it
-    /// in under the lock → THEN write the WMT2 sidecar. The sidecar-bearing
+    /// in under the lock → THEN write the WMT3 sidecar. The sidecar-bearing
     /// segment must never still be the live append tail when its sidecar lands
     /// on disk (cancellation/append hazard — see the inline comment).
     async fn seal_and_rotate(&self) -> DbResult<()> {
         // Snapshot the segment to seal under the lock.
-        let (sealed_seq, sealed_path, sealed_max, next_seq, sealing) = {
+        let (sealed_seq, sealed_path, sealed_max, sealed_pin, next_seq, sealing) = {
             let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
             // Guard against double-rotation: only the leader that still sees
             // an over-threshold active rotates it.
@@ -426,6 +477,7 @@ impl SegmentSet {
                 g.active_seq,
                 self.dir.join(seg_file_name(g.active_seq)),
                 g.active.max_committed(),
+                g.active.retention_pinned(),
                 g.active_seq + 1,
                 Arc::clone(&g.active),
             )
@@ -469,6 +521,7 @@ impl SegmentSet {
                 seq: sealed_seq,
                 path: sealed_path.clone(),
                 max_version: sealed_max,
+                pinned: sealed_pin,
                 synced: true,
             });
             // RV-WAL-A025886E binding order: the active-pointer swap happens BEFORE
@@ -485,10 +538,11 @@ impl SegmentSet {
         // sidecar never claims durability the data lacks; a write failure is
         // logged and swallowed (open falls back to replay).
         let meta_seg_path = sealed_path;
-        let write_res =
-            spawn_blocking(move || crate::segment_meta::write_blocking(&meta_seg_path, sealed_max))
-                .await
-                .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
+        let write_res = spawn_blocking(move || {
+            crate::segment_meta::write_blocking(&meta_seg_path, sealed_max, sealed_pin)
+        })
+        .await
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
         if let Err(e) = write_res {
             log::warn!(
                 "SegmentSet seal: max_version sidecar write for seq {sealed_seq} failed \
@@ -523,106 +577,97 @@ impl SegmentSet {
         Ok(out)
     }
 
-    /// Delete every sealed segment wholly durable in history — i.e. whose
+    /// Delete every unpinned sealed segment wholly durable in history — i.e. whose
     /// `max_version` is in `(0, durable_version]`. Returns the count deleted.
     ///
     /// The active segment is NEVER touched (I3). A sealed segment with
-    /// `max_version == 0` is a pin (legacy / non-versioned records, I5) and
+    /// `max_version == 0` or any zero-version record pins the segment and it
     /// is never deleted by version. Each `remove_file` is an atomic FS op;
     /// replay of the survivors after truncation is idempotent (I6).
+    /// Failed removals remain retryable; an I/O error reports the number
+    /// actually deleted and the number of failures. Cancellation after dispatch
+    /// detaches the blocking cleanup, which still reconciles its results.
     pub async fn truncate_below(&self, durable_version: u64) -> DbResult<usize> {
-        // CLAIM-then-delete: under the lock, collect the deletable sealed
-        // segments AND remove them from the sealed list in the SAME critical
-        // section. This makes truncation safe against a CONCURRENT truncator
-        // (the background drainer's interval pass racing an explicit
-        // `drain_all`): a second caller no longer sees these entries in
-        // `sealed`, so it never targets the same files — no double-`remove_file`
-        // race (which on Windows surfaces as `PermissionDenied`, not
-        // `NotFound`). The unlink syscall then runs OUTSIDE the lock. If an
-        // unlink fails, the file lingers on disk but is no longer tracked;
-        // `SegmentSet::open` re-scans the directory on reopen and replays it
-        // idempotently (I6), so a leaked file is harmless, never a data loss.
-        let to_delete: Vec<PathBuf> = {
-            let mut g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
-            let mut claimed = Vec::new();
-            g.sealed.retain(|m| {
-                if m.max_version > 0 && m.max_version <= durable_version {
-                    claimed.push(m.path.clone());
-                    false // claimed for deletion — drop from sealed now
+        // The blocking job owns the gate, even if its caller is cancelled.
+        let gate = Arc::clone(&self.truncate_gate).lock_owned().await;
+        let inner = Arc::clone(&self.inner);
+        #[cfg(test)]
+        let fail_seq = self.truncate_fail_seq.lock().unwrap().take();
+        #[cfg(test)]
+        let pause = self.truncate_pause.lock().unwrap().take();
+        spawn_blocking(move || -> DbResult<usize> {
+            let _gate = gate;
+            let candidates = {
+                let g = inner.lock().expect("SegmentSet inner mutex poisoned");
+                g.sealed
+                    .iter()
+                    .filter(|m| {
+                        !m.pinned && m.max_version > 0 && m.max_version <= durable_version
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            #[cfg(test)]
+            if let Some((entered, resume)) = pause {
+                let _ = entered.send(());
+                let _ = resume.recv();
+            }
+            let mut deleted = 0usize;
+            let mut first_error = None;
+            let mut failures = 0usize;
+            for meta in candidates {
+                #[cfg(test)]
+                let result = if fail_seq == Some(meta.seq) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected WAL unlink failure",
+                    ))
                 } else {
-                    true
+                    remove_file(&meta.path)
+                };
+                #[cfg(not(test))]
+                let result = remove_file(&meta.path);
+                match result {
+                    Ok(()) => deleted += 1,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        failures += 1;
+                        log::error!("SegmentSet truncate remove {:?}: {}", meta.path, e);
+                        if first_error.is_none() {
+                            first_error = Some((meta.path, e));
+                        }
+                        continue;
+                    }
                 }
-            });
-            claimed
-        };
-        if to_delete.is_empty() {
-            return Ok(0);
-        }
-
-        let paths = to_delete;
-        let deleted = spawn_blocking(move || -> DbResult<usize> {
-            let mut n = 0usize;
-            for p in &paths {
-                // Task #500: drop the max_version sidecar first (best-effort;
-                // a leaked `.meta` is harmless once its `.wal` is gone, since
-                // open only consults a `.meta` whose `.wal` it also scanned).
+                {
+                    let mut g = inner.lock().expect("SegmentSet inner mutex poisoned");
+                    g.sealed.retain(|m| m.seq != meta.seq);
+                }
                 crate::segment_meta::remove_blocking(
-                    p,
+                    &meta.path,
                     "harmless leaked sidecar (its .wal is gone too, so open ignores it)",
                 );
-                match remove_file(p) {
-                    Ok(()) => n += 1,
-                    // Already gone (idempotent re-truncate) — count as done.
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => n += 1,
-                    // Windows: a concurrent `replay()` on another drainer may
-                    // still hold this sealed segment open for reading, so the
-                    // unlink returns `PermissionDenied` ("Access is denied",
-                    // os error 5) instead of succeeding. The entry is ALREADY
-                    // claimed (removed from `sealed` above), so we do not retry
-                    // or fail: the file lingers on disk but is untracked, and
-                    // `SegmentSet::open` re-scans the directory on reopen and
-                    // replays it idempotently (I6) — never a data loss. Count it
-                    // as reclaimed (it will not be re-targeted).
-                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                        n += 1;
-                    }
-                    Err(e) => {
-                        return Err(DbError::Storage(format!(
-                            "SegmentSet truncate remove {p:?}: {e}"
-                        )))
-                    }
-                }
-
-                // F6c crash seam — `wal_mid_delete`. This crate cannot reach
-                // the engine's `maybe_crash` (no dependency edge), so the seam
-                // is self-contained: debug-only, env-gated, and a bare
-                // `process::abort()` AFTER the first successful unlink but
-                // BEFORE the rest. Why a bare abort is the correct mid-delete
-                // crash: by the drainer's I2 ordering, `flush_all_history` ran
-                // (and fsync'd) `history` up to the truncation watermark BEFORE
-                // calling `truncate_below`, so every record in every segment we
-                // are unlinking is already durable in `history`. Killing the
-                // process here leaves a torn delete-set — some segments gone,
-                // some surviving — yet zero data loss: `SegmentSet::open` on
-                // reopen picks up whatever survived and replay re-materializes
-                // it idempotently (the deleted segments' data is in `history`).
-                // Needs >= 2 truncatable segments to exercise (the abort fires
-                // after #1, before #2).
+                // Preserve the F6c crash seam after a resolved unlink.
                 #[cfg(debug_assertions)]
-                {
-                    if std::env::var("SHAMIR_TEST_CRASH_AFTER").as_deref() == Ok("wal_mid_delete") {
-                        std::process::abort();
-                    }
+                if std::env::var("SHAMIR_TEST_CRASH_AFTER").as_deref() == Ok("wal_mid_delete") {
+                    std::process::abort();
                 }
             }
-            Ok(n)
+            if let Some((path, error)) = first_error {
+                log::error!(
+                    "SegmentSet truncate: {deleted} deleted, {failures} failed; first failure {path:?}: {error}"
+                );
+                return Err(wal_io_error(
+                    format!(
+                        "SegmentSet truncate: {deleted} deleted, {failures} failed; first failure {path:?}"
+                    ),
+                    error,
+                ));
+            }
+            Ok(deleted)
         })
         .await
-        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
-
-        // The claimed entries were already removed from `sealed` above (under
-        // the lock), so there is nothing more to retract here.
-        Ok(deleted)
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?
     }
 
     /// Cheap probe (under the lock, no I/O): is any sealed segment
@@ -630,13 +675,13 @@ impl SegmentSet {
     /// durable_version`? The drainer gates the (more expensive)
     /// history-flush + `truncate_below` on this so truncation work fires
     /// only on a segment boundary, never per-commit (I2). The active
-    /// segment is never considered (I3); a `max_version == 0` segment is a
-    /// pin and never reclaimable (I5).
+    /// segment is never considered (I3); a zero maximum or zero-version record
+    /// pins the segment and makes it unreclaimable (I5).
     pub fn has_truncatable(&self, durable_version: u64) -> bool {
         let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
         g.sealed
             .iter()
-            .any(|m| m.max_version > 0 && m.max_version <= durable_version)
+            .any(|m| !m.pinned && m.max_version > 0 && m.max_version <= durable_version)
     }
 
     pub async fn sealed_retained_bytes(&self) -> DbResult<u64> {

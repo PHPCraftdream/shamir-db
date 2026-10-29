@@ -792,7 +792,7 @@ async fn rv_wal_a025886e_valid_wmt2_on_highest_seals_segment() {
         set.sync().await.unwrap();
         drop(set);
     }
-    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10).unwrap();
+    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10, false).unwrap();
     let meta_before = std::fs::read(meta_path(dir.path(), 0)).unwrap();
     let wal_before = std::fs::read(wal_path(dir.path(), 0)).unwrap();
 
@@ -900,7 +900,7 @@ async fn poison_rotation_sheds_stale_sidecar() {
     // Plant a STALE sidecar on the ACTIVE segment (seq 0) claiming max=10 —
     // AFTER open, so `open`'s own re-activation shed cannot be what removes it.
     // Only `rotate_after_poison` (below) can shed it now.
-    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10).unwrap();
+    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10, false).unwrap();
     assert!(
         meta_path(dir.path(), 0).exists(),
         "stale sidecar planted on the active segment"

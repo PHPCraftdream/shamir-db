@@ -189,7 +189,7 @@ async fn rv_wal_a025886e_removal_failure_never_affects_correctness() {
         set.sync().await.unwrap();
         drop(set);
     }
-    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10).unwrap();
+    crate::segment_meta::write_blocking(&wal_path(dir.path(), 0), 10, false).unwrap();
     let meta_before = std::fs::read(meta_path(dir.path(), 0)).unwrap();
 
     let set = SegmentSet::open(dir.path().to_path_buf(), 32)
