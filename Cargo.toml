@@ -51,6 +51,27 @@ incremental = false
 # size while leaving backtraces readable.
 debug = "line-tables-only"
 
+# Hot pure-Rust dependencies stay optimised in dev/test builds: an opt-level 0
+# Argon2id (19 MiB, t=2) costs seconds per hash and every server-booting test
+# pays several (SCRAM bootstrap + login); HNSW search dominates the vector
+# tests. Dependencies only, workspace crates keep opt-level 0.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.hmac]
+opt-level = 3
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.hnsw_rs]
+opt-level = 3
+[profile.dev.package.anndists]
+opt-level = 3
+
 [profile.release]
 lto = "fat"
 # `opt-level = 3` (speed) instead of `"z"` (size). This is a server-
