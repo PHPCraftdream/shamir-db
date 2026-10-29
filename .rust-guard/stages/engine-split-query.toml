@@ -1,5 +1,5 @@
 # Campaign engine-split-query: executor records visibility; orchestrator records conservation.
-base = "fd5d4c15df1a9531c2abd2c6af7d31e89a5ef489"
+base = "ae761093022ee7bdc152fbe13686ff4084006218"
 
 [[allow_widen]]
 path = "crates/shamir-engine-query/src/function.rs"
