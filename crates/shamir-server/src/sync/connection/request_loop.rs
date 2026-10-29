@@ -40,7 +40,6 @@ use tokio::task::JoinSet;
 use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome};
-use shamir_connect::Error as ConnectError;
 
 use super::push_sink::MpscPushSink;
 
@@ -511,5 +510,4 @@ async fn run_request_loop<R, W>(
     }
 
     let _ = sid;
-    let _ = ConnectError::AuthFailed;
 }

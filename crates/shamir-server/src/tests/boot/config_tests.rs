@@ -56,8 +56,32 @@ fn rv_server_ebc0829d_password_factory_accepts_secret_type() {
             "sensitive-value".into(),
         )),
         "localhost".into(),
+        Default::default(),
     );
     assert!(factory.is_some());
+}
+
+#[test]
+fn rv_server_e8e1d11b_ktav_pins_parse_and_reject_invalid() {
+    let good = r#"
+upstream_pins: {
+    "tcp://127.0.0.1:7331": [
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    ]
+}
+"#;
+    let config: crate::config::ReplicationConfig =
+        ktav::from_str(good).expect("valid upstream pin");
+    assert!(format!("{:?}", config.upstream_pins).contains("127.0.0.1:7331"));
+    for bad in [
+        good.replace("tcp://127.0.0.1:7331", "not-an-address"),
+        good.replace(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "invalid",
+        ),
+    ] {
+        assert!(ktav::from_str::<crate::config::ReplicationConfig>(&bad).is_err());
+    }
 }
 
 // =============== code-level defaults (RI-8) ===============

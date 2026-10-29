@@ -61,6 +61,10 @@ pub struct LoadedTls {
 /// `subject_alts` should be the union of every host/IP a client might use
 /// to reach the server (e.g. `localhost`, `127.0.0.1`, the LAN address).
 /// Ignored when both files already exist on disk.
+///
+/// This synchronous bootstrap helper performs filesystem and CPU-bound work.
+/// Call it before starting async service work, or use `tokio::task::spawn_blocking`
+/// when invoking it from an active async runtime.
 pub fn load_or_generate(
     cert_path: &Path,
     key_path: &Path,

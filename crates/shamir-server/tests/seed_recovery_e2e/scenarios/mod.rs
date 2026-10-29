@@ -6,3 +6,4 @@ pub mod a_crash_reseed;
 pub mod b_second_crash;
 pub mod c_refusals;
 pub mod d_restarts;
+pub mod e_upstream_pin;

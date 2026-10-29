@@ -3,7 +3,7 @@
 //! - Server: self-signed cert generation (rcgen) + ServerConfig builder.
 //! - Client: ClientConfig skips CA chains/hostname; application identity is
 //!   verified with exporter-bound Ed25519 proof (spec §6).
-//! - Both: TLS exporter extraction per RFC 9266 with label
+//! - Both: Project-specific TLS exporter extraction with label
 //!   `EXPORTER-ShamirDB-AUTH-v1`.
 //!
 //! A TLS-terminating relay has a different exporter on each leg, so relayed
@@ -13,10 +13,10 @@
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{aws_lc_rs, CryptoProvider};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::PrivatePkcs8KeyDer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, ServerConfig};
-use rustls_pki_types::pem::PemObject;
-use rustls_pki_types::PrivatePkcs8KeyDer;
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -54,12 +54,15 @@ pub enum TlsConfigError {
     Rcgen(#[from] rcgen::Error),
 }
 
-/// TLS exporter label per spec §4.2 / RFC 9266.
-pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-ShamirDB-AUTH-v1";
+/// Project-specific TLS exporter label (spec §4.2), not the RFC 9266 label.
+pub const EXPORTER_LABEL: &[u8] = shamir_connect::common::domain_tags::TLS_EXPORTER_LABEL;
 /// Empty exporter context.
 pub const EXPORTER_CONTEXT: &[u8] = b"";
 
 /// Generate a fresh self-signed server cert + key (ECDSA P-256 by default).
+///
+/// This synchronous bootstrap operation is CPU-bound; active async-runtime
+/// callers must run it with `tokio::task::spawn_blocking`.
 ///
 /// Returns `(cert_pem, key_pem)` — caller persists for reuse across restarts
 /// to avoid breaking session_id continuity (sessions are in-memory anyway,
@@ -78,6 +81,9 @@ pub fn generate_self_signed_server_cert(
 }
 
 /// Build a TLS 1.3 server config from PEM cert + key.
+///
+/// This synchronous bootstrap operation is CPU-bound; active async-runtime
+/// callers must run it with `tokio::task::spawn_blocking`.
 pub fn make_server_config_from_pem(
     cert_pem: &str,
     key_pem: &str,
@@ -121,8 +127,8 @@ pub fn make_client_config_app_authenticated(
 
 /// Extract the 32-byte TLS exporter for spec §4.2 channel binding.
 ///
-/// Generic over `T: rustls::ConnectionTrait` (covers both client and server
-/// post-handshake states). Returns the underlying rustls error so callers can
+/// Uses the local [`ConnectionExporter`] adapter for tokio-rustls client and
+/// server streams. Returns the underlying rustls error so callers can
 /// fail closed when the handshake is incomplete or exporter is unavailable.
 pub fn extract_tls_exporter(
     connection: &impl ConnectionExporter,
@@ -132,9 +138,8 @@ pub fn extract_tls_exporter(
     Ok(out)
 }
 
-/// Trait that tokio-rustls + rustls connections both implement to expose
-/// `export_keying_material`. Avoids importing rustls's stable trait, which
-/// would tightly couple us to a single rustls version.
+/// Local adapter exposing exporter extraction for tokio-rustls client and
+/// server streams.
 pub trait ConnectionExporter {
     /// Fill `out` with TLS exporter output for `(label, context)`.
     fn export_keying_material(

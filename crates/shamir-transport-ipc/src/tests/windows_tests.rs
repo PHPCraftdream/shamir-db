@@ -54,7 +54,18 @@ async fn rv_transport_ipc_bd4ebef7_windows_entrypoints_reject_invalid_addresses(
     let handle = listener.pipe_handle().expect("pending pipe handle");
     crate::tests::windows_dacl::check_handle_owner_dacl(handle as _)
         .expect("effective DACL is one owner SID allow ACE");
-    assert!(IpcListener::bind(&name).await.is_err());
+    let error = match IpcListener::bind(&name).await {
+        Ok(_) => panic!("duplicate bind unexpectedly succeeded"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains(&name));
+    assert!(error.to_string().contains("first named pipe instance"));
+    let context = error.get_ref().expect("context");
+    let original = std::error::Error::source(context)
+        .and_then(|source| source.downcast_ref::<std::io::Error>())
+        .expect("original OS error");
+    assert_eq!(error.kind(), original.kind());
+    assert!(original.raw_os_error().is_some());
     let server = tokio::spawn(async move {
         let mut stream = listener.accept().await.expect("accept");
         let mut byte = [0u8; 1];
