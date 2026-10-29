@@ -1,4 +1,4 @@
-use crate::common::{fixture_record, fresh_dir};
+use super::common::{fixture_record, fresh_dir};
 use shamir_connect::server::admin::UserDirectory;
 
 // ----------------------------------------------------------------------------

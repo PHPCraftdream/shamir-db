@@ -24,6 +24,8 @@
 //! tests; this e2e focuses on the wire-level `Hello`/`Pull` path + the
 //! role gate.
 
+use crate::common;
+
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -49,9 +51,6 @@ use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 
 use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::version::CURRENT_QUERY_LANG_VERSION;
-
-#[path = "../common/mod.rs"]
-mod common;
 
 // ---------------------------------------------------------------------------
 // Wire-frame mirrors of the auth_init / challenge / client_proof / auth_ok

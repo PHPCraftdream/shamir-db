@@ -1,5 +1,5 @@
 //! Nested batch read of a forbidden table stays denied.
-use crate::common::*;
+use super::common::*;
 use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::server::{BootstrapMode, ServerLauncher};
 use tempfile::TempDir;

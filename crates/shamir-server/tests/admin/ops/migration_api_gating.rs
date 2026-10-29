@@ -15,16 +15,13 @@
 //! `if config.security.enable_experimental_migration_api { ... }` block in
 //! `server_launcher/launch.rs` makes both of these tests fail.
 
-#[path = "../../common/mod.rs"]
-mod common;
-
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use shamir_server::config::Config;
 use shamir_server::server::{BootstrapMode, ServerLauncher};
 
-use common::make_test_config;
+use crate::common::make_test_config;
 
 /// A server booted with `security.enable_experimental_migration_api: true`
 /// must end up with the experimental-migration API enabled — i.e. a

@@ -1,4 +1,4 @@
-use crate::common::{fixture_record, fresh_dir, reopen};
+use super::common::{fixture_record, fresh_dir, reopen};
 use shamir_connect::server::admin::UserDirectory;
 use tempfile::TempDir;
 

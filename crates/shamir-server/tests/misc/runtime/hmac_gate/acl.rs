@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::common::{
+use super::common::{
     decode, encode, execute_built, expect_batch_ok, expect_error, root_session, session_key,
 };
 use shamir_connect::server::conn_services::ConnectionServices;

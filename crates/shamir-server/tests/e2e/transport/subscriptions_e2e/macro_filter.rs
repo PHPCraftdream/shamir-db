@@ -17,7 +17,7 @@ use shamir_query_types::TableRef;
 use shamir_server::db_handler::ShamirDbHandler;
 use shamir_server::subscriptions::SubscriptionRegistry;
 
-use crate::common::{
+use super::common::{
     capture, conn_with, decode, encode, execute_built, make_db_one_repo, next_event_for, settle,
     sub_id_of, unwrap_batch, user_session,
 };

@@ -9,8 +9,7 @@
 //! only assert boot + reconcile + shutdown are non-breaking with the default
 //! `replication = None` (no replicator credentials → no-op factory).
 
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use std::time::Duration;
 
