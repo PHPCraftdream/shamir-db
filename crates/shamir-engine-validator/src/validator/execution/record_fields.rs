@@ -81,7 +81,7 @@ pub trait RecordFields: Send + Sync {
 /// probe re-walking the interner for the SAME path. Content-keyed (the raw
 /// path segments, not an address) so a coincidental allocator address reuse
 /// across probes can never resolve the wrong field — see
-/// `crate::query::filter::field_path_cache` for the concrete hazard an
+/// `shamir_engine_query::query::filter::caches::field_path_cache` for the concrete hazard an
 /// address-keyed cache caused elsewhere in this codebase.
 struct PathCache {
     path: Vec<Box<str>>,
