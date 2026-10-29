@@ -1,6 +1,8 @@
 //! Wire-contract and rejection tests for FilterValue decoding.
 
 use crate::filter::{Cond, Filter, FilterExpr, FilterValue, FnCall};
+use serde::de::{Deserializer, Visitor};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 #[test]
@@ -260,4 +262,30 @@ fn rejects_ambiguous_or_invalid_marker_maps() {
             assert!(error.contains(key), "{input}: {error}");
         }
     }
+}
+
+/// A deserializer whose only callback is `visit_none`, which serde_json and
+/// rmp_serde never produce for a bare nil but other formats do.
+struct NoneDeserializer;
+
+impl<'de> Deserializer<'de> for NoneDeserializer {
+    type Error = serde::de::value::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+        visitor.visit_none()
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
+#[test]
+fn visit_none_callback_decodes_as_null() {
+    assert_eq!(
+        FilterValue::deserialize(NoneDeserializer).unwrap(),
+        FilterValue::Null
+    );
 }

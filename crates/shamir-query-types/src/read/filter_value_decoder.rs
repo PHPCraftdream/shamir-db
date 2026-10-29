@@ -26,6 +26,11 @@ impl<'de> Visitor<'de> for FilterValueVisitor {
         Ok(FilterValue::Null)
     }
 
+    // The previous untagged derive accepted both nil callbacks as `Null`.
+    fn visit_none<E: Error>(self) -> Result<Self::Value, E> {
+        Ok(FilterValue::Null)
+    }
+
     fn visit_bool<E: Error>(self, value: bool) -> Result<Self::Value, E> {
         Ok(FilterValue::Bool(value))
     }
