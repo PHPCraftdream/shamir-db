@@ -98,6 +98,173 @@ fn decode(qv: &QueryValue) -> Result<BatchOp, Box<dyn std::error::Error>> {
     rmp_serde::from_slice(&bytes).map_err(Into::into)
 }
 
+#[test]
+fn unknown_operation_fields_name_the_typo() {
+    for (json, key) in [
+        (
+            r#"{
+                "from": "t",
+                "wehre": {
+                    "op": "is_null",
+                    "field": ["x"]
+                }
+            }"#,
+            "wehre",
+        ),
+        (
+            r#"{
+                "update": "t",
+                "set": {},
+                "expected_verison": 1
+            }"#,
+            "expected_verison",
+        ),
+        (
+            r#"{
+                "insert_into": "t",
+                "values": [],
+                "return_results": true
+            }"#,
+            "return_results",
+        ),
+        (
+            r#"{
+                "from": "t",
+                "pagination": {
+                    "mode": "LimitOffset",
+                    "limt": 1
+                }
+            }"#,
+            "limt",
+        ),
+        (
+            r#"{
+                "create_table": "t",
+                "if_not_exist": true
+            }"#,
+            "if_not_exist",
+        ),
+        (
+            r#"{
+                "create_user": "u",
+                "password": "p",
+                "rolez": []
+            }"#,
+            "rolez",
+        ),
+        (
+            r#"{
+                "subscribe": [],
+                "intial": true
+            }"#,
+            "intial",
+        ),
+        (
+            r#"{
+                "call": "f",
+                "paramz": []
+            }"#,
+            "paramz",
+        ),
+        (
+            r#"{
+                "batch": {
+                    "id": 1,
+                    "queries": {}
+                },
+                "stray": true
+            }"#,
+            "stray",
+        ),
+    ] {
+        let value: QueryValue = serde_json::from_str(json).unwrap();
+        let error = decode(&value).unwrap_err().to_string();
+        assert!(error.contains(key), "{error}");
+    }
+}
+
+#[test]
+fn table_ref_map_is_validated() {
+    let default_repo: crate::TableRef = serde_json::from_str(
+        r#"{
+            "table": "t"
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(default_repo, crate::TableRef::new("t"));
+    let qualified: crate::TableRef = serde_json::from_str(
+        r#"{
+            "repo": "other",
+            "table": "t"
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(qualified, crate::TableRef::with_repo("other", "t"));
+    let value: QueryValue = serde_json::from_str(
+        r#"{
+            "from": {
+                "repo": "other",
+                "table": "t",
+                "tabble": true
+            }
+        }"#,
+    )
+    .unwrap();
+    assert!(decode(&value).unwrap_err().to_string().contains("tabble"));
+}
+
+#[test]
+fn user_data_and_entry_metadata_remain_open() {
+    let request = r#"{
+        "id": 1,
+        "queries": {
+            "arbitrary_alias": {
+                "update": "t",
+                "set": {
+                    "arbitrary_field": 1
+                },
+                "return_result": false,
+                "after": ["other"],
+                "when": {
+                    "op": "is_null",
+                    "field": ["x"]
+                }
+            },
+            "other": {
+                "insert_into": "t",
+                "values": [
+                    {
+                        "arbitrary_field": 2
+                    }
+                ]
+            },
+            "nested": {
+                "batch": {
+                    "id": 2,
+                    "queries": {}
+                },
+                "bind": {
+                    "arbitrary_binding": 3
+                }
+            }
+        },
+        "limits": {
+            "max_queries": 10
+        }
+    }"#;
+    let decoded: crate::batch::BatchRequest = serde_json::from_str(request).unwrap();
+    assert_eq!(decoded.queries.len(), 3);
+    assert_eq!(decoded.limits.max_queries, 10);
+    assert_eq!(
+        decoded.limits.max_iterations,
+        crate::batch::BatchLimits::default().max_iterations
+    );
+    let entry = &decoded.queries["arbitrary_alias"];
+    assert!(!entry.return_result);
+    assert_eq!(entry.after, ["other"]);
+    assert!(entry.when.is_some());
+}
+
 /// `{"from": ..., "insert_into": ...}` used to decode as `Read` (first arm
 /// wins) and silently drop the `insert_into` payload — now an error.
 #[test]

@@ -26,7 +26,7 @@ use shamir_types::access::ResourcePath;
 ///
 /// Each variant is a single-key object so the discriminator is unambiguous.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum ResourceRef {
     /// A database by name.
     Database { database: String },
@@ -70,7 +70,7 @@ impl ResourceRef {
 /// { "id": 3 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum GroupRef {
     Name { name: String },
     Id { id: u64 },
@@ -86,6 +86,7 @@ pub enum GroupRef {
 /// { "chmod": { "table": ["db", "main", "users"] }, "mode": 448 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChmodOp {
     pub chmod: ResourceRef,
     pub mode: u16,
@@ -101,6 +102,7 @@ pub struct ChmodOp {
 /// { "chown": { "table": ["db", "main", "users"] }, "owner": 7 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChownOp {
     pub chown: ResourceRef,
     pub owner: u64,
@@ -116,6 +118,7 @@ pub struct ChownOp {
 /// { "chgrp": { "table": ["db", "main", "users"] }, "group": null }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChgrpOp {
     pub chgrp: ResourceRef,
     pub group: Option<u64>,
@@ -130,6 +133,7 @@ pub struct ChgrpOp {
 /// { "create_group": "devs" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateGroupOp {
     pub create_group: String,
     /// Hex HMAC over `b"create_group\0<name>"`. See
@@ -146,6 +150,7 @@ pub struct CreateGroupOp {
 /// { "drop_group": { "name": "devs" }, "if_exists": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropGroupOp {
     pub drop_group: GroupRef,
     /// When `true`, dropping a non-existent group is a silent no-op
@@ -167,6 +172,7 @@ pub struct DropGroupOp {
 /// { "rename_group": { "id": 3 }, "to": "engineers" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameGroupOp {
     pub rename_group: GroupRef,
     pub to: String,
@@ -181,6 +187,7 @@ pub struct RenameGroupOp {
 /// { "add_group_member": { "name": "devs" }, "user": 42 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddGroupMemberOp {
     pub add_group_member: GroupRef,
     pub user: u64,
@@ -196,6 +203,7 @@ pub struct AddGroupMemberOp {
 /// { "remove_group_member": { "name": "devs" }, "user": 42 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveGroupMemberOp {
     pub remove_group_member: GroupRef,
     pub user: u64,
@@ -227,6 +235,7 @@ pub struct RemoveGroupMemberOp {
 /// Reading the tree requires `Manage` on the root (admin authority);
 /// non-admin callers are denied.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccessTreeOp {
     /// Discriminator flag — always `true`.
     pub access_tree: bool,

@@ -24,6 +24,7 @@ use crate::admin::types::db_ops::is_false;
 /// { "create_function": "my_fn", "wasm": "<base64>", "security": "definer", "hmac": "<hex>" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateFunctionOp {
     pub create_function: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,6 +71,7 @@ pub struct CreateFunctionOp {
 /// { "drop_function": "my_fn", "if_exists": true }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropFunctionOp {
     pub drop_function: String,
     /// When `true`, dropping a non-existent function is a silent no-op
@@ -86,6 +88,7 @@ pub struct DropFunctionOp {
 /// { "rename_function": "old_name", "to": "new_name" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameFunctionOp {
     pub rename_function: String,
     pub to: String,
@@ -97,6 +100,7 @@ pub struct RenameFunctionOp {
 /// { "create_function_folder": ["reports", "daily"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateFunctionFolderOp {
     pub create_function_folder: Vec<String>,
 }
@@ -111,6 +115,7 @@ pub struct CreateFunctionFolderOp {
 /// { "rename_function_folder": ["a", "b"], "to": ["a", "c"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameFunctionFolderOp {
     pub rename_function_folder: Vec<String>,
     pub to: Vec<String>,
