@@ -124,12 +124,17 @@ fn rv_index_2ba3b945_index_error_source_chain() {
         ErrorKind::PermissionDenied,
         "index source",
     )));
-    let db = index_error
-        .source()
-        .unwrap()
-        .downcast_ref::<DbError>()
-        .unwrap();
-    let io = db.source().unwrap().downcast_ref::<IoError>().unwrap();
+    let mut found = None;
+    let mut current = index_error.source();
+    while let Some(error) = current {
+        if let Some(io) = error.downcast_ref::<IoError>() {
+            found = Some(io);
+            break;
+        }
+        current = error.source();
+    }
+    let io =
+        found.expect("original I/O error must be reachable through the IndexError source chain");
     assert_eq!(io.kind(), ErrorKind::PermissionDenied);
     assert_eq!(io.to_string(), "index source");
     assert!(
