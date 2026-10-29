@@ -26,8 +26,8 @@ Suggested wave 3; starts after P2-06, P2-12 are merged.
 
 Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 95108B6D, 3854F3CC.
 
-- RV-INDEX-95108B6D: (no answer yet - skip)
-- RV-INDEX-3854F3CC: (no answer yet - skip)
+- RV-INDEX-95108B6D: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Add a 16 MiB clone-shared per-manager accounted cache budget alongside the existing 512-entry policy. Charge resident keys, RecordId slices and fixed entry/Arc metadata; exclude and document allocator/hash-table overhead and caller-held result Arcs. Atomically reserve before publication, roll back failures and release exactly once on replacement, eviction, all removals and DROP retain. Use bounded arbitrary eviction without nested shard guards; bypass caching when oversized or unable to reserve. Preserve generation/drain semantics and returned results. CI must cover concurrent budget enforcement, accounting lifecycle, oversized bypass and DROP/recreation; coordinate all removals with paged DROP.
+- RV-INDEX-3854F3CC: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Preserve multiple indexes per field/kind and any-Ready-match selection. Add an Fx-hashed reverse map from recognized kind and first field path to candidate IDs, maintained on successful insert/remove and rebuilt through recovery registration. Resolve only the candidate bucket and revalidate identity, membership and authoritative Ready state in by_id. Rename leaves membership unchanged; state transitions remain authoritative in by_id. Document O(k) candidate work, preserve reader-gate acquisition and lease lifetime, and test multiple matches, lifecycle transitions, failed registration, rename, removal/recreation and drain races in CI without imposing candidate order.
 
 ## Findings (ordered by risk, then size)
 

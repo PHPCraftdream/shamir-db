@@ -26,7 +26,7 @@ Suggested wave 2; no strict predecessor.
 
 Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 0FCB1771.
 
-- RV-FUNCLIB-0FCB1771: (no answer yet - skip)
+- RV-FUNCLIB-0FCB1771: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Implement exact mathematical cross-numeric comparison using existing BigInt support: finite floats are exact binary rationals, decimals are mantissa/scale, and integers remain exact. Preserve type ranks, recursive container order, equal signed zeros, and NaN-last/all-NaNs-equal behavior. Align distinct hashing with exact comparator equivalence while preserving first-occurrence output order. Do not alter engine filter/index equality. CI must cover boundary triples, permutation-invariant distinct counts, decimal/float boundaries, huge finite integers versus infinity, and recursive equality/hash coherence.
 
 ## Findings (ordered by risk, then size)
 

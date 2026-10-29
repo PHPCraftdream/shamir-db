@@ -26,10 +26,10 @@ Suggested wave 2; starts after P2-01, P2-08, P2-09 are merged.
 
 Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 5E4BFC76, A7B1FCEC, EFA1B8F4, FE40CB54.
 
-- RV-TYPES-5E4BFC76: (no answer yet - skip)
-- RV-TYPES-A7B1FCEC: (no answer yet - skip)
-- RV-TYPES-EFA1B8F4: (no answer yet - skip)
-- RV-TYPES-FE40CB54: (no answer yet - skip)
+- RV-TYPES-5E4BFC76: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Document from_bytes<T> as providing no recursion protection: permit statically nonrecursive roots, or require a type-specific decoder enforcing depth during deserialization for recursive untrusted roots. Distinguish depth from byte/allocation limits. Keep the generic signature and bincode encoding unchanged; do not add post-decode depth walks or claim a demonstrated recursive production exploit. Preserve the nonrecursive interner chunk format while coordinating hydration validation. Documentation only; no new behavioral test required.
+- RV-TYPES-A7B1FCEC: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Add borrowed resource-path views and nearest-first ancestor iteration, retaining owned ResourcePath, parent, and ancestors as compatibility wrappers. Adapt metadata resolution and ACL memo probes to borrowed paths; allocate ownership only for cache insertion or denial output. Support folder slices and function-name prefixes. Include shamir-db in scope and rebase on P2-01. Preserve awaited order, first denial, fail-closed errors, admin bypass, and diagnostic escaping; CI must compare all path variants against the owned traversal contract.
+- RV-TYPES-EFA1B8F4: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Add unary-minus numeric-literal object-value arms before generic token-tree arms, forwarding to the existing negative-literal conversion. Preserve arbitrary expressions as explicit @expr escapes and retain existing container syntax. CI must compile downstream object uses with negative integers/floats in first, middle, final, and nested positions, with and without trailing commas, and assert resulting values.
+- RV-TYPES-FE40CB54: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Use safe String::zeroize() in crypto-gated Drop. Retain ordinary PartialEq/Eq and document that equality is not constant-time and must not implement authentication. Preserve feature gating, redacted Debug, serde bytes, cloning, and into_inner ownership transfer; add no dependency or comparison API. CI must cover crypto on/off, empty and Unicode strings, ownership transfer, and wiping through a valid live-buffer seam without reading freed memory.
 
 ## Findings (ordered by risk, then size)
 

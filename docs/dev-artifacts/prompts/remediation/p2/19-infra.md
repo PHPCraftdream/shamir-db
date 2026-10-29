@@ -19,15 +19,15 @@ Crates: `shamir-numa`, `shamir-bench-utils`, `shamir-collections`. Dependents ar
 
 ## Coordination with other tasks
 
-Suggested wave 2; starts after P2-08 are merged.
-- Starts after P2-08 (collections lib.rs).
+Suggested wave 2; starts after P2-08, P2-05, P2-06 are merged.
+- Starts after P2-08 (collections lib.rs) and after P2-05 and P2-06 are integrated: RV-NUMA-6FDBD35C (decided) switches the shamir-index default constructors, deserialization and clone paths to a cached topology, so shamir-index is in scope for that card only. Within wave 2 this task is the last to start.
 
 ## Decisions
 
 Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 6FDBD35C, 92355828.
 
-- RV-NUMA-6FDBD35C: (no answer yet - skip)
-- RV-BENCH-UTILS-92355828: (no answer yet - skip)
+- RV-NUMA-6FDBD35C: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Add process-wide OnceLock-backed detect_cached() returning a shared Arc, retaining detect() as fresh probing. Switch default index constructors, deserialization, and clone paths to cached topology and include shamir-index consumers in scope. Cache successful topology or fallback for process lifetime; topology changes require fresh detection/injection or restart, not mutation of existing replicas. Coordinate once-only fallback diagnostics. Injected-probe CI must prove one initialization, shared Arc identity, cached fallback, and independent fresh calls.
+- RV-BENCH-UTILS-92355828: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). For finite lo < hi, preserve next_range's signature, interpolate in f64, round to f32, and constrain to [lo, hi) using hi's representable predecessor. Add try_next_range with explicit invalid-bounds errors; define the legacy wrapper to return NaN for nonfinite, equal, or reversed bounds without consuming RNG state. Consume one step per valid draw. Combine with the exact 24-bit next_f32 fix and bump GENERATOR_REVISION once. CI must cover predecessor seeds, adjacent signed floats, subnormals, opposite finite extremes, and invalid bounds.
 
 ## Findings (ordered by risk, then size)
 

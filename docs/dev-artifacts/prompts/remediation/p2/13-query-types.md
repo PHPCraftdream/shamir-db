@@ -26,11 +26,11 @@ Suggested wave 3; starts after P2-04 are merged.
 
 Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 182C703E, 4F767AA5, 5F9D5468, F05184D8, CC015A3C.
 
-- RV-QUERY-TYPES-182C703E: (no answer yet - skip)
-- RV-QUERY-TYPES-4F767AA5: (no answer yet - skip)
-- RV-QUERY-TYPES-5F9D5468: (no answer yet - skip)
-- RV-QUERY-TYPES-F05184D8: (no answer yet - skip)
-- RV-QUERY-TYPES-CC015A3C: (no answer yet - skip)
+- RV-QUERY-TYPES-182C703E: **SKIP** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Record accepted convention/API debt: retain manual error formatting and public String-returning validators in this sprint. No incorrect classification behavior is established, thiserror is not a dependency of shamir-query-types, and dependency/API churn is not justified solely by convention. Keep the fallible conversion fix independent of this cleanup.
+- RV-QUERY-TYPES-4F767AA5: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Add FilterValue::try_from_query_value returning a structured conversion error, reusing direct literal conversion and the authoritative H5 decoder. Preserve valid markers and existing numeric projections, including RU7 decimal strings. Migrate repository production conversions and propagate errors, including unsupported maps nested in lists. Preserve From<QueryValue> only as an explicitly documented legacy lossy compatibility adapter; do not claim its fallback is eliminated or add conflicting TryFrom<QueryValue>. CI must prove errors rather than Null/panics for unsupported and conflicting maps, valid-marker compatibility, RU7 preservation and agreement with the adjacent planner decoder.
+- RV-QUERY-TYPES-5F9D5468: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Keep bytewise equality for two IdBytes rows, return false when exactly one operand is IdBytes, and preserve existing Direct/Inserted field-value equality. Leave as_value and serialization unchanged. Add a three-value regression with two distinct opaque byte sequences and Direct(Null), checking symmetry, opaque equality/inequality and preserved Direct/Inserted equality; keep the scalar-accessor optimization independent.
+- RV-QUERY-TYPES-F05184D8: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Deserialize fields through QueryValue::deserialize and return InsertedRecord with id None, accepting supported non-map values as well as maps. Preserve serializer bytes, sorted map emission, decoded _id fields and the existing non-map-with-id envelope; do not unwrap envelopes. CI must prove id-less scalar, null, binary and list round-trips plus unchanged map/_id behavior. Coordinate removal of the obsolete visitor-local import with import cleanup.
+- RV-QUERY-TYPES-CC015A3C: **SKIP** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Record accepted allocation cost: retain public owned String repository fields and main defaults. The allocations exist, but the brief establishes no measured bottleneck to justify ownership/API changes. Continue the independent planner allocation reductions without changing these DTO contracts.
 
 ## Findings (ordered by risk, then size)
 

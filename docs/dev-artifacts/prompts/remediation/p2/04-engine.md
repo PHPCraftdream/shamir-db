@@ -27,7 +27,7 @@ Suggested wave 2; starts after P2-02 are merged.
 
 Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 3425FDE6.
 
-- RV-ENGINE-3425FDE6: (no answer yet - skip)
+- RV-ENGINE-3425FDE6: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Document raw engine/table APIs and custom AccessGate implementations as trusted native-embedding surfaces, cross-linking authorization-enforced execution through the real facade gate and Authorized token. Add explicit trust warnings to raw handle entry points. Preserve existing APIs and test-util gating; do not duplicate DAC or characterize the already-tokenized normal executor as an observed server bypass. Documentation only; no new behavioral test required.
 
 ## Findings (ordered by risk, then size)
 
