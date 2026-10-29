@@ -328,12 +328,128 @@ async fn corrupt_manifest_falls_back_to_rebuild_without_panic() {
     }
 }
 
+#[tokio::test]
+async fn corrupt_metadata_rebuild_then_automatic_snapshot_preserves_unverified_keys() {
+    for case in [
+        "missing sidecar",
+        "corrupt sidecar",
+        "corrupt integrity",
+        "legacy corrupt sidecar",
+        "legacy missing sidecar",
+    ] {
+        let i = Interner::new();
+        let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        seed_data_store(&i, &data_store).await;
+        let id = 71;
+        let (_, keyspace, _) = dump_fresh_snapshot(id, &info_store).await;
+        let old_graph = snapshot::chunk_key_for_test(&keyspace, 0, "graph", 0);
+        let old_graph_bytes = info_store.get(old_graph.clone()).await.unwrap();
+        let sidecar = snapshot::sidecar_key_for_test(&keyspace, 0);
+        let orphan = snapshot::sidecar_key_for_test(&keyspace, 1);
+        let orphan_bytes = bytes::Bytes::from_static(b"unverified orphan");
+        info_store
+            .set(orphan.clone(), orphan_bytes.clone())
+            .await
+            .unwrap();
+        if case.starts_with("legacy ") {
+            info_store
+                .remove(bytes::Bytes::from(format!("{keyspace}.integrity")).into())
+                .await
+                .unwrap();
+        }
+        match case {
+            "missing sidecar" | "legacy missing sidecar" => {
+                info_store.remove(sidecar.clone()).await.unwrap()
+            }
+            "corrupt sidecar" | "legacy corrupt sidecar" => info_store
+                .set(sidecar.clone(), bytes::Bytes::from_static(b"broken"))
+                .await
+                .unwrap(),
+            "corrupt integrity" => info_store
+                .set(
+                    bytes::Bytes::from(format!("{keyspace}.integrity")).into(),
+                    bytes::Bytes::from_static(b"broken"),
+                )
+                .await
+                .unwrap(),
+            _ => unreachable!(),
+        };
+        let old_sidecar = match info_store.get(sidecar.clone()).await {
+            Ok(bytes) => Some(bytes),
+            Err(shamir_storage::error::DbError::NotFound(_)) => None,
+            Err(error) => panic!("sidecar read failed: {error}"),
+        };
+        assert!(matches!(
+            snapshot::read_manifest(&info_store, &keyspace).await,
+            Err(snapshot::SnapshotError::Corrupt(_))
+        ));
+        let backend = make_backend(&i, id, DIM, VectorMetric::L2);
+        backend
+            .restore_on_open(Arc::clone(&info_store), Arc::clone(&data_store))
+            .await
+            .unwrap();
+        assert_eq!(backend.rebuild_count(), 1, "{case}");
+
+        let inserted = (rid(N + 1), lcg_vec(DIM as usize, 98765));
+        let idx = backend
+            .append_vector_delta(&info_store, std::slice::from_ref(&inserted), &[])
+            .await
+            .unwrap()
+            .unwrap();
+        backend
+            .apply_staged_vectors(std::slice::from_ref(&inserted))
+            .await
+            .unwrap();
+        backend.mark_delta_applied(idx);
+        let delta_key = bytes::Bytes::from(format!("{keyspace}.delta.{idx:010}"));
+        let delta = info_store.get(delta_key.clone().into()).await.unwrap();
+        let boundary = backend.applied_prefix();
+        backend.set_snapshot_threshold_for_test(1);
+        backend.trigger_snapshot_check(&info_store);
+        assert!(backend.snapshot_in_flight_for_test());
+        tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            while backend.snapshot_in_flight_for_test() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background snapshot did not finish");
+
+        let manifest = snapshot::read_manifest(&info_store, &keyspace)
+            .await
+            .unwrap();
+        assert_eq!(manifest.gen, 2, "{case}");
+        assert_eq!(manifest.delta_applied_upto, boundary, "{case}");
+        assert_eq!(info_store.get(old_graph).await.unwrap(), old_graph_bytes);
+        assert_eq!(info_store.get(orphan).await.unwrap(), orphan_bytes);
+        match old_sidecar {
+            Some(bytes) => assert_eq!(info_store.get(sidecar).await.unwrap(), bytes),
+            None => assert!(matches!(
+                info_store.get(sidecar).await,
+                Err(shamir_storage::error::DbError::NotFound(_))
+            )),
+        }
+        assert_eq!(info_store.get(delta_key.into()).await.unwrap(), delta);
+        snapshot::load_snapshot(&info_store, &keyspace)
+            .await
+            .unwrap();
+        let restarted = make_backend(&i, id, DIM, VectorMetric::L2);
+        restarted
+            .restore_on_open(Arc::clone(&info_store), Arc::clone(&data_store))
+            .await
+            .unwrap();
+        assert_eq!(restarted.rebuild_count(), 0, "{case}");
+        assert_eq!(topk_ids(&restarted, &inserted.1, 1).await, vec![inserted.0]);
+    }
+}
+
 // ----------------------------------------------------------------------------
 // 3. hnsw_rs version mismatch on the open path → VersionMismatch → rebuild
 // ----------------------------------------------------------------------------
 
 #[tokio::test]
-async fn hnsw_rs_version_mismatch_on_open_falls_back_to_rebuild() {
+async fn hnsw_rs_0_3_4_version_mismatch_on_open_falls_back_to_rebuild() {
     let i = Interner::new();
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -356,7 +472,7 @@ async fn hnsw_rs_version_mismatch_on_open_falls_back_to_rebuild() {
     let sidecar_k = snapshot::sidecar_key_for_test(&keyspace, manifest.gen);
     let sidecar_bytes = info_store.get(sidecar_k.clone()).await.unwrap();
     let mut sidecar: SnapshotSidecar = MetaEnvelope::open(&sidecar_bytes).unwrap();
-    sidecar.hnsw_rs_version = "99.99.99-future".to_string();
+    sidecar.hnsw_rs_version = "0.3.4".to_string();
     let tampered = MetaEnvelope::new(sidecar).encode().unwrap();
     info_store
         .set(sidecar_k, bytes::Bytes::from(tampered))
@@ -368,6 +484,10 @@ async fn hnsw_rs_version_mismatch_on_open_falls_back_to_rebuild() {
         .await
         .unwrap();
 
+    assert!(matches!(
+        snapshot::load_snapshot(&info_store, &keyspace).await,
+        Err(snapshot::SnapshotError::VersionMismatch(_))
+    ));
     let backend = make_backend(&i, id, DIM, VectorMetric::L2);
     backend
         .restore_on_open(Arc::clone(&info_store), Arc::clone(&data_store))

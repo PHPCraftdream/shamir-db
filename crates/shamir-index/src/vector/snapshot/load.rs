@@ -76,6 +76,8 @@ async fn read_metadata(
         Err(shamir_storage::error::DbError::NotFound(_)) => {}
         Err(error) => return Err(error.into()),
     }
+    // Legacy snapshots may lack a companion; still reject malformed sidecars.
+    decode_sidecar(&sidecar)?;
     Ok((manifest, sidecar))
 }
 
@@ -95,9 +97,9 @@ async fn read_metadata(
 ///    so `is_fitted == true`, the u8 graph + quantizer + `vectors_u8` are
 ///    all live, and post-load search goes the quantized path.
 ///
-/// Accepts both v1 and v2 sidecars (back-compat). A v1 sidecar has
-/// `quantization == None` and no qgraph sections → the load is identical to
-/// the pre-#412 path.
+/// The v1 and v2 sidecar layouts decode, but graph loading requires the
+/// supported `hnsw_rs` version. Version 0.3.4 is rejected with
+/// `VersionMismatch`; the backend can rebuild from source instead.
 pub async fn load_snapshot(
     store: &Arc<dyn Store>,
     keyspace: &str,
@@ -726,6 +728,28 @@ pub async fn flip_generation(
     ));
 
     store.transact(ops).await?;
+    Ok(())
+}
+
+/// Publish an absorption boundary and its companion without deleting any keys.
+pub(crate) async fn publish_manifest_without_prune(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    manifest: SnapshotManifest,
+) -> Result<(), SnapshotError> {
+    let sidecar = store.get(sidecar_key(keyspace, manifest.gen)).await?;
+    let manifest_bytes = MetaEnvelope::new(manifest)
+        .encode()
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    store
+        .transact(vec![
+            KvOp::Set(
+                integrity_key(keyspace),
+                integrity_bytes(&manifest_bytes, &sidecar),
+            ),
+            KvOp::Set(manifest_key(keyspace), Bytes::from(manifest_bytes)),
+        ])
+        .await?;
     Ok(())
 }
 

@@ -19,7 +19,7 @@ const MANIFEST_V1: &[u8] = b"SDB2\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x0
 const SIDECAR_V1: &[u8] = b"SDB2\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x04\x00\x00\x00\x00\x00\x00\x00\x0b\x00\x00\x00\x00\x00\x00\x00\x05\x06\x00\x00\x00\x00\x00\x00\x00\x0d\x00\x00\x00\x00\x00\x00\x00\x11\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\x00\x00\x00\x00\x00\x00\x000.3.5\x00xV4\x12\x15\x00\x00\x00\x00\x00\x00\x00\x16\x00\x00\x00\x00\x00\x00\x00";
 
 #[test]
-fn historical_layout_bytes_decode() {
+fn schema_derived_v1_layout_bytes_decode() {
     let m = decode_manifest(MANIFEST_V1).unwrap();
     assert_eq!(
         (m.format_version, m.gen, m.graph_chunks, m.data_chunks),
@@ -49,10 +49,10 @@ fn historical_layout_bytes_decode() {
     );
 }
 
-// The metadata below is encoded from the historical schema in CI; the graph
+// The metadata below is schema-derived; the graph
 // is produced by the currently pinned hnsw_rs, not captured historical bytes.
 #[tokio::test]
-async fn v1_layout_metadata_loads_current_compatible_graph() {
+async fn schema_derived_v1_layout_metadata_loads_supported_graph() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let keyspace = "legacy.layout";
     let adapter = HnswAdapter::new(2, VectorMetric::L2, HnswConfig::default());

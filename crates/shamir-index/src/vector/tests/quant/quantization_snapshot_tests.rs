@@ -358,7 +358,7 @@ async fn round_trip_quant_snapshot_preserves_recall_and_params() {
 }
 
 // ============================================================================
-// MIGRATION — v1 snapshot (f32) loads back-compat; quant-config + v1 → rebuild
+// V1 metadata layouts require a supported graph version; 0.3.4 rebuilds.
 // ============================================================================
 
 // ============================================================================
@@ -478,15 +478,13 @@ async fn compaction_snapshot_restart_preserves_quant_state() {
 }
 
 // ============================================================================
-// BACK-COMPAT — non-quantized v2 snapshot round-trips like v1
+// Non-quantized v2 snapshot round-trip
 // ============================================================================
 
-/// A v2 snapshot with `quantization == None` is semantically equivalent to a
-/// v1 snapshot: no u8 graph, no quantizer, the f32 path round-trips exactly
-/// like the pre-#412 codec. This test proves the v2 path does not regress
-/// the v1 round-trip contract for non-quantized adapters.
+/// A non-quantized v2 snapshot round-trips without a u8 graph or quantizer.
+/// This does not establish compatibility with historical v1 graph bytes.
 #[tokio::test]
-async fn back_compat_non_quant_v2_round_trips_like_v1() {
+async fn non_quant_v2_round_trips() {
     let dim = 16u32;
     let n = 300usize;
     let store = mem_store();

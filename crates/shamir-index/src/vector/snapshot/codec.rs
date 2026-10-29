@@ -29,17 +29,15 @@ const CHUNK_SIZE: usize = 1 << 20; // 1 MiB
 /// V5.3 (#412): bumped 1 → 2. A v2 sidecar MAY carry a `quantization:
 /// Some(bincode(QuantMeta))` field; the u8 graph (if quantized) is stored
 /// as additional chunks under the same generation. A v2 sidecar with
-/// `quantization == None` is semantically equivalent to a v1 snapshot
-/// (non-quantized f32 path). The load path accepts BOTH v1 and v2
-/// (back-compat — see [`SNAPSHOT_SUPPORTED_VERSIONS`]).
+/// `quantization == None` uses the non-quantized f32 path. The v1 and v2
+/// metadata layouts decode separately; loading either also requires a supported
+/// `hnsw_rs` graph version.
 pub(crate) const SNAPSHOT_FORMAT_VERSION: u16 = 2;
 
-/// Snapshot format versions this build can load. V5.3 (#412) accepts both
-/// v1 (the original f32-only codec) and v2 (the quantization-aware codec).
-/// A dump from a future v3 is refused with `VersionMismatch`. A v1 dump
-/// loads on a v2 build via the back-compat path: no quantization meta is
-/// present, so the adapter is constructed un-fitted (f32-only) — exactly
-/// the pre-#412 behaviour.
+/// Metadata layout versions decoded by this build. Graph loading additionally
+/// requires the supported `hnsw_rs` version; 0.3.4 is rejected with
+/// `VersionMismatch`, allowing the backend to rebuild from source. Future
+/// unsupported metadata versions are also rejected.
 pub(crate) const SNAPSHOT_SUPPORTED_VERSIONS: &[u16] = &[1, 2];
 
 /// The V5.3 (#412) marker stamped into `QuantMeta::method` for the SQ8

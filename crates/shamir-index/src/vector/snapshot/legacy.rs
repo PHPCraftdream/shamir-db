@@ -1,4 +1,6 @@
-//! Historical v1 disk layouts and validated inner-version dispatch.
+//! Schema-derived v1 metadata layouts and validated inner-version dispatch.
+//! Graph loading additionally requires the supported hnsw_rs version; 0.3.4
+//! is rejected with VersionMismatch and the backend rebuilds from source.
 //!
 //! Layouts mirror `3ed3069b^:crates/shamir-index/src/vector/snapshot.rs`.
 
