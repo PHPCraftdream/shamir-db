@@ -39,7 +39,7 @@ fn rv_wasm_host_df4ad1da_typed_gateway_errors() {
     assert!(matches!(private, NetGatewayError::NotAllowed(_)));
     assert_eq!(
         private.to_string(),
-        "egress to 127.0.0.1 not allowed (private/loopback IP requires exact allowlist entry)"
+        "egress to 127.0.0.1 not allowed (IP policy)"
     );
 
     // Bad scheme → guard denial.
