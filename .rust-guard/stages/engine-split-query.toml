@@ -1,0 +1,122 @@
+# Campaign engine-split-query: executor records visibility; orchestrator records conservation.
+base = "f9dc5788d38f79241db530d6546b910f407e8d8c"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/function.rs"
+item = "builtin_aggs"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/planning/compile.rs"
+item = "compile_filter_with_context"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/semantics/resolve.rs"
+item = "is_column_query_ref"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/semantics/resolve.rs"
+item = "resolve_query_ref_column"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::row_byte_meter"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::interner_overlay_ids"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::resolve_interner_id"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::with_read_overlay"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::clone_with_read_overlay"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::with_row_byte_meter"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::with_read_visibility_scope"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/eval_context.rs"
+item = "FilterContext::remaining_read_visibility_budget"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/read_budget.rs"
+item = "ReadVisibilityScope"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/runtime/core/read_budget.rs"
+item = "ReadByteMeter"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/read/aggregation/group_execution.rs"
+item = "try_apply_group_by"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/read/aggregation/group_execution.rs"
+item = "apply_aggregate_all_with_context"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/read/exec.rs"
+item = "apply_select_value_with_context"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/read/projection/order.rs"
+item = "PREALLOC_CAP"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/read/projection/select_projection.rs"
+item = "SelectProjection::new_with_context"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"
+
+[[allow_widen]]
+path = "crates/shamir-engine-query/src/query/filter/evaluation/planning/index_range.rs"
+item = "predicate_to_index_range_in_ctx"
+reason = "S1 #1548: query crate boundary"
+owner = "@engine"

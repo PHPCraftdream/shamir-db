@@ -1,0 +1,434 @@
+use shamir_collections::TSet;
+
+use crate::index2::expr::IndexExpr;
+use crate::query::filter::evaluation::filter_node::{CompactPath, CompareOp, FilterNode};
+use crate::query::filter::evaluation::semantics::fts::like_pattern_to_regex;
+use crate::query::filter::evaluation::semantics::pattern_guard::{build_like_regex, build_regex};
+use crate::query::filter::evaluation::semantics::resolve::{
+    filter_value_to_query, intern_field_path, intern_field_path_compact,
+    intern_field_path_compact_with,
+};
+use crate::query::filter::{Filter, FilterValue};
+use shamir_query_types::filter::ValueCompareOp;
+use shamir_types::core::interner::Interner;
+
+/// Convert the DTO-level `ValueCompareOp` (defined in `shamir-query-types`,
+/// which does not depend on `shamir-engine`) into the engine's `CompareOp`
+/// used by the compiled `FilterNode` tree.
+fn value_compare_op_to_compare_op(op: ValueCompareOp) -> CompareOp {
+    match op {
+        ValueCompareOp::Eq => CompareOp::Eq,
+        ValueCompareOp::Ne => CompareOp::Ne,
+        ValueCompareOp::Gt => CompareOp::Gt,
+        ValueCompareOp::Gte => CompareOp::Gte,
+        ValueCompareOp::Lt => CompareOp::Lt,
+        ValueCompareOp::Lte => CompareOp::Lte,
+    }
+}
+
+/// Compile a Filter AST into a tree of `FilterNode` (static dispatch).
+pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
+    try_compile_filter(filter, interner).unwrap_or(FilterNode::False)
+}
+
+/// Compile using the overlay snapshot already captured in the read context.
+pub fn compile_filter_with_context(
+    filter: &Filter,
+    ctx: &crate::query::filter::FilterContext<'_>,
+) -> FilterNode {
+    try_compile_filter_with_context(filter, ctx).unwrap_or(FilterNode::False)
+}
+
+pub(crate) fn try_compile_filter_with_context(
+    filter: &Filter,
+    ctx: &crate::query::filter::FilterContext<'_>,
+) -> Result<FilterNode, String> {
+    try_compile_filter_with_overlay(filter, ctx.interner, ctx.interner_overlay_ids.as_deref())
+}
+
+pub fn try_compile_filter(filter: &Filter, interner: &Interner) -> Result<FilterNode, String> {
+    try_compile_filter_with_overlay(filter, interner, None)
+}
+
+fn try_compile_filter_with_overlay(
+    filter: &Filter,
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> Result<FilterNode, String> {
+    match filter {
+        Filter::And { filters } => Ok(FilterNode::And(
+            filters
+                .iter()
+                .map(|f| try_compile_filter_with_overlay(f, interner, overlay_ids))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Filter::Or { filters } => Ok(FilterNode::Or(
+            filters
+                .iter()
+                .map(|f| try_compile_filter_with_overlay(f, interner, overlay_ids))
+                .collect::<Result<Vec<_>, _>>()?,
+        )),
+        Filter::Not { filter } => Ok(FilterNode::Not(Box::new(try_compile_filter_with_overlay(
+            filter,
+            interner,
+            overlay_ids,
+        )?))),
+        Filter::Regex { field, pattern } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => Ok(FilterNode::Regex {
+                field_path: path,
+                regex: build_regex(pattern)?,
+            }),
+            None => Ok(FilterNode::False),
+        },
+        Filter::Like { field, pattern } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => Ok(FilterNode::Like {
+                field_path: path,
+                regex: build_like_regex(pattern, false)?,
+            }),
+            None => Ok(FilterNode::False),
+        },
+        Filter::ILike { field, pattern } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => Ok(FilterNode::Like {
+                field_path: path,
+                regex: build_like_regex(pattern, true)?,
+            }),
+            None => Ok(FilterNode::False),
+        },
+        _ => Ok(compile_non_pattern(filter, interner, overlay_ids)),
+    }
+}
+
+fn intern_path(
+    field: &[String],
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> Option<CompactPath> {
+    match overlay_ids {
+        Some(ids) => intern_field_path_compact_with(field, interner, Some(ids)),
+        None => intern_field_path_compact(field, interner),
+    }
+}
+
+fn compile_non_pattern(
+    filter: &Filter,
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> FilterNode {
+    match filter {
+        Filter::Eq { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Eq, interner, overlay_ids)
+        }
+        Filter::Ne { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Ne, interner, overlay_ids)
+        }
+        Filter::Gt { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Gt, interner, overlay_ids)
+        }
+        Filter::Gte { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Gte, interner, overlay_ids)
+        }
+        Filter::Lt { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Lt, interner, overlay_ids)
+        }
+        Filter::Lte { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Lte, interner, overlay_ids)
+        }
+        Filter::FieldEq { field, value } => {
+            compile_compare_with_overlay(field, value, CompareOp::Eq, interner, overlay_ids)
+        }
+        // Value-vs-value comparison (#651 fix) — no field path to resolve,
+        // so no compile-time folding: both sides are resolved at MATCH
+        // time via `resolve_filter_query` (their `$query` refs vary per
+        // call). See `FilterNode::ValueCompare::matches` for the eval.
+        Filter::ValueCompare { left, cmp, right } => FilterNode::ValueCompare {
+            left: left.clone(),
+            op: value_compare_op_to_compare_op(*cmp),
+            right: right.clone(),
+        },
+        Filter::And { filters } => FilterNode::And(
+            filters
+                .iter()
+                .map(|f| compile_filter_with_overlay(f, interner, overlay_ids))
+                .collect(),
+        ),
+        Filter::Or { filters } => FilterNode::Or(
+            filters
+                .iter()
+                .map(|f| compile_filter_with_overlay(f, interner, overlay_ids))
+                .collect(),
+        ),
+        Filter::Not { filter } => FilterNode::Not(Box::new(compile_filter_with_overlay(
+            filter,
+            interner,
+            overlay_ids,
+        ))),
+        Filter::IsNull { field } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::IsNull { field_path: path },
+            None => FilterNode::True,
+        },
+        Filter::IsNotNull { field } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::IsNotNull { field_path: path },
+            None => FilterNode::False,
+        },
+        Filter::In { field, values } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => compile_in_node(path, values, false),
+            None => FilterNode::False,
+        },
+        Filter::NotIn { field, values } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => compile_in_node(path, values, true),
+            None => FilterNode::True,
+        },
+        Filter::Like { field, pattern } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => match like_pattern_to_regex(pattern, false) {
+                Some(regex) => FilterNode::Like {
+                    field_path: path,
+                    regex,
+                },
+                None => FilterNode::False,
+            },
+            None => FilterNode::False,
+        },
+        Filter::ILike { field, pattern } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => match like_pattern_to_regex(pattern, true) {
+                Some(regex) => FilterNode::Like {
+                    field_path: path,
+                    regex,
+                },
+                None => FilterNode::False,
+            },
+            None => FilterNode::False,
+        },
+        Filter::Regex { field, pattern } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => match build_regex(pattern) {
+                Ok(regex) => FilterNode::Regex {
+                    field_path: path,
+                    regex,
+                },
+                Err(_) => FilterNode::False,
+            },
+            None => FilterNode::False,
+        },
+        Filter::Contains { field, value } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::Contains {
+                field_path: path,
+                pre_resolved: filter_value_to_query(value),
+                value: value.clone(),
+            },
+            None => FilterNode::False,
+        },
+        Filter::ContainsAny { field, values } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => compile_contains_any_node(path, values),
+            None => FilterNode::False,
+        },
+        Filter::ContainsAll { field, values } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => compile_contains_all_node(path, values),
+            None => FilterNode::False,
+        },
+        Filter::Between { field, from, to } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::Between {
+                field_path: path,
+                pre_from: filter_value_to_query(from),
+                pre_to: filter_value_to_query(to),
+                from: from.clone(),
+                to: to.clone(),
+            },
+            None => FilterNode::False,
+        },
+        Filter::Exists { field } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::Exists { field_path: path },
+            None => FilterNode::False,
+        },
+        Filter::NotExists { field } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::NotExists { field_path: path },
+            None => FilterNode::True,
+        },
+        // Vector similarity cannot be brute-forced per-record
+        // (would be O(n×dim) without an index). Planner must handle.
+        Filter::VectorSimilarity { .. } => FilterNode::True,
+
+        // FTS brute-force fallback (when no FTS index exists).
+        Filter::Fts {
+            field, query, mode, ..
+        } => match intern_path(field, interner, overlay_ids) {
+            Some(path) => FilterNode::FtsMatch {
+                field_path: path,
+                query_tokens: query.split_whitespace().map(|w| w.to_lowercase()).collect(),
+                mode_and: mode != "or",
+            },
+            None => FilterNode::False,
+        },
+
+        // Computed expression comparison.
+        Filter::Computed {
+            expr_op,
+            field,
+            cmp,
+            value,
+            expr_args,
+        } => {
+            let op = match cmp.as_str() {
+                "eq" => CompareOp::Eq,
+                "ne" => CompareOp::Ne,
+                "gt" => CompareOp::Gt,
+                "gte" => CompareOp::Gte,
+                "lt" => CompareOp::Lt,
+                "lte" => CompareOp::Lte,
+                _ => return FilterNode::False,
+            };
+            match build_index_expr_with_overlay(
+                expr_op,
+                field,
+                expr_args.as_deref(),
+                interner,
+                overlay_ids,
+            ) {
+                Some(expr) => FilterNode::ComputedCompare {
+                    expr: Box::new(expr),
+                    pre_resolved: filter_value_to_query(value),
+                    value: value.clone(),
+                    op,
+                },
+                None => FilterNode::False,
+            }
+        }
+    }
+}
+
+fn compile_filter_with_overlay(
+    filter: &Filter,
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> FilterNode {
+    try_compile_filter_with_overlay(filter, interner, overlay_ids).unwrap_or(FilterNode::False)
+}
+
+fn build_index_expr_with_overlay(
+    expr_op: &str,
+    field: &[String],
+    _expr_args: Option<&[FilterValue]>,
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> Option<crate::index2::expr::IndexExpr> {
+    let path = match overlay_ids {
+        Some(ids) => intern_field_path(field, interner).or_else(|| {
+            let compact = intern_path(field, interner, Some(ids))?;
+            Some(compact.iter().map(|key| key.id()).collect())
+        })?,
+        None => intern_field_path(field, interner)?,
+    };
+    let base = IndexExpr::Field(path);
+    Some(match expr_op {
+        "lower" => IndexExpr::Lower(Box::new(base)),
+        "upper" => IndexExpr::Upper(Box::new(base)),
+        "trim" => IndexExpr::Trim(Box::new(base)),
+        "length" => IndexExpr::Length(Box::new(base)),
+        "field" => base,
+        // Unknown ops are treated as user-registered scalar names. The
+        // brute-force eval path resolves the name via the ScalarResolver
+        // at match time; the index path validates `.trusted_pure()` at
+        // creation time. If the name doesn't resolve, the eval returns
+        // an error → the comparison yields false (no match).
+        user_scalar => IndexExpr::Scalar {
+            name: user_scalar.to_string(),
+            inner: Box::new(base),
+        },
+    })
+}
+
+/// Build a compiled `$in` / `$nin` node.
+///
+/// If ALL `values` are literals (Null/Bool/Int/Float/String/Binary) we
+/// materialise them once into a `TSet<InnerValue>` and emit `FilterNode::InSet`
+/// for O(1) membership checks at eval time. If any value is a non-literal
+/// (FieldRef, QueryRef, Fn, Param, …) we fall back to `FilterNode::In` with
+/// the pre-resolved parallel slice — the same behaviour as before this
+/// optimisation.
+fn compile_in_node(path: CompactPath, values: &[FilterValue], negate: bool) -> FilterNode {
+    // Attempt to resolve every value to a literal.
+    let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
+        values.iter().map(filter_value_to_query).collect();
+
+    if resolved.iter().all(Option::is_some) {
+        // Fast path: all literals → HashSet.
+        let set: TSet<shamir_types::types::value::QueryValue> =
+            resolved.into_iter().flatten().collect();
+        FilterNode::InSet {
+            field_path: path,
+            values: set,
+            negate,
+        }
+    } else {
+        // Fallback: mixed literals + dynamic values → linear scan.
+        FilterNode::In {
+            field_path: path,
+            values: values.to_vec(),
+            pre_resolved: resolved,
+            ref_column_sets: std::sync::OnceLock::new(),
+            negate,
+        }
+    }
+}
+
+/// Build a compiled `$contains_any` node.
+///
+/// When ALL `values` are literals, materialise them into a `TSet<InnerValue>`
+/// and emit `FilterNode::ContainsAnySet` for O(1) per-element membership checks
+/// instead of the O(N×M) nested scan in `ContainsAny`.
+fn compile_contains_any_node(path: CompactPath, values: &[FilterValue]) -> FilterNode {
+    let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
+        values.iter().map(filter_value_to_query).collect();
+    if resolved.iter().all(Option::is_some) {
+        let set: TSet<shamir_types::types::value::QueryValue> =
+            resolved.into_iter().flatten().collect();
+        FilterNode::ContainsAnySet {
+            field_path: path,
+            values: set,
+        }
+    } else {
+        FilterNode::ContainsAny {
+            field_path: path,
+            values: values.to_vec(),
+        }
+    }
+}
+
+/// Build a compiled `$contains_all` node.
+///
+/// When ALL `values` are literals, materialise them into a `TSet<InnerValue>`
+/// and emit `FilterNode::ContainsAllSet` for O(field_len) counting instead of
+/// the O(N×M) nested scan in `ContainsAll`.
+fn compile_contains_all_node(path: CompactPath, values: &[FilterValue]) -> FilterNode {
+    let resolved: Vec<Option<shamir_types::types::value::QueryValue>> =
+        values.iter().map(filter_value_to_query).collect();
+    if resolved.iter().all(Option::is_some) {
+        let set: TSet<shamir_types::types::value::QueryValue> =
+            resolved.into_iter().flatten().collect();
+        FilterNode::ContainsAllSet {
+            field_path: path,
+            values: set,
+        }
+    } else {
+        FilterNode::ContainsAll {
+            field_path: path,
+            values: values.to_vec(),
+        }
+    }
+}
+
+fn compile_compare_with_overlay(
+    field: &[String],
+    value: &FilterValue,
+    op: CompareOp,
+    interner: &Interner,
+    overlay_ids: Option<&shamir_collections::TFxMap<String, u64>>,
+) -> FilterNode {
+    match intern_path(field, interner, overlay_ids) {
+        Some(path) => FilterNode::Compare {
+            field_path: path,
+            pre_resolved: filter_value_to_query(value),
+            value: value.clone(),
+            op,
+        },
+        None => FilterNode::False,
+    }
+}
