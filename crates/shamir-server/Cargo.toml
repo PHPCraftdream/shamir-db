@@ -134,7 +134,7 @@ sefer-alloc = { version = "0.2.1", features = ["production"] }
 # /metrics output (the process metrics register against a different global).
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio"] }
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false }
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
 metrics-process = "2"
 captrack = { workspace = true }
 
