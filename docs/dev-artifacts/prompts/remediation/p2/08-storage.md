@@ -4,11 +4,24 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 21 findings below in one coherent change set for shamir-storage (effort units 43: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. 
+Stop the default range filter at the upper bound, recover from a partial copy on the production rename path, remove the environmental thread-start panic, and tidy storage docs and tests.
+
+This is one change set for shamir-storage: 21 findings, effort units 43 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. 
 
 ## Scope
 
 Crates: `shamir-storage`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- The default range filter stops polling after the first key above the end bound (oracle: no further polls).
+- A partial copy on the production rename path is recovered or rolled back with a test; thread-start failure no longer panics.
+- Documentation and test-organization cards are closed without behavior change.
+
+## Coordination with other tasks
+
+Suggested wave 1; no strict predecessor.
+- record_id.rs (38F208C4, 9794FD53) is also edited by P2-12; collections lib.rs (8FEF1C5A) by P2-19. P2-12 and P2-19 start after P2-08.
 
 ## Decisions
 

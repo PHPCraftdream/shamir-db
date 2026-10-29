@@ -4,11 +4,24 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 26 findings below in one coherent change set for shamir-connect (effort units 45: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Public accepted-input and API changes need owner answers; downstream shamir-server/shamir-client migrations are part of the PR when an API becomes fallible.
+Correct the authentication-message oracles and add byte-exact vectors without changing wire bytes, bound and version the ticket format, keep session identity and cached HMAC keys coherent, and make entropy/clock failures fallible.
+
+This is one change set for shamir-connect: 26 findings, effort units 45 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Public accepted-input and API changes need owner answers; downstream shamir-server/shamir-client migrations are part of the PR when an API becomes fallible.
 
 ## Scope
 
 Crates: `shamir-connect`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- The auth-message oracles use the real 13-byte tag and 148-byte message; wire bytes do not change; byte-exact vectors cover change-password and bootstrap payloads.
+- The ticket version is validated on issuance and covered by a version-3 rejection test; ciphertext length cannot truncate silently.
+- Session id, cached HMAC key and change-password nonce are coherent through the public lifecycle; entropy and clock failures are fallible, with downstream migration (owner answers).
+
+## Coordination with other tasks
+
+Suggested wave 3; starts after P2-09, P2-18 are merged.
+- Starts after P2-09 and P2-18 (handshake.rs, domain_tags.rs, downstream client/server migration when an API becomes fallible).
 
 ## Decisions
 

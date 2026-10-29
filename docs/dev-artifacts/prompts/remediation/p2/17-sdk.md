@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 11 findings below in one coherent change set for shamir-sdk, shamir-sdk-macros (effort units 24: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. 
+Document and enforce the SDK ABI contracts, support renamed-dependency consumers of the macros, and clean up conventions.
+
+This is one change set for shamir-sdk, shamir-sdk-macros: 11 findings, effort units 24 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. 
 
 ## Scope
 
 Crates: `shamir-sdk`, `shamir-sdk-macros`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- SDK ABI contracts are documented and enforced where the card asks; macros work for renamed-dependency consumers (owner answers).
+- Convention cleanup closes without ABI changes beyond the cards.
+
+## Coordination with other tasks
+
+Suggested wave 3; starts after P2-16 are merged.
+- Starts after P2-16 (wasm_function.rs); P2-14 starts after P2-17 (sdk api/db.rs).
 
 ## Decisions
 

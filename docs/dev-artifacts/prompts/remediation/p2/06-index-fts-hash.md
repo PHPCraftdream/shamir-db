@@ -4,11 +4,24 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 9 findings below in one coherent change set for shamir-index (effort units 28: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Files under src/fts/**, src/backends/**, base_index/infra and index_manager_unique. Hash changes need a persisted-index migration/rebuild decision.
+Settle persisted hash identity for unique and FTS keys (keyed hash or value comparison, with a migration or rebuild policy), keep structured errors through IndexError, make FTS degradation visible, and bound the n-gram tokenizer.
+
+This is one change set for shamir-index: 9 findings, effort units 28 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Files under src/fts/**, src/backends/**, base_index/infra and index_manager_unique. Hash changes need a persisted-index migration/rebuild decision.
 
 ## Scope
 
 Crates: `shamir-index`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Unique and FTS identity no longer rest on a correlated or unkeyed hash alone, or the owner records an accepted risk with a migration/rebuild policy.
+- IndexError keeps the structured DbError identity across boundaries (owner answer on the public error contract).
+- Corrupt FTS posting values and silent fallbacks are logged and surfaced; the n-gram tokenizer output is bounded.
+
+## Coordination with other tasks
+
+Suggested wave 2; no strict predecessor.
+- Owns src/fts/**, src/backends/**, base_index/infra and index_manager_unique. tokenizer.rs is also edited by P2-07 (32C98E9F): P2-07 starts after P2-06.
 
 ## Decisions
 

@@ -4,11 +4,24 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 13 findings below in one coherent change set for shamir-engine (effort units 32: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Do not edit pre_commit/prelock.rs (owned by P2-02).
+Make the optimized contains_all and schema one_of paths agree with the dynamic semantics (coercing numerics, NaN), and trim cache/token overhead and small structural debts in the engine.
+
+This is one change set for shamir-engine: 13 findings, effort units 32 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Do not edit pre_commit/prelock.rs (owned by P2-02).
 
 ## Scope
 
 Crates: `shamir-engine`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Table-driven tests show the optimized contains_all agrees with dynamic membership for integers, floats and NaN.
+- The precomputed schema one_of accepts exactly what the fallback equality accepts, including NaN.
+- Cache/token overhead changes keep results identical; no edits to pre_commit/prelock.rs (owned by P2-02).
+
+## Coordination with other tasks
+
+Suggested wave 2; starts after P2-02 are merged.
+- Starts after P2-02 is merged (prelock.rs). Shares filter_node.rs and resolve.rs with P2-14 (P2-14 starts after P2-04). Shares types/value.rs with P2-12 in the same wave: the overlap is small (95ECC2FE vs 313627EB); resolve it in the integration merge.
 
 ## Decisions
 

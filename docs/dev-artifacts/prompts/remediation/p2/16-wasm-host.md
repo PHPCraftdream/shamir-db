@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 14 findings below in one coherent change set for shamir-wasm-host (effort units 22: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Bounding compiler output must keep the shamir-proc-tree lifecycle guarantees.
+Make runtime Rust-source compilation independent of the build machine checkout, bound the compiler output, validate pooling limits against custom function limits, and clean up allocation and metadata handling.
+
+This is one change set for shamir-wasm-host: 14 findings, effort units 22 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Bounding compiler output must keep the shamir-proc-tree lifecycle guarantees.
 
 ## Scope
 
 Crates: `shamir-wasm-host`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- compile_rust_source resolves the SDK from a supported, configurable source and fails with an actionable error when it is missing (owner answer).
+- Compiler output retained in memory is bounded with a truncation marker, keeping the proc-tree lifecycle guarantees; pooling ceiling versus custom function limits is validated.
+
+## Coordination with other tasks
+
+Suggested wave 2; no strict predecessor.
+- wasm_function.rs is also edited by P2-17 (723F5FD2): P2-17 starts after P2-16. core.rs of shamir-db (4669FDA6) is also edited by P2-01.
 
 ## Decisions
 

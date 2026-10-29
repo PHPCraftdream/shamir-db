@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 15 findings below in one coherent change set for shamir-wal (effort units 28: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Keep the P0 cancellation/fail-stop ticket semantics and the P1 corruption and typed-I/O policies.
+Prevent leader starvation in group commit, keep the zero-version retention pin across mixed batches and segments, bound recovery work, stop the destructive rollback schedule, and correct benchmark claims.
+
+This is one change set for shamir-wal: 15 findings, effort units 28 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Keep the P0 cancellation/fail-stop ticket semantics and the P1 corruption and typed-I/O policies.
 
 ## Scope
 
 Crates: `shamir-wal`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Sustained arrivals cannot keep the elected leader's append future from returning (test); P0 cancellation/fail-stop ticket semantics are preserved.
+- Zero-version retention pins survive mixed zero/positive batches and segments (test); recovery is bounded; the rollback schedule is no longer destructive; benchmark claims match what is covered.
+
+## Coordination with other tasks
+
+Suggested wave 1; no strict predecessor.
+- Keeps P0 cancellation/fail-stop ticket semantics and the P1 corruption/typed-I/O policies.
 
 ## Decisions
 

@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 31 findings below in one coherent change set for shamir-server, shamir-transport-tcp, shamir-transport-ws, shamir-transport-ipc (effort units 50: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. TCP pooling must keep secret zeroization and terminal cancellation behavior.
+Validate WebSocket origin patterns, align the loopback predicates of transport and server configuration, remove avoidable clones and staging costs in TCP, and fix exporter docs and transport/server test maintenance.
+
+This is one change set for shamir-server, shamir-transport-tcp, shamir-transport-ws, shamir-transport-ipc: 31 findings, effort units 50 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. TCP pooling must keep secret zeroization and terminal cancellation behavior.
 
 ## Scope
 
 Crates: `shamir-server`, `shamir-transport-tcp`, `shamir-transport-ws`, `shamir-transport-ipc`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Configured WS origin patterns and supplied serialized origins are validated; one-level wildcard semantics are preserved (owner answer).
+- Transport and server loopback predicates agree; TCP staging/clone costs and exporter docs are fixed; TCP secret zeroization and terminal cancellation behavior are preserved.
+
+## Coordination with other tasks
+
+Suggested wave 2; starts after P2-09 are merged.
+- Starts after P2-09 (client api.rs/transport.rs); P2-10 starts after P2-18 (connect handshake.rs, domain_tags.rs).
 
 ## Decisions
 

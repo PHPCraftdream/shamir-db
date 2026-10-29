@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 16 findings below in one coherent change set for shamir-client (effort units 33: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. RV-CLIENT-A911BA9E shares the RecordView boundary with the engine; do not change the engine side here.
+Turn malformed id-keyed rows and undecodable response frames into errors instead of empty records and hung waiters, zeroize the resume ticket, and cut interner traversal and encode copies.
+
+This is one change set for shamir-client: 16 findings, effort units 33 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. RV-CLIENT-A911BA9E shares the RecordView boundary with the engine; do not change the engine side here.
 
 ## Scope
 
 Crates: `shamir-client`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- A malformed id-keyed row yields a typed error; an undecodable response frame fails its waiters promptly instead of hanging them, and is logged above debug level.
+- The resume ticket and its wire copy are Zeroizing (owner answer); interner traversal and encode copies are reduced (allocation test or measured).
+
+## Coordination with other tasks
+
+Suggested wave 1; no strict predecessor.
+- api.rs and transport.rs are also edited by P2-18 (79910BA5, 8999F6B7): P2-18 starts after P2-09. messagepack.rs (9DEFDE43) is also edited by P2-12.
 
 ## Decisions
 

@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 12 findings below in one coherent change set for shamir-numa, shamir-bench-utils, shamir-collections (effort units 23: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Bump GENERATOR_REVISION when generator output changes.
+Fix the Lcg generator endpoints (bump GENERATOR_REVISION), the NUMA detection, coverage and QEMU oracle, and the related docs.
+
+This is one change set for shamir-numa, shamir-bench-utils, shamir-collections: 12 findings, effort units 23 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Bump GENERATOR_REVISION when generator output changes.
 
 ## Scope
 
 Crates: `shamir-numa`, `shamir-bench-utils`, `shamir-collections`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Lcg::next_f32 stays in [0, 1) and next_range never reaches hi; GENERATOR_REVISION is bumped where generated data changes.
+- NUMA detection/coverage and the QEMU oracle are corrected; the documentation cards are closed.
+
+## Coordination with other tasks
+
+Suggested wave 2; starts after P2-08 are merged.
+- Starts after P2-08 (collections lib.rs).
 
 ## Decisions
 

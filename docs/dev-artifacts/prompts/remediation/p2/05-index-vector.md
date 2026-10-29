@@ -4,11 +4,24 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 13 findings below in one coherent change set for shamir-index (effort units 26: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Files under src/vector/**. Keep the P1 SQ8-intent carrier and the repaired generation/prune ordering.
+Make the vector snapshot honest and safe: a real v1 decode path (or an honest claim), no panic on corrupt-but-decodable sidecars, no unaligned u32 lane loads on AArch64, batched delta replay, streaming dump/load, and a brute-force adapter with an observed lifecycle.
+
+This is one change set for shamir-index: 13 findings, effort units 26 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Files under src/vector/**. Keep the P1 SQ8-intent carrier and the repaired generation/prune ordering.
 
 ## Scope
 
 Crates: `shamir-index`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- A snapshot built from real historical v1 bytes decodes (or the compatibility claim is removed, per owner answer); the existing vacuous test is replaced.
+- A decodable sidecar with inconsistent parameter lengths returns an error instead of panicking.
+- SQ8 loads are correct for unaligned byte slices on every target (tests on aligned and unaligned offsets); delta replay is batched; snapshot dump/load no longer holds the whole graph twice (owner answer).
+
+## Coordination with other tasks
+
+Suggested wave 1; no strict predecessor.
+- Owns files under crates/shamir-index/src/vector/**.
 
 ## Decisions
 

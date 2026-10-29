@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 20 findings below in one coherent change set for shamir-query-builder, shamir-query-builder-macros (effort units 38: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Keep builder-only expansion paths (C5/H8) and clause-keyword disambiguation.
+Cut builder copying and reference collection, fix macro emission, diagnostics and parsing/allocation, correct macro docs, and clean up the builder crate.
+
+This is one change set for shamir-query-builder, shamir-query-builder-macros: 20 findings, effort units 38 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Keep builder-only expansion paths (C5/H8) and clause-keyword disambiguation.
 
 ## Scope
 
 Crates: `shamir-query-builder`, `shamir-query-builder-macros`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Builder copying/reference collection is reduced with unchanged output (existing fixtures stay green).
+- Macro emission, diagnostics and parsing changes keep builder-only expansion paths and clause-keyword disambiguation; docs are corrected.
+
+## Coordination with other tasks
+
+Suggested wave 4; starts after P2-04, P2-17 are merged.
+- Starts after P2-04 (filter_node.rs, resolve.rs) and P2-17 (sdk api/db.rs).
 
 ## Decisions
 

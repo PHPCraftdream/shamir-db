@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 13 findings below in one coherent change set for shamir-index (effort units 24: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Files under src/base_index/** (except infra/index_manager_unique hash code owned by P2-06) and src/model/**.
+Give the posting cache a byte budget, page the DROP sweeps, replace the O(N) registry scans, and clean up docs and convention debts in the index managers and runtime model.
+
+This is one change set for shamir-index: 13 findings, effort units 24 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Files under src/base_index/** (except infra/index_manager_unique hash code owned by P2-06) and src/model/**.
 
 ## Scope
 
 Crates: `shamir-index`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- The posting cache has a byte budget with an eviction test; DROP sweeps page their key list; registry lookups are not O(N) per call.
+- No local use statements or inline cfg(test) modules remain in the touched files; docs match the shipped behavior.
+
+## Coordination with other tasks
+
+Suggested wave 3; starts after P2-06, P2-12 are merged.
+- Starts after P2-06 (tokenizer.rs) and P2-12 (interner.rs, for 002DDDA6).
 
 ## Decisions
 

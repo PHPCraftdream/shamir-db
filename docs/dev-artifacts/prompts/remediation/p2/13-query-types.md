@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 18 findings below in one coherent change set for shamir-query-types (effort units 41: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Preserve the RU7 decimal-string large-integer projection; reuse the H5 decoder instead of adding another conversion oracle.
+Remove silent conversion loss, non-transitive equality and serializer/deserializer incompatibility in the request/response DTOs, fix pagination equality, reduce planner allocations, and clean up docs and tests.
+
+This is one change set for shamir-query-types: 18 findings, effort units 41 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Preserve the RU7 decimal-string large-integer projection; reuse the H5 decoder instead of adding another conversion oracle.
 
 ## Scope
 
 Crates: `shamir-query-types`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- No silent conversion loss: lossy conversions error or are explicit; the RU7 decimal-string projection is preserved.
+- Equality is consistent (transitive) or documented; serializer and deserializer round-trip for the affected types; pagination equality is fixed; planner allocations are reduced without result changes.
+
+## Coordination with other tasks
+
+Suggested wave 3; starts after P2-04 are merged.
+- Starts after P2-04 (authorized.rs).
 
 ## Decisions
 

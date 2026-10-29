@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 15 findings below in one coherent change set for shamir-funclib (effort units 25: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. #330 knowingly kept the non-transitive comparator; a comparator fix must revisit the distinct-hashing contract.
+Decide and implement the cross-numeric ordering contract of compare (with the distinct-hashing contract), make the Argon2 saturation oracle deterministic, and fix docs and test/layout debts.
+
+This is one change set for shamir-funclib: 15 findings, effort units 25 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. #330 knowingly kept the non-transitive comparator; a comparator fix must revisit the distinct-hashing contract.
 
 ## Scope
 
 Crates: `shamir-funclib`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- The cross-numeric order is either exact (boundary-triple and permutation oracles) or explicitly documented as lossy, and the distinct-hashing contract matches (owner answer).
+- The Argon2 saturation oracle no longer depends on scheduling (permit-held rendezvous); documentation and test/layout cards are closed.
+
+## Coordination with other tasks
+
+Suggested wave 2; no strict predecessor.
+- Comparator fix must revisit the distinct-hashing contract retained by #330.
 
 ## Decisions
 

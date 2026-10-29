@@ -4,11 +4,24 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 9 findings below in one coherent change set for shamir-client-node (effort units 19: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. JS/TS plus napi crate. RV-CLIENT-8997B366 (Rust client resume ticket) belongs to P2-09; keep the zeroization approach consistent.
+Give the Node binding a lossless integer policy shared with the TS DTOs, steer execute(object) onto the builder path, make the credential-lifetime claims true, and remove redundant decode/copy and false documentation.
+
+This is one change set for shamir-client-node: 9 findings, effort units 19 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. JS/TS plus napi crate. RV-CLIENT-8997B366 (Rust client resume ticket) belongs to P2-09; keep the zeroization approach consistent.
 
 ## Scope
 
 Crates: `shamir-client-node`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Independent fixtures at +-(2^53+1) round-trip exactly; BigInt input is accepted; safe numbers are unchanged; the policy matches the TS DTOs and builders.
+- execute(object) either goes through the builder types or its documentation no longer teaches hand-assembled wire shapes (owner answer).
+- Secrets the binding controls are zeroized and the documentation claims match reality.
+
+## Coordination with other tasks
+
+Suggested wave 1; no strict predecessor.
+- Keep zeroization consistent with RV-CLIENT-8997B366 in P2-09.
 
 ## Decisions
 

@@ -4,11 +4,23 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Fix the 14 findings below in one coherent change set for shamir-types (effort units 28: S=1, M=2, L=4). They are adjacent: same crate and overlapping files, so they are solved together and share tests and review. Keep identical delta recaptures and the contiguous-prefix cursor from H13.
+Reject conflicting interner hydration state while keeping legitimate recaptures, close the 32-bit binary-length overflow, stop logging raw resource names unescaped, and fix docs and test hygiene.
+
+This is one change set for shamir-types: 14 findings, effort units 28 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. Keep identical delta recaptures and the contiguous-prefix cursor from H13.
 
 ## Scope
 
 Crates: `shamir-types`. Dependents are type-checked with `cargo check` when a public signature changes.
+
+## Acceptance
+
+- Conflicting hydrated ids/names are rejected while identical delta recaptures and the contiguous-prefix cursor keep working (H13).
+- The 32-bit binary-length arithmetic is checked like the string case; raw resource names are not interpolated unescaped into logs.
+
+## Coordination with other tasks
+
+Suggested wave 2; starts after P2-01, P2-08, P2-09 are merged.
+- Starts after P2-01, P2-08 and P2-09 (shared files). Touches shamir-db authorize.rs (71AFA12F, A7B1FCEC): rebase on P2-01. Shares types/value.rs with P2-04 in the same wave (small overlap, resolve in the integration merge).
 
 ## Decisions
 
