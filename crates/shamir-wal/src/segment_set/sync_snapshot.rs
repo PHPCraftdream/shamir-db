@@ -31,19 +31,38 @@ impl SegmentSet {
             // fails this round closed; durable history publication permits retry.
             let path = meta.path;
             let synced = meta.synced;
+            #[cfg(test)]
+            let injected = self
+                .sync_test
+                .sealed_error
+                .swap(0, std::sync::atomic::Ordering::AcqRel);
             let records = spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
                 let mut file = std::fs::OpenOptions::new()
                     .read(true)
                     .write(!synced)
                     .open(&path)
-                    .map_err(|e| DbError::Storage(format!("sealed snapshot open: {e}")))?;
+                    .map_err(|e| wal_io_error("sealed snapshot open".into(), e))?;
                 let mut buffer = Vec::new();
-                file.read_to_end(&mut buffer)
-                    .map_err(|e| DbError::Storage(format!("sealed snapshot read: {e}")))?;
+                #[cfg(test)]
+                let read_result = if injected == 1 {
+                    Err(super::sync_test_seam::injected_error())
+                } else {
+                    file.read_to_end(&mut buffer)
+                };
+                #[cfg(not(test))]
+                let read_result = file.read_to_end(&mut buffer);
+                read_result.map_err(|e| wal_io_error("sealed snapshot read".into(), e))?;
                 let records = decode_snapshot(&buffer)?;
                 if !synced {
-                    file.sync_all()
-                        .map_err(|e| DbError::Storage(format!("sealed snapshot sync: {e}")))?;
+                    #[cfg(test)]
+                    let sync_result = if injected == 2 {
+                        Err(super::sync_test_seam::injected_error())
+                    } else {
+                        file.sync_all()
+                    };
+                    #[cfg(not(test))]
+                    let sync_result = file.sync_all();
+                    sync_result.map_err(|e| wal_io_error("sealed snapshot sync".into(), e))?;
                 }
                 Ok(records)
             })
@@ -59,11 +78,11 @@ impl SegmentSet {
         }
         let captured = spawn_blocking(move || -> DbResult<Vec<WalEntryV2>> {
             let file = File::open(&path)
-                .map_err(|e| DbError::Storage(format!("sync snapshot open {path:?}: {e}")))?;
+                .map_err(|e| wal_io_error(format!("sync snapshot open {path:?}"), e))?;
             let mut buffer = Vec::new();
             file.take(bytes)
                 .read_to_end(&mut buffer)
-                .map_err(|e| DbError::Storage(format!("sync snapshot read: {e}")))?;
+                .map_err(|e| wal_io_error("sync snapshot read".into(), e))?;
             if u64::try_from(buffer.len()).ok() != Some(bytes) {
                 return Err(DbError::Storage("short WAL sync snapshot".into()));
             }

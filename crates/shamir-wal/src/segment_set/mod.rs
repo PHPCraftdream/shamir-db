@@ -5,6 +5,6 @@ mod sealed_retained_bytes;
 mod set;
 mod sync_snapshot;
 #[cfg(test)]
-mod sync_test_seam;
+pub(crate) mod sync_test_seam;
 
 pub use set::SegmentSet;
