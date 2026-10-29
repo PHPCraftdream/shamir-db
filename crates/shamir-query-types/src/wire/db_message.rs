@@ -27,7 +27,9 @@ use crate::wire::repl::{ReplRequest, ReplResponse};
 /// v4: request options are typed (`durability: buffered|synced` enum, NEW
 /// `index_visibility: sync|async` replacing the old
 /// `durability: "async_index"` string, `isolation` strict enum); unknown
-/// `BatchRequest` keys are rejected; v3 and older are rejected by the server.
+/// request-tree keys are rejected, except compatibility-preserved
+/// shared storage/response types and open user-data maps; v3 and older are
+/// rejected by the server.
 pub const CURRENT_QUERY_LANG_VERSION: u32 = 4;
 
 fn deserialize_tx_isolation<'de, D>(deserializer: D) -> Result<Option<IsolationLevel>, D::Error>

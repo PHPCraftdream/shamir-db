@@ -12,6 +12,7 @@ fn default_repo() -> String {
 
 /// Create a table in a repository.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTableOp {
     pub create_table: String,
     #[serde(default = "default_repo")]
@@ -35,6 +36,7 @@ pub struct CreateTableOp {
 ///
 /// Requires `hmac` over `b"drop_table\0<db_in_use>\0<repo>\0<table>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropTableOp {
     pub drop_table: String,
     #[serde(default = "default_repo")]
@@ -61,6 +63,7 @@ pub struct DropTableOp {
 /// { "describe_table": "users", "repo": "main" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DescribeTableOp {
     pub describe_table: String,
     #[serde(default = "default_repo")]
@@ -82,6 +85,7 @@ pub struct DescribeTableOp {
 /// { "rename_table": "old_name", "to": "new_name", "repo": "main" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameTableOp {
     pub rename_table: String,
     pub to: String,

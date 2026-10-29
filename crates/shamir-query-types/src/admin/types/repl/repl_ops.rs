@@ -131,6 +131,7 @@ pub struct ReplStream {
 /// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateReplicationProfileOp {
     /// Profile name (discriminator key).
     pub create_replication_profile: String,
@@ -140,6 +141,7 @@ pub struct CreateReplicationProfileOp {
 /// Drop a named replication profile. Accounts bound to the profile keep
 /// running with their last-resolved rules until reassigned.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropReplicationProfileOp {
     /// Profile name (discriminator key).
     pub drop_replication_profile: String,
@@ -151,6 +153,9 @@ pub struct DropReplicationProfileOp {
 /// downstream subscribers may pull. `system/*` (users, roles, settings) is
 /// included by adding its scope explicitly — there is no separate
 /// "replicate accounts" op (§5.5 insight).
+///
+/// Also decoded in replication Hello responses; keep unknown fields lenient
+/// for older followers receiving advertisements from newer leaders.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreatePublicationOp {
     /// Publication name (discriminator key).
@@ -161,6 +166,7 @@ pub struct CreatePublicationOp {
 /// Drop a publication. Active subscriptions to it become stale and stop
 /// receiving new events.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropPublicationOp {
     /// Publication name (discriminator key).
     pub drop_publication: String,
@@ -174,6 +180,7 @@ pub struct DropPublicationOp {
 /// `upstream` is an opaque identifier for the leader (address / cluster-id /
 /// connection handle — the concrete form is finalized with R1's transport).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateSubscriptionOp {
     /// Subscription name (discriminator key).
     pub create_subscription: String,
@@ -191,6 +198,7 @@ pub struct CreateSubscriptionOp {
 /// Drop a subscription. The node stops pulling from the upstream; already-
 /// applied data is unaffected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropSubscriptionOp {
     /// Subscription name (discriminator key).
     pub drop_subscription: String,
@@ -214,6 +222,7 @@ pub enum SubAction {
 /// Alter an existing subscription: pause, resume, or rebind to a different
 /// profile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlterSubscriptionOp {
     /// Subscription name (discriminator key).
     pub alter_subscription: String,
@@ -225,6 +234,7 @@ pub struct AlterSubscriptionOp {
 /// Wire form: `{ "list_publications": true }`. The discriminator is a
 /// presence-only boolean flag (same convention as `access_tree`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ListPublicationsOp {
     /// Discriminator flag — presence-only, conventionally `true`.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -236,6 +246,7 @@ pub struct ListPublicationsOp {
 /// Wire form: `{ "list_subscriptions": true }`. The discriminator is a
 /// presence-only boolean flag (same convention as `access_tree`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ListSubscriptionsOp {
     /// Discriminator flag — presence-only, conventionally `true`.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -248,6 +259,7 @@ pub struct ListSubscriptionsOp {
 /// Wire form: `{ "replication_status": true }`. The discriminator is a
 /// presence-only boolean flag (same convention as `access_tree`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ReplicationStatusOp {
     /// Discriminator flag — presence-only, conventionally `true`.
     #[serde(default, skip_serializing_if = "is_false")]

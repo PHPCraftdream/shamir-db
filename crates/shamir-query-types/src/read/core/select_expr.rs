@@ -6,7 +6,7 @@ use crate::filter::{FieldPath, FilterExpr, FilterExprOp, FilterValue};
 
 /// Simple expressions (for future expansion)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SelectExpr {
     // Arithmetic
     Add {

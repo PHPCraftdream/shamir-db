@@ -15,6 +15,7 @@ fn default_repo() -> String {
 /// without retention" as CurrentOnly — that default lives at the table
 /// layer in T3, not here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Retention {
     /// CAP by age (seconds). `None` = no age cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -56,7 +57,7 @@ impl Retention {
 /// Imperative history purge scope — the manual twin of vacuum.
 /// Both predicates are epoch-millis / age-based.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum PurgeScope {
     /// Purge history older than this timestamp (epoch-millis).
     OlderThan { timestamp: u64 },
@@ -70,6 +71,7 @@ pub enum PurgeScope {
 /// { "purge_history": "users", "repo": "main", "scope": { "older_than_age": { "age_secs": 86400 } } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PurgeHistoryOp {
     pub purge_history: String,
     #[serde(default = "default_repo")]
@@ -94,6 +96,7 @@ pub struct PurgeHistoryOp {
 /// { "changes_since": 0, "repo": "main", "limit": 1000 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ChangesSinceOp {
     /// Cursor: return events with `commit_version > this` (discriminator key).
     pub changes_since: u64,
@@ -113,6 +116,7 @@ pub struct ChangesSinceOp {
 /// { "set_retention": "users", "repo": "main", "retention": { "max_count": 5 } }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetRetentionOp {
     pub set_retention: String,
     #[serde(default = "default_repo")]

@@ -7,6 +7,7 @@ use super::source::SubscriptionSource;
 ///
 /// Wire discriminator key: `"subscribe"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubscribeOp {
     pub subscribe: Vec<SubscriptionSource>,
     #[serde(default)]

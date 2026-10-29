@@ -9,6 +9,7 @@ pub(crate) fn is_false(b: &bool) -> bool {
 
 /// Create a new database.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateDbOp {
     pub create_db: String,
     /// When `true`, a pre-existing database with the same name is NOT an
@@ -25,6 +26,7 @@ pub struct CreateDbOp {
 /// wrong tag → request rejected with `hmac_required` /
 /// `hmac_mismatch`. See `query_buffer_config.rs` design notes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropDbOp {
     pub drop_db: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

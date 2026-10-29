@@ -17,6 +17,7 @@ use crate::batch::batch_request::BatchRequest;
 /// of once, per
 /// `docs/dev-artifacts/design/oql-04-loops-foreach-adr.md` Decision 1.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForEachOp {
     /// The value-producing expression that yields the list of elements to
     /// iterate over (e.g. `@alias[].field` or a literal array).

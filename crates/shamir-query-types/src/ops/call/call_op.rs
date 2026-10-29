@@ -23,6 +23,7 @@ fn default_repo() -> String {
 /// `params` are positional [`FilterValue`]s — they may be literals or
 /// `$query` references to other batch results (Phase 2 dependency-graph).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CallOp {
     /// Name of the function to invoke.
     pub call: String,

@@ -32,6 +32,7 @@ pub enum NumDto {
 /// `path` uses flat string names (de-interned on the client side).
 /// The server interns them before persisting to the catalogue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "FieldRuleWire")]
 pub struct FieldRuleDto {
     /// Field path segments (e.g. `["address", "zip"]`).
     pub path: Vec<String>,
@@ -64,6 +65,65 @@ pub struct FieldRuleDto {
         skip_serializing_if = "crate::admin::types::schema_ops::is_false"
     )]
     pub keyset_safe: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldRuleWire {
+    path: Vec<String>,
+    r#type: String,
+    #[serde(default)]
+    keyset_safe: bool,
+    required: Option<bool>,
+    nullable: Option<bool>,
+    unsigned: Option<bool>,
+    min: Option<NumDto>,
+    max: Option<NumDto>,
+    len: Option<u64>,
+    max_len: Option<u64>,
+    min_len: Option<u64>,
+    one_of: Option<Vec<QueryValue>>,
+    default: Option<FilterValue>,
+    array_of: Option<String>,
+    scalar: Option<String>,
+    format: Option<String>,
+    compare: Option<CompareDto>,
+    foreign_key: Option<ForeignKeyDto>,
+    unique: Option<bool>,
+    #[serde(default)]
+    auto_now: bool,
+    #[serde(default)]
+    auto_now_add: bool,
+}
+
+impl From<FieldRuleWire> for FieldRuleDto {
+    fn from(wire: FieldRuleWire) -> Self {
+        Self {
+            path: wire.path,
+            r#type: wire.r#type,
+            keyset_safe: wire.keyset_safe,
+            constraints: ConstraintsDto {
+                required: wire.required,
+                nullable: wire.nullable,
+                unsigned: wire.unsigned,
+                min: wire.min,
+                max: wire.max,
+                len: wire.len,
+                max_len: wire.max_len,
+                min_len: wire.min_len,
+                one_of: wire.one_of,
+                default: wire.default,
+                array_of: wire.array_of,
+                scalar: wire.scalar,
+                format: wire.format,
+                compare: wire.compare,
+                foreign_key: wire.foreign_key,
+                unique: wire.unique,
+                auto_now: wire.auto_now,
+                auto_now_add: wire.auto_now_add,
+            },
+        }
+    }
 }
 
 /// Constraint fields carried alongside a [`FieldRuleDto`].
@@ -167,6 +227,7 @@ pub fn is_false(v: &bool) -> bool {
 ///
 /// `ref_table` and `ref_field` are flat (de-interned) names.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForeignKeyDto {
     /// The parent table name (flat, same repo).
     pub ref_table: String,
@@ -204,6 +265,7 @@ pub struct ForeignKeyDto {
 /// comparison operator as a string (`"<"`, `"<="`, `"=="`, `"!="`,
 /// `">="`, `">"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompareDto {
     /// The other field path (flat string segments, NOT interned).
     pub other: Vec<String>,
@@ -220,6 +282,7 @@ pub struct CompareDto {
 ///   "schema": [ {path, type, ...} ], "expected_version": 3 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetTableSchemaOp {
     pub set_table_schema: String,
     #[serde(default = "default_repo")]
@@ -243,6 +306,7 @@ pub struct SetTableSchemaOp {
 ///   "rule": {path, type, ...} }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AddSchemaRuleOp {
     pub add_schema_rule: String,
     #[serde(default = "default_repo")]
@@ -257,6 +321,7 @@ pub struct AddSchemaRuleOp {
 ///   "path": ["email"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoveSchemaRuleOp {
     pub remove_schema_rule: String,
     #[serde(default = "default_repo")]
@@ -270,6 +335,7 @@ pub struct RemoveSchemaRuleOp {
 /// { "get_table_schema": "users", "repo": "main" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GetTableSchemaOp {
     pub get_table_schema: String,
     #[serde(default = "default_repo")]

@@ -1,0 +1,542 @@
+[
+  {
+    "name": "read_complex",
+    "builder": "rust: Query::from(users).select(name).where_(and(eq(active,true),or(in(role,[admin,user]),not(like(name,x%)),regex(name,^A)))).group_by(name).having(eq(active,true)).order_by_desc(name).limit(10).offset(2); ts: Query.from(users).select([name]).where(and(eq(active,true),or([in_(role,[admin,user]),not(like(name,x%)),regex(name,^A)]))).groupBy(name).having(eq(active,true)).orderByDesc(name).limit(10).offset(2)",
+    "wire": {
+      "from": "users",
+      "select": {
+        "items": [
+          {
+            "type": "field",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "distinct": false
+      },
+      "where": {
+        "op": "and",
+        "filters": [
+          {
+            "op": "eq",
+            "field": [
+              "active"
+            ],
+            "value": true
+          },
+          {
+            "op": "or",
+            "filters": [
+              {
+                "op": "in",
+                "field": [
+                  "role"
+                ],
+                "values": [
+                  "admin",
+                  "user"
+                ]
+              },
+              {
+                "op": "not",
+                "filter": {
+                  "op": "like",
+                  "field": [
+                    "name"
+                  ],
+                  "pattern": "x%"
+                }
+              },
+              {
+                "op": "regex",
+                "field": [
+                  "name"
+                ],
+                "pattern": "^A"
+              }
+            ]
+          }
+        ]
+      },
+      "group_by": {
+        "fields": [
+          [
+            "name"
+          ]
+        ],
+        "having": {
+          "op": "eq",
+          "field": [
+            "active"
+          ],
+          "value": true
+        }
+      },
+      "order_by": {
+        "items": [
+          {
+            "field": [
+              "name"
+            ],
+            "direction": "desc"
+          }
+        ]
+      },
+      "pagination": {
+        "mode": "LimitOffset",
+        "limit": 10,
+        "offset": 2
+      }
+    }
+  },
+  {
+    "name": "read_page",
+    "builder": "rust: Query::from(users).select(name).page(2,25); ts: Query.from(users).select([name]).page(2,25)",
+    "wire": {
+      "from": "users",
+      "select": {
+        "items": [
+          {
+            "type": "field",
+            "path": [
+              "name"
+            ]
+          }
+        ],
+        "distinct": false
+      },
+      "pagination": {
+        "mode": "Page",
+        "page": 2,
+        "page_size": 25
+      }
+    }
+  },
+  {
+    "name": "read_default_ts",
+    "builder": "ts: Query.from(users).build()",
+    "known_gap": "TS omits default select; Rust ReadQuery serializes it.",
+    "wire": {
+      "from": "users"
+    }
+  },
+  {
+    "name": "insert",
+    "builder": "rust: insert(users).row(doc(name=Ada)); ts: insert(users,{name:Ada})",
+    "wire": {
+      "insert_into": "users",
+      "values": [
+        {
+          "name": "Ada"
+        }
+      ]
+    }
+  },
+  {
+    "name": "update",
+    "builder": "rust: update(users).set(doc(name=Ada)).where(eq(id,1)).expected_version(7); ts: update(users).set({name:Ada}).where(eq(id,1)).expectedVersion(7)",
+    "wire": {
+      "update": "users",
+      "set": {
+        "name": "Ada"
+      },
+      "where": {
+        "op": "eq",
+        "field": [
+          "id"
+        ],
+        "value": 1
+      },
+      "expected_version": 7
+    }
+  },
+  {
+    "name": "delete",
+    "builder": "rust: delete(users).where(eq(id,1)); ts: del(users,eq(id,1))",
+    "wire": {
+      "delete_from": "users",
+      "where": {
+        "op": "eq",
+        "field": [
+          "id"
+        ],
+        "value": 1
+      }
+    }
+  },
+  {
+    "name": "upsert",
+    "builder": "rust: upsert(users).key(doc(id=1)).value(doc(name=Ada)); ts: upsert(users,{id:1},{name:Ada})",
+    "wire": {
+      "set": "users",
+      "key": {
+        "id": 1
+      },
+      "value": {
+        "name": "Ada"
+      }
+    }
+  },
+  {
+    "name": "create_table",
+    "builder": "rust: create_table(users).if_not_exists(); ts: createTable(users,{if_not_exists:true})",
+    "wire": {
+      "create_table": "users",
+      "repo": "main",
+      "if_not_exists": true
+    }
+  },
+  {
+    "name": "drop_index",
+    "builder": "rust: drop_index(idx,users).hmac(aa).if_exists(); ts: dropIndex(signer=aa,db,main,users,idx,{if_exists:true})",
+    "wire": {
+      "drop_index": "idx",
+      "table": "users",
+      "repo": "main",
+      "hmac": "aa",
+      "if_exists": true
+    }
+  },
+  {
+    "name": "rename_table",
+    "builder": "rust: rename_table(users,people); ts: renameTable(users,people,{repo:main})",
+    "wire": {
+      "rename_table": "users",
+      "to": "people",
+      "repo": "main"
+    }
+  },
+  {
+    "name": "get_schema",
+    "builder": "rust: get_table_schema(users); ts: getTableSchema(users)",
+    "wire": {
+      "get_table_schema": "users",
+      "repo": "main"
+    }
+  },
+  {
+    "name": "remove_schema_rule",
+    "builder": "rust: remove_schema_rule(users,[name]); ts: removeSchemaRule(users,[name])",
+    "wire": {
+      "remove_schema_rule": "users",
+      "repo": "main",
+      "path": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "add_schema_rule",
+    "builder": "rust: add_schema_rule(users).rule(field([email]).string().required().max_len(255)); ts: addSchemaRule(users,field([email]).string().required().maxLen(255).build())",
+    "wire": {
+      "add_schema_rule": "users",
+      "repo": "main",
+      "rule": {
+        "path": [
+          "email"
+        ],
+        "type": "string",
+        "required": true,
+        "max_len": 255
+      }
+    }
+  },
+  {
+    "name": "set_schema",
+    "builder": "rust: set_table_schema(users).rules([field([email]).string().required().build()]).expected_version(3); ts: setTableSchema(users,[field([email]).string().required().build()],{expectedVersion:3})",
+    "wire": {
+      "set_table_schema": "users",
+      "repo": "main",
+      "schema": [
+        {
+          "path": [
+            "email"
+          ],
+          "type": "string",
+          "required": true
+        }
+      ],
+      "expected_version": 3
+    }
+  },
+  {
+    "name": "create_validator",
+    "builder": "rust: create_validator(validate).source(source); ts: createValidator(validate,{source:source})",
+    "wire": {
+      "create_validator": "validate",
+      "source": "source",
+      "replace": false
+    }
+  },
+  {
+    "name": "bind_validator",
+    "builder": "rust: bind_validator(validate,users).db(app).ops([Insert,Update]).priority(1600); ts: bindValidator(validate,users,[insert,update],1600,{db:app})",
+    "wire": {
+      "bind_validator": "validate",
+      "db": "app",
+      "repo": "main",
+      "table": "users",
+      "ops": [
+        "insert",
+        "update"
+      ],
+      "priority": 1600
+    }
+  },
+  {
+    "name": "unbind_validator",
+    "builder": "rust: unbind_validator(validate,users).db(app); ts: unbindValidator(validate,{db:app,table:users})",
+    "wire": {
+      "unbind_validator": "validate",
+      "db": "app",
+      "repo": "main",
+      "table": "users"
+    }
+  },
+  {
+    "name": "drop_validator",
+    "builder": "rust: drop_validator(validate).hmac(aa).if_exists(); ts: dropValidator(validate,{hmac:aa,if_exists:true})",
+    "wire": {
+      "drop_validator": "validate",
+      "hmac": "aa",
+      "if_exists": true
+    }
+  },
+  {
+    "name": "rename_validator",
+    "builder": "rust: rename_validator(validate,validate2); ts: renameValidator(validate,validate2)",
+    "wire": {
+      "rename_validator": "validate",
+      "to": "validate2"
+    }
+  },
+  {
+    "name": "list_validators",
+    "builder": "rust: list_validators(users).db(app); ts: listValidators(users,{db:app})",
+    "wire": {
+      "list_validators": "users",
+      "db": "app",
+      "repo": "main"
+    }
+  },
+  {
+    "name": "call",
+    "builder": "rust: Batch::call(c,proc,[1]); ts: call(proc,[1])",
+    "wire": {
+      "call": "proc",
+      "params": [
+        1
+      ],
+      "repo": "main"
+    }
+  },
+  {
+    "name": "subscribe",
+    "builder": "rust: Subscribe::source(table(users).events(Put)).deliver_keys().with_initial().from_version(7); ts: subscribe({store:main,table:users,on:[put],deliver:keys},{initial:true,fromVersion:7})",
+    "wire": {
+      "subscribe": [
+        {
+          "table": "users",
+          "events": "put"
+        }
+      ],
+      "deliver": "keys",
+      "initial": true,
+      "from_version": 7
+    }
+  },
+  {
+    "name": "subscribe_default_ts",
+    "builder": "ts: subscribe({store:main,table:users})",
+    "known_gap": "TS omits subscription events, deliver and initial defaults; Rust serializes them.",
+    "wire": {
+      "subscribe": [
+        {
+          "table": "users"
+        }
+      ]
+    }
+  },
+  {
+    "name": "batch_rust",
+    "builder": "rust: Batch id=1; insert first users/name=Ada; op_silent second call proc(1); after(second,first); when(second,value_eq(1,1)); limits max_queries=20",
+    "wire": {
+      "id": 1,
+      "transactional": false,
+      "queries": {
+        "first": {
+          "insert_into": "users",
+          "values": [
+            {
+              "name": "Ada"
+            }
+          ],
+          "return_result": true
+        },
+        "second": {
+          "call": "proc",
+          "params": [
+            1
+          ],
+          "repo": "main",
+          "return_result": false,
+          "after": [
+            "first"
+          ],
+          "when": {
+            "op": "value_compare",
+            "left": 1,
+            "cmp": "eq",
+            "right": 1
+          }
+        }
+      },
+      "return_all": true,
+      "limits": {
+        "max_queries": 20,
+        "max_dependency_depth": 10,
+        "max_execution_time_secs": 30,
+        "max_result_size": 10485760,
+        "max_nesting_depth": 4,
+        "max_iterations": 1000,
+        "max_total_queries": 10000,
+        "max_total_work": 1000000,
+        "max_page_size": 100000,
+        "max_offset": 1000000
+      },
+      "result_encoding": "name"
+    }
+  },
+  {
+    "name": "batch_ts",
+    "builder": "ts: Batch.create(1).add(first,insert(users,{name:Ada})).add(second,call(proc,[1]),{returnResult:false,after:[first],when:valueEq(1,1)}).limits({max_queries:20})",
+    "known_gap": "TS omits request and entry defaults and four limit fields; Rust serializes them.",
+    "wire": {
+      "id": 1,
+      "queries": {
+        "first": {
+          "insert_into": "users",
+          "values": [
+            {
+              "name": "Ada"
+            }
+          ]
+        },
+        "second": {
+          "call": "proc",
+          "params": [
+            1
+          ],
+          "repo": "main",
+          "return_result": false,
+          "after": [
+            "first"
+          ],
+          "when": {
+            "op": "value_compare",
+            "left": 1,
+            "cmp": "eq",
+            "right": 1
+          }
+        }
+      },
+      "limits": {
+        "max_queries": 20,
+        "max_dependency_depth": 10,
+        "max_execution_time_secs": 30,
+        "max_result_size": 10485760,
+        "max_nesting_depth": 4,
+        "max_iterations": 1000
+      }
+    }
+  },
+  {
+    "name": "sub_batch_rust",
+    "builder": "rust: Batch::sub_batch(nested, Batch id=1 empty, bind x=1)",
+    "wire": {
+      "batch": {
+        "id": 1,
+        "transactional": false,
+        "queries": {},
+        "return_all": true,
+        "limits": {
+          "max_queries": 50,
+          "max_dependency_depth": 10,
+          "max_execution_time_secs": 30,
+          "max_result_size": 10485760,
+          "max_nesting_depth": 4,
+          "max_iterations": 1000,
+          "max_total_queries": 10000,
+          "max_total_work": 1000000,
+          "max_page_size": 100000,
+          "max_offset": 1000000
+        },
+        "result_encoding": "name"
+      },
+      "bind": {
+        "x": 1
+      }
+    }
+  },
+  {
+    "name": "for_each_rust",
+    "builder": "rust: Batch::for_each(loop,[1,2],row, Batch id=1 empty)",
+    "wire": {
+      "over": [
+        1,
+        2
+      ],
+      "bind_row": "row",
+      "for_each": {
+        "id": 1,
+        "transactional": false,
+        "queries": {},
+        "return_all": true,
+        "limits": {
+          "max_queries": 50,
+          "max_dependency_depth": 10,
+          "max_execution_time_secs": 30,
+          "max_result_size": 10485760,
+          "max_nesting_depth": 4,
+          "max_iterations": 1000,
+          "max_total_queries": 10000,
+          "max_total_work": 1000000,
+          "max_page_size": 100000,
+          "max_offset": 1000000
+        },
+        "result_encoding": "name"
+      }
+    }
+  },
+  {
+    "name": "sub_batch_ts",
+    "builder": "ts: Batch.create().subBatch(nested,Batch.create(),{bind:{x:1}}).build().queries.nested",
+    "known_gap": "TS nested Batch omits request defaults and limits; Rust serializes them.",
+    "wire": {
+      "batch": {
+        "id": 1,
+        "queries": {}
+      },
+      "bind": {
+        "x": 1
+      }
+    }
+  },
+  {
+    "name": "for_each_ts",
+    "builder": "ts: Batch.create().forEach(loop,[1,2],row,Batch.create()).build().queries.loop",
+    "known_gap": "TS nested Batch omits request defaults and limits; Rust serializes them.",
+    "wire": {
+      "over": [
+        1,
+        2
+      ],
+      "bind_row": "row",
+      "for_each": {
+        "id": 1,
+        "queries": {}
+      }
+    }
+  }
+]

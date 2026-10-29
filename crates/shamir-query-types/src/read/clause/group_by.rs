@@ -6,6 +6,7 @@ use crate::filter::{FieldPath, Filter};
 
 /// GROUP BY clause
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GroupBy {
     /// Fields to group by
     pub fields: Vec<FieldPath>,

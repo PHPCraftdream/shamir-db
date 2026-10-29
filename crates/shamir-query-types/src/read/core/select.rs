@@ -17,6 +17,7 @@ where
 
 /// What to select/return from a query
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Select {
     /// Select items (fields, aggregations, expressions)
     pub items: Vec<SelectItem>,
@@ -57,7 +58,7 @@ impl Select {
 
 /// Single select item
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SelectItem {
     /// Select all fields (*)
     All,

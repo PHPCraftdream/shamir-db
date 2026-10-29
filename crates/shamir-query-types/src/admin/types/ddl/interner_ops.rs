@@ -23,6 +23,7 @@ fn default_repo() -> String {
 /// { "interner_dump": "main", "since": 12 }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InternerDumpOp {
     /// Repo whose interner to dump (discriminator key = repo name).
     #[serde(default = "default_repo")]
@@ -44,6 +45,7 @@ pub struct InternerDumpOp {
 /// { "interner_touch": "main", "names": ["age", "name", "42"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InternerTouchOp {
     /// Repo whose interner to touch (discriminator key = repo name).
     #[serde(default = "default_repo")]

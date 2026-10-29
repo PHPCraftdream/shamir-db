@@ -175,6 +175,7 @@ impl std::fmt::Debug for User {
 
 /// Create a user.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateUserOp {
     pub create_user: String,
     /// Plaintext password. Wrapped in [`SecretString`] so `Debug` never
@@ -208,6 +209,7 @@ impl std::fmt::Debug for CreateUserOp {
 
 /// Drop a user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropUserOp {
     pub drop_user: String,
     /// Hex-encoded HMAC-SHA256 over `b"drop_user\0<username>"`
@@ -224,6 +226,7 @@ pub struct DropUserOp {
 
 /// Grant a role to a user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GrantRoleOp {
     pub grant_role: String,
     pub user: String,
@@ -236,6 +239,7 @@ pub struct GrantRoleOp {
 
 /// Revoke a role from a user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RevokeRoleOp {
     pub revoke_role: String,
     pub user: String,

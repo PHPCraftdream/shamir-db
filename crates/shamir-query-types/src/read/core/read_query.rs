@@ -10,6 +10,7 @@ use crate::TableRef;
 
 /// Complete read query definition
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReadQuery {
     /// Table to query (optionally qualified with repo)
     pub from: TableRef,

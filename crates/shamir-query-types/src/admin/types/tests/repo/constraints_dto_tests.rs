@@ -12,13 +12,49 @@
 //!   `None` (so existing persisted schemas do not change shape on reload).
 //! - `default: None` is omitted from the wire (`skip_serializing_if`).
 
-use crate::admin::ConstraintsDto;
+use crate::admin::{ConstraintsDto, FieldRuleDto};
 use crate::filter::{FilterValue, FnCall};
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn field_rule_rejects_unknown_constraint() {
+    let value = mpack!({
+        "add_schema_rule": "users",
+        "rule": {
+            "path": ["name"],
+            "type": "string",
+            "requird": true
+        }
+    });
+    let bytes = rmp_serde::to_vec_named(&value).unwrap();
+    let error = rmp_serde::from_slice::<crate::batch::BatchOp>(&bytes).unwrap_err();
+    assert!(error.to_string().contains("requird"));
+}
+
+#[test]
+fn field_rule_keeps_flat_serialization_bytes() {
+    let rule = FieldRuleDto {
+        path: vec!["name".to_string()],
+        r#type: "string".to_string(),
+        constraints: ConstraintsDto {
+            required: Some(true),
+            min_len: Some(2),
+            ..ConstraintsDto::default()
+        },
+        keyset_safe: false,
+    };
+    let expected: &[u8] =
+        b"\x84\xa4path\x91\xa4name\xa4type\xa6string\xa8required\xc3\xa7min_len\x02";
+    let bytes = rmp_serde::to_vec_named(&rule).unwrap();
+    assert_eq!(bytes, expected);
+    let decoded: FieldRuleDto = rmp_serde::from_slice(expected).unwrap();
+    assert_eq!(decoded, rule);
+    assert_eq!(rmp_serde::to_vec_named(&decoded).unwrap(), expected);
+}
 
 /// Serialize → decode to `QueryValue` (the wire-level view).
 fn wire(c: &ConstraintsDto) -> QueryValue {

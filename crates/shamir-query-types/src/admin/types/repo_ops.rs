@@ -40,6 +40,7 @@ pub struct CreateRepoOp {
 ///
 /// Requires `hmac` over `b"drop_repo\0<db_in_use>\0<repo>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropRepoOp {
     pub drop_repo: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +92,7 @@ pub struct AlterRepoOp {
 /// { "rename_repo": "old_name", "to": "new_name" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameRepoOp {
     pub rename_repo: String,
     pub to: String,
@@ -117,6 +119,7 @@ pub struct RenameRepoOp {
 /// { "rename_db": "old_name", "to": "new_name" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameDbOp {
     pub rename_db: String,
     pub to: String,

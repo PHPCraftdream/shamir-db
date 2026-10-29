@@ -1,9 +1,11 @@
 //! Table reference with optional repository qualifier.
 //!
-//! Supports two wire formats:
+//! Supports three input wire formats:
 //! - `"users"` → repo="main", table="users"
 //! - `["hot", "sessions"]` → repo="hot", table="sessions"
+//! - `{ "repo": "hot", "table": "sessions" }` → explicit map (repo optional)
 
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 const DEFAULT_REPO: &str = "main";
@@ -49,15 +51,13 @@ impl Serialize for TableRef {
 
 impl<'de> Deserialize<'de> for TableRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de;
-
         struct TableRefVisitor;
 
         impl<'de> de::Visitor<'de> for TableRefVisitor {
             type Value = TableRef;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a string \"table\" or array [\"repo\", \"table\"]")
+                f.write_str("a table string, [repo, table] array, or {repo, table} map")
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> Result<TableRef, E> {
@@ -66,6 +66,33 @@ impl<'de> Deserialize<'de> for TableRef {
 
             fn visit_string<E: de::Error>(self, v: String) -> Result<TableRef, E> {
                 Ok(TableRef::new(v))
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<TableRef, A::Error> {
+                let mut repo = None;
+                let mut table = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "repo" => {
+                            if repo.is_some() {
+                                return Err(de::Error::duplicate_field("repo"));
+                            }
+                            repo = Some(map.next_value::<String>()?);
+                        }
+                        "table" => {
+                            if table.is_some() {
+                                return Err(de::Error::duplicate_field("table"));
+                            }
+                            table = Some(map.next_value::<String>()?);
+                        }
+                        _ => return Err(de::Error::unknown_field(&key, &["repo", "table"])),
+                    }
+                }
+                let table = table.ok_or_else(|| de::Error::missing_field("table"))?;
+                Ok(TableRef::with_repo(
+                    repo.unwrap_or_else(|| DEFAULT_REPO.to_string()),
+                    table,
+                ))
             }
 
             fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<TableRef, A::Error> {

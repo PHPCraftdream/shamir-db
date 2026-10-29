@@ -8,7 +8,7 @@ fn default_repo() -> String {
 
 /// List databases / repos / tables / indexes / functions / validators / function_folders.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "list")]
+#[serde(tag = "list", deny_unknown_fields)]
 pub enum ListOp {
     #[serde(rename = "databases")]
     Databases,

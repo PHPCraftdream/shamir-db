@@ -11,7 +11,7 @@ use shamir_types::types::value::QueryValue;
 /// reference or by move, so dropping `Copy` has no ripple beyond the derive
 /// list itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "mode")]
+#[serde(tag = "mode", deny_unknown_fields)]
 #[derive(Default)]
 pub enum Pagination {
     /// Classic limit + offset

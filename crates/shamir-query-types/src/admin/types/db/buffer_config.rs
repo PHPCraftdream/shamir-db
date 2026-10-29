@@ -14,6 +14,7 @@ fn default_repo() -> String {
 /// crate into clients. The executor maps
 /// this struct into the storage struct on its way in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BufferConfigDto {
     pub max_bytes: usize,
     pub max_entries: usize,
@@ -31,6 +32,7 @@ pub struct BufferConfigDto {
 ///   * key present and `null` → clear TTL,
 ///   * key present and a number → set TTL to that many ms.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BufferConfigPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<usize>,
@@ -63,6 +65,7 @@ where
 
 /// Persist a full buffer config for a table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SetBufferConfigOp {
     pub set_buffer_config: String,
     #[serde(default = "default_repo")]
@@ -73,6 +76,7 @@ pub struct SetBufferConfigOp {
 /// Read the persisted buffer config for a table. Returns `null`
 /// in the `config` field when no DDL has set one for this table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GetBufferConfigOp {
     pub get_buffer_config: String,
     #[serde(default = "default_repo")]
@@ -82,6 +86,7 @@ pub struct GetBufferConfigOp {
 /// Partial-update one or more buffer knobs without re-stating
 /// the whole config.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlterBufferConfigOp {
     pub alter_buffer_config: String,
     #[serde(default = "default_repo")]

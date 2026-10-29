@@ -21,6 +21,7 @@ fn default_repo() -> String {
 ///
 /// `unique=true` + `sorted=true` is rejected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateIndexOp {
     pub create_index: String,
     pub table: String,
@@ -208,6 +209,7 @@ where
 ///   same table.
 /// - Refuses when the source index does not exist (unless `if_exists = true`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RenameIndexOp {
     /// Old index name.
     pub rename_index: String,
@@ -245,6 +247,7 @@ pub struct RenameIndexOp {
 /// Requires `hmac` over
 /// `b"drop_index\0<db_in_use>\0<repo>\0<table>\0<index>"`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DropIndexOp {
     pub drop_index: String,
     pub table: String,
