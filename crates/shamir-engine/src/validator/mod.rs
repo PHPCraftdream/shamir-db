@@ -16,22 +16,25 @@
 pub mod schema;
 
 mod codecs;
+mod engine_bound;
 mod execution;
 mod registry;
 
 // Module-path facades: the pre-sweep file names stay reachable at
 // `crate::validator::<name>` so no caller in any crate changes.
 pub use codecs::{decode, encode, native_adapter, query_value_conv};
+pub use engine_bound::{persistence, validator_db};
 pub use execution::{
     native_record_validator, record_fields, record_validator, transform_spec, validation_outcome,
     wasm_record_validator,
 };
-pub use registry::{persisted_validators, persistence, validator_binding, validator_db};
+pub use registry::{persisted_validators, validator_binding};
 
 pub use codecs::decode::{decode_validation_result, ValidatorDecodeError};
 pub use codecs::encode::{validation_to_query_value, Validation};
 pub use codecs::native_adapter::{NativeValidatorAdapter, NativeValidatorFn};
 pub use codecs::query_value_conv::{inner_to_query_value, inner_to_query_value_with};
+pub use engine_bound::validator_db::ValidatorDb;
 pub use execution::native_record_validator::{NativeRecordValidator, NativeValidatorFnNew};
 pub use execution::record_fields::{OwnedFields, RecordFields, ViewFields};
 pub use execution::record_validator::{RecordValidator, ValidatorCtx};
@@ -40,7 +43,6 @@ pub use execution::validation_outcome::{ValidationOutcome, ValidatorFailure};
 pub use execution::wasm_record_validator::WasmRecordValidator;
 pub use registry::persisted_validators::PersistedValidators;
 pub use registry::validator_binding::ValidatorBinding;
-pub use registry::validator_db::ValidatorDb;
 
 pub use registry::validator_registry::{ValidatorRegistry, ValidatorRegistryError};
 
