@@ -148,6 +148,8 @@ impl ScalarResolver {
         }
         match tokio::runtime::Handle::try_current() {
             Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                // A panicking scalar becomes an error; its captured state is the
+                // closure's own concern (AssertUnwindSafe only contains the unwind).
                 tokio::task::block_in_place(|| {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(name, args)))
                 })
