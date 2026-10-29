@@ -345,6 +345,11 @@ async fn release_locks_clears_holders() {
         assert_eq!(s.holders.len(), 1);
         assert_eq!(s.mode, Some(LockMode::Exclusive));
     }
+    let lb = mvcc
+        .locks
+        .get_sync(key_b.as_ref())
+        .map(|e| Arc::clone(e.get()))
+        .unwrap();
 
     // Release (as commit/abort would).
     mvcc.release_locks(
@@ -362,16 +367,15 @@ async fn release_locks_clears_holders() {
         assert!(s.holders.is_empty(), "holders must be empty after release");
         assert_eq!(s.mode, None, "mode must be None after release");
     }
-    let lb = mvcc
-        .locks
-        .get_sync(key_b.as_ref())
-        .map(|e| Arc::clone(e.get()))
-        .unwrap();
     {
         let s = lb.state.lock().await;
         assert!(s.holders.is_empty());
         assert_eq!(s.mode, None);
     }
+
+    // Unused entries are retired from the registry once released.
+    assert!(mvcc.locks.get_sync(key_a.as_ref()).is_none());
+    assert!(mvcc.locks.get_sync(key_b.as_ref()).is_none());
 }
 
 /// Zero-overhead invariant: a Snapshot and a Serializable tx never
