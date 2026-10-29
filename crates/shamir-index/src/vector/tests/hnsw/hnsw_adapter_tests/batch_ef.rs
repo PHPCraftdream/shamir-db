@@ -696,6 +696,7 @@ async fn from_parts_seeds_deleted_count() {
         vectors,
         deleted,
         10, // next_id
+        None,
     );
 
     assert_eq!(adapter.deleted_count(), 5);

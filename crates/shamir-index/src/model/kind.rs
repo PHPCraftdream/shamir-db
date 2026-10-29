@@ -132,15 +132,8 @@ pub enum VectorMetric {
 
 /// Vector quantization strategy for an HNSW index (opt-in).
 ///
-/// `#serde(default)` + `skip_serializing_if = "Option::is_none"` in
-/// [`VectorConfig`] keep old messages (without the field) parsing to
-/// `None` = unquantized f32 path — bit-for-bit back-compat.
-///
-/// # Bincode ordinal stability: append only
-///
-/// Persisted via bincode which encodes variants by their ordinal position.
-/// **Never** reorder or insert variants before existing ones — only append
-/// at the end. `Sq8` is ordinal 0; future PQ/BQ append at 1/2.
+/// Descriptor persistence stores this intent as a stable string in the
+/// versioned `IndexDescriptor::options` map, not as a bincode ordinal.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VectorQuantization {
     // ordinal 0 — DO NOT MOVE
@@ -176,12 +169,8 @@ pub struct VectorConfig {
     /// `#[serde(default)]` for skipped fields on read (it tries to read the
     /// field bytes and fails with `UnexpectedEof`), so adding a non-`skip`
     /// field would break every pre-#411 persisted index descriptor. The
-    /// quantization mode is instead carried through the WIRE op
-    /// (`CreateIndexOp.vector_quantization`, a serde-friendly msgpack
-    /// string) and threaded into the adapter at create time; it is NOT
-    /// persisted in #411 (snapshot codec for quantization is #412).
-    /// On snapshot load the adapter starts un-fitted and re-fits at the
-    /// threshold — see `HnswAdapter::from_parts`.
+    /// persistence layer carries intent in `IndexDescriptor::options`; the
+    /// wire operation carries it separately as a string.
     #[serde(skip)]
     pub quantization: Option<VectorQuantization>,
 }
