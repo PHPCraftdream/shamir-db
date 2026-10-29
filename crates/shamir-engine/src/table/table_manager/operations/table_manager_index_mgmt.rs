@@ -178,20 +178,15 @@ impl TableManager {
     pub(in crate::table) async fn backfill_index2_backend(
         &self,
         backend: &dyn crate::index2::backend::IndexBackend,
-    ) -> DbResult<()> {
+    ) -> Result<(), crate::index2::IndexError> {
         let stream = self.list_stream(1000);
         futures::pin_mut!(stream);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
             for (rid, cow) in batch {
                 let val = cow.into_inner()?;
-                let ops = backend
-                    .plan_insert(rid, &val)
-                    .await
-                    .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
-                crate::index2::apply_index_ops(&ops, &self.info_store, backend)
-                    .await
-                    .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                let ops = backend.plan_insert(rid, &val).await?;
+                crate::index2::apply_index_ops(&ops, &self.info_store, backend).await?;
             }
         }
         Ok(())

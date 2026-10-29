@@ -212,11 +212,12 @@ impl VectorBackend {
     ) -> Result<(), IndexError> {
         let stored_hwm = snapshot::highest_delta_index(info_store, keyspace)
             .await
-            .map_err(|e| {
-                IndexError::Backend(format!(
+            .map_err(|e| match e {
+                SnapshotError::Db(error) => IndexError::Db(error),
+                other => IndexError::Backend(format!(
                     "delta HWM scan failed for index {} (keyspace {}): {} —                      refusing to seed next_delta_idx below the surviving chunks",
-                    index_name, keyspace, e
-                ))
+                    index_name, keyspace, other
+                )),
             })?;
         // Fresh index (no manifest, no chunks): keep the constructor seed.
         if manifest.is_none() && stored_hwm == 0 {

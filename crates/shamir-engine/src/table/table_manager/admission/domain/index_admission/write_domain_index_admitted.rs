@@ -400,7 +400,8 @@ impl TableManager {
         self.backfill_index2_backend(backend.as_ref())
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let e = shamir_storage::error::DbError::from(e);
+                let detail = format!(
                     "CREATE INDEX '{}': the index was durably persisted as \
                      Building, but the backfill failed: {e}. The index is NOT \
                      queryable — it remains permanently Building until rebuilt. \
@@ -408,7 +409,9 @@ impl TableManager {
                      Building state and re-backfill. Call TableManager::verify() \
                      to confirm state, or TableManager::repair() to rebuild it.",
                     op.create_index
-                ))
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(e, detail)
             })?;
 
         // #534 finding-1 regression hook: park here (backfill done, backend NOT
@@ -421,7 +424,7 @@ impl TableManager {
         }
 
         self.index2_registry.insert(backend).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "CREATE INDEX '{}': the index was durably persisted as \
                      Building and the backfill completed, but registering the \
                      backend in the live registry failed: {e}. The index is \
@@ -430,7 +433,12 @@ impl TableManager {
                      Call TableManager::verify() to confirm state, or \
                      TableManager::repair() to rebuild it.",
                 op.create_index
-            ))
+            );
+            log::error!("{}", detail);
+            shamir_index::backend::contextualize_db_error(
+                shamir_storage::error::DbError::from(e),
+                detail,
+            )
         })?;
 
         // #1003 test-only pause point: park here (backend now LIVE in the
@@ -462,7 +470,7 @@ impl TableManager {
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "CREATE INDEX '{}': the backfill completed and the index was \
                      flipped to Ready in memory, but the final durable persist of \
                      the Ready state failed: {e}. The index is queryable in THIS \
@@ -471,7 +479,9 @@ impl TableManager {
                      re-backfill. Call TableManager::verify() to confirm state, \
                      or TableManager::repair() to rebuild it.",
                     op.create_index
-                ))
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(e, detail)
             })?;
 
         Ok(())

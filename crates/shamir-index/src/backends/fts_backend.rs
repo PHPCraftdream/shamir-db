@@ -80,6 +80,19 @@ impl FtsBackend {
         }
     }
 
+    fn try_tokenize_record(&self, rec: &dyn RecordRef) -> Result<TFxSet<u64>, IndexError> {
+        let ipath = self.ipath();
+        match rec.str_at(&ipath) {
+            Some(text) => Ok(self
+                .tokenizer
+                .try_tokenize(text)?
+                .into_iter()
+                .map(|t| token_hash(&t))
+                .collect()),
+            None => Ok(TFxSet::default()),
+        }
+    }
+
     fn posting_key_for_token(&self, th: u64, rid: &RecordId) -> Vec<u8> {
         build_posting_key(self.descriptor.id, type_tag::FTS, &th.to_le_bytes(), rid)
     }
@@ -99,7 +112,7 @@ impl FtsBackend {
             .scan_prefix_stream(Bytes::from(prefix.clone()), 1024);
         let mut rids = BTreeSet::new();
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_result.map_err(IndexError::from)?;
             for (key_bytes, _) in batch {
                 if let Some(pk) = PostingKeyRef::decode(&key_bytes) {
                     if pk.index_id == self.descriptor.id && pk.type_tag == type_tag::FTS {
@@ -122,12 +135,13 @@ impl IndexBackend for FtsBackend {
         &self.descriptor
     }
 
-    fn tokenize_query(&self, query: &str) -> Vec<u64> {
-        self.tokenizer
-            .tokenize(query)
+    fn tokenize_query(&self, query: &str) -> Result<Vec<u64>, IndexError> {
+        Ok(self
+            .tokenizer
+            .try_tokenize(query)?
             .iter()
             .map(|t| token_hash(t))
-            .collect()
+            .collect())
     }
 
     async fn plan_insert(
@@ -135,7 +149,7 @@ impl IndexBackend for FtsBackend {
         rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let tokens = self.tokenize_record(rec);
+        let tokens = self.try_tokenize_record(rec)?;
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(tokens.len());
         for th in tokens {
@@ -156,7 +170,7 @@ impl IndexBackend for FtsBackend {
         new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let old_tokens = self.tokenize_record(old);
-        let new_tokens = self.tokenize_record(new);
+        let new_tokens = self.try_tokenize_record(new)?;
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::new();
         // Remove tokens that disappeared.
@@ -243,12 +257,12 @@ impl IndexBackend for FtsBackend {
             .store
             .scan_prefix_stream(Bytes::copy_from_slice(&prefix), 1024);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_result.map_err(IndexError::from)?;
             for (key_bytes, _) in batch {
                 self.store
                     .remove(key_bytes)
                     .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                    .map_err(IndexError::from)?;
             }
         }
         Ok(())

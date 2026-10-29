@@ -202,14 +202,16 @@ impl IndexManager {
         // NOTE: Cannot write DdlOpState::Failed here because this layer
         // (IndexManagerUnique) does not have op_id in scope.
         self.save_index_info_unique().await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "CREATE UNIQUE INDEX '{name_interned}': the index posting \
                  entries were durably written, but persisting the index \
                  definition failed: {e}. The index definition is NOT persisted — \
                  on restart, orphan postings will exist without a corresponding \
                  definition. Call TableManager::verify() to confirm state, or \
                  TableManager::repair() to rebuild it."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         log::info!(
@@ -294,13 +296,15 @@ impl IndexManager {
         self.sweep_index_postings(true, name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP UNIQUE INDEX '{name_interned}': a durable drop tombstone \
                  was persisted and the definition was retired from the planner, \
                  but the posting sweep failed: {e}. On restart, recovery will \
                  resume the sweep idempotently and finish the drop. Call \
                  TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         // P0-3 (#959) test seam — post-sweep, pre-persist crash window.
@@ -318,14 +322,16 @@ impl IndexManager {
         // which sits one layer up.
         if was_removed {
             self.save_index_info_unique().await.map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP UNIQUE INDEX '{name_interned}': a durable drop \
                      tombstone was persisted, the definition was retired, and \
                      the posting sweep completed, but persisting the reduced \
                      index metadata failed: {e}. On restart, recovery will \
                      finish the drop idempotently. Call TableManager::verify() \
                      to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
         }
 
@@ -382,13 +388,15 @@ impl IndexManager {
         self.clear_from_dropping(true, name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP UNIQUE INDEX '{name_interned}': the drop is essentially \
                  complete (tombstone persisted, definition retired, sweep done, \
                  reduced metadata persisted), but clearing the drop tombstone \
                  failed: {e}. On restart, recovery will clear the tombstone as \
                  a no-op. Call TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         Ok(was_removed)

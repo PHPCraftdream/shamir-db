@@ -90,10 +90,7 @@ pub async fn apply_index_ops(
     }
 
     if !kv_ops.is_empty() {
-        store
-            .transact(kv_ops)
-            .await
-            .map_err(|e| IndexError::Storage(e.to_string()))?;
+        store.transact(kv_ops).await.map_err(IndexError::from)?;
     }
 
     if !in_memory_ops.is_empty() {
@@ -154,7 +151,7 @@ pub async fn apply_index_ops_at_commit(
         info_store
             .transact(kv_ops)
             .await
-            .map_err(|e| IndexError::Storage(e.to_string()))?;
+            .map_err(IndexError::from)?;
     }
 
     if !in_memory_ops.is_empty() {

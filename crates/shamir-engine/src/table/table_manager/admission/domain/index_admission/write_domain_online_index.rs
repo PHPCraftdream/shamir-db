@@ -180,10 +180,12 @@ impl TableManager {
             }
 
             let batch = batch_result.map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "CREATE INDEX '{name_interned}': online build backfill (Phase A) failed: {e}. \
                          The index is Building (planner-invisible) but under-populated."
-                ))
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(e, detail)
             })?;
 
             // Declare per-batch accumulators FRESH inside the loop (no shadowing).
@@ -207,11 +209,13 @@ impl TableManager {
                     .write_postings_batch(posting_writes, cache_index_keys)
                     .await
                     .map_err(|e| {
-                        shamir_storage::error::DbError::Internal(format!(
+                        let detail = format!(
                             "CREATE INDEX '{name_interned}': online build backfill (Phase A) \
                              failed: {e}. The index is Building (planner-invisible) but \
                              under-populated."
-                        ))
+                        );
+                        log::error!("{}", detail);
+                        shamir_index::backend::contextualize_db_error(e, detail)
                     })?;
             }
 
@@ -310,7 +314,7 @@ impl TableManager {
             .flip_to_ready(name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "CREATE INDEX '{name_interned}': catch-up completed and the \
                      index was flipped to Ready in memory, but the final durable \
                      persist of the Ready state (Phase D) failed: {e}. The index is \
@@ -318,7 +322,9 @@ impl TableManager {
                      restart will reload it as Building (planner-invisible). Call \
                      TableManager::verify() to confirm state, or \
                      TableManager::repair() to rebuild it."
-                ))
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(e, detail)
             })?;
 
         self.index_manager.clear_build_in_flight(name_interned);

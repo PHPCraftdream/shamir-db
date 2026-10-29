@@ -88,7 +88,10 @@ pub(super) fn build_covering_projection(
             out.extend_from_slice(&msgpack);
             Bytes::from(out)
         }
-        Err(_) => Bytes::new(),
+        Err(error) => {
+            log::warn!("failed to encode covering projection: {error}");
+            Bytes::new()
+        }
     }
 }
 
