@@ -11,9 +11,10 @@
 
 /// Execution context available to `#[procedure]` and `#[function]` kinds.
 ///
-/// `Ctx` is the gateway to everything a non-pure function can do.
-/// **Scalars (`#[scalar]`) intentionally have no `Ctx`** — that is the
-/// purity guarantee.
+/// Scalars (`#[scalar]`) receive one `Params` argument and no injected
+/// `Ctx`. Their bodies can construct `Ctx`; this signature restriction is
+/// neither a purity guarantee nor a security boundary. Host authorization and
+/// configured capabilities still apply.
 ///
 /// # Reachable API
 ///

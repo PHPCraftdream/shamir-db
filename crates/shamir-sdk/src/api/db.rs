@@ -21,7 +21,8 @@ use std::cell::Cell;
 /// Database access handle (bound to the default repo).
 ///
 /// Obtained via [`crate::Ctx::db`]. Available to `#[procedure]` and
-/// `#[function]` kinds. **Not** available to `#[scalar]` (purity).
+/// `#[function]` kinds. Scalars receive no injected `Ctx`, though their
+/// bodies can construct one; host authorization still applies.
 ///
 /// # Operations
 ///

@@ -8,6 +8,7 @@
 
 use crate::validation::{Validation, ValidationError};
 use crate::value::Value;
+use shamir_types::types::value::QueryValue;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -236,8 +237,6 @@ fn into_value_shape_matches_engine_decoder_contract() {
 /// dev-dependency) to confirm wire compatibility.
 #[test]
 fn msgpack_roundtrip_matches_host_query_value() {
-    use shamir_types::types::value::QueryValue;
-
     let validation = Validation::reject(["address", "zip"], "invalid_zip")
         .record("missing_contact")
         .stop();
@@ -302,8 +301,6 @@ fn msgpack_roundtrip_matches_host_query_value() {
 
 #[test]
 fn accept_msgpack_roundtrip_matches_host() {
-    use shamir_types::types::value::QueryValue;
-
     let guest_value = Validation::accept().into_value();
     let bytes = crate::__rt::encode_value(&guest_value).unwrap();
     let host_value: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
