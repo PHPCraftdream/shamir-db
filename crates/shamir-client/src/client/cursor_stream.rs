@@ -30,7 +30,7 @@
 //!   FG-5b's own design already documents, not an afterthought here either.
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
 use futures::stream::{self, Stream};
@@ -114,7 +114,10 @@ async fn best_effort_cancel(client: &Client, cursor_id: CursorId) {
 /// unexpected `DbResponse` variant) the step yields `Err(..)` as the
 /// stream's next (and final) item; the state collapses to `Exhausted` so
 /// the stream ends cleanly afterward instead of retrying or panicking.
-async fn step(mut state: State<'_>) -> Option<(Result<QueryRecord, ClientError>, State<'_>)> {
+async fn step<'a>(
+    mut state: State<'a>,
+    cursor_cell: &OnceLock<CursorId>,
+) -> Option<(Result<QueryRecord, ClientError>, State<'a>)> {
     loop {
         state = match state {
             State::Init {
@@ -129,13 +132,16 @@ async fn step(mut state: State<'_>) -> Option<(Result<QueryRecord, ClientError>,
                         cursor_id,
                         page,
                         has_more,
-                    }) => State::Buffered {
-                        client,
-                        cursor_id,
-                        page_size,
-                        remaining: page.records.into_iter(),
-                        has_more,
-                    },
+                    }) => {
+                        let _ = cursor_cell.set(cursor_id);
+                        State::Buffered {
+                            client,
+                            cursor_id,
+                            page_size,
+                            remaining: page.records.into_iter(),
+                            has_more,
+                        }
+                    }
                     Ok(other) => {
                         return Some((
                             Err(ClientError::Protocol(format!(
@@ -213,18 +219,18 @@ async fn step(mut state: State<'_>) -> Option<(Result<QueryRecord, ClientError>,
 /// negligible cost.
 pub struct CursorStream<'a> {
     client: &'a Client,
-    /// Set by the `unfold` closure the moment `CreateCursor` succeeds —
+    /// Set the moment `CreateCursor` succeeds, even for an empty page.
     /// `close()` needs the id, but `unfold`'s own state lives inside the
     /// opaque combinator, so it is mirrored out here via a shared cell.
     /// `None` until the first page has been fetched (a `close()` before
     /// any poll is then a no-op — nothing to cancel).
-    cursor_id: Arc<StdMutex<Option<CursorId>>>,
+    cursor_id: Arc<OnceLock<CursorId>>,
     inner: Pin<Box<dyn Stream<Item = Result<QueryRecord, ClientError>> + 'a>>,
 }
 
 impl<'a> CursorStream<'a> {
     pub(crate) fn new(client: &'a Client, db: &str, query: ReadQuery, page_size: u32) -> Self {
-        let cursor_id: Arc<StdMutex<Option<CursorId>>> = Arc::new(StdMutex::new(None));
+        let cursor_id = Arc::new(OnceLock::new());
         let cursor_id_for_stream = cursor_id.clone();
 
         let initial = State::Init {
@@ -234,26 +240,9 @@ impl<'a> CursorStream<'a> {
             page_size,
         };
 
-        // Wrap `step` so the cursor id is mirrored into `cursor_id` above the
-        // moment `CreateCursor` succeeds. CR-C1 (P-5): every yielded item
-        // re-enters this closure (once per `step()` call, i.e. once per
-        // record after the first `Init -> Buffered` transition), but the id
-        // itself never changes for the life of the stream — so the
-        // `is_none()` guard below skips the mutex lock entirely on every
-        // yield after the very first, rather than re-locking and
-        // re-writing the SAME value on every single record.
         let inner = stream::unfold(initial, move |state| {
             let cursor_id_cell = cursor_id_for_stream.clone();
-            async move {
-                let next = step(state).await;
-                if let Some((_, State::Buffered { cursor_id, .. })) = &next {
-                    let mut guard = cursor_id_cell.lock().unwrap_or_else(|p| p.into_inner());
-                    if guard.is_none() {
-                        *guard = Some(*cursor_id);
-                    }
-                }
-                next
-            }
+            async move { step(state, &cursor_id_cell).await }
         });
 
         Self {
@@ -273,7 +262,7 @@ impl<'a> CursorStream<'a> {
     /// `src/tests/cursor_stream_tests.rs`); ordinary callers don't need it —
     /// `close()` already knows it internally.
     pub fn cursor_id(&self) -> Option<CursorId> {
-        *self.cursor_id.lock().unwrap_or_else(|p| p.into_inner())
+        self.cursor_id.get().copied()
     }
 
     /// Explicitly release the server-side cursor early.
