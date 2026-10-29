@@ -26,6 +26,29 @@
 const { encode, decode } = require('@msgpack/msgpack');
 const native = require('../native/index.js');
 
+const MIN_I64 = -(1n << 63n);
+const MAX_U64 = (1n << 64n) - 1n;
+
+function mapIntegers(value, encoding) {
+  if (typeof value === 'bigint') {
+    if (encoding && (value < MIN_I64 || value > MAX_U64)) {
+      throw new RangeError('BigInt outside MessagePack int64/uint64 range');
+    }
+    return !encoding && value >= BigInt(Number.MIN_SAFE_INTEGER) &&
+      value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : value;
+  }
+  if (encoding && typeof value === 'number' && Number.isInteger(value)) {
+    if (!Number.isSafeInteger(value)) throw new RangeError('Unsafe integer Number; use BigInt');
+    if (value < -0x80000000 || value > 0xffffffff) return BigInt(value);
+  }
+  if (ArrayBuffer.isView(value) || value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map(item => mapIntegers(item, encoding));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapIntegers(item, encoding)]));
+  }
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // ShamirDbError — mirrors the TS SDK's ShamirDbError
 // (shamir-client-ts/src/core/support/errors.ts).
@@ -74,16 +97,29 @@ class ShamirDbError extends Error {
 // The native side encodes domain DB errors as
 // `{ kind: "error", code: "...", message: "..." }`. Normal success payloads
 // never carry `kind: "error"` (BatchResponse is a plain struct with no `kind`
-// field; ReplResponse uses `repl_kind`; raw user-id bytes don't decode to a
-// map with that key).
+// field; ReplResponse uses `repl_kind`). User IDs are arbitrary raw bytes.
 // ---------------------------------------------------------------------------
 
 function decodeOrThrow(buf) {
-  const decoded = decode(new Uint8Array(buf));
-  if (decoded && decoded.kind === 'error') {
+  const decoded = mapIntegers(decode(buf, { useBigInt64: true }), false);
+  if (decoded && decoded.kind === 'error' &&
+      typeof decoded.code === 'string' && typeof decoded.message === 'string') {
     throw new ShamirDbError(decoded.code, decoded.message);
   }
   return decoded;
+}
+
+// Named rmp-serde DbResponse::Error starts with a three-field map and kind.
+const ERROR_PREFIX = Buffer.from([0x83, 0xa4, 0x6b, 0x69, 0x6e, 0x64, 0xa5, 0x65, 0x72, 0x72, 0x6f, 0x72]);
+
+function throwIfError(buf) {
+  if (buf.length >= ERROR_PREFIX.length && buf.subarray(0, ERROR_PREFIX.length).equals(ERROR_PREFIX)) {
+    try {
+      decodeOrThrow(buf);
+    } catch (error) {
+      if (error instanceof ShamirDbError) throw error;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -98,11 +134,13 @@ class ShamirClient extends native.ShamirClient {
   }
 
   /**
-   * Execute a BatchRequest (plain JS object) and return the BatchResponse
-   * as a plain JS object. Throws ShamirDbError on domain-level DB errors.
+   * Low-level object FFI: pass a TS Batch builder's build() result.
+   * Batch.execute(nodeClient, db) is unsupported; it requires executeWithTouch.
+   * Safe decoded integers are Numbers, otherwise BigInts; unsafe integer input
+   * must be BigInt within the int64/uint64 range. Throws ShamirDbError for DB errors.
    */
   async execute(db, batchObj) {
-    const buf = Buffer.from(encode(batchObj));
+    const buf = Buffer.from(encode(mapIntegers(batchObj, true), { useBigInt64: true }));
     const resp = await super.execute(db, buf);
     return decodeOrThrow(resp);
   }
@@ -114,11 +152,7 @@ class ShamirClient extends native.ShamirClient {
    */
   async repl(req) {
     const resp = await super.repl(req);
-    try {
-      decodeOrThrow(resp);
-    } catch (e) {
-      if (e instanceof ShamirDbError) throw e;
-    }
+    throwIfError(resp);
     return resp;
   }
 
@@ -128,11 +162,8 @@ class ShamirClient extends native.ShamirClient {
    */
   async createScramUser(name, password, roles) {
     const resp = await super.createScramUser(name, password, roles);
-    try {
-      decodeOrThrow(resp);
-    } catch (e) {
-      if (e instanceof ShamirDbError) throw e;
-    }
+    // A successful user ID is exactly 16 raw bytes, not MessagePack.
+    if (resp.length !== 16) throwIfError(resp);
     return resp;
   }
 
@@ -146,11 +177,7 @@ class ShamirClient extends native.ShamirClient {
    */
   async setReplicator(user, on) {
     const resp = await super.setReplicator(user, on);
-    try {
-      decodeOrThrow(resp);
-    } catch (e) {
-      if (e instanceof ShamirDbError) throw e;
-    }
+    throwIfError(resp);
     // Void op — no payload to return.
   }
 }
