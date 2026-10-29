@@ -61,12 +61,16 @@ impl Lcg {
     }
     #[inline]
     fn next_f32(&mut self) -> f32 {
-        let high = (self.next_u64() >> 32) as u32;
-        (high as f32) / (1u64 << 32) as f32
+        (self.next_u64() >> 40) as f32 * (1.0 / 16_777_216.0)
     }
     #[inline]
     fn next_range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.next_f32()
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return f32::NAN;
+        }
+        let fraction = f64::from(self.next_f32());
+        let value = (f64::from(lo) + (f64::from(hi) - f64::from(lo)) * fraction) as f32;
+        value.max(lo).min(hi.next_down())
     }
     /// Standard-normal via polar Box-Muller (same shape as bench-utils).
     fn next_gaussian(&mut self) -> f32 {
@@ -84,7 +88,7 @@ impl Lcg {
 
 /// Clustered dataset generator: `n` points of `dim` around `k_clusters`
 /// centroids in `[-1, 1]^dim` with per-dim Gaussian noise of std `sigma`.
-/// Mirrors `shamir_bench_utils::clustered_vectors` byte-for-byte in shape.
+/// Mirrors `shamir_bench_utils::clustered_vectors` for the valid test inputs below.
 fn clustered(n: usize, dim: usize, k: usize, sigma: f32, seed: u64) -> Vec<Vec<f32>> {
     assert!(k > 0);
     let mut rng = Lcg::new(seed);
@@ -543,6 +547,26 @@ fn rv_bench_utils_a7605ff1_lcg_lineage_matches_bench_utils() {
                 "seed {seed}: u64 stream drifted"
             );
         }
+        for _ in 0..64 {
+            assert_eq!(
+                local.next_f32(),
+                canon.next_f32(),
+                "seed {seed}: uniform drifted"
+            );
+        }
+        for (lo, hi) in [
+            (-1.0, 1.0),
+            (1.0, f32::from_bits(0x3f80_0001)),
+            (-f32::MAX, f32::MAX),
+        ] {
+            assert_eq!(
+                local.next_range(lo, hi),
+                canon.next_range(lo, hi),
+                "seed {seed}: range drifted"
+            );
+        }
+        assert!(local.next_range(1.0, 1.0).is_nan());
+        assert!(canon.next_range(1.0, 1.0).is_nan());
         for _ in 0..64 {
             assert_eq!(
                 local.next_gaussian(),
