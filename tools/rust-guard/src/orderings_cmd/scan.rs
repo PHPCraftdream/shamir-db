@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::spanned::Spanned;
@@ -89,7 +90,14 @@ pub fn run(repo: &Path, pins_path: Option<&str>) -> u8 {
                 continue;
             }
         };
+        let mut aliases = BTreeSet::new();
+        for item in &file.items {
+            if let Item::Use(item_use) = item {
+                collect_atomic_aliases(&item_use.tree, &mut aliases);
+            }
+        }
         let mut scanner = Scanner {
+            aliases: &aliases,
             wanted: &pin.item,
             branch: &pin.branch,
             calls: &pin.calls,
@@ -123,6 +131,7 @@ pub fn run(repo: &Path, pins_path: Option<&str>) -> u8 {
 }
 
 struct Scanner<'a> {
+    aliases: &'a BTreeSet<String>,
     wanted: &'a str,
     branch: &'a str,
     calls: &'a [CallPin],
@@ -170,6 +179,7 @@ impl Scanner<'_> {
         }
         self.matched = true;
         let mut calls = Calls {
+            aliases: self.aliases,
             pins: self.calls,
             path: self.path,
             report: self.report,
@@ -286,7 +296,23 @@ fn cfg_selects_branch(meta: &syn::Meta, branch: &str) -> bool {
 fn cfg_requires_loom(meta: &syn::Meta) -> bool {
     cfg_eval(meta, false) == Some(false)
 }
+fn collect_atomic_aliases(tree: &syn::UseTree, aliases: &mut BTreeSet<String>) {
+    match tree {
+        syn::UseTree::Path(path) => collect_atomic_aliases(&path.tree, aliases),
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_atomic_aliases(item, aliases);
+            }
+        }
+        syn::UseTree::Rename(rename) if rename.ident.to_string().starts_with("Atomic") => {
+            aliases.insert(rename.rename.to_string());
+        }
+        _ => {}
+    }
+}
+
 struct Calls<'a> {
+    aliases: &'a BTreeSet<String>,
     pins: &'a [CallPin],
     path: &'a str,
     report: &'a mut crate::common::finding::Report,
@@ -470,6 +496,28 @@ impl<'ast> Visit<'ast> for Calls<'_> {
         };
         if name == "fence" && node.args.first().and_then(ordering).as_deref() == self.fence {
             self.has_fence = true;
+        } else if let Expr::Path(path) = &*node.func {
+            let ty = if let Some(qself) = &path.qself {
+                type_name(&qself.ty)
+            } else {
+                path.path
+                    .segments
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .map(|segment| segment.ident.to_string())
+                    .unwrap_or_default()
+            };
+            if (ty.starts_with("Atomic") || self.aliases.contains(&ty))
+                && ATOMIC.contains(&name.as_str())
+                && !node.args.is_empty()
+            {
+                self.check(
+                    &name,
+                    &node.args.iter().skip(1).cloned().collect::<Vec<_>>(),
+                    node.span().start().line,
+                );
+            }
         }
         visit::visit_expr_call(self, node);
     }
