@@ -35,7 +35,7 @@
 //! reports BODY_CHANGED.
 
 use super::delta::Delta;
-use super::item::{identity, weak_key, Item, TestKind};
+use super::item::{declared_key, identity, weak_key, Item, TestKind};
 use crate::common::finding::Report;
 use crate::common::suggest::MoveSuggestion;
 use std::collections::{BTreeMap, BTreeSet};
@@ -384,11 +384,11 @@ fn declared_pass(
     }
     let mut by_key: BTreeMap<String, Vec<usize>> = BTreeMap::new();
     for &h in head_left.iter() {
-        by_key.entry(weak_key(&head[h])).or_default().push(h);
+        by_key.entry(declared_key(&head[h])).or_default().push(h);
     }
     let mut still: Vec<usize> = Vec::new();
     for &b in base_left.iter() {
-        let (bi, hit) = (&base[b], by_key.get_mut(&weak_key(&base[b])));
+        let (bi, hit) = (&base[b], by_key.get_mut(&declared_key(&base[b])));
         let named = hit.and_then(|v| {
             let pos = v.iter().position(|&h| {
                 delta.moved_names_pair(&bi.path, &bi.logical, &head[h].path, &head[h].logical)

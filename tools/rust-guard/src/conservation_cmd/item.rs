@@ -98,6 +98,17 @@ pub fn weak_key(it: &Item) -> String {
     )
 }
 
+/// Key of the declared-move pass: [`weak_key`] without the package, so a
+/// `[[moved]]` entry may relocate an item into another package.
+pub fn declared_key(it: &Item) -> String {
+    format!(
+        "{}\u{1}{}\u{1}{}",
+        it.kind,
+        it.enclosing.as_deref().unwrap_or(""),
+        it.name
+    )
+}
+
 // ---------- extraction ----------
 
 /// Extracts inventory items from one parsed file.
