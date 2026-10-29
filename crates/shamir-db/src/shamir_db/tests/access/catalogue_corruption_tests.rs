@@ -390,8 +390,33 @@ async fn invocation_denies_corrupt_settings_catalogue() {
     shamir
         .register_fn("sample", false, |_, _, _| async { Ok(QueryValue::Null) })
         .unwrap();
-    let table = stage_corrupt_row(&shamir, "settings").await;
-    assert_corrupt_record_reported(&table, "settings").await;
+    assert!(shamir
+        .invoke_function_as(
+            "sample",
+            crate::engine::function::Params::new(),
+            Actor::User(99),
+        )
+        .await
+        .is_ok());
+    // The invocation loader reads with a filter, so corrupt an existing
+    // persisted settings row instead of staging an unlisted one.
+    let meta = ResourceMeta {
+        owner: Actor::User(41),
+        group: None,
+        mode: 0o755,
+    };
+    shamir
+        .set_resource_meta(&ResourcePath::FunctionNamespace, &meta)
+        .await
+        .unwrap();
+    let table = shamir
+        .system_store()
+        .system_repo()
+        .unwrap()
+        .get_table("settings")
+        .await
+        .unwrap();
+    corrupt_persisted_row(&table, "settings", "key", "fn_namespace_meta").await;
     assert!(shamir
         .system_store()
         .load_invocation_settings()

@@ -83,6 +83,9 @@ async fn invocation_snapshot_uses_current_definer_owner() {
             .unwrap(),
         Actor::User(11)
     );
+    // Remove the row first: `set` merges into an existing row and would keep the owner.
+    // A record without an owner field must never escalate the caller.
+    store.remove_function("sample").await.unwrap();
     store
         .save_function_meta_record("sample", &record)
         .await
