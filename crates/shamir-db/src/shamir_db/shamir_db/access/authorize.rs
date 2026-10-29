@@ -248,8 +248,10 @@ impl ShamirDb {
         let Ok(Some(rec)) = self.system_store.load_function(fn_name).await else {
             return caller.clone();
         };
+        let Ok(fn_meta) = FunctionMeta::try_from_record(&rec) else {
+            return caller.clone();
+        };
         let res_meta = ResourceMeta::from_record(&rec);
-        let fn_meta = FunctionMeta::from_record(&rec);
         // Fail-closed owner lookup for escalation: `None` (owner field
         // absent) must resolve to the caller, never to
         // `from_record`'s System default. See the doc comment above.

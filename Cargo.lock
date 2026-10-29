@@ -3959,7 +3959,6 @@ dependencies = [
  "log",
  "rustix 1.1.4",
  "scc",
- "serde",
  "sha2",
  "shamir-collections",
  "shamir-funclib",

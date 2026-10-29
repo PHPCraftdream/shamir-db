@@ -1,4 +1,4 @@
-use crate::{supervise, ProcessTree, TeardownFaults};
+use crate::{supervise, supervise_bounded, ProcessTree, TeardownFaults, TRUNCATION_MARKER};
 #[cfg(unix)]
 use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
 use std::io::{self, BufRead, BufReader, Read};
@@ -225,6 +225,16 @@ fn ready(
     faults: TeardownFaults,
     watchdog: SharedWatchdog,
 ) -> Result<std::process::Output, String> {
+    ready_with_capture(script, timeout, faults, watchdog, None)
+}
+
+fn ready_with_capture(
+    script: &str,
+    timeout: Duration,
+    faults: TeardownFaults,
+    watchdog: SharedWatchdog,
+    limit: Option<usize>,
+) -> Result<std::process::Output, String> {
     let mut cmd = command(script);
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -244,7 +254,10 @@ fn ready(
     let stderr = guard.child().stderr.take();
     // supervise consumes both owners; its unwind path is outside this guard.
     let (child, tree) = guard.transfer();
-    supervise(child, tree, Some(stdout), stderr, timeout, faults)
+    match limit {
+        Some(limit) => supervise_bounded(child, tree, Some(stdout), stderr, timeout, faults, limit),
+        None => supervise(child, tree, Some(stdout), stderr, timeout, faults),
+    }
 }
 
 #[cfg(unix)]
@@ -476,6 +489,82 @@ fn rv_wasm_host_58c052b0_exited_leader_straggler_is_torn_down() {
         assert!(output.status.success());
     });
 }
+#[test]
+fn bounded_capture_drains_both_oversized_pipes() {
+    bounded(|watchdog| {
+        #[cfg(unix)]
+        let script = "echo ready; i=0; while [ $i -lt 3000 ]; do echo 0123456789012345678901234567890123456789; echo 0123456789012345678901234567890123456789 >&2; i=$((i+1)); done";
+        #[cfg(windows)]
+        let script = "echo ready& for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789& for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789 1>&2";
+        let output = ready_with_capture(
+            script,
+            Duration::from_secs(30),
+            TeardownFaults::default(),
+            watchdog,
+            Some(65536),
+        )
+        .expect("supervision");
+        assert!(output.status.success());
+        for bytes in [&output.stdout, &output.stderr] {
+            assert_eq!(bytes.len(), 65536 + TRUNCATION_MARKER.len());
+            assert!(bytes.ends_with(TRUNCATION_MARKER));
+            assert!(bytes.starts_with(b"0123456789"));
+        }
+    });
+}
+
+#[test]
+fn bounded_capture_preserves_small_output_without_marker() {
+    bounded(|watchdog| {
+        #[cfg(unix)]
+        let script = "echo ready; echo small";
+        #[cfg(windows)]
+        let script = "echo ready& echo small";
+        let output = ready_with_capture(
+            script,
+            Duration::from_secs(10),
+            TeardownFaults::default(),
+            watchdog,
+            Some(65536),
+        )
+        .expect("supervision");
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "small");
+        assert!(output.stderr.is_empty());
+    });
+}
+
+#[test]
+fn bounded_capture_timeout_kills_tree() {
+    bounded(|watchdog| {
+        let error = ready_with_capture(
+            timeout_command(),
+            Duration::ZERO,
+            TeardownFaults::default(),
+            watchdog,
+            Some(65536),
+        )
+        .unwrap_err();
+        assert!(error.contains("compilation timed out"), "{error}");
+        assert!(!error.contains("teardown incomplete"), "{error}");
+    });
+}
+
+#[test]
+fn bounded_capture_exited_leader_terminates_inherited_pipe_descendant() {
+    bounded(|watchdog| {
+        let output = ready_with_capture(
+            straggler_command(),
+            Duration::from_secs(10),
+            TeardownFaults::default(),
+            watchdog,
+            Some(65536),
+        )
+        .expect("supervision");
+        assert!(output.status.success());
+    });
+}
+
 #[test]
 fn rv_wasm_host_58c052b0_dropping_tree_kills_descendants() {
     bounded(|watchdog| {

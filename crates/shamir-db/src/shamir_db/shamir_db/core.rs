@@ -419,11 +419,10 @@ impl ShamirDb {
                 )));
             }
         }
-
-        // Load persisted functions; registry collisions are fatal so rejected
-        // catalogue artifacts cannot publish contradictory function metadata.
+        // Decode all metadata before registering recovered functions.
         let fn_records = shamir.system_store.load_functions().await?;
-        for rec in &fn_records {
+        super::catalog::with_checked_function_metadata(&fn_records, |metadata| async {
+        for (rec, meta) in fn_records.iter().zip(metadata) {
             let name = match rec["name"].as_str() {
                 Some(n) => n.to_string(),
                 None => continue,
@@ -480,8 +479,7 @@ impl ShamirDb {
                             name
                         )));
                     }
-                    // Populate in-memory metadata only after artifact registration succeeds.
-                    let meta = FunctionMeta::from_record(rec);
+                    // Publish metadata after registration succeeds.
                     let _ = shamir.function_meta.insert(name.clone(), meta);
                 }
                 Err(e) => {
@@ -493,6 +491,8 @@ impl ShamirDb {
                 }
             }
         }
+        Ok::<(), DbError>(())
+        }).await??;
 
         // Load persisted WASM validators from the validator catalogue and
         // register them (S1). Mirrors the function loading block above.

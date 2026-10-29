@@ -87,6 +87,7 @@ use crate::runtime::registry::FunctionRegistry;
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
 use shamir_types::access::Actor;
+use shamir_types::codecs::{Codec, MessagePackCodec};
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -264,6 +265,7 @@ impl WasmFunction {
     /// allowlist) rather than a redundant re-check of what the linker
     /// already rejects for free.
     pub fn from_wat(engine: Arc<WasmEngine>, wat: &str, limits: WasmLimits) -> FnResult<Self> {
+        engine.validate_limits(&limits)?;
         let wasm_bytes = wat::parse_str(wat)
             .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
         verify_wasm_module(&wasm_bytes)?;
@@ -305,6 +307,7 @@ impl WasmFunction {
         wasm_or_cwasm_bytes: &[u8],
         limits: WasmLimits,
     ) -> FnResult<Self> {
+        engine.validate_limits(&limits)?;
         verify_wasm_module(wasm_or_cwasm_bytes)?;
         let module = engine
             .compile(wasm_or_cwasm_bytes)
@@ -463,15 +466,17 @@ pub(in crate::wasm) async fn write_bytes_to_guest(
     Ok(packed)
 }
 
+pub(crate) fn encode_params(params: &Params) -> FnResult<Vec<u8>> {
+    MessagePackCodec::encode(&MessagePackCodec, params.raw())
+        .map_err(|e| FunctionError::Compute(format!("params encode error: {e}")))
+}
+
 // ── ShamirFunction impl ──────────────────────────────────────────────
 
 #[async_trait]
 impl ShamirFunction for WasmFunction {
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
-        let input = QueryValue::Map(params.raw().clone())
-            .to_bytes()
-            .map_err(|e| FunctionError::Compute(format!("params encode error: {e}")))?
-            .to_vec();
+        let input = encode_params(params)?;
 
         let engine = self.engine.clone();
         let limits = self.limits.clone();

@@ -145,7 +145,7 @@ pub fn check_url_allowed(url: &str, allowlist: &[String]) -> Result<(), NetGatew
 /// The outcome of a successful [`check_url_allowed_resolved`] check: the exact
 /// host/port/IP(s) the guard validated, so the actual network call can be
 /// PINNED to them and cannot be re-resolved to a different address at
-/// connection time (finding 2c DNS-rebind TOCTOU fix).
+/// connection time, preventing DNS-rebinding TOCTOU.
 #[derive(Debug, Clone)]
 pub struct ResolvedPin {
     /// The literal host from the URL authority (sent as `Host`/SNI).
@@ -158,7 +158,7 @@ pub struct ResolvedPin {
     pub pinned_ips: Vec<IpAddr>,
 }
 
-/// Full egress guard for real network I/O (finding 2c / SSRF): runs the
+/// Full egress guard for real network I/O: runs the
 /// string-level allowlist check AND resolves the host via DNS, rejecting if
 /// ANY forbidden address, or an internal address without an exact host entry.
 ///
@@ -171,7 +171,7 @@ pub struct ResolvedPin {
 /// `127.0.0.1` test target) is honoured — literal IPs need no DNS lookup,
 /// and the exact-match rule in [`check_host_allowed`] already applies.
 ///
-/// # DNS-rebind TOCTOU (finding 2c)
+/// # DNS-rebind TOCTOU
 ///
 /// Returns the validated [`ResolvedPin`] so the caller can pin its actual
 /// connection to the SAME address(es) the guard checked. Without this, the
@@ -264,7 +264,7 @@ pub(crate) struct ParsedUrl {
     pub(crate) host: String,
     /// The connection port, taken from the authority when present or defaulted
     /// from the scheme (80 for http, 443 for https). Needed to build curl's
-    /// `--resolve host:port:ip` pin (finding 2c DNS-rebind fix).
+    /// `--resolve host:port:ip` pin.
     pub(crate) port: u16,
 }
 

@@ -4,13 +4,62 @@
 //! Drop also has an absolute 10-second limit. This overwhelmingly exposes a gap,
 //! but is not deterministic: a 500 ms reader deschedule can hide it.
 
-use crate::{FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction};
+use crate::{
+    FnBatch, FnCtx, FunctionError, FunctionMeta, FunctionRegistry, Params, Security,
+    ShamirFunction, Visibility,
+};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[test]
+fn checked_metadata_roundtrip_and_rejection() {
+    let mut record = QueryValue::Map(Default::default());
+    let QueryValue::Map(ref mut fields) = record else {
+        unreachable!()
+    };
+    fields.insert("version".into(), QueryValue::Int(37));
+    let legacy = FunctionMeta::try_from_record(&record).unwrap();
+    assert_eq!(legacy.visibility, Visibility::Private);
+    assert_eq!(legacy.security, Security::Invoker);
+    assert!(legacy.secret_grants.is_empty() && legacy.net_grants.is_empty());
+    let meta = FunctionMeta::new(
+        Visibility::Public,
+        Security::Definer,
+        vec!["secret".into()],
+        vec!["example.org".into()],
+    );
+    meta.inject_into(&mut record);
+    let decoded = FunctionMeta::try_from_record(&record).unwrap();
+    assert_eq!(decoded.visibility, meta.visibility);
+    assert_eq!(decoded.security, meta.security);
+    assert_eq!(decoded.secret_grants, meta.secret_grants);
+    assert_eq!(decoded.net_grants, meta.net_grants);
+    assert_eq!(record["version"], QueryValue::Int(37));
+    assert!(FunctionMeta::try_from_record(&QueryValue::Null).is_err());
+    for (field, value) in [
+        ("metadata_version", QueryValue::Int(2)),
+        ("visibility", QueryValue::Str("invalid".into())),
+        ("security", QueryValue::Int(1)),
+        ("secret_grants", QueryValue::List(vec![QueryValue::Int(1)])),
+        ("net_grants", QueryValue::Bool(true)),
+    ] {
+        let mut bad = record.clone();
+        let QueryValue::Map(ref mut fields) = bad else {
+            unreachable!()
+        };
+        fields.insert(field.into(), value);
+        assert!(FunctionMeta::try_from_record(&bad).is_err(), "{field}");
+    }
+    let QueryValue::Map(ref mut fields) = record else {
+        unreachable!()
+    };
+    fields.shift_remove("security");
+    assert!(FunctionMeta::try_from_record(&record).is_err());
+}
 
 /// A trivial function that ignores its inputs and returns a constant.
 struct Const(i64);

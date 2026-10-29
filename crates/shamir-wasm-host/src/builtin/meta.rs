@@ -8,6 +8,8 @@
 //! [`CreateFunctionOptions`] is the options bag accepted by
 //! `ShamirDb::create_function_with_opts`.
 
+use shamir_types::types::value::QueryValue;
+
 /// Who may see that the function exists.
 ///
 /// Stored in the catalogue; enforcement is deferred to slice 10.
@@ -147,9 +149,63 @@ impl FunctionMeta {
         }
     }
 
+    /// Decode a catalogue record, rejecting malformed metadata.
+    /// Unversioned legacy records default only absent fields. Version 1 requires
+    /// all four fields written by `inject_into`; unsupported versions and
+    /// malformed present fields are rejected.
+    pub fn try_from_record(rec: &shamir_types::types::value::QueryValue) -> Result<Self, String> {
+        let QueryValue::Map(map) = rec else {
+            return Err("function metadata record must be a map".into());
+        };
+        match map.get("metadata_version") {
+            None => {}
+            Some(QueryValue::Int(1)) => {
+                for field in ["visibility", "security", "secret_grants", "net_grants"] {
+                    if !map.contains_key(field) {
+                        return Err(format!("missing {field} in metadata version 1"));
+                    }
+                }
+            }
+            Some(_) => return Err("unsupported or malformed metadata_version".into()),
+        }
+        let visibility = match map.get("visibility") {
+            None => Visibility::Private,
+            Some(QueryValue::Str(value)) => value.parse().map_err(|_| "invalid visibility")?,
+            Some(_) => return Err("invalid visibility".into()),
+        };
+        let security = match map.get("security") {
+            None => Security::Invoker,
+            Some(QueryValue::Str(value)) => value.parse().map_err(|_| "invalid security")?,
+            Some(_) => return Err("invalid security".into()),
+        };
+        let grants = |name: &str| -> Result<Vec<String>, String> {
+            match map.get(name) {
+                None => Ok(Vec::new()),
+                Some(QueryValue::List(values)) => values
+                    .iter()
+                    .map(|value| match value {
+                        QueryValue::Str(value) => Ok(value.clone()),
+                        _ => Err(format!("invalid {name} entry")),
+                    })
+                    .collect(),
+                Some(_) => Err(format!("invalid {name}")),
+            }
+        };
+        Ok(Self {
+            visibility,
+            security,
+            secret_grants: grants("secret_grants")?,
+            net_grants: grants("net_grants")?,
+        })
+    }
+
     /// Inject metadata fields into a `QueryValue::Map` record for persistence.
     pub fn inject_into(&self, rec: &mut shamir_types::types::value::QueryValue) {
         if let shamir_types::types::value::QueryValue::Map(map) = rec {
+            map.insert(
+                "metadata_version".to_string(),
+                shamir_types::types::value::QueryValue::Int(1),
+            );
             map.insert(
                 "visibility".to_string(),
                 shamir_types::types::value::QueryValue::Str(self.visibility.to_string()),
