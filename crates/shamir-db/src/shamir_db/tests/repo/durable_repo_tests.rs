@@ -34,6 +34,38 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// session 1 must be readable in session 2 — proving both that the redb file
 /// was created on disk *and* the catalogue record was persisted correctly.
 #[tokio::test]
+async fn boot_groups_tables_by_database_and_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let sys_path = dir.path().join("meta");
+    {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
+            .await
+            .unwrap();
+        for (db, table) in [("alpha", "one"), ("beta", "two")] {
+            shamir.create_db(db).await.unwrap();
+            let mut batch = Batch::new();
+            batch.id(1);
+            batch.create_repo(
+                "create",
+                ddl::create_repo("shared")
+                    .engine("in_memory")
+                    .tables([table]),
+            );
+            shamir
+                .execute(db, &batch.to_request_via_msgpack().unwrap())
+                .await
+                .unwrap();
+        }
+    }
+    let reopened = reinit_with_retry(sys_path).await;
+    for (db, present, absent) in [("alpha", "one", "two"), ("beta", "two", "one")] {
+        let tables = reopened.get_db(db).unwrap().list_tables("shared").unwrap();
+        assert!(tables.iter().any(|table| table == present));
+        assert!(!tables.iter().any(|table| table == absent));
+    }
+}
+
+#[tokio::test]
 async fn wire_created_repo_is_durable_across_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let sys_path = dir.path().join("meta.redb");

@@ -72,7 +72,9 @@ impl ShamirAdminExecutor {
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
         let schema_dto = match rec.get(SCHEMA_FIELD) {
-            Some(qv) if !matches!(qv, QueryValue::Null) => dto_list_from_catalogue(qv, interner),
+            Some(qv) if !matches!(qv, QueryValue::Null) => {
+                dto_list_from_catalogue(qv, interner).map_err(|e| err_code("bad_schema", e))?
+            }
             _ => Vec::new(),
         };
         let schema_version = rec

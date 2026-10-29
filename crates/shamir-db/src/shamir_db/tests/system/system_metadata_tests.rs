@@ -1,17 +1,37 @@
+#[cfg(feature = "fjall")]
 use shamir_query_builder::batch::Batch;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::doc;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::write;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::Query;
 
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::ShamirDb;
+#[cfg(feature = "fjall")]
 use crate::shamir_db::SystemStoreConfig;
 use shamir_types::types::value::QueryValue;
 
 // ============================================================================
 // System store persistence tests
 // ============================================================================
+
+#[cfg(not(feature = "fjall"))]
+#[tokio::test]
+async fn unavailable_fjall_system_store_returns_error() {
+    let path = tempfile::tempdir().unwrap().path().join("system");
+    let result =
+        crate::shamir_db::SystemStore::init(crate::shamir_db::SystemStoreConfig::Fjall(path)).await;
+    match result {
+        Err(crate::DbError::Storage(message)) => {
+            assert!(message.contains("unavailable fjall backend"))
+        }
+        Err(error) => panic!("unexpected error: {error}"),
+        Ok(_) => panic!("unavailable fjall backend unexpectedly succeeded"),
+    }
+}
 
 #[tokio::test]
 async fn test_create_db_persists() {
@@ -122,6 +142,7 @@ async fn test_multiple_repos_persist() {
 
 /// Count records returned by a `{"from": <table>}` read through the
 /// high-level execute pipeline.
+#[cfg(feature = "fjall")]
 async fn read_count(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> usize {
     let mut b = Batch::new();
     b.id(1);
@@ -142,6 +163,7 @@ async fn read_count(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> usi
 /// against a genuinely stuck open. This is a test artifact of dropping and
 /// re-opening the same on-disk store inside one process; production opens
 /// the store exactly once per run.
+#[cfg(feature = "fjall")]
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
@@ -159,6 +181,7 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// the SAME underlying store — WITHOUT re-creating the table — and its
 /// data must be readable. Before this fix `init` re-attached repos with an
 /// empty table list, so the table didn't exist on restart.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn table_catalogue_survives_restart() {
     let sys_dir = tempfile::tempdir().unwrap();
@@ -222,6 +245,7 @@ async fn table_catalogue_survives_restart() {
 
 /// A table created via `ShamirDb::add_table` (the path the executor's
 /// `CreateTable` now routes through) must survive a restart.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn table_added_after_repo_survives_restart() {
     let sys_dir = tempfile::tempdir().unwrap();
@@ -269,6 +293,7 @@ async fn table_added_after_repo_survives_restart() {
 
 /// A table dropped via `ShamirDb::drop_table` must NOT reappear after a
 /// restart — its catalogue entry must be removed.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn dropped_table_does_not_resurrect_after_restart() {
     let sys_dir = tempfile::tempdir().unwrap();

@@ -11,9 +11,12 @@
 //! (`create_db_as_checked`, `remove_db`, and the wire `CREATE DATABASE`
 //! handler's `persist_failed` mapping).
 
+use std::hash::BuildHasher;
 use std::sync::Arc;
 
-use shamir_engine::function::{FnBatch, FnCtx, Params};
+use shamir_engine::function::{
+    FnBatch, FnCtx, FunctionMeta, HttpRequest, NetGatewayError, Params, Security, Visibility,
+};
 use shamir_engine::validator::{RecordFields, Validation, ValidatorCtx};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -22,6 +25,174 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::shamir_db::ShamirDb;
+
+#[tokio::test]
+async fn invocation_settings_match_resource_meta_defaults_and_malformed_values() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    let caller = Actor::User(7);
+    assert_eq!(
+        db.authorize_invocation("missing", &caller).await.unwrap(),
+        caller
+    );
+    db.system_store()
+        .save_setting("root_meta", &QueryValue::Int(1))
+        .await
+        .unwrap();
+    db.system_store()
+        .save_setting("fn_namespace_meta", &QueryValue::Int(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.authorize_invocation("missing", &caller).await.unwrap(),
+        caller
+    );
+    let mut malformed = new_map();
+    malformed.insert("mode".into(), QueryValue::Str("invalid".into()));
+    db.system_store()
+        .save_setting("fn_namespace_meta", &QueryValue::Map(malformed))
+        .await
+        .unwrap();
+    assert!(db.authorize_invocation("missing", &caller).await.is_err());
+}
+
+#[tokio::test]
+async fn invocation_snapshot_uses_current_definer_owner() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    let store = db.system_store();
+    let mut fields = new_map();
+    fields.insert("name".into(), QueryValue::Str("sample".into()));
+    fields.insert("security".into(), QueryValue::Str("definer".into()));
+    let record = QueryValue::Map(fields);
+    let mut meta = ResourceMeta {
+        owner: Actor::User(10),
+        group: None,
+        mode: 0o755,
+    };
+    store.save_function("sample", &record, &meta).await.unwrap();
+    assert_eq!(
+        db.authorize_invocation("sample", &Actor::User(7))
+            .await
+            .unwrap(),
+        Actor::User(10)
+    );
+    meta.owner = Actor::User(11);
+    store.save_function("sample", &record, &meta).await.unwrap();
+    assert_eq!(
+        db.authorize_invocation("sample", &Actor::User(7))
+            .await
+            .unwrap(),
+        Actor::User(11)
+    );
+    store
+        .save_function_meta_record("sample", &record)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.authorize_invocation("sample", &Actor::User(7))
+            .await
+            .unwrap(),
+        Actor::User(7)
+    );
+}
+
+#[tokio::test]
+async fn network_gateway_retains_distinct_grant_sets_when_alternating() {
+    let mut db = ShamirDb::init_memory().await.unwrap();
+    let first_grants = vec!["first.example".to_string()];
+    let slot = |grants: &[String]| shamir_collections::THasher::default().hash_one(grants) % 64;
+    let first_slot = slot(&first_grants);
+    let second_grants = (0..1000)
+        .map(|i| vec![format!("host{i}.example")])
+        .find(|grants| slot(grants) != first_slot)
+        .unwrap();
+    db.set_net_allowlist(vec![first_grants[0].clone(), second_grants[0].clone()]);
+    for (name, grants) in [("first", first_grants), ("second", second_grants)] {
+        db.function_meta.insert(
+            name.into(),
+            FunctionMeta::new(Visibility::Private, Security::Invoker, vec![], grants),
+        );
+    }
+    let first = db.build_net_gateway("first");
+    let second = db.build_net_gateway("second");
+    assert!(Arc::ptr_eq(&first, &db.build_net_gateway("first")));
+    assert!(Arc::ptr_eq(&second, &db.build_net_gateway("second")));
+}
+
+#[tokio::test]
+async fn network_gateway_tracks_function_rename_drop_and_recreate() {
+    let mut db = ShamirDb::init_memory().await.unwrap();
+    db.set_net_allowlist(vec!["allowed.example".into()]);
+    db.register_fn("old", false, |_, _, _| async { Ok(QueryValue::Null) })
+        .unwrap();
+    db.function_meta.insert(
+        "old".into(),
+        FunctionMeta::new(Visibility::Private, Security::Invoker, vec![], vec![]),
+    );
+    let restricted = db.build_net_gateway("old");
+    db.rename_function("old", "new").await.unwrap();
+    assert!(Arc::ptr_eq(&restricted, &db.build_net_gateway("new")));
+    assert!(!Arc::ptr_eq(&restricted, &db.build_net_gateway("old")));
+    db.drop_function("new").await.unwrap();
+    assert!(!Arc::ptr_eq(&restricted, &db.build_net_gateway("new")));
+    db.register_fn("new", false, |_, _, _| async { Ok(QueryValue::Null) })
+        .unwrap();
+    db.function_meta.insert(
+        "new".into(),
+        FunctionMeta::new(
+            Visibility::Private,
+            Security::Invoker,
+            vec![],
+            vec!["allowed.example".into()],
+        ),
+    );
+    assert!(!Arc::ptr_eq(&restricted, &db.build_net_gateway("new")));
+}
+
+#[tokio::test]
+async fn network_gateway_cache_tracks_grants_and_allowlist_across_clones() {
+    let mut db = ShamirDb::init_memory().await.unwrap();
+    db.set_net_allowlist(vec!["one.example".into(), "two.example".into()]);
+    let mut other = db.clone();
+    other.set_net_allowlist(vec!["one.example".into()]);
+    let meta = |grants: Vec<String>| {
+        FunctionMeta::new(Visibility::Private, Security::Invoker, vec![], grants)
+    };
+    db.function_meta
+        .insert("f".into(), meta(vec!["one.example".into()]));
+    let first = db.build_net_gateway("f");
+    assert!(Arc::ptr_eq(&first, &db.build_net_gateway("f")));
+    let other_first = other.build_net_gateway("f");
+    let request = || HttpRequest {
+        method: "GET".into(),
+        url: "https://two.example/".into(),
+        headers: vec![],
+        body: vec![],
+    };
+    assert!(matches!(
+        first.fetch(request()).await,
+        Err(NetGatewayError::NotAllowed(_))
+    ));
+    db.function_meta
+        .insert("f".into(), meta(vec!["two.example".into()]));
+    assert!(!Arc::ptr_eq(&first, &db.build_net_gateway("f")));
+    assert!(!Arc::ptr_eq(&other_first, &other.build_net_gateway("f")));
+    assert!(matches!(
+        other.build_net_gateway("f").fetch(request()).await,
+        Err(NetGatewayError::NotAllowed(_))
+    ));
+    let before_allowlist = db.build_net_gateway("f");
+    db.set_net_allowlist(vec![]);
+    assert!(!Arc::ptr_eq(&before_allowlist, &db.build_net_gateway("f")));
+    assert!(matches!(
+        db.build_net_gateway("f").fetch(request()).await,
+        Err(NetGatewayError::NotAllowed(_))
+    ));
+    db.function_meta.remove("f");
+    let builtin = db.build_net_gateway("f");
+    assert!(Arc::ptr_eq(&builtin, &db.build_net_gateway("unknown")));
+    db.function_meta.insert("f".into(), meta(vec![]));
+    assert!(!Arc::ptr_eq(&builtin, &db.build_net_gateway("f")));
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // RV-DB-093EAA95 — write-new-before-remove-old on rename

@@ -44,7 +44,7 @@ use shamir_types::types::record_id::RecordId;
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::admin_result;
 use super::schema_codec::{
-    dto_list_from_catalogue, map_insert, schema_version_of, serialise_rules, serialise_rules_flat,
+    checked_catalogue_rules, map_insert, schema_version_of, serialise_rules, serialise_rules_flat,
 };
 
 #[path = "../repo_admin/admin_schema_admission.rs"]
@@ -468,10 +468,7 @@ impl ShamirAdminExecutor {
         // proof, and only genuinely new/type-changed rules get a fresh
         // `table.count() == 0` check. Client-supplied `keyset_safe` is
         // ignored unconditionally.
-        let prev_rules: Vec<FieldRuleDto> = match rec.get(SCHEMA_FIELD) {
-            Some(qv) => dto_list_from_catalogue(qv, interner),
-            None => Vec::new(),
-        };
+        let prev_rules = checked_catalogue_rules(rec.get(SCHEMA_FIELD), interner)?;
         let mut stamped_rules = op.schema.clone();
         stamp_keyset_safe(
             &self.shamir,
@@ -627,10 +624,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
         // Read the current schema list (de-interned for path matching).
-        let mut rules: Vec<FieldRuleDto> = match rec.get(SCHEMA_FIELD) {
-            Some(qv) => dto_list_from_catalogue(qv, interner),
-            None => Vec::new(),
-        };
+        let mut rules = checked_catalogue_rules(rec.get(SCHEMA_FIELD), interner)?;
 
         // F-17 (#810) — snapshot the previous rules for keyset_safe
         // preservation (unchanged rules keep their prior proof).
@@ -832,10 +826,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
         // Read current rules (DTO form, de-interned).
-        let mut rules: Vec<FieldRuleDto> = match rec.get(SCHEMA_FIELD) {
-            Some(qv) => dto_list_from_catalogue(qv, interner),
-            None => Vec::new(),
-        };
+        let mut rules = checked_catalogue_rules(rec.get(SCHEMA_FIELD), interner)?;
 
         // Remove by path.
         let before = rules.len();
@@ -975,10 +966,7 @@ impl ShamirAdminExecutor {
             .map_err(|e| err_code("internal_error", e.to_string()))?;
 
         // De-intern the catalogue schema into the wire DTO form (flat names).
-        let schema_dto = match rec.get(SCHEMA_FIELD) {
-            Some(qv) if !matches!(qv, QueryValue::Null) => dto_list_from_catalogue(qv, interner),
-            _ => Vec::new(),
-        };
+        let schema_dto = checked_catalogue_rules(rec.get(SCHEMA_FIELD), interner)?;
         let schema_version = rec
             .get(SCHEMA_VERSION_FIELD)
             .and_then(|v| v.as_i64())

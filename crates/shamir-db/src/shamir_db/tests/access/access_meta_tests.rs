@@ -643,7 +643,7 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// armed, fails every read (`get`, `get_many`, `iter_stream`,
 /// `scan_prefix_stream`) with a `DbError::Storage` — simulating a real
 /// catalogue-page-corruption / I/O failure rather than "record absent".
-mod failing_store {
+pub(super) mod failing_store {
     use async_trait::async_trait;
     use bytes::Bytes;
     use shamir_storage::error::{DbError, DbResult};
@@ -903,6 +903,36 @@ async fn resource_meta_group_fails_closed_on_storage_error() {
          resolve_group_id as Err, not fail-open into a default-open \
          ResourceMeta"
     );
+}
+
+#[tokio::test]
+async fn membership_read_error_denies_group_and_other_under_0704() {
+    let (shamir, fault) = shamir_with_failing_groups_table().await;
+    shamir.create_db("testdb").await.unwrap();
+    let gid = shamir.create_group("devs").await.unwrap();
+    shamir.add_group_member(gid, 20).await.unwrap();
+    let path = ResourcePath::database("testdb");
+    let meta = ResourceMeta {
+        owner: Actor::User(10),
+        group: Some(gid),
+        mode: 0o704,
+    };
+    shamir.set_resource_meta(&path, &meta).await.unwrap();
+    assert!(shamir
+        .authorize_access(&Actor::User(20), &path, crate::access::Action::Read)
+        .await
+        .is_err());
+    assert!(shamir
+        .authorize_access(&Actor::User(30), &path, crate::access::Action::Read)
+        .await
+        .is_ok());
+    fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    for user in [20, 30] {
+        assert!(shamir
+            .authorize_access(&Actor::User(user), &path, crate::access::Action::Read)
+            .await
+            .is_err());
+    }
 }
 
 #[tokio::test]

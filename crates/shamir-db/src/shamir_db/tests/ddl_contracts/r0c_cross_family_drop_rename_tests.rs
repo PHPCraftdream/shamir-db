@@ -134,6 +134,94 @@ async fn rename_index_refuses_pre_existing_cross_family_collision() {
 }
 
 #[tokio::test]
+async fn invalid_foreign_key_action_blocks_schema_rewrite_without_persisting() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("testdb").await.unwrap();
+    db.add_repo(
+        "testdb",
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("items")),
+    )
+    .await
+    .unwrap();
+    let manager = db.resolve_repo_interner("testdb", "main").await.unwrap();
+    let interner = manager.get().await.unwrap();
+    let first = interner.touch_ind("first").unwrap().into_key().id();
+    let second = interner.touch_ind("second").unwrap().into_key().id();
+    let make_rule = |id, fk: bool| {
+        let mut rule = shamir_types::types::common::new_map();
+        rule.insert(
+            "path".into(),
+            crate::types::value::QueryValue::List(vec![crate::types::value::QueryValue::Int(
+                id as i64,
+            )]),
+        );
+        rule.insert(
+            "type".into(),
+            crate::types::value::QueryValue::Str("string".into()),
+        );
+        if fk {
+            let mut foreign = shamir_types::types::common::new_map();
+            foreign.insert(
+                "ref_table".into(),
+                crate::types::value::QueryValue::Str("parents".into()),
+            );
+            foreign.insert(
+                "ref_field".into(),
+                crate::types::value::QueryValue::Str("id".into()),
+            );
+            foreign.insert(
+                "on_delete".into(),
+                crate::types::value::QueryValue::Str("invalid".into()),
+            );
+            rule.insert(
+                "foreign_key".into(),
+                crate::types::value::QueryValue::Map(foreign),
+            );
+        }
+        crate::types::value::QueryValue::Map(rule)
+    };
+    let mut record = db
+        .system_store()
+        .load_table_record("testdb", "main", "items")
+        .await
+        .unwrap()
+        .unwrap();
+    if let crate::types::value::QueryValue::Map(ref mut fields) = record {
+        fields.insert(
+            "schema".into(),
+            crate::types::value::QueryValue::List(vec![
+                make_rule(first, false),
+                make_rule(second, true),
+            ]),
+        );
+    }
+    db.system_store().save_table_meta(&record).await.unwrap();
+    let before = db
+        .system_store()
+        .load_table_record("testdb", "main", "items")
+        .await
+        .unwrap()
+        .unwrap();
+    let mut batch = Batch::new();
+    batch.id("remove");
+    batch.remove_schema_rule(
+        "remove",
+        ddl::remove_schema_rule("items", ["first"]).repo("main"),
+    );
+    assert!(db
+        .execute("testdb", &batch.to_request_via_msgpack().unwrap())
+        .await
+        .is_err());
+    let after = db
+        .system_store()
+        .load_table_record("testdb", "main", "items")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before, after);
+}
+
+#[tokio::test]
 async fn rv_db_9257b8e1_removing_missing_rule_keeps_schema_version() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await.unwrap();

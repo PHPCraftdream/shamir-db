@@ -61,20 +61,10 @@ log         = "0.4"            # log!/info!/warn! macros across the facade
 async-trait = "0.1.81"         # AdminExecutor / TableResolver trait impls
 rmp-serde   = "1.3.0"          # facade encodes audit / system-store records
 rand        = "0.9.2"          # facade rng for record-id allocation
-argon2      = "0.5"            # hash users.password_hash at rest (PHC string)
 arc-swap    = "1.7"            # RCU snapshot for the quarantine cache
 base64      = "0.22"           # function wasm binary persistence
 rustc-hash  = "2.1"            # function content hash (fxhash's maintained successor)
 tempfile    = "3.10.1"         # curl gateway temp files for secrets
-
-# Legacy network / TLS module (`db/net/*`) — kept compiling so the
-# obsolete code doesn't bit-rot before its planned deletion.
-rustls       = "0.23"
-tokio-rustls = "0.26"
-# Self-signed certs sign with aws-lc-rs, the crypto library rustls already uses,
-# instead of rcgen's default `ring` backend: one native crypto library in the
-# tree, and `ring` (C + assembly) is gone.
-rcgen        = { version = "0.13", default-features = false, features = ["pem", "aws_lc_rs"] }
 
 # Bench allocator options (optional — gated by bench-sefer features).
 sefer-alloc = { version = "0.2.1", features = ["production"], optional = true }
@@ -130,6 +120,7 @@ harness = false
 [[bench]]
 name = "durability_axis"
 harness = false
+required-features = ["fjall"]
 
 
 [lib]

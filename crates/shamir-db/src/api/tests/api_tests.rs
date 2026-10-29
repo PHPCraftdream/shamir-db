@@ -1,12 +1,12 @@
-#![allow(deprecated)]
-
 use crate::api::{Command, Request, Response};
 use crate::codecs::basic::MessagePackCodec;
 use crate::codecs::Codec;
 use crate::types::common::new_map;
+#[allow(deprecated, reason = "Exercises legacy UserValue compatibility")]
 use crate::types::value::UserValue;
 
 #[test]
+#[allow(deprecated, reason = "Exercises legacy UserValue compatibility")]
 fn test_request_response_roundtrip() {
     let codec = MessagePackCodec;
 

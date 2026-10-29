@@ -99,6 +99,7 @@ pub(super) async fn fresh_db() -> Arc<ShamirDb> {
     shamir
 }
 
+#[cfg(feature = "fjall")]
 pub(super) async fn fresh_db_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
     fresh_db_with(BoxRepoFactory::fjall(path.to_path_buf())).await
 }
@@ -123,6 +124,7 @@ pub(super) async fn fresh_db_membuffer_in_memory() -> Arc<ShamirDb> {
     .await
 }
 
+#[cfg(feature = "fjall")]
 pub(super) async fn fresh_db_membuffer_fjall(path: &std::path::Path) -> Arc<ShamirDb> {
     use shamir_storage::storage_membuffer::MemBufferConfig;
     fresh_db_with(BoxRepoFactory::membuffer(
@@ -386,4 +388,5 @@ pub(super) fn bulk_counts() -> Vec<usize> {
 /// these are I/O-bound (every commit hits real disk), so scaling N
 /// doesn't add a meaningful signal the way it does for the in-memory
 /// variants above; kept at the smallest cell only.
+#[cfg(feature = "fjall")]
 pub(super) const BULK_COUNT: usize = 100;

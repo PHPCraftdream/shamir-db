@@ -42,6 +42,7 @@ async fn commit_one(shamir: &ShamirDb, db: &str, repo: &str, table: &str) -> u64
 /// previous session's store still holds the Fjall lock (it is released a few
 /// ms after the owning `ShamirDb` is dropped). Mirrors `reinit_with_retry` in
 /// `durable_repo_tests`.
+#[cfg(feature = "fjall")]
 async fn reinit_synced_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
         match ShamirDb::init_with_durability(
@@ -94,6 +95,7 @@ async fn default_policy_reads_back_buffered() {
 /// (b) `init_with_durability(Synced)` → the repo reads back Synced AND a
 /// commit through the db leaves the WAL's recoverability prefix `R` at
 /// the commit version (Synced acks at the fsynced watermark).
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn synced_policy_reaches_repo_and_acks_fsynced() {
     let dir = tempfile::tempdir().unwrap();
@@ -209,6 +211,7 @@ async fn mem_repo_synced_policy_commits_recoverably() {
 }
 
 /// Boot catalogue reopening must install the supplied policy before recovery.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn boot_reopen_inherits_policy_and_recovered_prefix() {
     // FLAKE-2: install a logger so the engine's `shutdown stage slow` warnings

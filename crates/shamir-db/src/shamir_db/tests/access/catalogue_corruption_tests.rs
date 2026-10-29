@@ -69,6 +69,71 @@ async fn assert_corrupt_record_reported(table: &TableManager, table_name: &str) 
 }
 
 #[tokio::test]
+async fn invocation_denies_settings_storage_read_failure() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir
+        .register_fn("sample", false, |_, _, _| async { Ok(QueryValue::Null) })
+        .unwrap();
+    let fault = std::sync::Arc::new(super::access_meta_tests::failing_store::FailingStore::new());
+    let repo = shamir.system_store().system_repo().unwrap();
+    let table = TableManager::create_with_domain(
+        "settings".to_string(),
+        fault.clone() as std::sync::Arc<dyn shamir_storage::types::Store>,
+        std::sync::Arc::new(shamir_storage::storage_in_memory::InMemoryStore::new()),
+        std::sync::Arc::clone(repo.write_domain()),
+    )
+    .await
+    .unwrap()
+    .with_interner(repo.repo_interner().await.unwrap());
+    repo.install_table_for_test("settings", table);
+    assert!(shamir
+        .invoke_function_as(
+            "sample",
+            crate::engine::function::Params::new(),
+            Actor::User(99)
+        )
+        .await
+        .is_ok());
+    fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(shamir
+        .system_store()
+        .load_invocation_settings()
+        .await
+        .is_err());
+    assert!(shamir
+        .invoke_function_as(
+            "sample",
+            crate::engine::function::Params::new(),
+            Actor::User(99)
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn invocation_denies_corrupt_settings_catalogue() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir
+        .register_fn("sample", false, |_, _, _| async { Ok(QueryValue::Null) })
+        .unwrap();
+    let table = stage_corrupt_row(&shamir, "settings").await;
+    assert_corrupt_record_reported(&table, "settings").await;
+    assert!(shamir
+        .system_store()
+        .load_invocation_settings()
+        .await
+        .is_err());
+    assert!(shamir
+        .invoke_function_as(
+            "sample",
+            crate::engine::function::Params::new(),
+            Actor::User(99),
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn rv_db_23a03103_corrupt_repository_row_still_fails_closed() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("db").await.unwrap();

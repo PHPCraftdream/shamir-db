@@ -4,7 +4,9 @@ use std::sync::Arc;
 #[cfg(feature = "fjall")]
 use shamir_engine::repo::{BoxRepoFactory, RepoFactory};
 use shamir_engine::repo::{RepoInstance, SeedInstallState, SeedReceipt, SeedTable};
-use shamir_storage::types::{RecordKey, Repo, Store};
+#[cfg(feature = "fjall")]
+use shamir_storage::types::Repo;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::types::value::QueryValue;
 
 use crate::access::{Actor, ResourceMeta};

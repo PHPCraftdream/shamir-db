@@ -171,12 +171,7 @@ impl ShamirAdminExecutor {
         // writes the delta since the last chunk as an append-only chunk.
         mgr.persist().await.map_err(|e| err(e.to_string()))?;
 
-        let epoch = interner
-            .all_entries()
-            .iter()
-            .map(|(k, _)| k.id())
-            .max()
-            .unwrap_or(0);
+        let epoch = interner.max_published_id();
 
         Ok(admin_result(mpack!({
             "interner_touch": @(QueryValue::Str(op.interner_touch.clone())),
