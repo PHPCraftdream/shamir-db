@@ -36,6 +36,8 @@ directory unless an explicit `--exceptions` path is given.
 
 `.rust-guard/atomic_orderings.toml` pins AST-selected Rust functions and methods. Each `[[pin]]` names a `path`, `item` (`fn` or `Type::method`), optional `branch` (`production`, the default, or `loom`), `owner`, `reason`, and `calls` entries containing `method` and minimum `Ordering` variant. Optional `require_fence` demands an explicit fence. The gate reports missing items, weakened or non-literal orderings, unpinned calls, missing fences, and stale call pins. Calls are pinned by method and required minimum ordering; CAS and fetch-update failure orderings are checked with the Rust failure-order constraints. Nested cfg predicates select the loom/production branch, and macro token arguments are parsed as expressions when possible.
 
+Atomic associated-function calls such as `AtomicUsize::load(&value, Ordering::SeqCst)` and `<AtomicUsize>::load(...)` are checked like method calls, including `Atomic* as X` imports in the same file (including nested use groups); aliases imported from other modules are not resolved. This is a syntactic check, not type resolution: pins apply to the operation name throughout the selected item, not to a particular receiver.
+
 ## Subcommands
 - `rust-guard modules [--rev <rev>] [--exceptions <path>]` — module
   reachability. Discovers package/target roots (`cargo metadata
