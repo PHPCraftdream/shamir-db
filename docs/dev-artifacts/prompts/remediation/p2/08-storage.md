@@ -4,7 +4,7 @@ Source: P2 revalidation of the active findings against master `7f04e096`. Read f
 
 ## Goal
 
-Stop the default range filter at the upper bound, recover from a partial copy on the production rename path, remove the environmental thread-start panic, and tidy storage docs and tests.
+Stop the default range filter at the upper bound, define the partial-copy contract of copy_store (rename retry recovery is deferred), remove the environmental thread-start panic, validate Fjall store names, and tidy storage docs and tests.
 
 This is one change set for shamir-storage: 21 findings, effort units 43 (S=1, M=2, L=4). They are adjacent (same crate, overlapping files), so they are solved together and share tests and review. 
 
@@ -15,7 +15,7 @@ Crates: `shamir-storage`. Dependents are type-checked with `cargo check` when a 
 ## Acceptance
 
 - The default range filter stops polling after the first key above the end bound (oracle: no further polls).
-- A partial copy on the production rename path is recovered or rolled back with a test; thread-start failure no longer panics.
+- copy_store has an explicit documented partial-copy contract (incremental merge/upsert, no rollback) pinned by a contract test; rename retry contamination stays unremediated and is deferred to a separately scoped engine/database change; Fjall worker-start failure no longer panics.
 - Documentation and test-organization cards are closed without behavior change.
 
 ## Coordination with other tasks

@@ -465,12 +465,12 @@ Derived from the evidence paths of the cards at the verification commit; an exec
 - Wave 1; after: none. Cards 21 (medium 1, low 11, nit 9), effort 43, owner-decision cards 7.
 - Shares files with: P2-12, P2-19.
 
-**Goal.** Stop the default range filter at the upper bound, recover from a partial copy on the production rename path, remove the environmental thread-start panic, and tidy storage docs and tests.
+**Goal.** Stop the default range filter at the upper bound, define the partial-copy contract of copy_store (rename retry recovery is deferred), remove the environmental thread-start panic, validate Fjall store names, and tidy storage docs and tests.
 
 **Acceptance.**
 
 - The default range filter stops polling after the first key above the end bound (oracle: no further polls).
-- A partial copy on the production rename path is recovered or rolled back with a test; thread-start failure no longer panics.
+- copy_store has an explicit documented partial-copy contract (incremental merge/upsert, no rollback) pinned by a contract test; rename retry contamination stays unremediated and is deferred to a separately scoped engine/database change; Fjall worker-start failure no longer panics.
 - Documentation and test-organization cards are closed without behavior change.
 
 **Coordination.**
