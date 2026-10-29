@@ -8,6 +8,7 @@ use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::batch::batch_op::BatchOp;
+use crate::subscribe::DeliverMode;
 
 // Wire-format regression tests use raw input because a builder would bypass the decoding boundary.
 #[test]
@@ -221,4 +222,51 @@ fn trailing_sequence_elements_are_rejected_like_the_wire_decoder() {
         "from": ["main", "users", "unexpected"]
     });
     assert!(decode(&trailing).is_err());
+}
+
+// Raw MessagePack: these forms are only reachable below the QueryValue builders.
+#[test]
+fn enum_identifier_forms_accepted_by_the_wire_decoder_stay_accepted() {
+    let forms: [(&str, &[u8]); 3] = [
+        (
+            "variant index",
+            &[
+                0x82, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0x90, 0xa7, b'd',
+                b'e', b'l', b'i', b'v', b'e', b'r', 0x00,
+            ],
+        ),
+        (
+            "string name",
+            &[
+                0x82, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0x90, 0xa7, b'd',
+                b'e', b'l', b'i', b'v', b'e', b'r', 0xa7, b'r', b'e', b'c', b'o', b'r', b'd', b's',
+            ],
+        ),
+        (
+            "binary name",
+            &[
+                0x82, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0x90, 0xa7, b'd',
+                b'e', b'l', b'i', b'v', b'e', b'r', 0xc4, 0x07, b'r', b'e', b'c', b'o', b'r', b'd',
+                b's',
+            ],
+        ),
+    ];
+    for (label, bytes) in forms {
+        match rmp_serde::from_slice::<BatchOp>(bytes) {
+            Ok(BatchOp::Subscribe(op)) => assert_eq!(op.deliver, DeliverMode::Records, "{label}"),
+            other => panic!("{label}: unexpected result {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn binary_where_a_sequence_is_expected_decodes_as_bytes() {
+    // {"subscribe": bin8(empty)} decoded as an empty Vec before the direct path.
+    let bytes = [
+        0x81, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0xc4, 0x00,
+    ];
+    match rmp_serde::from_slice::<BatchOp>(&bytes) {
+        Ok(BatchOp::Subscribe(op)) => assert!(op.subscribe.is_empty()),
+        other => panic!("unexpected result {other:?}"),
+    }
 }
