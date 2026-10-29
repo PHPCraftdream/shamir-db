@@ -69,6 +69,129 @@ async fn assert_corrupt_record_reported(table: &TableManager, table_name: &str) 
 }
 
 #[tokio::test]
+async fn corrupt_group_catalogue_denies_access_and_invocation() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let gid = shamir.create_group("readers").await.unwrap();
+    shamir.add_group_member(gid, 99).await.unwrap();
+    shamir
+        .register_fn("grouped", false, |_, _, _| async { Ok(QueryValue::Null) })
+        .unwrap();
+    let path = ResourcePath::function("grouped");
+    let meta = |mode| ResourceMeta {
+        owner: Actor::User(41),
+        group: Some(gid),
+        mode,
+    };
+    let mut fields = new_map();
+    fields.insert("name".to_string(), QueryValue::Str("grouped".to_string()));
+    let record = QueryValue::Map(fields);
+    shamir
+        .system_store()
+        .save_function("grouped", &record, &meta(0o740))
+        .await
+        .unwrap();
+    let persisted = shamir
+        .system_store()
+        .load_function("grouped")
+        .await
+        .unwrap()
+        .unwrap();
+    let persisted_meta = ResourceMeta::from_record(&persisted);
+    assert_eq!(persisted_meta.group, Some(gid));
+    assert_eq!(persisted_meta.mode, 0o740);
+    assert!(shamir
+        .authorize_access(&Actor::User(99), &path, Action::Read)
+        .await
+        .is_ok());
+    shamir
+        .system_store()
+        .save_function("grouped", &record, &meta(0o704))
+        .await
+        .unwrap();
+    let persisted = shamir
+        .system_store()
+        .load_function("grouped")
+        .await
+        .unwrap()
+        .unwrap();
+    let persisted_meta = ResourceMeta::from_record(&persisted);
+    assert_eq!(persisted_meta.group, Some(gid));
+    assert_eq!(persisted_meta.mode, 0o704);
+    assert!(shamir
+        .authorize_access(&Actor::User(99), &path, Action::Read)
+        .await
+        .is_err());
+    assert!(shamir
+        .authorize_access(&Actor::User(100), &path, Action::Read)
+        .await
+        .is_ok());
+    shamir
+        .system_store()
+        .save_function("grouped", &record, &meta(0o705))
+        .await
+        .unwrap();
+    let persisted = shamir
+        .system_store()
+        .load_function("grouped")
+        .await
+        .unwrap()
+        .unwrap();
+    let persisted_meta = ResourceMeta::from_record(&persisted);
+    assert_eq!(persisted_meta.group, Some(gid));
+    assert_eq!(persisted_meta.mode, 0o705);
+    assert!(shamir
+        .invoke_function_as(
+            "grouped",
+            crate::engine::function::Params::new(),
+            Actor::User(99),
+        )
+        .await
+        .is_err());
+    assert!(shamir
+        .invoke_function_as(
+            "grouped",
+            crate::engine::function::Params::new(),
+            Actor::User(100)
+        )
+        .await
+        .is_ok());
+    let table = stage_corrupt_row(&shamir, "groups").await;
+    assert_corrupt_record_reported(&table, "groups").await;
+    let error = shamir.system_store().load_group(gid).await.unwrap_err();
+    assert!(error.to_string().contains(&format!("group {gid}")));
+    assert!(shamir.system_store().load_groups().await.is_err());
+    assert!(shamir
+        .authorize_access(&Actor::User(100), &path, Action::Read)
+        .await
+        .is_err());
+    assert!(shamir
+        .invoke_function_as(
+            "grouped",
+            crate::engine::function::Params::new(),
+            Actor::User(100)
+        )
+        .await
+        .is_err());
+    shamir
+        .system_store()
+        .save_function("grouped", &record, &meta(0o704))
+        .await
+        .unwrap();
+    assert!(shamir
+        .authorize_access(&Actor::User(100), &path, Action::Read)
+        .await
+        .is_err());
+    assert!(shamir
+        .invoke_function_as(
+            "grouped",
+            crate::engine::function::Params::new(),
+            Actor::User(100)
+        )
+        .await
+        .is_err());
+}
+
+#[tokio::test]
 async fn invocation_denies_settings_storage_read_failure() {
     let shamir = ShamirDb::init_memory().await.unwrap();
     shamir
