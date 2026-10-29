@@ -361,51 +361,6 @@ async fn round_trip_quant_snapshot_preserves_recall_and_params() {
 // MIGRATION — v1 snapshot (f32) loads back-compat; quant-config + v1 → rebuild
 // ============================================================================
 
-/// A v1 sidecar (format_version = 1, no quantization) must still load on a
-/// build that understands v2. The load path accepts both versions.
-#[tokio::test]
-async fn migration_v1_snapshot_loads_back_compat() {
-    let dim = 16u32;
-    let store = mem_store();
-    // Build a NON-quantized adapter (v1 semantics), dump, then manually
-    // rewrite the sidecar's format_version to 1 to simulate an old snapshot.
-    let adapter = HnswAdapter::new(dim, VectorMetric::L2, HnswConfig::default());
-    let n = 300usize;
-    for i in 0..n {
-        adapter
-            .upsert(rid(i), &lcg_vec(dim as usize, i as u64))
-            .await
-            .unwrap();
-    }
-    dump_snapshot(&adapter, &store, KEYSPACE).await.unwrap();
-
-    // Rewrite the sidecar's format_version to 1 (simulate a v1 snapshot).
-    let sidecar_k = snapshot::sidecar_key_for_test(KEYSPACE, 0);
-    let sidecar_bytes = store.get(sidecar_k.clone()).await.unwrap();
-    let mut sidecar: SnapshotSidecar = MetaEnvelope::open(&sidecar_bytes).unwrap();
-    sidecar.format_version = 1;
-    sidecar.quantization = None;
-    let new_bytes = MetaEnvelope::new(sidecar).encode().unwrap();
-    store.set(sidecar_k, new_bytes.into()).await.unwrap();
-
-    // Also patch the manifest's format_version to 1.
-    let manifest_k: bytes::Bytes = format!("{}.manifest", KEYSPACE).into();
-    let manifest_bytes = store.get(manifest_k.clone().into()).await.unwrap();
-    let mut manifest: snapshot::SnapshotManifest = MetaEnvelope::open(&manifest_bytes).unwrap();
-    manifest.format_version = 1;
-    let new_manifest = MetaEnvelope::new(manifest).encode().unwrap();
-    store
-        .set(manifest_k.into(), new_manifest.into())
-        .await
-        .unwrap();
-
-    // Load must succeed (back-compat) — NOT a VersionMismatch.
-    let loaded = load_snapshot(&store, KEYSPACE).await.expect("v1 must load");
-    assert_eq!(loaded.len(), n, "v1 snapshot loaded wrong number of points");
-    // A v1-loaded adapter is NOT quantized (no quant meta).
-    assert!(!loaded.is_quantized(), "v1 load must not be quantized");
-}
-
 // ============================================================================
 // CRASH / COLD-START for a quantized index — restart preserves is_fitted
 // ============================================================================

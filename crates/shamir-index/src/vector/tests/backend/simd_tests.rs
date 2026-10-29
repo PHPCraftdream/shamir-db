@@ -185,6 +185,54 @@ const WEIGHTED_DIMS: &[usize] = &[
 ];
 
 #[test]
+fn weighted_offset_slices_match_scalar_at_chunk_boundaries() {
+    // On AArch64 these dispatchers select the NEON kernels when NEON exists.
+    #[cfg(target_arch = "aarch64")]
+    assert!(std::arch::is_aarch64_feature_detected!("neon"));
+
+    for dim in [0usize, 1, 3, 4, 5, 7, 8, 9, 11, 12, 13] {
+        let x_storage = rand_vec(dim + 7, 123);
+        let y_storage = rand_vec(dim + 7, 456);
+        let x_base = (4 - x_storage.as_ptr().addr() % 4) % 4;
+        let y_base = (4 - y_storage.as_ptr().addr() % 4) % 4;
+        let weights = rand_f32_vec(dim, 789, 0.25, 2.0);
+        let scales = rand_f32_vec(dim, 987, 0.125, 1.0);
+        for x_offset in 0..4 {
+            for y_offset in 0..4 {
+                let x = &x_storage[x_base + x_offset..x_base + x_offset + dim];
+                let y = &y_storage[y_base + y_offset..y_base + y_offset + dim];
+                assert_eq!(x.as_ptr().addr() % 4, x_offset);
+                assert_eq!(y.as_ptr().addr() % 4, y_offset);
+                let context = format!("dim={dim} x={x_offset} y={y_offset}");
+                assert_close(
+                    weighted_bilinear_f32(&weights, &scales, x, y),
+                    weighted_bilinear_scalar(&weights, &scales, x, y),
+                    &context,
+                );
+                assert_close(
+                    weighted_sq_diff_u8(&scales, x, y),
+                    weighted_sq_diff_scalar(&scales, x, y),
+                    &context,
+                );
+                assert_close(
+                    weighted_linear_u8(&weights, x),
+                    weighted_linear_scalar(&weights, x),
+                    &context,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn weighted_neon_does_not_use_aligned_u32_lane_loads() {
+    // Numerical parity alone cannot detect undefined unaligned loads on CPUs
+    // that tolerate them. This guard fails on the previous implementation.
+    let source = include_str!("../../simd/quantized.rs");
+    assert!(!source.contains("vld1_lane_u32"));
+}
+
+#[test]
 fn weighted_bilinear_dispatcher_equals_scalar_random() {
     for &dim in WEIGHTED_DIMS {
         let min_scale = rand_f32_vec(dim, dim as u64 * 3 + 1, -5.0, 5.0);

@@ -2,6 +2,7 @@
 //! (write) path of the snapshot codec. The load path + delta-log live in
 //! [`super::load`].
 
+use super::manifest::{integrity_bytes, integrity_key};
 use crate::kind::VectorMetric;
 use crate::meta_envelope::MetaEnvelope;
 use crate::vector::hnsw_adapter::HnswAdapter;
@@ -537,7 +538,7 @@ pub async fn dump_snapshot_with_gen(
         .map_err(|e| SnapshotError::Serde(e.to_string()))?;
     ops.push(KvOp::Set(
         sidecar_key(keyspace, gen),
-        Bytes::from(sidecar_bytes),
+        Bytes::from(sidecar_bytes.clone()),
     ));
 
     // ---- 4. build the manifest -------------------------------------------
@@ -579,6 +580,10 @@ pub async fn dump_snapshot_with_gen(
     // because we don't know the prior gen's chunk counts here without
     // reading its manifest; leaving stale chunks is harmless for V2.1
     // since the manifest points unambiguously at the new gen.
+    ops.push(KvOp::Set(
+        integrity_key(keyspace),
+        integrity_bytes(&manifest_bytes, &sidecar_bytes),
+    ));
     ops.push(KvOp::Set(
         manifest_key(keyspace),
         Bytes::from(manifest_bytes),

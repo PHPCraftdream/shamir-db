@@ -53,6 +53,7 @@
 //!   (checksums-everywhere).
 
 mod codec;
+mod legacy;
 mod load;
 mod manifest;
 mod quantized_load;

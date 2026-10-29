@@ -362,6 +362,11 @@ async fn hnsw_rs_version_mismatch_on_open_falls_back_to_rebuild() {
         .set(sidecar_k, bytes::Bytes::from(tampered))
         .await
         .unwrap();
+    // Reach the version validation rather than a stale metadata checksum.
+    info_store
+        .remove(bytes::Bytes::from(format!("{}.integrity", keyspace)).into())
+        .await
+        .unwrap();
 
     let backend = make_backend(&i, id, DIM, VectorMetric::L2);
     backend

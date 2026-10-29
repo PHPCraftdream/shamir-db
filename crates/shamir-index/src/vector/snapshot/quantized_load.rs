@@ -1,5 +1,6 @@
 //! Quantized graph loading with independent file and loader ownership.
 
+use super::manifest::validate_basename;
 use super::SnapshotError;
 use crate::kind::VectorMetric;
 use crate::vector::quantized_dist::ShamirDistU8;
@@ -18,6 +19,7 @@ pub(super) fn load_quantized_graph(
     quantizer: Arc<Sq8Quantizer>,
     metric: VectorMetric,
 ) -> Result<Arc<Hnsw<'static, u8, ShamirDistU8>>, SnapshotError> {
+    validate_basename(basename)?;
     let graph_path = temp_dir.path().join(format!("{basename}.hnsw.graph"));
     let data_path = temp_dir.path().join(format!("{basename}.hnsw.data"));
     let mut graph_file = std::fs::File::create(graph_path)?;
@@ -34,9 +36,9 @@ pub(super) fn load_quantized_graph(
     // hnsw_rs unwraps while parsing the description, so a corrupt/truncated
     // dump panics instead of returning Err; contain it as a load error.
     let loaded = catch_unwind(AssertUnwindSafe(|| loader.load_hnsw_with_dist(distance)))
-        .map_err(|_| SnapshotError::Io("hnsw_rs load_hnsw_with_dist (u8) panicked".into()))?;
+        .map_err(|_| SnapshotError::Corrupt("hnsw_rs load_hnsw_with_dist (u8) panicked".into()))?;
     let graph = loaded.map_err(|error| {
-        SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist (u8) failed: {error}"))
+        SnapshotError::Corrupt(format!("hnsw_rs load_hnsw_with_dist (u8) failed: {error}"))
     })?;
     Ok(Arc::new(graph))
 }

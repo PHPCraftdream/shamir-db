@@ -237,6 +237,11 @@ async fn foreign_format_version_yields_version_mismatch() {
         .map_err(|e| e.to_string())
         .unwrap();
     store.set(sidecar_k, Bytes::from(new_bytes)).await.unwrap();
+    // Exercise the semantic version check as legacy metadata, without a companion.
+    store
+        .remove(Bytes::from(format!("{KEYSPACE}.integrity")).into())
+        .await
+        .unwrap();
 
     let err = match load_snapshot(&store, KEYSPACE).await {
         Ok(_) => panic!("expected VersionMismatch error, load succeeded"),
@@ -276,6 +281,11 @@ async fn foreign_hnsw_rs_version_yields_version_mismatch() {
         .map_err(|e| e.to_string())
         .unwrap();
     store.set(sidecar_k, Bytes::from(new_bytes)).await.unwrap();
+    // Exercise the semantic version check as legacy metadata, without a companion.
+    store
+        .remove(Bytes::from(format!("{KEYSPACE}.integrity")).into())
+        .await
+        .unwrap();
 
     let err = match load_snapshot(&store, KEYSPACE).await {
         Ok(_) => panic!("expected VersionMismatch error, load succeeded"),
@@ -475,6 +485,9 @@ async fn rv_index_07424ef0_flip_prunes_old_quantized_generation_chunks() {
         .unwrap();
     store
         .set(qd.clone(), Bytes::from_static(b"old-qdata"))
+        .await
+        .unwrap();
+    snapshot::dump_snapshot_with_gen(&adapter, &store, keyspace, old.gen + 1)
         .await
         .unwrap();
     let written = SnapshotManifest {
