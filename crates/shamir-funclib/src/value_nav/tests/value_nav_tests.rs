@@ -189,3 +189,41 @@ fn exists_true_false_and_err() {
         "type_mismatch"
     );
 }
+
+#[test]
+fn type_of_remaining_variants() {
+    let r = reg();
+    for (value, name) in [
+        (QueryValue::F64(1.5), "f64"),
+        (QueryValue::Dec(rust_decimal::Decimal::from(1)), "dec"),
+        (QueryValue::Big(num_bigint::BigInt::from(1)), "big"),
+        (QueryValue::Bin(vec![]), "bytes"),
+        (
+            QueryValue::Set(shamir_types::types::common::new_set()),
+            "set",
+        ),
+    ] {
+        assert_eq!(
+            r.call("type_of", &[value]).unwrap(),
+            QueryValue::Str(name.into())
+        );
+    }
+}
+
+#[test]
+fn numeric_map_keys_cover_signed_boundaries() {
+    let r = reg();
+    let root = map(vec![
+        ("-9223372036854775808", QueryValue::Int(1)),
+        ("9223372036854775807", QueryValue::Int(2)),
+        ("0", QueryValue::Int(3)),
+        ("-1", QueryValue::Int(4)),
+    ]);
+    for (key, expected) in [(i64::MIN, 1), (i64::MAX, 2), (0, 3), (-1, 4)] {
+        let path = QueryValue::List(vec![QueryValue::Int(key)]);
+        assert_eq!(
+            r.call("get_path", &[root.clone(), path]).unwrap(),
+            QueryValue::Int(expected)
+        );
+    }
+}

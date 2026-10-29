@@ -26,7 +26,7 @@
 //! - Accessors over an empty array (`first`, `last`) yield
 //!   `ScalarError("empty")`; out-of-bounds `get` yields `out_of_range`.
 //!
-//! Every function here is pure + deterministic (indexable).
+//! Every function here is pure + deterministic but remains unvouched for indexing.
 
 use crate::compare::compare;
 use crate::registry::{

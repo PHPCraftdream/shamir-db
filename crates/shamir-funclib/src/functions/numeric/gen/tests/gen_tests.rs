@@ -73,21 +73,13 @@ fn random_in_unit_range() {
     let r = reg();
     for _ in 0..100 {
         match r.call("random", &[]).unwrap() {
-            QueryValue::F64(f) => {
-                assert!(
-                    (0.0..1.0).contains(&f),
-                    "random() returned {f}, outside [0.0, 1.0)"
-                );
-            }
             QueryValue::Dec(d) => {
-                // v_f64 stores as Dec; check range via f64 conversion.
-                let f = d.to_string().parse::<f64>().unwrap();
                 assert!(
-                    (0.0..1.0).contains(&f),
+                    d >= rust_decimal::Decimal::ZERO && d < rust_decimal::Decimal::ONE,
                     "random() returned {d}, outside [0.0, 1.0)"
                 );
             }
-            other => panic!("expected numeric, got {other:?}"),
+            other => panic!("expected Dec, got {other:?}"),
         }
     }
 }

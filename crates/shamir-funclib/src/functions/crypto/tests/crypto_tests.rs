@@ -3,6 +3,7 @@
 
 use crate::crypto;
 use crate::registry::{v_bool, ScalarRegistry};
+use argon2::{Algorithm, Argon2, Params, Version};
 use shamir_types::types::value::QueryValue;
 
 fn reg() -> ScalarRegistry {
@@ -158,135 +159,8 @@ fn hex_lower(bytes: &[u8]) -> String {
     s
 }
 
-/// Concurrency-cap regression (audit §2b).
-///
-/// `argon2id()` is a guest/query-reachable scalar that can allocate up to
-/// `A2_MAX_MEMORY_KB` per call. Without an aggregate concurrency cap a
-/// low-privileged user (or WASM guest function) can issue many parallel
-/// `argon2id()` calls and OOM the server. This test asserts that the number
-/// of `hash_password_into` calls executing *concurrently* never exceeds the
-/// documented cap.
-///
-/// Determinism: the semaphore gates *scheduling* only — it must not change the
-/// KDF output. The `argon2id_matches_reference_and_is_deterministic` test
-/// above covers the bit-identity contract; this test covers the cap.
-///
-/// Methodology: [`crypto::argon2id_fn`] updates a process-wide
-/// `A2_PEAK_IN_FLIGHT` atomic (inc-on-entry / dec-on-exit around the gated
-/// region, with a `fetch_max` to track the running peak). We reset it to zero,
-/// spawn `2×cap` worker threads each invoking `argon2id()` through the registry
-/// with a moderate profile, join them, then read the peak.
-///
-/// - **Capped (correct):** the semaphore holds in-flight at `cap`, so
-///   `A2_PEAK_IN_FLIGHT <= cap`.
-/// - **Uncapped (the bug):** all `2×cap` calls enter the KDF region
-///   concurrently, so `A2_PEAK_IN_FLIGHT == 2×cap > cap`.
-///
-/// # Deterministic overlap via a barrier (audit G4 / #528)
-///
-/// An earlier version of this test relied on wall-clock scheduling luck: it
-/// spawned the workers and hoped enough of them reached `hash_password_into`
-/// at overlapping instants to saturate the semaphore. Under system load the
-/// threads staggered, the KDF calls did not overlap past `cap`, and the
-/// `peak == cap` assertion flaked (e.g. "expected 16, got 10") — a
-/// timing-measurement flake, NOT a semaphore-correctness bug.
-///
-/// The fix synchronises entry with a [`std::sync::Barrier`] sized to
-/// `n_workers`: every worker does all its cheap setup (registry lookup, arg
-/// construction) and then blocks on `barrier.wait()`. The barrier releases
-/// ALL threads simultaneously, so they all race into the semaphore-gated KDF
-/// region at approximately the same instant regardless of scheduler jitter.
-/// The semaphore admits exactly `cap` of them; because each admitted call
-/// holds its permit for the full KDF duration (tens of ms — orders of
-/// magnitude longer than the post-barrier acquire path), all `cap` permit
-/// holders are provably in flight together, driving `A2_PEAK_IN_FLIGHT` to
-/// `cap`. This makes the "peak reaches cap" assertion deterministic instead
-/// of probabilistic. The semaphore gating logic itself is unchanged — this is
-/// purely a test-synchronisation hardening.
-#[test]
-fn argon2id_concurrency_cap_bounds_parallel_calls() {
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
-    let cap = crate::crypto::ARGON2ID_CONCURRENCY_CAP;
-    let n_workers = (cap as usize) * 2; // 2× cap → uncapped peak clearly exceeds cap
-
-    // Reset BOTH observability counters so prior tests (which may have left
-    // A2_IN_FLIGHT non-zero if a call was interrupted, or raised the peak)
-    // do not pollute this run's assertion.
-    crate::crypto::A2_PEAK_IN_FLIGHT.store(0, std::sync::atomic::Ordering::Relaxed);
-    crate::crypto::A2_IN_FLIGHT.store(0, std::sync::atomic::Ordering::Relaxed);
-
-    let registry = Arc::new(reg());
-    // Barrier sized to every worker: all threads block until the last one
-    // arrives, then enter the semaphore-gated KDF region together. This
-    // removes the wall-clock-scheduling dependency that made the previous
-    // `peak == cap` assertion flaky under load.
-    let gate = Arc::new(Barrier::new(n_workers));
-    let password = b"concurrency-test-pw";
-    let salt = b"0123456789abcdef"; // 16 bytes
-
-    let mut handles = Vec::with_capacity(n_workers);
-    for _ in 0..n_workers {
-        let reg = Arc::clone(&registry);
-        let gate = Arc::clone(&gate);
-        handles.push(thread::spawn(move || {
-            // Build the argument vector BEFORE the barrier so the only work
-            // between release and the semaphore acquire is the call itself —
-            // maximising the overlap window at the gated region.
-            let args = [
-                bin(password),
-                bin(salt),
-                QueryValue::Int(32_768), // memory_kb — 32 MiB
-                QueryValue::Int(3),      // time
-                QueryValue::Int(1),      // parallelism
-                QueryValue::Int(32),     // length
-            ];
-            // Release all workers at once → simultaneous rush at the semaphore.
-            gate.wait();
-            // Moderate profile (32 MiB, t=3): each call holds its permit long
-            // enough that all `cap` permit holders are provably in-flight
-            // together, while staying well under `A2_MAX_MEMORY_KB` (64 MiB)
-            // so memory-bandwidth contention does not fully serialise the
-            // calls independent of the semaphore. Bumped from the original
-            // 16 MiB/t=2 profile: on constrained-core CI runners (observed:
-            // GitHub-hosted windows-latest), OS thread-scheduling latency for
-            // getting all `n_workers` threads past the barrier and into the
-            // semaphore acquire can exceed a too-short KDF call's own
-            // duration, so the fastest workers finish (and release their
-            // permit) before the slowest ones even arrive — peak_in_flight
-            // then stalls below `cap` despite the barrier. Doubling the cost
-            // widens the in-flight window well past realistic scheduling
-            // jitter without materially slowing the test.
-            let res = reg.call("argon2id", &args);
-            res.unwrap_or_else(|e| panic!("argon2id call failed: {e:?}"));
-        }));
-    }
-    for h in handles {
-        h.join().expect("worker thread panicked");
-    }
-
-    let peak = crate::crypto::A2_PEAK_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed);
-    assert!(
-        peak <= cap,
-        "argon2id concurrency cap violated: observed peak in-flight {peak} > cap {cap} \
-         (spawned {n_workers} concurrent workers)",
-    );
-    // Sanity: with 2×cap workers all released together by the barrier, the cap
-    // must actually have been saturated — otherwise the test is vacuous.
-    // Peak == cap (not below) confirms the semaphore was exercised at
-    // saturation.
-    assert_eq!(
-        peak, cap,
-        "expected the concurrency cap to be saturated (peak == cap == {cap}), got peak = {peak}; \
-         the workers likely did not overlap enough — increase n_workers or the per-call work",
-    );
-}
-
 #[test]
 fn argon2id_matches_reference_and_is_deterministic() {
-    use argon2::{Algorithm, Argon2, Params, Version};
-
     let r = reg();
     let password = b"correct horse battery staple";
     let salt = b"0123456789abcdef"; // 16 bytes

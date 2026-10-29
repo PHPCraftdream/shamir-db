@@ -19,7 +19,7 @@
 //! - Regexes are compiled once and cached by pattern (Rust `regex` is
 //!   ReDoS-safe, so no input-size guard is needed).
 
-use super::regex_cache;
+use crate::functions::text::regex_cache;
 use crate::registry::{
     arg_i64, arg_str, v_bool, v_int, v_list, v_str, FnEntry, ScalarError, ScalarRegistry,
     ScalarResult,
@@ -130,7 +130,7 @@ pub fn register(reg: &mut ScalarRegistry) {
         FnEntry::pure(
             |a| {
                 // substring(s, start, len) — start is a 0-based char offset, len
-                // a char count. Out-of-range start/negative args -> out_of_range.
+                // a char count. Past-end starts return empty; negative args -> out_of_range.
                 let s = arg_str(a, 0)?;
                 let start = arg_i64(a, 1)?;
                 let len = arg_i64(a, 2)?;

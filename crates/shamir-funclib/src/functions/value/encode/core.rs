@@ -4,7 +4,7 @@
 //! registration stores these names verbatim; `register_builtins` dispatches them
 //! under the production `encode/` folder prefix.
 //! `base64_enc base64_dec base64url_enc base64url_dec hex_enc hex_dec
-//!  base32_enc base32_dec url_encode url_decode html_escape str_escape_chars
+//!  base32_enc base32_dec url_encode url_decode html_escape json_escape
 //!  to_json parse_json`.
 //!
 //! Conventions (mirroring `math.rs`):

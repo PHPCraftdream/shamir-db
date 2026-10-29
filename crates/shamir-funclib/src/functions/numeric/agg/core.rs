@@ -268,7 +268,7 @@ impl Aggregator for CountDistinctAgg {
 }
 
 /// Wraps any [`Aggregator`], using hash buckets and explicit `compare` checks
-/// (never an `Eq` implementation over the possibly non-transitive relation).
+/// (without changing `QueryValue`'s own equality).
 /// The first occurrence is forwarded in arrival order. Nulls pass through.
 pub struct DistinctWrapper {
     inner: Box<dyn Aggregator>,
@@ -798,15 +798,11 @@ impl Aggregator for ArrayAggAgg {
 
 struct BoolAndAgg {
     result: bool,
-    any: bool,
 }
 
 impl BoolAndAgg {
     fn new() -> Self {
-        Self {
-            result: true,
-            any: false,
-        }
+        Self { result: true }
     }
 }
 
@@ -818,7 +814,6 @@ impl Aggregator for BoolAndAgg {
         match v {
             QueryValue::Bool(b) => {
                 self.result = self.result && *b;
-                self.any = true;
                 Ok(())
             }
             _ => Err(ScalarError::builtin("type_mismatch")),
@@ -827,22 +822,17 @@ impl Aggregator for BoolAndAgg {
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         // Identity for AND is true; return true even on empty input.
-        let _ = self.any;
         Ok(QueryValue::Bool(self.result))
     }
 }
 
 struct BoolOrAgg {
     result: bool,
-    any: bool,
 }
 
 impl BoolOrAgg {
     fn new() -> Self {
-        Self {
-            result: false,
-            any: false,
-        }
+        Self { result: false }
     }
 }
 
@@ -854,7 +844,6 @@ impl Aggregator for BoolOrAgg {
         match v {
             QueryValue::Bool(b) => {
                 self.result = self.result || *b;
-                self.any = true;
                 Ok(())
             }
             _ => Err(ScalarError::builtin("type_mismatch")),
@@ -863,7 +852,6 @@ impl Aggregator for BoolOrAgg {
 
     fn finalize(self: Box<Self>) -> Result<QueryValue, ScalarError> {
         // Identity for OR is false; return false even on empty input.
-        let _ = self.any;
         Ok(QueryValue::Bool(self.result))
     }
 }
