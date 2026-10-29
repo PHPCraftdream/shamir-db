@@ -80,52 +80,9 @@ harness = false
 [lints]
 workspace = true
 
-# Integration tests live in topical subfolders, so autodiscovery (which only
-# scans tests/*.rs at the top level) is replaced by explicit targets.
+# Topical folders are modules of one binary to save link time. Autodiscovery
+# would infer tests/<dir>/main.rs targets; this path suppresses the auth target.
 [[test]]
-name = "integration_admin"
-path = "tests/admin/integration_admin.rs"
-
-[[test]]
-name = "integration_bootstrap"
-path = "tests/lifecycle/integration_bootstrap.rs"
-
-[[test]]
-name = "integration_changepw"
-path = "tests/lifecycle/integration_changepw.rs"
-
-[[test]]
-name = "integration_full_auth"
-path = "tests/auth/integration_full_auth.rs"
-
-[[test]]
-name = "rv_client_f20c09bf_rotation_recovery"
-path = "tests/auth/rv_client_f20c09bf_rotation_recovery.rs"
-
-[[test]]
-name = "rv_handshake_0fc58d93_tofu_pin"
-path = "tests/auth/rv_handshake_0fc58d93_tofu_pin_after_identity_verify.rs"
-
-[[test]]
-name = "integration_log_redaction"
-path = "tests/audit/integration_log_redaction.rs"
-
-[[test]]
-name = "integration_resume"
-path = "tests/resume/main.rs"
-
-[[test]]
-name = "integration_rotation"
-path = "tests/lifecycle/integration_rotation.rs"
-
-[[test]]
-name = "integration_session"
-path = "tests/session/integration_session.rs"
-
-[[test]]
-name = "integration_username_precis"
-path = "tests/identity/integration_username_precis.rs"
-[[test]]
-name = "rv_feature_fed6910e_client_only"
-path = "tests/lifecycle/rv_feature_fed6910e_client_only_surface.rs"
+name = "integration"
+path = "tests/auth/main.rs"
 
