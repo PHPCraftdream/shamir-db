@@ -107,7 +107,7 @@ impl FieldRule {
     }
 
     /// Public test-only entry point for a downstream crate's test harness
-    /// that needs to run [`check`](Self::check) directly, bypassing the
+    /// that needs to run `check` directly, bypassing the
     /// async `SchemaValidator::validate`/`RecordValidator` boundary (e.g. a
     /// sync `NativeRecordValidator` closure). Always runs the original
     /// per-call linear `one_of` scan (`one_of_set: None`) — such callers
