@@ -24,9 +24,18 @@ Suggested wave 2; starts after P2-09 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: E8E1D11B, A65118CC, FA481516, F0A54173, 97C240D7, 4D95A5F8, 9C706A16, 460A02D6, 5D3BB859, B1243564.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: E8E1D11B, A65118CC, FA481516, F0A54173, 97C240D7, 4D95A5F8, 9C706A16, 460A02D6, 5D3BB859, B1243564.
 
-- (none yet)
+- RV-SERVER-E8E1D11B: (no answer yet - skip)
+- RV-SERVER-A65118CC: (no answer yet - skip)
+- RV-TRANSPORT-IPC-FA481516: (no answer yet - skip)
+- RV-TRANSPORT-WS-F0A54173: (no answer yet - skip)
+- RV-SERVER-97C240D7: (no answer yet - skip)
+- RV-TRANSPORT-TCP-4D95A5F8: (no answer yet - skip)
+- RV-TRANSPORT-TCP-9C706A16: (no answer yet - skip)
+- RV-TRANSPORT-WS-460A02D6: (no answer yet - skip)
+- RV-TRANSPORT-WS-5D3BB859: (no answer yet - skip)
+- RV-TRANSPORT-WS-B1243564: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

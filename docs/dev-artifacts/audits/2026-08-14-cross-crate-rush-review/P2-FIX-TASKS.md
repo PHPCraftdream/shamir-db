@@ -1151,99 +1151,127 @@ Tracking: status `[ ]`; evidence runs and decisions are recorded in the decision
 
 One line per card; the first clause of the recipe states what has to be decided. Ask by wave, record the answer in the decision log and in the brief.
 
-| Task | Card | Risk | Decide |
-|---|---|---|---|
-| P2-01 | RV-DB-C2DCAC96 | low | Promote the builder to a production dependency and migrate facade construction with genuine exceptions documented. |
-| P2-01 | RV-DB-0541AF4D | low | Define a response-byte budget and enforce it during transfer and bounded file reading. |
-| P2-01 | RV-DB-140F9E99 | low | Remove unused direct argon2/TLS dependencies and stale legacy-network rationale. |
-| P2-01 | RV-DB-0065D2A2 | nit | Define informational versus integrity/version semantics before adding consumers or changing persisted metadata. |
-| P2-01 | RV-DB-7C59E01B | nit | Choose bounded striped locking or an explicit retained-key budget without unsafe live-entry eviction. |
-| P2-02 | RV-TX-4A1FDAAE | low | Choose shared in-memory table-name storage while preserving serialized string values. |
-| P2-02 | RV-TX-56651C4A | low | Add ordered journal batch persistence without crossing gap or barrier boundaries. |
-| P2-02 | RV-TX-782352E1 | low | Reject reserved empty payloads before version allocation while preserving an explicit deletion path. |
-| P2-02 | RV-TX-ED8562B0 | low | Reject or normalize zero seeds consistently in both allocators and pin external-zero semantics. |
-| P2-03 | RV-CLIENT-NODE-C42AA40A | high | Define a lossless integer policy shared with TS DTOs and test independent int64 fixtures, bigint inputs and integer markers. |
-| P2-03 | RV-CLIENT-NODE-144A5920 | medium | Integrate supported builder and batch DTO exports plus an execution adapter and replace handwritten wire examples. |
-| P2-03 | RV-CLIENT-NODE-31D3BBE5 | nit | Document the owner-approved Rust and npm version relationship rather than silently changing release versions. |
-| P2-04 | RV-ENGINE-3425FDE6 | low | Ratify and document trusted embedding APIs versus authorization-enforced batch execution. |
-| P2-05 | RV-INDEX-4DC29EFB | medium | Stream bounded snapshot chunks and move sidecar ownership while preserving generation coherence. |
-| P2-05 | RV-INDEX-9E0EC9A5 | medium | Validate persisted parameters fallibly and add versioned sidecar integrity coverage with corruption fixtures. |
-| P2-05 | RV-INDEX-8533E947 | low | Validate single-component basenames and introduce versioned metadata integrity with a legacy-read policy. |
-| P2-06 | RV-INDEX-2BA3B945 | medium | Preserve typed storage errors and sources through index and engine boundaries. |
-| P2-06 | RV-INDEX-53CEF405 | medium | Choose collision-resolving token identity with an explicit persisted FTS rebuild/version policy. |
-| P2-06 | RV-INDEX-9E472725 | medium | Choose collision-resolving canonical-value identity and an index migration/rebuild policy. |
-| P2-06 | RV-INDEX-0695AADA | low | Define explicit token/work budgets and propagate typed over-budget errors without silent truncation. |
-| P2-06 | RV-INDEX-605EEC5D | low | Define portable persisted-hash identity, golden keys and explicit upgrade or rebuild rules. |
-| P2-06 | RV-INDEX-FBB72544 | low | Canonicalize recursive Map hashing and provide persisted-index rebuild handling and order-parity tests. |
-| P2-07 | RV-INDEX-95108B6D | medium | Reserve retained bytes atomically and account for admission, replacement, removal and invalidation. |
-| P2-07 | RV-INDEX-3854F3CC | low | Choose multi-match selection semantics and maintain a lifecycle-synchronized reverse lookup. |
-| P2-08 | RV-STORAGE-38F208C4 | low | Approve the actual probabilistic uniqueness contract or implement cross-handle collision-safe insertion. |
-| P2-08 | RV-STORAGE-9478B37E | low | Choose explicit partial-copy semantics or a rename-owned staging and recovery protocol. |
-| P2-08 | RV-STORAGE-0A9E3A41 | low | Return worker-start failures through DbResult and approve source-preserving error representations. |
-| P2-08 | RV-STORAGE-CC5C79BA | low | Apply one approved backend-compatible name validator before ordinary and atomic keyspace operations. |
-| P2-08 | RV-STORAGE-1A5A9374 | low | Document per-worker ordering and explicitly decide whether cross-route submission ordering is required. |
-| P2-08 | RV-STORAGE-88C4F2CC | nit | Approve a cohesive API-polish scope before changing aliases, bounds, copy semantics or public errors. |
-| P2-08 | RV-STORAGE-FB7C0794 | nit | Approve a key-size limit and enforce it with a bounded deserialization visitor before growth. |
-| P2-09 | RV-CLIENT-8997B366 | low | Protect resume ticket ownership, serialized payloads and framing scratch on all exits while retaining wire bytes. |
-| P2-09 | RV-CLIENT-0157DABC | nit | Document RequestIdMismatch as reserved and not emitted, or remove it under an explicit API compatibility decision. |
-| P2-10 | RV-CONNECT-2B5AF3F2 | low | Bind immutable session identity before HMAC caching and use that identity for password-change proof binding. |
-| P2-10 | RV-CONNECT-387EAA05 | low | Introduce fallible entropy and clock APIs and propagate typed environmental errors through callers. |
-| P2-10 | RV-CONNECT-7D41FB60 | low | Resolve the four component cards and close this aggregate without duplicating implementation work. |
-| P2-10 | RV-CONNECT-3380EB1C | low | Use zeroizing ownership for server and resume secrets while preserving immutable key/cache consistency. |
-| P2-10 | RV-CONNECT-E0A24E86 | low | Centralize the supported ticket version and reject unsupported versions during encryption. |
-| P2-10 | RV-CONNECT-F34827AC | low | Make ticket serialization reject ciphertext lengths above u16::MAX and test boundary round trips. |
-| P2-10 | RV-CONNECT-3BAF631D | nit | Reject an all-zero client nonce before replacing pending challenge state and test preservation of the previous challenge. |
-| P2-10 | RV-CONNECT-E4631CD9 | nit | Return the common typed KDF error instead of allocated discarded String diagnostics. |
-| P2-10 | RV-CONNECT-C7F16BFB | nit | Remove the unused direct unicode-normalization dependency while retaining PRECIS normalization. |
-| P2-11 | RV-WAL-A25EDE9D | low | Introduce bounded incremental replay and migrate startup and live gap recovery consumers. |
-| P2-11 | RV-WAL-DD492F5C | low | Document trusted directory writers, required ACLs and the absence of WAL authenticity guarantees. |
-| P2-11 | RV-WAL-0843B96B | nit | Remove the empty public segment_meta namespace and align documentation visibility. |
-| P2-11 | RV-WAL-3F10E8A1 | nit | Define operator diagnostic versus public-error policy and redact externally surfaced paths. |
-| P2-11 | RV-WAL-5DFE355F | nit | Gate or restrict mark_poisoned after consumer review, or explicitly support it as an administrative API. |
-| P2-12 | RV-TYPES-5E4BFC76 | low | Define trusted-type/input constraints and require explicitly bounded decoding for recursive untrusted roots. |
-| P2-12 | RV-TYPES-A7B1FCEC | low | Introduce borrowed ancestor traversal and compatible metadata lookup while preserving nearest-first awaited authorization. |
-| P2-12 | RV-TYPES-EFA1B8F4 | low | Add negative-literal object arms and CI cases with and without trailing commas while retaining explicit expression escapes. |
-| P2-12 | RV-TYPES-FE40CB54 | low | Use safe String zeroization, settle public comparison semantics, and add lifecycle and feature CI coverage. |
-| P2-13 | RV-QUERY-TYPES-182C703E | low | Migrate formatting to thiserror and adopt typed validation errors under an explicit API compatibility plan. |
-| P2-13 | RV-QUERY-TYPES-4F767AA5 | low | Introduce fallible QueryValue conversion, migrate callers and reject unsupported maps without Null substitution. |
-| P2-13 | RV-QUERY-TYPES-5F9D5468 | low | Make opaque-versus-nonopaque comparisons false and add a three-value transitivity regression. |
-| P2-13 | RV-QUERY-TYPES-F05184D8 | low | Accept existing non-map wire values in the decoder and add scalar/list round-trip tests. |
-| P2-13 | RV-QUERY-TYPES-CC015A3C | nit | Decide whether measured cost justifies changing public String ownership or explicitly accept default-name allocations. |
-| P2-14 | RV-QUERY-BUILDER-FE2003D1 | low | Specify and test large-integer ordering, range and membership across Big and decimal-string storage while preserving RU7. |
-| P2-14 | RV-QUERY-BUILDER-9E172C69 | low | Add a consuming validated build path and use it where callers own the batch, retaining borrowed reuse. |
-| P2-14 | RV-QUERY-BUILDER-MACROS-02993B77 | low | Resolve the consumer dependency alias for all builder expansion paths and add an alias-only consumer fixture. |
-| P2-14 | RV-QUERY-BUILDER-DE20E96B | nit | Add thiserror and migrate the five error implementations while preserving messages and sources. |
-| P2-15 | RV-FUNCLIB-0FCB1771 | medium | Implement exact cross-numeric ordering, reconcile distinct hashing, and add boundary-triple and permutation oracles. |
-| P2-16 | RV-WASM-HOST-C17D12C8 | medium | Define a deployment-supported SDK source and configurable runtime resolution with actionable errors. |
-| P2-16 | RV-WASM-HOST-4669FDA6 | low | Introduce checked version-aware metadata decoding with explicit malformed-field errors and legacy defaults. |
-| P2-16 | RV-WASM-HOST-98551A44 | low | Define an engine memory ceiling and reconcile accepted function limits with pooling capacity. |
-| P2-16 | RV-WASM-HOST-EB1654FA | low | Drain both pipes continuously while retaining capped diagnostics with explicit truncation markers. |
-| P2-16 | RV-WASM-HOST-FE02BB1D | low | Distinguish blocking-task panic from cancellation and preserve a diagnostic panic cause. |
-| P2-16 | RV-WASM-HOST-FF7C2D6E | nit | Complete the remaining path and metadata components through cards 796ECAE4 and 4669FDA6. |
-| P2-16 | RV-WASM-HOST-EBD32CA5 | nit | Remove the unused direct serde dependency. |
-| P2-17 | RV-SDK-77261152 | low | Choose signature-only purity documentation or host-enforced scalar capability isolation. |
-| P2-17 | RV-SDK-MACROS-44A9CC7A | low | Define host-enforced scalar capability policy and replace the lexical purity guarantee with accurate documentation and tests. |
-| P2-17 | RV-SDK-E3875787 | low | Restrict packed result ABI to wasm32 and use native-width interfaces for native testing. |
-| P2-17 | RV-SDK-MACROS-C8189C06 | low | Resolve dependency aliases and reject nonempty unsupported attribute tokens with consumer CI fixtures. |
-| P2-17 | RV-SDK-723F5FD2 | nit | Explicitly define the below-2-GiB ABI range and align memory documentation and boundary fixtures. |
-| P2-18 | RV-SERVER-E8E1D11B | low | Define persisted leader-pin enrollment, rotation, mismatch, and reconnect policy and wire it into replication. |
-| P2-18 | RV-SERVER-A65118CC | low | Choose mapped-IPv4 loopback policy and align or contract-test both validation paths. |
-| P2-18 | RV-TRANSPORT-IPC-FA481516 | low | Record accepted conditional exposure and offer an owner-only socket parent as structural mitigation. |
-| P2-18 | RV-TRANSPORT-WS-F0A54173 | low | Validate origin patterns and serialized origins while preserving explicit one-level wildcard semantics. |
-| P2-18 | RV-SERVER-97C240D7 | nit | Choose protected-file/stdin credential input and deprecate or explicitly document plaintext argv input. |
-| P2-18 | RV-TRANSPORT-TCP-4D95A5F8 | nit | Add capped writer companions while retaining existing default-cap wrappers. |
-| P2-18 | RV-TRANSPORT-TCP-9C706A16 | nit | Narrow Tokio library features and declare test-only runtime capabilities separately. |
-| P2-18 | RV-TRANSPORT-WS-460A02D6 | nit | Remove the unused hex, serde, serde_bytes and rmp-serde dev-dependencies. |
-| P2-18 | RV-TRANSPORT-WS-5D3BB859 | nit | Return a fixed browser origin-rejection body while preserving typed diagnostics internally. |
-| P2-18 | RV-TRANSPORT-WS-B1243564 | nit | Classify present non-text browser origins as NotAllowed rather than Missing. |
-| P2-19 | RV-NUMA-6FDBD35C | low | Introduce shared cached topology for constructors while retaining an explicit fresh-probe path. |
-| P2-19 | RV-BENCH-UTILS-92355828 | low | Enforce exclusive range endpoints, define invalid-bound handling and add adjacent-float tests with revision bump. |
+| Task | Card | Risk | Decide | Decision |
+|---|---|---|---|---|
+| P2-01 | RV-DB-C2DCAC96 | low | Promote the builder to a production dependency and migrate facade construction with genuine exceptions documented. | DEFER |
+| P2-01 | RV-DB-0541AF4D | low | Define a response-byte budget and enforce it during transfer and bounded file reading. | IMPLEMENT |
+| P2-01 | RV-DB-140F9E99 | low | Remove unused direct argon2/TLS dependencies and stale legacy-network rationale. | IMPLEMENT |
+| P2-01 | RV-DB-0065D2A2 | nit | Define informational versus integrity/version semantics before adding consumers or changing persisted metadata. | IMPLEMENT |
+| P2-01 | RV-DB-7C59E01B | nit | Choose bounded striped locking or an explicit retained-key budget without unsafe live-entry eviction. | SKIP |
+| P2-02 | RV-TX-4A1FDAAE | low | Choose shared in-memory table-name storage while preserving serialized string values. | SKIP |
+| P2-02 | RV-TX-56651C4A | low | Add ordered journal batch persistence without crossing gap or barrier boundaries. | IMPLEMENT |
+| P2-02 | RV-TX-782352E1 | low | Reject reserved empty payloads before version allocation while preserving an explicit deletion path. | IMPLEMENT |
+| P2-02 | RV-TX-ED8562B0 | low | Reject or normalize zero seeds consistently in both allocators and pin external-zero semantics. | IMPLEMENT |
+| P2-03 | RV-CLIENT-NODE-C42AA40A | high | Define a lossless integer policy shared with TS DTOs and test independent int64 fixtures, bigint inputs and integer markers. | IMPLEMENT |
+| P2-03 | RV-CLIENT-NODE-144A5920 | medium | Integrate supported builder and batch DTO exports plus an execution adapter and replace handwritten wire examples. | IMPLEMENT |
+| P2-03 | RV-CLIENT-NODE-31D3BBE5 | nit | Document the owner-approved Rust and npm version relationship rather than silently changing release versions. | SKIP |
+| P2-04 | RV-ENGINE-3425FDE6 | low | Ratify and document trusted embedding APIs versus authorization-enforced batch execution. | open |
+| P2-05 | RV-INDEX-4DC29EFB | medium | Stream bounded snapshot chunks and move sidecar ownership while preserving generation coherence. | DEFER |
+| P2-05 | RV-INDEX-9E0EC9A5 | medium | Validate persisted parameters fallibly and add versioned sidecar integrity coverage with corruption fixtures. | IMPLEMENT |
+| P2-05 | RV-INDEX-8533E947 | low | Validate single-component basenames and introduce versioned metadata integrity with a legacy-read policy. | IMPLEMENT |
+| P2-06 | RV-INDEX-2BA3B945 | medium | Preserve typed storage errors and sources through index and engine boundaries. | open |
+| P2-06 | RV-INDEX-53CEF405 | medium | Choose collision-resolving token identity with an explicit persisted FTS rebuild/version policy. | open |
+| P2-06 | RV-INDEX-9E472725 | medium | Choose collision-resolving canonical-value identity and an index migration/rebuild policy. | open |
+| P2-06 | RV-INDEX-0695AADA | low | Define explicit token/work budgets and propagate typed over-budget errors without silent truncation. | open |
+| P2-06 | RV-INDEX-605EEC5D | low | Define portable persisted-hash identity, golden keys and explicit upgrade or rebuild rules. | open |
+| P2-06 | RV-INDEX-FBB72544 | low | Canonicalize recursive Map hashing and provide persisted-index rebuild handling and order-parity tests. | open |
+| P2-07 | RV-INDEX-95108B6D | medium | Reserve retained bytes atomically and account for admission, replacement, removal and invalidation. | open |
+| P2-07 | RV-INDEX-3854F3CC | low | Choose multi-match selection semantics and maintain a lifecycle-synchronized reverse lookup. | open |
+| P2-08 | RV-STORAGE-38F208C4 | low | Approve the actual probabilistic uniqueness contract or implement cross-handle collision-safe insertion. | IMPLEMENT |
+| P2-08 | RV-STORAGE-9478B37E | low | Choose explicit partial-copy semantics or a rename-owned staging and recovery protocol. | IMPLEMENT |
+| P2-08 | RV-STORAGE-0A9E3A41 | low | Return worker-start failures through DbResult and approve source-preserving error representations. | IMPLEMENT |
+| P2-08 | RV-STORAGE-CC5C79BA | low | Apply one approved backend-compatible name validator before ordinary and atomic keyspace operations. | IMPLEMENT |
+| P2-08 | RV-STORAGE-1A5A9374 | low | Document per-worker ordering and explicitly decide whether cross-route submission ordering is required. | IMPLEMENT |
+| P2-08 | RV-STORAGE-88C4F2CC | nit | Approve a cohesive API-polish scope before changing aliases, bounds, copy semantics or public errors. | SKIP |
+| P2-08 | RV-STORAGE-FB7C0794 | nit | Approve a key-size limit and enforce it with a bounded deserialization visitor before growth. | SKIP |
+| P2-09 | RV-CLIENT-8997B366 | low | Protect resume ticket ownership, serialized payloads and framing scratch on all exits while retaining wire bytes. | IMPLEMENT |
+| P2-09 | RV-CLIENT-0157DABC | nit | Document RequestIdMismatch as reserved and not emitted, or remove it under an explicit API compatibility decision. | IMPLEMENT |
+| P2-10 | RV-CONNECT-2B5AF3F2 | low | Bind immutable session identity before HMAC caching and use that identity for password-change proof binding. | open |
+| P2-10 | RV-CONNECT-387EAA05 | low | Introduce fallible entropy and clock APIs and propagate typed environmental errors through callers. | open |
+| P2-10 | RV-CONNECT-7D41FB60 | low | Resolve the four component cards and close this aggregate without duplicating implementation work. | open |
+| P2-10 | RV-CONNECT-3380EB1C | low | Use zeroizing ownership for server and resume secrets while preserving immutable key/cache consistency. | open |
+| P2-10 | RV-CONNECT-E0A24E86 | low | Centralize the supported ticket version and reject unsupported versions during encryption. | open |
+| P2-10 | RV-CONNECT-F34827AC | low | Make ticket serialization reject ciphertext lengths above u16::MAX and test boundary round trips. | open |
+| P2-10 | RV-CONNECT-3BAF631D | nit | Reject an all-zero client nonce before replacing pending challenge state and test preservation of the previous challenge. | open |
+| P2-10 | RV-CONNECT-E4631CD9 | nit | Return the common typed KDF error instead of allocated discarded String diagnostics. | open |
+| P2-10 | RV-CONNECT-C7F16BFB | nit | Remove the unused direct unicode-normalization dependency while retaining PRECIS normalization. | open |
+| P2-11 | RV-WAL-A25EDE9D | low | Introduce bounded incremental replay and migrate startup and live gap recovery consumers. | SKIP |
+| P2-11 | RV-WAL-DD492F5C | low | Document trusted directory writers, required ACLs and the absence of WAL authenticity guarantees. | IMPLEMENT |
+| P2-11 | RV-WAL-0843B96B | nit | Remove the empty public segment_meta namespace and align documentation visibility. | SKIP |
+| P2-11 | RV-WAL-3F10E8A1 | nit | Define operator diagnostic versus public-error policy and redact externally surfaced paths. | SKIP |
+| P2-11 | RV-WAL-5DFE355F | nit | Gate or restrict mark_poisoned after consumer review, or explicitly support it as an administrative API. | SKIP |
+| P2-12 | RV-TYPES-5E4BFC76 | low | Define trusted-type/input constraints and require explicitly bounded decoding for recursive untrusted roots. | open |
+| P2-12 | RV-TYPES-A7B1FCEC | low | Introduce borrowed ancestor traversal and compatible metadata lookup while preserving nearest-first awaited authorization. | open |
+| P2-12 | RV-TYPES-EFA1B8F4 | low | Add negative-literal object arms and CI cases with and without trailing commas while retaining explicit expression escapes. | open |
+| P2-12 | RV-TYPES-FE40CB54 | low | Use safe String zeroization, settle public comparison semantics, and add lifecycle and feature CI coverage. | open |
+| P2-13 | RV-QUERY-TYPES-182C703E | low | Migrate formatting to thiserror and adopt typed validation errors under an explicit API compatibility plan. | open |
+| P2-13 | RV-QUERY-TYPES-4F767AA5 | low | Introduce fallible QueryValue conversion, migrate callers and reject unsupported maps without Null substitution. | open |
+| P2-13 | RV-QUERY-TYPES-5F9D5468 | low | Make opaque-versus-nonopaque comparisons false and add a three-value transitivity regression. | open |
+| P2-13 | RV-QUERY-TYPES-F05184D8 | low | Accept existing non-map wire values in the decoder and add scalar/list round-trip tests. | open |
+| P2-13 | RV-QUERY-TYPES-CC015A3C | nit | Decide whether measured cost justifies changing public String ownership or explicitly accept default-name allocations. | open |
+| P2-14 | RV-QUERY-BUILDER-FE2003D1 | low | Specify and test large-integer ordering, range and membership across Big and decimal-string storage while preserving RU7. | open |
+| P2-14 | RV-QUERY-BUILDER-9E172C69 | low | Add a consuming validated build path and use it where callers own the batch, retaining borrowed reuse. | open |
+| P2-14 | RV-QUERY-BUILDER-MACROS-02993B77 | low | Resolve the consumer dependency alias for all builder expansion paths and add an alias-only consumer fixture. | open |
+| P2-14 | RV-QUERY-BUILDER-DE20E96B | nit | Add thiserror and migrate the five error implementations while preserving messages and sources. | open |
+| P2-15 | RV-FUNCLIB-0FCB1771 | medium | Implement exact cross-numeric ordering, reconcile distinct hashing, and add boundary-triple and permutation oracles. | open |
+| P2-16 | RV-WASM-HOST-C17D12C8 | medium | Define a deployment-supported SDK source and configurable runtime resolution with actionable errors. | open |
+| P2-16 | RV-WASM-HOST-4669FDA6 | low | Introduce checked version-aware metadata decoding with explicit malformed-field errors and legacy defaults. | open |
+| P2-16 | RV-WASM-HOST-98551A44 | low | Define an engine memory ceiling and reconcile accepted function limits with pooling capacity. | open |
+| P2-16 | RV-WASM-HOST-EB1654FA | low | Drain both pipes continuously while retaining capped diagnostics with explicit truncation markers. | open |
+| P2-16 | RV-WASM-HOST-FE02BB1D | low | Distinguish blocking-task panic from cancellation and preserve a diagnostic panic cause. | open |
+| P2-16 | RV-WASM-HOST-FF7C2D6E | nit | Complete the remaining path and metadata components through cards 796ECAE4 and 4669FDA6. | open |
+| P2-16 | RV-WASM-HOST-EBD32CA5 | nit | Remove the unused direct serde dependency. | open |
+| P2-17 | RV-SDK-77261152 | low | Choose signature-only purity documentation or host-enforced scalar capability isolation. | open |
+| P2-17 | RV-SDK-MACROS-44A9CC7A | low | Define host-enforced scalar capability policy and replace the lexical purity guarantee with accurate documentation and tests. | open |
+| P2-17 | RV-SDK-E3875787 | low | Restrict packed result ABI to wasm32 and use native-width interfaces for native testing. | open |
+| P2-17 | RV-SDK-MACROS-C8189C06 | low | Resolve dependency aliases and reject nonempty unsupported attribute tokens with consumer CI fixtures. | open |
+| P2-17 | RV-SDK-723F5FD2 | nit | Explicitly define the below-2-GiB ABI range and align memory documentation and boundary fixtures. | open |
+| P2-18 | RV-SERVER-E8E1D11B | low | Define persisted leader-pin enrollment, rotation, mismatch, and reconnect policy and wire it into replication. | open |
+| P2-18 | RV-SERVER-A65118CC | low | Choose mapped-IPv4 loopback policy and align or contract-test both validation paths. | open |
+| P2-18 | RV-TRANSPORT-IPC-FA481516 | low | Record accepted conditional exposure and offer an owner-only socket parent as structural mitigation. | open |
+| P2-18 | RV-TRANSPORT-WS-F0A54173 | low | Validate origin patterns and serialized origins while preserving explicit one-level wildcard semantics. | open |
+| P2-18 | RV-SERVER-97C240D7 | nit | Choose protected-file/stdin credential input and deprecate or explicitly document plaintext argv input. | open |
+| P2-18 | RV-TRANSPORT-TCP-4D95A5F8 | nit | Add capped writer companions while retaining existing default-cap wrappers. | open |
+| P2-18 | RV-TRANSPORT-TCP-9C706A16 | nit | Narrow Tokio library features and declare test-only runtime capabilities separately. | open |
+| P2-18 | RV-TRANSPORT-WS-460A02D6 | nit | Remove the unused hex, serde, serde_bytes and rmp-serde dev-dependencies. | open |
+| P2-18 | RV-TRANSPORT-WS-5D3BB859 | nit | Return a fixed browser origin-rejection body while preserving typed diagnostics internally. | open |
+| P2-18 | RV-TRANSPORT-WS-B1243564 | nit | Classify present non-text browser origins as NotAllowed rather than Missing. | open |
+| P2-19 | RV-NUMA-6FDBD35C | low | Introduce shared cached topology for constructors while retaining an explicit fresh-probe path. | open |
+| P2-19 | RV-BENCH-UTILS-92355828 | low | Enforce exclusive range endpoints, define invalid-bound handling and add adjacent-float tests with revision bump. | open |
 
 ## Decision log
 
-| Date | Task / card | Question | Answer | By |
+| Date | Task / card | Decision | Answer | By |
 |---|---|---|---|---|
-| - | - | - | - | - |
+| 2026-10-29 | P2-09 / RV-CLIENT-0157DABC | IMPLEMENT | Keep ClientError::RequestIdMismatch with its existing fields and display text, documenting it as reserved and not currently emitted. Do not emit it for legitimate late responses or redesign multiplexing in this documentation card; keep request-ID exhaustion and malformed-envelope remediation separate. No new behavioral test is needed. Evidence: crates/shamir-client/src/error.rs:95-97; crates/shamir-client/src/client/transport.rs:623-632. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-09 / RV-CLIENT-8997B366 | IMPLEMENT | Preserve ResumeOptions.ticket: Vec<u8> for existing struct-literal callers and add a secure-options alternative owning Zeroizing<Vec<u8>> with a resume entry point sharing one protected handshake implementation. In the legacy async entry point, transfer ticket ownership into Zeroizing before the first internal await; explicitly document its raw-options exposure before polling and recommend secure options for retained or cancellable options. Protect wire copies, serialization scratch including partial-error paths, and received rotated-ticket buffers on success, failure and cancellation. Preser… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-03 / RV-CLIENT-NODE-144A5920 | IMPLEMENT | Choose the documentation-only builder path permitted by the brief: replace handwritten wire examples with existing TS builder .build() output passed to Node execute, document execute(object) as the low-level FFI submission boundary, and explicitly state that Batch.execute(nodeClient, db) is unsupported. Preserve the existing object API. Do not add a new SDK dependency, duplicate batch DTOs, or add an executeWithTouch alias that lacks smart-write behavior; defer DTO re-exports and full adapter integration. CI must compile-check and exercise the documented builder-to-execute example together wi… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-03 / RV-CLIENT-NODE-31D3BBE5 | SKIP | Record the Cargo/npm metadata discrepancy as accepted for this sprint, without changing versions or asserting an unrecorded owner-approved release policy. The generated loader compares optional npm platform-package versions, not Cargo's version, and tries local native files first, so the discrepancy alone does not establish loader failure. Defer version alignment or independence policy to release preparation. Evidence: crates/shamir-client-node/Cargo.toml:3; crates/shamir-client-node/package.json:3; crates/shamir-client-node/native/index.js:189-198. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-03 / RV-CLIENT-NODE-C42AA40A | IMPLEMENT | Implement lossless object-level integer conversion using the existing MessagePack dependency: decode int64/uint64 losslessly, normalize safe decoded integers to Number and retain unsafe integers as BigInt; encode in-range signed/unsigned 64-bit BigInt and promote safe wide integer Numbers so they retain integer wire markers. Reject out-of-range BigInt rather than wrapping it. Preserve fractional Numbers, strings, binary contents and raw repl bytes, and use the TS DTO number-or-bigint contract. CI must use independent fixtures for signed ±(2^53+1), signed/unsigned boundaries, genuine BigInt in… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-01 / RV-DB-0065D2A2 | IMPLEMENT | Document existing wasm_hash as a noncryptographic diagnostic fingerprint and function version=1 as legacy informational metadata, neither an integrity guarantee nor a replacement-generation counter. Preserve field names, representations, existing writes and legacy catalogue compatibility; add no integrity consumer, migration or version increment. This is documentation-only remediation requiring no new behavioral test and must remain independent of invocation-metadata reuse. Evidence: crates/shamir-db/src/shamir_db/shamir_db/db/function_management.rs:195-217,228-244; crates/shamir-db/src/shami… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-01 / RV-DB-0541AF4D | IMPLEMENT | Keep CurlNetGateway::new(allowlist), giving it a documented 16 MiB response-body limit, and add a constructor accepting an explicit positive byte limit. Enforce the budget during receipt even without Content-Length, rather than relying solely on curl max-filesize support or post-transfer file metadata. Bound any subsequent file read, reject oversize and failed transfers through the existing transport-error variant, never return truncated success, and kill/reap the child on abort. Preserve response shapes, SSRF checks and the adjacent DNS-pinning fix. CI must prove exact-limit success, limit-p… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-01 / RV-DB-140F9E99 | IMPLEMENT | Remove unused direct argon2, rustls, tokio-rustls and rcgen dependencies and the stale legacy-network rationale from shamir-db only. Preserve dependencies and feature selections in actual crypto-owning crates; do not claim transitive crypto removal. No behavioral test is required for declaration cleanup. CI must check all facade targets, affected dependents and feature combinations for accidental feature-unification reliance. Evidence: crates/shamir-db/Cargo.toml:64,70-77. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-01 / RV-DB-7C59E01B | SKIP | Accept indefinite admin/schema lock-key retention for this sprint. Concrete lock maps are publicly exposed, so replacing them with stripes is not a surgical source-compatible change; eviction can split synchronization for a live key, while a retained-key budget adds new operation failures. Record the tradeoff without claiming negligible memory or that these are the only unbounded structures. Defer bounded locking to an API-encapsulation change and preserve all current lock-order and RMW guarantees. Evidence: crates/shamir-db/src/shamir_db/shamir_db/core.rs:661,669,702; crates/shamir-db/src/sh… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-01 / RV-DB-C2DCAC96 | DEFER | DEFER to a separate follow-up task after P2-01 is accepted: migrating 30+ facade operations to the builder is an L-size change for a low-risk convention card and would dominate the authorization fix. Record the reviewer's approach for that follow-up (promote shamir-query-builder to a production dependency of shamir-db; migrate through supported builders; keep batch semantics, transaction boundaries, authorization ordering and durability calls; document genuine exceptions). Do NOT change this card in P2-01. | rush reviewer recommended IMPLEMENT; orchestrator deferred |
+| 2026-10-29 | P2-05 / RV-INDEX-4DC29EFB | DEFER | DEFER to a dedicated design task: streaming snapshot dump/load is a high-risk redesign of snapshot persistence (staging generations, durability before manifest publication, incremental checksums) for a medium memory-cost card with no demonstrated incident. Do NOT change this card in P2-05; keep 9E0EC9A5, 8533E947 and FDC0161A, and avoid changes that would make a later streaming design harder. | rush reviewer recommended IMPLEMENT; orchestrator deferred |
+| 2026-10-29 | P2-05 / RV-INDEX-8533E947 | IMPLEMENT | Validate used basenames as nonempty portable single filename components before file creation, rejecting traversal, separators, absolute/drive/UNC paths, NULs and alternate-stream syntax; allow unused empty qbasename. Add one snapshot-local versioned integrity companion covering exact manifest and sidecar bytes using existing CRC, without changing their layouts or shared MetaEnvelope. Publish it atomically with every manifest update. Missing means legacy validation; invalid present records fail closed. CI covers historical v1/current v2, metadata corruption and both path branches. CRC is not a… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-05 / RV-INDEX-9E0EC9A5 | IMPLEMENT | Add fallible persisted quantizer reconstruction while retaining the existing public to_quantizer signature. Validate positive matching dimensions, parameter lengths, finite parameters, nonnegative scales including zero, vector/code widths and persisted build parameters before construction. Return Corrupt rather than assert and contain parser panics on both graph branches. Share integrity coverage with 8533E947. CI includes malformed legacy and correctly checksummed malformed new metadata, independently proving semantic validation; coordinate existing test relocation. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-0A9E3A41 | IMPLEMENT | Fix worker startup only: make WriteWorker::spawn fallible and propagate startup failure through insert and nonempty transact using existing DbError::Io. Preserve lazy, single-worker initialization under concurrent first use; a private OnceLock<Result<WriteWorker, std::io::Error>> may cache startup failure, with propagated owned I/O errors preserving kind and source. Inject startup failure in CI tests and prove both methods, including subsequent attempts, return errors without panic or writes. Defer general source-chain redesign; preserve existing public error variants, conversions and wire co… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-1A5A9374 | IMPLEMENT | Clarify ordering documentation only: one worker executes jobs FIFO in actual channel-admission order, not concurrent invocation order. There is no universal submission order across handles, worker jobs, blocking routes or repository batches; callers needing sequencing must await preceding operations. Correct transact's every-point-write ordering claim. Preserve routes, visibility and durability behavior, and do not imply atomic reader visibility. No behavioral regression test is required. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-38F208C4 | IMPLEMENT | Approve documented probabilistic uniqueness, not collision-safe insertion. Replace uniform-128-bit and provably-pointless-probe claims with the actual relative-timestamp plus 64-bit Xoshiro-tail layout and explicitly accept collision/overwrite risk; qualify probability estimates by equal timestamp prefixes and the random-tail model. Preserve generation, encoding and insertion behavior; do not add a check-then-insert probe. Documentation-only: no behavioral regression test is required. Coordinate any record_id.rs documentation edit with P2-12. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-88C4F2CC | SKIP | Defer interface-polish debt: the private stream alias is externally expressible, and changing Bytes bounds, copy signatures or public error payloads adds compatibility cost without a demonstrated runtime benefit. Preserve those APIs. Apply copy semantics and worker-start decisions under their dedicated cards; retain separately scoped alias-reuse and documentation cleanup without duplicating them here. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-9478B37E | IMPLEMENT | Choose explicit partial-copy semantics: copy_store incrementally merges/upserts into the destination, preserves unrelated keys, provides no snapshot or rollback guarantee, and may leave partial results on error or cancellation. Do not delete caller-owned destinations. Extend contract tests to prove completed batches, pre-existing unrelated keys and matching-key overwrites survive a later failure. Record rename retry contamination as unremediated and revise P2-08's recovery acceptance criterion; a rename-owned recovery protocol requires a separately scoped engine/database change. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-CC5C79BA | IMPLEMENT | Add one Fjall-local store-name validator accepting nonempty names of at most 255 UTF-8 bytes, without character filtering or normalization. Validate ordinary get/delete, atomic staging and every commit name before keyspace resolution; return DbError::Validation. Preserve valid existing names and other backends' contracts. CI tests cover empty, 255/256-byte and multibyte names, accepted punctuation, and mixed valid/invalid batches with no keyspace creation or writes. Confirm this compatibility boundary against locked Fjall 3.1.10; locally inspected 3.1.6 source is not evidence of the locked im… | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-08 / RV-STORAGE-FB7C0794 | SKIP | Accept current allocation exposure pending a demonstrated ingress path and compatibility-backed size policy. KeyBytes constructors and serialization accept arbitrary lengths; a Deserialize-only cap would reject previously round-trippable keys and cannot universally prevent allocation inside the underlying decoder. No remote exploit path is established by this review. Preserve encoding and accepted lengths; bounded diagnostics remain an independent change, not justification for a universal key-size cap. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-02 / RV-TX-4A1FDAAE | SKIP | Record accepted allocation debt. Keep the public RecordChange.table: String field and serialized string values unchanged: Arc<str> would break Rust source compatibility, and no measured benefit justifies a parallel event representation in this sprint. Journal batching is independent. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-02 / RV-TX-56651C4A | IMPLEMENT | Add an object-safe event-only put_many with an ordered default returning one result per input. Batch consecutive Event messages within count/byte limits, flushing before every control message and serialization failure; preserve FIFO order, per-event gaps and successful-write watermark accounting. Add the production StoreChangelog batch override and preserve clean-horizon durability boundaries. Extend ownership to the engine journal adapter and coordinate with P2-04. CI proves storage batching, partial failures and all control boundaries. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-02 / RV-TX-782352E1 | IMPLEMENT | Reject reserved empty payloads on all ordinary versioned-set variants using an existing invalid-input error. Prevalidate entire batches before allocating versions or publishing cells; keep empty batches as no-ops and explicit delete/recovery tombstones unchanged. Preserve persisted encoding. CI proves invalid single and mixed-batch writes consume no versions and change no history/overlay state, while explicit deletion remains functional. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-02 / RV-TX-ED8562B0 | IMPLEMENT | Normalize constructor seeds to max(seed, 1) in RepoWalManager and RepoTxGate without signature changes. Preserve positive seeds, monotonic recovery floors, persisted entries and implicit/nontransactional external tx_id zero. CI proves both zero-seeded allocators first issue one, positive seeds remain exact and event projection retains intentional external zero semantics. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-11 / RV-WAL-0843B96B | SKIP | Record accepted public-namespace debt. Keep segment_meta publicly importable: removing an empty public module still breaks downstream imports without runtime benefit. Do not widen private helpers for documentation. Reconsider only during explicitly compatibility-breaking API cleanup, independently of sidecar correctness repairs. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-11 / RV-WAL-3F10E8A1 | SKIP | Record accepted operator-diagnostic path exposure at the embedded library boundary. Preserve WAL path context and typed I/O causes; no specific remote WAL disclosure route has been established, and ticketed append display errors are already path-free. Sanitize only at a demonstrated external transport boundary rather than weakening WAL diagnostics or the P1 typed-I/O policy. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-11 / RV-WAL-5DFE355F | SKIP | Record accepted legacy public test-hook surface, not a supported administrative contract. Keep mark_poisoned unchanged: restricting it breaks public callers, repository-only consumer review cannot exclude external use and misuse requires an in-process segment holder. Avoid API churn for this nit while fixing actual append/rollback concurrency behavior. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-11 / RV-WAL-A25EDE9D | SKIP | Record accepted backlog-dependent decoded-memory debt and schedule a cross-crate bounded-recovery project. A cursor alone cannot preserve startup commit-version sorting, interner-before-finalization ordering, full-entry cold journal certification and live window reseeding with bounded memory. Those changes exceed this WAL-only brief. Continue CC3131A9 incremental frame parsing, but do not claim end-to-end bounded recovery. | rush reviewer (read-only), accepted by orchestrator |
+| 2026-10-29 | P2-11 / RV-WAL-DD492F5C | IMPLEMENT | Document that data and sibling WAL directories, sidecars, parent-directory replacement and restored copies are writable only by the database identity and trusted operators/tooling. Specify restrictive Unix permissions and Windows ACLs. Explain that CRC detects corruption but does not authenticate writers and that TLS/volume encryption do not provide WAL authenticity. Update WAL crate docs and the security data-protection guide; authorize that documentation scope extension. No format/runtime/dependency changes or behavioral tests are required. | rush reviewer (read-only), accepted by orchestrator |
 
 ## Execution log
 

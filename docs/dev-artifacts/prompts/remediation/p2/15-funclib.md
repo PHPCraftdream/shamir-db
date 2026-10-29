@@ -24,9 +24,9 @@ Suggested wave 2; no strict predecessor.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 0FCB1771.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 0FCB1771.
 
-- (none yet)
+- RV-FUNCLIB-0FCB1771: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

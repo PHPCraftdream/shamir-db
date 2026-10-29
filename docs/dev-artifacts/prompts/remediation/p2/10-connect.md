@@ -25,9 +25,17 @@ Suggested wave 3; starts after P2-09, P2-18 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 2B5AF3F2, 387EAA05, 7D41FB60, 3380EB1C, E0A24E86, F34827AC, 3BAF631D, E4631CD9, C7F16BFB.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 2B5AF3F2, 387EAA05, 7D41FB60, 3380EB1C, E0A24E86, F34827AC, 3BAF631D, E4631CD9, C7F16BFB.
 
-- (none yet)
+- RV-CONNECT-2B5AF3F2: (no answer yet - skip)
+- RV-CONNECT-387EAA05: (no answer yet - skip)
+- RV-CONNECT-7D41FB60: (no answer yet - skip)
+- RV-CONNECT-3380EB1C: (no answer yet - skip)
+- RV-CONNECT-E0A24E86: (no answer yet - skip)
+- RV-CONNECT-F34827AC: (no answer yet - skip)
+- RV-CONNECT-3BAF631D: (no answer yet - skip)
+- RV-CONNECT-E4631CD9: (no answer yet - skip)
+- RV-CONNECT-C7F16BFB: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

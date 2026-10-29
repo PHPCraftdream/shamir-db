@@ -24,9 +24,12 @@ Suggested wave 2; starts after P2-01, P2-08, P2-09 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 5E4BFC76, A7B1FCEC, EFA1B8F4, FE40CB54.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 5E4BFC76, A7B1FCEC, EFA1B8F4, FE40CB54.
 
-- (none yet)
+- RV-TYPES-5E4BFC76: (no answer yet - skip)
+- RV-TYPES-A7B1FCEC: (no answer yet - skip)
+- RV-TYPES-EFA1B8F4: (no answer yet - skip)
+- RV-TYPES-FE40CB54: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

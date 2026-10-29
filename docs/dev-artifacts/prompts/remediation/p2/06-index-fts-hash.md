@@ -25,9 +25,14 @@ Suggested wave 2; no strict predecessor.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 2BA3B945, 53CEF405, 9E472725, 0695AADA, 605EEC5D, FBB72544.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 2BA3B945, 53CEF405, 9E472725, 0695AADA, 605EEC5D, FBB72544.
 
-- (none yet)
+- RV-INDEX-2BA3B945: (no answer yet - skip)
+- RV-INDEX-53CEF405: (no answer yet - skip)
+- RV-INDEX-9E472725: (no answer yet - skip)
+- RV-INDEX-0695AADA: (no answer yet - skip)
+- RV-INDEX-605EEC5D: (no answer yet - skip)
+- RV-INDEX-FBB72544: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

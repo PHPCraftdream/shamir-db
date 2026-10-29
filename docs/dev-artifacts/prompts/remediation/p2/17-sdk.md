@@ -24,9 +24,13 @@ Suggested wave 3; starts after P2-16 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 77261152, 44A9CC7A, E3875787, C8189C06, 723F5FD2.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 77261152, 44A9CC7A, E3875787, C8189C06, 723F5FD2.
 
-- (none yet)
+- RV-SDK-77261152: (no answer yet - skip)
+- RV-SDK-MACROS-44A9CC7A: (no answer yet - skip)
+- RV-SDK-E3875787: (no answer yet - skip)
+- RV-SDK-MACROS-C8189C06: (no answer yet - skip)
+- RV-SDK-723F5FD2: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

@@ -25,9 +25,11 @@ Suggested wave 1; no strict predecessor.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 4DC29EFB, 9E0EC9A5, 8533E947.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 4DC29EFB, 9E0EC9A5, 8533E947.
 
-- (none yet)
+- RV-INDEX-4DC29EFB: **DEFER** (rush reviewer recommended IMPLEMENT; orchestrator deferred, 2026-10-29). DEFER to a dedicated design task: streaming snapshot dump/load is a high-risk redesign of snapshot persistence (staging generations, durability before manifest publication, incremental checksums) for a medium memory-cost card with no demonstrated incident. Do NOT change this card in P2-05; keep 9E0EC9A5, 8533E947 and FDC0161A, and avoid changes that would make a later streaming design harder.
+- RV-INDEX-9E0EC9A5: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Add fallible persisted quantizer reconstruction while retaining the existing public to_quantizer signature. Validate positive matching dimensions, parameter lengths, finite parameters, nonnegative scales including zero, vector/code widths and persisted build parameters before construction. Return Corrupt rather than assert and contain parser panics on both graph branches. Share integrity coverage with 8533E947. CI includes malformed legacy and correctly checksummed malformed new metadata, independently proving semantic validation; coordinate existing test relocation.
+- RV-INDEX-8533E947: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Validate used basenames as nonempty portable single filename components before file creation, rejecting traversal, separators, absolute/drive/UNC paths, NULs and alternate-stream syntax; allow unused empty qbasename. Add one snapshot-local versioned integrity companion covering exact manifest and sidecar bytes using existing CRC, without changing their layouts or shared MetaEnvelope. Publish it atomically with every manifest update. Missing means legacy validation; invalid present records fail closed. CI covers historical v1/current v2, metadata corruption and both path branches. CRC is not authentication; coordinate 9E0EC9A5 and 4DC29EFB.
 
 ## Findings (ordered by risk, then size)
 

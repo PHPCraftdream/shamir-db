@@ -24,9 +24,10 @@ Suggested wave 2; starts after P2-08 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 6FDBD35C, 92355828.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 6FDBD35C, 92355828.
 
-- (none yet)
+- RV-NUMA-6FDBD35C: (no answer yet - skip)
+- RV-BENCH-UTILS-92355828: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

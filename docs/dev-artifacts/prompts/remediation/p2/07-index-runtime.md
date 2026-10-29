@@ -24,9 +24,10 @@ Suggested wave 3; starts after P2-06, P2-12 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 95108B6D, 3854F3CC.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 95108B6D, 3854F3CC.
 
-- (none yet)
+- RV-INDEX-95108B6D: (no answer yet - skip)
+- RV-INDEX-3854F3CC: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

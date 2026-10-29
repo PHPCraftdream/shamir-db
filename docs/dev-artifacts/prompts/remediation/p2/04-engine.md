@@ -25,9 +25,9 @@ Suggested wave 2; starts after P2-02 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 3425FDE6.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 3425FDE6.
 
-- (none yet)
+- RV-ENGINE-3425FDE6: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

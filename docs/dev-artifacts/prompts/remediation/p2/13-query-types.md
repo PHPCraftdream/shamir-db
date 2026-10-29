@@ -24,9 +24,13 @@ Suggested wave 3; starts after P2-04 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 182C703E, 4F767AA5, 5F9D5468, F05184D8, CC015A3C.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 182C703E, 4F767AA5, 5F9D5468, F05184D8, CC015A3C.
 
-- (none yet)
+- RV-QUERY-TYPES-182C703E: (no answer yet - skip)
+- RV-QUERY-TYPES-4F767AA5: (no answer yet - skip)
+- RV-QUERY-TYPES-5F9D5468: (no answer yet - skip)
+- RV-QUERY-TYPES-F05184D8: (no answer yet - skip)
+- RV-QUERY-TYPES-CC015A3C: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

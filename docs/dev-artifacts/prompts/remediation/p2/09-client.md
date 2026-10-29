@@ -24,9 +24,10 @@ Suggested wave 1; no strict predecessor.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: 8997B366, 0157DABC.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: 8997B366, 0157DABC.
 
-- (none yet)
+- RV-CLIENT-8997B366: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Preserve ResumeOptions.ticket: Vec<u8> for existing struct-literal callers and add a secure-options alternative owning Zeroizing<Vec<u8>> with a resume entry point sharing one protected handshake implementation. In the legacy async entry point, transfer ticket ownership into Zeroizing before the first internal await; explicitly document its raw-options exposure before polling and recommend secure options for retained or cancellable options. Protect wire copies, serialization scratch including partial-error paths, and received rotated-ticket buffers on success, failure and cancellation. Preserve exact wire bytes and identity-proof-before-ticket-disclosure ordering. CI must observe erasure through safe test seams across success, early failure and cancellation; coordinate native-owned buffer guarantees with P2-03. Evidence: crates/shamir-client/src/client/options.rs:100-109; crates/shamir-client/src/client/connect.rs:611-633,670-677,709-735.
+- RV-CLIENT-0157DABC: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Keep ClientError::RequestIdMismatch with its existing fields and display text, documenting it as reserved and not currently emitted. Do not emit it for legitimate late responses or redesign multiplexing in this documentation card; keep request-ID exhaustion and malformed-envelope remediation separate. No new behavioral test is needed. Evidence: crates/shamir-client/src/error.rs:95-97; crates/shamir-client/src/client/transport.rs:623-632.
 
 ## Findings (ordered by risk, then size)
 

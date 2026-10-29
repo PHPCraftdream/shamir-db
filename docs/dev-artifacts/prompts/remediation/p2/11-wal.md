@@ -24,9 +24,13 @@ Suggested wave 1; no strict predecessor.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: A25EDE9D, DD492F5C, 0843B96B, 3F10E8A1, 5DFE355F.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: A25EDE9D, DD492F5C, 0843B96B, 3F10E8A1, 5DFE355F.
 
-- (none yet)
+- RV-WAL-A25EDE9D: **SKIP** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Record accepted backlog-dependent decoded-memory debt and schedule a cross-crate bounded-recovery project. A cursor alone cannot preserve startup commit-version sorting, interner-before-finalization ordering, full-entry cold journal certification and live window reseeding with bounded memory. Those changes exceed this WAL-only brief. Continue CC3131A9 incremental frame parsing, but do not claim end-to-end bounded recovery.
+- RV-WAL-DD492F5C: **IMPLEMENT** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Document that data and sibling WAL directories, sidecars, parent-directory replacement and restored copies are writable only by the database identity and trusted operators/tooling. Specify restrictive Unix permissions and Windows ACLs. Explain that CRC detects corruption but does not authenticate writers and that TLS/volume encryption do not provide WAL authenticity. Update WAL crate docs and the security data-protection guide; authorize that documentation scope extension. No format/runtime/dependency changes or behavioral tests are required.
+- RV-WAL-0843B96B: **SKIP** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Record accepted public-namespace debt. Keep segment_meta publicly importable: removing an empty public module still breaks downstream imports without runtime benefit. Do not widen private helpers for documentation. Reconsider only during explicitly compatibility-breaking API cleanup, independently of sidecar correctness repairs.
+- RV-WAL-3F10E8A1: **SKIP** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Record accepted operator-diagnostic path exposure at the embedded library boundary. Preserve WAL path context and typed I/O causes; no specific remote WAL disclosure route has been established, and ticketed append display errors are already path-free. Sanitize only at a demonstrated external transport boundary rather than weakening WAL diagnostics or the P1 typed-I/O policy.
+- RV-WAL-5DFE355F: **SKIP** (rush reviewer (read-only), accepted by orchestrator, 2026-10-29). Record accepted legacy public test-hook surface, not a supported administrative contract. Keep mark_poisoned unchanged: restricting it breaks public callers, repository-only consumer review cannot exclude external use and misuse requires an in-process segment holder. Avoid API churn for this nit while fixing actual append/rollback concurrency behavior.
 
 ## Findings (ordered by risk, then size)
 

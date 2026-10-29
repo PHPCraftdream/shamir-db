@@ -24,9 +24,15 @@ Suggested wave 2; no strict predecessor.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: C17D12C8, 4669FDA6, 98551A44, EB1654FA, FE02BB1D, FF7C2D6E, EBD32CA5.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: C17D12C8, 4669FDA6, 98551A44, EB1654FA, FE02BB1D, FF7C2D6E, EBD32CA5.
 
-- (none yet)
+- RV-WASM-HOST-C17D12C8: (no answer yet - skip)
+- RV-WASM-HOST-4669FDA6: (no answer yet - skip)
+- RV-WASM-HOST-98551A44: (no answer yet - skip)
+- RV-WASM-HOST-EB1654FA: (no answer yet - skip)
+- RV-WASM-HOST-FE02BB1D: (no answer yet - skip)
+- RV-WASM-HOST-FF7C2D6E: (no answer yet - skip)
+- RV-WASM-HOST-EBD32CA5: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 

@@ -24,9 +24,12 @@ Suggested wave 4; starts after P2-04, P2-17 are merged.
 
 ## Decisions
 
-Filled by the orchestrator before launch (owner answers). Empty means: skip the cards marked OWNER DECISION: FE2003D1, 9E172C69, 02993B77, DE20E96B.
+Answers for the cards marked OWNER DECISION, recorded by the orchestrator (reviewer recommendation, accepted or overridden). A card without an answer is skipped and reported. Cards: FE2003D1, 9E172C69, 02993B77, DE20E96B.
 
-- (none yet)
+- RV-QUERY-BUILDER-FE2003D1: (no answer yet - skip)
+- RV-QUERY-BUILDER-9E172C69: (no answer yet - skip)
+- RV-QUERY-BUILDER-MACROS-02993B77: (no answer yet - skip)
+- RV-QUERY-BUILDER-DE20E96B: (no answer yet - skip)
 
 ## Findings (ordered by risk, then size)
 
