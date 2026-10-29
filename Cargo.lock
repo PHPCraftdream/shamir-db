@@ -3508,6 +3508,7 @@ dependencies = [
  "shamir-bench-utils",
  "shamir-collections",
  "shamir-engine-query",
+ "shamir-engine-validator",
  "shamir-funclib",
  "shamir-index",
  "shamir-query-builder",
@@ -3545,6 +3546,29 @@ dependencies = [
  "shamir-tx",
  "shamir-types",
  "smallvec",
+ "tokio",
+]
+
+[[package]]
+name = "shamir-engine-validator"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "bincode",
+ "log",
+ "num-bigint",
+ "regex",
+ "rust_decimal",
+ "serde",
+ "shamir-collections",
+ "shamir-funclib",
+ "shamir-query-types",
+ "shamir-storage",
+ "shamir-types",
+ "shamir-wasm-host",
+ "smallvec",
+ "thiserror 2.0.21",
  "tokio",
 ]
 

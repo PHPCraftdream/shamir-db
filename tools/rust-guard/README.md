@@ -324,7 +324,9 @@ directory unless an explicit `--exceptions` path is given.
   All four entry fields (`path`, `item`, `reason`, `owner`) are
   REQUIRED and non-empty on every entry; a missing `base`, or a missing
   or empty entry field, is a `MALFORMED_DELTA` finding. `item` fields
-  match full logical paths exactly. A single `[[changed]]` entry excuses
+  match full logical paths exactly. A move into another package is declarable with
+  `[[moved]]` naming both sides, but a cross-package move combined with a rename
+  is not declarable because `[[renamed]]` requires the same package. A single `[[changed]]` entry excuses
   both body-fingerprint and signature drift on one item (consumed once).
   Each consumed entry disappears; whatever remains when the comparison
   ends is `UNUSED_ALLOWANCE`. Tests are outside the allowance system:

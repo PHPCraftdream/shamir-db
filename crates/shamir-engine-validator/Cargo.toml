@@ -1,0 +1,38 @@
+[package]
+name = "shamir-engine-validator"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "ShamirDB portable validators (schema rules, codecs, registry), re-exported as shamir_engine::validator::*."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+shamir-types = { path = "../shamir-types" }
+shamir-collections = { path = "../shamir-collections" }
+shamir-query-types = { path = "../shamir-query-types" }
+shamir-funclib = { path = "../shamir-funclib" }
+shamir-wasm-host = { path = "../shamir-wasm-host" }
+shamir-storage = { path = "../shamir-storage", default-features = false }
+async-trait = "0.1.81"
+arc-swap = "1.7"
+thiserror = "2.0"
+serde = { version = "1.0.217", features = ["derive"] }
+smallvec = { version = "1.11", features = ["serde"] }
+tokio = { version = "1.49.0", features = ["full"] }
+log = "0.4"
+regex = "1.11.1"
+
+[dev-dependencies]
+rust_decimal = { version = "1.40.0", features = ["serde"] }
+num-bigint = { version = "0.4", features = ["serde"] }
+bincode = "1.3.3"
+
+[features]
+# Exposes validator test helpers to downstream tests.
+test-util = []
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

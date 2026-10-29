@@ -1,9 +1,7 @@
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::TableConfig;
-use crate::validator::registry::validator_db::{
-    reset_staged_rechecks, staged_rechecks, ValidatorDb,
-};
+use crate::validator::validator_db::{reset_staged_rechecks, staged_rechecks, ValidatorDb};
 use shamir_query_builder::write::{doc, insert};
 use shamir_tx::IsolationLevel;
 use shamir_types::access::Actor;

@@ -13,6 +13,7 @@ license = "MIT OR Apache-2.0"
 # C/assembly). The `#[cfg(loom)]` module in `writer_drain_barrier.rs` is
 # compiled away from every other build -- see its doc for the opt-in command.
 loom = { version = "0.7", optional = true }
+shamir-engine-validator = { path = "../shamir-engine-validator" }
 shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 # Backends inherit `shamir-storage`'s feature set — the engine doesn't
@@ -97,7 +98,7 @@ fjall  = ["shamir-storage/fjall"]
 # shamir-engine is pulled in as a normal dependency. Enabled by
 # `shamir-db`'s `[dev-dependencies]` (audit #540 regression test); never
 # enabled by default, so nothing ships in a production build.
-test-util = ["shamir-engine-query/test-util"]
+test-util = ["shamir-engine-query/test-util", "shamir-engine-validator/test-util"]
 # F-56 (#882): enables the loom model-checker module in
 # `writer_drain_barrier.rs`. The `build.rs` emits `cfg(loom)` ONLY for this
 # crate when this feature is on (NOT via a global rustflag), so the heavy
