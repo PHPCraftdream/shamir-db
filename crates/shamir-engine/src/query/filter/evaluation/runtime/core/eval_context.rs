@@ -10,10 +10,10 @@ use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::batch::exec_scope::RowByteMeter;
 use crate::query::filter::caches::cond_cache::{new_local_cond_cache, CondCache, LocalCondCache};
 use crate::query::filter::caches::field_path_cache::FieldPathCache;
 use crate::query::filter::caches::query_ref_cache::QueryRefCache;
+use crate::query::filter::read_budget::{ReadByteMeter, ReadVisibilityScope};
 use crate::query::read::QueryResult;
 
 /// Context passed to filter callbacks during evaluation.
@@ -42,8 +42,8 @@ use crate::query::read::QueryResult;
 /// path). Used to resolve `FilterValue::Param { name }` references.
 pub struct FilterContext<'a> {
     pub(crate) read_visibility_budget: Option<Duration>,
-    pub(crate) read_visibility_scope: Option<&'a crate::query::batch::ExecScope>,
-    pub(crate) row_byte_meter: Option<&'a RowByteMeter<'a>>,
+    pub(crate) read_visibility_scope: Option<&'a dyn ReadVisibilityScope>,
+    pub(crate) row_byte_meter: Option<&'a dyn ReadByteMeter>,
     max_accumulator_bytes: Option<usize>,
     /// Interner for resolving field paths. `pub(crate)`, not `pub` (S5c-X
     /// Round 7): the `Interner` is interior-mutable (`touch_ind`), so a
@@ -232,7 +232,7 @@ impl<'a> FilterContext<'a> {
         }
     }
 
-    pub(crate) fn with_row_byte_meter(mut self, meter: Option<&'a RowByteMeter<'a>>) -> Self {
+    pub(crate) fn with_row_byte_meter(mut self, meter: Option<&'a dyn ReadByteMeter>) -> Self {
         self.row_byte_meter = meter;
         self
     }
@@ -252,10 +252,7 @@ impl<'a> FilterContext<'a> {
         self
     }
 
-    pub(crate) fn with_read_visibility_scope(
-        mut self,
-        scope: &'a crate::query::batch::ExecScope,
-    ) -> Self {
+    pub(crate) fn with_read_visibility_scope(mut self, scope: &'a dyn ReadVisibilityScope) -> Self {
         self.read_visibility_scope = Some(scope);
         self
     }

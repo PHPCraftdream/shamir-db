@@ -14,7 +14,7 @@ pub mod evaluation;
 pub use caches::{cond_cache, field_path_cache, query_ref_cache};
 pub use evaluation::filter_node;
 pub use evaluation::planning::{compile, index_range};
-pub use evaluation::runtime::core::{eval, eval_bytes, eval_context};
+pub use evaluation::runtime::core::{eval, eval_bytes, eval_context, read_budget};
 pub use evaluation::semantics::{fts, pattern_guard, resolve};
 // Crate-internal module (kept at the historical `filter::numeric_cmp` path).
 pub(crate) use evaluation::semantics::numeric_cmp;

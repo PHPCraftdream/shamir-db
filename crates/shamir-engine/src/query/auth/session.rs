@@ -1,8 +1,8 @@
 //! Pre-computed permission cache for O(1) superadmin / O(n) access checks.
 
 use crate::query::auth::{Action, Effect, Resource, Role};
-use crate::query::batch::{BatchOp, QueryEntry};
 use crate::query::filter::Filter;
+use shamir_query_types::batch::{BatchOp, QueryEntry};
 use shamir_types::types::common::TMap;
 
 // ============================================================================
