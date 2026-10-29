@@ -3859,12 +3859,8 @@ name = "shamir-transport-ws"
 version = "0.1.0-alpha.1"
 dependencies = [
  "futures-util",
- "hex",
  "http",
- "rmp-serde",
  "rustls",
- "serde",
- "serde_bytes",
  "shamir-connect",
  "shamir-transport-tcp",
  "thiserror 2.0.21",
