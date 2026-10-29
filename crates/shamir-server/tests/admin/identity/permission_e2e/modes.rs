@@ -1,5 +1,5 @@
 //! Scenarios 1-3: chmod deny/allow by mode, group grant, open default.
-use crate::common::*;
+use super::common::*;
 use shamir_server::db_handler::{DbRequest, DbResponse};
 use shamir_server::server::{BootstrapMode, ServerLauncher};
 use tempfile::TempDir;

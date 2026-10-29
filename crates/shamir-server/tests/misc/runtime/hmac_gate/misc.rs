@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use crate::common::{
+use super::common::{
     build_handler_with_admin, decode, encode, execute_built, expect_batch_ok, expect_error,
     make_db_with_table, root_session, session_key,
 };

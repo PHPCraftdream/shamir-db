@@ -21,10 +21,10 @@ use std::time::Duration;
 
 use shamir_server::replication_seed::Manifest;
 
-use crate::harness::child;
-use crate::harness::follower;
-use crate::harness::ops;
-use crate::harness::wire;
+use super::super::harness::child;
+use super::super::harness::follower;
+use super::super::harness::ops;
+use super::super::harness::wire;
 
 const WAIT: Duration = Duration::from_secs(30);
 

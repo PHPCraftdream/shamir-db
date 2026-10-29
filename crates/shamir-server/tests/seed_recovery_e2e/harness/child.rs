@@ -68,7 +68,7 @@ pub fn free_addr() -> SocketAddr {
     addr
 }
 
-/// Spec-floor-but-fast KDF, matching `tests/common/mod.rs::fast_kdf`.
+/// Spec-floor-but-fast KDF, matching the shared harness `fast_kdf`.
 fn ktav_config(data_dir: &Path, addr: SocketAddr) -> String {
     format!(
         "\

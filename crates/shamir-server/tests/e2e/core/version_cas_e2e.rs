@@ -8,6 +8,8 @@
 //! must succeed and the other must see a `version_conflict` typed error;
 //! then a retry with the freshly-read version must succeed.
 
+use crate::common;
+
 use shamir_types::mpack;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -17,9 +19,6 @@ use shamir_query_builder::batch::{Batch, Isolation};
 use shamir_query_builder::filter;
 use shamir_query_builder::write::{update, upsert};
 use shamir_query_builder::{doc, Query};
-
-#[path = "../../common/mod.rs"]
-mod common;
 
 async fn connect_admin(addr: std::net::SocketAddr, admin_pw: &[u8]) -> Client {
     Client::connect(ConnectOptions {
