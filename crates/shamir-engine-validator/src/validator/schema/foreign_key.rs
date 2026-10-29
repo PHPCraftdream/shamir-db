@@ -3,7 +3,7 @@
 //! [`ForeignKeyRef`] identifies the parent table and field that the child
 //! field must reference.  The existence check is performed at write time by
 //! [`SchemaValidator`](super::schema_validator::SchemaValidator) via
-//! [`ValidatorDb::exists_in`](crate::validator::validator_db::ValidatorDb::exists_in).
+//! [`ValidatorDbProbe::exists_in`](crate::validator::validator_db_probe::ValidatorDbProbe::exists_in).
 //!
 //! Phase D adds [`on_delete`](ForeignKeyRef::on_delete) — the referential
 //! action applied when the parent row is deleted.
