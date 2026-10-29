@@ -381,6 +381,12 @@ async fn restore_on_open_version_mismatch_warns_and_rebuilds() {
         .await
         .unwrap();
 
+    // Exercise unsupported-version recovery in legacy metadata.
+    info_store
+        .remove(bytes::Bytes::from(format!("{}.integrity", keyspace)).into())
+        .await
+        .unwrap();
+
     // ---- phase 3: open — restore_on_open must warn + fall back ---------
     let backend = make_backend(&i, id, DIM, VectorMetric::L2);
     // Must NOT panic — a corrupt snapshot is recoverable.

@@ -16,8 +16,31 @@
 //! test binaries need no fixture crate at runtime; the lineage test below
 //! keeps the mirror in check.
 
+use crate::vector::quant_meta::QuantMeta;
 use crate::vector::sq8::Sq8Quantizer;
 use shamir_bench_utils::vector_data::{Lcg as BenchLcg, LCG_INC, LCG_MULT};
+
+/// `from_quantizer` ↔ `to_quantizer` round-trips the params exactly.
+#[test]
+fn quant_meta_round_trips_sq8_params() {
+    let training: Vec<Vec<f32>> = (0..50)
+        .map(|i| {
+            (0..8)
+                .map(|j| (i as f32 * 0.1) + (j as f32 * 0.01))
+                .collect()
+        })
+        .collect();
+    let q = Sq8Quantizer::fit(&training, 8);
+    let meta = QuantMeta::from_quantizer(&q);
+    assert_eq!(meta.method, "sq8");
+    assert_eq!(meta.dim, 8);
+    let q2 = meta.to_quantizer();
+    assert_eq!(q2.dim(), q.dim());
+    assert_eq!(q2.mins(), q.mins());
+    assert_eq!(q2.scales(), q.scales());
+    let v = training[0].clone();
+    assert_eq!(q.quantize(&v), q2.quantize(&v));
+}
 
 // ----- deterministic RNG (mirrors shamir_bench_utils::Lcg lineage) --------
 
