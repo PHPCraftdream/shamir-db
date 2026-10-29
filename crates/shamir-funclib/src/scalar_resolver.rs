@@ -7,6 +7,7 @@
 //! priority while keeping the built-in fast-path (empty user layer → one hash-miss
 //! on an empty `scc::HashMap` → straight to the static builtin).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use scc::hash_map::Entry;
@@ -15,6 +16,11 @@ use shamir_collections::THasher;
 
 use crate::registry::{FnEntry, ScalarError, ScalarResult};
 use shamir_types::types::value::QueryValue;
+
+/// Number of argon2-named calls run inline while a non-multi-thread runtime is active.
+pub static ARGON2_INLINE_ON_RUNTIME: AtomicU64 = AtomicU64::new(0);
+/// Whether the process-wide warning for inline runtime execution has been issued.
+pub static ARGON2_INLINE_WARNING_EMITTED: AtomicBool = AtomicBool::new(false);
 
 // -----------------------------------------------------------------
 // UserScalarLayer — the per-DB user-registered scalar table.
@@ -127,6 +133,39 @@ impl ScalarResolver {
                 .ok_or_else(|| ScalarError::builtin("unknown_function"))?,
             args,
         )
+    }
+
+    /// Dispatch argon2-named scalars with a Tokio worker handoff on multi-thread
+    /// runtimes, including user shadows. The call runs on the current thread,
+    /// not the blocking pool. Do not call from a LocalSet driven by
+    /// Runtime::block_on or Handle::block_on on a multi-thread runtime: its
+    /// local tasks cannot be handed off. Other scalars run inline. Current-thread
+    /// runtimes run inline with a once-per-process warning and counter; calls
+    /// outside a runtime run inline without either.
+    pub fn call_offloaded(&self, name: &str, args: &[QueryValue]) -> ScalarResult {
+        if name != "crypto/argon2id" && name != "argon2id" {
+            return self.call(name, args);
+        }
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                // A panicking scalar becomes an error; its captured state is the
+                // closure's own concern (AssertUnwindSafe only contains the unwind).
+                tokio::task::block_in_place(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(name, args)))
+                })
+                .map_err(|_| ScalarError::new("scalar_task_failed"))?
+            }
+            Ok(_) => {
+                ARGON2_INLINE_ON_RUNTIME.fetch_add(1, Ordering::Relaxed);
+                if !ARGON2_INLINE_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+                    log::warn!(
+                        "argon2 scalar runs inline and may stall the current-thread runtime worker"
+                    );
+                }
+                self.call(name, args)
+            }
+            Err(_) => self.call(name, args),
+        }
     }
 
     /// Call a resolved entry only when it is trusted for functional indexing.

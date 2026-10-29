@@ -4,7 +4,14 @@
 //! Each check has an accept + reject case; the scalar-bridge `None`-resolver
 //! path (silent skip) is covered explicitly.
 
-use shamir_funclib::scalar_resolver::ScalarResolver;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
+
+use shamir_funclib::registry::FnEntry;
+use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
@@ -17,6 +24,16 @@ use crate::validator::schema::format::FormatKind;
 use crate::validator::schema::type_tag::TypeTag;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
+
+fn assert_ticker_progress(ticker: &AtomicU64) {
+    let before = ticker.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = ticker.load(Ordering::Relaxed);
+    assert!(
+        after.saturating_sub(before) >= 3,
+        "ticker stalled: {before} -> {after}"
+    );
+}
 
 fn fields_from(pairs: Vec<(&str, QueryValue)>) -> QueryValue {
     let mut m = new_map();
@@ -65,6 +82,53 @@ fn rule_with(path: &str, ty: TypeTag, constraints: Constraints) -> FieldRule {
 // ═══════════════════════════════════════════════════════════════════════
 // 1. SCALAR-BRIDGE
 // ═══════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn scalar_bridge_argon_keeps_worker_live() {
+    let ticker = Arc::new(AtomicU64::new(0));
+    let ticks = Arc::clone(&ticker);
+    let ticker_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ticks.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let invoked = Arc::new(AtomicU64::new(0));
+    let invoked_in_scalar = Arc::clone(&invoked);
+    let result = tokio::spawn(async move {
+        let layer = Arc::new(UserScalarLayer::new());
+        layer.register(
+            "crypto/argon2id",
+            FnEntry::pure(
+                move |_| {
+                    invoked_in_scalar.fetch_add(1, Ordering::Relaxed);
+                    assert_ticker_progress(&ticker);
+                    Ok(QueryValue::Bool(true))
+                },
+                1,
+                Some(1),
+            ),
+        );
+        let resolver = ScalarResolver::new(layer);
+        let rule = rule_with(
+            "x",
+            TypeTag::String,
+            Constraints {
+                scalar: Some("crypto/argon2id".into()),
+                ..Default::default()
+            },
+        );
+        let qv = fields_from(vec![("x", QueryValue::Str("value".into()))]);
+        let result = check_extended_with_resolver(&rule, &qv, &resolver);
+        assert!(result.is_ok(), "{:?}", result.errors);
+    })
+    .await;
+    ticker_task.abort();
+    let _ = ticker_task.await;
+    result.unwrap();
+    // The ticker assertion lives inside the scalar: prove the scalar ran exactly once.
+    assert_eq!(invoked.load(Ordering::Relaxed), 1);
+}
 
 #[test]
 fn scalar_bridge_accepts_valid_email() {

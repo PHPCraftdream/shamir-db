@@ -15,8 +15,11 @@
 //!   Argon2id KDF. It is **deterministic** given its inputs (same password +
 //!   salt + params → same digest), so it fits the pure-scalar contract — but
 //!   it is **CPU- and memory-bound** (tens of ms at OWASP defaults). A caller
-//!   dispatching it on an async runtime MUST offload to `spawn_blocking`; do
-//!   not invoke it inline on a runtime worker.
+//!   dispatching it on a multi-thread Tokio runtime hands off the worker while
+//!   running the call on the current thread, not the blocking pool. Do not call
+//!   from a LocalSet driven by Runtime::block_on or Handle::block_on on a
+//!   multi-thread runtime. On a current-thread runtime the synchronous
+//!   dispatcher runs inline and warns because it can stall the sole worker.
 //! - Every function here is `pure + deterministic` (no randomness, no clock),
 //!   so all use [`FnEntry::pure`]. Non-deterministic procedural crypto
 //!   (random / uuid) and asymmetric / PQC primitives remain out of scope.
@@ -32,6 +35,8 @@
 //! [`ARGON2ID_CONCURRENCY_CAP`]) bounds the in-flight `hash_password_into`
 //! calls across ALL connections/queries. See the note on [`argon2id_fn`] for
 //! the inline-dispatch tension this gate cannot resolve on its own.
+
+pub use crate::scalar_resolver::{ARGON2_INLINE_ON_RUNTIME, ARGON2_INLINE_WARNING_EMITTED};
 
 use crate::registry::{arg_bytes, arg_i64, v_bool, v_bytes, FnEntry, ScalarError, ScalarRegistry};
 use argon2::{Algorithm, Argon2, Params as Argon2Params, Version};
@@ -104,15 +109,14 @@ pub(crate) static A2_IN_FLIGHT: AtomicU32 = AtomicU32::new(0);
 /// through `FnEntry` (which is a pure `fn(&[QueryValue]) -> ScalarResult`
 /// contract with no side-channel for shared limiters).
 ///
-/// **Inlining tension (audit §2b, residual risk):** the current engine
-/// dispatches registered scalars *inline* on the async runtime worker — no
-/// `spawn_blocking` wraps `scalars.call(...)` in `filter/resolve.rs`,
-/// `table/write_helpers.rs`, or `validator/schema/field_rule.rs`. A blocking
-/// `acquire()` here therefore stalls the runtime worker the same way the
-/// uncapped Argon2 call already does today. The cap nonetheless bounds
-/// aggregate Argon2 memory (the primary audit concern) and is the correct
-/// minimal fix; moving scalar dispatch onto `spawn_blocking` project-wide is a
-/// larger refactor flagged as follow-up.
+/// **Runtime contract:** the engine's scalar dispatcher hands off the worker
+/// for argon2-named calls, including gate waits, on multi-thread Tokio runtimes;
+/// the call remains on the current thread, not the blocking pool. Do not call
+/// from a LocalSet driven by Runtime::block_on or Handle::block_on on a
+/// multi-thread runtime. On a current-thread runtime it runs inline, potentially stalling the worker, and
+/// records a counter and a once-per-process warning. Plain synchronous calls
+/// run inline without warning. The cap bounds aggregate Argon2 memory in all
+/// cases.
 static ARGON2ID_CONCURRENCY_GATE: LazyLock<CountingSemaphore> =
     LazyLock::new(|| CountingSemaphore::with_capacity(ARGON2ID_CONCURRENCY_CAP));
 

@@ -206,7 +206,7 @@ pub(super) fn resolve_aggregate_input(
                 .map(|arg| resolve_aggregate_input(arg, record, ctx))
                 .collect::<DbResult<Vec<_>>>()?;
             ctx.scalars
-                .call(call.name(), &args)
+                .call_offloaded(call.name(), &args)
                 .map_err(|error| DbError::Function(error.to_string()))
         }
         FilterValue::Cond { cond } => {
