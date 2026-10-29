@@ -26,7 +26,7 @@ pub(super) use tokio::task::spawn_blocking;
 
 pub(super) use crate::segment::wal_sink::WalSink;
 pub(super) use crate::wal_entry_v2::WalEntryV2;
-pub(super) use crate::wal_segment::WalSegment;
+pub(super) use crate::wal_segment::{wal_io_error, WalSegment};
 
 /// Metadata for one sealed (closed) segment. Its file is fully written
 /// (no torn tail) and may be replayed or deleted but never appended.
@@ -70,6 +70,8 @@ pub struct SegmentSet {
     pub(crate) sync_gate: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     pub(crate) sync_test: super::sync_test_seam::SyncTestSeam,
+    #[cfg(test)]
+    fail_retry_write: std::sync::atomic::AtomicBool,
 }
 
 /// Format a segment file name from its seq: `NNNNNNNN.wal` (zero-padded 8).
@@ -98,14 +100,14 @@ impl SegmentSet {
         let scan_dir = dir.clone();
         let mut seqs: Vec<u64> = spawn_blocking(move || -> DbResult<Vec<u64>> {
             std::fs::create_dir_all(&scan_dir).map_err(|e| {
-                DbError::Storage(format!("SegmentSet create_dir {scan_dir:?}: {e}"))
+                wal_io_error(format!("SegmentSet create_dir {scan_dir:?}"), e)
             })?;
             let mut out = Vec::new();
             for entry in std::fs::read_dir(&scan_dir)
-                .map_err(|e| DbError::Storage(format!("SegmentSet read_dir {scan_dir:?}: {e}")))?
+                .map_err(|e| wal_io_error(format!("SegmentSet read_dir {scan_dir:?}"), e))?
             {
                 let entry =
-                    entry.map_err(|e| DbError::Storage(format!("SegmentSet dir entry: {e}")))?;
+                    entry.map_err(|e| wal_io_error("SegmentSet dir entry".into(), e))?;
                 if let Some(name) = entry.file_name().to_str() {
                     if let Some(seq) = parse_seg_seq(name) {
                         out.push(seq);
@@ -140,6 +142,8 @@ impl SegmentSet {
                 sync_gate: Arc::new(tokio::sync::Mutex::new(())),
                 #[cfg(test)]
                 sync_test: super::sync_test_seam::SyncTestSeam::default(),
+                #[cfg(test)]
+                fail_retry_write: std::sync::atomic::AtomicBool::new(false),
                 inner: Mutex::new(Inner {
                     sealed: Vec::new(),
                     active,
@@ -246,12 +250,20 @@ impl SegmentSet {
             sync_gate: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             sync_test: super::sync_test_seam::SyncTestSeam::default(),
+            #[cfg(test)]
+            fail_retry_write: std::sync::atomic::AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 sealed,
                 active,
                 active_seq,
             }),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_retry_write_failure(&self) {
+        self.fail_retry_write
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Append a batch to the active segment, then rotates if the active
@@ -316,6 +328,13 @@ impl SegmentSet {
                     let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
                     Arc::clone(&g.active)
                 };
+                #[cfg(test)]
+                if self
+                    .fail_retry_write
+                    .swap(false, std::sync::atomic::Ordering::AcqRel)
+                {
+                    active.inject_partial_write_failure(7);
+                }
                 let last_seq = active.append_batch(payloads, max_version).await?;
                 // The freshly-rotated segment is brand new and small — no
                 // size-based rotation check needed here.

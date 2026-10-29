@@ -287,6 +287,7 @@ impl HnswAdapter {
         vectors: scc::HashMap<usize, Vec<f32>, THasher>,
         deleted: scc::HashMap<usize, (), THasher>,
         next_id: usize,
+        quantization: Option<VectorQuantization>,
     ) -> Self {
         #[allow(clippy::disallowed_methods)] // O(N) ack: one-time seed at snapshot load
         let deleted_cnt = deleted.len();
@@ -297,7 +298,7 @@ impl HnswAdapter {
             m: usize::from(hnsw.get_max_nb_connection()),
             max_layer: hnsw.get_max_level(),
             ef_construction: hnsw.get_ef_construction(),
-            quantization: None,
+            quantization,
             state: Arc::new(HnswState {
                 hnsw: ArcSwapOption::new(Some(hnsw)),
                 rid_map,

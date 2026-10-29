@@ -8,6 +8,90 @@ use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::batch::batch_op::BatchOp;
+use crate::subscribe::DeliverMode;
+
+// Wire-format regression tests use raw input because a builder would bypass the decoding boundary.
+#[test]
+fn large_typed_unsigned_values_survive_batch_dispatch() {
+    for version in [i64::MAX as u64 + 1, u64::MAX] {
+        for input in [
+            format!(
+                r#"{{
+                "update": "users",
+                "set": {{}},
+                "expected_version": {version}
+            }}"#
+            ),
+            format!(
+                r#"{{
+                "delete_from": "users",
+                "where": {{
+                    "op": "eq",
+                    "field": ["name"],
+                    "value": "x"
+                }},
+                "expected_version": {version}
+            }}"#
+            ),
+        ] {
+            let wire: serde_json::Value = serde_json::from_str(&input).unwrap();
+            let bytes = rmp_serde::to_vec_named(&wire).unwrap();
+            let op: BatchOp = rmp_serde::from_slice(&bytes).unwrap();
+            let actual = match op {
+                BatchOp::Update(op) => op.expected_version,
+                BatchOp::Delete(op) => op.expected_version,
+                other => panic!("unexpected operation: {other:?}"),
+            };
+            assert_eq!(actual, Some(version));
+        }
+    }
+}
+
+#[test]
+fn nested_batch_preserves_large_work_limit() {
+    let wire: serde_json::Value = serde_json::from_str(
+        r#"{
+        "batch": {
+            "id": null,
+            "queries": {},
+            "limits": {
+                "max_total_work": 18446744073709551615
+            }
+        }
+    }"#,
+    )
+    .unwrap();
+    let bytes = rmp_serde::to_vec_named(&wire).unwrap();
+    let op: BatchOp = rmp_serde::from_slice(&bytes).unwrap();
+    match op {
+        BatchOp::Batch(op) => assert_eq!(op.batch.limits.max_total_work, u64::MAX),
+        other => panic!("unexpected operation: {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_discriminator_last_value_wins() {
+    let input = r#"{
+        "from": "first",
+        "from": "last"
+    }"#;
+    match serde_json::from_str::<BatchOp>(input).unwrap() {
+        BatchOp::Read(op) => assert_eq!(op.from.table, "last"),
+        other => panic!("unexpected operation: {other:?}"),
+    }
+}
+
+#[test]
+fn ambiguous_discriminator_error_is_preserved() {
+    let op = mpack!({
+        "from": "users",
+        "insert_into": "orders"
+    });
+    assert!(decode(&op)
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous BatchOp discriminators"));
+}
 
 fn decode(qv: &QueryValue) -> Result<BatchOp, Box<dyn std::error::Error>> {
     let bytes = rmp_serde::to_vec_named(qv)?;
@@ -124,5 +208,65 @@ fn rv_query_types_77bfc767_drop_index_with_payload_decodes() {
     match decode(&qv).expect("payload keys belong to the typed op") {
         BatchOp::DropIndex(op) => assert_eq!(op.request_id, Some(request_id)),
         other => panic!("expected DropIndex, got {other:?}"),
+    }
+}
+
+#[test]
+fn trailing_sequence_elements_are_rejected_like_the_wire_decoder() {
+    // TableRef reads exactly two elements; the buffered path must not drop a third.
+    let valid = mpack!({
+        "from": ["main", "users"]
+    });
+    assert!(decode(&valid).is_ok());
+    let trailing = mpack!({
+        "from": ["main", "users", "unexpected"]
+    });
+    assert!(decode(&trailing).is_err());
+}
+
+// Raw MessagePack: these forms are only reachable below the QueryValue builders.
+#[test]
+fn enum_identifier_forms_accepted_by_the_wire_decoder_stay_accepted() {
+    let forms: [(&str, &[u8]); 3] = [
+        (
+            "variant index",
+            &[
+                0x82, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0x90, 0xa7, b'd',
+                b'e', b'l', b'i', b'v', b'e', b'r', 0x00,
+            ],
+        ),
+        (
+            "string name",
+            &[
+                0x82, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0x90, 0xa7, b'd',
+                b'e', b'l', b'i', b'v', b'e', b'r', 0xa7, b'r', b'e', b'c', b'o', b'r', b'd', b's',
+            ],
+        ),
+        (
+            "binary name",
+            &[
+                0x82, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0x90, 0xa7, b'd',
+                b'e', b'l', b'i', b'v', b'e', b'r', 0xc4, 0x07, b'r', b'e', b'c', b'o', b'r', b'd',
+                b's',
+            ],
+        ),
+    ];
+    for (label, bytes) in forms {
+        match rmp_serde::from_slice::<BatchOp>(bytes) {
+            Ok(BatchOp::Subscribe(op)) => assert_eq!(op.deliver, DeliverMode::Records, "{label}"),
+            other => panic!("{label}: unexpected result {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn binary_where_a_sequence_is_expected_decodes_as_bytes() {
+    // {"subscribe": bin8(empty)} decoded as an empty Vec before the direct path.
+    let bytes = [
+        0x81, 0xa9, b's', b'u', b'b', b's', b'c', b'r', b'i', b'b', b'e', 0xc4, 0x00,
+    ];
+    match rmp_serde::from_slice::<BatchOp>(&bytes) {
+        Ok(BatchOp::Subscribe(op)) => assert!(op.subscribe.is_empty()),
+        other => panic!("unexpected result {other:?}"),
     }
 }

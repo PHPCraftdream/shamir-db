@@ -1,6 +1,8 @@
 //! Exact coverage and sync phase regressions.
 use super::*;
+use crate::segment_set::sync_test_seam::InjectedSealedError;
 use crate::wal_group_commit::WalCoverage;
+use crate::wal_ticket::WalAppendError;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Bounded test-only bitmap oracle (versions 1..=63). Production coverage
@@ -536,4 +538,57 @@ async fn rotation_waits_for_existing_sync_without_blocking_ordinary_append() {
     drop(held);
     append.await.unwrap();
     assert_eq!(segments.replay().await.unwrap()[0].commit_version, 1);
+}
+
+// A reopened seal has uncertain durability; neither read nor sync failure may
+// be certified or lose its original I/O cause in the ticket.
+#[tokio::test]
+async fn rv_wal_5839ff0d_sealed_snapshot_ticket_preserves_io_cause() {
+    for injection in [1, 2] {
+        let dir = TempDir::new().unwrap();
+        let old = crate::wal_segment::WalSegment::open(dir.path().join("00000000.wal"))
+            .await
+            .unwrap();
+        old.append_batch(Arc::new(vec![entry(1, 1).encode().unwrap()]), 1)
+            .await
+            .unwrap();
+        drop(old);
+        drop(
+            crate::wal_segment::WalSegment::open(dir.path().join("00000001.wal"))
+                .await
+                .unwrap(),
+        );
+        let segments = SegmentSet::open(dir.path().to_path_buf(), u64::MAX)
+            .await
+            .unwrap();
+        segments
+            .sync_test
+            .sealed_error
+            .store(injection, Ordering::Release);
+        let sink = Arc::new(WalSink::File(segments));
+        let gc = tracked_group(Arc::clone(&sink));
+        let (ticket, completion) =
+            gc.append_ticketed(entry(2, 2).encode().unwrap(), 2, WalDurability::Synced);
+        assert_eq!(completion.await, Err(WalAppendError::WrittenNotDurable));
+        let cause = ticket.failure_cause().unwrap();
+        let shamir_storage::error::DbError::Io(io) = &*cause else {
+            panic!("expected typed I/O cause: {cause}");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+        let original = io
+            .get_ref()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<std::io::Error>()
+            .unwrap();
+        assert_eq!(original.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(original
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<InjectedSealedError>()
+            .is_some());
+        assert_eq!(gc.recoverable_through(), 0);
+        gc.sync_now().await.unwrap();
+    }
 }

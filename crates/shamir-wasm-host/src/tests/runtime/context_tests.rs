@@ -1,8 +1,10 @@
 use crate::{FnBatch, FnCtx, FunctionRegistry, GlobalVars, Params, ShamirFunction};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::thread;
+use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::{ffi::OsString, os::unix::ffi::OsStringExt, process::Command};
 
@@ -65,44 +67,72 @@ impl ShamirFunction for GlobalBump {
 
 // ── Tests ─────────────────────────────────────────────────────────────
 
+// Many observed writer completions between reads increase the likelihood of
+// detecting a missing-key gap under concurrent updates. This is statistical,
+// not a guarantee: even 20,000 such observations can miss a gap.
+fn check_setter_reads<W, R>(write: W, read: R)
+where
+    W: Fn() + Send + 'static,
+    R: Fn() -> bool,
+{
+    let stop = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(AtomicU64::new(0));
+    let writer_stop = Arc::clone(&stop);
+    let writer_progress = Arc::clone(&progress);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let writer = thread::spawn(move || {
+        while !writer_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+            write();
+            writer_progress.fetch_add(1, Ordering::Release);
+        }
+    });
+
+    let mut count = 0;
+    let mut missing = false;
+    let mut previous = progress.load(Ordering::Acquire);
+    while count < 20_000 && Instant::now() < deadline {
+        if !read() {
+            missing = true;
+            break;
+        }
+        let current = progress.load(Ordering::Acquire);
+        if current != previous {
+            count += 1;
+        } else {
+            thread::yield_now();
+        }
+        previous = current;
+    }
+    stop.store(true, Ordering::Release);
+    let joined = writer.join();
+    assert!(joined.is_ok(), "writer thread panicked");
+    assert!(!missing, "setter exposed a missing key");
+    assert!(
+        count >= 20_000,
+        "overlap not achieved: only {count} reads observed writer progress before deadline"
+    );
+}
+
 #[test]
 fn rv_wasm_host_c51052df_context_put_never_exposes_missing_key() {
     let context = Arc::new(BatchContext::new());
     context.put("key", QueryValue::Int(0));
-    let start = Arc::new(Barrier::new(2));
     let writer_context = Arc::clone(&context);
-    let writer_start = Arc::clone(&start);
-    let writer = thread::spawn(move || {
-        writer_start.wait();
-        for value in 1..=100_000 {
-            writer_context.put("key", QueryValue::Int(value));
-        }
-    });
-    start.wait();
-    for _ in 0..100_000 {
-        assert!(context.get("key").is_some(), "put exposed a missing key");
-    }
-    writer.join().expect("writer thread panicked");
+    check_setter_reads(
+        move || writer_context.put("key", QueryValue::Int(1)),
+        || context.get("key").is_some(),
+    );
 }
 
 #[test]
 fn rv_wasm_host_c51052df_global_set_never_exposes_missing_key() {
     let globals = Arc::new(GlobalVars::new());
     globals.set("key", QueryValue::Int(0));
-    let start = Arc::new(Barrier::new(2));
     let writer_globals = Arc::clone(&globals);
-    let writer_start = Arc::clone(&start);
-    let writer = thread::spawn(move || {
-        writer_start.wait();
-        for value in 1..=100_000 {
-            writer_globals.set("key", QueryValue::Int(value));
-        }
-    });
-    start.wait();
-    for _ in 0..100_000 {
-        assert!(globals.get("key").is_some(), "set exposed a missing key");
-    }
-    writer.join().expect("writer thread panicked");
+    check_setter_reads(
+        move || writer_globals.set("key", QueryValue::Int(1)),
+        || globals.get("key").is_some(),
+    );
 }
 
 #[cfg(unix)]

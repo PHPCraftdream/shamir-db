@@ -26,9 +26,10 @@
 
 use crate::backend::{IndexBackend, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
-use crate::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
+use crate::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization};
+use crate::persistence::{load_index2_metadata, save_index2_metadata};
 use crate::vector::adapter::VectorAdapter;
-use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
+use crate::vector::hnsw_adapter::{await_fitted, HnswAdapter, HnswConfig};
 use crate::vector::snapshot;
 use crate::vector::vector_backend::VectorBackend;
 use shamir_storage::storage_in_memory::InMemoryStore;
@@ -400,4 +401,237 @@ async fn restore_on_open_version_mismatch_warns_and_rebuilds() {
     let top = topk_ids(&backend, &q, 5).await;
     assert_eq!(top.len(), 5, "fallback rebuild must populate the graph");
     // No panic — the corrupt snapshot did not abort the open.
+}
+
+async fn persisted_vector(
+    info: &Arc<dyn Store>,
+    interner: &Interner,
+    id: u32,
+    mode: Option<VectorQuantization>,
+) {
+    let mut descriptor = make_backend(interner, id, DIM, VectorMetric::L2)
+        .descriptor()
+        .clone();
+    descriptor.paths.push(vec![intern(interner, "embedding")]);
+    if let IndexKind::Vector(config) = &mut descriptor.kind {
+        config.quantization = mode;
+    }
+    let registry = crate::IndexRegistry::new();
+    registry
+        .insert(crate::build_index2_backend(descriptor, info))
+        .await
+        .unwrap();
+    save_index2_metadata(&registry, info).await.unwrap();
+}
+
+async fn reopen_vector(info: &Arc<dyn Store>, data: &Arc<dyn Store>) -> Arc<dyn IndexBackend> {
+    let descriptor = load_index2_metadata(info)
+        .await
+        .unwrap()
+        .unwrap()
+        .descriptors
+        .remove(0);
+    let backend = crate::build_index2_backend(descriptor, info);
+    backend
+        .restore_on_open(Arc::clone(info), Arc::clone(data))
+        .await
+        .unwrap();
+    backend
+}
+
+async fn write_source(data: &Arc<dyn Store>, interner: &Interner, count: usize) {
+    for n in 0..count {
+        let vector = lcg_vec(DIM as usize, n as u64 + 1);
+        let record = make_rec(
+            interner,
+            &vector.iter().map(|v| f64::from(*v)).collect::<Vec<_>>(),
+        );
+        data.set(rid(n).to_bytes().into(), record.to_bytes().unwrap())
+            .await
+            .unwrap();
+    }
+}
+
+async fn finish_and_assert_fit(backend: &Arc<dyn IndexBackend>, first: usize) {
+    let adapter = backend
+        .as_any()
+        .downcast_ref::<VectorBackend>()
+        .unwrap()
+        .adapter_for_test();
+    let hnsw = adapter.as_hnsw_adapter().unwrap();
+    assert_eq!(hnsw.quantization_mode(), Some(VectorQuantization::Sq8));
+    assert!(!hnsw.is_quantized());
+    assert_eq!(adapter.len(), first);
+    for n in first..256 {
+        adapter
+            .upsert(rid(n), &lcg_vec(DIM as usize, n as u64 + 1))
+            .await
+            .unwrap();
+    }
+    await_fitted(hnsw).await;
+    assert!(hnsw.is_quantized());
+}
+
+#[tokio::test]
+async fn sq8_intent_survives_metadata_and_missing_snapshot() {
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let interner = Interner::new();
+    persisted_vector(&info, &interner, 19, Some(VectorQuantization::Sq8)).await;
+    write_source(&data, &interner, 4).await;
+    let backend = reopen_vector(&info, &data).await;
+    assert_eq!(backend.rebuild_count(), 1);
+    finish_and_assert_fit(&backend, 4).await;
+}
+
+#[tokio::test]
+async fn sq8_intent_survives_f32_snapshot() {
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let interner = Interner::new();
+    persisted_vector(&info, &interner, 20, Some(VectorQuantization::Sq8)).await;
+    let (original, _) = build_adapter(DIM, VectorMetric::L2);
+    for n in 0..4 {
+        original
+            .upsert(rid(n), &lcg_vec(DIM as usize, n as u64 + 1))
+            .await
+            .unwrap();
+    }
+    snapshot::dump_snapshot(&original, &info, "__vec_snap__20")
+        .await
+        .unwrap();
+    let backend = reopen_vector(&info, &data).await;
+    assert_eq!(backend.rebuild_count(), 0);
+    finish_and_assert_fit(&backend, 4).await;
+}
+
+#[tokio::test]
+async fn sq8_intent_survives_corrupt_snapshot() {
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let interner = Interner::new();
+    persisted_vector(&info, &interner, 21, Some(VectorQuantization::Sq8)).await;
+    write_source(&data, &interner, 4).await;
+    let (original, _) = build_adapter(DIM, VectorMetric::L2);
+    original
+        .upsert(rid(0), &lcg_vec(DIM as usize, 1))
+        .await
+        .unwrap();
+    snapshot::dump_snapshot(&original, &info, "__vec_snap__21")
+        .await
+        .unwrap();
+    let manifest = snapshot::read_manifest(&info, "__vec_snap__21")
+        .await
+        .unwrap();
+    let key = format!("__vec_snap__21.g{}.sidecar", manifest.gen);
+    info.set(
+        bytes::Bytes::from(key).into(),
+        bytes::Bytes::from_static(b"corrupt"),
+    )
+    .await
+    .unwrap();
+    let backend = reopen_vector(&info, &data).await;
+    assert_eq!(backend.rebuild_count(), 1);
+    finish_and_assert_fit(&backend, 4).await;
+}
+
+#[tokio::test]
+async fn f32_snapshot_without_intent_never_fits() {
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let interner = Interner::new();
+    persisted_vector(&info, &interner, 22, None).await;
+    let (original, _) = build_adapter(DIM, VectorMetric::L2);
+    for n in 0..4 {
+        original
+            .upsert(rid(n), &lcg_vec(DIM as usize, n as u64 + 1))
+            .await
+            .unwrap();
+    }
+    snapshot::dump_snapshot(&original, &info, "__vec_snap__22")
+        .await
+        .unwrap();
+    let backend = reopen_vector(&info, &data).await;
+    assert_eq!(backend.rebuild_count(), 0);
+    let adapter = backend
+        .as_any()
+        .downcast_ref::<VectorBackend>()
+        .unwrap()
+        .adapter_for_test();
+    let hnsw = adapter.as_hnsw_adapter().unwrap();
+    assert_eq!(hnsw.quantization_mode(), None);
+    for n in 4..300 {
+        adapter
+            .upsert(rid(n), &lcg_vec(DIM as usize, n as u64 + 1))
+            .await
+            .unwrap();
+    }
+    assert!(!hnsw.is_quantized());
+}
+
+#[tokio::test]
+async fn legacy_fitted_snapshot_self_heals_options() {
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let interner = Interner::new();
+    persisted_vector(&info, &interner, 23, None).await;
+    assert!(load_index2_metadata(&info)
+        .await
+        .unwrap()
+        .unwrap()
+        .descriptors[0]
+        .options
+        .is_empty());
+    let original = HnswAdapter::new_with_quantization(
+        DIM,
+        VectorMetric::L2,
+        HnswConfig::default(),
+        Some(VectorQuantization::Sq8),
+    );
+    for n in 0..256 {
+        original
+            .upsert(rid(n), &lcg_vec(DIM as usize, n as u64 + 1))
+            .await
+            .unwrap();
+    }
+    await_fitted(&original).await;
+    snapshot::dump_snapshot(&original, &info, "__vec_snap__23")
+        .await
+        .unwrap();
+    let backend = reopen_vector(&info, &data).await;
+    assert_eq!(backend.rebuild_count(), 0);
+    let adapter = backend
+        .as_any()
+        .downcast_ref::<VectorBackend>()
+        .unwrap()
+        .adapter_for_test();
+    assert!(adapter.as_hnsw_adapter().unwrap().is_quantized());
+    let registry = crate::IndexRegistry::new();
+    registry.insert(backend).await.unwrap();
+    save_index2_metadata(&registry, &info).await.unwrap();
+    let descriptor = load_index2_metadata(&info)
+        .await
+        .unwrap()
+        .unwrap()
+        .descriptors
+        .remove(0);
+    assert!(!descriptor.options.is_empty());
+    assert!(
+        matches!(&descriptor.kind, IndexKind::Vector(config) if config.quantization == Some(VectorQuantization::Sq8))
+    );
+    let reopened = crate::build_index2_backend(descriptor, &info);
+    reopened
+        .restore_on_open(Arc::clone(&info), data)
+        .await
+        .unwrap();
+    let live = reopened
+        .as_any()
+        .downcast_ref::<VectorBackend>()
+        .unwrap()
+        .adapter_for_test();
+    assert_eq!(
+        live.as_hnsw_adapter().unwrap().quantization_mode(),
+        Some(VectorQuantization::Sq8)
+    );
+    assert!(live.as_hnsw_adapter().unwrap().is_quantized());
 }

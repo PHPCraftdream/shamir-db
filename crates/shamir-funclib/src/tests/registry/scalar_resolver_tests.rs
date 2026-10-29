@@ -4,6 +4,95 @@
 use crate::registry::{v_int, v_str, FnEntry, ScalarResult};
 use crate::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_types::types::value::QueryValue;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
+
+fn assert_ticker_progress(ticker: &AtomicU64) {
+    let before = ticker.load(Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = ticker.load(Ordering::Relaxed);
+    assert!(
+        after.saturating_sub(before) >= 3,
+        "ticker stalled: {before} -> {after}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn argon_hands_off_worker() {
+    let ticker = Arc::new(AtomicU64::new(0));
+    let ticks = Arc::clone(&ticker);
+    let ticker_task = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            ticks.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+    let layer = Arc::new(UserScalarLayer::new());
+    layer.register(
+        "crypto/argon2id",
+        FnEntry::pure(
+            move |_| {
+                assert_ticker_progress(&ticker);
+                Ok(v_int(7))
+            },
+            0,
+            Some(0),
+        ),
+    );
+    let result =
+        tokio::spawn(
+            async move { ScalarResolver::new(layer).call_offloaded("crypto/argon2id", &[]) },
+        )
+        .await;
+    ticker_task.abort();
+    let _ = ticker_task.await;
+    assert_eq!(result.unwrap().unwrap(), v_int(7));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn argon_worker_panic_maps_to_scalar_error() {
+    let layer = Arc::new(UserScalarLayer::new());
+    layer.register(
+        "crypto/argon2id",
+        FnEntry::pure(|_| panic!("probe panic"), 0, Some(0)),
+    );
+    let result =
+        tokio::spawn(
+            async move { ScalarResolver::new(layer).call_offloaded("crypto/argon2id", &[]) },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.unwrap_err().code, "scalar_task_failed");
+}
+
+#[test]
+fn argon_does_not_deadlock_saturated_blocking_pool() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let layer = Arc::new(UserScalarLayer::new());
+    layer.register("crypto/argon2id", constant_entry(7));
+    let result = rt.block_on(async move {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || {
+                ScalarResolver::new(layer).call_offloaded("crypto/argon2id", &[])
+            }),
+        )
+        .await
+    });
+    rt.shutdown_timeout(Duration::from_secs(1));
+    assert!(
+        matches!(result, Ok(Ok(Ok(QueryValue::Int(7))))),
+        "{result:?}"
+    );
+}
 
 fn constant_entry(v: i64) -> FnEntry {
     FnEntry::pure(move |_| -> ScalarResult { Ok(v_int(v)) }, 0, None)

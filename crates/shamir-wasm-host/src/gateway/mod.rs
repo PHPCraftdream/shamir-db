@@ -1,5 +1,6 @@
 pub(crate) mod db_gateway;
 pub(crate) mod env_policy;
+pub(crate) mod ip_policy;
 pub(crate) mod net_gateway;
 #[cfg(test)]
 mod tests;

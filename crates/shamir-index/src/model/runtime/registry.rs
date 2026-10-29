@@ -495,7 +495,7 @@ impl IndexRegistry {
         let mut out = Vec::with_capacity(self.by_id.len());
         self.by_id
             .iter_async(|_, entry| {
-                let mut desc = entry.backend.descriptor().clone();
+                let mut desc = entry.backend.persisted_descriptor();
                 desc.state = entry.state;
                 desc.name = entry.name.clone();
                 desc.name_interned = entry.name_interned;
