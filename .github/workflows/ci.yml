@@ -141,7 +141,7 @@ jobs:
             esac
           fi
       # CI-03b: the full-tier rustdoc gate, mirrored cheaply for drafts.
-      # Engine and query crate cargo doc invocations as the `rustdoc` job (default and
+      # Engine, query and validator crate cargo doc invocations as the `rustdoc` job (default and
       # --no-default-features), gated on shamir-engine being affected —
       # same case-guard style as the doctests step above.
       - name: rustdoc gate (shamir-engine, draft tier)
@@ -157,6 +157,8 @@ jobs:
               cargo doc -p shamir-engine --no-deps --document-private-items --locked --no-default-features
               cargo doc -p shamir-engine-query --no-deps --document-private-items --locked
               cargo doc -p shamir-engine-query --no-deps --document-private-items --locked --features test-util
+              cargo doc -p shamir-engine-validator --no-deps --document-private-items --locked
+              cargo doc -p shamir-engine-validator --no-deps --document-private-items --locked --features test-util
               ;;
             *) echo "shamir-engine not affected; skipping rustdoc gate" ;;
           esac
@@ -213,7 +215,7 @@ jobs:
   # CI-03b: rustdoc gate. Docs are code: a broken intra-doc link or an
   # accidentally-private documented item fails CI like any other compile
   # error (`-D` promotes both lints to errors via RUSTDOCFLAGS). Only
-  # shamir-engine and shamir-engine-query are documented (the engine doctest gate is
+  # shamir-engine, shamir-engine-query and shamir-engine-validator are documented (the engine doctest gate is
   # the compile-fail boundary); shamir-db / shamir-server rustdoc is a
   # known limitation for a later round. Runs once with default features
   # and once with none, so doc comments under feature-gated items resolve
@@ -248,6 +250,12 @@ jobs:
       - env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine-query --no-deps --document-private-items --locked --features test-util
+      - env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        run: cargo doc -p shamir-engine-validator --no-deps --document-private-items --locked
+      - env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        run: cargo doc -p shamir-engine-validator --no-deps --document-private-items --locked --features test-util
 
   # CI-03b: engine feature matrix. Each cell compiles shamir-engine in
   # ISOLATION (`-p shamir-engine --lib`, never a workspace invocation that
@@ -303,6 +311,10 @@ jobs:
       - run: cargo clippy -p shamir-engine-query --lib --locked -- -D warnings
         if: matrix.cell.id == 'no-default'
       - run: cargo clippy -p shamir-engine-query --lib --locked --features test-util -- -D warnings
+        if: matrix.cell.id == 'test-util'
+      - run: cargo clippy -p shamir-engine-validator --lib --locked -- -D warnings
+        if: matrix.cell.id == 'no-default'
+      - run: cargo clippy -p shamir-engine-validator --lib --locked --features test-util -- -D warnings
         if: matrix.cell.id == 'test-util'
       # --all-targets ONLY here: under dev-dependency/workspace unification
       # it would falsely enable features in the reduced cells (see CI
