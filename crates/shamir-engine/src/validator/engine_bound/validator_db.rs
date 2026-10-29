@@ -34,6 +34,7 @@
 //! the same transaction is caught at validation time, not deferred to
 //! commit-time `UniqueGuard` re-validation.
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::{DbError, DbResult};
@@ -45,6 +46,7 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use crate::query::TableRef;
 use crate::query::TableResolver;
 use crate::table::TableManager;
+use crate::validator::ValidatorDbProbe;
 
 // ── QueryValue → InnerValue scalar conversion ───────────────────────────────
 
@@ -519,5 +521,21 @@ impl<'a> ValidatorDb<'a> {
             }
         }
         Ok(false)
+    }
+}
+
+#[async_trait]
+impl ValidatorDbProbe for ValidatorDb<'_> {
+    async fn exists_in(&self, table: &TableRef, field: &str, value: &QueryValue) -> DbResult<bool> {
+        ValidatorDb::exists_in(self, table, field, value).await
+    }
+
+    async fn exists_in_self(
+        &self,
+        field: &str,
+        value: &QueryValue,
+        exclude_rid: Option<&RecordId>,
+    ) -> DbResult<bool> {
+        ValidatorDb::exists_in_self(self, field, value, exclude_rid).await
     }
 }
