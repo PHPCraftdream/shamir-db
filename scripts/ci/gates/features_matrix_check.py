@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assert engine and forwarded query-crate features match a matrix cell.
+"""Assert engine and forwarded query/validator-crate features match a matrix cell.
 
 Why
     The ``engine-features`` CI job compiles one isolated cell per feature
@@ -111,6 +111,10 @@ EXPECTED: dict[str, set[str]] = {
 
 FORWARDED = {
     "shamir-engine-query": {
+        cell: {"default"} | ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
+        for cell in EXPECTED
+    },
+    "shamir-engine-validator": {
         cell: {"default"} | ({"test-util"} if cell in {"test-util", "fjall-test-util", "default-plus"} else set())
         for cell in EXPECTED
     }
