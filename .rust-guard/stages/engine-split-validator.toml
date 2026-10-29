@@ -3186,24 +3186,24 @@ owner = "@engine"
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_does_not_overwrite_explicit_null"
-to_path = "crates/shamir-engine-validator/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
-to_item = "shamir-engine-validator::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_does_not_overwrite_explicit_null"
+to_path = "crates/shamir-engine/src/validator/engine_bound/tests/computed_default_transform_tests.rs"
+to_item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests::computed_default_does_not_overwrite_explicit_null"
 reason = "moved with its module into the new crate (#1548 S2)"
 owner = "@engine"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_does_not_overwrite_present_value"
-to_path = "crates/shamir-engine-validator/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
-to_item = "shamir-engine-validator::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_does_not_overwrite_present_value"
+to_path = "crates/shamir-engine/src/validator/engine_bound/tests/computed_default_transform_tests.rs"
+to_item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests::computed_default_does_not_overwrite_present_value"
 reason = "moved with its module into the new crate (#1548 S2)"
 owner = "@engine"
 
 [[moved]]
 path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
 item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_fn_call_stamps_absent_field"
-to_path = "crates/shamir-engine-validator/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
-to_item = "shamir-engine-validator::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_fn_call_stamps_absent_field"
+to_path = "crates/shamir-engine/src/validator/engine_bound/tests/computed_default_transform_tests.rs"
+to_item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests::computed_default_fn_call_stamps_absent_field"
 reason = "moved with its module into the new crate (#1548 S2)"
 owner = "@engine"
 
@@ -4165,4 +4165,52 @@ owner = "@engine"
 path = "crates/shamir-engine/src/validator/mod.rs"
 item = "shamir-engine::lib::validator::engine_bound"
 reason = "new item of the validator split (seam trait / crate facade)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
+item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx"
+reason = "db field is the dyn seam ValidatorDbProbe (S2 seam)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
+item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::with_db"
+reason = "takes &dyn ValidatorDbProbe instead of the engine ValidatorDb (S2 seam)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/execution/record_validator.rs"
+item = "shamir-engine::lib::validator::execution::record_validator::ValidatorCtx::db"
+reason = "returns &dyn ValidatorDbProbe instead of the engine ValidatorDb (S2 seam)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
+item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_fn_call_stamps_absent_field"
+reason = "hoisted local use statements (S0b, test moved to validator::engine_bound)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
+item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_does_not_overwrite_present_value"
+reason = "hoisted local use statements (S0b, test moved to validator::engine_bound)"
+owner = "@engine"
+
+[[changed]]
+path = "crates/shamir-engine/src/validator/schema/tests/schema_rules/schema_validator_tests.rs"
+item = "shamir-engine::lib::validator::schema::tests::schema_rules::schema_validator_tests::computed_default_does_not_overwrite_explicit_null"
+reason = "hoisted local use statements (S0b, test moved to validator::engine_bound)"
+owner = "@engine"
+
+[[added]]
+path = "crates/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in"
+reason = "ValidatorDbProbe impl member delegating to the inherent probe (S2 seam)"
+owner = "@engine"
+
+[[added]]
+path = "crates/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in_self"
+reason = "ValidatorDbProbe impl member delegating to the inherent probe (S2 seam)"
 owner = "@engine"
