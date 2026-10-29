@@ -102,7 +102,7 @@ impl NetGateway for CurlNetGateway {
 
         // 4. Build curl config file.
         //    On Windows, paths in curl config must use forward slashes.
-        let mut cfg = String::new();
+        let mut cfg = String::from("noproxy = \"*\"\n");
 
         cfg.push_str(&format!("url = \"{}\"\n", escape_curl_value(&req.url)));
         cfg.push_str(&format!(
