@@ -42,9 +42,8 @@ use std::time::{Duration, Instant};
 
 use crate::query::batch::ExecScope;
 use async_trait::async_trait;
-use shamir_collections::TFxSet;
 use shamir_query_types::batch::{
-    collect_required_access, BatchError, BatchLimits, BatchRequest, ExecPolicy,
+    BatchError, BatchLimits, BatchRequest, ExecPolicy, RequestMetadata,
 };
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 
@@ -78,6 +77,7 @@ pub struct Authorized<'a> {
     db_name: &'a str,
     policy: ExecPolicy,
     deadline_cap: Option<(Instant, Duration)>,
+    metadata: RequestMetadata,
 }
 
 impl<'a> Authorized<'a> {
@@ -87,8 +87,7 @@ impl<'a> Authorized<'a> {
     /// 1. The actor may [`Action::Read`] the database itself
     ///    (`ResourcePath::database(db_name)`) — the same DB-visibility
     ///    gate `execute_as`/`tx_execute_as` ran before this seam existed.
-    /// 2. Every `(Action, ResourcePath)` pair
-    ///    [`collect_required_access`] derives from the WHOLE query tree —
+    /// 2. Every `(Action, ResourcePath)` pair derived from the WHOLE query tree —
     ///    including nested `Batch`/`ForEach` bodies at any depth — against
     ///    the SAME `gate`. Pairs are deduplicated (a batch touching the
     ///    same table N times pays the gate cost once), mirroring the
@@ -107,12 +106,9 @@ impl<'a> Authorized<'a> {
             .await
             .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
 
-        let mut seen: TFxSet<(Action, ResourcePath)> = TFxSet::default();
-        for (action, path) in collect_required_access(&request.queries, db_name) {
-            if !seen.insert((action, path.clone())) {
-                continue;
-            }
-            gate.check(&actor, &path, action)
+        let metadata = RequestMetadata::collect(&request.queries, db_name);
+        for (action, path) in &metadata.required_access {
+            gate.check(&actor, path, *action)
                 .await
                 .map_err(|e| BatchError::query_coded("", "access_denied", e.to_string()))?;
         }
@@ -123,6 +119,7 @@ impl<'a> Authorized<'a> {
             db_name,
             policy: ExecPolicy::EMBEDDED,
             deadline_cap: None,
+            metadata,
         })
     }
 
@@ -142,6 +139,7 @@ impl<'a> Authorized<'a> {
             db_name,
             policy: ExecPolicy::EMBEDDED,
             deadline_cap: None,
+            metadata: RequestMetadata::collect(&request.queries, db_name),
         }
     }
 
@@ -195,7 +193,8 @@ impl<'a> Authorized<'a> {
                 .clamped_to(&BatchLimits::CEILING),
             self.policy.enforce_result_size,
         )
-        .with_read_visibility_timeout(self.policy.read_visibility_timeout_ms);
+        .with_read_visibility_timeout(self.policy.read_visibility_timeout_ms)
+        .with_root_metadata(self.metadata.clone());
         match self.deadline_cap {
             Some((deadline, cap)) => scope.with_deadline_cap(deadline, cap),
             None => scope,
@@ -215,6 +214,10 @@ impl<'a> Authorized<'a> {
     /// The database the request was authorized against.
     pub fn db_name(&self) -> &'a str {
         self.db_name
+    }
+
+    pub(in crate::query::batch) fn metadata(&self) -> &RequestMetadata {
+        &self.metadata
     }
 
     /// Consume the token, handing its parts to the execution entry points

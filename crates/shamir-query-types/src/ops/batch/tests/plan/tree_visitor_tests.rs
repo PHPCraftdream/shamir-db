@@ -7,7 +7,8 @@ use shamir_types::types::value::QueryValue;
 use crate::admin::DropTableOp;
 use crate::batch::{
     collect_required_access, distinct_repos, BatchError, BatchLimits, BatchOp, BatchPlanner,
-    BatchRequest, BatchTreeVisitor, ForEachOp, QueryEntry, ResultEncoding, SubBatchOp,
+    BatchRequest, BatchTreeVisitor, ForEachOp, QueryEntry, RequestMetadata, ResultEncoding,
+    SubBatchOp,
 };
 use crate::filter::FilterValue;
 use crate::read::{Pagination, ReadQuery, Select, Temporal};
@@ -159,6 +160,37 @@ fn mixed_tree_preorder_aliases_depth_and_collectors() {
     })
     .collect();
     assert_eq!(collect_required_access(&tree.0, "db"), expected);
+}
+
+#[test]
+fn fused_metadata_matches_existing_walks_for_nested_batches_and_empty_loops() {
+    let destructive = entry(BatchOp::DropTable(DropTableOp {
+        drop_table: "secret".into(),
+        repo: "main".into(),
+        hmac: None,
+        if_exists: false,
+        cascade: false,
+    }));
+    let mut nested = singleton("same", read("cold", "events"));
+    nested.insert("write".into(), destructive);
+    nested.insert("duplicate".into(), read("cold", "events"));
+    let mut queries = singleton("nested", wrap(singleton("loop", wrap(nested, true)), false));
+    queries.insert("read".into(), read("main", "users"));
+    queries.insert("empty".into(), wrap(TMap::default(), true));
+    let metadata = RequestMetadata::collect(&queries, "db");
+    assert_eq!(metadata.repos, distinct_repos(&queries));
+    for (alias, entry) in &queries {
+        assert_eq!(metadata.writes[alias], entry.op.is_write());
+    }
+    let mut expected = Vec::new();
+    for access in collect_required_access(&queries, "db") {
+        if !expected.contains(&access) {
+            expected.push(access);
+        }
+    }
+    assert_eq!(metadata.required_access, expected);
+    assert!(metadata.writes["nested"]);
+    assert!(!metadata.writes["empty"]);
 }
 
 #[test]

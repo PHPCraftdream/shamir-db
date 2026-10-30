@@ -8,10 +8,13 @@ use shamir_query_types::batch::VisibilityWait;
 pub(in crate::query::batch) async fn validate(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
+    root_metadata: Option<&shamir_query_types::batch::RequestMetadata>,
 ) -> Result<(), BatchError> {
     if !request.transactional
-        && !request.queries.values().any(|entry| {
-            entry.op.is_write()
+        && !request.queries.iter().any(|(alias, entry)| {
+            root_metadata
+                .and_then(|metadata| metadata.writes.get(alias).copied())
+                .unwrap_or_else(|| entry.op.is_write())
                 && !matches!(
                     &entry.op,
                     BatchOp::Insert(_) | BatchOp::Update(_) | BatchOp::Delete(_) | BatchOp::Set(_)
@@ -24,20 +27,30 @@ pub(in crate::query::batch) async fn validate(
     while let Some((body, inherited)) = bodies.pop() {
         let wait = body.visibility_wait.or(inherited);
         let mut bounded = matches!(wait, Some(VisibilityWait::Bounded { .. }));
-        let unsupported = body.queries.values().any(|entry| {
-            entry.op.is_write()
-                && !matches!(
-                    &entry.op,
-                    BatchOp::Insert(_)
-                        | BatchOp::Update(_)
-                        | BatchOp::Delete(_)
-                        | BatchOp::Set(_)
-                        | BatchOp::Batch(_)
-                        | BatchOp::ForEach(_)
-                )
+        let unsupported = body.queries.iter().any(|(alias, entry)| {
+            !matches!(
+                &entry.op,
+                BatchOp::Insert(_)
+                    | BatchOp::Update(_)
+                    | BatchOp::Delete(_)
+                    | BatchOp::Set(_)
+                    | BatchOp::Batch(_)
+                    | BatchOp::ForEach(_)
+            ) && (if std::ptr::eq(body, request) {
+                root_metadata.and_then(|metadata| metadata.writes.get(alias).copied())
+            } else {
+                None
+            })
+            .unwrap_or_else(|| entry.op.is_write())
         });
         if wait.is_none() && unsupported {
-            for repo_name in shamir_query_types::batch::distinct_repos(&body.queries) {
+            let repos = if std::ptr::eq(body, request) {
+                root_metadata.map(|metadata| metadata.repos.clone())
+            } else {
+                None
+            }
+            .unwrap_or_else(|| shamir_query_types::batch::distinct_repos(&body.queries));
+            for repo_name in repos {
                 // An unresolvable repository has no commit policy to inherit:
                 // execution reports the real error where it always did.
                 if let Ok(repo) = resolver.resolve_repo(&repo_name).await {

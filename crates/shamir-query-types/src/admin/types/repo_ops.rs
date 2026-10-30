@@ -38,7 +38,7 @@ pub struct CreateRepoOp {
 
 /// Drop a repository.
 ///
-/// Requires `hmac` over `b"drop_repo\0<db_in_use>\0<repo>"`.
+/// Requires a hex HMAC-SHA256 tag over the canonical v2 operation encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DropRepoOp {

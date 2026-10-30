@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::admin::types::db_ops::is_false;
 use crate::filter::Filter;
 use crate::read::{GroupBy, OrderBy, Pagination, Select, Temporal};
 use crate::TableRef;
@@ -48,10 +49,6 @@ pub struct ReadQuery {
 
 fn default_select() -> Select {
     Select::all()
-}
-
-fn is_false(v: &bool) -> bool {
-    !v
 }
 
 impl ReadQuery {

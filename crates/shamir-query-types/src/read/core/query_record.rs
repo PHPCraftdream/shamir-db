@@ -246,10 +246,7 @@ impl QueryRecord {
     pub fn get_value_i64(&self, key: &str) -> Option<i64> {
         match self {
             QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_i64),
-            QueryRecord::Inserted(_) => self
-                .get_value_owned(key)
-                .as_ref()
-                .and_then(QueryValue::as_i64),
+            QueryRecord::Inserted(rec) => rec.fields.get(key).and_then(QueryValue::as_i64),
             QueryRecord::IdBytes(_) => None,
         }
     }
@@ -261,10 +258,7 @@ impl QueryRecord {
     pub fn get_value_u64(&self, key: &str) -> Option<u64> {
         match self {
             QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_u64),
-            QueryRecord::Inserted(_) => self
-                .get_value_owned(key)
-                .as_ref()
-                .and_then(QueryValue::as_u64),
+            QueryRecord::Inserted(rec) => rec.fields.get(key).and_then(QueryValue::as_u64),
             QueryRecord::IdBytes(_) => None,
         }
     }
@@ -275,10 +269,7 @@ impl QueryRecord {
     pub fn get_value_bool(&self, key: &str) -> Option<bool> {
         match self {
             QueryRecord::Direct(qv) => qv.get(key).and_then(QueryValue::as_bool),
-            QueryRecord::Inserted(_) => self
-                .get_value_owned(key)
-                .as_ref()
-                .and_then(QueryValue::as_bool),
+            QueryRecord::Inserted(rec) => rec.fields.get(key).and_then(QueryValue::as_bool),
             QueryRecord::IdBytes(_) => None,
         }
     }
@@ -288,11 +279,10 @@ impl QueryRecord {
 
 impl PartialEq for QueryRecord {
     fn eq(&self, other: &Self) -> bool {
-        // Fast-path: both IdBytes — compare raw bytes directly.
-        if let (QueryRecord::IdBytes(a), QueryRecord::IdBytes(b)) = (self, other) {
-            return a == b;
+        match (self, other) {
+            (QueryRecord::IdBytes(a), QueryRecord::IdBytes(b)) => a == b,
+            (QueryRecord::IdBytes(_), _) | (_, QueryRecord::IdBytes(_)) => false,
+            _ => self.as_value() == other.as_value(),
         }
-        // General case: normalise via QueryValue so Direct == Inserted works.
-        self.as_value() == other.as_value()
     }
 }

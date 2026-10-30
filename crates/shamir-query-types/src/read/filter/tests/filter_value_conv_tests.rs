@@ -8,6 +8,8 @@
 //! - `From<QueryValue> for FilterValue` uses the direct path for literals
 //!   (no silent Null) and falls back to msgpack for Map/expression defaults.
 
+use shamir_types::mpack;
+use shamir_types::types::common::{new_map, TSet};
 use shamir_types::types::value::QueryValue;
 
 use crate::filter::filter_enum::Filter;
@@ -173,7 +175,6 @@ fn qv_to_fv_nested_list() {
 
 #[test]
 fn qv_to_fv_map_returns_none() {
-    use shamir_types::types::common::new_map;
     let mut m = new_map();
     m.insert("$fn".to_string(), QueryValue::Str("now".to_string()));
     let qv = QueryValue::Map(m);
@@ -183,7 +184,6 @@ fn qv_to_fv_map_returns_none() {
 
 #[test]
 fn qv_to_fv_set_returns_none() {
-    use shamir_types::types::common::TSet;
     // Set has no direct FilterValue equivalent → None.
     let qv = QueryValue::Set(TSet::default());
     assert!(query_value_to_filter_value(&qv).is_none());
@@ -252,6 +252,56 @@ fn from_qv_list_converts_recursively() {
     assert_eq!(
         got,
         FilterValue::Array(vec![FilterValue::Int(5), FilterValue::Bool(true)])
+    );
+}
+
+#[test]
+fn fallible_conversion_preserves_numeric_and_set_wire_projection() {
+    let big = QueryValue::Big(num_bigint::BigInt::from(u64::MAX));
+    let decimal = QueryValue::Dec("123.4500".parse().unwrap());
+    let mut set = TSet::default();
+    set.insert(QueryValue::Int(7));
+    set.insert(QueryValue::Str("x".to_owned()));
+    let set = QueryValue::Set(set);
+    for value in [big, decimal, set] {
+        let expected: FilterValue =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&value).unwrap()).unwrap();
+        assert_eq!(
+            FilterValue::try_from_query_value_ref(&value).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(
+        FilterValue::try_from_query_value(QueryValue::Big(num_bigint::BigInt::from(u64::MAX)))
+            .unwrap(),
+        FilterValue::String(u64::MAX.to_string())
+    );
+}
+
+#[test]
+fn fallible_conversion_rejects_maps_even_inside_lists() {
+    let unsupported = shamir_types::mpack!({
+        "ordinary": 1
+    });
+    assert!(FilterValue::try_from_query_value(unsupported.clone()).is_err());
+    assert!(FilterValue::try_from_query_value(QueryValue::List(vec![unsupported])).is_err());
+    let conflicting = shamir_types::mpack!({
+        "$query": "a",
+        "$ref": "b"
+    });
+    assert!(FilterValue::try_from_query_value(conflicting.clone()).is_err());
+    assert!(
+        FilterValue::try_from_query_value(QueryValue::List(vec![QueryValue::List(vec![
+            conflicting
+        ])]))
+        .is_err()
+    );
+    let valid = shamir_types::mpack!({
+        "$query": "a"
+    });
+    assert_eq!(
+        FilterValue::try_from_query_value(valid).unwrap(),
+        FilterValue::query_ref("a")
     );
 }
 
