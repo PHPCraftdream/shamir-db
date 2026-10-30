@@ -83,7 +83,10 @@ CI's job, and `./scripts/test.sh` is executed **in the PR's CI**:
   and `./scripts/test.sh` lib tests of the affected crates) runs.
   `gh pr ready` runs the full matrix (`./scripts/test.sh` and the
   integration run on Ubuntu/Windows/macOS), which is the merge gate;
-  `gh workflow run ci.yml --ref <branch>` forces the full tier on a draft.
+  `gh workflow run ci.yml --ref <branch>` forces the full tier on a draft,
+  and so does the explicit marker `[ci full]` alone on a line of the head
+  commit message (see "CI tiers"). Nothing else triggers a full run on a
+  draft: the full matrix is kept for the end of a sprint.
 * A failing test, hang or flake is diagnosed from the CI log
   (`gh run view <id> --log-failed`), fixed in code and re-pushed. It is not
   reproduced locally; reading code and logs is the debugging tool. When a
@@ -397,7 +400,7 @@ substitute for running the gate yourself before pushing.
 CI is segmented into two tiers to keep the shared runner pool responsive
 (see `.github/workflows/ci.yml`):
 
-* **FAST tier — draft PR pushes.** One ubuntu job (`fast`): `cargo fmt
+* **FAST tier — draft PR pushes without the full-tier marker.** One ubuntu job (`fast`): `cargo fmt
   --check`, the `scripts/ci/affected_crates.py` unit tests, then clippy and
   lib tests (`./scripts/test.sh`) limited to the AFFECTED crates (changed
   crate + its workspace dependents). Falls back to `--workspace` when the
@@ -414,7 +417,21 @@ CI is segmented into two tiers to keep the shared runner pool responsive
   (CI-05: the macOS runner queue was the merge bottleneck), so a macOS-only
   failure surfaces there, not at ready.
 * All three workflows cancel superseded PR runs via `concurrency`.
-* Force the full tier on a draft: `gh workflow run ci.yml --ref <branch>`.
+* **Explicit triggers of the FULL tier on a draft (the ONLY two).**
+  1. The commit-message marker: the line `[ci full]` alone on its own line
+     in the message of the PR **head** commit (`git commit -m "…" -m "[ci full]"`).
+     The `plan` job (`scripts/ci/gates/full_tier_plan.py`, unit-tested)
+     reads only the head commit, so one marker buys exactly one full run and
+     the next push without it is fast again. The match is whole-line and
+     case-sensitive; prose that merely mentions the marker never triggers.
+  2. A manual run through Actions: `gh workflow run ci.yml --ref <branch>`
+     (or "Run workflow" in the UI) — `workflow_dispatch` is always full.
+
+  Test selection is NOT read from the commit message: inside the fast tier
+  the tested crates come from the diff (`scripts/ci/affected_crates.py`).
+  The marker only decides fast vs full. Rule for sprints: waves of work go
+  as drafts (fast tier); the full matrix is run once at the end of the
+  sprint — by the marker, `gh pr ready` or a manual dispatch.
 
 ### 📐 Layout limits (MANDATORY for new and changed code)
 
@@ -516,9 +533,15 @@ and `#[ignore]` changes are never declarable**.
   gating job; the ONE required branch-protection check, decided by
   `scripts/ci/gates/merge_gate_check.py` from `toJSON(needs)`. Failure or
   cancellation anywhere fails it; a skipped job fails it unless skipped by
-  design for the tier (draft PR: the full tier; ready/master/dispatch:
-  `fast`). A draft PR ALWAYS fails it with "draft PR: full matrix not run,
-  not merge-ready" — draft fast-tier success never authorises a merge.
+  design for the tier (fast tier: the full tier; full tier: `fast`). A
+  fast-tier draft PR ALWAYS fails it with "draft PR: full matrix not run,
+  not merge-ready" — draft fast-tier success never authorises a merge. A
+  draft whose head commit carries `[ci full]` is judged as the full tier it
+  actually ran (GitHub itself refuses to merge a draft).
+* `plan` (`tier plan`) — the first job of every run; emits `full=true|false`
+  (full for everything except a draft without the marker). Every full-tier
+  job gates on it, every fast-tier job on its negation, and it is one of the
+  merge gate's required jobs: a failing `plan` fails the gate closed.
 
 Known limitations: downstream
 crates (`shamir-db`, `shamir-server`) are not rustdoc'd yet;
