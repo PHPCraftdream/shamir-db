@@ -72,6 +72,38 @@ async fn rv_wal_67475c86_cancelled_unlink_reconciles_before_next_truncator() {
 }
 
 #[tokio::test]
+async fn retained_bytes_waits_for_cancelled_truncation() {
+    let dir = TempDir::new().unwrap();
+    let set = Arc::new(SegmentSet::open(dir.path().to_path_buf(), 1).await.unwrap());
+    set.append_batch(vec![entry(1, 1).encode().unwrap()], 1)
+        .await
+        .unwrap();
+    let (entered, resume) = set.pause_next_truncate();
+    let worker = Arc::clone(&set);
+    let task = tokio::spawn(async move { worker.truncate_below(1).await });
+    entered.await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let worker = Arc::clone(&set);
+    let measurement = tokio::spawn(async move { worker.sealed_retained_bytes().await });
+    tokio::task::yield_now().await;
+    assert!(!measurement.is_finished());
+    resume.send(()).unwrap();
+    assert_eq!(measurement.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn retained_bytes_reports_unexpected_missing_segment() {
+    let dir = TempDir::new().unwrap();
+    let set = SegmentSet::open(dir.path().to_path_buf(), 1).await.unwrap();
+    set.append_batch(vec![entry(1, 1).encode().unwrap()], 1)
+        .await
+        .unwrap();
+    std::fs::remove_file(dir.path().join("00000000.wal")).unwrap();
+    assert!(set.sealed_retained_bytes().await.is_err());
+}
+
+#[tokio::test]
 async fn rv_wal_ae1ca19c_rejects_noncanonical_names_and_sequence_aliases() {
     // A bare non-canonical numeric `.wal` name is rejected outright.
     let dir = TempDir::new().unwrap();
