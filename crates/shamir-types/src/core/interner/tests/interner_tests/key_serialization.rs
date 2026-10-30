@@ -2,6 +2,7 @@
 
 use crate::core::interner::InternerKey;
 use crate::types::common::new_map_wc;
+use crate::types::value::InnerValue;
 use shamir_collections::TFxSet;
 
 #[test]
@@ -96,8 +97,6 @@ fn test_interned_key_compact_messagepack_serialization() {
 
 #[test]
 fn test_map_with_interned_keys_compact() {
-    use crate::types::value::InnerValue;
-
     println!("\n=== Testing Map<InternedKey, InnerValue> compact serialization ===\n");
 
     // Create a map with InternedKey keys

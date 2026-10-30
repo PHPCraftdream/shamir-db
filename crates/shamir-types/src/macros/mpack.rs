@@ -276,7 +276,7 @@ macro_rules! mpack {
 // ---------------------------------------------------------------------------
 // Private helper — converts a literal into QueryValue via type inference.
 //
-// The trait `MpackIntoValue` has two impls:
+// The trait `MpackIntoValue` has three impls:
 //   - `i64`  → QueryValue::Int
 //   - `f64`  → QueryValue::F64
 //   - `&str` → QueryValue::Str
