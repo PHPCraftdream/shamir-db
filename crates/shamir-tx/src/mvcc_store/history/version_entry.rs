@@ -15,11 +15,10 @@ use crate::version_codec::decode_version_key;
 /// T4-history: one row in a key's version timeline.
 ///
 /// Returned by [`MvccStore::history_of`]. `version` is the monotonic
-/// commit version assigned by `RepoTxGate`; `value` is the bytes that
-/// were current at that version (all versions, including the current one,
-/// are read from the single `history` log); `ts_millis` is
-/// the per-version commit timestamp (T1c), or `None` when no ts was
-/// recorded for this version.
+/// commit version assigned by `RepoTxGate`; `value` is the value at that
+/// version, resolved from the version history log and production overlay;
+/// `ts_millis` is the per-version commit timestamp, or `None` if it is missing
+/// or malformed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionEntry {
     /// Monotonic commit version assigned by `RepoTxGate::assign_next_version`.
@@ -27,10 +26,8 @@ pub struct VersionEntry {
     /// The value bytes current at `version` (MessagePack-encoded
     /// `InnerValue` for record keys, raw user bytes otherwise).
     pub value: Bytes,
-    /// Per-version commit timestamp in milliseconds since UNIX_EPOCH
-    /// (T1c, stored as a `ts_key(version)` entry in the history store,
-    /// written alongside the history transact). `None`
-    /// when no ts entry exists for this version.
+    /// Commit timestamp in milliseconds since UNIX_EPOCH, or `None` when it
+    /// is absent or malformed in the history store.
     pub ts_millis: Option<u64>,
 }
 
@@ -53,24 +50,20 @@ use shamir_storage::error::DbResult;
 /// stream is exhausted.
 type GroupByStep = Option<(Result<Vec<(Bytes, Bytes)>, DbError>, StreamingGroupByState)>;
 
-/// C2 streaming group-by state for `current_stream`. The log is key-major,
-/// version-ascending; this state tracks the last (highest) version per key
-/// and emits the current value once all versions of a key have been seen.
-///
-/// R3 — MVCC pre-floor: `floor` caps version visibility. Versions above
-/// the floor are skipped in the group-by (inlined comparison, no second pass).
-///
-/// P1b — overlay merge: `overlay` holds the per-key overlay winner `≤ floor`.
-/// As each history key is flushed, the overlay winner (if any) for that key is
-/// merged in (newest version wins; tombstone suppresses). Overlay-only keys
-/// (never seen in history) are emitted after the history stream drains.
+/// Streaming group-by state for `current_stream`. The version history log is
+/// key-major and version-ascending within each key; this state tracks the
+/// last (highest) version per key and emits the current value once all
+/// versions of a key have been seen.
+/// `floor` caps visible versions. The overlay winner is merged with each key's
+/// durable versions (newer wins; tombstones suppress); overlay-only keys are
+/// emitted after history drains.
 pub(crate) enum StreamingGroupByState {
     Start {
         history: Arc<dyn Store>,
         batch_size: usize,
-        /// R3: committed floor — versions > floor are invisible.
+        /// The reader-visible floor; versions above it are excluded.
         floor: u64,
-        /// P1b: overlay winners `≤ floor` to merge into the stream.
+        /// Overlay winners `≤ floor` to merge with durable history results.
         overlay: OverlayWinners,
         /// CR-B1: when `true`, a tombstoned winner is emitted (empty value)
         /// instead of being suppressed. Used ONLY by
@@ -82,9 +75,9 @@ pub(crate) enum StreamingGroupByState {
     Streaming {
         stream: BoxedLogStream,
         batch_size: usize,
-        /// R3: committed floor — versions > floor are invisible.
+        /// The reader-visible floor; versions above it are excluded.
         floor: u64,
-        /// P1b: overlay winners not yet consumed by a matching history key.
+        /// Overlay winners that have not matched a durable history key.
         overlay: OverlayWinners,
         /// `(original_key_bytes, last_value)` — the group being accumulated.
         cur_key: Option<Bytes>,
@@ -327,9 +320,8 @@ impl StreamingGroupByState {
 }
 
 impl MvccStore {
-    /// C2: flip get_current to the single version log. Returns `None` for
-    /// tombstones (empty value) and absent keys. Cold-start: when the cell is
-    /// absent (`current_version == 0`), scans the log for the latest version
+    /// C2: return the current value, or `None` for tombstones and absent keys.
+    /// Cold-start: when the cell is absent (`current_version == 0`), scans the log for the latest version
     /// via `seek_latest_published`, bounded at the published floor ONLY while
     /// the receipt's materialize→publish window is open (see the cold-path
     /// comment in [`get_current_bytes`](Self::get_current_bytes)).
@@ -425,10 +417,9 @@ impl MvccStore {
         }
     }
 
-    /// C2: stream every CURRENT `(key, value)` pair from the single version
-    /// log. The log is key-major, version-ascending; a streaming group-by tracks
-    /// the last (highest) version per key — that is the current. Tombstones
-    /// (empty value) are suppressed. Emits in batches of `batch`.
+    /// C2: stream current values from the key-major history log and visible
+    /// overlay. The group-by tracks the highest version per key. Tombstones
+    /// are suppressed; rows are emitted in batches of `batch`.
     ///
     /// R3 — MVCC pre-floor: versions above `gate.last_committed()` are
     /// excluded from the group-by. The per-entry check is inlined into the

@@ -821,13 +821,12 @@ impl RepoTxGate {
         let _ = self.orphan_entries.remove_sync(&version);
     }
 
-    /// Publish: update `last_committed_version` atomically.
+    /// Publish: monotonically advance `last_committed_version` atomically.
     ///
     /// Legacy plain-store fixture hook; does not settle completion. Production
     /// publishers use `raise_published`, and transaction snapshots read W.
     pub fn publish_committed(&self, version: u64) {
-        self.last_committed_version
-            .store(version, Ordering::Release);
+        self.raise_published(version);
     }
 
     /// Test/bench seam: force-settle every version through `version`, then publish.

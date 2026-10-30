@@ -1,7 +1,10 @@
 use super::helpers::{count_history_entries, make_gate, make_mvcc, make_mvcc_with_gate};
+use crate::mvcc_store::tests::gc::test_stores::failing_store::FailingStore;
 use crate::mvcc_store::Retention;
 use bytes::Bytes;
 use shamir_storage::types::RecordKey;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 // ================================================================
 // T1b.1 — eager vacuum (CurrentOnly default) tests.
@@ -577,6 +580,39 @@ async fn retention_patch_independent() {
 // All tests freeze the clock via `set_test_now` for determinism.
 // `count_history_entries` counts only version-keys (ts-keys excluded).
 // ================================================================
+
+#[tokio::test]
+async fn rv_tx_3fc2fa1d_age_vacuum_keeps_versions_when_timestamp_get_fails() {
+    let gate = make_gate();
+    let history = Arc::new(FailingStore::new());
+    let mvcc = crate::mvcc_store::MvccStore::new(history.clone(), gate.clone());
+    let key = Bytes::from("unknown_age");
+    mvcc.set_retention(Retention::keep_history()).unwrap();
+    mvcc.set_test_now(1);
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("old"))
+        .await
+        .unwrap();
+    mvcc.set_test_now(10_000);
+    mvcc.set_versioned(RecordKey::from(key.clone()), Bytes::from("new"))
+        .await
+        .unwrap();
+    mvcc.gc_overlay_to(2);
+    history.fail_timestamp_get.store(true, Ordering::Relaxed);
+    mvcc.set_retention(Retention {
+        max_age_secs: Some(1),
+        max_count: None,
+        min_count: None,
+    })
+    .unwrap();
+    mvcc.vacuum_key(&key, 2).await.unwrap();
+    let timestamp_get_calls = history.timestamp_get_calls.load(Ordering::Relaxed);
+    assert!(timestamp_get_calls > 0, "GC must attempt timestamp lookup");
+    assert_eq!(count_history_entries(&mvcc).await, 2);
+
+    history.fail_timestamp_get.store(false, Ordering::Relaxed);
+    mvcc.vacuum_key(&key, 2).await.unwrap();
+    assert_eq!(count_history_entries(&mvcc).await, 1);
+}
 
 /// 1. `max_age_secs: Some(60)` (KeepHistory base, no count cap), no
 /// snapshot: a version written 100s ago (ts=0, now=100_000) is reclaimed;
