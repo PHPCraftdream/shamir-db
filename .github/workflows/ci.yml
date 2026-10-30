@@ -21,6 +21,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  # Keep this block identical to cache-warm.yml: rust-cache hashes these
+  # environment variables into its cache key.
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
@@ -423,6 +425,30 @@ jobs:
             *) echo "shamir-engine not affected; skipping engine feature cells" ;;
           esac
 
+  # Windows cold-cache 30-min timeout fix (owner decision 2026-10-30): the
+  # workspace compile/link was the dominant, OS-dependent cost inside `test`'s
+  # 30-minute budget. This job compiles only the lib test binaries ONCE per OS
+  # with its own 60-minute budget and packs them into a nextest archive; only
+  # the lib `test` job consumes it. `integration` builds in place.
+  # The warm base cache comes from cache-warm.yml via the same composite action
+  # (.github/actions/build-test-archive) and its rust-cache shared key.
+  test-build:
+    name: test build archive (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: ./.github/actions/build-test-archive
+        with:
+          upload: 'true'
+          artifact-name: test-archive-${{ matrix.os }}
+
   # Fast primary signal: the ~2700 library unit tests, on every OS. Matches
   # the project's stated pre-commit gate in CLAUDE.md ("Code quality
   # (MANDATORY)"): `./scripts/test.sh` (the nextest wrapper — raw
@@ -435,7 +461,7 @@ jobs:
     name: cargo test lib (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    needs: plan
+    needs: [plan, test-build]
     if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
@@ -454,21 +480,36 @@ jobs:
       - uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0  # v2.87.22
         with:
           tool: nextest@0.9.137
+      # The lib tests come prebuilt in the archive from `test-build`; the only
+      # compile left in this job is the ubuntu doctest below (shamir-engine and
+      # its dependency graph), so the caches stay on for ubuntu only.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        if: matrix.os == 'ubuntu-latest'
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
-      # Cache workspace-crate compilation across runs (rust-cache keeps only
-      # third-party deps); a crate whose inputs did not change is not rebuilt.
+        if: matrix.os == 'ubuntu-latest'
       - name: enable sccache
+        if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - name: download test archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: test-archive-${{ matrix.os }}
+          path: ${{ runner.temp }}
       # bash on every runner (Git Bash on Windows) — `./scripts/test.sh` is
       # a bash script; without this, GitHub Actions defaults `run:` steps
       # to PowerShell on windows-latest, which cannot execute it directly.
       # Parity with the `integration` job's own `shell: bash` below.
-      - run: ./scripts/test.sh --locked
+      - name: lib tests from archive (timed)
         shell: bash
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          ./scripts/test.sh --from-archive "$RUNNER_TEMP/test-archive.tar.zst"
+          end=$(date +%s)
+          echo "lib tests ran in $((end - start))s" >> "$GITHUB_STEP_SUMMARY"
       # S5c-X P2 (Round 6): nextest cannot run doctests — enforce the
       # shamir-engine boundary compile-fail gate explicitly (one OS is
       # enough; the fast-tier affected step covers the rest).
@@ -1238,7 +1279,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [plan, fast, fmt, clippy, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
+    needs: [plan, fast, fmt, clippy, test-build, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - env:

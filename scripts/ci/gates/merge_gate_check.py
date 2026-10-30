@@ -50,6 +50,7 @@ REQUIRED_JOBS = [
     "fast",
     "fmt",
     "clippy",
+    "test-build",
     "test",
     "integration",
     "ts-unit",
