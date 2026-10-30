@@ -66,9 +66,8 @@ pub struct FilterContext<'a> {
     /// `over`, write-value resolution) fall back to `local_cond_cache`
     /// below (group 13 Defect 1), not to an unconditional recompile. Only
     /// callers that build a [`CondCache`] once (e.g. `SelectProjection::new`)
-    /// and inject it via [`with_cond_cache`](Self::with_cond_cache) skip
-    /// `local_cond_cache`'s per-lookup content-hash cost too, trading it for
-    /// an eager, address-independent prescan.
+    /// and inject it via [`with_cond_cache`](Self::with_cond_cache) reuse an
+    /// eagerly compiled, address-independent condition cache.
     pub cond_cache: Option<&'a CondCache>,
     /// Optional pre-interned `FieldRef` path cache (F1). Defaults to `None`
     /// — every EXISTING caller (WHERE, `when`, `for_each`'s `over`,

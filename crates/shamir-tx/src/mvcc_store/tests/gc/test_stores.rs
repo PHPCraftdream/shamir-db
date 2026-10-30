@@ -307,6 +307,7 @@ pub(in crate::mvcc_store::tests) mod counting_store {
     pub struct CountingStore {
         inner: InMemoryStore,
         pub scan_prefix_count: AtomicUsize,
+        pub range_count: AtomicUsize,
     }
 
     impl CountingStore {
@@ -314,6 +315,7 @@ pub(in crate::mvcc_store::tests) mod counting_store {
             Self {
                 inner: InMemoryStore::new(),
                 scan_prefix_count: AtomicUsize::new(0),
+                range_count: AtomicUsize::new(0),
             }
         }
     }
@@ -345,6 +347,16 @@ pub(in crate::mvcc_store::tests) mod counting_store {
             batch_size: usize,
         ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
             self.inner.iter_stream(batch_size)
+        }
+
+        fn iter_range_stream(
+            &self,
+            start: Option<Bytes>,
+            end: Option<Bytes>,
+            batch_size: usize,
+        ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+            self.range_count.fetch_add(1, Ordering::Relaxed);
+            self.inner.iter_range_stream(start, end, batch_size)
         }
 
         fn scan_prefix_stream(

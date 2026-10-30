@@ -71,6 +71,10 @@ pub fn table_token_for(name: &str) -> u64 {
     h.finish()
 }
 
+/// Trusted native-embedding handle: operations do not perform actor authorization.
+/// Use authorization-enforced facade execution with [`crate::query::batch::Authorized`]
+/// for untrusted requests; the `shamir-db` facade supplies the live ACL gate.
+///
 /// S5c-X P2 (Round 6, split Round 7): these compile-fail doctests are the
 /// ENFORCED boundary gate. Doctests are enabled on this crate solely so they
 /// run in CI (see `Cargo.toml` `[lib]` and the `cargo test --doc` workflow
@@ -135,6 +139,7 @@ pub fn table_token_for(name: &str) -> u64 {
 /// ```
 pub struct TableManager {
     pub(super) name: String,
+    pub(super) token: u64,
     pub(super) table: Arc<Table>,
     /// Direct handle to the info_store the sub-managers were
     /// built on. Kept so DDL (buffer-config get/set, future
@@ -486,6 +491,7 @@ impl Clone for TableManager {
     fn clone(&self) -> Self {
         Self {
             name: self.name.clone(),
+            token: self.token,
             table: Arc::clone(&self.table),
             info_store: Arc::clone(&self.info_store),
             interner: self.interner.clone(),
@@ -666,6 +672,7 @@ impl TableManager {
         // literal below, so `name.clone()` after that move would not compile.
         let domain = RepoWriteDomain::new(name.clone());
         Self {
+            token: table_token_for(&name),
             name,
             table: Arc::new(table),
             info_store,

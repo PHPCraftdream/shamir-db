@@ -190,6 +190,7 @@ impl TableManager {
             };
 
         let mgr = Self {
+            token: super::table_token_for(&name),
             name,
             table: Arc::new(table),
             info_store: Arc::clone(&info_store),

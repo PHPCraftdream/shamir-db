@@ -7,13 +7,18 @@
 //! that window used to miss the newest versions — an intermittent
 //! `ts-e2e-nightly` failure (`history:*` e2e tests saw 1-2 of 3 versions).
 
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::mvcc_store::ts_key;
 use bytes::Bytes;
-use shamir_storage::types::{KvOp, Store};
+use futures::Stream;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::storage_in_memory::InMemoryStore;
+use shamir_storage::types::{KvOp, RecordKey, Store};
 
+use crate::mvcc_store::tests::gc::test_stores::counting_store::CountingStore;
 use crate::mvcc_store::tests::gc::test_stores::failing_store::FailingStore;
 use crate::mvcc_store::MvccStore;
 
@@ -24,6 +29,133 @@ fn set(key: &'static [u8], val: &'static [u8]) -> Vec<KvOp> {
         Bytes::from_static(key).into(),
         Bytes::from_static(val),
     )]
+}
+
+struct KeyedRangeFailureStore(InMemoryStore);
+
+#[async_trait::async_trait]
+impl Store for KeyedRangeFailureStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.0.insert(value).await
+    }
+
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        self.0.set(key, value).await
+    }
+
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.0.get(key).await
+    }
+
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.0.remove(key).await
+    }
+
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        self.0.transact(ops).await
+    }
+
+    fn iter_stream(
+        &self,
+        size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        self.0.iter_stream(size)
+    }
+
+    fn scan_prefix_stream(
+        &self,
+        prefix: Bytes,
+        size: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        self.0.scan_prefix_stream(prefix, size)
+    }
+
+    fn iter_range_stream(
+        &self,
+        start: Option<Bytes>,
+        end: Option<Bytes>,
+        _: usize,
+    ) -> Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbError>> + Send>> {
+        let message = if end.is_some() {
+            "shared range"
+        } else if start.as_ref().is_some_and(|key| key.starts_with(b"z\xff")) {
+            "z error"
+        } else {
+            "a error"
+        };
+        Box::pin(futures::stream::once(async move {
+            Err(DbError::Storage(message.into()))
+        }))
+    }
+}
+
+#[tokio::test]
+async fn history_many_range_error_retries_in_input_order() {
+    let history = Arc::new(KeyedRangeFailureStore(InMemoryStore::new()));
+    let mvcc = MvccStore::new(history, make_gate());
+    for (keys, expected) in [
+        ([b"z".as_slice(), b"a".as_slice()], "z error"),
+        ([b"a".as_slice(), b"z".as_slice()], "a error"),
+    ] {
+        let error = mvcc.history_of_many(&keys).await.unwrap_err();
+        assert!(matches!(error, DbError::Storage(message) if message == expected));
+    }
+}
+
+#[tokio::test]
+async fn history_many_matches_single_and_uses_one_range() {
+    let gate = make_gate();
+    let history = Arc::new(CountingStore::new());
+    let mvcc = MvccStore::new(history.clone(), gate.clone());
+    for (key, value, ts) in [
+        (b"k".as_slice(), b"a".as_slice(), 100),
+        (b"kk", b"b", 200),
+        (b"z", b"c", 300),
+    ] {
+        mvcc.set_test_now(ts);
+        let v = gate.assign_next_version();
+        let ops = set(key, value);
+        mvcc.apply_committed_visible(&ops, v);
+        mvcc.write_committed_to_history(&ops, v).await.unwrap();
+    }
+    mvcc.set_test_now(400);
+    let v = gate.assign_next_version();
+    mvcc.apply_committed_visible(&set(b"k", b"pending"), v);
+    let keys: &[&[u8]] = &[b"z", b"k", b"missing", b"kk", b"k"];
+    let mut expected = Vec::new();
+    for key in keys {
+        expected.push(mvcc.history_of(key).await.unwrap());
+    }
+    history.range_count.store(0, Ordering::Relaxed);
+    assert_eq!(mvcc.history_of_many(keys).await.unwrap(), expected);
+    assert_eq!(history.range_count.load(Ordering::Relaxed), 1);
+    assert!(mvcc.history_of_many(&[]).await.unwrap().is_empty());
+    assert_eq!(history.range_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn history_many_recovers_scan_and_retries_timestamps() {
+    let gate = make_gate();
+    let history = Arc::new(FailingStore::new());
+    let mvcc = MvccStore::new(history.clone(), gate.clone());
+    mvcc.set_test_now(1234);
+    let version = gate.assign_next_version();
+    let ops = set(b"a", b"value");
+    mvcc.apply_committed_visible(&ops, version);
+    mvcc.write_committed_to_history(&ops, version)
+        .await
+        .unwrap();
+    mvcc.gc_overlay_to(version);
+    history.fail_scan.store(true, Ordering::Relaxed);
+    let recovered = mvcc.history_of_many(&[b"z", b"a"]).await.unwrap();
+    assert!(recovered[0].is_empty());
+    assert_eq!(recovered[1][0].ts_millis, Some(1234));
+    history.get_many_calls.store(0, Ordering::Relaxed);
+    history.fail_many.store(true, Ordering::Relaxed);
+    let result = mvcc.history_of_many(&[b"z", b"a"]).await.unwrap();
+    assert!(result[0].is_empty());
+    assert_eq!(result[1][0].ts_millis, Some(1234));
+    assert_eq!(history.get_many_calls.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

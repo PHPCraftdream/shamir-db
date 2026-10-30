@@ -315,7 +315,13 @@ impl FieldRule {
                 }
                 return;
             }
-            // Non-scalar (container / Dec / Big) — fall back to materialize.
+            if let Some(value) = fields.borrowed_value(path) {
+                if !set.contains_materialized(value) {
+                    v.field_error(self.path.clone(), "not_in_enum");
+                }
+                return;
+            }
+            // Non-scalar values without a compatible borrowed representation.
             match fields.materialize(path) {
                 Some(iv) => {
                     if !set.contains_materialized(&inner_to_qv(iv)) {
@@ -336,6 +342,28 @@ impl FieldRule {
             Some(vals) if !vals.is_empty() => vals,
             _ => return,
         };
+
+        if let Some(sr) = fields.scalar(path) {
+            let matches = allowed.iter().any(|value| match (sr, value) {
+                (ScalarRef::Null, QueryValue::Null) => true,
+                (ScalarRef::Bool(a), QueryValue::Bool(b)) => a == *b,
+                (ScalarRef::Int(a), QueryValue::Int(b)) => a == *b,
+                (ScalarRef::F64(a), QueryValue::F64(b)) => a == *b || (a.is_nan() && b.is_nan()),
+                (ScalarRef::Str(a), QueryValue::Str(b)) => a == b.as_str(),
+                (ScalarRef::Bin(a), QueryValue::Bin(b)) => a == b.as_slice(),
+                _ => false,
+            });
+            if !matches {
+                v.field_error(self.path.clone(), "not_in_enum");
+            }
+            return;
+        }
+        if let Some(actual) = fields.borrowed_value(path) {
+            if !allowed.contains(actual) {
+                v.field_error(self.path.clone(), "not_in_enum");
+            }
+            return;
+        }
 
         // Materialise the value and convert to QueryValue for comparison.
         let actual = self.materialize_as_qv(fields, path);

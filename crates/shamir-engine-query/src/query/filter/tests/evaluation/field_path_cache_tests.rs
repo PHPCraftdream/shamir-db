@@ -6,7 +6,7 @@
 //! (one `Vec<u64>` alloc + one `Interner::get_ind` `DashMap` lookup per
 //! path segment, per row), even though `path` is static per query. This
 //! cache keys the pre-interned `SmallVec<[InternerKey; 4]>` by the CONTENT
-//! of the `FieldRef` node itself (its `path`, via `field_ref_key` —
+//! of the `FieldRef` node itself (its `path` —
 //! group 13 Defect 2 fix, replacing the original pointer-identity key), so
 //! callers that pre-scan a static `FilterValue` tree once
 //! (`SelectProjection::new`) skip the per-row re-interning entirely.
@@ -30,9 +30,7 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 
 use crate::query::filter::eval::resolve_filter_query;
 use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::field_path_cache::{
-    field_ref_key, prescan_field_path_cache, FieldPathCache,
-};
+use crate::query::filter::field_path_cache::{prescan_field_path_cache, FieldPathCache};
 use crate::query::filter::{Cond, Filter, FilterValue, FnCall};
 use crate::query::read::select_projection::SelectProjection;
 use crate::query::read::{QueryResult, Select, SelectItem};
@@ -255,12 +253,11 @@ fn prescan_recurses_into_all_documented_shapes() {
     }
 }
 
-/// Compute the SAME content-derived key `prescan_field_path_cache` inserts
-/// (`field_ref_key`, group 13 Defect 2 fix). Named `fv_ref_addr` for
-/// minimal diff against the pre-fix test bodies below — it no longer
-/// returns an address, just the cache's actual `String` key.
-fn fv_ref_addr(fv: &FilterValue) -> String {
-    field_ref_key(fv)
+fn fv_ref_addr(fv: &FilterValue) -> Vec<String> {
+    match fv {
+        FilterValue::FieldRef { path } => path.clone(),
+        _ => unreachable!(),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -428,4 +425,27 @@ fn select_projection_caches_field_ref_and_evaluates_per_record() {
         }
         _ => panic!("expected QueryValue::Map, got {:?}", qval_b),
     }
+}
+
+#[test]
+fn cached_field_path_accepts_borrowed_segments_after_source_drop() {
+    let interner = Interner::new();
+    interner.touch_ind("name").unwrap();
+    let mut cache: FieldPathCache = new_map();
+    {
+        let source = FilterValue::field_ref("name");
+        prescan_field_path_cache(&source, &interner, &mut cache);
+    }
+    let path = vec!["name".to_string()];
+    assert!(cache.get(path.as_slice()).is_some());
+    let refs = empty_refs();
+    let ctx = FilterContext::new(&interner, &refs).with_field_path_cache(&cache);
+    assert_eq!(
+        resolve_filter_query(
+            &FilterValue::field_ref("name"),
+            &make_name_record(&interner, "alice"),
+            &ctx,
+        ),
+        Some(QueryValue::Str("alice".to_string()))
+    );
 }

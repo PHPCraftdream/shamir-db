@@ -50,9 +50,10 @@ use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 
 /// Capability to check whether `actor` may perform `action` on `path`.
 ///
-/// Implemented by `ShamirDb` (`shamir-db`), delegating to
-/// `authorize_access` against the live ACL tree. See the module doc for
-/// why this indirection exists.
+/// Implemented by [`ShamirDb`](../../../../../shamir-db/src/shamir_db/shamir_db/access/gate.rs)
+/// (`shamir-db`), delegating to `authorize_access` against the live ACL tree.
+/// Custom implementations are trusted native-embedding policy: a permissive
+/// gate authorizes the request. See [`Authorized`] and the module doc.
 #[async_trait]
 pub trait AccessGate: Send + Sync {
     /// Check one `(actor, path, action)` triple. `Err` denies.
