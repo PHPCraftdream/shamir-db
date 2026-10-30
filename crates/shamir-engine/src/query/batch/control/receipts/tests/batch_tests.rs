@@ -370,8 +370,16 @@ async fn receipt_preflight_reuses_root_classification_and_matches_fallback() {
     assert_eq!(cached.code(), fallback.code());
     assert_eq!(cached.code(), Some("validation"));
 
-    // A deliberately different cache verifies the root path consumes it.
-    // Production metadata always comes from this exact request.
+    // For a non-transactional request the root early return depends on the
+    // write classification, so a deliberately different cache proves the root
+    // path consumes it. Production metadata always comes from this request.
+    request.transactional = false;
+    let genuine = shamir_query_types::batch::RequestMetadata::collect(&request.queries, "test");
+    assert!(
+        super::super::policy::validate(&request, &resolver, Some(&genuine))
+            .await
+            .is_err()
+    );
     let mut different =
         shamir_query_types::batch::RequestMetadata::collect(&request.queries, "test");
     *different.writes.get_mut("call").unwrap() = false;
