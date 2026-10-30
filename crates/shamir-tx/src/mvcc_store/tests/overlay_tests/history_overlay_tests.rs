@@ -182,6 +182,72 @@ async fn history_batches_archival_timestamps_and_preserves_pending() {
     assert_eq!(history.get_many_calls.load(Ordering::Relaxed), 1);
 }
 
+#[tokio::test]
+async fn rv_tx_3fc2fa1d_history_reporting_propagates_timestamp_storage_failure() {
+    let gate = make_gate();
+    let history = Arc::new(FailingStore::new());
+    let mvcc = MvccStore::new(history.clone(), gate.clone());
+    mvcc.set_test_now(1234);
+    let version = gate.assign_next_version();
+    let ops = set(b"reporting-error", b"value");
+    mvcc.apply_committed_visible(&ops, version);
+    mvcc.write_committed_to_history(&ops, version)
+        .await
+        .unwrap();
+    mvcc.gc_overlay_to(version);
+
+    history.fail_timestamp_get.store(true, Ordering::Relaxed);
+    history.fail_many.store(true, Ordering::Relaxed);
+    let history_single = mvcc.history_of(b"reporting-error").await;
+    assert!(
+        matches!(history_single, Err(DbError::Storage(message)) if message == "injected I/O fault")
+    );
+    assert_eq!(history.timestamp_get_calls.load(Ordering::Relaxed), 1);
+    history.fail_timestamp_get.store(true, Ordering::Relaxed);
+    history.fail_many.store(true, Ordering::Relaxed);
+    let history_many = mvcc.history_of_many(&[b"reporting-error"]).await;
+    assert!(
+        matches!(history_many, Err(DbError::Storage(message)) if message == "injected I/O fault")
+    );
+    assert_eq!(history.timestamp_get_calls.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn rv_tx_3fc2fa1d_missing_timestamp_is_not_storage_failure() {
+    let gate = make_gate();
+    let history = Arc::new(FailingStore::new());
+    let mvcc = MvccStore::new(history.clone(), gate.clone());
+    let version = gate.assign_next_version();
+    let ops = set(b"missing-ts", b"value");
+    mvcc.apply_committed_visible(&ops, version);
+    mvcc.write_committed_to_history(&ops, version)
+        .await
+        .unwrap();
+    mvcc.gc_overlay_to(version);
+    history.remove(ts_key(version).into()).await.unwrap();
+    history.fail_many.store(true, Ordering::Relaxed);
+    let missing_single = mvcc.history_of(b"missing-ts").await.unwrap();
+    assert_eq!(missing_single[0].ts_millis, None);
+    history.fail_many.store(true, Ordering::Relaxed);
+    let missing_many = mvcc.history_of_many(&[b"missing-ts"]).await.unwrap();
+    assert_eq!(missing_many[0][0].ts_millis, None);
+
+    let valid_gate = make_gate();
+    let valid_history = Arc::new(FailingStore::new());
+    let valid_mvcc = MvccStore::new(valid_history, valid_gate.clone());
+    let valid_version = valid_gate.assign_next_version();
+    let valid_ops = set(b"present-ts", b"value");
+    valid_mvcc.apply_committed_visible(&valid_ops, valid_version);
+    valid_mvcc
+        .write_committed_to_history(&valid_ops, valid_version)
+        .await
+        .unwrap();
+    valid_mvcc.gc_overlay_to(valid_version);
+    assert!(valid_mvcc.history_of(b"present-ts").await.unwrap()[0]
+        .ts_millis
+        .is_some());
+}
+
 /// Three commits acked through the overlay only (no drain yet): the whole
 /// timeline must be visible, with each version's commit-time ts.
 #[tokio::test]

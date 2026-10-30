@@ -167,8 +167,8 @@ impl MvccStore {
     /// versions still appear.
     ///
     /// Each entry's commit timestamp comes from the pending commit-time stamp
-    /// while the version is undrained, else from [`Self::lookup_ts`] (T1c).
-    /// Entries with no recorded ts carry `ts_millis = None`.
+    /// while undrained, otherwise from the stored timestamp. Missing or
+    /// malformed timestamps are `None`; timestamp storage errors are returned.
     ///
     /// Read-only, no cell mutation, no locking. Allocation is bounded by
     /// the key's version count (one `VersionEntry` per archived version).
@@ -244,7 +244,7 @@ impl MvccStore {
                 Err(error) => {
                     log::warn!("batch timestamp lookup failed: {error}; retrying individually");
                     for &i in chunk {
-                        stamps[i] = self.lookup_ts(entries[i].0).await;
+                        stamps[i] = self.try_lookup_ts(entries[i].0).await?;
                     }
                 }
             }
@@ -502,10 +502,8 @@ impl MvccStore {
             .pending_ts
             .insert_sync(commit_version, self.now_millis());
 
-        // P1c: populate the overlay with the SAME (key, version) → value pair
-        // that the drainer will later land in history. The overlay value is
-        // byte-identical to the eventual history payload: the raw value for
-        // `Set`, an empty `Bytes` tombstone for `Remove`.
+        // Populate the overlay with the same bytes that the drainer persists
+        // to history: values for Set operations and empty tombstones for Remove.
         for op in ops {
             match op {
                 // KvOp keys and the overlay are both `RecordKey`-keyed
@@ -917,20 +915,23 @@ impl MvccStore {
         .await
     }
 
-    /// T1c: look up the recorded commit timestamp (millis) for `version`.
-    /// Returns `None` if no ts entry exists (treated as "unknown age" → the
-    /// age axis conservatively keeps the version).
-    pub(crate) async fn lookup_ts(&self, version: u64) -> Option<u64> {
+    /// T1c: look up a recorded commit timestamp, distinguishing missing or
+    /// malformed stamps from storage failures for reporting callers.
+    pub(crate) async fn try_lookup_ts(&self, version: u64) -> DbResult<Option<u64>> {
         match self.history.get(ts_key(version).into()).await {
-            Ok(val) => {
-                if val.len() == 8 {
-                    let bytes: [u8; 8] = val.as_ref().try_into().ok()?;
-                    Some(u64::from_le_bytes(bytes))
-                } else {
-                    None
-                }
-            }
-            Err(DbError::NotFound(_)) => None,
+            Ok(val) if val.len() == 8 => match <[u8; 8]>::try_from(val.as_ref()) {
+                Ok(bytes) => Ok(Some(u64::from_le_bytes(bytes))),
+                Err(_) => Ok(None),
+            },
+            Ok(_) | Err(DbError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Conservative timestamp lookup for GC: storage failures are unknown age.
+    pub(crate) async fn lookup_ts(&self, version: u64) -> Option<u64> {
+        match self.try_lookup_ts(version).await {
+            Ok(ts) => ts,
             Err(error) => {
                 log::warn!("timestamp lookup failed for version {version}: {error}");
                 None

@@ -21,14 +21,13 @@
 //! - [`repo_wal_manager`] — [`RepoWalManager`] repo-level WAL for transactional
 //!   writes, one `WalEntryV2` per tx/batch (Stage 2.4).
 //!
-//! **Stage 3.1 (in progress).** MvccStore landed:
+//! **Stage 3 (complete).** `MvccStore` and its history, overlay, timestamp,
+//! and GC paths are active.
 //!
-//! - [`mvcc_store`] — [`MvccStore`] versioned KV layer over main + history
-//!   stores, zero-overhead when no snapshots are active.
+//! - [`mvcc_store`] — [`MvccStore`] versioned KV layer over the history log
+//!   and production-populated overlay, with snapshot-aware reads.
 //!
-//! Stage 2 is now **complete** (RepoTxGate + TxContext + LayeredInterner +
-//! RepoWalManager). Upcoming stages (see `docs/dev-artifacts/pre-transactional/`):
-//! - Stage 6: `GcWorker`, `TxReaper`
+//! Stage 2 is complete.
 
 #[cfg(test)]
 mod tests;
