@@ -260,6 +260,13 @@ impl MvccStore {
             .collect())
     }
 
+    /// Return histories in input order using bounded shared archive scans.
+    /// Scans may include unrelated keys in gaps. If a scan fails, retry
+    /// individual keys in input order, returning the first retry error.
+    pub async fn history_of_many(&self, keys: &[&[u8]]) -> DbResult<Vec<Vec<VersionEntry>>> {
+        super::history_many::history_of_many(self, keys).await
+    }
+
     /// cancel-safe: yes — a single synchronous `cells.entry_sync`
     /// modify-or-insert; the fn no longer suspends, so cancellation can only
     /// happen before the whole update runs or after it completed.

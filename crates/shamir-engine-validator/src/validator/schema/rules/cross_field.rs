@@ -8,6 +8,7 @@
 use std::cmp::Ordering;
 
 use shamir_types::record_view::ScalarRef;
+use smallvec::SmallVec;
 
 use crate::validator::record_fields::RecordFields;
 
@@ -80,7 +81,7 @@ impl CrossFieldCompare {
     /// (either path absent, or the values are not mutually orderable).  The
     /// caller decides how to surface a `None`.
     pub fn check(&self, fields: &dyn RecordFields, self_path: &[&str]) -> CrossFieldResult {
-        let other_refs: Vec<&str> = self.other.iter().map(String::as_str).collect();
+        let other_refs: SmallVec<[&str; 4]> = self.other.iter().map(String::as_str).collect();
 
         let lhs = match fields.scalar(self_path) {
             Some(s) => s,

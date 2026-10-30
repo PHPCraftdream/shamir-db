@@ -7,6 +7,7 @@ use bytes::Bytes;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -108,8 +109,16 @@ impl IndexManager {
         index_def: IndexDefinition,
         records: Vec<(RecordId, InnerValue)>,
     ) -> DbResult<()> {
-        use shamir_types::types::common::{new_map, TMap};
+        self.create_unique_index_from_records_borrowed(index_def, &records)
+            .await
+    }
 
+    /// Backfill from a borrowed snapshot, retaining the owned API's validation and publication order.
+    pub async fn create_unique_index_from_records_borrowed(
+        &self,
+        index_def: IndexDefinition,
+        records: &[(RecordId, InnerValue)],
+    ) -> DbResult<()> {
         let name_interned = index_def.name_interned;
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
@@ -130,7 +139,7 @@ impl IndexManager {
         let mut key_counts: TMap<Bytes, usize> = new_map();
         let mut entries: Vec<(RecordId, Bytes)> = Vec::with_capacity(16);
 
-        for (record_id, value) in &records {
+        for (record_id, value) in records {
             if let Some(irk) =
                 build_index_key_from_record(true, name_interned, value, &index_def.paths)
             {

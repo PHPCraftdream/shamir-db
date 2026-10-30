@@ -33,7 +33,11 @@ mod transactions;
 /// Barriers share the bounded writer channel's slots with journal events.
 const JOURNAL_CONFIRM_BUDGET: Duration = Duration::from_secs(1);
 
-/// Manages a single repository and its tables
+/// Manages a single repository and its tables.
+///
+/// Trusted native-embedding handle; raw operations do not authorize an actor.
+/// Use [`crate::query::batch::Authorized`] with the `shamir-db` facade's
+/// live ACL gate for authorization-enforced batch execution.
 pub struct RepoInstance {
     name: String,
     commit_visibility_wait: VisibilityWait,
