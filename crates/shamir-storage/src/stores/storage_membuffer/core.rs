@@ -14,8 +14,21 @@ use tokio::sync::Notify;
 
 use super::revision::{Stamp, StripedRevisions};
 
-/// Configuration for `MemBufferStore`. Stable wire-format
-/// (serialized into `info_store` by the DDL layer).
+/// Configuration for `MemBufferStore`.
+///
+/// # Wire format (pinned)
+///
+/// Persisted into `info_store` by the DDL layer as positional bincode
+/// (legacy `bincode::serialize`: fixint little-endian, `usize` as
+/// `u64`) inside `MetaEnvelope` v1 (magic `SDB2`, `version: u16`,
+/// `written_at_nanos: u64`), payload field order exactly as declared
+/// below. This is a v1 format contract: adding, removing, reordering or
+/// retyping a field is a format break that must ship with either a
+/// versioned decode path or explicit fail-closed rejection of the old
+/// bytes — it may never silently change what v1 decodes to. The golden
+/// byte-literal tests in
+/// `shamir-engine/src/table/tests/table_core/config/buffer_config_tests.rs`
+/// pin these bytes and change only together with such a decision.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemBufferConfig {
     /// Soft cap for total cache accounting weight; conservative count-limit
