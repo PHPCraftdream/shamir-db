@@ -23,6 +23,15 @@
 #   ./scripts/test.sh @e2e                     # all e2e suites (--full implied)
 #   ./scripts/test.sh @types @tx               # combine scopes
 #   ./scripts/test.sh @oracle -- watermark     # scope + name filter
+#   ./scripts/test.sh --archive-to <file.tar.zst>  # build+archive workspace lib test binaries (CI)
+#   ./scripts/test.sh --from-archive <file.tar.zst> # run tests from a nextest archive (CI)
+#
+# CI archive modes:
+#   --archive-to builds `cargo nextest archive --workspace --lib --locked`
+#   by default; `--full` omits --lib (nextest default target selection).
+#   Only the lib `test` job consumes the archive; `integration` builds in place.
+#   --from-archive runs archived tests, omitting only --lib and --locked while
+#   forwarding every other argument unchanged; CI auto-selects profile ci.
 #
 # Available scopes (extend as needed):
 #   @tx       — shamir-tx
@@ -124,6 +133,8 @@ print_help() {
 }
 
 mode="lib"            # default: lib tests only — fastest signal
+archive_to=""         # --archive-to: build+pack a nextest archive (CI)
+archive_from=""       # --from-archive: run tests from a nextest archive (CI)
 forces_full=""        # named scopes can force --full (e.g. @e2e)
 extra_args=()
 scope_seen=0
@@ -136,6 +147,16 @@ while [[ $# -gt 0 ]]; do
         --full|-f)
             mode="full"
             shift
+            ;;
+        --archive-to)
+            [[ $# -ge 2 ]] || { echo "ERROR: --archive-to requires a file path" >&2; exit 2; }
+            archive_to="$2"
+            shift 2
+            ;;
+        --from-archive)
+            [[ $# -ge 2 ]] || { echo "ERROR: --from-archive requires a file path" >&2; exit 2; }
+            archive_from="$2"
+            shift 2
             ;;
         --lib|-l)
             mode="lib"
@@ -172,6 +193,25 @@ if [[ -n "$forces_full" ]]; then
     mode="full"
 fi
 
+if [[ -n "$archive_to" && -n "$archive_from" ]]; then
+    echo "ERROR: --archive-to and --from-archive are mutually exclusive" >&2
+    exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# Archive-build mode (CI): only the lib `test` job consumes this archive;
+# `integration` builds in place. Benches are never built by nextest's default
+# target selection.
+# ---------------------------------------------------------------------------
+if [[ -n "$archive_to" ]]; then
+    archive_args=(--workspace --locked)
+    if [[ "$mode" == "lib" ]]; then
+        archive_args+=(--lib)
+    fi
+    echo "» cargo nextest archive ${archive_args[*]} --archive-file $archive_to" >&2
+    exec cargo nextest archive "${archive_args[@]}" --archive-file "$archive_to"
+fi
+
 case "$mode" in
     lib)
         nextest_args=(--lib --no-fail-fast)
@@ -195,6 +235,22 @@ esac
 # caller already passed an explicit `--profile`.
 if [[ "${CI:-}" == "true" ]] && ! printf '%s\n' "${extra_args[@]:-}" | grep -q -- '--profile'; then
     nextest_args+=(--profile ci)
+fi
+
+if [[ -n "$archive_from" ]]; then
+    rest=()
+    for a in ${extra_args[@]+"${extra_args[@]}"}; do
+        # These options are build-only and unsupported while consuming archives.
+        [[ "$a" == "--locked" || "$a" == "--lib" ]] && continue
+        rest+=("$a")
+    done
+    run_args=(--no-fail-fast)
+    if [[ "${CI:-}" == "true" ]] && ! printf '%s\n' "${rest[@]:-}" | grep -q -- '--profile'; then
+        run_args+=(--profile ci)
+    fi
+    run_args+=(--archive-file "$archive_from" --workspace-remap .)
+    echo "» cargo nextest run ${run_args[*]} ${rest[*]:-}" >&2
+    exec cargo nextest run "${run_args[@]}" ${rest[@]+"${rest[@]}"}
 fi
 
 echo "» cargo nextest run ${nextest_args[*]} ${extra_args[*]:-}" >&2

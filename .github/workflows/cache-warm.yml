@@ -1,0 +1,50 @@
+name: cache warm
+
+# Warms the base cargo cache used by test-build (see ci.yml and
+# .github/actions/build-test-archive). Only the lib `test` job consumes the
+# archive; `integration` builds in place.
+# The weekly schedule keeps the cache from expiring (GitHub evicts after 7
+# days of disuse). After default-branch Cargo.lock or toolchain changes,
+# manually warm it with: gh workflow run cache-warm.yml --ref master
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Weekly Saturday, off-minute (different slot from ci.yml).
+    - cron: '43 4 * * 6'
+
+# Read-only: the job builds and populates the actions cache (implicit scope,
+# same as ci.yml's jobs) but touches nothing else.
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-warm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  warm:
+    name: warm test-build cache (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    # A cache saved on a feature ref is invisible to other PRs (GHA cache
+    # scoping): only warm the default branch. Scheduled runs on a synced
+    # fork's master are skipped here rather than failing.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # Same composite action as ci.yml's test-build → same rust-cache
+      # shared key; workflow env blocks also match because rust-cache hashes
+      # their CARGO_*/RUST_* values. No artifact upload: only the lib `test`
+      # job consumes the archive; `integration` builds in place.
+      - uses: ./.github/actions/build-test-archive
+        with:
+          upload: 'false'
