@@ -4,7 +4,7 @@ use shamir_collections::{TMap, TSet};
 
 use super::edge_kind::EdgeKind;
 use super::planner::{BatchPlanner, MAX_EXTRACT_DEPTH};
-use crate::filter::Filter;
+use crate::filter::{Filter, FilterValue};
 
 /// Execution plan with parallel stages.
 ///
@@ -137,8 +137,6 @@ impl BatchPlanner {
         fv: &crate::filter::FilterValue,
         depth: usize,
     ) -> bool {
-        use crate::filter::FilterValue;
-
         // Same depth cap as [`Self::contains_field_based_comparison`] — see
         // its depth-parameter doc comment for why `true` is conservative.
         if depth > MAX_EXTRACT_DEPTH {

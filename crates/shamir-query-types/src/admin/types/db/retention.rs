@@ -77,7 +77,7 @@ pub struct PurgeHistoryOp {
     #[serde(default = "default_repo")]
     pub repo: String,
     pub scope: PurgeScope,
-    /// Hex HMAC over `b"purge_history\0<db_in_use>\0<repo>\0<table>\0<scope>"`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     /// Irreversible audit-trail loss — see `crate::auth::DropUserOp` for the
     /// field-shape precedent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,7 +122,7 @@ pub struct SetRetentionOp {
     #[serde(default = "default_repo")]
     pub repo: String,
     pub retention: Retention,
-    /// Hex HMAC over `b"set_retention\0<db_in_use>\0<repo>\0<table>\0<retention>"`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     /// See `PurgeHistoryOp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,

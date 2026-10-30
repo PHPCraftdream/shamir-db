@@ -35,18 +35,8 @@
 mod seed_subscription;
 pub use seed_subscription::SeedRepositoryStatus;
 
+use crate::admin::types::db_ops::is_false;
 use serde::{Deserialize, Serialize};
-
-/// Serde skip-serializing-if helper: omit `false` booleans from the wire.
-///
-/// Mirrors [`super::db_ops::is_false`] — declared locally to keep this
-/// module self-contained (the read-only introspection ops below use it to
-/// make a default-constructed payload byte-identical to an empty map, so
-/// `ListPublicationsOp::default()` does not emit a spurious
-/// `"list_publications": false` key).
-pub(crate) fn is_false(b: &bool) -> bool {
-    !*b
-}
 
 /// Replication scope — the `(db[, repo[, table]])` triple that identifies
 /// *what* is replicated. `repo == None` means "the whole database";

@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 /// | `max_queries` | 50 | Maximum queries per batch |
 /// | `max_dependency_depth` | 10 | Maximum dependency chain length |
 /// | `max_execution_time_secs` | 30 | Maximum total execution time |
-/// | `max_result_size` | 10MB | Maximum total result size |
+/// | `max_result_size` | 10 MiB | Maximum total result size |
+/// | `max_nesting_depth` | 4 | Maximum sub-batch nesting depth |
 /// | `max_iterations` | 1000 | Maximum `for_each` loop iterations |
 ///
 /// # Example

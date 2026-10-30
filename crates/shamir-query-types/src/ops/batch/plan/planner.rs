@@ -63,7 +63,8 @@ use crate::batch::alias::split_path_tail;
 use crate::batch::{
     BatchError, BatchLimits, BatchOp, BatchPlan, BatchTreeVisitor, EdgeKind, QueryEntry,
 };
-use crate::filter::Filter;
+use crate::filter::{Filter, FilterValue};
+use crate::read::SelectExpr;
 use shamir_collections::{new_map, new_set, TFxSet, TMap, TSet};
 use shamir_types::types::value::QueryValue;
 
@@ -182,14 +183,13 @@ impl BatchPlanner {
         }
 
         // Aliases are keys in the map (no duplicates possible)
-        let aliases: TSet<String> = queries.keys().cloned().collect();
-        let alias_order: Vec<String> = queries.keys().cloned().collect();
+        let alias_order: Vec<&str> = queries.keys().map(String::as_str).collect();
 
         // Extract dependencies for each query, tagging each edge with its
         // provenance (Explicit from `after`, DataFlow from `$query`, or
         // Both when the same alias is named by both sources).
-        let mut dependencies: TMap<String, TSet<String>> = new_map();
-        let mut edge_provenance: TMap<String, TMap<String, EdgeKind>> = new_map();
+        let mut dependencies: TMap<&str, TSet<&str>> = new_map();
+        let mut edge_provenance: TMap<&str, TMap<&str, EdgeKind>> = new_map();
 
         for (alias, entry) in queries {
             let mut data_flow_deps = Self::extract_dependencies(&entry.op, alias)?;
@@ -219,10 +219,10 @@ impl BatchPlanner {
                 Self::extract_deps_from_filter(when_filter, &mut data_flow_deps, 0)?;
             }
 
-            let mut provenance: TMap<String, EdgeKind> = new_map();
-            for dep in &data_flow_deps {
-                provenance.insert(dep.clone(), EdgeKind::DataFlow);
-            }
+            let mut provenance: TMap<String, EdgeKind> = data_flow_deps
+                .into_iter()
+                .map(|dep| (dep, EdgeKind::DataFlow))
+                .collect();
 
             // Merge explicit ordering dependencies from `after`. A garbage
             // path tail (e.g. "mk[0].id") is rejected: `after` is alias-only
@@ -245,11 +245,9 @@ impl BatchPlanner {
                     .or_insert(EdgeKind::Explicit);
             }
 
-            let deps: TSet<String> = provenance.keys().cloned().collect();
-
             // Validate all referenced aliases exist
-            for dep in &deps {
-                if !aliases.contains(dep) {
+            for dep in provenance.keys() {
+                if !queries.contains_key(dep) {
                     return Err(BatchError::UnknownAlias {
                         alias: dep.clone(),
                         referenced_by: alias.clone(),
@@ -257,8 +255,24 @@ impl BatchPlanner {
                 }
             }
 
-            dependencies.insert(alias.clone(), deps);
-            edge_provenance.insert(alias.clone(), provenance);
+            let borrowed_provenance: TMap<&str, EdgeKind> = provenance
+                .iter()
+                .map(|(dep, kind)| {
+                    (
+                        queries
+                            .get_key_value(dep)
+                            .expect("validated alias")
+                            .0
+                            .as_str(),
+                        *kind,
+                    )
+                })
+                .collect();
+            dependencies.insert(
+                alias.as_str(),
+                borrowed_provenance.keys().copied().collect(),
+            );
+            edge_provenance.insert(alias.as_str(), borrowed_provenance);
         }
 
         // Check for cycles
@@ -280,9 +294,28 @@ impl BatchPlanner {
 
         Ok(BatchPlan {
             stages,
-            aliases: alias_order,
-            dependencies,
-            edge_provenance,
+            aliases: alias_order.into_iter().map(str::to_owned).collect(),
+            dependencies: dependencies
+                .into_iter()
+                .map(|(alias, deps)| {
+                    (
+                        alias.to_owned(),
+                        deps.into_iter().map(str::to_owned).collect(),
+                    )
+                })
+                .collect(),
+            edge_provenance: edge_provenance
+                .into_iter()
+                .map(|(alias, edges)| {
+                    (
+                        alias.to_owned(),
+                        edges
+                            .into_iter()
+                            .map(|(dep, kind)| (dep.to_owned(), kind))
+                            .collect(),
+                    )
+                })
+                .collect(),
         })
     }
 
@@ -405,10 +438,7 @@ impl BatchPlanner {
     /// detected with the exact reserved-key-map convention (mirroring
     /// `contains_param_ref`'s `is_marker_map` in `shamir-engine`'s
     /// `param_subst.rs`), then decoded into a
-    /// [`crate::filter::FilterValue`] via the same msgpack round-trip
-    /// `param_subst.rs` uses to RESOLVE it at execution time — the wire
-    /// encodings coincide — and delegated to the shared leaf extractor
-    /// (one shared implementation, no drift).
+    /// [`crate::filter::FilterValue`] using the shared buffered-value decoder,
     ///
     /// `$param` is intentionally NOT treated as a marker here: it carries no
     /// alias to depend on (it reads from the sub-batch's `bind` scope, not
@@ -430,8 +460,6 @@ impl BatchPlanner {
         alias: &str,
         depth: usize,
     ) -> Result<(), BatchError> {
-        use crate::filter::FilterValue;
-
         if depth > MAX_EXTRACT_DEPTH {
             return Err(BatchError::NestingTooDeep {
                 depth,
@@ -458,18 +486,7 @@ impl BatchPlanner {
                 if is_query_fn_cond_expr_marker
                     && Self::value_height_bounded(value, MAX_EXTRACT_DEPTH - depth)
                 {
-                    // `rmp_serde::to_vec_named` serializes the ENTIRE value
-                    // recursively — only safe when the value tree's height is
-                    // bounded (checked above, iteratively, against the
-                    // remaining depth budget). An over-deep value falls
-                    // through to the plain depth-bounded recursion below,
-                    // which rejects it with `NestingTooDeep` at
-                    // `MAX_EXTRACT_DEPTH` instead of overflowing the stack
-                    // inside serde.
-                    if let Some(fv) = rmp_serde::to_vec_named(value)
-                        .ok()
-                        .and_then(|bytes| rmp_serde::from_slice::<FilterValue>(&bytes).ok())
-                    {
+                    if let Ok(fv) = FilterValue::try_from_query_value_ref(value) {
                         if let FilterValue::Cond { cond } = &fv {
                             // Check the top-level condition, then recurse
                             // into `then`/`or_else` in case the guard-worthy
@@ -616,8 +633,6 @@ impl BatchPlanner {
         deps: &mut TSet<String>,
         depth: usize,
     ) -> Result<(), BatchError> {
-        use crate::filter::FilterValue;
-
         if depth > MAX_EXTRACT_DEPTH {
             return Err(BatchError::NestingTooDeep {
                 depth,
@@ -669,13 +684,13 @@ impl BatchPlanner {
     /// with an explicit stack). The cycle check precedes the depth rejection,
     /// so its walk depth must not scale with an attacker-controlled alias
     /// chain length.
-    fn detect_cycle(deps: &TMap<String, TSet<String>>) -> Option<Vec<String>> {
+    fn detect_cycle(deps: &TMap<&str, TSet<&str>>) -> Option<Vec<String>> {
         // Borrow-based sets — no allocations in the happy path.
-        let mut white: TFxSet<&str> = deps.keys().map(String::as_str).collect();
+        let mut white: TFxSet<&str> = deps.keys().copied().collect();
         let mut black: TFxSet<&str> = TFxSet::default();
 
         // Collect keys once so we can iterate without borrowing `white` mutably.
-        let all_nodes: Vec<&str> = deps.keys().map(String::as_str).collect();
+        let all_nodes: Vec<&str> = deps.keys().copied().collect();
         for start in all_nodes {
             if !white.contains(start) {
                 continue;
@@ -695,7 +710,7 @@ impl BatchPlanner {
                 let next = deps.get(node).and_then(|ns| ns.iter().nth(idx));
                 if let Some(n) = next {
                     top.1 += 1;
-                    let nb: &str = n.as_str();
+                    let nb: &str = n;
                     if gray.contains(nb) {
                         // Found cycle — allocate only here (error path).
                         let cycle_start = path.iter().position(|&x| x == nb)?;
@@ -749,7 +764,6 @@ impl BatchPlanner {
     /// mirrors [`Self::value_height_bounded`]: proves that
     /// `to_filter_value`'s recursive translation cannot overflow.
     fn select_expr_height_bounded(expr: &crate::read::SelectExpr, cap: usize) -> bool {
-        use crate::read::SelectExpr;
         let mut stack: Vec<(&SelectExpr, usize)> = vec![(expr, 1)];
         while let Some((e, h)) = stack.pop() {
             if h > cap {
@@ -776,17 +790,15 @@ impl BatchPlanner {
     /// dependencies: the initial frontier is the no-dependency nodes and the
     /// wave walk must traverse the REVERSE adjacency (dep → dependents),
     /// exactly like [`Self::topological_sort`] below.
-    fn calculate_max_depth(deps: &TMap<String, TSet<String>>) -> usize {
-        let mut in_degree: TMap<&str, usize> =
-            deps.iter().map(|(k, v)| (k.as_str(), v.len())).collect();
+    fn calculate_max_depth(deps: &TMap<&str, TSet<&str>>) -> usize {
+        let mut in_degree: TMap<&str, usize> = deps.iter().map(|(k, v)| (*k, v.len())).collect();
 
         // reverse_adj[dep] = list of nodes that depend on `dep`.
-        let mut reverse_adj: TMap<&str, Vec<&str>> =
-            deps.keys().map(|k| (k.as_str(), vec![])).collect();
+        let mut reverse_adj: TMap<&str, Vec<&str>> = deps.keys().map(|k| (*k, vec![])).collect();
         for (node, neighbors) in deps {
             for n in neighbors {
-                if let Some(list) = reverse_adj.get_mut(n.as_str()) {
-                    list.push(node.as_str());
+                if let Some(list) = reverse_adj.get_mut(n) {
+                    list.push(node);
                 }
             }
         }
@@ -831,29 +843,23 @@ impl BatchPlanner {
     /// Each stage contains queries whose dependencies are all satisfied
     /// by previous stages. Ties within a stage are broken by insertion order
     /// (`order` slice) for deterministic output.
-    fn topological_sort(deps: &TMap<String, TSet<String>>, order: &[String]) -> Vec<Vec<String>> {
+    fn topological_sort(deps: &TMap<&str, TSet<&str>>, order: &[&str]) -> Vec<Vec<String>> {
         // Build a position map for O(1) tie-breaking.
-        let pos: TMap<&str, usize> = order
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.as_str(), i))
-            .collect();
+        let pos: TMap<&str, usize> = order.iter().enumerate().map(|(i, s)| (*s, i)).collect();
 
         // In this DAG an edge A→B means "A depends on B, so B must run first".
         // For Kahn's we need the *reverse* adjacency (B→A: "completing B unblocks A")
         // and in-degree[A] = number of A's dependencies.
 
         // in_degree[node] = how many deps the node still has outstanding.
-        let mut in_degree: TMap<&str, usize> =
-            deps.keys().map(|k| (k.as_str(), deps[k].len())).collect();
+        let mut in_degree: TMap<&str, usize> = deps.keys().map(|k| (*k, deps[k].len())).collect();
 
         // reverse_adj[dep] = list of nodes that depend on `dep`.
-        let mut reverse_adj: TMap<&str, Vec<&str>> =
-            deps.keys().map(|k| (k.as_str(), vec![])).collect();
+        let mut reverse_adj: TMap<&str, Vec<&str>> = deps.keys().map(|k| (*k, vec![])).collect();
         for (node, neighbors) in deps {
             for n in neighbors {
-                if let Some(list) = reverse_adj.get_mut(n.as_str()) {
-                    list.push(node.as_str());
+                if let Some(list) = reverse_adj.get_mut(n) {
+                    list.push(node);
                 }
             }
         }

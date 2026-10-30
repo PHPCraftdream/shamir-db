@@ -1,6 +1,6 @@
-//! Allocation-free write-result record for INSERT/UPSERT hot paths.
+//! Write-result record serialization without an intermediate map.
 
-use serde::de::{Deserializer, MapAccess, Visitor};
+use serde::de::Deserializer;
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Serialize};
 use shamir_types::types::record_id::RecordId;
@@ -80,26 +80,8 @@ impl Serialize for InsertedRecord {
 
 impl<'de> Deserialize<'de> for InsertedRecord {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        // Decode as a `QueryValue` map (byte-identical wire shape).
-        // The `_id` key is stored in `fields` when present; callers can
-        // look it up via `get_value_owned("_id")`.
-        struct DirectVisitor;
-
-        impl<'de> Visitor<'de> for DirectVisitor {
-            type Value = InsertedRecord;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a map")
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
-                use serde::de::value::MapAccessDeserializer;
-                let fields = QueryValue::deserialize(MapAccessDeserializer::new(map))?;
-                Ok(InsertedRecord { id: None, fields })
-            }
-        }
-
-        d.deserialize_map(DirectVisitor)
+        let fields = QueryValue::deserialize(d)?;
+        Ok(InsertedRecord { id: None, fields })
     }
 }
 

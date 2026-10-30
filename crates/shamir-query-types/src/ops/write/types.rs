@@ -76,6 +76,9 @@ pub struct InsertSelect {
 // ============================================================================
 
 /// Insert operation - inserts new records into a table.
+///
+/// Returned records follow input order within each channel: `values` first,
+/// then `records_idmsgpack`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InsertOp {
