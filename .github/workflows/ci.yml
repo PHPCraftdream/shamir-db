@@ -33,6 +33,43 @@ permissions:
   contents: read
 
 jobs:
+  # TIER PLANNER. Decides once per run whether the FULL matrix runs; every
+  # full-tier job gates on `needs.plan.outputs.full == 'true'`, every
+  # fast-tier job on the negation, and the merge gate reads it to pick the
+  # tier it judges. FULL is selected by: ready_for_review / a non-draft PR,
+  # master pushes, workflow_dispatch, schedule — and by a DRAFT PR whose HEAD
+  # commit message carries the marker `[ci full]` alone on a line
+  # (scripts/ci/gates/full_tier_plan.py, unit-tested). Only the head commit
+  # counts: one marker buys one full run, the next push is fast again. The
+  # message is fetched through the API into a file and never interpolated
+  # into a shell line. Test selection inside the fast tier stays diff-based
+  # (scripts/ci/affected_crates.py), not message-based.
+  plan:
+    name: tier plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.tier.outputs.full }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: PR head commit message (draft PRs only)
+        if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq .commit.message > "$RUNNER_TEMP/head-message.txt"
+      - name: Decide the tier
+        id: tier
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DRAFT: ${{ github.event.pull_request.draft == true }}
+        run: |
+          set -euo pipefail
+          message="$RUNNER_TEMP/head-message.txt"
+          [ -f "$message" ] || : > "$message"
+          python3 -I scripts/ci/gates/full_tier_plan.py --event "$EVENT_NAME" --draft "$DRAFT" --message-file "$message"
+
   # FAST tier — draft pull requests only. ONE ubuntu job with a shared
   # cargo cache: cargo fmt, the affected-crates selector's unit tests, then
   # clippy + lib tests limited to the crates the PR can affect
@@ -40,12 +77,14 @@ jobs:
   # without queueing the 17-job full matrix. It never silently skips: a diff
   # the selector cannot bound runs --workspace; a docs-only diff runs fmt +
   # the selector's unit tests only. The FULL tier below (the merge gate)
-  # runs for ready PRs, master pushes and workflow_dispatch.
+  # runs for ready PRs, master pushes and workflow_dispatch, and for a draft
+  # whose head commit message has the `[ci full]` marker (see `plan`).
   fast:
     name: fast tier (draft PRs)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    needs: plan
+    if: needs.plan.outputs.full != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -167,7 +206,8 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -191,7 +231,8 @@ jobs:
     name: cargo clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -224,7 +265,8 @@ jobs:
     name: cargo doc (shamir-engine)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -278,7 +320,8 @@ jobs:
     name: engine features (${{ matrix.cell.id }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -332,7 +375,8 @@ jobs:
     name: engine features fast (draft PRs)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name == 'pull_request' && github.event.pull_request.draft == true
+    needs: plan
+    if: needs.plan.outputs.full != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -391,7 +435,8 @@ jobs:
     name: cargo test lib (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -476,7 +521,8 @@ jobs:
     name: cargo test integration (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -532,7 +578,8 @@ jobs:
     name: ts unit (shamir-client-ts)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -579,7 +626,8 @@ jobs:
     name: dependency cooldown (30d)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -616,7 +664,8 @@ jobs:
     name: cargo deny check
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -699,7 +748,8 @@ jobs:
     name: loom model (writer_drain_barrier)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -870,17 +920,19 @@ jobs:
   # CI-03b: compare compiled test inventories for every selected campaign
   # package at head and those present at the merge base, using the campaign's
   # discovery_delta. Base lists are cached by SHA, OS, config and packages.
-  # Drafts run ubuntu/default only; ready PRs use the full OS/config matrix.
+  # Fast-tier drafts run ubuntu/default only; the full tier (ready PRs, or a
+  # draft with the `[ci full]` marker) uses the full OS/config matrix.
   # No selected campaign means a no-op; non-PR events run format smoke.
   test-discovery:
     name: test discovery (${{ matrix.os }}, ${{ matrix.config.id }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(github.event.pull_request.draft && '["ubuntu-latest"]' || (contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]')) }}
-        config: ${{ fromJSON(github.event.pull_request.draft && '[{"id":"default","flags":""}]' || '[{"id":"default","flags":""},{"id":"test-util-fts","flags":"--features shamir-engine/test-util,shamir-engine/fts_indexed_long"}]') }}
+        os: ${{ fromJSON((github.event.pull_request.draft && needs.plan.outputs.full != 'true') && '["ubuntu-latest"]' || (contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]')) }}
+        config: ${{ fromJSON((github.event.pull_request.draft && needs.plan.outputs.full != 'true') && '[{"id":"default","flags":""}]' || '[{"id":"default","flags":""},{"id":"test-util-fts","flags":"--features shamir-engine/test-util,shamir-engine/fts_indexed_long"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -930,7 +982,7 @@ jobs:
       # no lib tests; shamir-types is the smallest crate that clearly does
       # (#[test] modules under crates/shamir-types/src/**/tests/).
       - name: format smoke (real nextest output must round-trip)
-        if: matrix.os == 'ubuntu-latest' && matrix.config.id == 'default' && github.event.pull_request.draft != true
+        if: matrix.os == 'ubuntu-latest' && matrix.config.id == 'default' && (github.event.pull_request.draft != true || needs.plan.outputs.full == 'true')
         shell: bash
         run: |
           set -euo pipefail
@@ -1115,7 +1167,8 @@ jobs:
     name: node binding (shamir-client)
     runs-on: windows-latest
     timeout-minutes: 30
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
@@ -1185,10 +1238,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [fast, fmt, clippy, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
+    needs: [plan, fast, fmt, clippy, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - env:
           NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          echo "$NEEDS_JSON" | python3 -I scripts/ci/gates/merge_gate_check.py --event ${{ github.event_name }} --draft ${{ github.event.pull_request.draft == true }}
+          echo "$NEEDS_JSON" | python3 -I scripts/ci/gates/merge_gate_check.py --event ${{ github.event_name }} --draft ${{ github.event.pull_request.draft == true && needs.plan.outputs.full != 'true' }}
