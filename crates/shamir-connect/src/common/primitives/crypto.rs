@@ -62,7 +62,12 @@ pub type HmacTag = [u8; 32];
 /// Fill `out` with cryptographically secure random bytes.
 ///
 /// Uses [`rand::rngs::OsRng`] — same source as Ed25519 key generation and
-/// nonce derivation throughout the spec. Panics on OS entropy failure.
+/// nonce derivation throughout the spec.
+///
+/// Legacy wrapper; prefer [`try_random_bytes`].
+///
+/// # Panics
+/// Panics on OS entropy failure.
 pub fn random_bytes(out: &mut [u8]) {
     try_random_bytes(out).expect("OS RNG failure");
 }
@@ -120,7 +125,12 @@ pub fn try_random_array<const N: usize>() -> std::result::Result<[u8; N], Enviro
     Ok(out)
 }
 
-/// Generate `N` random bytes as a fresh array. Panics on OS entropy failure.
+/// Generate `N` random bytes as a fresh array.
+///
+/// Legacy wrapper; prefer [`try_random_array`].
+///
+/// # Panics
+/// Panics on OS entropy failure.
 pub fn random_array<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
     random_bytes(&mut out);
@@ -263,14 +273,26 @@ fn base64_first8(bytes: &[u8]) -> String {
 
 impl Ed25519Keypair {
     /// Generate a fresh keypair from OsRng.
+    ///
+    /// Legacy wrapper; prefer [`Ed25519Keypair::try_generate`].
+    ///
+    /// # Panics
+    /// Panics on OS entropy failure.
     pub fn generate() -> Self {
-        let mut seed = [0u8; 32];
-        rand::rngs::OsRng
-            .try_fill_bytes(&mut seed)
-            .expect("OS RNG failure");
-        Self {
+        Self::try_generate().expect("OS RNG failure")
+    }
+
+    /// Generate a fresh keypair from OsRng, propagating entropy failure.
+    ///
+    /// The 32-byte seed buffer is zeroized immediately after the signing key
+    /// is derived; only the `SigningKey` (which zeroizes internally on drop)
+    /// retains the material.
+    pub fn try_generate() -> std::result::Result<Self, EnvironmentError> {
+        let mut seed = Zeroizing::new([0u8; 32]);
+        try_random_bytes(seed.as_mut())?;
+        Ok(Self {
             signing: SigningKey::from_bytes(&seed),
-        }
+        })
     }
 
     /// Reconstruct from a 32-byte seed (only for known-good inputs, e.g. test

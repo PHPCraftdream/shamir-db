@@ -203,3 +203,48 @@ fn rv_client_f20c09bf_auth_ok_hints_survive_wire_decode() {
     assert_eq!(rotation.rotation_proof, [0x33; 64]);
     assert_eq!(decoded.kdf_upgrade_required, Some(true));
 }
+
+// ── Shared wire fixtures (L4-RV-SERVER-8999F6B7) ─────────────────────────────
+//
+// The committed msgpack bytes under crates/shamir-connect/test-vectors/ are
+// the same bytes the server tests decode through the production
+// `AuthOk` / `ResumeOkWire` DTOs (crates/shamir-server/src/tests/engine/
+// auth_ok_hint_tests.rs). Here they are decoded through the production
+// client DTOs `WireAuthOk` / `WireResumeOk` to prove one wire shape serves
+// both sides.
+
+#[test]
+fn rv_server_8999f6b7_shared_fixtures_decode_production_client_dtos() {
+    let base: WireAuthOk = rmp_serde::from_slice(include_bytes!(
+        "../../../../shamir-connect/test-vectors/auth_ok_base.msgpack"
+    ))
+    .expect("decode shared base fixture into production WireAuthOk");
+    assert_eq!(base.server_signature, vec![1; 32]);
+    assert_eq!(base.server_pub_key, vec![2; 32]);
+    assert_eq!(base.identity_sig, vec![3; 64]);
+    assert_eq!(base.session_id, vec![4; 32]);
+    assert_eq!(base.expires_at_ns, 7);
+    assert!(base.resumption_ticket.is_empty());
+    assert_eq!(base.resumption_expires_at_ns, 0);
+    assert_eq!(base.server_query_version, 1);
+    assert!(base.rotation_in_progress.is_none());
+    assert_eq!(base.kdf_upgrade_required, None);
+
+    let hinted: WireAuthOk = rmp_serde::from_slice(include_bytes!(
+        "../../../../shamir-connect/test-vectors/auth_ok_hinted.msgpack"
+    ))
+    .expect("decode shared hinted fixture into production WireAuthOk");
+    assert_eq!(hinted.session_id, vec![4; 32]);
+    assert_eq!(hinted.server_query_version, 1);
+    assert!(hinted.rotation_in_progress.is_none());
+    assert_eq!(hinted.kdf_upgrade_required, Some(true));
+
+    let resume: WireResumeOk = rmp_serde::from_slice(include_bytes!(
+        "../../../../shamir-connect/test-vectors/resume_ok.msgpack"
+    ))
+    .expect("decode shared resume fixture into production WireResumeOk");
+    assert_eq!(resume.session_id, vec![0xAB; 32]);
+    assert_eq!(resume.expires_at_ns, 99);
+    assert_eq!(resume.resumption_expires_at_ns, 0);
+    assert_eq!(resume.server_query_version, 2);
+}

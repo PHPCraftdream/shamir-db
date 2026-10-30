@@ -1,8 +1,8 @@
 //! Regression tests for `ServerIdentityState` rotation CAS
-//! (RV-CONNECT-F8A5E821): the overlap check and the snapshot publish must be
-//! one atomic transition on the `ArcSwap`, and the version mirror must stay
-//! in sync with the published snapshot.
+//! (RV-CONNECT-F8A5E821): overlap checks and ticket-version acceptance use
+//! the authoritative ArcSwap snapshot.
 
+use crate::common::crypto::with_entropy_failure;
 use crate::server::rotation::ServerIdentityState;
 use std::sync::Arc;
 use std::sync::Barrier;
@@ -45,9 +45,8 @@ fn rv_connect_f8a5e821_rotate_wins_exactly_once_under_contention() {
     );
 }
 
-/// After the overlap window expires, `try_finalize` clears the overlap
-/// atomically and rotation becomes possible again; versions advance 0 -> 1
-/// -> 2 with no lost updates relative to the mirror.
+/// After rotation and finalization, ticket acceptance is derived from the
+/// current authoritative snapshot at each point in the transition.
 #[test]
 fn rv_connect_f8a5e821_finalize_then_rotate_keeps_versions_coherent() {
     let state = ServerIdentityState::fresh();
@@ -55,6 +54,8 @@ fn rv_connect_f8a5e821_finalize_then_rotate_keeps_versions_coherent() {
 
     assert!(state.rotate(1_000).is_ok());
     assert_eq!(state.current_version(), 1);
+    assert!(state.is_ticket_version_acceptable(1));
+    assert!(!state.is_ticket_version_acceptable(0));
     assert!(
         state.try_finalize(overlap_end),
         "finalize must clear overlap"
@@ -68,23 +69,22 @@ fn rv_connect_f8a5e821_finalize_then_rotate_keeps_versions_coherent() {
         .rotate(overlap_end + 1)
         .expect("rotation after finalize");
     assert_eq!(outcome.new_version, 2);
-    assert_eq!(state.current_version(), 2, "mirror must match the snapshot");
+    assert_eq!(state.current_version(), 2);
+    assert!(!state.is_ticket_version_acceptable(1));
+    assert!(state.is_ticket_version_acceptable(2));
 }
 
-/// Version mirror must never regress (RV-CONNECT-F8A5E821): an older
-/// rotation finishing last (stale publication) must not overwrite a newer
-/// version in the lock-free mirror. Calls the (crate-private)
-/// `publish_version` helper with the OLDER outcome's version and asserts the
-/// mirror still reports the snapshot's version. With the pre-fix `store`
-/// implementation this test fails (mirror regresses to 1); with
-/// `fetch_max` it passes.
+/// Repeated snapshot reads must never accept an older version after a
+/// successful rotation; acceptance follows the committed snapshot directly.
 #[test]
-fn rv_connect_f8a5e821_version_mirror_never_regresses() {
+fn rv_connect_f8a5e821_ticket_acceptance_tracks_authoritative_snapshot() {
     let state = ServerIdentityState::fresh();
     let overlap_end = 1_000 + crate::server::rotation::ROTATION_OVERLAP_NS;
 
     let first = state.rotate(1_000).expect("first rotation");
     assert_eq!(first.new_version, 1);
+    assert!(state.is_ticket_version_acceptable(1));
+    assert!(!state.is_ticket_version_acceptable(0));
     assert!(
         state.try_finalize(overlap_end),
         "finalize must clear overlap"
@@ -93,25 +93,15 @@ fn rv_connect_f8a5e821_version_mirror_never_regresses() {
         .rotate(overlap_end + 1)
         .expect("second rotation after finalize");
     assert_eq!(second.new_version, 2);
+    assert!(state.is_ticket_version_acceptable(2));
+    assert!(!state.is_ticket_version_acceptable(1));
     assert_eq!(state.current_version(), 2);
-
-    // Simulate the stale publication: the older rotation's publish lands
-    // after the newer one. The mirror must stay at the snapshot's version.
-    state.publish_version(first.new_version);
-    assert_eq!(
-        state.current_version(),
-        second.new_version,
-        "stale publication must not regress the version mirror"
-    );
 }
 
 /// Observable requirement for the rejected-flag fix (RV-CONNECT-F8A5E821):
 /// after a rotation is rejected during overlap, a rotation after the overlap
-/// window must succeed, publish version 2, and keep the mirror in sync. The
-/// underlying property — the per-attempt `rejected` flag being reset on a
-/// retried winning attempt — only manifests under a concurrent retry
-/// schedule inside `rcu` and is not deterministically testable here; this
-/// test pins the externally observable behavior.
+/// window must succeed, publish version 2, and ticket acceptance follows the
+/// authoritative snapshot.
 #[test]
 fn rv_connect_f8a5e821_rejection_then_successful_rotation_returns_ok() {
     let state = ServerIdentityState::fresh();
@@ -128,5 +118,42 @@ fn rv_connect_f8a5e821_rejection_then_successful_rotation_returns_ok() {
         .rotate(overlap_end + 1)
         .expect("rotation after rejection + finalize must succeed");
     assert_eq!(outcome.new_version, 2);
-    assert_eq!(state.current_version(), 2, "mirror must equal 2");
+    assert_eq!(state.current_version(), 2);
+    assert!(!state.is_ticket_version_acceptable(1));
+    assert!(state.is_ticket_version_acceptable(2));
+}
+
+/// RV-CONNECT-387EAA05 (P2-10 second tranche): under a failing entropy
+/// source `rotate` must return `Error::Environment` and leave keys,
+/// `rotation_until_ns` and the version counter unchanged — no zero-entropy
+/// keypair, no partial publication. On the pre-fix code the test fails:
+/// `Ed25519Keypair::generate` panicked on the OS RNG failure.
+#[test]
+fn rv_connect_387eaa05_rotate_entropy_failure_returns_environment_and_keeps_identity() {
+    let state = ServerIdentityState::fresh();
+    let pub_before = state.current_pub();
+    let version_before = state.current_version();
+    let rotation_until_before = state.rotation_until_ns();
+
+    let result = with_entropy_failure(|| state.rotate(1_000));
+    assert!(
+        matches!(result, Err(crate::common::error::Error::Environment(_))),
+        "entropy failure must surface as Error::Environment, got {result:?}"
+    );
+
+    assert_eq!(state.current_pub(), pub_before, "current key unchanged");
+    assert_eq!(state.previous_pub(), None, "no previous key published");
+    assert_eq!(state.current_version(), version_before, "version unchanged");
+    assert_eq!(
+        state.rotation_until_ns(),
+        rotation_until_before,
+        "rotation_until unchanged"
+    );
+
+    // A later rotation with working entropy succeeds normally.
+    let outcome = state
+        .rotate(2_000)
+        .expect("rotation after entropy recovers");
+    assert_eq!(outcome.new_version, 1);
+    assert_eq!(state.current_version(), 1);
 }

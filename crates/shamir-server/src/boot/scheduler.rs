@@ -12,6 +12,7 @@
 //! tick, listens on a shared `tokio::sync::Notify` for shutdown, and is
 //! panic-safe via `std::panic::catch_unwind`.
 
+use shamir_connect::common::error::EnvironmentError;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain};
 use shamir_connect::server::lockout::LockoutStore;
@@ -116,6 +117,29 @@ impl core::fmt::Debug for Scheduler {
     }
 }
 
+/// Read the clock for one scheduler tick (RV-CONNECT-387EAA05).
+///
+/// Clock-injected core (private): on clock failure this logs a warning and
+/// returns `None`, and the caller skips that tick — the clock is never
+/// substituted with a fabricated value and no panic escapes `safe_run`.
+pub(crate) fn tick_clock_or_skip(
+    task: &'static str,
+    clock: Result<u64, EnvironmentError>,
+) -> Option<u64> {
+    match clock {
+        Ok(now_ns) => Some(now_ns),
+        Err(error) => {
+            tracing::warn!(task, %error, "scheduler tick skipped: clock unavailable");
+            None
+        }
+    }
+}
+
+/// Convenience wrapper around [`tick_clock_or_skip`] using the real clock.
+fn tick_now_or_skip(task: &'static str) -> Option<u64> {
+    tick_clock_or_skip(task, UnixNanos::try_now().map(UnixNanos::as_u64))
+}
+
 impl Scheduler {
     /// Spawn all six periodic tasks. Returns immediately; tasks are now live.
     pub fn spawn(inputs: SchedulerInputs, config: SchedulerConfig) -> Self {
@@ -135,7 +159,10 @@ impl Scheduler {
             let period = config.counter_gc_period;
             handles.push(tokio::spawn(async move {
                 run_periodic("counter_gc", period, rx, move || {
-                    let now_ns = UnixNanos::now().as_u64();
+                    let now_ns = match tick_now_or_skip("counter_gc") {
+                        Some(now_ns) => now_ns,
+                        None => return,
+                    };
                     let store = store.clone();
                     safe_run("counter_gc", move || {
                         store.gc(now_ns);
@@ -152,7 +179,10 @@ impl Scheduler {
             let period = config.lockout_gc_period;
             handles.push(tokio::spawn(async move {
                 run_periodic("lockout_gc", period, rx, move || {
-                    let now_ns = UnixNanos::now().as_u64();
+                    let now_ns = match tick_now_or_skip("lockout_gc") {
+                        Some(now_ns) => now_ns,
+                        None => return,
+                    };
                     let store = store.clone();
                     safe_run("lockout_gc", move || {
                         store.gc(now_ns);
@@ -169,7 +199,10 @@ impl Scheduler {
             let period = config.rate_limit_gc_period;
             handles.push(tokio::spawn(async move {
                 run_periodic("rate_limit_gc", period, rx, move || {
-                    let now_ns = UnixNanos::now().as_u64();
+                    let now_ns = match tick_now_or_skip("rate_limit_gc") {
+                        Some(now_ns) => now_ns,
+                        None => return,
+                    };
                     let store = store.clone();
                     safe_run("rate_limit_gc", move || {
                         store.gc(now_ns);
@@ -188,7 +221,10 @@ impl Scheduler {
             let idle_ttl_ns = inputs.session_idle_ttl_ns;
             handles.push(tokio::spawn(async move {
                 run_periodic("session_gc", period, rx, move || {
-                    let now_ns = UnixNanos::now().as_u64();
+                    let now_ns = match tick_now_or_skip("session_gc") {
+                        Some(now_ns) => now_ns,
+                        None => return,
+                    };
                     let store = store.clone();
                     safe_run("session_gc", move || {
                         let evicted = store.gc_expired(now_ns, max_age_ns, idle_ttl_ns);
@@ -228,7 +264,10 @@ impl Scheduler {
             let period = config.identity_finalize_period;
             handles.push(tokio::spawn(async move {
                 run_periodic("identity_finalize", period, rx, move || {
-                    let now_ns = UnixNanos::now().as_u64();
+                    let now_ns = match tick_now_or_skip("identity_finalize") {
+                        Some(now_ns) => now_ns,
+                        None => return,
+                    };
                     let identity = identity.clone();
                     safe_run("identity_finalize", move || {
                         if identity.try_finalize(now_ns) {

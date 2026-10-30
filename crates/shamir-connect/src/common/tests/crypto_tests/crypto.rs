@@ -265,6 +265,15 @@ fn random_bytes_distinct_each_call() {
 }
 
 #[test]
+fn rv_connect_ed25519_try_generate_entropy_failure_is_typed() {
+    with_entropy_failure(|| {
+        assert!(matches!(
+            Ed25519Keypair::try_generate(),
+            Err(EnvironmentError::Entropy)
+        ));
+    });
+}
+#[test]
 fn random_bytes_into_slice() {
     let mut buf = [0u8; 64];
     random_bytes(&mut buf);
