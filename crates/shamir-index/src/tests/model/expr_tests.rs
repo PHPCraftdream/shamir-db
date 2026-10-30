@@ -184,6 +184,78 @@ fn rv_index_bcd7caf0_trusted_scalar_dispatch_preserves_result_and_arity() {
 }
 
 #[test]
+fn scalar_list_round_trip_without_map_keys() {
+    let interner = Interner::new();
+    let rec = make_rec(&interner);
+    let user = Arc::new(UserScalarLayer::new());
+    user.register(
+        "identity",
+        FnEntry::pure(|args| Ok(args[0].clone()), 1, Some(1)).trusted_pure(),
+    );
+    let resolver = ScalarResolver::new(user);
+    let expr = IndexExpr::Scalar {
+        name: "identity".into(),
+        inner: Box::new(IndexExpr::Field(vec![intern(&interner, "tags")])),
+    };
+    assert_eq!(
+        expr.eval_with_scalars(&rec, Some(&resolver)).unwrap(),
+        InnerValue::List(vec![
+            InnerValue::Str("a".into()),
+            InnerValue::Str("b".into())
+        ])
+    );
+}
+
+#[test]
+fn scalar_returned_map_uses_fresh_scratch_and_nested_scalar_rejects_unknown_key() {
+    let interner = Interner::new();
+    let rec = make_rec(&interner);
+    let user = Arc::new(UserScalarLayer::new());
+    user.register(
+        "map",
+        FnEntry::pure(
+            |_| {
+                let mut map = new_map_wc(1);
+                map.insert("answer".to_string(), QueryValue::Int(42));
+                Ok(QueryValue::Map(map))
+            },
+            1,
+            Some(1),
+        )
+        .trusted_pure(),
+    );
+    user.register(
+        "identity",
+        FnEntry::pure(|args| Ok(args[0].clone()), 1, Some(1)).trusted_pure(),
+    );
+    let resolver = ScalarResolver::new(user);
+    let inner = IndexExpr::Scalar {
+        name: "map".into(),
+        inner: Box::new(IndexExpr::Field(vec![intern(&interner, "age")])),
+    };
+    let result = inner.eval_with_scalars(&rec, Some(&resolver)).unwrap();
+    let scratch = Interner::new();
+    let mut expected = new_map_wc(1);
+    expected.insert(
+        InternerKey::new(intern(&scratch, "answer")),
+        InnerValue::Int(42),
+    );
+    assert_eq!(result, InnerValue::Map(expected));
+    let outer = IndexExpr::Scalar {
+        name: "identity".into(),
+        inner: Box::new(inner),
+    };
+    let old_error =
+        shamir_types::codecs::interned::inner_value_to_query_value(&result, &Interner::new())
+            .unwrap_err()
+            .to_string();
+    assert!(matches!(
+        outer.eval_with_scalars(&rec, Some(&resolver)),
+        Err(ExprError::ScalarError(error)) if error == old_error
+    ));
+}
+
+#[test]
 fn modulo_div_zero() {
     let i = Interner::new();
     let rec = make_rec(&i);

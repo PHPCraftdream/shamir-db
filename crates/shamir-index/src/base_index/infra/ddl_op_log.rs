@@ -64,6 +64,12 @@ const DDL_OP_KEY_PREFIX: &[u8] = b"ddl_op:";
 /// and add migration logic in `read_op_status`.
 const DDL_OP_LOG_VERSION: u8 = 0x01;
 
+pub(in crate::base_index) fn timestamp_millis(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 /// Builds the storage key for a given operation ID.
 /// The key is the prefix "ddl_op:" (7 bytes) followed by the raw 16 bytes of the op_id.
 /// This avoids a second pass through RecordId::system which would truncate the key.

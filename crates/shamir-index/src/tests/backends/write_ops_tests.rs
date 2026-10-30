@@ -1,11 +1,15 @@
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
 use crate::kind::IndexKind;
-use crate::write_ops::{apply_index_ops, apply_index_ops_tx, IndexWriteOp};
+use crate::write_ops::{
+    apply_index_ops, apply_index_ops_at_commit, apply_index_ops_tx, IndexWriteOp,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
+use shamir_tx::{IsolationLevel, TxContext, TxId};
+use shamir_types::types::record_id::RecordId;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -15,6 +19,7 @@ use std::sync::Arc;
 struct MockBackend {
     descriptor: IndexDescriptor,
     bump_count: AtomicU32,
+    descriptor_count: AtomicU32,
 }
 
 impl MockBackend {
@@ -28,6 +33,7 @@ impl MockBackend {
                 IndexKind::Btree { unique: false },
             ),
             bump_count: AtomicU32::new(0),
+            descriptor_count: AtomicU32::new(0),
         }
     }
 }
@@ -38,6 +44,7 @@ impl IndexBackend for MockBackend {
         self
     }
     fn descriptor(&self) -> &IndexDescriptor {
+        self.descriptor_count.fetch_add(1, Ordering::Relaxed);
         &self.descriptor
     }
     async fn lookup(&self, _: IndexQuery) -> Result<IndexResult, IndexError> {
@@ -58,6 +65,32 @@ impl IndexBackend for MockBackend {
         }
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn commit_backend_lookup_visits_each_backend_once_and_keeps_first_match() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let first = Arc::new(MockBackend::new());
+    let second = Arc::new(MockBackend::new());
+    let backends: Vec<Arc<dyn IndexBackend>> = vec![first.clone(), second.clone()];
+    let ops: Vec<_> = (1..=8)
+        .map(|epoch| IndexWriteOp::BumpFtsStats {
+            doc_len: 1,
+            sign: 1,
+            provenance: shamir_tx::Provenance {
+                name_interned: 100,
+                instance_epoch: epoch,
+                ..Default::default()
+            },
+        })
+        .collect();
+    apply_index_ops_at_commit(&ops, &store, &backends)
+        .await
+        .unwrap();
+    assert_eq!(first.descriptor_count.load(Ordering::Relaxed), 1);
+    assert_eq!(second.descriptor_count.load(Ordering::Relaxed), 1);
+    assert_eq!(first.bump_count.load(Ordering::Relaxed), 8);
+    assert_eq!(second.bump_count.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -140,7 +173,6 @@ async fn lookup_tx_none_forwards_to_lookup() {
 
 #[tokio::test]
 async fn lookup_tx_some_forwards_to_lookup() {
-    use shamir_types::types::record_id::RecordId;
     let backend = MockBackend::new();
     // Non-vector backends ignore the staged slice and forward to lookup.
     let staged: Vec<(RecordId, Vec<f32>)> = Vec::new();
@@ -227,7 +259,6 @@ async fn apply_index_ops_tx_none_forwards() {
 
 #[tokio::test]
 async fn apply_index_ops_tx_some_stages_into_tx() {
-    use shamir_tx::{IsolationLevel, TxContext, TxId};
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let backend = MockBackend::new();
     let mut tx = TxContext::new(TxId::new(1), 0, 42, IsolationLevel::Snapshot);
@@ -265,7 +296,6 @@ async fn apply_index_ops_tx_drop_leaves_no_postings() {
     // commit must NOT leave any posting in the store / in-memory
     // backend state. Staging in `index_write_set` is RAII-cleaned
     // because TxContext owns the vec.
-    use shamir_tx::{IsolationLevel, TxContext, TxId};
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let backend = MockBackend::new();
     {

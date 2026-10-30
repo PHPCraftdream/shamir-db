@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
@@ -526,22 +527,18 @@ impl IndexManager {
         name_interned: u64,
     ) -> DbResult<()> {
         let prefix = IndexRecordKey::new(is_unique, name_interned).to_prefix_bytes();
-        use futures::StreamExt;
-        let mut to_remove: Vec<RecordKey> = Vec::new();
         let mut stream = self
             .info_store
             .scan_prefix_stream(prefix.clone(), FULL_SCAN_BATCH);
         while let Some(batch_result) = stream.next().await {
-            for (key, _) in batch_result? {
-                to_remove.push(key);
+            let keys: Vec<RecordKey> = batch_result?.into_iter().map(|(key, _)| key).collect();
+            if !keys.is_empty() {
+                self.info_store.remove_many(keys).await?;
             }
-        }
-        if !to_remove.is_empty() {
-            let _ = self.info_store.remove_many(to_remove).await?;
         }
         self.posting_cache_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.posting_cache.retain(|k, _| !k.starts_with(&prefix));
+        self.posting_cache.retain_prefix_excluding(&prefix);
         Ok(())
     }
 

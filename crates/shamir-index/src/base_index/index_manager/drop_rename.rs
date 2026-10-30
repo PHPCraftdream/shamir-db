@@ -260,10 +260,9 @@ impl IndexManager {
                         index_name: index_name_str.to_string(),
                     },
                     state: shamir_query_types::read::DdlOpState::Succeeded {
-                        completed_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at: crate::base_index::ddl_op_log::timestamp_millis(
+                            std::time::SystemTime::now(),
+                        ),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.

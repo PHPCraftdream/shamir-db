@@ -156,16 +156,11 @@ impl super::inner::SortedIndexManager {
         let prefix = self.entry_prefix(name_interned);
         let stream = self.info_store.scan_prefix_stream(prefix, MAINT_SCAN_BATCH);
         futures::pin_mut!(stream);
-        // `RecordKey` (scan yields store keys, consumed by `remove_many`).
-        let mut to_drop: Vec<RecordKey> = Vec::new();
         while let Some(batch) = stream.next().await {
-            for (k, _) in batch? {
-                to_drop.push(k);
+            let keys: Vec<RecordKey> = batch?.into_iter().map(|(key, _)| key).collect();
+            if !keys.is_empty() {
+                self.info_store.remove_many(keys).await?;
             }
-        }
-        if !to_drop.is_empty() {
-            // Ok-value (removed entries) intentionally discarded; ? propagates errors.
-            let _ = self.info_store.remove_many(to_drop).await?;
         }
         Ok(())
     }
@@ -363,10 +358,9 @@ impl super::inner::SortedIndexManager {
                     index_name: index_name_str.to_string(),
                 },
                 state: shamir_query_types::read::DdlOpState::Succeeded {
-                    completed_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
+                    completed_at: crate::base_index::ddl_op_log::timestamp_millis(
+                        std::time::SystemTime::now(),
+                    ),
                 },
             };
             // Do not swallow status-write errors — log loudly.
@@ -864,10 +858,9 @@ impl super::inner::SortedIndexManager {
                     new_name: new_name_str.to_string(),
                 },
                 state: shamir_query_types::read::DdlOpState::Succeeded {
-                    completed_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64,
+                    completed_at: crate::base_index::ddl_op_log::timestamp_millis(
+                        std::time::SystemTime::now(),
+                    ),
                 },
             };
             // Do not swallow status-write errors — log loudly.

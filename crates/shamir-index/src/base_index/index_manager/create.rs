@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
@@ -36,8 +37,6 @@ impl IndexManager {
     /// флашится в `info_store` через `set_many`. Пиковая память
     /// ограничена размером батча, а не размером всей таблицы.
     pub async fn create_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use futures::StreamExt;
-
         let name_interned = index_def.name_interned;
 
         // P0-3 (#959) sub-bug 3b: reject CREATE INDEX for a name whose DROP
@@ -437,8 +436,6 @@ impl IndexManager {
     where
         S: futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Unpin,
     {
-        use futures::StreamExt;
-
         let name_interned = index_def.name_interned;
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
