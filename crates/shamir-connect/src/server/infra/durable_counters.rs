@@ -172,7 +172,10 @@ impl ConsumedCounterStore for FjallConsumedCounters {
         new_counter: u64,
     ) -> AdvanceOutcome {
         let key = Self::key(user_id, family_id);
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = match UnixNanos::try_now() {
+            Ok(now) => now.as_u64(),
+            Err(_) => return AdvanceOutcome::StorageFailed,
+        };
 
         let _guard = self.write_lock.lock();
 

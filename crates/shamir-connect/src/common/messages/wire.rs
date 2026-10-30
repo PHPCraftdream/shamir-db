@@ -66,15 +66,26 @@ impl core::fmt::Debug for BootstrapRequest {
     }
 }
 
-/// Server-side: build the [`BootstrapChallenge`] in response to `bootstrap_hello`.
+/// Server-side compatibility wrapper. Panics if the system clock is invalid.
 pub fn make_bootstrap_challenge(
     server_keypair: &Ed25519Keypair,
     transport_kind: TransportKind,
     tls_exporter: &[u8; 32],
     hello: &BootstrapHello,
 ) -> BootstrapChallenge {
+    try_make_bootstrap_challenge(server_keypair, transport_kind, tls_exporter, hello)
+        .expect("system clock failure")
+}
+
+/// Build a bootstrap challenge, propagating system clock failure.
+pub fn try_make_bootstrap_challenge(
+    server_keypair: &Ed25519Keypair,
+    transport_kind: TransportKind,
+    tls_exporter: &[u8; 32],
+    hello: &BootstrapHello,
+) -> crate::common::error::Result<BootstrapChallenge> {
     let server_pub = server_keypair.public_bytes();
-    let server_time_ns = UnixNanos::now().as_u64();
+    let server_time_ns = UnixNanos::try_now()?.as_u64();
     let payload = build_bootstrap_input(
         &server_pub,
         transport_kind,
@@ -83,11 +94,11 @@ pub fn make_bootstrap_challenge(
         server_time_ns,
     );
     let sig = server_keypair.sign(&payload);
-    BootstrapChallenge {
+    Ok(BootstrapChallenge {
         server_pub_key: server_pub,
         server_time_ns,
         identity_sig_bootstrap: sig,
-    }
+    })
 }
 
 /// Wire view: client → server `changePassword` body.

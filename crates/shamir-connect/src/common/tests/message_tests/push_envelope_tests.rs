@@ -3,6 +3,7 @@ use crate::common::push_envelope::{PushEnvelope, PushKind};
 #[test]
 fn push_kind_round_trip() {
     for kind in [
+        PushKind::Ready,
         PushKind::Event,
         PushKind::Gap,
         PushKind::SlowConsumer,

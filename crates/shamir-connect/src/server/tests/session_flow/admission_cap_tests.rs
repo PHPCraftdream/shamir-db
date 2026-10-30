@@ -35,6 +35,22 @@ fn sid(n: u8) -> [u8; 32] {
     [n; 32]
 }
 
+#[test]
+fn pre_admission_key_does_not_poison_admitted_identity() {
+    let store = SessionStore::new();
+    let session = sess(uid(1), T);
+    let before = session.hmac_key();
+    let admitted = match store.admit(sid(7), session, T, 16) {
+        Admission::Admitted { session, .. } => session,
+        Admission::Rejected(reason) => panic!("unexpected rejection: {reason:?}"),
+    };
+    assert_ne!(before, admitted.hmac_key());
+    assert_eq!(
+        admitted.hmac_key(),
+        crate::common::crypto::derive_session_hmac_key(&sid(7))
+    );
+}
+
 /// RV-CONNECT-0A42F42C — all-active cap: 16 sessions with
 /// `last = T - 59_999_999_999` (active: age < 60 s) ⇒ the 17th login is
 /// REJECTED with `AllActive`; count stays 16, the new sid is absent and all

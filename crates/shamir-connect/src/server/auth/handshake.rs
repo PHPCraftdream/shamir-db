@@ -14,7 +14,7 @@
 //! response by `target_constant_time_ms` (=`max(50ms, kdf_time*1000)`).
 
 use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
-use crate::common::crypto::{constant_time_eq, random_array, Ed25519Keypair, HmacTag};
+use crate::common::crypto::{try_random_array, Ed25519Keypair, HmacTag};
 use crate::common::error::{Error, Result};
 use crate::common::fake_blob::FakeBlob;
 use crate::common::identity::{build_identity_input, sign_identity};
@@ -24,7 +24,6 @@ use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::server::config::{ListenerPolicy, ServerSecrets};
-use crate::server::resume::ResumeConfig;
 use crate::server::rotation::{
     build_rotation_in_progress_payload, RotationInProgressPayload, ServerIdentityState,
 };
@@ -147,7 +146,7 @@ impl<'a> ServerHandshake<'a> {
         let user_record = lookup_user(&auth_init.user);
         let fake_blob = FakeBlob::derive(&secrets.server_secret, &auth_init.user)?;
 
-        let server_nonce = random_array::<{ limits::SERVER_NONCE_BYTES }>();
+        let server_nonce = try_random_array::<{ limits::SERVER_NONCE_BYTES }>()?;
 
         // M-tier audit M7: defense-in-depth — reject when client and
         // server nonces coincide. See [`verify_nonces_distinct`].
@@ -221,8 +220,8 @@ impl<'a> ServerHandshake<'a> {
         let mut server_key_arr = [0u8; 32];
         server_key_arr.copy_from_slice(server_key_ref);
         let server_signature = build_server_signature(&server_key_arr, &am);
-        let session_id = random_array::<{ limits::SESSION_ID_BYTES }>();
-        let now_ns = UnixNanos::now().as_u64();
+        let session_id = try_random_array::<{ limits::SESSION_ID_BYTES }>()?;
+        let now_ns = UnixNanos::try_now()?.as_u64();
         let expires_at_ns = now_ns.saturating_add(session_max_age);
 
         let identity_input = build_identity_input(
@@ -241,7 +240,6 @@ impl<'a> ServerHandshake<'a> {
 
         // Branch ONLY on the accept/reject decision. Both paths have already
         // computed the same three operations.
-        let _ = constant_time_eq;
 
         if verified && self.user_record.is_some() {
             Ok(ProofOutcome::Accepted(Box::new(AuthOkView {
@@ -266,7 +264,7 @@ impl<'a> ServerHandshake<'a> {
         view: &AuthOkView,
         state: &ServerIdentityState,
     ) -> Result<Option<RotationInProgressPayload>> {
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = UnixNanos::try_now()?.as_u64();
         if !state.rotation_in_progress(now_ns) || state.current_pub() != view.server_pub_key {
             return Ok(None);
         }
@@ -419,7 +417,3 @@ pub fn complete_auth_ok(
     }
     view
 }
-
-// Suppress unused warnings for re-exports kept for caller convenience.
-#[allow(dead_code)]
-fn _doc_link_targets(_: &ServerIdentityState, _: &ResumeConfig) {}

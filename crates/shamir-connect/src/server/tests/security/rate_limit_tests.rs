@@ -7,6 +7,34 @@ use crate::server::rate_limit::{
 };
 use std::sync::Arc;
 
+struct FailingSink;
+impl RateLimitSnapshotSink for FailingSink {
+    fn save(&self, _: &RateLimitSnapshot) -> Result<(), RateLimitSnapshotError> {
+        Err(RateLimitSnapshotError::Storage("save failed".into()))
+    }
+    fn load(&self) -> Result<Option<RateLimitSnapshot>, RateLimitSnapshotError> {
+        Err(RateLimitSnapshotError::Encoding("load failed".into()))
+    }
+}
+
+#[test]
+fn failed_snapshot_load_starts_empty_and_save_preserves_throttle() {
+    let limiter = InMemoryRateLimiter::with_snapshot_sink(Arc::new(FailingSink), 0);
+    assert_eq!(limiter.tracked_subnets(), 0);
+    let now = WARMUP_WINDOW_NS + 1;
+    for _ in 0..10 {
+        assert_eq!(limiter.check(s(1), now), RateDecision::Allowed);
+    }
+    assert!(matches!(
+        limiter.persist_snapshot(),
+        Err(RateLimitSnapshotError::Storage(_))
+    ));
+    assert!(matches!(
+        limiter.check(s(1), now),
+        RateDecision::RateLimited { .. }
+    ));
+}
+
 fn s(b: u8) -> Subnet {
     Subnet::V4([10, 0, b])
 }
