@@ -20,9 +20,10 @@
 use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
 use crate::common::bootstrap_message::build_bootstrap_input;
 use crate::common::changepw::{build_auth_message_cp, ChangePwAuthMessageInputs};
-use crate::common::crypto::{
-    aes256gcm_decrypt, aes256gcm_encrypt, argon2id, ed25519_verify_strict, Ed25519Keypair,
-};
+#[cfg(feature = "server")]
+use crate::common::crypto::{aes256gcm_decrypt, aes256gcm_encrypt};
+use crate::common::crypto::{argon2id, ed25519_verify_strict, Ed25519Keypair};
+#[cfg(feature = "server")]
 use crate::common::domain_tags::TICKET_V1;
 use crate::common::fake_blob::FakeBlob;
 use crate::common::identity::{build_identity_input, sign_identity};
@@ -31,6 +32,7 @@ use crate::common::rotation::build_rotate_event_input;
 use crate::common::scram::{build_client_proof, build_server_signature, DerivedKeys};
 use crate::common::types::{BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
+#[cfg(feature = "server")]
 use crate::server::ticket::TicketPlain;
 
 // Independent layouts assembled from the documented field widths; bootstrap's
@@ -113,6 +115,7 @@ const ARGON2_TOML: &str = include_str!("../../../../test-vectors/argon2id_defaul
 const SCRAM_TOML: &str = include_str!("../../../../test-vectors/scram_flow_default.toml");
 const IDENTITY_TOML: &str = include_str!("../../../../test-vectors/identity_sig_default.toml");
 const FAKE_BLOB_TOML: &str = include_str!("../../../../test-vectors/fake_blob_default.toml");
+#[cfg(feature = "server")]
 const TICKET_TOML: &str = include_str!("../../../../test-vectors/resumption_ticket_roundtrip.toml");
 const ROTATION_TOML: &str =
     include_str!("../../../../test-vectors/identity_rotation_signed_by_old.toml");
@@ -469,11 +472,13 @@ fn fake_blob_matches_vector() {
 // 6. resumption_ticket_roundtrip (AES-256-GCM)
 // ===========================================================================
 
+#[cfg(feature = "server")]
 #[derive(serde::Deserialize)]
 struct TicketVector {
     inputs: TicketInputs,
     expected: TicketExpected,
 }
+#[cfg(feature = "server")]
 #[derive(serde::Deserialize)]
 struct TicketInputs {
     ticket_key_hex: String,
@@ -482,6 +487,7 @@ struct TicketInputs {
     aad_hex: String,
     ticket_plain_fields: TicketPlainFields,
 }
+#[cfg(feature = "server")]
 #[derive(serde::Deserialize)]
 struct TicketPlainFields {
     version: u8,
@@ -496,12 +502,14 @@ struct TicketPlainFields {
     family_counter: u64,
     identity_key_version: u64,
 }
+#[cfg(feature = "server")]
 #[derive(serde::Deserialize)]
 struct TicketExpected {
     ciphertext_and_tag_hex: String,
     ciphertext_and_tag_total_bytes: usize,
 }
 
+#[cfg(feature = "server")]
 #[test]
 fn resumption_ticket_roundtrip_matches_vector() {
     let v: TicketVector = toml::from_str(TICKET_TOML).unwrap();

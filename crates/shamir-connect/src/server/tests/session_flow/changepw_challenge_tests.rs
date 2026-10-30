@@ -8,14 +8,18 @@
 //! `load` + `store(None)` would reintroduce a TOCTOU race where two callers
 //! each see `Some` before either clears it).
 
+#[cfg(feature = "client")]
 use crate::client::changepw::build_request;
-use crate::common::crypto::{Ed25519Keypair, StoredKey};
+#[cfg(feature = "client")]
+use crate::common::crypto::Ed25519Keypair;
+use crate::common::crypto::StoredKey;
 use crate::common::error::EnvironmentError;
 use crate::common::error::Error;
 use crate::common::kdf_params::KdfParams;
 use crate::common::time::UnixNanos;
 use crate::common::types::limits;
 use crate::common::types::{BindingMode, TransportKind};
+#[cfg(feature = "client")]
 use crate::common::username::NormalizedUsername;
 use crate::server::auth::changepw::{
     start_change_password_challenge, verify_change_password_request_with_sid, ChangePwRequest,
@@ -24,7 +28,7 @@ use crate::server::config::ServerSecrets;
 use crate::server::session::{PendingChangePwChallenge, Session, SessionPermissions};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 fn fresh_session() -> Session {
     Session::new(
@@ -61,6 +65,7 @@ fn bootstrap_entropy_failure_does_not_publish_token() {
     assert!(state.issue_token(100, 10).is_ok());
 }
 
+#[cfg(feature = "client")]
 #[test]
 fn local_bootstrap_wipes_password_before_hello_and_verification_errors() {
     let key = Ed25519Keypair::from_seed(&[4; 32]);
@@ -89,6 +94,7 @@ fn local_bootstrap_wipes_password_before_hello_and_verification_errors() {
     }
 }
 
+#[cfg(feature = "client")]
 #[test]
 fn bootstrap_password_wiped_on_request_exits() {
     let kdf = KdfParams {
@@ -129,6 +135,7 @@ fn bootstrap_password_wiped_on_request_exits() {
     }
 }
 
+#[cfg(feature = "client")]
 #[test]
 fn password_change_wipes_both_buffers_on_all_paths() {
     let username = NormalizedUsername::from_raw("alice").unwrap();
@@ -197,6 +204,9 @@ fn checked_clock_rejects_pre_epoch_and_overflow() {
 
 #[test]
 fn server_secrets_clone_redaction_and_zeroize() {
+    fn assert_zeroize_on_drop<T: ZeroizeOnDrop>() {}
+    assert_zeroize_on_drop::<ServerSecrets>();
+    assert_zeroize_on_drop::<zeroize::Zeroizing<[u8; 32]>>();
     let mut secrets = ServerSecrets {
         server_secret: [17; 32],
         lockout_secret: [29; 32],
@@ -278,6 +288,8 @@ fn mismatched_session_id_consumes_challenge() {
     session
         .pending_changepw_challenge
         .store(Some(Arc::new(pending())));
+    // Supplementary consumption check only: the zero proof is invalid even
+    // without SID validation. The integration valid-proof test is the oracle.
     let result = verify_change_password_request_with_sid(
         &session,
         &[1; 32],

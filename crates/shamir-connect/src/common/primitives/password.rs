@@ -27,6 +27,7 @@ impl<'a> WipeOnDrop<'a> {
     }
 
     /// Mutable view for passing the guarded buffer to another wiping API.
+    #[cfg(feature = "client")]
     pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
         self.0
     }

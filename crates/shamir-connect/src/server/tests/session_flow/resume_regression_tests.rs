@@ -17,6 +17,44 @@ use crate::server::ticket::{
 };
 
 #[test]
+fn initial_ticket_nonce_entropy_failure_is_environmental() {
+    let cfg = config();
+    let counters = InMemoryConsumedCounters::new();
+    let store = SessionStore::new();
+    let now = ns::HOUR * 1_000;
+    let issue = || {
+        issue_initial_ticket(
+            cfg.ticket_key(),
+            USER,
+            "u".into(),
+            BindingMode::TlsExporter.as_u8(),
+            BindingMode::TlsExporter.as_u8(),
+            [0x77; 32],
+            0,
+            now,
+            ns::HOUR,
+        )
+    };
+    // The family ID succeeds; the ticket encryption nonce fails.
+    let result = crate::common::crypto::with_entropy_failure_after(1, issue);
+    assert!(matches!(
+        result,
+        Err(Error::Environment(
+            crate::common::error::EnvironmentError::Entropy
+        ))
+    ));
+    // Initial issuance has no counter or session store to publish into.
+    assert!(counters.is_empty());
+    assert_eq!(store.len(), 0);
+    let (ticket, expiry) = issue().unwrap();
+    assert_eq!(expiry, now + ns::HOUR);
+    let wire = TicketWire::from_bytes(&ticket).unwrap();
+    let plain = decrypt_ticket(cfg.ticket_key(), None, &wire).unwrap();
+    assert_eq!(*plain.user_id.as_ref(), USER);
+    assert_eq!(plain.family_counter, 1);
+}
+
+#[test]
 fn resume_entropy_failure_does_not_consume_counter_or_publish_session() {
     let cfg = config();
     let users = lookup_map();

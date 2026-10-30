@@ -543,7 +543,7 @@ pub fn issue_initial_ticket(
         family_counter: 1,
         identity_key_version,
     };
-    let wire = encrypt_ticket(ticket_key, &plain).map_err(|_| Error::AuthFailed)?;
+    let wire = encrypt_ticket(ticket_key, &plain)?;
     Ok((wire.to_bytes()?, plain.expires_at_ns))
 }
 
