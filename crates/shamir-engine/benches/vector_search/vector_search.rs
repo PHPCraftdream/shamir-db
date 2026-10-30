@@ -59,7 +59,7 @@ use shamir_engine::index2::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
 use shamir_types::types::record_id::RecordId;
 
 /// Fixed dataset seed — surfaces in the reproducibility key
-/// `(n, dim, k=64, σ=0.1, seed=42)`.
+/// `(GENERATOR_REVISION, n, dim, k=64, σ=0.1, seed=42)`.
 const SEED: u64 = 42;
 /// Cluster count for the clustered generator. 64 keeps clusters non-degenerate
 /// at n=10K (~156 points/cluster) and well-populated at n=100K.
@@ -112,7 +112,7 @@ fn register_cell(
     dim: usize,
     metric: VectorMetric,
 ) {
-    // Reproducibility key: (n, dim, k=64, σ=0.1, seed=42).
+    // Reproducibility key: (GENERATOR_REVISION, n, dim, k=64, σ=0.1, seed=42).
     let ds = clustered_vectors(n, dim, K_CLUSTERS, SIGMA, SEED);
     debug_assert_eq!(ds.n(), n);
     debug_assert_eq!(ds.dim(), dim);

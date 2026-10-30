@@ -26,6 +26,8 @@ fn rv_funclib_24c30e50_builtin_catalog_covers_all_observed_codes() {
         "bad_unit",
         "compute",
         "parse",
+        "scalar_task_failed",
+        "not_indexable",
     ];
     assert_eq!(SCALAR_ERROR_CODES, codes);
     for code in codes {
