@@ -495,7 +495,7 @@ fn bounded_capture_drains_both_oversized_pipes() {
         #[cfg(unix)]
         let script = "echo ready; i=0; while [ $i -lt 3000 ]; do echo 0123456789012345678901234567890123456789; echo 0123456789012345678901234567890123456789 >&2; i=$((i+1)); done";
         #[cfg(windows)]
-        let script = "echo ready& for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789& for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789 1>&2";
+        let script = "echo ready& for /L %i in (1,1,3000) do @(echo 0123456789012345678901234567890123456789& echo 0123456789012345678901234567890123456789 1>&2)";
         let output = ready_with_capture(
             script,
             Duration::from_secs(30),

@@ -191,7 +191,8 @@ fn password_change_wipes_both_buffers_on_all_paths() {
 #[test]
 fn checked_clock_rejects_pre_epoch_and_overflow() {
     assert!(matches!(
-        UnixNanos::try_from_system_time(UNIX_EPOCH - Duration::from_nanos(1)),
+        // Windows SystemTime ticks are 100 ns; 1 ns would round to the epoch itself.
+        UnixNanos::try_from_system_time(UNIX_EPOCH - Duration::from_micros(1)),
         Err(EnvironmentError::ClockBeforeEpoch)
     ));
     assert!(matches!(

@@ -58,7 +58,8 @@ async fn rv_transport_ipc_bd4ebef7_windows_entrypoints_reject_invalid_addresses(
         Ok(_) => panic!("duplicate bind unexpectedly succeeded"),
         Err(error) => error,
     };
-    assert!(error.to_string().contains(&name));
+    // The message renders the name with `{:?}`, which escapes backslashes.
+    assert!(error.to_string().contains(&format!("{name:?}")));
     assert!(error.to_string().contains("first named pipe instance"));
     let context = error.get_ref().expect("context");
     let original = std::error::Error::source(context)
