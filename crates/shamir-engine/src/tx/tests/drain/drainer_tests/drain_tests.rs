@@ -338,6 +338,7 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
     use crate::tx::commit_tx;
 
     let repo = make_repo();
+    repo.disable_background_drainer_for_test();
     repo.add_table_for_test(crate::table::TableConfig::new("t"));
 
     // Set a very low watermark so most offers are dropped.
@@ -362,8 +363,19 @@ async fn drain_step_recovers_dropped_entries_via_gap_reseed() {
         "with hw=2, some offers must have been dropped (dropped={dropped})"
     );
 
-    // drain_step must recover ALL entries via gap-reseed.
+    assert_eq!(drainer.window_keys(), vec![1, 2]);
+    let wal = repo.repo_wal().await.unwrap();
+    let versions: Vec<_> = wal
+        .recover()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.commit_version)
+        .collect();
+    assert_eq!(versions, (1..=10).collect::<Vec<_>>());
+    let recover_before = drainer.recover_calls();
     let drained = drainer.drain_all(&repo).await.unwrap();
+    assert!(drainer.recover_calls() > recover_before);
     assert_eq!(drained, 10, "all 10 entries must be drained despite drops");
 
     let gate = repo.tx_gate().await.unwrap();

@@ -655,14 +655,17 @@ pub(super) mod failing_store {
     use futures::stream::Stream;
 
     pub struct FailingStore {
-        inner: InMemoryStore,
+        inner: std::sync::Arc<dyn Store>,
         pub armed: AtomicBool,
     }
 
     impl FailingStore {
         pub fn new() -> Self {
+            Self::wrapping(std::sync::Arc::new(InMemoryStore::new()))
+        }
+        pub fn wrapping(inner: std::sync::Arc<dyn Store>) -> Self {
             Self {
-                inner: InMemoryStore::new(),
+                inner,
                 armed: AtomicBool::new(false),
             }
         }
@@ -907,7 +910,7 @@ async fn resource_meta_group_fails_closed_on_storage_error() {
 
 #[tokio::test]
 async fn membership_read_error_denies_group_and_other_under_0704() {
-    let (shamir, fault) = shamir_with_failing_groups_table().await;
+    let shamir = ShamirDb::init_memory().await.unwrap();
     shamir.create_db("testdb").await.unwrap();
     let gid = shamir.create_group("devs").await.unwrap();
     shamir.add_group_member(gid, 20).await.unwrap();
@@ -926,8 +929,36 @@ async fn membership_read_error_denies_group_and_other_under_0704() {
         .authorize_access(&Actor::User(30), &path, crate::access::Action::Read)
         .await
         .is_ok());
+    let system_repo = shamir.system_store().system_repo().unwrap();
+    system_repo.flush_buffers().await.unwrap();
+    let original = system_repo.get_table("groups").await.unwrap();
+    let history = original.mvcc_store_for_test().unwrap();
+    let fault = std::sync::Arc::new(failing_store::FailingStore::wrapping(
+        history.history_store().clone(),
+    ));
+    let mvcc = std::sync::Arc::new(shamir_tx::MvccStore::new(
+        fault.clone() as std::sync::Arc<dyn shamir_storage::types::Store>,
+        system_repo.tx_gate().await.unwrap(),
+    ));
+    let table = crate::engine::table::TableManager::create_with_domain(
+        "groups".to_string(),
+        original.data_store_for_test().clone(),
+        original.info_store_for_test(),
+        std::sync::Arc::clone(system_repo.write_domain()),
+    )
+    .await
+    .unwrap()
+    .with_interner(system_repo.repo_interner().await.unwrap())
+    .with_mvcc_store(mvcc);
+    system_repo.install_table_for_test("groups", table);
+    assert!(shamir.user_in_group(20, gid).await.unwrap());
+    assert!(!shamir.user_in_group(30, gid).await.unwrap());
     fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     for user in [20, 30] {
+        assert!(matches!(
+            shamir.user_in_group(user, gid).await,
+            Err(shamir_storage::error::DbError::Storage(_))
+        ));
         assert!(shamir
             .authorize_access(&Actor::User(user), &path, crate::access::Action::Read)
             .await

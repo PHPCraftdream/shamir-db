@@ -684,6 +684,10 @@ impl SegmentSet {
             .any(|m| !m.pinned && m.max_version > 0 && m.max_version <= durable_version)
     }
 
+    pub(super) async fn lock_truncation(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.truncate_gate).lock_owned().await
+    }
+
     pub async fn sealed_retained_bytes(&self) -> DbResult<u64> {
         super::sealed_retained_bytes::measure(self).await
     }
