@@ -16,7 +16,9 @@ import unittest
 sys.path.insert(
     0,
     os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        ),
         "gates",
     ),
 )
@@ -39,6 +41,7 @@ def NEEDS(**results):
 
 
 FULL_OK = NEEDS(
+    plan="success",
     fast="skipped",
     fmt="success",
     clippy="success",
@@ -57,6 +60,7 @@ FULL_OK = NEEDS(
 )
 
 DRAFT_OK = NEEDS(
+    plan="success",
     fast="success",
     fmt="skipped",
     clippy="skipped",
@@ -191,9 +195,26 @@ class EvaluateTests(unittest.TestCase):
         reasons = mgc.evaluate(data, **READY)
         self.assertTrue(r.startswith("job fmt: invalid result") for r in reasons)
 
+    def test_skipped_plan_is_never_by_design(self):
+        for scenario, data in ((READY, FULL_OK), (DRAFT, DRAFT_OK)):
+            broken = dict(data)
+            broken["plan"] = {"result": "skipped", "outcome": "skipped"}
+            reasons = mgc.evaluate(broken, **scenario)
+            self.assertIn("job plan unexpectedly skipped", reasons)
+
+    def test_failed_plan_fails_the_gate(self):
+        broken = dict(FULL_OK)
+        broken["plan"] = {"result": "failure", "outcome": "failure"}
+        self.assertEqual(mgc.evaluate(broken, **READY), ["job plan: failure"])
+
+    def test_draft_with_full_marker_is_judged_as_the_full_tier(self):
+        # ci.yml passes draft=false when plan.outputs.full == 'true'.
+        self.assertEqual(mgc.evaluate(FULL_OK, event="pull_request", draft=False), [])
+
     def test_required_jobs_list_excludes_fast_tier_only_job(self):
         self.assertNotIn("engine-features-fast", mgc.REQUIRED_JOBS)
-        self.assertEqual(len(mgc.REQUIRED_JOBS), 15)
+        self.assertEqual(len(mgc.REQUIRED_JOBS), 16)
+        self.assertIn("plan", mgc.REQUIRED_JOBS)
         self.assertIn("deny", mgc.REQUIRED_JOBS)
 
 

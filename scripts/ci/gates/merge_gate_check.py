@@ -12,15 +12,20 @@ Why
 Semantics (implemented exactly)
     * ``result`` ``failure`` or ``cancelled``  -> FAIL, naming the job.
     * ``skipped`` -> FAIL ("unexpectedly skipped") UNLESS skipped by design
-      for the tier:
-      - DRAFT PR (``--event pull_request --draft true``): every
-        ``REQUIRED_JOBS`` entry except ``fast`` is skipped by design.
-        Even in the only-passing shape (``fast`` == success, everything
-        else skipped) the gate still FAILS with
+      for the tier.  ``plan`` (the tier planner, scripts/ci/gates/
+      full_tier_plan.py) has no ``if`` and is NEVER skipped by design.
+      - FAST tier (``--event pull_request --draft true``): every
+        ``REQUIRED_JOBS`` entry except ``plan`` and ``fast`` is skipped by
+        design.  Even in the only-passing shape (``fast`` == success,
+        everything else skipped) the gate still FAILS with
         "draft PR: full matrix not run, not merge-ready" — draft success
         never authorises a merge.
-      - non-draft (ready PR / master push / workflow_dispatch): ``fast``
-        is skipped by design; every other required job must be ``success``.
+      - FULL tier (ready PR / master push / workflow_dispatch / a draft PR
+        whose head commit carries the ``[ci full]`` marker): ``fast`` is
+        skipped by design; every other required job must be ``success``.
+    * ``--draft`` therefore means "the FAST tier was selected": ci.yml passes
+      ``draft == true AND plan.outputs.full != 'true'``, so a marker run on a
+      draft is judged as the full tier it actually ran.
     * any ``result`` that is not EXACTLY one of ``success`` / ``failure``
       / ``cancelled`` / ``skipped`` -> FAIL ("invalid result", naming the
       job and the bad value; a MISSING ``result`` key counts as invalid),
@@ -41,6 +46,7 @@ import json
 import sys
 
 REQUIRED_JOBS = [
+    "plan",
     "fast",
     "fmt",
     "clippy",
@@ -90,7 +96,7 @@ def evaluate(
         elif result in ("failure", "cancelled"):
             reasons.append("job %s: %s" % (job, result))
         elif result == "skipped":
-            by_design = (job == "fast") != is_draft_pr
+            by_design = job != "plan" and (job == "fast") != is_draft_pr
             if not by_design:
                 reasons.append("job %s unexpectedly skipped" % job)
 
