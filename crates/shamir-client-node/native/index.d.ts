@@ -21,14 +21,17 @@ export declare class ShamirClient {
    * as `trustedPin` on subsequent connections.
    */
   serverPubKeyPin(): Buffer
-  /** 32-byte session id assigned by the server. */
+  /** 32-byte session id assigned by the server; empty after close. */
   sessionId(): Buffer
   /**
    * Absolute session expiry (unix nanoseconds). Returned as `BigInt`
    * in JS because nanoseconds since epoch overflow `Number`.
    */
   expiresAtNs(): bigint
-  /** Resumption ticket bytes (if the server issued one). */
+  /**
+   * Resumption ticket bytes (if issued). Node has no resume input.
+   * Returns null after close; previously returned JS copies are not erased.
+   */
   resumptionTicket(): Buffer | null
   /** Resumption expiry (paired with [`Self::resumption_ticket`]). */
   resumptionExpiresAtNs(): bigint | null
@@ -82,8 +85,8 @@ export interface ConnectOptions {
   /** Username (raw — server-side normalisation applies). */
   username: string
   /**
-   * Plaintext password. Zeroised in the native side after the
-   * handshake completes.
+   * Plaintext password. The owned native buffer is zeroized on drop;
+   * JavaScript strings and copies outside this buffer are not erased.
    */
   password: string
   /**

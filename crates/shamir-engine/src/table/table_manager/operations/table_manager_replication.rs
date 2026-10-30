@@ -245,20 +245,13 @@ impl TableManager {
             )> = batch.iter().map(|(rid, val)| (*rid, val)).collect();
             for backend in &backends {
                 for (rid, val) in &items {
-                    let ops = backend.plan_insert(*rid, *val).await.map_err(|e| {
-                        shamir_storage::error::DbError::Internal(format!(
-                            "bulk_populate_index2 plan_insert failed: {}",
-                            e
-                        ))
-                    })?;
+                    let ops = backend
+                        .plan_insert(*rid, *val)
+                        .await
+                        .map_err(shamir_storage::error::DbError::from)?;
                     crate::index2::apply_index_ops(&ops, &self.info_store, backend.as_ref())
                         .await
-                        .map_err(|e| {
-                            shamir_storage::error::DbError::Internal(format!(
-                                "bulk_populate_index2 apply_index_ops failed: {}",
-                                e
-                            ))
-                        })?;
+                        .map_err(shamir_storage::error::DbError::from)?;
                 }
             }
         }

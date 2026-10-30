@@ -788,7 +788,7 @@ pub(crate) async fn apply_index_batch(
             // OLD (buggy) order, test-only: apply the postings FIRST...
             crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
                 .await
-                .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
+                .map_err(DbError::from)?;
             tbl.index_manager_ref()
                 .invalidate_posting_cache_for_ops(ops);
             // ...pause strictly between apply and bump — the exact TOCTOU
@@ -821,7 +821,7 @@ pub(crate) async fn apply_index_batch(
 
             crate::index2::write_ops::apply_index_ops_at_commit(ops, tbl.info_store(), &backends)
                 .await
-                .map_err(|e| DbError::Internal(format!("index apply at commit: {e}")))?;
+                .map_err(DbError::from)?;
             // Invalidate the base_index IndexManager's posting cache for every
             // SetPosting / RemovePosting that was just durably applied, so
             // the next lookup_by_index re-fetches from the store instead of

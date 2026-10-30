@@ -637,7 +637,7 @@ impl IndexBackend for VectorBackend {
         let batch_size = 1000usize;
         let mut stream = source.iter_stream(batch_size);
         while let Some(batch_res) = stream.next().await {
-            let batch = batch_res.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_res.map_err(IndexError::from)?;
             let mut items: Vec<(RecordId, Vec<f32>)> = Vec::new();
             for (key_bytes, val_bytes) in batch {
                 let arr: [u8; 16] = key_bytes
@@ -766,11 +766,12 @@ impl IndexBackend for VectorBackend {
                             hnsw,
                         )
                         .await
-                        .map_err(|e| {
-                            IndexError::Backend(format!(
+                        .map_err(|e| match e {
+                            SnapshotError::Db(error) => IndexError::Db(error),
+                            other => IndexError::Backend(format!(
                                 "vector delta replay failed for index {} (keyspace {}): {} — failing the open closed; omitting these mutations would let the next snapshot prune their delta chunks",
-                                self.descriptor.name, keyspace, e
-                            ))
+                                self.descriptor.name, keyspace, other
+                            )),
                         })?,
                     ),
                     // RV-INDEX-4651AA00/2F3CBCA3: a snapshot loaded although
@@ -801,12 +802,13 @@ impl IndexBackend for VectorBackend {
                 // recovered graph.
                 let stored_hwm = snapshot::highest_delta_index(&info_store, &keyspace)
                     .await
-                    .map_err(|e| {
-                        IndexError::Backend(format!(
+                    .map_err(|e| match e {
+                        SnapshotError::Db(error) => IndexError::Db(error),
+                        other => IndexError::Backend(format!(
                             "delta HWM scan failed for index {} (keyspace {}): {} — \
                              refusing to seed next_delta_idx below the surviving chunks",
-                            self.descriptor.name, keyspace, e
-                        ))
+                            self.descriptor.name, keyspace, other
+                        )),
                     })?;
                 // Conservative fold: gaps between the replayed boundary and
                 // surviving chunks only ever raise the seed (safe, never
@@ -886,12 +888,9 @@ impl IndexBackend for VectorBackend {
         let prefix = format!("{}.", self.snapshot_keyspace());
         let mut stream = store.scan_prefix_stream(prefix.clone().into(), 1024);
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_result.map_err(IndexError::from)?;
             for (key, _) in batch {
-                store
-                    .remove(key)
-                    .await
-                    .map_err(|e| IndexError::Storage(e.to_string()))?;
+                store.remove(key).await.map_err(IndexError::from)?;
             }
         }
         Ok(())
@@ -937,7 +936,10 @@ impl IndexBackend for VectorBackend {
             self.mark_delta_applied(idx);
             self.release_promote_turn(idx);
             reservation.disarm();
-            return Err(IndexError::Backend(format!("delta append: {e}")));
+            return Err(match e {
+                SnapshotError::Db(error) => IndexError::Db(error),
+                other => IndexError::Backend(format!("delta append: {other}")),
+            });
         } // P0 index promote order: the engine's Drop-guard ticket (minted right
           // below, no await between) owns the turn from here on.
         reservation.disarm();

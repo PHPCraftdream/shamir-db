@@ -18,15 +18,21 @@ pub mod cursor_stream;
 pub mod subscription;
 
 pub use connect::Client;
-pub use options::{bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions};
+pub use options::{
+    bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions,
+    SecureResumeOptions,
+};
 
 #[cfg(test)]
 pub(crate) use api::should_advertise_interner_epochs;
 #[cfg(test)]
-pub(crate) use connect::{resume_wire_exchange, verify_resume_identity_proof};
+pub(crate) use connect::resume_security::{
+    read_resume_frame, serialize_resume, ProtectedResumeBuffer,
+};
+#[cfg(test)]
+pub(crate) use connect::{resume_wire_exchange, take_resume_wipes, verify_resume_identity_proof};
 
 #[cfg(test)]
 pub(crate) use transport::{
-    await_pending_response, connect_tcp, reader_task, HookPoint, Lifecycle, LifecycleHooks,
-    ShutdownGuard,
+    await_pending_response, reader_task, HookPoint, Lifecycle, LifecycleHooks, ShutdownGuard,
 };

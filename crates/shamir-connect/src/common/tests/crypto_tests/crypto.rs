@@ -5,9 +5,31 @@
 
 use crate::common::crypto::{
     aes256gcm_decrypt, aes256gcm_encrypt, argon2id, constant_time_eq, ed25519_verify_strict,
-    hkdf_sha256, hmac_sha256, random_array, random_bytes, sha256, Ed25519Keypair,
+    hkdf_sha256, hmac_sha256, random_array, random_bytes, sha256, try_random_array,
+    try_random_bytes, with_entropy_failure, with_entropy_failure_after, Ed25519Keypair,
 };
+use crate::common::error::EnvironmentError;
 use crate::common::kdf_params::KdfParams;
+
+#[test]
+fn injected_entropy_failure_is_typed_and_restores_state() {
+    with_entropy_failure_after(1, || {
+        assert!(try_random_array::<16>().is_ok());
+        with_entropy_failure(|| {
+            let mut bytes = [7; 16];
+            assert!(matches!(
+                try_random_bytes(&mut bytes),
+                Err(EnvironmentError::Entropy)
+            ));
+            assert_eq!(bytes, [7; 16]);
+        });
+        assert!(matches!(
+            try_random_array::<16>(),
+            Err(EnvironmentError::Entropy)
+        ));
+    });
+    assert!(try_random_array::<16>().is_ok());
+}
 
 #[test]
 fn sha256_empty_string_rfc6234() {

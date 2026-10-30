@@ -9,7 +9,7 @@
 //! - Provides `subtle::ConstantTimeEq` wrappers for SCRAM proof comparison.
 //! - Returns [`crate::common::Error`] (no upstream errors leak).
 
-use crate::common::error::{Error, Result};
+use crate::common::error::{EnvironmentError, Error, Result};
 use crate::common::kdf_params::KdfParams;
 use ::hkdf::Hkdf;
 use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, Payload};
@@ -62,14 +62,65 @@ pub type HmacTag = [u8; 32];
 /// Fill `out` with cryptographically secure random bytes.
 ///
 /// Uses [`rand::rngs::OsRng`] — same source as Ed25519 key generation and
-/// nonce derivation throughout the spec.
+/// nonce derivation throughout the spec. Panics on OS entropy failure.
 pub fn random_bytes(out: &mut [u8]) {
-    rand::rngs::OsRng
-        .try_fill_bytes(out)
-        .expect("OS RNG failure");
+    try_random_bytes(out).expect("OS RNG failure");
 }
 
-/// Generate `N` random bytes as a fresh array.
+#[cfg(test)]
+thread_local! {
+    static FAIL_ENTROPY: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Run a synchronous test operation with this thread's entropy source failing.
+#[cfg(test)]
+pub(crate) fn with_entropy_failure<T>(operation: impl FnOnce() -> T) -> T {
+    with_entropy_failure_after(0, operation)
+}
+
+/// Fail entropy after the specified number of successful calls on this thread.
+#[cfg(test)]
+pub(crate) fn with_entropy_failure_after<T>(
+    successful_calls: usize,
+    operation: impl FnOnce() -> T,
+) -> T {
+    struct Reset(Option<usize>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAIL_ENTROPY.with(|flag| flag.set(self.0));
+        }
+    }
+    let previous = FAIL_ENTROPY.with(|flag| flag.replace(Some(successful_calls)));
+    let _reset = Reset(previous);
+    operation()
+}
+
+/// Fill a buffer from OS entropy, returning an environmental error on failure.
+pub fn try_random_bytes(out: &mut [u8]) -> std::result::Result<(), EnvironmentError> {
+    #[cfg(test)]
+    if FAIL_ENTROPY.with(|flag| match flag.get() {
+        Some(0) => true,
+        Some(remaining) => {
+            flag.set(Some(remaining - 1));
+            false
+        }
+        None => false,
+    }) {
+        return Err(EnvironmentError::Entropy);
+    }
+    rand::rngs::OsRng
+        .try_fill_bytes(out)
+        .map_err(|_| EnvironmentError::Entropy)
+}
+
+/// Generate an array from OS entropy without panicking.
+pub fn try_random_array<const N: usize>() -> std::result::Result<[u8; N], EnvironmentError> {
+    let mut out = [0u8; N];
+    try_random_bytes(&mut out)?;
+    Ok(out)
+}
+
+/// Generate `N` random bytes as a fresh array. Panics on OS entropy failure.
 pub fn random_array<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
     random_bytes(&mut out);

@@ -8,6 +8,7 @@
 //! structural equality because insertion order is preserved but we do not
 //! rely on a specific key ordering for the assertions.
 
+use crate::filter::FilterExt;
 use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
@@ -394,8 +395,6 @@ fn delete_with_repo() {
 
 #[test]
 fn delete_complex_where() {
-    use crate::filter::FilterExt;
-
     let f = filter::eq("status", "inactive").and(filter::lt("last_seen", 1000_i64));
     let op = delete("users").where_(f).build().unwrap();
     let bytes = rmp_serde::to_vec_named(&op).unwrap();

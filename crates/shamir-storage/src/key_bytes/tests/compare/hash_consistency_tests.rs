@@ -9,7 +9,7 @@
 
 use super::super::super::KeyBytes;
 use shamir_collections::{TFxMap, THasher};
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, DefaultHasher, Hash, Hasher};
 
 /// Several short byte strings that exercise the inline path, including
 /// edge lengths and a realistic 16-byte `RecordId`-shaped key.
@@ -49,7 +49,6 @@ fn inline_and_heap_hash_identically_under_fxhasher() {
 
 #[test]
 fn inline_and_heap_hash_identically_under_std_default_hasher() {
-    use std::hash::DefaultHasher;
     for &bytes in SAMPLES {
         let inline = KeyBytes::from_slice(bytes);
         let heap = KeyBytes::force_heap_for_test(bytes);

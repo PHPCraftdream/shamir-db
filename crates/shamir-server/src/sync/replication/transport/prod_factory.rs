@@ -24,16 +24,23 @@
 //! connect error surfaces as a transient [`ReplError::Transport`] the loop
 //! retries with backoff).
 
+#[cfg(test)]
+#[path = "../tests/recovery_gap/pin_tests.rs"]
+mod pin_tests;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use scc::hash_map::Entry;
 use shamir_client::{Client, ConnectOptions};
+use shamir_collections::THasher;
 use shamir_query_types::wire::repl::ReplResponse;
 use tokio::sync::Mutex;
 use tracing::warn;
 use zeroize::Zeroizing;
 
+use super::replication_config::UpstreamPins;
 use super::source::ReplSource;
 use super::wire_source::WireReplSource;
 use crate::replication::error::ReplError;
@@ -47,8 +54,8 @@ struct ReplicatorCreds {
     user: String,
     password: ReplicatorPassword,
     server_name: String,
+    pins: Arc<PinPolicy>,
 }
-
 /// Build a production [`ReplSourceFactory`] from the resolved replicator
 /// credentials. Returns `None` when no `replicator_user` / `replicator_password`
 /// is configured — with no credentials there is nothing to connect *as*, so
@@ -58,6 +65,7 @@ pub fn build_prod_factory(
     user: Option<String>,
     password: Option<ReplicatorPassword>,
     server_name: String,
+    upstream_pins: UpstreamPins,
 ) -> Option<ReplSourceFactory> {
     let (user, password) = match (user, password) {
         (Some(u), Some(p)) if !u.is_empty() && !p.reveal().is_empty() => (u, p),
@@ -67,11 +75,58 @@ pub fn build_prod_factory(
         user,
         password,
         server_name,
+        pins: Arc::new(PinPolicy {
+            configured: upstream_pins,
+            learned: scc::HashMap::with_hasher(THasher::default()),
+        }),
     };
     let factory: ReplSourceFactory = Arc::new(move |sub: &Subscription| {
         Arc::new(LazyWireSource::new(sub.upstream.clone(), creds.clone())) as Arc<dyn ReplSource>
     });
     Some(factory)
+}
+
+/// Shared across every source produced by one factory. Keys are operator-controlled
+/// subscription upstreams; entries deliberately persist until process restart.
+struct PinPolicy {
+    configured: UpstreamPins,
+    learned: scc::HashMap<SocketAddr, [u8; 32], THasher>,
+}
+
+/// Pure decision for configured and previously learned public pins.
+fn check_pin(addr: SocketAddr, observed: [u8; 32], expected: &[[u8; 32]]) -> Result<(), ReplError> {
+    if expected.contains(&observed) {
+        return Ok(());
+    }
+    Err(ReplError::UpstreamKeyMismatch {
+        upstream: addr,
+        observed: hex::encode(observed),
+        expected: expected
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>()
+            .join(", "),
+    })
+}
+
+impl PinPolicy {
+    /// All handshake checks have succeeded and no replication data has been sent;
+    /// this post-handshake comparison is equivalent to the in-handshake pin check.
+    fn check(&self, addr: SocketAddr, observed: [u8; 32]) -> Result<(), ReplError> {
+        if let Some(expected) = self.configured.0.get(&addr) {
+            return check_pin(addr, observed, expected);
+        }
+        match self.learned.entry_sync(addr) {
+            Entry::Occupied(entry) => check_pin(addr, observed, std::slice::from_ref(entry.get())),
+            Entry::Vacant(entry) => {
+                entry.insert_entry(observed);
+                warn!(upstream = %addr, pin = %hex::encode(observed),
+                    enrollment = %format!("\"{addr}\": [\"{}\"]", hex::encode(observed)),
+                    "replication learned upstream key; verify out of band and enroll under replication.upstream_pins");
+                Ok(())
+            }
+        }
+    }
 }
 
 /// A [`ReplSource`] that connects to its upstream on first use and caches the
@@ -111,8 +166,7 @@ impl LazyWireSource {
             server_name: self.creds.server_name.clone(),
             username: self.creds.user.clone(),
             password: Zeroizing::new(self.creds.password.reveal().as_bytes().to_vec()),
-            // Trust-on-first-use: the follower has no pre-pinned leader key in
-            // 386-c. Persisting a leader pin is future work (#388).
+            // Pin policy is enforced after all handshake checks, before replication requests.
             accept_new_host: true,
             trusted_pin: None,
             // Production inter-node replication traffic: bound both the
@@ -128,6 +182,7 @@ impl LazyWireSource {
             warn!(upstream = %self.upstream, error = %e, "supervisor: upstream connect failed");
             ReplError::Transport(e.to_string())
         })?;
+        self.creds.pins.check(addr, client.server_pub_key_pin())?;
         let src = Arc::new(WireReplSource::new(client));
         *guard = Some(src.clone());
         Ok(src)
@@ -192,7 +247,7 @@ impl ReplSource for NoopReplSource {
 /// Accepts a bare `host:port` or a `tcp://host:port` URL form. Only literal
 /// socket addresses are resolved (no DNS) — matching the loopback e2e path;
 /// hostname resolution is future work.
-fn parse_upstream_addr(upstream: &str) -> Result<SocketAddr, String> {
+pub(super) fn parse_upstream_addr(upstream: &str) -> Result<SocketAddr, String> {
     let hostport = upstream
         .strip_prefix("tcp://")
         .or_else(|| upstream.strip_prefix("tls://"))

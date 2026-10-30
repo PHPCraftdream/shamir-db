@@ -17,6 +17,8 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::types::record_id::RecordId;
+use std::error::Error;
+use std::io::{Error as IoError, ErrorKind};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,6 +35,7 @@ type TestStream = Pin<Box<dyn Stream<Item = Result<Vec<(RecordKey, Bytes)>, DbEr
 struct FailableSetStore {
     inner: Arc<dyn Store>,
     armed: Arc<AtomicBool>,
+    scan_armed: AtomicBool,
 }
 
 impl FailableSetStore {
@@ -40,6 +43,7 @@ impl FailableSetStore {
         Self {
             inner,
             armed: Arc::new(AtomicBool::new(false)),
+            scan_armed: AtomicBool::new(false),
         }
     }
 }
@@ -51,7 +55,10 @@ impl Store for FailableSetStore {
     }
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
         if self.armed.swap(false, Ordering::SeqCst) {
-            return Err(DbError::Storage("injected set failure".to_string()));
+            return Err(DbError::Io(IoError::new(
+                ErrorKind::PermissionDenied,
+                "injected set failure",
+            )));
         }
         self.inner.set(key, value).await
     }
@@ -65,6 +72,14 @@ impl Store for FailableSetStore {
         self.inner.iter_stream(batch_size)
     }
     fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> TestStream {
+        if self.scan_armed.swap(false, Ordering::SeqCst) {
+            return Box::pin(futures::stream::once(async {
+                Err(DbError::Io(IoError::new(
+                    ErrorKind::PermissionDenied,
+                    "injected scan failure",
+                )))
+            }));
+        }
         self.inner.scan_prefix_stream(prefix, batch_size)
     }
     async fn set_many(&self, items: Vec<(RecordKey, Bytes)>) -> DbResult<Vec<bool>> {
@@ -73,6 +88,151 @@ impl Store for FailableSetStore {
     async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
         self.inner.remove_many(keys).await
     }
+}
+
+#[test]
+fn rv_index_2ba3b945_contextual_io_round_trip() {
+    let original = DbError::Io(IoError::new(ErrorKind::PermissionDenied, "original io"));
+    let contextual = shamir_index::backend::contextualize_db_error(
+        original,
+        "CREATE INDEX failed: original io".to_string(),
+    );
+    let index_error = shamir_index::backend::IndexError::from(contextual);
+    assert!(index_error.to_string().contains("CREATE INDEX failed"));
+    let error = DbError::from(index_error);
+    assert!(error.to_string().contains("CREATE INDEX failed"));
+    assert!(matches!(&error, DbError::Io(io) if io.kind() == ErrorKind::PermissionDenied));
+    let mut source = error.source();
+    let mut found_original = false;
+    while let Some(current) = source {
+        if let Some(io) = current.downcast_ref::<IoError>() {
+            if io.kind() == ErrorKind::PermissionDenied && io.to_string() == "original io" {
+                found_original = true;
+            }
+        }
+        source = current.source();
+    }
+    assert!(
+        found_original,
+        "original I/O error must remain in the source chain"
+    );
+}
+
+#[test]
+fn rv_index_2ba3b945_index_error_source_chain() {
+    let index_error = shamir_index::backend::IndexError::from(DbError::Io(IoError::new(
+        ErrorKind::PermissionDenied,
+        "index source",
+    )));
+    let mut found = None;
+    let mut current = index_error.source();
+    while let Some(error) = current {
+        if let Some(io) = error.downcast_ref::<IoError>() {
+            found = Some(io);
+            break;
+        }
+        current = error.source();
+    }
+    let io =
+        found.expect("original I/O error must be reachable through the IndexError source chain");
+    assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(io.to_string(), "index source");
+    assert!(
+        matches!(DbError::from(index_error), DbError::Io(io) if io.kind() == ErrorKind::PermissionDenied)
+    );
+}
+
+#[tokio::test]
+async fn rv_index_2ba3b945_metadata_save_preserves_io() {
+    let faulty = Arc::new(FailableSetStore::new(Arc::new(InMemoryStore::new())));
+    let store: Arc<dyn Store> = faulty.clone();
+    faulty.armed.store(true, Ordering::SeqCst);
+    let error = shamir_index::persistence::save_index2_metadata(
+        &shamir_index::IndexRegistry::new(),
+        &store,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(&error, DbError::Io(io) if io.kind() == ErrorKind::PermissionDenied));
+    assert_eq!(error.source().unwrap().to_string(), "injected set failure");
+}
+
+#[tokio::test]
+async fn rv_index_2ba3b945_injected_io_survives_index_to_engine() {
+    let faulty = Arc::new(FailableSetStore::new(Arc::new(InMemoryStore::new())));
+    let info_store: Arc<dyn Store> = faulty.clone();
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mgr = TableManager::create("rows".into(), data_store, info_store)
+        .await
+        .unwrap();
+    let interner = mgr.interner().get().await.unwrap();
+    let key = interner.touch_ind("body").unwrap().into_key();
+    mgr.interner().persist().await.unwrap();
+    let op = shamir_query_builder::ddl::create_index("search", "rows")
+        .field("body")
+        .index_type("fts")
+        .build();
+    let shamir_query_types::batch::BatchOp::CreateIndex(op) = op else {
+        panic!("expected create index");
+    };
+    mgr.create_index_v2(&op).await.unwrap();
+    let mut row = shamir_types::types::common::new_map();
+    row.insert(
+        key,
+        shamir_types::types::value::InnerValue::Str("hello".into()),
+    );
+    faulty.armed.store(true, Ordering::SeqCst);
+    let error = mgr
+        .index2_on_insert(
+            &RecordId::system("row"),
+            &shamir_types::types::value::InnerValue::Map(row),
+        )
+        .await
+        .unwrap_err();
+    let source = error.source().expect("Io source survives");
+    let io = source
+        .downcast_ref::<IoError>()
+        .expect("source is io error");
+    assert_eq!(io.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(io.to_string(), "injected set failure");
+    assert!(matches!(error, DbError::Io(_)));
+}
+
+#[tokio::test]
+async fn rv_index_2ba3b945_functional_planner_propagates_scan_io() {
+    let faulty = Arc::new(FailableSetStore::new(Arc::new(InMemoryStore::new())));
+    let info_store: Arc<dyn Store> = faulty.clone();
+    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let mgr = TableManager::create("rows".into(), data_store, info_store)
+        .await
+        .unwrap();
+    let interner = mgr.interner().get().await.unwrap();
+    interner.touch_ind("email").unwrap();
+    mgr.interner().persist().await.unwrap();
+    let op = shamir_query_builder::ddl::create_index("email_lower", "rows")
+        .field("email")
+        .index_type("functional")
+        .functional_op("lower")
+        .build();
+    let shamir_query_types::batch::BatchOp::CreateIndex(op) = op else {
+        panic!("expected create index");
+    };
+    mgr.create_index_v2(&op).await.unwrap();
+    let filter = shamir_query_builder::filter::computed("lower", "email", "eq", "alice");
+    let interner = mgr.interner().get().await.unwrap();
+    assert!(mgr
+        .try_plan_index2(&filter, interner)
+        .await
+        .unwrap()
+        .is_some());
+    faulty.scan_armed.store(true, Ordering::SeqCst);
+    let result = mgr.try_plan_index2(&filter, interner).await;
+    assert!(matches!(
+        result,
+        Err(DbError::Io(ref io))
+            if io.kind() == ErrorKind::PermissionDenied && io.to_string() == "injected scan failure"
+    ));
+    assert!(!faulty.scan_armed.load(Ordering::SeqCst));
 }
 
 // ============================================================================
@@ -144,8 +304,8 @@ async fn p967_rename_hash_index_failure_writes_structured_error() {
 
     let result = rename_task.await.unwrap();
     assert!(
-        result.is_err(),
-        "rename should fail due to injected fault at drop_index"
+        matches!(result, Err(DbError::Io(ref io)) if io.kind() == ErrorKind::PermissionDenied),
+        "rename must preserve the injected Io error"
     );
 
     // Read the op-status log.
@@ -242,8 +402,8 @@ async fn p967_rename_unique_hash_index_failure_writes_structured_error() {
 
     let result = rename_task.await.unwrap();
     assert!(
-        result.is_err(),
-        "rename should fail due to injected fault at drop_unique_index"
+        matches!(result, Err(DbError::Io(ref io)) if io.kind() == ErrorKind::PermissionDenied),
+        "rename must preserve the injected Io error"
     );
 
     // Read the op-status log.

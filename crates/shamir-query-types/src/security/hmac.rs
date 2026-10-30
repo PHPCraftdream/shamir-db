@@ -3,9 +3,44 @@
 //! `count:u32be || strings`; integers are big-endian and discriminants are
 //! one byte. Conditional CreateFunction/CreateValidator operations are
 //! encoded even when NotGated, allowing signing before tags are attached.
+//!
+//! | Operation | v2 tag |
+//! | --- | --- |
+//! | DropDb | 0x0001 |
+//! | DropRepo | 0x0002 |
+//! | DropTable | 0x0003 |
+//! | DropIndex | 0x0004 |
+//! | DropUser | 0x0005 |
+//! | StartMigration | 0x0006 |
+//! | CommitMigration | 0x0007 |
+//! | RollbackMigration | 0x0008 |
+//! | GrantRole | 0x0009 |
+//! | RevokeRole | 0x000A |
+//! | Chmod | 0x000B |
+//! | Chown | 0x000C |
+//! | Chgrp | 0x000D |
+//! | CreateUser | 0x000E |
+//! | SetRetention | 0x000F |
+//! | PurgeHistory | 0x0010 |
+//! | CreateGroup | 0x0011 |
+//! | DropGroup | 0x0012 |
+//! | RenameGroup | 0x0013 |
+//! | AddGroupMember | 0x0014 |
+//! | RemoveGroupMember | 0x0015 |
+//! | CreateFunction | 0x0016 |
+//! | SetSuperuser | 0x0017 |
+//! | SetReplicator | 0x0018 |
+//! | CreateScramUser | 0x0019 |
+//! | DropFunction | 0x001A |
+//! | DropValidator | 0x001B |
+//! | CreateValidator | 0x001C |
+//! | DropReplicationProfile | 0x001D |
+//! | DropPublication | 0x001E |
+//! | DropSubscription | 0x001F |
 
 use crate::admin::{GroupRef, PurgeScope, ResourceRef};
 use crate::batch::BatchOp;
+use crate::batch::BatchOp::*;
 use crate::wire::DbRequest;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -178,7 +213,6 @@ pub enum HmacPolicy {
 }
 /// Exhaustive destructive-op coverage policy. All other variants are explicitly not gated.
 pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
-    use BatchOp::*;
     match op {
         DropDb(_)
         | DropRepo(_)
@@ -268,7 +302,6 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
 }
 /// Canonical bytes for a whole operation; every applicable DTO is destructured without `..`.
 pub fn canonical_batch_op(db: &str, op: &BatchOp) -> Result<Vec<u8>, CanonicalOpError> {
-    use BatchOp::*;
     let mut e;
     match op {
         DropDb(x) => {
@@ -655,7 +688,6 @@ pub fn canonical_db_request(r: &DbRequest) -> Result<Vec<u8>, CanonicalOpError> 
 }
 /// HMAC field accessor for exhaustive verifier dispatch.
 pub fn supplied_hmac(op: &BatchOp) -> Option<&str> {
-    use BatchOp::*;
     match op {
         DropDb(x) => x.hmac.as_deref(),
         DropRepo(x) => x.hmac.as_deref(),

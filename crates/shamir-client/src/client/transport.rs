@@ -3,6 +3,8 @@
 //! reader task.
 
 use std::cell::Cell;
+use std::future::Future;
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,11 +22,11 @@ use tokio_rustls::client::TlsStream;
 
 use shamir_transport_ipc::IpcClientStream;
 
-use shamir_connect::common::envelope::{ErrorEnvelope, ResponseEnvelope};
-use shamir_connect::common::push_envelope::PushEnvelope;
+use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 
 use shamir_transport_tcp::framing::{read_frame_into, FrameError, MAX_FRAME_SIZE_DEFAULT};
 
+use crate::client::connect::resume_security::ProtectedResumeBuffer;
 use crate::client::subscription::{PushSender, EARLY_BUFFER_CAP, EARLY_BUFFER_TOTAL_CAP};
 use crate::error::{ClientError, CloseCause};
 
@@ -81,30 +83,70 @@ impl AsyncWrite for WriteSink {
 /// error string, both tagged with the correlation id.
 enum DemuxResult {
     /// Success envelope: `(rid, payload_bytes)`.
-    Response { rid: Option<u32>, payload: Vec<u8> },
+    Response {
+        rid: Option<u32>,
+        payload: Vec<u8>,
+    },
     /// Error envelope: `(rid, error_string)`.
-    Error { rid: Option<u32>, error: String },
+    Error {
+        rid: Option<u32>,
+        error: String,
+    },
+    Push(PushEnvelope),
 }
 
-/// Decode one raw frame into a [`DemuxResult`].
-///
-/// Strategy: try `ResponseEnvelope` first (contains `res` bytes field);
-/// on failure try `ErrorEnvelope` (contains `error` string field).
-/// If both fail, return `None` so the reader task can log-and-drop.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+struct IncomingEnvelope {
+    #[serde(default)]
+    rid: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    res: Option<serde_bytes::ByteBuf>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    error: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    push: Option<PushKind>,
+    #[serde(default)]
+    sub: Option<u64>,
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default)]
+    data: Option<serde_bytes::ByteBuf>,
+    #[serde(default)]
+    gap_at: Option<u64>,
+}
+
 fn decode_frame(buf: &[u8]) -> Option<DemuxResult> {
-    if let Ok(env) = ResponseEnvelope::from_msgpack(buf) {
-        return Some(DemuxResult::Response {
-            rid: env.request_id,
-            payload: env.res,
-        });
+    let mut decoder = rmp_serde::Deserializer::new(Cursor::new(buf));
+    let env = IncomingEnvelope::deserialize(&mut decoder).ok()?;
+    if decoder.get_ref().position() != buf.len() as u64 {
+        return None;
     }
-    if let Ok(env) = ErrorEnvelope::from_msgpack(buf) {
-        return Some(DemuxResult::Error {
-            rid: env.request_id,
-            error: env.error,
-        });
+    match (env.res, env.error, env.push) {
+        (Some(payload), None, None) => Some(DemuxResult::Response {
+            rid: env.rid,
+            payload: payload.into_vec(),
+        }),
+        (None, Some(error), None) => Some(DemuxResult::Error {
+            rid: env.rid,
+            error,
+        }),
+        (None, None, Some(push)) => Some(DemuxResult::Push(PushEnvelope {
+            push,
+            sub: env.sub?,
+            seq: env.seq?,
+            data: env.data.map(serde_bytes::ByteBuf::into_vec),
+            gap_at: env.gap_at,
+        })),
+        _ => None,
     }
-    None
 }
 
 /// Establish the underlying TCP connection, optionally bounded by a
@@ -119,13 +161,7 @@ pub(crate) async fn connect_tcp(
     addr: SocketAddr,
     timeout: Option<std::time::Duration>,
 ) -> Result<TcpStream, ClientError> {
-    match timeout {
-        None => Ok(TcpStream::connect(addr).await?),
-        Some(d) => match tokio::time::timeout(d, TcpStream::connect(addr)).await {
-            Ok(res) => Ok(res?),
-            Err(_elapsed) => Err(ClientError::ConnectTimeout(d)),
-        },
-    }
+    connect_with_timeout(TcpStream::connect(addr), timeout).await
 }
 
 /// Establish the underlying local-IPC connection (Unix domain socket /
@@ -135,11 +171,21 @@ pub(crate) async fn connect_ipc(
     addr: &str,
     timeout: Option<std::time::Duration>,
 ) -> Result<IpcClientStream, ClientError> {
+    connect_with_timeout(shamir_transport_ipc::connect(addr), timeout).await
+}
+
+pub(crate) async fn connect_with_timeout<T, E>(
+    connector: impl Future<Output = Result<T, E>>,
+    timeout: Option<std::time::Duration>,
+) -> Result<T, ClientError>
+where
+    ClientError: From<E>,
+{
     match timeout {
-        None => Ok(shamir_transport_ipc::connect(addr).await?),
-        Some(d) => match tokio::time::timeout(d, shamir_transport_ipc::connect(addr)).await {
+        None => Ok(connector.await?),
+        Some(d) => match tokio::time::timeout(d, connector).await {
             Ok(res) => Ok(res?),
-            Err(_elapsed) => Err(ClientError::ConnectTimeout(d)),
+            Err(_) => Err(ClientError::ConnectTimeout(d)),
         },
     }
 }
@@ -538,77 +584,71 @@ pub(crate) async fn reader_task<R>(
             }
         }
         let result = match decode_frame(&frame_buf) {
-            Some(r) => r,
-            None => {
-                // Not a response/error envelope — try push frame.
-                if let Ok(envelope) = rmp_serde::from_slice::<PushEnvelope>(&frame_buf) {
-                    // Route to live sender or buffer early under the shared subscription mutex.
-                    enum PushAction {
-                        Live(Result<(), tokio::sync::mpsc::error::TrySendError<PushEnvelope>>),
-                        Buffered,
+            Some(r @ (DemuxResult::Response { .. } | DemuxResult::Error { .. })) => r,
+            Some(DemuxResult::Push(envelope)) => {
+                // Route to live sender or buffer early under the shared subscription mutex.
+                enum PushAction {
+                    Live(Result<(), tokio::sync::mpsc::error::TrySendError<PushEnvelope>>),
+                    Buffered,
+                }
+                // One reader task and rare subscribe calls per connection; this mutex makes route/install/flush atomic.
+                let mut subs = state.subs.lock().unwrap_or_else(|p| p.into_inner());
+                debug_assert_eq!(
+                    subs.early_total,
+                    subs.early.values().map(Vec::len).sum::<usize>()
+                );
+                let action = if let Some(tx) = subs.live.get(&envelope.sub) {
+                    PushAction::Live(tx.try_send(envelope))
+                } else if subs.closed.is_none() {
+                    if subs.early_total < EARLY_BUFFER_TOTAL_CAP {
+                        let items = subs.early.entry(envelope.sub).or_default();
+                        if items.len() < EARLY_BUFFER_CAP {
+                            items.push(envelope);
+                            subs.early_total += 1;
+                        } else {
+                            tracing::debug!(
+                                "reader_task: early buffer full for sub {}; push dropped",
+                                envelope.sub
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
+                            "reader_task: aggregate early buffer full; push for sub {} dropped",
+                            envelope.sub
+                        );
                     }
-                    // One reader task and rare subscribe calls per connection; this mutex makes route/install/flush atomic.
-                    let mut subs = state.subs.lock().unwrap_or_else(|p| p.into_inner());
                     debug_assert_eq!(
                         subs.early_total,
                         subs.early.values().map(Vec::len).sum::<usize>()
                     );
-                    let action = if let Some(tx) = subs.live.get(&envelope.sub) {
-                        PushAction::Live(tx.try_send(envelope))
-                    } else if subs.closed.is_none() {
-                        if subs.early_total < EARLY_BUFFER_TOTAL_CAP {
-                            let items = subs.early.entry(envelope.sub).or_default();
-                            if items.len() < EARLY_BUFFER_CAP {
-                                items.push(envelope);
-                                subs.early_total += 1;
-                            } else {
-                                tracing::debug!(
-                                    "reader_task: early buffer full for sub {}; push dropped",
-                                    envelope.sub
-                                );
-                            }
-                        } else {
-                            tracing::debug!(
-                                "reader_task: aggregate early buffer full; push for sub {} dropped",
-                                envelope.sub
-                            );
+                    PushAction::Buffered
+                } else {
+                    PushAction::Buffered
+                };
+                if let PushAction::Live(res) = action {
+                    match res {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
+                            tracing::warn!("client mpsc full for sub={}; dropping push", env.sub);
                         }
-                        debug_assert_eq!(
-                            subs.early_total,
-                            subs.early.values().map(Vec::len).sum::<usize>()
-                        );
-                        PushAction::Buffered
-                    } else {
-                        PushAction::Buffered
-                    };
-                    if let PushAction::Live(res) = action {
-                        match res {
-                            Ok(()) => {}
-                            Err(tokio::sync::mpsc::error::TrySendError::Full(env)) => {
-                                tracing::warn!(
-                                    "client mpsc full for sub={}; dropping push",
-                                    env.sub
-                                );
-                            }
-                            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                // Consumer dropped — SubscriptionHandle::Drop has or
-                                // will clean up the registry entry.
-                            }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            // Consumer dropped — SubscriptionHandle::Drop has or
+                            // will clean up the registry entry.
                         }
                     }
-                } else {
-                    tracing::debug!(
-                        "reader_task: could not decode frame ({} bytes), dropping",
-                        frame_buf.len()
-                    );
                 }
                 continue;
+            }
+            None => {
+                tracing::warn!("reader_task: invalid envelope ({} bytes)", frame_buf.len());
+                break CloseCause::Protocol(Arc::from("invalid response envelope"));
             }
         };
 
         let (rid, outcome) = match result {
             DemuxResult::Response { rid, payload } => (rid, Ok(payload)),
             DemuxResult::Error { rid, error } => (rid, Err(ClientError::Server { code: error })),
+            DemuxResult::Push(_) => unreachable!(),
         };
 
         let rid = match rid {
@@ -674,9 +714,9 @@ pub(crate) struct WireClientProof {
 
 /// Sent by the client as the first frame when resuming a session via ticket.
 #[derive(Serialize)]
-pub(crate) struct WireResumeInit {
+pub(crate) struct WireResumeInit<'a> {
     #[serde(with = "serde_bytes")]
-    pub ticket: Vec<u8>,
+    pub ticket: &'a [u8],
     #[serde(with = "serde_bytes")]
     pub client_nonce: Vec<u8>,
     pub binding_mode: u8,
@@ -707,8 +747,11 @@ pub(crate) struct WireResumeOk {
     #[serde(with = "serde_bytes")]
     pub session_id: Vec<u8>,
     pub expires_at_ns: u64,
-    #[serde(default, with = "serde_bytes")]
-    pub resumption_ticket: Vec<u8>,
+    #[serde(
+        default,
+        deserialize_with = "super::connect::deserialize_resume_ticket"
+    )]
+    pub resumption_ticket: ProtectedResumeBuffer,
     #[serde(default)]
     pub resumption_expires_at_ns: u64,
     /// Max query-language version this server supports; `0` when absent

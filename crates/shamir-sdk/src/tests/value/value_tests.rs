@@ -1,6 +1,10 @@
 use crate::__rt::{block_on, decode_params, encode_value};
 use crate::value::Value;
+use num_bigint::BigInt;
+use rust_decimal::Decimal;
+use shamir_types::types::common::{new_map, new_set};
 use shamir_types::types::value::QueryValue;
+use std::str::FromStr;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -85,6 +89,35 @@ fn f64_normal_bidirectional() {
 }
 
 #[test]
+fn rv_sdk_9abdb893_float_wire_edges() {
+    for bits in [
+        0x7ff8_0000_0000_0042u64,
+        0x7ff0_0000_0000_0000,
+        0xfff0_0000_0000_0000,
+    ] {
+        let value = f64::from_bits(bits);
+        let mut golden = vec![0xcb];
+        golden.extend_from_slice(&bits.to_be_bytes());
+        let guest = encode_value(&Value::F64(value)).unwrap();
+        let host = QueryValue::F64(value).to_bytes().unwrap();
+        assert_eq!(guest, golden);
+        assert_eq!(&*host, golden);
+        match rmp_serde::from_slice::<Value>(&host).unwrap() {
+            Value::F64(decoded) => {
+                assert_eq!(decoded.to_bits(), bits);
+                assert_eq!(decoded.is_nan(), value.is_nan());
+                assert_eq!(decoded.is_infinite(), value.is_infinite());
+            }
+            other => panic!("expected float, got {other:?}"),
+        }
+        match rmp_serde::from_slice::<QueryValue>(&guest).unwrap() {
+            QueryValue::F64(decoded) => assert_eq!(decoded.to_bits(), bits),
+            other => panic!("expected host float, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn f64_zero_bidirectional() {
     assert_bidirectional(&Value::F64(0.0), &QueryValue::F64(0.0));
 }
@@ -143,8 +176,6 @@ fn list_empty_bidirectional() {
 
 #[test]
 fn map_bidirectional() {
-    use shamir_types::types::common::new_map;
-
     let guest = Value::Map(vec![
         ("n".into(), Value::Int(21)),
         ("s".into(), Value::Str("hello".into())),
@@ -174,8 +205,6 @@ fn map_bidirectional() {
 
 #[test]
 fn map_empty_bidirectional() {
-    use shamir_types::types::common::new_map;
-
     let guest = Value::Map(vec![]);
     let host = QueryValue::Map(new_map());
 
@@ -190,8 +219,6 @@ fn map_empty_bidirectional() {
 
 #[test]
 fn nested_list_in_map_bidirectional() {
-    use shamir_types::types::common::new_map;
-
     let guest = Value::Map(vec![(
         "items".into(),
         Value::List(vec![
@@ -222,8 +249,6 @@ fn nested_list_in_map_bidirectional() {
 
 #[test]
 fn nested_map_in_list_bidirectional() {
-    use shamir_types::types::common::new_map;
-
     let guest = Value::List(vec![
         Value::Map(vec![("a".into(), Value::Int(1))]),
         Value::Null,
@@ -243,8 +268,6 @@ fn nested_map_in_list_bidirectional() {
 
 #[test]
 fn deeply_nested_bidirectional() {
-    use shamir_types::types::common::new_map;
-
     // guest: {"a": [{"b": 42}]}
     let guest = Value::Map(vec![(
         "a".into(),
@@ -276,9 +299,6 @@ fn deeply_nested_bidirectional() {
 /// Guest decodes it as `Value::Str` — lossy but stable.
 #[test]
 fn lossy_dec_to_str() {
-    use rust_decimal::Decimal;
-    use std::str::FromStr;
-
     let dec = Decimal::from_str("123.456").unwrap();
     let host = QueryValue::Dec(dec);
     let host_bytes = host.to_bytes().unwrap();
@@ -295,8 +315,6 @@ fn lossy_dec_to_str() {
 /// Host `QueryValue::Dec` with a whole number (no fractional part).
 #[test]
 fn lossy_dec_whole_to_str() {
-    use rust_decimal::Decimal;
-
     let dec = Decimal::from(1000i64);
     let host = QueryValue::Dec(dec);
     let host_bytes = host.to_bytes().unwrap();
@@ -309,9 +327,6 @@ fn lossy_dec_whole_to_str() {
 /// Guest decodes it as `Value::Str`.
 #[test]
 fn lossy_big_to_str() {
-    use num_bigint::BigInt;
-    use std::str::FromStr;
-
     let big = BigInt::from_str("999999999999999999999999999999").unwrap();
     let expected_str = "999999999999999999999999999999";
     let host = QueryValue::Big(big);
@@ -328,8 +343,6 @@ fn lossy_big_to_str() {
 /// Host `QueryValue::Big` with a negative value.
 #[test]
 fn lossy_big_negative_to_str() {
-    use num_bigint::BigInt;
-
     let big = BigInt::from(-42i64);
     let host = QueryValue::Big(big);
     let host_bytes = host.to_bytes().unwrap();
@@ -342,8 +355,6 @@ fn lossy_big_negative_to_str() {
 /// Guest decodes it as `Value::List`.
 #[test]
 fn lossy_set_to_list() {
-    use shamir_types::types::common::new_set;
-
     let mut set = new_set();
     set.insert(QueryValue::Int(1));
     set.insert(QueryValue::Int(2));
@@ -363,8 +374,6 @@ fn lossy_set_to_list() {
 /// Host `QueryValue::Set` with mixed types.
 #[test]
 fn lossy_set_mixed_to_list() {
-    use shamir_types::types::common::new_set;
-
     let mut set = new_set();
     set.insert(QueryValue::Str("hello".into()));
     set.insert(QueryValue::Bool(true));
@@ -382,8 +391,6 @@ fn lossy_set_mixed_to_list() {
 /// Empty host `Set` → empty guest `List`.
 #[test]
 fn lossy_set_empty_to_list() {
-    use shamir_types::types::common::new_set;
-
     let set = new_set();
     let host = QueryValue::Set(set);
     let host_bytes = host.to_bytes().unwrap();
@@ -398,8 +405,6 @@ fn lossy_set_empty_to_list() {
 
 #[test]
 fn decode_params_extracts_map() {
-    use shamir_types::types::common::new_map;
-
     let mut host_map = new_map();
     host_map.insert("n".into(), QueryValue::Int(21));
     host_map.insert("msg".into(), QueryValue::Str("hi".into()));

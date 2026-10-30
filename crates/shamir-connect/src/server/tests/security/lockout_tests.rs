@@ -8,6 +8,29 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 
+struct FailingSink;
+impl LockoutSnapshotSink for FailingSink {
+    fn save(&self, _: &LockoutSnapshot) -> Result<(), LockoutSnapshotError> {
+        Err(LockoutSnapshotError::Storage("save failed".into()))
+    }
+    fn load(&self) -> Result<Option<LockoutSnapshot>, LockoutSnapshotError> {
+        Err(LockoutSnapshotError::Encoding("load failed".into()))
+    }
+}
+
+#[test]
+fn failed_snapshot_load_starts_empty_and_save_preserves_state() {
+    let store = InMemoryLockoutStore::with_snapshot_sink(Arc::new(FailingSink));
+    assert_eq!(store.failure_pair_count(), 0);
+    store.register_failure(key(1, 1), 1_000);
+    assert!(matches!(
+        store.persist_snapshot(),
+        Err(LockoutSnapshotError::Storage(_))
+    ));
+    assert_eq!(store.failure_pair_count(), 1);
+    assert_eq!(store.current_backoff_ms(key(1, 1), 1_000), 100);
+}
+
 fn key(subnet: u8, user: u8) -> PairKey {
     (Subnet::V4([10, 0, subnet]), [user; 16])
 }

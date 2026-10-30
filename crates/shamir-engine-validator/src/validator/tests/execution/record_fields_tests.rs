@@ -288,3 +288,27 @@ fn owned_fields_absent_returns_none() {
     assert_eq!(of.materialize(&["no_such"]), None);
     assert_eq!(of.scalar(&["nested", "no_such"]), None);
 }
+
+#[test]
+fn cached_path_snapshots_share_ids_and_survive_replacement() {
+    let (iv, interner) = build_test_record();
+    let bytes = iv.to_bytes().unwrap();
+    let view = RecordView::new(&bytes).unwrap();
+    let fields = ViewFields::new(&view, &interner);
+    let first = fields.cached_path_ids(&["nested", "x"]).unwrap();
+    let second = fields.cached_path_ids(&["nested", "x"]).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    assert_eq!(fields.scalar(&["age"]), Some(ScalarRef::Int(30)));
+    assert_eq!(view.scalar_at(&first), Some(ScalarRef::Int(7)));
+    assert!(fields.cached_path_ids(&["missing"]).is_none());
+}
+
+#[test]
+fn owned_borrowed_value_preserves_materialization_for_nested_maps() {
+    let qv = build_test_qv();
+    let fields = OwnedFields { qv: &qv };
+    let borrowed = fields.borrowed_value(&["list"]).unwrap();
+    assert!(std::ptr::eq(borrowed, &qv["list"]));
+    assert!(fields.borrowed_value(&["nested"]).is_none());
+    assert_eq!(fields.materialize(&["nested"]), Some(InnerValue::Null));
+}

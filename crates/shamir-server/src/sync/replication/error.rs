@@ -108,6 +108,17 @@ pub enum ReplError {
         observed_epoch: u64,
     },
 
+    /// The authenticated upstream key is not approved; operator action is required.
+    #[error("upstream {upstream} key mismatch: observed {observed}, expected {expected}")]
+    UpstreamKeyMismatch {
+        /// Normalized upstream address.
+        upstream: std::net::SocketAddr,
+        /// Observed public key digest, hex encoded.
+        observed: String,
+        /// Approved public key digests, hex encoded.
+        expected: String,
+    },
+
     /// Transport-level failure (connection drop, decode error, wire error
     /// envelope). Transient — the loop backs off and retries.
     #[error("replication transport error: {0}")]

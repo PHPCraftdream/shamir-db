@@ -41,7 +41,7 @@ impl Insert {
     /// Append a single record.
     ///
     /// Accepts a [`Doc`](super::doc::Doc) (via `Into<QueryValue>`) or any
-    /// `QueryValue` directly (e.g. from `mpak!({...})`).
+    /// `QueryValue` directly (e.g. from `mpack!({...})`).
     pub fn row(mut self, value: impl Into<QueryValue>) -> Self {
         self.values.push(value.into());
         self

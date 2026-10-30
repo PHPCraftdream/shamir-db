@@ -9,27 +9,33 @@ contended interconnect when it crosses a socket boundary (Hennessy & Patterson
 crate lets the database keep hot read-mostly state **node-local**: a reader on
 node *N* loads its own replica without reaching across a socket.
 
-## What's here (Фаза 1)
+## What's here
 
 | Item | Role |
 |---|---|
 | `Topology` (trait) | Discovery + best-effort thread pinning, behind one DI seam |
 | `MockTopology` | Test double — simulate any node/CPU layout, no real hardware |
-| `FallbackSingleNodeTopology` | One UMA node; used on Windows / macOS / single-socket |
+| `FallbackSingleNodeTopology` | One UMA node; used on non-Linux or failed Linux probes |
 | `NodeReplicated<T>` | One cache-padded `ArcSwap<T>` per node; RCU copy-on-write |
 | `CachePadded<T>` | 128-byte alignment to defeat false sharing (Herlihy & Shavit §8) |
 | `parse_cpulist` | Pure parser for the Linux `/sys` cpulist format |
-| `detect()` | Best-effort topology factory (single-node fallback for now) |
+| `detect()` | Fresh Linux discovery or single-node fallback |
+| `detect_cached()` | Process-wide shared topology, including a cached fallback |
 
 `NodeReplicated` **degrades to a single replica** when the topology reports one
-node, behaving exactly like a bare `ArcSwap` — so consumers use it
-unconditionally with zero overhead on single-socket / dev / CI machines.
+node; writes have no mirror loop. Local reads still query the topology and
+resolve a replica in constant time before loading its `ArcSwap`.
+
+`detect_cached()` retains its first result for the process lifetime. Use fresh
+`detect()`, inject a topology, or restart to observe topology changes; existing
+replicas do not update automatically. Linux probe failures produce at most one
+process-wide classified diagnostic on stderr.
 
 ```rust
 use std::sync::Arc;
 use shamir_numa::{detect, NodeReplicated};
 
-let topo = detect();                       // single-node fallback here
+let topo = detect();                       // fresh discovery or fallback
 let defs = NodeReplicated::new(topo, vec![/* index definitions */]);
 
 let snapshot = defs.load_local();          // node-local read, O(1)
@@ -38,12 +44,14 @@ defs.rcu(|cur| { let mut v = cur.clone(); /* mutate */ v });  // COW, all nodes
 
 ## Testing strategy (three tiers)
 
-1. **Tier 1 — DI-mock unit tests** (this version). Platform-independent; run on
-   every OS via `cargo test -p shamir-numa --lib` and the workspace CI matrix.
-2. **Tier 2 — Linux integration** against real `/sys` (Фаза 1b, `LinuxTopology`).
-3. **Tier 3 — QEMU NUMA emulation** in CI for multi-socket correctness without
-   physical hardware. Opt-in via `[numa-qemu]` flag in the commit message;
-   implemented in `scripts/runners/ci-qemu-numa-test.sh`.
+1. **Tier 1 — DI-mock unit tests** run across the CI OS matrix.
+2. **Tier 2 — Linux integration** exercises `LinuxTopology` against real `/sys`.
+3. **Tier 3 — QEMU NUMA smoke** checks guest topology announcements, not Rust
+   integration. Opt-in via `[numa-qemu]` in the commit message; implemented in
+   `scripts/runners/ci-qemu-numa-test.sh`.
+
+CI uses `./scripts/test.sh -p shamir-numa --full` for the full crate suite.
+Local test execution requires explicit user permission.
 
 ### Tier-3 QEMU harness — current scope
 
@@ -76,9 +84,9 @@ out-of-CI — QEMU models topology, not latency asymmetry.
 
 ## Roadmap
 
-- **Фаза 1b** — `LinuxTopology` (`/sys` probe + `sched_setaffinity`), QEMU CI.
-- **Фаза 2** — migrate the hot `ArcSwap` registries (`IndexInfo` #292,
-  `SortedIndexManager` #304, validator bindings #289) to `NodeReplicated`.
-- **Фаза 3** — pin critical threads (WAL writer, drainer) via config.
+- Full guest Rust integration remains future work; Linux discovery and QEMU
+  topology smoke coverage are already shipped.
+- Migrate remaining hot registries to `NodeReplicated` where appropriate.
+- Pin critical threads (WAL writer, drainer) via config.
 
 See `docs/dev-artifacts/research/NUMA-DESIGN-2026-06-29.md` for the full design and sources.

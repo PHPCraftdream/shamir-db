@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{FieldPath, FilterValue};
+use crate::read::SelectExpr;
 
 /// Maximum nesting depth for filter trees. Deeply-nested `$cond`/`not`/`and`/`or`
 /// beyond this cap will be rejected to prevent stack overflow post-handshake.
@@ -388,7 +389,6 @@ fn push_select_expr_children<'a>(
     depth: usize,
     stack: &mut Vec<(DepthNode<'a>, usize)>,
 ) {
-    use crate::read::SelectExpr;
     match expr {
         SelectExpr::Add { left, right }
         | SelectExpr::Sub { left, right }

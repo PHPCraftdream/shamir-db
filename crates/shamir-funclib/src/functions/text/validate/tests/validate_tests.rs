@@ -183,8 +183,14 @@ fn matches_ok_and_bad_pattern() {
 fn is_text_encoded_ok_and_bad() {
     let r = reg();
     assert_eq!(
-        r.call("is_json", &[s(r#"{"a": [1, 2, true, null], "b": "xA"}"#)])
-            .unwrap(),
+        r.call(
+            "is_json",
+            &[s(r#"{
+            "a": [1, 2, true, null],
+            "b": "xA"
+        }"#)]
+        )
+        .unwrap(),
         v_bool(true)
     );
     assert_eq!(r.call("is_json", &[s("123")]).unwrap(), v_bool(true));

@@ -90,8 +90,7 @@ pub enum GroupRef {
 pub struct ChmodOp {
     pub chmod: ResourceRef,
     pub mode: u16,
-    /// Hex HMAC over `b"chmod\0<resource>\0<mode>"`. See
-    /// `crate::auth::DropUserOp` for the field-shape precedent.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -106,7 +105,7 @@ pub struct ChmodOp {
 pub struct ChownOp {
     pub chown: ResourceRef,
     pub owner: u64,
-    /// Hex HMAC over `b"chown\0<resource>\0<owner>"`. See `ChmodOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -122,7 +121,7 @@ pub struct ChownOp {
 pub struct ChgrpOp {
     pub chgrp: ResourceRef,
     pub group: Option<u64>,
-    /// Hex HMAC over `b"chgrp\0<resource>\0<group|null>"`. See `ChmodOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -136,8 +135,7 @@ pub struct ChgrpOp {
 #[serde(deny_unknown_fields)]
 pub struct CreateGroupOp {
     pub create_group: String,
-    /// Hex HMAC over `b"create_group\0<name>"`. See
-    /// `crate::auth::DropUserOp` for the field-shape precedent.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -157,7 +155,7 @@ pub struct DropGroupOp {
     /// returning `{"existed": false}` instead of an error.
     #[serde(default, skip_serializing_if = "is_false")]
     pub if_exists: bool,
-    /// Hex HMAC over `b"drop_group\0<group_ref>"`. See `CreateGroupOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -176,7 +174,7 @@ pub struct DropGroupOp {
 pub struct RenameGroupOp {
     pub rename_group: GroupRef,
     pub to: String,
-    /// Hex HMAC over `b"rename_group\0<group_ref>\0<to>"`. See `CreateGroupOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -191,8 +189,7 @@ pub struct RenameGroupOp {
 pub struct AddGroupMemberOp {
     pub add_group_member: GroupRef,
     pub user: u64,
-    /// Hex HMAC over `b"add_group_member\0<group_ref>\0<user>"`. See
-    /// `CreateGroupOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -207,8 +204,7 @@ pub struct AddGroupMemberOp {
 pub struct RemoveGroupMemberOp {
     pub remove_group_member: GroupRef,
     pub user: u64,
-    /// Hex HMAC over `b"remove_group_member\0<group_ref>\0<user>"`. See
-    /// `CreateGroupOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }

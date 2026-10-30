@@ -20,7 +20,7 @@ use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::anndists::dist::distances::Distance;
 use std::sync::Arc;
 
-// ----- deterministic RNG (mirrors sq8_tests::Lcg lineage) -----------------
+// ----- deterministic RNG (historical high-32 fixture mapping) --------------
 
 struct Lcg {
     state: u64,

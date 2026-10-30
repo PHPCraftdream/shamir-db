@@ -4,9 +4,11 @@ use crate::base_index::index_keys::build_index_key_from_record;
 use crate::base_index::index_manager::IndexManager;
 use crate::base_index::write_barrier_flags::UNIQUE_INDEX_EXISTS;
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
+use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
@@ -30,8 +32,6 @@ impl IndexManager {
     ///   - количество записей с дублирующимися значениями
     ///   - пример дублирующегося значения
     pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use futures::StreamExt;
-
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_unique_index_from_records.
         //
@@ -108,8 +108,16 @@ impl IndexManager {
         index_def: IndexDefinition,
         records: Vec<(RecordId, InnerValue)>,
     ) -> DbResult<()> {
-        use shamir_types::types::common::{new_map, TMap};
+        self.create_unique_index_from_records_borrowed(index_def, &records)
+            .await
+    }
 
+    /// Backfill from a borrowed snapshot, retaining the owned API's validation and publication order.
+    pub async fn create_unique_index_from_records_borrowed(
+        &self,
+        index_def: IndexDefinition,
+        records: &[(RecordId, InnerValue)],
+    ) -> DbResult<()> {
         let name_interned = index_def.name_interned;
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
@@ -130,7 +138,7 @@ impl IndexManager {
         let mut key_counts: TMap<Bytes, usize> = new_map();
         let mut entries: Vec<(RecordId, Bytes)> = Vec::with_capacity(16);
 
-        for (record_id, value) in &records {
+        for (record_id, value) in records {
             if let Some(irk) =
                 build_index_key_from_record(true, name_interned, value, &index_def.paths)
             {
@@ -202,14 +210,16 @@ impl IndexManager {
         // NOTE: Cannot write DdlOpState::Failed here because this layer
         // (IndexManagerUnique) does not have op_id in scope.
         self.save_index_info_unique().await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "CREATE UNIQUE INDEX '{name_interned}': the index posting \
                  entries were durably written, but persisting the index \
                  definition failed: {e}. The index definition is NOT persisted — \
                  on restart, orphan postings will exist without a corresponding \
                  definition. Call TableManager::verify() to confirm state, or \
                  TableManager::repair() to rebuild it."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         log::info!(
@@ -294,13 +304,15 @@ impl IndexManager {
         self.sweep_index_postings(true, name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP UNIQUE INDEX '{name_interned}': a durable drop tombstone \
                  was persisted and the definition was retired from the planner, \
                  but the posting sweep failed: {e}. On restart, recovery will \
                  resume the sweep idempotently and finish the drop. Call \
                  TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         // P0-3 (#959) test seam — post-sweep, pre-persist crash window.
@@ -318,14 +330,16 @@ impl IndexManager {
         // which sits one layer up.
         if was_removed {
             self.save_index_info_unique().await.map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP UNIQUE INDEX '{name_interned}': a durable drop \
                      tombstone was persisted, the definition was retired, and \
                      the posting sweep completed, but persisting the reduced \
                      index metadata failed: {e}. On restart, recovery will \
                      finish the drop idempotently. Call TableManager::verify() \
                      to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
         }
 
@@ -343,10 +357,9 @@ impl IndexManager {
                         index_name: index_name_str.to_string(),
                     },
                     state: shamir_query_types::read::DdlOpState::Succeeded {
-                        completed_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at: crate::base_index::ddl_op_log::timestamp_millis(
+                            std::time::SystemTime::now(),
+                        ),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.
@@ -382,13 +395,15 @@ impl IndexManager {
         self.clear_from_dropping(true, name_interned)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP UNIQUE INDEX '{name_interned}': the drop is essentially \
                  complete (tombstone persisted, definition retired, sweep done, \
                  reduced metadata persisted), but clearing the drop tombstone \
                  failed: {e}. On restart, recovery will clear the tombstone as \
                  a no-op. Call TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                crate::backend::contextualize_db_error(e, detail)
             })?;
 
         Ok(was_removed)

@@ -5,11 +5,13 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, BinOp, Expr};
 
+use crate::MacroInput;
+
 // ── public entry for the `filter!` proc-macro ──────────────────────
 
-pub fn filter_macro(input: TokenStream) -> TokenStream {
-    let expr = parse_macro_input!(input as Expr);
-    match lower_expr(&expr) {
+pub(crate) fn filter_macro(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as MacroInput<Expr>);
+    match lower_expr(&input.value, &input.root) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -17,28 +19,28 @@ pub fn filter_macro(input: TokenStream) -> TokenStream {
 
 // ── public helper: lower a `syn::Expr` (used by q! as well) ───────
 
-pub fn lower_expr(expr: &Expr) -> syn::Result<TokenStream2> {
-    lower(expr)
+pub(crate) fn lower_expr(expr: &Expr, root: &TokenStream2) -> syn::Result<TokenStream2> {
+    lower(expr, root)
 }
 
 // ── recursive lowering ─────────────────────────────────────────────
 
-fn lower(expr: &Expr) -> syn::Result<TokenStream2> {
+fn lower(expr: &Expr, root: &TokenStream2) -> syn::Result<TokenStream2> {
     match expr {
         // ── parenthesised: (expr) ──────────────────────────────
-        Expr::Paren(p) => lower(&p.expr),
+        Expr::Paren(p) => lower(&p.expr, root),
 
         // ── binary: a op b ─────────────────────────────────────
-        Expr::Binary(bin) => lower_binary(bin),
+        Expr::Binary(bin) => lower_binary(bin, root),
 
         // ── unary: !expr ───────────────────────────────────────
-        Expr::Unary(u) => lower_unary(u),
+        Expr::Unary(u) => lower_unary(u, root),
 
         // ── group (compiler-inserted transparent parens) ───────
-        Expr::Group(g) => lower(&g.expr),
+        Expr::Group(g) => lower(&g.expr, root),
 
         // ── predicate call at filter position ──────────────────
-        Expr::Call(call) => lower_predicate_call(call),
+        Expr::Call(call) => lower_predicate_call(call, root),
 
         _ => Err(syn::Error::new_spanned(
             expr,
@@ -52,31 +54,31 @@ fn lower(expr: &Expr) -> syn::Result<TokenStream2> {
 
 // ── binary expressions ─────────────────────────────────────────────
 
-fn lower_binary(bin: &syn::ExprBinary) -> syn::Result<TokenStream2> {
+fn lower_binary(bin: &syn::ExprBinary, root: &TokenStream2) -> syn::Result<TokenStream2> {
     match &bin.op {
         // Logical combinators — recurse both sides.
         BinOp::And(_) => {
-            let lhs = lower(&bin.left)?;
-            let rhs = lower(&bin.right)?;
+            let lhs = lower(&bin.left, root)?;
+            let rhs = lower(&bin.right, root)?;
             Ok(quote! {
-                ::shamir_query_builder::filter::and([#lhs, #rhs])
+                #root::filter::and([#lhs, #rhs])
             })
         }
         BinOp::Or(_) => {
-            let lhs = lower(&bin.left)?;
-            let rhs = lower(&bin.right)?;
+            let lhs = lower(&bin.left, root)?;
+            let rhs = lower(&bin.right, root)?;
             Ok(quote! {
-                ::shamir_query_builder::filter::or([#lhs, #rhs])
+                #root::filter::or([#lhs, #rhs])
             })
         }
 
         // Comparison operators — LHS is a field path, RHS is verbatim.
-        BinOp::Eq(_) => lower_cmp(bin, quote! { eq }),
-        BinOp::Ne(_) => lower_cmp(bin, quote! { ne }),
-        BinOp::Gt(_) => lower_cmp(bin, quote! { gt }),
-        BinOp::Ge(_) => lower_cmp(bin, quote! { gte }),
-        BinOp::Lt(_) => lower_cmp(bin, quote! { lt }),
-        BinOp::Le(_) => lower_cmp(bin, quote! { lte }),
+        BinOp::Eq(_) => lower_cmp(bin, root, quote! { eq }),
+        BinOp::Ne(_) => lower_cmp(bin, root, quote! { ne }),
+        BinOp::Gt(_) => lower_cmp(bin, root, quote! { gt }),
+        BinOp::Ge(_) => lower_cmp(bin, root, quote! { gte }),
+        BinOp::Lt(_) => lower_cmp(bin, root, quote! { lt }),
+        BinOp::Le(_) => lower_cmp(bin, root, quote! { lte }),
 
         _ => Err(syn::Error::new_spanned(
             bin.op,
@@ -85,21 +87,25 @@ fn lower_binary(bin: &syn::ExprBinary) -> syn::Result<TokenStream2> {
     }
 }
 
-fn lower_cmp(bin: &syn::ExprBinary, func: TokenStream2) -> syn::Result<TokenStream2> {
+fn lower_cmp(
+    bin: &syn::ExprBinary,
+    root: &TokenStream2,
+    func: TokenStream2,
+) -> syn::Result<TokenStream2> {
     let field = field_path(&bin.left)?;
     let rhs = &bin.right;
     Ok(quote! {
-        ::shamir_query_builder::filter::#func(#field, #rhs)
+        #root::filter::#func(#field, #rhs)
     })
 }
 
 // ── unary: !expr → filter::not ─────────────────────────────────────
 
-fn lower_unary(u: &syn::ExprUnary) -> syn::Result<TokenStream2> {
+fn lower_unary(u: &syn::ExprUnary, root: &TokenStream2) -> syn::Result<TokenStream2> {
     if let syn::UnOp::Not(_) = &u.op {
-        let inner = lower(&u.expr)?;
+        let inner = lower(&u.expr, root)?;
         Ok(quote! {
-            ::shamir_query_builder::filter::not(#inner)
+            #root::filter::not(#inner)
         })
     } else {
         Err(syn::Error::new_spanned(
@@ -112,10 +118,10 @@ fn lower_unary(u: &syn::ExprUnary) -> syn::Result<TokenStream2> {
 // ── predicate-call lowering ────────────────────────────────────────
 
 /// Known predicate names and their arities / lowering strategy.
-fn lower_predicate_call(call: &syn::ExprCall) -> syn::Result<TokenStream2> {
+fn lower_predicate_call(call: &syn::ExprCall, root: &TokenStream2) -> syn::Result<TokenStream2> {
     // Extract the callee name (must be a simple path like `like`, `is_null`, etc.)
     let name = match call.func.as_ref() {
-        Expr::Path(p) if p.path.segments.len() == 1 => p.path.segments[0].ident.to_string(),
+        Expr::Path(p) if p.path.segments.len() == 1 => &p.path.segments[0].ident,
         _ => {
             return Err(syn::Error::new_spanned(
                 &call.func,
@@ -127,154 +133,154 @@ fn lower_predicate_call(call: &syn::ExprCall) -> syn::Result<TokenStream2> {
         }
     };
 
-    let args: Vec<&Expr> = call.args.iter().collect();
+    let args = &call.args;
 
-    match name.as_str() {
+    match name {
         // ── pattern matching: field + pattern ──────────────────
-        "like" | "ilike" | "regex" => {
+        n if n == "like" || n == "ilike" || n == "regex" => {
             if args.len() != 2 {
                 return Err(syn::Error::new_spanned(
                     call,
                     format!("filter!: `{name}` expects 2 arguments: (field, pattern)"),
                 ));
             }
-            let field = field_path(args[0])?;
-            let pat = args[1];
-            let func_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            let field = field_path(&args[0])?;
+            let pat = &args[1];
+            let func_ident = name;
             Ok(quote! {
-                ::shamir_query_builder::filter::#func_ident(#field, #pat)
+                #root::filter::#func_ident(#field, #pat)
             })
         }
 
         // ── unary field predicates ─────────────────────────────
-        "is_null" | "is_not_null" | "exists" | "not_exists" => {
+        n if n == "is_null" || n == "is_not_null" || n == "exists" || n == "not_exists" => {
             if args.len() != 1 {
                 return Err(syn::Error::new_spanned(
                     call,
                     format!("filter!: `{name}` expects 1 argument: (field)"),
                 ));
             }
-            let field = field_path(args[0])?;
-            let func_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            let field = field_path(&args[0])?;
+            let func_ident = name;
             Ok(quote! {
-                ::shamir_query_builder::filter::#func_ident(#field)
+                #root::filter::#func_ident(#field)
             })
         }
 
         // ── contains: field + value ────────────────────────────
-        "contains" => {
+        n if n == "contains" => {
             if args.len() != 2 {
                 return Err(syn::Error::new_spanned(
                     call,
                     "filter!: `contains` expects 2 arguments: (field, value)",
                 ));
             }
-            let field = field_path(args[0])?;
-            let val = args[1];
+            let field = field_path(&args[0])?;
+            let val = &args[1];
             Ok(quote! {
-                ::shamir_query_builder::filter::contains(#field, #val)
+                #root::filter::contains(#field, #val)
             })
         }
 
         // ── contains_any / contains_all: field + array ─────────
-        "contains_any" | "contains_all" => {
+        n if n == "contains_any" || n == "contains_all" => {
             if args.len() != 2 {
                 return Err(syn::Error::new_spanned(
                     call,
                     format!("filter!: `{name}` expects 2 arguments: (field, [values...])"),
                 ));
             }
-            let field = field_path(args[0])?;
-            let vals = args[1];
-            let func_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            let field = field_path(&args[0])?;
+            let vals = &args[1];
+            let func_ident = name;
             Ok(quote! {
-                ::shamir_query_builder::filter::#func_ident(#field, #vals)
+                #root::filter::#func_ident(#field, #vals)
             })
         }
 
         // ── in_ / not_in: field + array ────────────────────────
-        "in_" | "not_in" => {
+        n if n == "in_" || n == "not_in" => {
             if args.len() != 2 {
                 return Err(syn::Error::new_spanned(
                     call,
                     format!("filter!: `{name}` expects 2 arguments: (field, [values...])"),
                 ));
             }
-            let field = field_path(args[0])?;
-            let vals = args[1];
-            let func_ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            let field = field_path(&args[0])?;
+            let vals = &args[1];
+            let func_ident = name;
             Ok(quote! {
-                ::shamir_query_builder::filter::#func_ident(#field, #vals)
+                #root::filter::#func_ident(#field, #vals)
             })
         }
 
         // ── between: field + lo + hi ───────────────────────────
-        "between" => {
+        n if n == "between" => {
             if args.len() != 3 {
                 return Err(syn::Error::new_spanned(
                     call,
                     "filter!: `between` expects 3 arguments: (field, lo, hi)",
                 ));
             }
-            let field = field_path(args[0])?;
-            let lo = args[1];
-            let hi = args[2];
+            let field = field_path(&args[0])?;
+            let lo = &args[1];
+            let hi = &args[2];
             Ok(quote! {
-                ::shamir_query_builder::filter::between(#field, #lo, #hi)
+                #root::filter::between(#field, #lo, #hi)
             })
         }
 
         // ── fts: field + query + mode ──────────────────────────
-        "fts" => {
+        n if n == "fts" => {
             if args.len() != 3 {
                 return Err(syn::Error::new_spanned(
                     call,
                     "filter!: `fts` expects 3 arguments: (field, query, mode)",
                 ));
             }
-            let field = field_path(args[0])?;
-            let query = args[1];
-            let mode = args[2];
+            let field = field_path(&args[0])?;
+            let query = &args[1];
+            let mode = &args[2];
             Ok(quote! {
-                ::shamir_query_builder::filter::fts(#field, #query, #mode)
+                #root::filter::fts(#field, #query, #mode)
             })
         }
 
         // ── vector_similarity: field + vec_expr + k ────────────
-        "vector_similarity" => {
+        n if n == "vector_similarity" => {
             if args.len() != 3 {
                 return Err(syn::Error::new_spanned(
                     call,
                     "filter!: `vector_similarity` expects 3 arguments: (field, vec_expr, k)",
                 ));
             }
-            let field = field_path(args[0])?;
-            let vec_expr = args[1];
-            let k = args[2];
+            let field = field_path(&args[0])?;
+            let vec_expr = &args[1];
+            let k = &args[2];
             Ok(quote! {
-                ::shamir_query_builder::filter::vector_similarity(#field, #vec_expr, #k)
+                #root::filter::vector_similarity(#field, #vec_expr, #k)
             })
         }
 
         // ── computed: expr_op + field + cmp + value ──────────
-        "computed" => {
+        n if n == "computed" => {
             if args.len() != 4 {
                 return Err(syn::Error::new_spanned(
                     call,
                     "filter!: `computed` expects 4 arguments: (expr_op, field, cmp, value)",
                 ));
             }
-            let expr_op = args[0];
-            let field = field_path(args[1])?;
-            let cmp = args[2];
-            let val = args[3];
+            let expr_op = &args[0];
+            let field = field_path(&args[1])?;
+            let cmp = &args[2];
+            let val = &args[3];
             Ok(quote! {
-                ::shamir_query_builder::filter::computed(#expr_op, #field, #cmp, #val)
+                #root::filter::computed(#expr_op, #field, #cmp, #val)
             })
         }
 
         // ── computed_with_args: expr_op + field + expr_args + cmp + value
-        "computed_with_args" => {
+        n if n == "computed_with_args" => {
             if args.len() != 5 {
                 return Err(syn::Error::new_spanned(
                     call,
@@ -282,13 +288,13 @@ fn lower_predicate_call(call: &syn::ExprCall) -> syn::Result<TokenStream2> {
                      (expr_op, field, expr_args, cmp, value)",
                 ));
             }
-            let expr_op = args[0];
-            let field = field_path(args[1])?;
-            let expr_args = args[2];
-            let cmp = args[3];
-            let val = args[4];
+            let expr_op = &args[0];
+            let field = field_path(&args[1])?;
+            let expr_args = &args[2];
+            let cmp = &args[3];
+            let val = &args[4];
             Ok(quote! {
-                ::shamir_query_builder::filter::computed_with_args(
+                #root::filter::computed_with_args(
                     #expr_op, #field, #expr_args, #cmp, #val
                 )
             })
@@ -312,34 +318,39 @@ fn lower_predicate_call(call: &syn::ExprCall) -> syn::Result<TokenStream2> {
 ///
 /// - bare ident `status`       → `"status"`
 /// - dotted `address.city`     → `["address", "city"]`
-pub fn field_path(expr: &Expr) -> syn::Result<TokenStream2> {
+fn field_path(expr: &Expr) -> syn::Result<TokenStream2> {
     let mut segments = Vec::new();
     collect_field_segments(expr, &mut segments)?;
 
-    if segments.len() == 1 {
-        let s = &segments[0];
-        Ok(quote! { #s })
+    Ok(segments_to_field_path(&segments))
+}
+
+pub(crate) fn ident_literal(ident: &syn::Ident) -> syn::LitStr {
+    let value = ident.to_string();
+    syn::LitStr::new(value.strip_prefix("r#").unwrap_or(&value), ident.span())
+}
+
+pub(crate) fn segments_to_field_path(segments: &[syn::Ident]) -> TokenStream2 {
+    let literals: Vec<_> = segments.iter().map(ident_literal).collect();
+    if literals.len() == 1 {
+        let literal = &literals[0];
+        quote! { #literal }
     } else {
-        Ok(quote! { [#( #segments ),*] })
+        quote! { [#(#literals),*] }
     }
 }
 
-fn unraw_ident(ident: &syn::Ident) -> String {
-    let value = ident.to_string();
-    value.strip_prefix("r#").unwrap_or(&value).to_owned()
-}
-
-fn collect_field_segments(expr: &Expr, out: &mut Vec<String>) -> syn::Result<()> {
+fn collect_field_segments(expr: &Expr, out: &mut Vec<syn::Ident>) -> syn::Result<()> {
     match expr {
         Expr::Path(p) if p.path.segments.len() == 1 => {
-            out.push(unraw_ident(&p.path.segments[0].ident));
+            out.push(p.path.segments[0].ident.clone());
             Ok(())
         }
         Expr::Field(f) => {
             collect_field_segments(&f.base, out)?;
             match &f.member {
                 syn::Member::Named(ident) => {
-                    out.push(unraw_ident(ident));
+                    out.push(ident.clone());
                     Ok(())
                 }
                 syn::Member::Unnamed(idx) => Err(syn::Error::new_spanned(

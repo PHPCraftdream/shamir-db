@@ -1,9 +1,100 @@
 //! WalSink truncation-probe tests.
 
-use std::sync::mpsc;
+use std::future::Future;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+use crate::wal_entry_v2::WalEntryV2;
 use crate::wal_sink::WalSink;
+
+fn payload(version: u64) -> Vec<u8> {
+    WalEntryV2::new(version, 1, Vec::new())
+        .with_commit_version(version)
+        .encode()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn rv_wal_3735f642_quiet_append_completes_in_one_poll() {
+    let sink = WalSink::mem();
+    let mut append = Box::pin(sink.append_batch(vec![payload(1)], 1));
+    let result = std::future::poll_fn(|cx| std::task::Poll::Ready(append.as_mut().poll(cx))).await;
+    assert!(matches!(result, std::task::Poll::Ready(Ok(0))));
+}
+
+#[tokio::test]
+async fn rv_wal_3735f642_snapshot_replay_does_not_block_append() {
+    let sink = Arc::new(WalSink::mem());
+    sink.append_batch(vec![payload(1)], 1).await.unwrap();
+    let (entered, resume) = sink.pause_mem_replay();
+    let worker = Arc::clone(&sink);
+    let replay = tokio::spawn(async move { worker.replay().await });
+    entered.await.unwrap();
+    sink.append_batch(vec![payload(2)], 2).await.unwrap();
+    resume.send(()).unwrap();
+    let snapshot = replay.await.unwrap().unwrap();
+    assert_eq!(
+        snapshot
+            .iter()
+            .map(|e| e.commit_version)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    let current = sink.replay().await.unwrap();
+    assert_eq!(
+        current.iter().map(|e| e.commit_version).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
+#[tokio::test]
+async fn rv_wal_3735f642_truncate_retries_snapshot_after_append_and_cancellation() {
+    let sink = Arc::new(WalSink::mem());
+    sink.append_batch(vec![payload(1), payload(0)], 1)
+        .await
+        .unwrap();
+    let (entered, resume) = sink.pause_mem_truncate();
+    let worker = Arc::clone(&sink);
+    let task = tokio::spawn(async move { worker.truncate_below(1).await });
+    entered.await.unwrap();
+    sink.append_batch(vec![payload(2)], 2).await.unwrap();
+    assert_eq!(sink.replay().await.unwrap().len(), 3);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    resume.send(()).unwrap();
+    // The second truncation waits for the detached worker's gate.
+    let (entered, resume) = sink.pause_mem_truncate();
+    let worker = Arc::clone(&sink);
+    let retry = tokio::spawn(async move { worker.truncate_below(1).await });
+    entered.await.unwrap();
+    resume.send(()).unwrap();
+    assert_eq!(retry.await.unwrap().unwrap(), 0);
+    let versions = sink
+        .replay()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.commit_version)
+        .collect::<Vec<_>>();
+    assert_eq!(versions, vec![0, 2]);
+    assert!(!sink.has_truncatable(1));
+    assert!(sink.has_truncatable(2));
+}
+
+#[tokio::test]
+async fn rv_wal_8021eb80_mem_mixed_batch_keeps_zero_pin() {
+    let sink = WalSink::mem();
+    sink.append_batch(vec![payload(0), payload(10)], 10)
+        .await
+        .unwrap();
+    assert_eq!(sink.max_committed(), 10);
+    assert!(sink.has_truncatable(10));
+    assert_eq!(sink.truncate_below(10).await.unwrap(), 1);
+    assert!(!sink.has_truncatable(u64::MAX));
+    let entries = sink.replay().await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].commit_version, 0);
+}
 
 /// Drop-guard living INSIDE the `thread::scope` closure (its first
 /// statement): signals the holder thread to release the frames mutex when the
@@ -44,16 +135,13 @@ fn rv_wal_b8e9884c_has_truncatable_does_not_take_frames_mutex() {
             .build()
             .expect("test runtime");
         rt.block_on(async {
-            sink.append_batch(vec![b"pinned".to_vec()], 0)
-                .await
-                .unwrap();
-            sink.append_batch(vec![b"x".to_vec()], 10).await.unwrap();
+            sink.append_batch(vec![payload(0)], 0).await.unwrap();
+            sink.append_batch(vec![payload(10)], 10).await.unwrap();
         });
     }
     let WalSink::Mem(mem) = &sink else {
         panic!("expected Mem sink");
     };
-    let frames = mem.frames_mutex_for_test();
 
     let (release_tx, release_rx) = mpsc::channel::<()>();
     let (held_tx, held_rx) = mpsc::channel::<()>();
@@ -68,9 +156,10 @@ fn rv_wal_b8e9884c_has_truncatable_does_not_take_frames_mutex() {
         // It receives ONLY `release_rx`; the sender stays with the guard
         // above, so a closure panic still triggers the release.
         s.spawn(move || {
-            let _held = frames.lock().expect("test holds frames mutex");
-            held_tx.send(()).expect("holder handshake send");
-            let _ = release_rx.recv();
+            mem.with_frames_lock_for_test(|| {
+                held_tx.send(()).expect("holder handshake send");
+                let _ = release_rx.recv();
+            });
         });
         // Handshake FIRST: the probe can only matter once the mutex is
         // verifiably held by another thread.
@@ -99,13 +188,11 @@ async fn rv_wal_b8e9884c_mirror_tracks_append_and_truncate() {
     assert!(!sink.has_truncatable(5), "empty sink: nothing truncatable");
 
     // Batch with max_version 0 pins the frame (never eligible).
-    sink.append_batch(vec![b"pinned".to_vec()], 0)
-        .await
-        .unwrap();
+    sink.append_batch(vec![payload(0)], 0).await.unwrap();
     assert!(!sink.has_truncatable(u64::MAX), "pinned frame only");
 
-    sink.append_batch(vec![b"a".to_vec()], 3).await.unwrap();
-    sink.append_batch(vec![b"b".to_vec()], 7).await.unwrap();
+    sink.append_batch(vec![payload(3)], 3).await.unwrap();
+    sink.append_batch(vec![payload(7)], 7).await.unwrap();
     assert!(!sink.has_truncatable(2), "nothing <= 2 yet");
     assert!(sink.has_truncatable(3), "frame 3 qualifies");
     assert!(sink.has_truncatable(7), "frame 7 qualifies");

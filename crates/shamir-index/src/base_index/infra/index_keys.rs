@@ -219,6 +219,8 @@ fn hash_inner_value(v: &InnerValue, state: &mut impl Hasher) {
 /// fast zero-copy path); falls back to `materialize_at` for Dec/Big/containers.
 ///
 /// Returns `None` if ANY path is absent (all-or-nothing semantics).
+/// This persisted identity may change only with an identity-version bump;
+/// golden-vector tests guard its existing outputs.
 fn compute_leaf_hashes(
     rec: &(impl RecordRef + ?Sized),
     paths: &[IndexInfoItem],
@@ -263,6 +265,8 @@ fn compute_leaf_hashes(
 
 /// Compute the dual `(hash1, hash2)` for lookup values (`&[InnerValue]`)
 /// using the SAME tag scheme as `compute_leaf_hashes`.
+/// This persisted identity may change only with an identity-version bump;
+/// golden-vector tests guard its existing outputs.
 fn compute_lookup_hashes(values: &[InnerValue], name_interned: u64) -> (u64, u64) {
     const SEED2: u64 = 0x9E3779B97F4A7C15;
 

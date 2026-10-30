@@ -87,7 +87,7 @@ pub type ScalarFn = Arc<dyn Fn(&[QueryValue]) -> ScalarResult + Send + Sync>;
 /// `min_args` / `max_args` bound the argument count (`max_args = None` ⇒
 /// variadic / unbounded, used by n-ary `min`/`max`). `pure` and `deterministic`
 /// describe the function's semantics. `trusted_pure` is an **explicit embedder
-/// opt-in** (via [`.trusted_pure()`](FnEntry::trusted_pure)) that vouches the
+/// vouch** (via [`.trusted_pure()`](FnEntry::trusted_pure) or public metadata) that the
 /// function is safe to back a functional index — it must be `pure + deterministic`
 /// AND the embedder must have audited the native code. A non-vouched function
 /// is rejected from the functional-index path.
@@ -98,8 +98,8 @@ pub struct FnEntry {
     pub max_args: Option<usize>,
     pub pure: bool,
     pub deterministic: bool,
-    /// Explicit embedder opt-in for functional-index use. Set via
-    /// [`.trusted_pure()`](FnEntry::trusted_pure). If `false`, the function
+    /// Native embedder vouch for functional-index use, via the builder or
+    /// public fields. If `false`, the function
     /// cannot back a functional index even if `pure && deterministic`.
     pub trusted_pure: bool,
 }
@@ -128,7 +128,8 @@ impl FnEntry {
     /// This is the **index-safety gate**: a lying native scalar (one that
     /// returns different values for the same input, or has side effects)
     /// would silently corrupt a functional index. By requiring an explicit
-    /// opt-in, the embedder acknowledges they have audited the function.
+    /// vouch, the native embedder acknowledges they have audited the function.
+    /// Public fields also permit an explicit native vouch; they are trusted metadata.
     ///
     /// Sets `pure = true`, `deterministic = true`, `trusted_pure = true`.
     pub fn trusted_pure(mut self) -> Self {
@@ -166,6 +167,7 @@ impl ScalarRegistry {
     /// Register a function under `name`. When called inside an
     /// [`in_folder`](Self::in_folder) scope the name is automatically
     /// folder-qualified (`"math/abs"`); otherwise it is stored as-is.
+    /// A duplicate qualified name is replaced: the last registration wins.
     pub fn register(&mut self, name: impl Into<String>, entry: FnEntry) {
         let key = if self.prefix.is_empty() {
             name.into()

@@ -9,7 +9,7 @@
 //! mirrors that mechanism.
 //!
 //! This module provides an opt-in cache keyed by the *content* of the
-//! `FieldRef` node itself (see `field_ref_key`). Callers that build a
+//! `FieldRef` path. Callers that build a
 //! `FieldPathCache` once (e.g. `SelectProjection::new`) and thread it
 //! through `FilterContext::field_path_cache` get pre-interned
 //! `SmallVec<InternerKey>` paths for every `FieldRef` in the tree; callers
@@ -25,28 +25,8 @@ use smallvec::SmallVec;
 use crate::query::filter::evaluation::semantics::resolve::intern_field_path;
 use crate::query::filter::{Filter, FilterValue};
 
-/// Content-keyed cache mapping a `FieldRef` node (by its full `Debug`
-/// representation, i.e. its `path`) to its pre-interned
-/// `SmallVec<[InternerKey; 4]>` path.
-///
-/// # Why content, not raw address (Defect 2 / group 13 fix)
-///
-/// This used to be keyed on the raw pointer address of the enclosing
-/// `FilterValue` (`fv as *const FilterValue as usize`), sound only as long
-/// as the cache never outlives the exact allocation it was built from — an
-/// invariant the type system never enforced. See `cond_cache.rs`'s doc
-/// comment for the full address-reuse hazard this class of bug shares. The
-/// key is now [`format!("{:?}", fv)`]: two `FieldRef` nodes collide in this
-/// map if and only if they reference the same `path`, regardless of memory
-/// address. As a side effect, two independently-allocated `FieldRef { path
-/// }` nodes with the same path now correctly share one cache entry.
-pub type FieldPathCache = TMap<String, SmallVec<[InternerKey; 4]>>;
-
-/// Compute the content-derived cache key for a `FieldRef` node.
-#[inline]
-pub(in crate::query::filter) fn field_ref_key(fv: &FilterValue) -> String {
-    format!("{fv:?}")
-}
+/// Cache of owned field paths and their interned representations.
+pub type FieldPathCache = TMap<Vec<String>, SmallVec<[InternerKey; 4]>>;
 
 /// Recursively walk a `FilterValue` tree, interning and caching every
 /// nested `FieldRef`'s `path` (at ANY nesting depth — inside `FnCall` args,
@@ -77,17 +57,10 @@ pub fn prescan_field_path_cache(fv: &FilterValue, interner: &Interner, cache: &m
         | FilterValue::QueryRef { .. }
         | FilterValue::Param { .. } => {}
         FilterValue::FieldRef { path } => {
-            // Intern ONCE at prescan time. The key is the enclosing node's
-            // CONTENT (its `path`, via `field_ref_key`'s `Debug` format),
-            // not its address — see this module's doc comment.
-            // `entry().or_insert()` (not `or_insert_with`) is used because
-            // `intern_field_path` may return `None`, in which case the
-            // insert must be skipped entirely — `or_insert_with` can't
-            // express that skip.
             if let Some(keys) = intern_field_path(path, interner) {
                 let ipath: SmallVec<[InternerKey; 4]> =
                     keys.iter().map(|&id| InternerKey::new(id)).collect();
-                cache.entry(field_ref_key(fv)).or_insert(ipath);
+                cache.entry(path.clone()).or_insert(ipath);
             }
         }
         FilterValue::Array(items) => {

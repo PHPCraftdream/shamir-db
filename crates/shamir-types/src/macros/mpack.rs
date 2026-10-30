@@ -245,6 +245,13 @@ macro_rules! mpack {
         mpack!(@object $map [$($key)+] (mpack!(@ $val)));
     };
 
+    (@object $map:ident ($($key:tt)+) (: - $value:literal , $($rest:tt)*) $copy:tt) => {
+        mpack!(@object $map [$($key)+] (mpack!(- $value)) , $($rest)*);
+    };
+    (@object $map:ident ($($key:tt)+) (: - $value:literal) $copy:tt) => {
+        mpack!(@object $map [$($key)+] (mpack!(- $value)));
+    };
+
     // Value is a single `tt` token, followed by a comma.
     (@object $map:ident ($($key:tt)+) (: $value:tt , $($rest:tt)*) $copy:tt) => {
         mpack!(@object $map [$($key)+] (mpack!($value)) , $($rest)*);

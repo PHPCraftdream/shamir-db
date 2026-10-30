@@ -50,7 +50,7 @@ pub enum WsFrameError {
     LengthMismatch {
         /// Length declared by the inner u32_be prefix.
         declared: usize,
-        /// Actual length of the WS message body minus 4.
+        /// Body length excluding the prefix, or total message length if shorter than four bytes.
         actual: usize,
     },
     /// Frame larger than `MAX_WS_FRAME_SIZE`.

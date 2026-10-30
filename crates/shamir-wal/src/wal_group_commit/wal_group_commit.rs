@@ -29,9 +29,9 @@
 //! it established are reproduced below and in
 //! `docs/dev-artifacts/perf/capstone-subplan.md` §1:
 //!   - **L1 (no stranded committer):** leadership is released under the SAME
-//!     `pending` lock as `push` (in [`WalGroupCommit::lead_until_drained`]) —
-//!     a late push is either seen by the current leader or wins leadership
-//!     itself, so no entry is ever stranded;
+//!     `pending` lock as `push`; after two windows a caller transfers reserved
+//!     leadership to a continuation if work remains, including cancelled
+//!     followers' frames. A late push is seen by the leader or elects itself;
 //!   - **L2 (no lost wakeup):** the `enable()`-before-check `Notify` park
 //!     loop closes the subscribe-window race;
 //!   - **L3 (circuit-breaker):** on a write/sync error the leader releases
@@ -125,10 +125,10 @@ pub struct WalGroupCommit {
     // atomicity property (the non-yielding Mem append keeps a commit atomic
     // on a current-thread runtime; the mandatory yield let concurrent SSI
     // committers all validate before any published). Deferred, not rejected.
-    pending: Mutex<Vec<Pending>>,
-    flushing: AtomicBool,
-    indeterminate: AtomicBool,
-    stopped: Notify,
+    pending: Arc<Mutex<Vec<Pending>>>,
+    flushing: Arc<AtomicBool>,
+    indeterminate: Arc<AtomicBool>,
+    stopped: Arc<Notify>,
     // RF1: true when a Buffered append completed but no fsync has run since.
     // R = contiguous RECOVERABILITY prefix + coalesced-fsync state. All
     // logic in `wal_group_commit/recoverable_through.rs` (lock-free:
@@ -141,11 +141,23 @@ impl WalGroupCommit {
     pub fn new(sink: Arc<WalSink>) -> Self {
         Self {
             sink: Arc::clone(&sink),
-            pending: Mutex::new(Vec::new()),
-            flushing: AtomicBool::new(false),
-            indeterminate: AtomicBool::new(false),
-            stopped: Notify::new(),
+            pending: Arc::new(Mutex::new(Vec::new())),
+            flushing: Arc::new(AtomicBool::new(false)),
+            indeterminate: Arc::new(AtomicBool::new(false)),
+            stopped: Arc::new(Notify::new()),
             sync: Arc::new(SyncCoordinator::new(sink)),
+        }
+    }
+
+    // Private shared handle for a continuation; all coordinator state is shared.
+    fn shared_handle(&self) -> Self {
+        Self {
+            sink: Arc::clone(&self.sink),
+            pending: Arc::clone(&self.pending),
+            flushing: Arc::clone(&self.flushing),
+            indeterminate: Arc::clone(&self.indeterminate),
+            stopped: Arc::clone(&self.stopped),
+            sync: Arc::clone(&self.sync),
         }
     }
 
@@ -215,7 +227,20 @@ impl WalGroupCommit {
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
         {
-            self.lead_until_drained().await;
+            let guard = LeaderGuard {
+                group: self.shared_handle(),
+                metas: Vec::new(),
+                armed: true,
+            };
+            if let Some(guard) = self.lead_until_drained(guard, true).await {
+                let group = guard.group.shared_handle();
+                // fire-and-forget: reserved leadership owns queued work even if
+                // every follower is cancelled. The guard exists before spawn,
+                // so runtime shutdown before the first poll still fail-stops.
+                drop(tokio::spawn(async move {
+                    let _ = group.lead_until_drained(guard, false).await;
+                }));
+            }
         }
         loop {
             let notified = waiter.notify.notified();
@@ -287,23 +312,25 @@ impl WalGroupCommit {
         self.drive_and_wait(&waiter).await.map_err(DbError::from)
     }
 
-    // Caller holds leadership (flushing == true). Drain windows until the
-    // queue is observed empty, then release leadership ATOMICALLY with the
-    // empty observation (under the pending lock) so a concurrent pusher is
-    // either seen by us or wins leadership itself — never stranded.
-    async fn lead_until_drained(&self) {
-        let mut guard = LeaderGuard {
-            group: self,
-            metas: Vec::new(),
-            armed: true,
-        };
+    // The caller owns leadership for at most two windows. If more work is
+    // queued, transfer its still-armed guard without releasing `flushing`.
+    // The continuation drains to empty and releases under the pending lock.
+    async fn lead_until_drained(
+        &self,
+        mut guard: LeaderGuard,
+        bounded: bool,
+    ) -> Option<LeaderGuard> {
+        let mut windows = 0;
         loop {
             let batch = {
                 let mut p = self.pending.lock().await;
                 if self.indeterminate.load(Ordering::Acquire) || p.is_empty() {
                     guard.armed = false;
                     self.flushing.store(false, Ordering::Release);
-                    return;
+                    return None;
+                }
+                if bounded && windows == 2 {
+                    return Some(guard);
                 }
                 std::mem::take(&mut *p)
             };
@@ -332,7 +359,7 @@ impl WalGroupCommit {
             // rotating AFTER a successful write, and rollback failure is not
             // typed by WalSegment. Conservatively fail-stop those outcomes.
             if !write_ok && matches!(self.sink.as_ref(), WalSink::File(_)) {
-                return;
+                return None;
             }
             // Publish WRITTEN before this coordinator's explicit sync. File
             // auto-rotation can fsync inside append_batch before it returns;
@@ -404,7 +431,10 @@ impl WalGroupCommit {
                 }
                 guard.armed = false;
                 self.flushing.store(false, Ordering::Release);
-                return;
+                return None;
+            }
+            if bounded {
+                windows += 1;
             }
         }
     }
@@ -501,13 +531,13 @@ impl WalGroupCommit {
 
 // Owns the existing metadata allocation, not another per-window allocation.
 // Drop performs only synchronous publication/wakes; it never waits or spawns.
-struct LeaderGuard<'a> {
-    group: &'a WalGroupCommit,
+struct LeaderGuard {
+    group: WalGroupCommit,
     metas: Vec<(WalDurability, Arc<WalTicket>)>,
     armed: bool,
 }
 
-impl Drop for LeaderGuard<'_> {
+impl Drop for LeaderGuard {
     fn drop(&mut self) {
         if !self.armed {
             return;

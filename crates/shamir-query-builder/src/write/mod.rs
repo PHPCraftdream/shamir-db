@@ -16,8 +16,8 @@
 //! use shamir_query_builder::{write::doc, val::*};
 //!
 //! let d = doc()
-//!     .set("email", "Alice@X.COM")
-//!     .set("email_norm", func("strings/lower", [col("email")]));
+//!     .set("email", "Alice@X.COM").unwrap()
+//!     .set("email_norm", func("strings/lower", [col("email")])).unwrap();
 //! ```
 //!
 //! # Op builders
@@ -29,20 +29,20 @@
 //!
 //! // Insert
 //! let ins = insert("users")
-//!     .row(doc().set("name", "Alice"))
+//!     .row(doc().set("name", "Alice").unwrap())
 //!     .build();
 //!
 //! // Update
 //! let upd = update("users")
 //!     .where_(eq("id", 1))
-//!     .set(doc().set("name", "Bob"))
+//!     .set(doc().set("name", "Bob").unwrap())
 //!     .returning(UpdateReturnMode::All)
 //!     .build();
 //!
 //! // Upsert (SetOp)
 //! let ups = upsert("cache")
 //!     .key(mpack!("k1"))
-//!     .value(doc().set("v", 42))
+//!     .value(doc().set("v", 42).unwrap())
 //!     .build();
 //!
 //! // Delete

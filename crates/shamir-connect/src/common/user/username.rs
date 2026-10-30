@@ -5,18 +5,15 @@
 //! complete UsernameCaseMapped profile per RFC 8265 §3.3:
 //!
 //! 1. **Width Mapping** — half-width / full-width forms folded.
-//! 2. **Case Mapping** — Unicode case-fold (per RFC 8265, NOT raw
-//!    `String::to_lowercase`; e.g. Turkish `İ` casefolds to `i\u{307}`,
-//!    German `ß` to `ss`).
+//! 2. **Case Mapping** — Unicode Lowercase_Mapping; Turkish `İ` maps to
+//!    `i\u{307}` and German `ß` remains `ß`.
 //! 3. **NFC Normalization** — applied AFTER case mapping.
 //! 4. **Directionality** — reject ambiguous bidi.
 //! 5. **Restrictions** — control chars, private-use, non-characters,
 //!    incompatible-with-IdentifierClass code points are rejected.
 //!
-//! This is the spec §15.3 NORMATIVE form. Cross-language consistency is
-//! preserved against any other RFC-8265-compliant implementation
-//! (JavaScript, Python, etc.) — `to_lowercase()` was a release-blocker
-//! gap.
+//! This is the spec §15.3 NORMATIVE form. Cross-language consistency
+//! requires matching the same PRECIS profile across implementations.
 //!
 //! Length cap (255 bytes after normalization) is applied on top of the
 //! PRECIS profile result.
@@ -38,8 +35,7 @@ impl NormalizedUsername {
     /// after normalization, or any forbidden character category per the
     /// PRECIS profile.
     pub fn from_raw(raw: &str) -> Result<Self> {
-        // PRECIS UsernameCaseMapped: width mapping → case mapping (RFC 8265
-        // case-fold, not String::to_lowercase) → NFC normalization →
+        // PRECIS UsernameCaseMapped: width mapping → Lowercase_Mapping → NFC normalization →
         // directionality + restrictions checks.
         let profile = UsernameCaseMapped::new();
         let mapped = profile

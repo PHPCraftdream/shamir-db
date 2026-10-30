@@ -596,3 +596,76 @@ fn nested_path_wrong_type() {
     let v = check_rule(&rule, &qv);
     assert_eq!(v.errors[0].code, "type_mismatch");
 }
+
+#[test]
+fn one_of_hash_matches_query_value_equality() {
+    let nan_a = QueryValue::F64(f64::NAN);
+    let nan_b = QueryValue::F64(f64::from_bits(0x7ff8_0000_0000_0001));
+    let mut map_a = new_map();
+    map_a.insert("a".to_owned(), nan_a.clone());
+    map_a.insert("b".to_owned(), QueryValue::F64(-0.0));
+    let mut map_b = new_map();
+    map_b.insert("b".to_owned(), QueryValue::F64(0.0));
+    map_b.insert("a".to_owned(), nan_b.clone());
+    let mut set_a = new_set();
+    set_a.insert(nan_a.clone());
+    set_a.insert(QueryValue::Int(2));
+    let mut set_b = new_set();
+    set_b.insert(QueryValue::Int(2));
+    set_b.insert(nan_b.clone());
+    let pairs = vec![
+        (nan_a, nan_b),
+        (QueryValue::F64(-0.0), QueryValue::F64(0.0)),
+        (
+            QueryValue::List(vec![QueryValue::F64(-0.0)]),
+            QueryValue::List(vec![QueryValue::F64(0.0)]),
+        ),
+        (QueryValue::Set(set_a), QueryValue::Set(set_b)),
+        (QueryValue::Map(map_a), QueryValue::Map(map_b)),
+    ];
+    for (allowed, probe) in pairs {
+        assert_eq!(allowed, probe);
+        let set = crate::validator::schema::one_of_set::OneOfSet::build(Some(&[
+            allowed.clone(),
+            probe.clone(),
+        ]))
+        .unwrap();
+        assert_eq!(set.residual_len(), 1);
+        assert!(set.contains_materialized(&probe));
+        if let QueryValue::F64(f) = probe {
+            assert!(set.contains_scalar(shamir_types::record_view::ScalarRef::F64(f)));
+        }
+    }
+}
+
+#[test]
+fn one_of_optimized_matches_fallback_for_float_and_containers() {
+    let values = vec![
+        QueryValue::F64(f64::NAN),
+        QueryValue::F64(-0.0),
+        QueryValue::F64(1.5),
+        QueryValue::Int(1),
+        QueryValue::List(vec![QueryValue::F64(f64::NAN)]),
+        QueryValue::List(vec![QueryValue::F64(3.0)]),
+    ];
+    for allowed in &values {
+        let mut rule = simple_rule("x", TypeTag::Any);
+        rule.constraints.one_of = Some(vec![allowed.clone()]);
+        let set = crate::validator::schema::one_of_set::OneOfSet::build(
+            rule.constraints.one_of.as_deref(),
+        );
+        for probe in &values {
+            let qv = fields_from(vec![("x", probe.clone())]);
+            let fields = OwnedFields { qv: &qv };
+            let mut fast = Validation::accept();
+            let mut fallback = Validation::accept();
+            rule.check(&fields, &["x"], set.as_ref(), &mut fast);
+            rule.check(&fields, &["x"], None, &mut fallback);
+            assert_eq!(
+                fast.is_ok(),
+                fallback.is_ok(),
+                "allowed={allowed:?}, probe={probe:?}"
+            );
+        }
+    }
+}

@@ -12,7 +12,6 @@ shamir-funclib = { path = "../shamir-funclib" }
 shamir-proc-tree = { path = "../shamir-proc-tree" }
 tokio = { version = "1.49.0", features = ["full"] }
 async-trait = "0.1.81"
-serde = { version = "1.0.217", features = ["derive"] }
 thiserror = "2.0"
 log = "0.4"
 wasmtime = { version = "48", default-features = false, features = [

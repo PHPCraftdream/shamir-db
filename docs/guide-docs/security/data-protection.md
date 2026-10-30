@@ -102,6 +102,32 @@ cloud disk encryption), and the key file's filesystem permissions should be
 `0600` owner-only. This document does not change any of those rules — they
 already apply uniformly to all secret-bearing files on the host.
 
+### 1.5 Filesystem trust boundary for data and WAL
+
+WAL CRC checks detect accidental corruption; they **do not authenticate
+writers**. A local writer with access to the WAL can inject transactions that
+recovery replays. TLS protects traffic in transit, and volume encryption
+protects storage at rest; neither provides WAL authenticity against local
+writers.
+
+The data directory, any sibling WAL directory, WAL segments and sidecars, and
+restored copies **MUST** be writable only by the database identity and
+explicitly trusted operators or tooling. Protect their parent directories too:
+otherwise an untrusted user may rename or replace a protected directory or file.
+Apply the same boundary when copying or restoring backups, before the database
+uses them.
+
+* **Unix:** Use `0700` for directories and `0600` for files, with `umask 0077`
+  for newly created objects. Secure parent directories against unauthorized
+  rename or replacement. Where trusted operators or tooling need access,
+  grant only the necessary permissions through appropriately restricted ACLs
+  or other controlled arrangements; do not grant broad write access.
+* **Windows:** Configure ACLs so only the dedicated database identity and
+  explicitly trusted operators or tooling can write. Restrict inherited broad
+  write, delete, and delete-child permissions on the directories, files, and
+  their parents so untrusted identities cannot modify, rename, or replace them.
+  Apply equivalent ACLs to restored copies and their parent directories.
+
 ---
 
 ## 2. PII retention / erasure procedure

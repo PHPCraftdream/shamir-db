@@ -340,6 +340,7 @@ impl ShamirAdminExecutor {
 
         let factory = match op.engine.as_deref() {
             Some("in_memory") => BoxRepoFactory::in_memory(),
+            #[cfg(feature = "fjall")]
             Some("fjall") | None => {
                 // Durable default: if the home has a data_root,
                 // use a fjall directory under data_root/<db>/<repo>.
@@ -391,6 +392,15 @@ impl ShamirAdminExecutor {
                         ));
                     }
                 }
+            }
+            #[cfg(not(feature = "fjall"))]
+            None => {
+                if self.shamir.data_root().is_some() {
+                    return Err(err(
+                        "Unsupported engine 'fjall': backend not enabled".to_string()
+                    ));
+                }
+                BoxRepoFactory::in_memory()
             }
             Some(other) => {
                 return Err(err(format!(

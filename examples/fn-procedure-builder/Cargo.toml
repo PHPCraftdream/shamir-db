@@ -11,9 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 shamir-sdk = { path = "../../crates/shamir-sdk", features = ["query-builder"] }
-# Direct dep required because `q!`/`filter!` proc-macros emit
-# `::shamir_query_builder::…` absolute paths.
-shamir-query-builder = { path = "../../crates/shamir-query-builder" }
 
 [profile.release]
 opt-level = "z"

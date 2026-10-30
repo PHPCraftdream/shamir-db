@@ -7,8 +7,7 @@ use thiserror::Error;
 /// [`Topology::pin_current_thread_to_node`]: crate::Topology::pin_current_thread_to_node
 #[derive(Debug, Error)]
 pub enum AffinityError {
-    /// The platform / topology cannot pin threads to nodes (a real
-    /// `LinuxTopology` not yet wired, or a genuinely affinity-less OS). A
+    /// The platform / topology cannot pin threads to nodes. A
     /// best-effort NUMA policy should treat this as a soft no-op, not a hard
     /// failure. Note that the single-node fallback returns `Ok(())` for node 0
     /// instead — see [`FallbackSingleNodeTopology`](crate::FallbackSingleNodeTopology).

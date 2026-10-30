@@ -10,10 +10,9 @@ use crate::error::AffinityError;
 /// Production code depends on `Arc<dyn Topology>`; tests inject
 /// [`MockTopology`](crate::MockTopology). The real source of truth on Linux is
 /// `/sys/devices/system/node/` for discovery (Drepper §5.3) and
-/// `sched_setaffinity(2)` for pinning (Drepper §5.2). Every non-Linux platform
-/// and every single-socket box uses
-/// [`FallbackSingleNodeTopology`](crate::FallbackSingleNodeTopology), which
-/// reports a single UMA node.
+/// `sched_setaffinity(2)` for pinning (Drepper §5.2). Non-Linux platforms
+/// and failed Linux probes use [`FallbackSingleNodeTopology`](crate::FallbackSingleNodeTopology),
+/// which reports a single UMA node.
 ///
 /// Implementations must be cheap to query — `num_nodes` / `cores_on_node` are
 /// read on construction paths, and `current_node` may be consulted on the read

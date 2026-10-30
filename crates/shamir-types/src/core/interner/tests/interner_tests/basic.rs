@@ -43,7 +43,7 @@ fn test_with_state_initialization() {
         (InternerKey::new(50), UserKey::from_str("age")),
         (InternerKey::new(100), UserKey::from_str("city")),
     ];
-    let interner = Interner::with_state(initial_data);
+    let interner = Interner::with_state(initial_data).unwrap();
 
     // Check that initial data is loaded correctly
     assert_eq!(interner.get_ind("name"), Some(InternerKey::new(1)));
@@ -143,7 +143,7 @@ fn test_concurrent_with_state() {
         })
         .collect();
 
-    let interner = Arc::new(Interner::with_state(initial_data));
+    let interner = Arc::new(Interner::with_state(initial_data).unwrap());
     let num_threads = 20;
     let mut handles = vec![];
 

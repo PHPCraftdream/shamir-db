@@ -173,6 +173,12 @@ impl SystemStore {
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_GROUPS);
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt group catalogue: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -192,6 +198,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(DbError::Internal(format!(
+                "corrupt group catalogue while loading group {group_id}: {} unreadable record(s)",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()

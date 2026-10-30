@@ -63,17 +63,17 @@ core/
 
 - **Interner**: Main struct containing:
   - **Forward Map**: `TDashMap<UserKey, InternerKey>` - String to Compact ID
-  - **Reverse Map**: `TDashMap<InternerKey, UserKey>` - Compact ID to String
-  - **Current ID**: `Mutex<u64>` counter for new assignments
+  - **Reverse spine**: `ArcSwap<Vec<OnceLock<Arc<str>>>>`, indexed by ID
+  - **Current ID**: `AtomicU64`; first-touch publication is serialized by a writer mutex
 
 ### Key Methods
 
 | Method | Description |
 |--------|-------------|
 | `Interner::new()` | Creates empty interner |
-| `Interner::with_state(Vec<(InternerKey, UserKey)>)` | Hydrate from persistent store |
+| `Interner::with_state(Vec<(InternerKey, UserKey)>)` | Hydrate and validate persistent state; returns `Result` |
 | `touch_ind(str)` -> `Result<TouchInd>` | Get or create ID for a string |
-| `get_str(id)` -> `Option<UserKey>` | Reverse lookup: ID to string |
+| `get_str(id)` -> `Option<Arc<str>>` | Reverse lookup: ID to string |
 | `get_ind(str)` -> `Option<InternerKey>` | Forward lookup: string to ID (without creating) |
 | `all_entries()` -> `Vec<(InternerKey, UserKey)>` | All interned pairs (for persistence) |
 | `len()` | Number of interned keys |
@@ -81,7 +81,8 @@ core/
 | `make_key(u64)` -> `InternerKey` | Create key from numeric ID |
 
 ### Thread Safety
-- `TDashMap` (DashMap with FxHasher) enables lock-free concurrent reads
+- Reverse reads use ArcSwap without locks; forward DashMap reads take shard locks
+- First-touch reverse and forward publication is serialized by a writer mutex
 - `touch_ind()` is thread-safe - uses entry API for race condition handling
 - Deterministic across threads (critical for correctness!)
 
@@ -101,7 +102,7 @@ assert!(!result2.is_new()); // Key already existed
 
 // Reverse lookup
 let name = interner.get_str(result1.key()).unwrap();
-assert_eq!(name.as_str(), "username");
+assert_eq!(&*name, "username");
 
 // Forward lookup (without creating)
 let key = interner.get_ind("username");
@@ -122,13 +123,13 @@ let state = interner.all_entries(); // Vec<(InternerKey, UserKey)>
 
 // Restore from disk
 let state = load_from_file("interner_state.bin");
-let interner = Interner::with_state(state);
+let interner = Interner::with_state(state).unwrap();
 ```
 
 ### Performance
 - **Memory**: Adaptive key sizing saves space for small datasets
-- **Speed**: O(1) hash lookup for both directions
-- **Concurrency**: Lock-free reads, fine-grained writes via DashMap
+- **Speed**: O(1) forward hash lookup and reverse indexed lookup
+- **Concurrency**: Lock-free reverse reads; sharded forward reads and serialized publication
 - **Serialization**: Compact MessagePack format saves disk space
 
 ---

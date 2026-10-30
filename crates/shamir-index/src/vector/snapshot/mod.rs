@@ -53,6 +53,7 @@
 //!   (checksums-everywhere).
 
 mod codec;
+mod legacy;
 mod load;
 mod manifest;
 mod quantized_load;
@@ -79,6 +80,7 @@ pub use load::flip_generation;
 pub use load::highest_delta_index;
 pub use load::load_snapshot;
 pub(crate) use load::load_snapshot_with_intent;
+pub(crate) use load::publish_manifest_without_prune;
 pub use load::read_manifest;
 pub use load::replay_delta;
 pub use load::DeltaOp;

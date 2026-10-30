@@ -17,6 +17,8 @@
 //!   already produced by INSERT/UPDATE resolved_values). Direct string key
 //!   lookup; no interner needed.
 
+use std::sync::Arc;
+
 use arc_swap::ArcSwapOption;
 use shamir_types::codecs::CodecError;
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -60,6 +62,11 @@ pub trait RecordFields: Send + Sync {
     /// Scalar callers should prefer [`scalar`](Self::scalar) (zero-copy).
     fn materialize(&self, path: &[&str]) -> Option<InnerValue>;
 
+    /// Borrow a non-scalar value when it has the same representation as materialization.
+    fn borrowed_value(&self, _path: &[&str]) -> Option<&QueryValue> {
+        None
+    }
+
     /// Materialise the **whole record** as an owned `QueryValue::Map`.
     ///
     /// This is the §5b escape hatch used exclusively by [`WasmRecordValidator`]
@@ -85,7 +92,7 @@ pub trait RecordFields: Send + Sync {
 /// address-keyed cache caused elsewhere in this codebase.
 struct PathCache {
     path: Vec<Box<str>>,
-    ids: Vec<InternerKey>,
+    ids: Arc<[InternerKey]>,
 }
 
 /// [`RecordFields`] backed by a zero-copy [`RecordView`] lens.
@@ -117,6 +124,11 @@ impl<'a> ViewFields<'a> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn cached_path_ids(&self, path: &[&str]) -> Option<Arc<[InternerKey]>> {
+        self.resolve_path(path).map(|cache| Arc::clone(&cache.ids))
+    }
+
     /// Resolve a string path to an interned-id path, returning `None` if any
     /// segment is unknown to the interner.
     ///
@@ -127,8 +139,8 @@ impl<'a> ViewFields<'a> {
     /// `get_ind` walk and refreshes the slot; a resolution failure (unknown
     /// segment) is not cached — `Option::collect`'s short-circuit already
     /// makes that path cheap.
-    fn resolve_path(&self, path: &[&str]) -> Option<Vec<InternerKey>> {
-        if let Some(cached) = self.path_cache.load().as_deref() {
+    fn resolve_path(&self, path: &[&str]) -> Option<Arc<PathCache>> {
+        if let Some(cached) = self.path_cache.load_full() {
             if cached.path.len() == path.len()
                 && cached
                     .path
@@ -136,40 +148,40 @@ impl<'a> ViewFields<'a> {
                     .zip(path.iter())
                     .all(|(cached_seg, seg)| cached_seg.as_ref() == *seg)
             {
-                return Some(cached.ids.clone());
+                return Some(cached);
             }
         }
 
         let ids: Option<Vec<InternerKey>> =
             path.iter().map(|seg| self.interner.get_ind(*seg)).collect();
-        let ids = ids?;
-        self.path_cache.store(Some(std::sync::Arc::new(PathCache {
+        let cached = Arc::new(PathCache {
             path: path.iter().map(|seg| Box::from(*seg)).collect(),
-            ids: ids.clone(),
-        })));
-        Some(ids)
+            ids: ids?.into(),
+        });
+        self.path_cache.store(Some(Arc::clone(&cached)));
+        Some(cached)
     }
 }
 
 impl<'a> RecordFields for ViewFields<'a> {
     fn scalar(&self, path: &[&str]) -> Option<ScalarRef<'_>> {
         let ids = self.resolve_path(path)?;
-        self.view.scalar_at(&ids)
+        self.view.scalar_at(&ids.ids)
     }
 
     fn str(&self, path: &[&str]) -> Option<&str> {
         let ids = self.resolve_path(path)?;
-        self.view.str_at(&ids)
+        self.view.str_at(&ids.ids)
     }
 
     fn present(&self, path: &[&str]) -> Option<Kind> {
         let ids = self.resolve_path(path)?;
-        self.view.present_kind_at(&ids)
+        self.view.present_kind_at(&ids.ids)
     }
 
     fn materialize(&self, path: &[&str]) -> Option<InnerValue> {
         let ids = self.resolve_path(path)?;
-        self.view.materialize_at(&ids)
+        self.view.materialize_at(&ids.ids)
     }
 
     fn to_query_value(&self) -> Result<QueryValue, CodecError> {
@@ -262,6 +274,15 @@ fn qv_to_inner(qv: &QueryValue) -> InnerValue {
     }
 }
 
+fn can_borrow_materialized(value: &QueryValue) -> bool {
+    match value {
+        QueryValue::Map(_) => false,
+        QueryValue::List(values) => values.iter().all(can_borrow_materialized),
+        QueryValue::Set(values) => values.iter().all(can_borrow_materialized),
+        _ => true,
+    }
+}
+
 impl<'a> RecordFields for OwnedFields<'a> {
     fn scalar(&self, path: &[&str]) -> Option<ScalarRef<'_>> {
         qv_descend(self.qv, path).and_then(qv_to_scalar)
@@ -280,6 +301,11 @@ impl<'a> RecordFields for OwnedFields<'a> {
 
     fn materialize(&self, path: &[&str]) -> Option<InnerValue> {
         qv_descend(self.qv, path).map(qv_to_inner)
+    }
+
+    fn borrowed_value(&self, path: &[&str]) -> Option<&QueryValue> {
+        let value = qv_descend(self.qv, path)?;
+        can_borrow_materialized(value).then_some(value)
     }
 
     fn to_query_value(&self) -> Result<QueryValue, CodecError> {

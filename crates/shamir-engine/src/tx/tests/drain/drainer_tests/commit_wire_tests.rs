@@ -108,6 +108,7 @@ async fn drain_step_still_drains_correctly_with_offer_wired() {
     use crate::tx::commit_tx;
 
     let repo = make_repo();
+    repo.disable_background_drainer_for_test();
     repo.add_table_for_test(crate::table::TableConfig::new("t"));
 
     for i in 1..=2u64 {

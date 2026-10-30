@@ -25,7 +25,6 @@
 //! )
 //! ```
 
-use proc_macro2::TokenStream as TokenStream2;
 use syn::parse::{Parse, ParseStream};
 use syn::{Expr, Ident, LitInt, LitStr, Token};
 
@@ -608,65 +607,12 @@ fn parse_dotted_ident_from(input: ParseStream) -> syn::Result<Vec<Ident>> {
     Ok(segs)
 }
 
-/// Parse a filter expression that ends when we hit a clause keyword at
-/// the top level or end-of-input. We collect tokens into a buffer, then
-/// parse that buffer as a `syn::Expr`.
+/// Parse a filter expression followed by a clause keyword or end-of-input.
 fn parse_filter_expr(input: ParseStream, clause: &str) -> syn::Result<Expr> {
-    // Collect raw token trees, stopping at clause keywords.
-    let mut tokens = TokenStream2::new();
-
-    while !input.is_empty() {
-        // At depth 0, check for clause keywords that terminate the expr.
-        // A keyword only terminates if the tokens collected so far already
-        // form a complete expression; otherwise it is part of the expression
-        // itself (e.g. dotted segment `foo.select` or RHS `x == group_by`).
-        if is_clause_keyword(input)
-            && (tokens.is_empty() || syn::parse2::<Expr>(tokens.clone()).is_ok())
-        {
-            break;
-        }
-
-        // Track paren/bracket/brace depth so keywords inside groups
-        // don't terminate the expression.
-        if input.peek(syn::token::Paren) {
-            let content;
-            let paren = syn::parenthesized!(content in input);
-            let inner = content.parse::<proc_macro2::TokenStream>()?;
-            // Re-emit as a parenthesised group.
-            let mut group = proc_macro2::Group::new(proc_macro2::Delimiter::Parenthesis, inner);
-            group.set_span(paren.span.join());
-            tokens.extend(std::iter::once(proc_macro2::TokenTree::Group(group)));
-            continue;
-        }
-        if input.peek(syn::token::Bracket) {
-            let content;
-            let bracket = syn::bracketed!(content in input);
-            let inner = content.parse::<proc_macro2::TokenStream>()?;
-            let mut group = proc_macro2::Group::new(proc_macro2::Delimiter::Bracket, inner);
-            group.set_span(bracket.span.join());
-            tokens.extend(std::iter::once(proc_macro2::TokenTree::Group(group)));
-            continue;
-        }
-        if input.peek(syn::token::Brace) {
-            let content;
-            let brace = syn::braced!(content in input);
-            let inner = content.parse::<proc_macro2::TokenStream>()?;
-            let mut group = proc_macro2::Group::new(proc_macro2::Delimiter::Brace, inner);
-            group.set_span(brace.span.join());
-            tokens.extend(std::iter::once(proc_macro2::TokenTree::Group(group)));
-            continue;
-        }
-
-        // Default: consume one token tree.
-        let tt: proc_macro2::TokenTree = input.parse()?;
-        tokens.extend(std::iter::once(tt));
-    }
-
-    if tokens.is_empty() {
+    if input.is_empty() || is_clause_keyword(input) {
         return Err(input.error(format!("q!: expected a filter expression after `{clause}`")));
     }
-
-    syn::parse2::<Expr>(tokens)
+    input.parse::<Expr>()
 }
 
 /// Check (without consuming) whether the next token(s) form a clause keyword.

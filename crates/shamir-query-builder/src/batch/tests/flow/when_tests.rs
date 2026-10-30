@@ -1,7 +1,9 @@
 //! Tests for the `Batch::when` / `Batch::switch` conditional-execution
 //! builder ergonomics (Epic03/C, task #646).
 
+use crate::wire::ToWire;
 use shamir_query_types::filter::{Filter, FilterValue};
+use shamir_types::types::value::QueryValue;
 
 use crate::batch::{Batch, BuildError};
 use crate::ddl;
@@ -32,9 +34,6 @@ fn when_sets_field_on_entry() {
 
 #[test]
 fn when_wire_serialization_round_trips() {
-    use crate::wire::ToWire;
-    use shamir_types::types::value::QueryValue;
-
     let mut b = Batch::new();
     b.id(1);
     let cond = filter::eq("active", true);
@@ -56,8 +55,6 @@ fn when_wire_serialization_round_trips() {
 
 #[test]
 fn when_absent_is_omitted_from_wire() {
-    use crate::wire::ToWire;
-
     let mut b = Batch::new();
     b.insert(
         "unconditional",

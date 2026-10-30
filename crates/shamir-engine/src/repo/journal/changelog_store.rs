@@ -91,6 +91,43 @@ impl shamir_tx::ChangelogStore for StoreChangelog {
         Ok(())
     }
 
+    async fn put_many(&self, items: Vec<(Bytes, Bytes)>) -> Vec<Result<(), ChangelogError>> {
+        // Metadata must retain put's flush boundaries even for invalid callers.
+        if items.iter().any(|(key, _)| {
+            *key == shamir_tx::changefeed::gap_marker_key()
+                || *key == shamir_tx::changefeed::clean_horizon_key()
+        }) {
+            let mut results = Vec::with_capacity(items.len());
+            for (key, value) in items {
+                results.push(self.put(key, value).await);
+            }
+            return results;
+        }
+        let count = items.len();
+        let items = items
+            .into_iter()
+            .map(|(key, value)| (key.into(), value))
+            .collect();
+        match self.store.set_many(items).await {
+            Ok(flags) if flags.len() == count => (0..count).map(|_| Ok(())).collect(),
+            Ok(_) => (0..count)
+                .map(|_| {
+                    Err(ChangelogError::Journal(
+                        "changelog batch returned wrong result count".into(),
+                    ))
+                })
+                .collect(),
+            // set_many may have applied an unknown prefix: conservatively gap all.
+            Err(error) => (0..count)
+                .map(|_| {
+                    Err(ChangelogError::Journal(format!(
+                        "changelog batch set: {error}"
+                    )))
+                })
+                .collect(),
+        }
+    }
+
     async fn range_from(
         &self,
         from_key: Bytes,

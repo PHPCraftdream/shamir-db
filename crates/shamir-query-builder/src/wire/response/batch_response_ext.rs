@@ -12,11 +12,13 @@ use crate::wire::WireError;
 // ============================================================================
 
 /// Errors returned by typed extraction methods on `BatchResponseExt`.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ResponseError {
     /// The requested alias is not present in the response `results` map.
+    #[error("alias '{0}' not found in response results")]
     MissingAlias(String),
     /// The requested row index is out of range for the alias's records.
+    #[error("row index {index} out of range for alias '{alias}' (len {len})")]
     RowOutOfRange {
         /// Alias whose records were indexed.
         alias: String,
@@ -29,45 +31,13 @@ pub enum ResponseError {
     ///
     /// The source is a [`WireError`] from the msgpack round-trip through
     /// `QueryValue`: encoding the record or decoding it into `T` failed.
+    #[error("failed to deserialize record for alias '{alias}': {source}")]
     Deserialize {
         /// Alias whose record failed.
         alias: String,
         /// The source codec failure, retaining the encode/decode phase.
         source: WireError,
     },
-}
-
-impl std::fmt::Display for ResponseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ResponseError::MissingAlias(alias) => {
-                write!(f, "alias '{}' not found in response results", alias)
-            }
-            ResponseError::RowOutOfRange { alias, index, len } => {
-                write!(
-                    f,
-                    "row index {} out of range for alias '{}' (len {})",
-                    index, alias, len
-                )
-            }
-            ResponseError::Deserialize { alias, source } => {
-                write!(
-                    f,
-                    "failed to deserialize record for alias '{}': {}",
-                    alias, source
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for ResponseError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            ResponseError::Deserialize { source, .. } => Some(source),
-            _ => None,
-        }
-    }
 }
 
 // ============================================================================

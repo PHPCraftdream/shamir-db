@@ -420,7 +420,7 @@ impl TableManager {
                     staged,
                 )
                 .await
-                .map_err(|e| DbError::Internal(e.to_string()))?;
+                .map_err(DbError::from)?;
 
             let last_ranked = match result {
                 IndexResult::Ranked(r) => r,

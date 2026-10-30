@@ -15,7 +15,7 @@ use shamir_storage::types::Store;
 
 use super::super::read_only_views::{TableDataStoreReadView, TableInfoStoreReadView};
 use super::super::TableManager;
-use super::super::{panic_payload_message, table_token_for, AUTO_VERIFY_EVERY_N_WRITES};
+use super::super::{panic_payload_message, AUTO_VERIFY_EVERY_N_WRITES};
 
 impl TableManager {
     /// Increment the watchdog counter for `n` writes. Every
@@ -130,7 +130,7 @@ impl TableManager {
     /// Stage 4 implementation: deterministic hash of `self.name`.
     /// Stage 5 will replace with real repo-level interner ID.
     pub fn table_token(&self) -> u64 {
-        table_token_for(&self.name)
+        self.token
     }
 
     pub(crate) fn data_store(&self) -> &Arc<dyn Store> {

@@ -175,7 +175,7 @@ fn graph_runner_preserves_deadline_with_pending_blocking_task() {
     drop(guard);
 }
 
-// ----- deterministic RNG (mirrors sq8_tests::Lcg lineage) -----------------
+// ----- deterministic RNG (historical high-32 fixture mapping) --------------
 
 struct Lcg {
     state: u64,

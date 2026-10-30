@@ -19,6 +19,7 @@ shamir-collections = { path = "../shamir-collections" }
 shamir-query-builder-macros = { path = "../shamir-query-builder-macros" }
 shamir-types = { path = "../shamir-types", default-features = false }
 serde = { version = "1.0.217", features = ["derive"] }
+thiserror = "=2.0.21"
 rmp-serde = "1"
 
 [dev-dependencies]

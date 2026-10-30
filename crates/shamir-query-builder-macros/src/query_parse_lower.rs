@@ -1,20 +1,21 @@
-//! Lowering half of the `q!` macro — see [`crate::query_parse`] for the parse half and the module docs.
+//! Lowering half of the `q!` macro — see [`crate::query_parse`] for parsing.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::Ident;
 
-use crate::filter_lower;
+use crate::filter_lower::{ident_literal, segments_to_field_path};
 use crate::query_parse::{
     CallMacro, CallName, DeleteMacro, DocMapAst, FieldPathAst, InsertMacro, OrderDir, QMacro,
     QueryMacro, SelectItemAst, TableArg, TableName, UpdateMacro, UpsertMacro,
 };
+use crate::{filter_lower, MacroInput};
 
 // ── code generation ────────────────────────────────────────────────
 
 impl QueryMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         // -- from --
         let mut chain = match &self.table {
             TableArg::Simple(name) => {
@@ -26,21 +27,21 @@ impl QueryMacro {
                     TableName::Lit(lit) => quote! { #lit },
                 };
                 quote! {
-                    ::shamir_query_builder::query::Query::from(#table_expr)
+                    #root::query::Query::from(#table_expr)
                 }
             }
             TableArg::Repo { repo, table } => {
                 let r = unraw(repo);
                 let t = unraw(table);
                 quote! {
-                    ::shamir_query_builder::query::Query::with_repo(#r, #t)
+                    #root::query::Query::with_repo(#r, #t)
                 }
             }
         };
 
         // -- where --
         if let Some(expr) = &self.where_clause {
-            let filter_ts = filter_lower::lower_expr(expr)?;
+            let filter_ts = filter_lower::lower_expr(expr, root)?;
             chain = quote! { #chain.where_(#filter_ts) };
         }
 
@@ -51,7 +52,7 @@ impl QueryMacro {
                 .iter()
                 .map(|field| match field {
                     FieldPathAst::Idents(names) => {
-                        let names: Vec<String> = names.iter().map(unraw).collect();
+                        let names: Vec<_> = names.iter().map(ident_literal).collect();
                         quote! { vec![#(#names.to_owned()),*] }
                     }
                     FieldPathAst::Lit(lit) => quote! {
@@ -64,7 +65,7 @@ impl QueryMacro {
 
         // -- having --
         if let Some(expr) = &self.having_clause {
-            let filter_ts = filter_lower::lower_expr(expr)?;
+            let filter_ts = filter_lower::lower_expr(expr, root)?;
             chain = quote! { #chain.having(#filter_ts) };
         }
 
@@ -73,7 +74,7 @@ impl QueryMacro {
             let items: Vec<TokenStream2> = self
                 .select_items
                 .iter()
-                .map(lower_select_item)
+                .map(|item| lower_select_item(item, root))
                 .collect::<syn::Result<Vec<_>>>()?;
             chain = quote! { #chain.select([#( #items ),*]) };
         }
@@ -113,7 +114,7 @@ impl QueryMacro {
 
 // ── write code generation ──────────────────────────────────────────
 
-/// Emit tokens for a `DocMapAst` → `::shamir_query_builder::write::doc().set(k, v)...`.
+/// Emit tokens for a `DocMapAst` through the builder's `write::doc()`.
 ///
 /// `Doc::set` is fallible (RV-QUERY-BUILDER-20D9732A), so each `.set` is
 /// followed by an unwrap that panics with the typed error — the macro layer
@@ -121,7 +122,7 @@ impl QueryMacro {
 ///
 /// **Note:** over-deep literal values (nesting beyond `MAX_FILTER_DEPTH`)
 /// therefore PANIC at macro construction.
-fn lower_doc_map(doc: &DocMapAst) -> TokenStream2 {
+fn lower_doc_map(doc: &DocMapAst, root: &TokenStream2) -> TokenStream2 {
     let entries: Vec<TokenStream2> = doc
         .pairs
         .iter()
@@ -133,7 +134,7 @@ fn lower_doc_map(doc: &DocMapAst) -> TokenStream2 {
             }
         })
         .collect();
-    quote! { ::shamir_query_builder::write::doc() #(#entries)* }
+    quote! { #root::write::doc() #(#entries)* }
 }
 
 /// Emit a table constructor prefix for write builders.
@@ -162,17 +163,17 @@ fn write_table_tokens(
 }
 
 impl InsertMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         let chain = write_table_tokens(
             &self.table,
-            quote! { ::shamir_query_builder::write::Insert },
+            quote! { #root::write::Insert },
             quote! { into },
         );
         let rows: Vec<TokenStream2> = self
             .docs
             .iter()
             .map(|doc| {
-                let doc_ts = lower_doc_map(doc);
+                let doc_ts = lower_doc_map(doc, root);
                 quote! { .row(#doc_ts) }
             })
             .collect();
@@ -181,16 +182,16 @@ impl InsertMacro {
 }
 
 impl UpdateMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
-            quote! { ::shamir_query_builder::write::Update },
+            quote! { #root::write::Update },
             quote! { table },
         );
-        let doc_ts = lower_doc_map(&self.set_doc);
+        let doc_ts = lower_doc_map(&self.set_doc, root);
         chain = quote! { #chain.set(#doc_ts) };
         if let Some(expr) = &self.where_clause {
-            let filter_ts = filter_lower::lower_expr(expr)?;
+            let filter_ts = filter_lower::lower_expr(expr, root)?;
             chain = quote! { #chain.where_(#filter_ts) };
         }
         Ok(quote! { #chain.build() })
@@ -198,34 +199,34 @@ impl UpdateMacro {
 }
 
 impl DeleteMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
-            quote! { ::shamir_query_builder::write::Delete },
+            quote! { #root::write::Delete },
             quote! { from_table },
         );
-        let filter_ts = filter_lower::lower_expr(&self.where_clause)?;
+        let filter_ts = filter_lower::lower_expr(&self.where_clause, root)?;
         chain = quote! { #chain.where_(#filter_ts) };
         Ok(quote! { #chain.build() })
     }
 }
 
 impl UpsertMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         let mut chain = write_table_tokens(
             &self.table,
-            quote! { ::shamir_query_builder::write::Upsert },
+            quote! { #root::write::Upsert },
             quote! { table },
         );
-        let key_ts = lower_doc_map(&self.key_doc);
-        let val_ts = lower_doc_map(&self.value_doc);
+        let key_ts = lower_doc_map(&self.key_doc, root);
+        let val_ts = lower_doc_map(&self.value_doc, root);
         chain = quote! { #chain.key(#key_ts).value(#val_ts) };
         Ok(quote! { #chain.build() })
     }
 }
 
 impl CallMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         let name_expr = match &self.name {
             CallName::Ident(id) => {
                 let s = unraw(id);
@@ -243,14 +244,12 @@ impl CallMacro {
             None => quote! { "main" },
         };
 
-        // Expansion paths must live under `::shamir_query_builder` only
-        // (RV-QUERY-BUILDER-MACROS-36328515); the builder re-exports the
-        // `shamir-query-types` items as `#[doc(hidden)]`.
+        // The builder facade re-exports the query types used here.
         Ok(quote! {
-            ::shamir_query_builder::CallOp {
+            #root::CallOp {
                 call: ::std::string::String::from(#name_expr),
                 params: ::std::vec![#(
-                    ::std::convert::Into::<::shamir_query_builder::FilterValue>::into(#args)
+                    ::std::convert::Into::<#root::FilterValue>::into(#args)
                 ),*],
                 repo: ::std::string::String::from(#repo_expr),
             }
@@ -259,14 +258,14 @@ impl CallMacro {
 }
 
 impl QMacro {
-    pub(crate) fn to_tokens(&self) -> syn::Result<TokenStream2> {
+    pub(crate) fn to_tokens(&self, root: &TokenStream2) -> syn::Result<TokenStream2> {
         match self {
-            QMacro::Read(qm) => qm.to_tokens(),
-            QMacro::Insert(im) => im.to_tokens(),
-            QMacro::Update(um) => um.to_tokens(),
-            QMacro::Delete(dm) => dm.to_tokens(),
-            QMacro::Upsert(um) => um.to_tokens(),
-            QMacro::Call(cm) => cm.to_tokens(),
+            QMacro::Read(qm) => qm.to_tokens(root),
+            QMacro::Insert(im) => im.to_tokens(root),
+            QMacro::Update(um) => um.to_tokens(root),
+            QMacro::Delete(dm) => dm.to_tokens(root),
+            QMacro::Upsert(um) => um.to_tokens(root),
+            QMacro::Call(cm) => cm.to_tokens(root),
         }
     }
 }
@@ -274,14 +273,7 @@ impl QMacro {
 fn field_path_tokens(field: &FieldPathAst) -> TokenStream2 {
     match field {
         FieldPathAst::Lit(lit) => quote! { #lit },
-        FieldPathAst::Idents(segments) if segments.len() == 1 => {
-            let name = unraw(&segments[0]);
-            quote! { #name }
-        }
-        FieldPathAst::Idents(segments) => {
-            let names: Vec<String> = segments.iter().map(unraw).collect();
-            quote! { [#( #names ),*] }
-        }
+        FieldPathAst::Idents(segments) => segments_to_field_path(segments),
     }
 }
 
@@ -290,23 +282,23 @@ fn unraw(ident: &Ident) -> String {
     value.strip_prefix("r#").unwrap_or(&value).to_owned()
 }
 
-fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
+fn lower_select_item(item: &SelectItemAst, root: &TokenStream2) -> syn::Result<TokenStream2> {
     match item {
         SelectItemAst::All => Ok(quote! {
-            ::shamir_query_builder::select::all()
+            #root::select::all()
         }),
 
         SelectItemAst::Field { segments, alias } => {
             let field = segments_to_field_path(segments);
             match alias {
                 Some(a) => {
-                    let alias_str = unraw(a);
+                    let alias_str = ident_literal(a);
                     Ok(quote! {
-                        ::shamir_query_builder::select::field_as(#field, #alias_str)
+                        #root::select::field_as(#field, #alias_str)
                     })
                 }
                 None => Ok(quote! {
-                    ::shamir_query_builder::select::field(#field)
+                    #root::select::field(#field)
                 }),
             }
         }
@@ -314,10 +306,10 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
         SelectItemAst::CountAll { alias } => {
             let alias_str = alias
                 .as_ref()
-                .map(unraw)
-                .unwrap_or_else(|| "count".to_owned());
+                .map(ident_literal)
+                .unwrap_or_else(|| syn::LitStr::new("count", proc_macro2::Span::call_site()));
             Ok(quote! {
-                ::shamir_query_builder::select::count_all(#alias_str)
+                #root::select::count_all(#alias_str)
             })
         }
 
@@ -327,10 +319,10 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
             alias,
         } => {
             let field = segments_to_field_path(field_segments);
-            let alias_str = unraw(alias);
+            let alias_str = ident_literal(alias);
             let func_ident = syn::Ident::new(func, proc_macro2::Span::call_site());
             Ok(quote! {
-                ::shamir_query_builder::select::#func_ident(#field, #alias_str)
+                #root::select::#func_ident(#field, #alias_str)
             })
         }
 
@@ -340,35 +332,24 @@ fn lower_select_item(item: &SelectItemAst) -> syn::Result<TokenStream2> {
             alias,
         } => {
             let field = segments_to_field_path(field_segments);
-            let alias_str = unraw(alias);
+            let alias_str = ident_literal(alias);
             Ok(quote! {
-                ::shamir_query_builder::select::agg_fn(#name, #field, #alias_str)
+                #root::select::agg_fn(#name, #field, #alias_str)
             })
         }
 
         SelectItemAst::Func { name, args, alias } => {
-            let alias_str = unraw(alias);
+            let alias_str = ident_literal(alias);
             Ok(quote! {
-                ::shamir_query_builder::select::func(#alias_str, #name, #args)
+                #root::select::func(#alias_str, #name, #args)
             })
         }
     }
 }
 
-/// Convert a vector of ident segments into a field path token stream.
-fn segments_to_field_path(segments: &[Ident]) -> TokenStream2 {
-    if segments.len() == 1 {
-        let s = unraw(&segments[0]);
-        quote! { #s }
-    } else {
-        let strings: Vec<String> = segments.iter().map(unraw).collect();
-        quote! { [#( #strings ),*] }
-    }
-}
-
-pub fn q_macro(input: TokenStream) -> TokenStream {
-    let qm = syn::parse_macro_input!(input as QMacro);
-    match qm.to_tokens() {
+pub(crate) fn q_macro(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as MacroInput<QMacro>);
+    match input.value.to_tokens(&input.root) {
         Ok(ts) => ts.into(),
         Err(e) => e.to_compile_error().into(),
     }
@@ -377,5 +358,6 @@ pub fn q_macro(input: TokenStream) -> TokenStream {
 /// Render a parsed [`QMacro`] to its expansion string (unit-test helper).
 #[cfg(test)]
 pub(crate) fn render(qm: &QMacro) -> syn::Result<String> {
-    qm.to_tokens().map(|ts| ts.to_string())
+    qm.to_tokens(&quote! { ::shamir_query_builder })
+        .map(|ts| ts.to_string())
 }

@@ -95,6 +95,12 @@ fn marker_wire_shapes_and_round_trips() {
             expected
         );
         let bytes = rmp_serde::to_vec_named(&wire).unwrap();
+        let buffered: shamir_types::types::value::QueryValue =
+            rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            FilterValue::try_from_query_value_ref(&buffered).unwrap(),
+            expected
+        );
         assert_eq!(
             rmp_serde::from_slice::<FilterValue>(&bytes).unwrap(),
             expected

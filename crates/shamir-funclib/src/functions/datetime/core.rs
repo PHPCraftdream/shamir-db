@@ -15,7 +15,7 @@
 //!   canonical `Int` epoch-millis.
 //! - `now` and `age` read the wall clock and are therefore **non-deterministic
 //!   and impure** (`pure:false, deterministic:false`); every other function is
-//!   `pure + deterministic` and may back a functional index.
+//!   `pure + deterministic` but remains unvouched for indexing.
 //! - Errors are machine codes only: `"out_of_range"` for un-representable
 //!   timestamps, `"parse"` for an unparseable RFC-3339 string, a strftime
 //!   pattern containing an invalid specifier, or an input string that does

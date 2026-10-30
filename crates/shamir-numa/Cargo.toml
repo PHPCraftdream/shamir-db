@@ -23,7 +23,7 @@ arc-swap = "1.7"
 thiserror = "2.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# /sys probe + sched_setaffinity / sched_getcpu for LinuxTopology (Фаза 1b).
+# /sys probe + sched_setaffinity / sched_getcpu for LinuxTopology.
 libc = "0.2"
 # Fx-hashed map for the CPU->node reverse index (workspace hasher policy —
 # see CLAUDE.md "Fx hash"); bare std::collections::HashMap is disallowed.

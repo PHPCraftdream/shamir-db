@@ -7,7 +7,44 @@ use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Repo;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::InnerValue;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+#[tokio::test]
+async fn cached_token_preserves_hash_across_construction_clone_and_reopen() {
+    let repo = InMemoryRepo::new();
+    let data = repo.store_get("__data__token".to_string()).await.unwrap();
+    let info = repo.store_get("__info__token".to_string()).await.unwrap();
+    let name = "token";
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    let expected = hasher.finish();
+    let mut table = TableManager::create(name.to_string(), data.clone(), info.clone())
+        .await
+        .unwrap();
+    assert_eq!(table.table_token(), expected);
+    assert_eq!(table.clone().table_token(), expected);
+    let reopened = TableManager::create(name.to_string(), data.clone(), info.clone())
+        .await
+        .unwrap();
+    assert_eq!(reopened.table_token(), expected);
+    let domain = crate::repo::RepoWriteDomain::new("repo".to_string());
+    let permit = domain.admit().await.unwrap();
+    let admitted = TableManager::create_with_domain_admitted(
+        name.to_string(),
+        data,
+        info,
+        Arc::clone(&domain),
+        &permit,
+    )
+    .await
+    .unwrap();
+    assert_eq!(admitted.table_token(), expected);
+    // Test-only mutation discriminates a cached token from rehashing the name.
+    table.name = "different".to_string();
+    assert_eq!(table.table_token(), expected);
+    assert_eq!(table.clone().table_token(), expected);
+}
 
 #[tokio::test]
 async fn test_table_manager_creation() {
@@ -33,6 +70,9 @@ async fn test_table_manager_creation() {
 
     let ctx = TableManager::new("test".to_string(), table, interner, counter, index_manager);
     assert_eq!(ctx.name(), "test");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "test".hash(&mut hasher);
+    assert_eq!(ctx.table_token(), hasher.finish());
 }
 
 #[tokio::test]

@@ -716,7 +716,7 @@ impl BatchOp {
         self.is_write_leaf()
     }
 
-    fn is_write_leaf(&self) -> bool {
+    pub(crate) fn is_write_leaf(&self) -> bool {
         match self {
             // ----- pure reads / introspection (write = false) -------------
             BatchOp::Read(_) => false,

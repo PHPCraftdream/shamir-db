@@ -1,12 +1,8 @@
 //! Representation-transparent small-buffer key — `KeyBytes`.
 //!
-//! Implements step 1 of
-//! `docs/dev-artifacts/design/record-key-128-migration-plan.md` (task #491): a new
-//! representation-transparent small-string-optimized byte-string type,
-//! fully tested, **with zero call-site changes anywhere else** in the
-//! workspace. `crates/shamir-storage/src/types.rs`'s `pub type
-//! RecordKey = Bytes;` alias is left untouched; this type lands
-//! alongside it, currently unused by production code.
+//! `RecordKey` is an alias for this type, used by storage backends.
+//! Equality, ordering, hashing, and serialization must remain independent
+//! of the inline or heap representation.
 //!
 //! # Design (see plan doc §3)
 //!
@@ -51,9 +47,8 @@
 //! `Bytes` today (`serde_bytes::Bytes::new(b).serialize(s)` /
 //! `serde_bytes::ByteBuf::deserialize`). This makes the on-disk /
 //! on-wire encoding of a key independent of whether it is currently
-//! represented inline or as a heap `Bytes`, so a later step that flips
-//! `type RecordKey = Bytes` to `type RecordKey = KeyBytes` introduces
-//! no WAL/disk format change (mandatory test category 3 guards this
+//! represented inline or as a heap `Bytes`. The `RecordKey = KeyBytes`
+//! migration introduces no WAL/disk format change (mandatory test category 3 guards this
 //! byte-for-byte against `Bytes` under both `bincode` and `rmp-serde`).
 //!
 //! # No derived `PartialEq`/`Eq`/`PartialOrd`/`Ord`/`Hash`

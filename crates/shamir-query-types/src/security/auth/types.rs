@@ -188,9 +188,8 @@ pub struct CreateUserOp {
     /// database) may create it without global-admin rights. See [`User`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<String>,
-    /// Hex HMAC over `b"create_user\0<username>"` — the password is NEVER
-    /// part of the canonical input (it must not enter an HMAC input or be
-    /// logged). See `DropUserOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding; the password
+    /// is excluded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }
@@ -212,9 +211,8 @@ impl std::fmt::Debug for CreateUserOp {
 #[serde(deny_unknown_fields)]
 pub struct DropUserOp {
     pub drop_user: String,
-    /// Hex-encoded HMAC-SHA256 over `b"drop_user\0<username>"`
-    /// keyed by the session HMAC key. See admin types for the key
-    /// derivation. Required at runtime; the field is `Option`
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding, keyed by
+    /// the session HMAC key. Required at runtime; the field is `Option`
     /// purely to allow types to roundtrip uncheckedly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
@@ -230,7 +228,7 @@ pub struct DropUserOp {
 pub struct GrantRoleOp {
     pub grant_role: String,
     pub user: String,
-    /// Hex HMAC over `b"grant_role\0<role>\0<user>"`. See `DropUserOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     /// The single most dangerous op in the system (e.g. granting
     /// `superuser` to an attacker-controlled account) — always gated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +241,7 @@ pub struct GrantRoleOp {
 pub struct RevokeRoleOp {
     pub revoke_role: String,
     pub user: String,
-    /// Hex HMAC over `b"revoke_role\0<role>\0<user>"`. See `GrantRoleOp`.
+    /// Hex HMAC-SHA256 over the canonical v2 operation encoding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hmac: Option<String>,
 }

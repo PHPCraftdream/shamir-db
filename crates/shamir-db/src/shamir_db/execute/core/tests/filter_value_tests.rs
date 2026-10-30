@@ -24,6 +24,28 @@ use crate::types::common::TMap;
 
 use crate::shamir_db::execute::helpers::filter_value_to_query_value;
 
+#[test]
+fn malformed_foreign_key_actions_do_not_round_trip() {
+    let interner = shamir_types::core::interner::Interner::new();
+    for field in ["on_delete", "on_update"] {
+        for bad in [QueryValue::Str("unknown".into()), QueryValue::Int(1)] {
+            let mut fk = crate::types::common::new_map();
+            fk.insert("ref_table".into(), QueryValue::Str("parents".into()));
+            fk.insert("ref_field".into(), QueryValue::Str("id".into()));
+            fk.insert(field.into(), bad);
+            let mut rule = crate::types::common::new_map();
+            rule.insert("foreign_key".into(), QueryValue::Map(fk));
+            let schema = QueryValue::List(vec![QueryValue::Map(rule)]);
+            assert!(
+                crate::shamir_db::execute::schema_codec::dto_list_from_catalogue(
+                    &schema, &interner
+                )
+                .is_err()
+            );
+        }
+    }
+}
+
 // ── literals (regression: never part of the collapse) ────────────────────────
 
 #[test]

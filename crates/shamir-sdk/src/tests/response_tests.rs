@@ -3,6 +3,30 @@ use crate::error::ErrorKind;
 use crate::Value;
 
 #[test]
+fn rv_sdk_17bc120c_723f5fd2_response_range_boundaries() {
+    let check = __rt::validate_response_range;
+    assert!(check(1, 3, 4).is_ok());
+    assert!(check(4, 0, 4).is_ok());
+    assert!(check(-1, 1, 64).is_err());
+    assert!(check(1, -1, 64).is_err());
+    assert!(check(i32::MIN, 1, u32::MAX as u64).is_err());
+    assert!(check(1, i32::MIN, u32::MAX as u64).is_err());
+    assert!(check(0, 1, 64).is_err());
+    assert!(check(4, 1, 4).is_err());
+    assert!(check(i32::MAX, 1, 1u64 << 31).is_ok());
+    assert!(check(i32::MAX, 2, u32::MAX as u64).is_err());
+    assert!(check(i32::MAX, 0, 16).is_err());
+}
+
+#[test]
+fn rv_sdk_723f5fd2_guest_request_fields_checked() {
+    assert_eq!(__rt::guest_buffer_fields(1, 3).unwrap(), (1, 3));
+    assert!(__rt::guest_buffer_fields(1usize << 31, 0).is_err());
+    assert!(__rt::guest_buffer_fields(1, 1usize << 31).is_err());
+    assert!(__rt::guest_buffer_fields(i32::MAX as usize, 2).is_err());
+}
+
+#[test]
 fn rv_sdk_8190492d_response_buffer_reclaimed_after_decode() {
     assert_eq!(__rt::live_response_bytes(), 0);
     let packed = rmp_serde::to_vec(&Value::Str("ok".into())).expect("encode");

@@ -7,6 +7,18 @@ use std::sync::Arc;
 use std::thread;
 
 #[test]
+fn max_published_id_sees_reverse_publication_gap() {
+    let interner = Interner::new();
+    interner.touch_with_id("low", 2).unwrap();
+    interner
+        .touch_with_id_with_test_hook("high", 30, |_| {
+            assert_eq!(interner.max_published_id(), 30);
+        })
+        .unwrap();
+    assert_eq!(interner.max_published_id(), 30);
+}
+
+#[test]
 fn test_concurrent_interning() {
     let interner = Arc::new(Interner::new());
     let mut handles = vec![];

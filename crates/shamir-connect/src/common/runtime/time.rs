@@ -3,6 +3,7 @@
 //! Per spec §15.5 [NORMATIVE]: all wire-level and persisted timestamps use
 //! `u64` unix nanos with `_ns` suffix. NTP-disciplined clock required.
 
+use crate::common::error::EnvironmentError;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Unix timestamp in nanoseconds.
@@ -12,14 +13,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct UnixNanos(pub u64);
 
 impl UnixNanos {
-    /// Current wall-clock time as unix nanos.
-    ///
-    /// Panics if the system clock is before 1970 (extremely unlikely).
+    /// Legacy wrapper; panics when the clock is invalid or out of range.
     pub fn now() -> Self {
-        let dur = SystemTime::now()
+        Self::try_now().expect("system clock unavailable")
+    }
+
+    /// Read and validate the system clock.
+    pub fn try_now() -> Result<Self, EnvironmentError> {
+        Self::try_from_system_time(SystemTime::now())
+    }
+
+    /// Convert a system time without truncation.
+    pub fn try_from_system_time(time: SystemTime) -> Result<Self, EnvironmentError> {
+        let duration = time
             .duration_since(UNIX_EPOCH)
-            .expect("system clock before unix epoch");
-        Self(dur.as_nanos() as u64)
+            .map_err(|_| EnvironmentError::ClockBeforeEpoch)?;
+        let nanos =
+            u64::try_from(duration.as_nanos()).map_err(|_| EnvironmentError::ClockOverflow)?;
+        Ok(Self(nanos))
     }
 
     /// Unwrap to raw `u64`.

@@ -8,8 +8,7 @@ fn default_repo() -> String {
 
 /// Start an online table migration to a different storage engine.
 ///
-/// Requires `hmac` over
-/// `b"start_migration\0<db>\0<src_repo>\0<table>\0<dst_repo>\0<dst_engine>"`.
+/// Requires a hex HMAC-SHA256 tag over the canonical v2 operation encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartMigrationOp {
@@ -26,7 +25,7 @@ pub struct StartMigrationOp {
 
 /// Commit a running migration — performs cutover + swap.
 ///
-/// Requires `hmac` over `b"commit_migration\0<db>\0<migration_id>"`.
+/// Requires a hex HMAC-SHA256 tag over the canonical v2 operation encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommitMigrationOp {
@@ -37,7 +36,7 @@ pub struct CommitMigrationOp {
 
 /// Rollback a running (or committed-but-not-dropped) migration.
 ///
-/// Requires `hmac` over `b"rollback_migration\0<db>\0<migration_id>"`.
+/// Requires a hex HMAC-SHA256 tag over the canonical v2 operation encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RollbackMigrationOp {

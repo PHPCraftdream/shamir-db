@@ -10,7 +10,7 @@
 use crate::common::changepw::{
     build_auth_message_cp, ChangePwAuthMessageInputs, CHANGEPW_CHALLENGE_TTL_NS,
 };
-use crate::common::crypto::{constant_time_eq, hmac_sha256, random_array, sha256, StoredKey};
+use crate::common::crypto::{constant_time_eq, hmac_sha256, sha256, try_random_array, StoredKey};
 use crate::common::error::{Error, Result};
 use crate::common::kdf_params::KdfParams;
 use crate::common::types::limits;
@@ -58,8 +58,11 @@ pub fn start_change_password_challenge(
     user_kdf_params: KdfParams,
     client_nonce_cp: [u8; 32],
     now_ns: u64,
-) -> ChangePwChallengeView {
-    let server_nonce_cp = random_array::<32>();
+) -> Result<ChangePwChallengeView> {
+    if client_nonce_cp.iter().all(|&b| b == 0) {
+        return Err(Error::InvalidInput("client_nonce_cp all-zero"));
+    }
+    let server_nonce_cp = try_random_array::<32>()?;
     let pending = PendingChangePwChallenge {
         server_nonce_cp,
         client_nonce_cp,
@@ -73,19 +76,13 @@ pub fn start_change_password_challenge(
         .pending_changepw_challenge
         .store(Some(Arc::new(pending)));
 
-    ChangePwChallengeView {
+    Ok(ChangePwChallengeView {
         server_nonce_cp,
         salt: user_salt,
         kdf_params: user_kdf_params,
-    }
+    })
 }
 
-/// Step 2: server verifies the request and (on success) returns the new
-/// material to persist. The pending challenge is cleared regardless of
-/// outcome (single-use), and on success ALL sessions of the user must be
-/// killed by the caller (`session_store.snapshot_by_user(user_id)` then
-/// remove + bump `tickets_invalid_before_ns = now_ns`).
-///
 /// Helper: kill all sessions for a user after a successful changePassword.
 ///
 /// Per spec §12.5.3: "Все сессии юзера убиваются (включая текущую) И
@@ -105,9 +102,7 @@ pub fn finalize_change_password(store: &SessionStore, user_id: &[u8; 16], now_ns
 /// proof check on `proof_old`, and return the new (salt, stored_key,
 /// server_key, kdf_params) the caller should persist.
 ///
-/// `session_id` is passed explicitly because [`Session`] does not carry its
-/// own id (the caller looking up the session in [`SessionStore`] already has
-/// it).
+/// The supplied session ID must match the session-owned identifier.
 ///
 /// The pending challenge is popped atomically (single-use) regardless of
 /// outcome.
@@ -129,6 +124,9 @@ pub fn verify_change_password_request_with_sid(
     // The `Guard` pins the slot; we deref through it to the `Option<Arc<_>>`.
     let pending_guard = session.pending_changepw_challenge.swap(None);
     let pending: &PendingChangePwChallenge = pending_guard.as_deref().ok_or(Error::AuthFailed)?;
+    if !constant_time_eq(session_id, &session.session_id) {
+        return Err(Error::AuthFailed);
+    }
     // TTL check with a backwards-clock guard (RV-CONNECT-C9066D95): a
     // reversed timestamp (`now_ns < issued_at_ns`) must be rejected, never
     // wrap through unsigned underflow into a huge "elapsed" value.
@@ -141,7 +139,7 @@ pub fn verify_change_password_request_with_sid(
 
     let am_cp = build_auth_message_cp(ChangePwAuthMessageInputs {
         username: &NormalizedUsername::from_normalized_unchecked(session.username.clone()),
-        session_id,
+        session_id: &session.session_id,
         client_nonce_cp: &pending.client_nonce_cp,
         server_nonce_cp: &pending.server_nonce_cp,
         salt: &user_salt,

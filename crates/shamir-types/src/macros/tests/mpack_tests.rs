@@ -336,3 +336,13 @@ fn mpack_escape_set() {
     let expected = QueryValue::Set(s.clone());
     assert_eq!(mpack!(@ QueryValue::Set(s)), expected);
 }
+
+#[test]
+fn object_negative_literals_at_all_positions() {
+    let value = mpack!({"first": -1, "middle": -2.5, "nested": {"x": -3,}, "last": -4});
+    assert_eq!(value.get_path("first"), Some(&QueryValue::Int(-1)));
+    assert_eq!(value.get_path("middle"), Some(&QueryValue::F64(-2.5)));
+    assert_eq!(value.get_path("nested.x"), Some(&QueryValue::Int(-3)));
+    assert_eq!(value.get_path("last"), Some(&QueryValue::Int(-4)));
+    assert_eq!(mpack!({"x": -1,}), mpack!({"x": -1}));
+}

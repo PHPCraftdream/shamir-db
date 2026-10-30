@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::FilterValue;
 
+/// Path into a record field tree.
+pub type FieldPath = Vec<String>;
+
 /// Expression operator for $expr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

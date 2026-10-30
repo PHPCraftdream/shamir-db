@@ -1,32 +1,10 @@
-//! Precomputed `one_of` membership set (audit group 25 / defect 2).
-//!
-//! `FieldRule::check_one_of` used to run a LINEAR `Vec::contains` scan over
-//! the user-supplied `one_of` allowed-list, fed by an ALLOCATING
-//! `materialize_as_qv` call — both **per record**. For an unbounded
-//! allowed-list this is O(records × list_len), and the allocation (owned
-//! `String`/`Vec<u8>` clones for `Str`/`Bin` scalars) is pure waste when all
-//! we need is a membership test.
-//!
-//! `OneOfSet` is built ONCE, at [`SchemaValidator::new`](crate::validator::schema::SchemaValidator::new)
-//! time, from `Constraints::one_of`. Per-record membership is then an O(1)
-//! hash lookup for the scalar kinds that dominate real `one_of` usage
-//! (Null/Bool/Int/Str/Bin), probed with a **borrowed** `ScalarRef` — no
-//! `materialize_as_qv` allocation on the hot path. `Str`/`Bin` lookups use
-//! `std`'s `Borrow<str>`/`Borrow<[u8]>` impls for `String`/`Vec<u8>`, so
-//! `TFxSet<String>::contains(&str)` and `TFxSet<Vec<u8>>::contains(&[u8])`
-//! never allocate.
-//!
-//! `F64` and any non-scalar value (`Dec`/`Big`/`List`/`Set`/`Map`) fall back
-//! to a linear scan over `residual` — `one_of` on those kinds is rare in
-//! practice (enums are overwhelmingly int/str/bool), and `F64` specifically
-//! cannot share the `Int` bucket's exact-bits hashing without diverging from
-//! `QueryValue`'s existing `==`-based equality (NaN/±0.0 semantics).
+//! Precomputed `one_of` membership with the same equality as `QueryValue`.
 
 use shamir_collections::TFxSet;
 use shamir_types::record_view::ScalarRef;
 use shamir_types::types::value::QueryValue;
 
-/// Precomputed, bucketed `one_of` allowed-value set. See module docs.
+/// Precomputed, bucketed `one_of` allowed-value set.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OneOfSet {
     null: bool,
@@ -34,17 +12,13 @@ pub(crate) struct OneOfSet {
     ints: TFxSet<i64>,
     strs: TFxSet<String>,
     bins: TFxSet<Vec<u8>>,
-    /// Everything that isn't cheaply bucketable: `F64` (equality semantics
-    /// would diverge from bit-hashing) plus any non-scalar `QueryValue`
-    /// (`Dec`/`Big`/`List`/`Set`/`Map`) reachable via the `materialize`
-    /// fallback. Linear-scanned; expected to stay empty/tiny in practice.
-    residual: Vec<QueryValue>,
+    // Value's Hash canonicalizes NaNs and signed zero recursively, and uses
+    // order-independent hashes for sets and maps, matching Value::PartialEq.
+    residual: TFxSet<QueryValue>,
 }
 
 impl OneOfSet {
-    /// Build a set from `Constraints::one_of`. Returns `None` when `allowed`
-    /// is absent or empty — mirrors the original "no `one_of` constraint"
-    /// skip in `check_one_of`.
+    /// An absent or empty list means no constraint.
     pub(crate) fn build(allowed: Option<&[QueryValue]>) -> Option<Self> {
         let allowed = allowed.filter(|vals| !vals.is_empty())?;
         let mut set = OneOfSet::default();
@@ -63,13 +37,20 @@ impl OneOfSet {
                 QueryValue::Bin(b) => {
                     set.bins.insert(b.clone());
                 }
-                other => set.residual.push(other.clone()),
+                other => {
+                    set.residual.insert(other.clone());
+                }
             }
         }
         Some(set)
     }
 
-    /// Zero-allocation membership probe for a borrowed scalar.
+    #[cfg(test)]
+    pub(crate) fn residual_len(&self) -> usize {
+        self.residual.len()
+    }
+
+    /// Probe scalar values without allocating.
     pub(crate) fn contains_scalar(&self, sr: ScalarRef<'_>) -> bool {
         match sr {
             ScalarRef::Null => self.null,
@@ -77,16 +58,19 @@ impl OneOfSet {
             ScalarRef::Int(i) => self.ints.contains(&i),
             ScalarRef::Str(s) => self.strs.contains(s),
             ScalarRef::Bin(b) => self.bins.contains(b),
-            ScalarRef::F64(f) => self
-                .residual
-                .iter()
-                .any(|qv| matches!(qv, QueryValue::F64(rf) if *rf == f)),
+            ScalarRef::F64(f) => self.residual.contains(&QueryValue::F64(f)),
         }
     }
 
-    /// Membership probe for an already-materialized (non-scalar) value —
-    /// the `Dec`/`Big`/`List`/`Set`/`Map` fallback path.
+    /// Probe a value produced by the existing materialization conversion.
     pub(crate) fn contains_materialized(&self, qv: &QueryValue) -> bool {
-        self.residual.contains(qv)
+        match qv {
+            QueryValue::Null => self.null,
+            QueryValue::Bool(b) => self.bools.contains(b),
+            QueryValue::Int(i) => self.ints.contains(i),
+            QueryValue::Str(s) => self.strs.contains(s.as_str()),
+            QueryValue::Bin(b) => self.bins.contains(b.as_slice()),
+            other => self.residual.contains(other),
+        }
     }
 }

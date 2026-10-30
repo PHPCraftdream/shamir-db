@@ -154,6 +154,12 @@ impl SystemStore {
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
         let query = crate::query::read::ReadQuery::new(TABLE_FUNCTION_FOLDERS);
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(crate::DbError::Internal(format!(
+                "corrupt function folder catalogue: {} corrupt records",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()
@@ -173,6 +179,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(crate::DbError::Internal(format!(
+                "corrupt function folder {path_key} catalogue: {} corrupt records",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()

@@ -26,7 +26,7 @@
 //! 5. server CAS-validates and creates the user
 //! ```
 
-use crate::common::crypto::{constant_time_eq, random_array, sha256, StoredKey};
+use crate::common::crypto::{constant_time_eq, sha256, try_random_array, StoredKey};
 use crate::common::error::{Error, Result};
 use crate::common::kdf_params::KdfParams;
 use crate::server::user_record::UserRecord;
@@ -125,7 +125,7 @@ impl BootstrapState {
         if g.bootstrap_token_hash.is_some() {
             return Err(Error::BootstrapFailed);
         }
-        let token: [u8; 32] = random_array::<32>();
+        let token: [u8; 32] = try_random_array::<32>()?;
         g.bootstrap_token_hash = Some(sha256(&token));
         g.bootstrap_token_expires_at_ns = Some(now_ns.saturating_add(ttl_ns));
         Ok(Zeroizing::new(token))

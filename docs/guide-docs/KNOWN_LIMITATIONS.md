@@ -414,6 +414,17 @@ artifact).
 
 ## 3. Indexes
 
+- **Persisted hash identity is collision-prone and not portable.** Unique
+  indexes and full-text postings identify values or tokens by hashes alone;
+  writers can craft collisions, including false unique conflicts. This is an
+  accepted risk, not collision resolution. Functional Map hashes also depend
+  on insertion order. Drop and recreate affected indexes (`DROP` + `CREATE`)
+  when identity compatibility is lost. A portable, collision-resolving index
+  identity v2 and its versioned migration are deferred. Sources:
+  `crates/shamir-index/src/base_index/infra/index_keys.rs`,
+  `crates/shamir-index/src/fts/tokenizer.rs`,
+  `crates/shamir-index/src/backends/functional_backend.rs`.
+
 - **`unique` and `sorted` are mutually exclusive on the same index.**
   Creating an index with both `unique: true` and `sorted: true` is
   rejected. See

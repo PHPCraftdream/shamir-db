@@ -3,15 +3,159 @@
 //! These tests exercise only serialisation/deserialisation of
 //! [`WireResumeInit`] and [`WireResumeOk`] — no server required.
 
-use crate::client::resume_wire_exchange;
 use crate::client::transport::{WireResumeInit, WireResumeOk, WireResumeProofOk};
 use crate::client::verify_resume_identity_proof;
+use crate::client::{
+    read_resume_frame, resume_wire_exchange, serialize_resume, take_resume_wipes,
+    ProtectedResumeBuffer,
+};
 use crate::error::ClientError;
+use serde::ser::{Error as _, SerializeSeq};
+use serde::{Serialize, Serializer};
 use shamir_connect::common::crypto::Ed25519Keypair;
 use shamir_transport_tcp::framing::{read_frame, write_frame, MAX_FRAME_SIZE_DEFAULT};
 use std::error::Error as _;
 use std::time::Duration;
 use tokio::io::{duplex, split, AsyncReadExt, AsyncWriteExt};
+use zeroize::Zeroizing;
+
+struct FailingResumeSerialization;
+
+impl Serialize for FailingResumeSerialization {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut seq = serializer.serialize_seq(Some(2))?;
+        seq.serialize_element(&serde_bytes::Bytes::new(&[0xa5; 32]))?;
+        Err(S::Error::custom("injected error after ticket"))
+    }
+}
+
+#[test]
+fn resume_partial_serialization_wipes_live_scratch() {
+    take_resume_wipes();
+    assert!(serialize_resume(&FailingResumeSerialization, 128).is_err());
+    let events = take_resume_wipes();
+    assert!(events
+        .iter()
+        .any(|&(len, had_secret, wiped)| len >= 32 && had_secret && wiped));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn secure_resume_early_error_wipes_real_input_ticket() {
+    take_resume_wipes();
+    let result = crate::Client::resume_secure(crate::SecureResumeOptions {
+        addr: "127.0.0.1:1".parse().unwrap(),
+        server_name: "invalid name with spaces".into(),
+        ticket: Zeroizing::new(vec![0xa5; 71]),
+        pinned_hash: [0; 32],
+    })
+    .await;
+    assert!(result.is_err());
+    assert!(take_resume_wipes().contains(&(71, true, true)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn legacy_resume_early_error_wipes_real_input_ticket() {
+    take_resume_wipes();
+    let result = crate::Client::resume(crate::ResumeOptions {
+        addr: "127.0.0.1:1".parse().unwrap(),
+        server_name: "invalid name with spaces".into(),
+        ticket: vec![0xa6; 72],
+        pinned_hash: [0; 32],
+    })
+    .await;
+    assert!(result.is_err());
+    assert!(take_resume_wipes().contains(&(72, true, true)));
+}
+
+#[test]
+fn secure_resume_options_consume_legacy_ticket_without_copying() {
+    let ticket = vec![0xa5; 64];
+    let address = ticket.as_ptr();
+    let options = crate::ResumeOptions {
+        addr: "127.0.0.1:1".parse().unwrap(),
+        server_name: "localhost".into(),
+        ticket,
+        pinned_hash: [0; 32],
+    };
+    let secure: crate::SecureResumeOptions = options.into();
+    assert_eq!(secure.ticket.as_ptr(), address);
+    assert_eq!(&secure.ticket[..], &[0xa5; 64]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_exchange_cancellation_while_sending_wipes_ticket() {
+    take_resume_wipes();
+    let (_proof_writer, mut reader) = duplex(64);
+    let (mut writer, _undrained) = duplex(1);
+    let mut exchange = Box::pin(resume_wire_exchange(
+        &mut reader,
+        &mut writer,
+        ProtectedResumeBuffer(Zeroizing::new(vec![0xe4; 74])),
+        [0; 32],
+        [0; 32],
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut exchange)
+            .await
+            .is_err()
+    );
+    drop(exchange);
+    assert!(take_resume_wipes().contains(&(74, true, true)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_exchange_cancellation_wipes_input_ticket() {
+    take_resume_wipes();
+    let (mut client_reader, mut client_writer, mut c2s, _s2c) = wire_halves();
+    let mut exchange = Box::pin(resume_wire_exchange(
+        &mut client_reader,
+        &mut client_writer,
+        ProtectedResumeBuffer(Zeroizing::new(vec![0xe3; 73])),
+        [0; 32],
+        [0; 32],
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut exchange)
+            .await
+            .is_err()
+    );
+    let proof = read_frame(&mut c2s, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
+    assert!(!proof.is_empty());
+    drop(exchange);
+    assert!(take_resume_wipes().contains(&(73, true, true)));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_frame_wipes_live_storage_on_success_error_and_cancellation() {
+    take_resume_wipes();
+    let (mut writer, mut reader) = duplex(64);
+    writer
+        .write_all(&[0, 0, 0, 4, 11, 22, 33, 44])
+        .await
+        .unwrap();
+    let frame = match read_resume_frame(&mut reader).await {
+        Ok(frame) => frame,
+        Err(err) => panic!("frame: {err}"),
+    };
+    assert_eq!(&frame[..], &[11, 22, 33, 44]);
+    drop(frame);
+    assert_eq!(take_resume_wipes(), vec![(4, true, true)]);
+
+    let (mut writer, mut reader) = duplex(64);
+    writer.write_all(&[0, 0, 0, 4, 11, 22]).await.unwrap();
+    drop(writer);
+    assert!(read_resume_frame(&mut reader).await.is_err());
+    assert_eq!(take_resume_wipes(), vec![(4, true, true)]);
+
+    let (mut writer, mut reader) = duplex(64);
+    writer.write_all(&[0, 0, 0, 4, 11, 22]).await.unwrap();
+    let mut future = Box::pin(read_resume_frame(&mut reader));
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut future)
+        .await
+        .is_err());
+    drop(future);
+    assert_eq!(take_resume_wipes(), vec![(4, true, true)]);
+}
 
 /// FAILS IF the client's pre-auth frame cap (MAX_PRE_AUTH_FRAME in
 /// connect.rs challenge/auth_ok/proof_ok/ok reads) is reverted to
@@ -36,7 +180,13 @@ async fn rv_transport_tcp_5940216b_oversized_preauth_frame_is_rejected() {
     let (mut r, mut w) = split(client_side);
     let result = tokio::time::timeout(
         SEND_BUDGET,
-        crate::client::resume_wire_exchange(&mut r, &mut w, vec![0xAA; 64], [0u8; 32], [0u8; 32]),
+        crate::client::resume_wire_exchange(
+            &mut r,
+            &mut w,
+            ProtectedResumeBuffer(Zeroizing::new(vec![0xAA; 64])),
+            [0u8; 32],
+            [0u8; 32],
+        ),
     )
     .await
     .expect("oversized pre-auth read must not hang");
@@ -68,12 +218,41 @@ struct WireResumeInitDeser {
     binding_mode: u8,
 }
 
+#[derive(Serialize)]
+struct OwningResumeInit {
+    #[serde(with = "serde_bytes")]
+    ticket: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    client_nonce: Vec<u8>,
+    binding_mode: u8,
+}
+
+#[test]
+fn resume_init_borrowed_serialization_matches_owning_wire_bytes() {
+    for len in [0, 64, 255, 256] {
+        let ticket = vec![0xa5; len];
+        let nonce = vec![0x42; 32];
+        let borrowed = WireResumeInit {
+            ticket: &ticket,
+            client_nonce: nonce.clone(),
+            binding_mode: 2,
+        };
+        let protected = serialize_resume(&borrowed, len + 128).unwrap();
+        let owning = OwningResumeInit {
+            ticket,
+            client_nonce: nonce,
+            binding_mode: 2,
+        };
+        assert_eq!(&protected[..], &rmp_serde::to_vec(&owning).unwrap());
+    }
+}
+
 #[test]
 fn resume_init_roundtrip() {
     let ticket = vec![0xAA_u8; 64];
     let nonce = vec![0x01_u8; 32];
     let frame = WireResumeInit {
-        ticket: ticket.clone(),
+        ticket: &ticket,
         client_nonce: nonce.clone(),
         binding_mode: 2,
     };
@@ -84,6 +263,28 @@ fn resume_init_roundtrip() {
     assert_eq!(decoded.ticket, ticket);
     assert_eq!(decoded.client_nonce, nonce);
     assert_eq!(decoded.binding_mode, 2);
+}
+
+#[test]
+fn rotated_ticket_success_wipes_its_actual_allocation() {
+    let bytes = [0x94, 0xc4, 0x00, 0x01, 0xc4, 0x02, 0xaa, 0xbb, 0x02];
+    take_resume_wipes();
+    let ok: WireResumeOk = rmp_serde::from_slice(&bytes).unwrap();
+    assert_eq!(&ok.resumption_ticket[..], &[0xaa, 0xbb]);
+    drop(ok);
+    assert!(take_resume_wipes().contains(&(2, true, true)));
+}
+
+#[test]
+fn resume_ok_rejects_truncated_ticket_and_invalid_later_field() {
+    // Array encoding: session id, expiry, bin ticket, then expiry. The first
+    // input truncates the ticket; the second fails after the ticket was read.
+    let truncated = [0x94, 0xc4, 0x00, 0x01, 0xc4, 0x04, 0xaa, 0xbb];
+    assert!(rmp_serde::from_slice::<WireResumeOk>(&truncated).is_err());
+    take_resume_wipes();
+    let invalid_later = [0x94, 0xc4, 0x00, 0x01, 0xc4, 0x02, 0xaa, 0xbb, 0xc0];
+    assert!(rmp_serde::from_slice::<WireResumeOk>(&invalid_later).is_err());
+    assert!(take_resume_wipes().contains(&(2, true, true)));
 }
 
 #[test]
@@ -114,7 +315,7 @@ fn resume_ok_roundtrip() {
 
     assert_eq!(ok.session_id, session_id);
     assert_eq!(ok.expires_at_ns, 999_000_000_000);
-    assert_eq!(ok.resumption_ticket, ticket);
+    assert_eq!(&ok.resumption_ticket[..], &ticket[..]);
     assert_eq!(ok.resumption_expires_at_ns, 888_000_000_000);
 }
 
@@ -269,8 +470,9 @@ fn wire_halves() -> (
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn rv_client_de75addd_substituted_identity_never_receives_ticket() {
+    take_resume_wipes();
     let server_kp = Ed25519Keypair::from_seed(&[7u8; 32]);
     let attacker = Ed25519Keypair::from_seed(&[9u8; 32]);
     let pinned_hash = shamir_connect::common::crypto::sha256(&server_kp.public_bytes());
@@ -311,7 +513,7 @@ async fn rv_client_de75addd_substituted_identity_never_receives_ticket() {
         resume_wire_exchange(
             &mut client_reader,
             &mut client_writer,
-            ticket,
+            ProtectedResumeBuffer(Zeroizing::new(ticket)),
             pinned_hash,
             exporter,
         ),
@@ -327,6 +529,7 @@ async fn rv_client_de75addd_substituted_identity_never_receives_ticket() {
         "substituted identity must fail specifically with ServerIdentityChanged"
     );
 
+    assert!(take_resume_wipes().contains(&(64, true, true)));
     // Release the test-held halves so the server's read sees the true EOF.
     drop(client_reader);
     drop(client_writer);
@@ -371,7 +574,7 @@ async fn rv_client_de75addd_bad_signature_never_receives_ticket() {
         resume_wire_exchange(
             &mut client_reader,
             &mut client_writer,
-            ticket,
+            ProtectedResumeBuffer(Zeroizing::new(ticket)),
             pinned_hash,
             exporter,
         ),
@@ -385,8 +588,9 @@ async fn rv_client_de75addd_bad_signature_never_receives_ticket() {
     server.await.expect("emulated server task panicked");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn rv_client_de75addd_valid_proof_proceeds_and_sends_ticket_once() {
+    take_resume_wipes();
     let server_kp = Ed25519Keypair::from_seed(&[7u8; 32]);
     let pinned_hash = shamir_connect::common::crypto::sha256(&server_kp.public_bytes());
     let exporter = [0x22u8; 32];
@@ -415,6 +619,7 @@ async fn rv_client_de75addd_valid_proof_proceeds_and_sends_ticket_once() {
         let frame = read_frame(&mut c2s, MAX_FRAME_SIZE_DEFAULT)
             .await
             .expect("resume init frame must follow a valid proof");
+        let init_len = frame.len();
         let resume_init: WireResumeInitDeser =
             rmp_serde::from_slice(&frame).expect("decode ResumeInit");
         assert_eq!(resume_init.ticket, server_ticket, "ticket must match input");
@@ -435,21 +640,32 @@ async fn rv_client_de75addd_valid_proof_proceeds_and_sends_ticket_once() {
         write_frame(&mut s2c, &rmp_serde::to_vec(&ok).expect("encode resume ok"))
             .await
             .expect("send resume ok");
+        init_len
     });
 
     let resumed = resume_wire_exchange(
         &mut client_reader,
         &mut client_writer,
-        ticket,
+        ProtectedResumeBuffer(Zeroizing::new(ticket)),
         pinned_hash,
         exporter,
     )
     .await
     .expect("valid-proof exchange must succeed");
+    let init_len = server.await.expect("emulated server task panicked");
+    let wipes = take_resume_wipes();
+    assert!(wipes.contains(&(64, true, true)), "input ticket wiped");
+    assert!(
+        wipes.contains(&(init_len, true, true)),
+        "serialized scratch wiped"
+    );
     assert_eq!(resumed.session_id, [0x42_u8; 32]);
     assert_eq!(resumed.expires_at_ns, 999_000_000_000);
     assert_eq!(
-        resumed.resumption_ticket.as_deref(),
+        resumed
+            .resumption_ticket
+            .as_ref()
+            .map(|ticket| ticket.as_slice()),
         Some(&[0xDD_u8; 48][..])
     );
     assert_eq!(resumed.resumption_expires_at_ns, Some(888_000_000_000));
@@ -457,7 +673,6 @@ async fn rv_client_de75addd_valid_proof_proceeds_and_sends_ticket_once() {
 
     drop(client_reader);
     drop(client_writer);
-    server.await.expect("emulated server task panicked");
 }
 
 /// RV-CLIENT-35A189A9: typed error sources must survive. The pre-fix code
@@ -476,7 +691,7 @@ async fn rv_client_35a189a9_resume_eof_preserves_source() {
     let err = match resume_wire_exchange(
         &mut client_reader,
         &mut client_writer,
-        vec![0xAA; 48],
+        ProtectedResumeBuffer(Zeroizing::new(vec![0xAA; 48])),
         [0; 32],
         [0; 32],
     )

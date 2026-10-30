@@ -97,6 +97,11 @@ pub async fn resolve_host(host: &str, port: u16) -> Result<SocketAddr, ClientErr
 ///
 /// Obtain the ticket and `pinned_hash` from a prior [`Client::connect`] via
 /// [`Client::resumption_ticket`] and [`Client::server_pub_key_pin`].
+///
+/// The ticket is an ordinary `Vec`: retaining these options, or dropping the
+/// future returned by `Client::resume` before its first poll, does not wipe it.
+/// Prefer [`SecureResumeOptions`] for retained or cancellable options. Rust-owned
+/// protection does not erase copies held by JavaScript or other foreign callers.
 pub struct ResumeOptions {
     /// Server address (host:port).
     pub addr: SocketAddr,
@@ -107,6 +112,31 @@ pub struct ResumeOptions {
     /// `SHA256(server_ed25519_pub_key)` pinned during the initial connection.
     /// The resumed session will carry the same pin.
     pub pinned_hash: [u8; 32],
+}
+
+/// Resumption options whose Rust-owned ticket is wiped on drop, including
+/// when retained or when an unpolled resume future is cancelled. This does not
+/// wipe copies owned by JavaScript or other foreign callers.
+pub struct SecureResumeOptions {
+    /// Server address (host:port).
+    pub addr: SocketAddr,
+    /// SNI hostname for TLS.
+    pub server_name: String,
+    /// Resumption ticket, wiped when its owner is dropped.
+    pub ticket: Zeroizing<Vec<u8>>,
+    /// Pinned SHA256 of the server identity key.
+    pub pinned_hash: [u8; 32],
+}
+
+impl From<ResumeOptions> for SecureResumeOptions {
+    fn from(opts: ResumeOptions) -> Self {
+        Self {
+            addr: opts.addr,
+            server_name: opts.server_name,
+            ticket: Zeroizing::new(opts.ticket),
+            pinned_hash: opts.pinned_hash,
+        }
+    }
 }
 
 /// Connection parameters for [`Client::connect_local`] — local IPC

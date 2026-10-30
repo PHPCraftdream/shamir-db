@@ -85,7 +85,7 @@
 //! `Cargo.toml`/dependencies).
 
 use crate::runtime::error::{FnResult, FunctionError};
-use shamir_proc_tree::{supervise, ProcessTree, TeardownFaults};
+use shamir_proc_tree::{supervise_bounded, ProcessTree, TeardownFaults};
 use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -616,6 +616,97 @@ pub async fn compile_rust_source_blocking(source: &str) -> FnResult<Vec<u8>> {
 /// Exposed primarily for tests, which can pass a tiny timeout to exercise
 /// the kill path without waiting minutes for a pathological build.
 pub fn compile_rust_source_with_timeout(source: &str, timeout: Duration) -> FnResult<Vec<u8>> {
+    compile_rust_source_with_options(source, timeout, &RustCompileOptions::default())
+}
+
+/// Host-controlled compilation configuration. The SDK directory must be trusted
+/// and contain a version-matched source bundle. For the shipped SDK, copy its
+/// containing Cargo workspace and sibling crates: shamir-sdk-macros,
+/// shamir-query-builder, shamir-query-builder-macros, shamir-query-types,
+/// shamir-collections and shamir-types. Workspace inheritance must resolve.
+/// Cargo checks manifest versions and remaining transitive dependencies; registry
+/// dependency resolution retains the existing Cargo cache/network behavior.
+#[derive(Debug, Clone, Default)]
+pub struct RustCompileOptions {
+    pub sdk_dir: Option<PathBuf>,
+}
+
+/// Compile on a blocking worker using explicit host-controlled options.
+pub async fn compile_rust_source_blocking_with_options(
+    source: &str,
+    timeout: Duration,
+    options: RustCompileOptions,
+) -> FnResult<Vec<u8>> {
+    let source = source.to_owned();
+    crate::wasm::run_compile_blocking(move || {
+        compile_rust_source_with_options(&source, timeout, &options)
+    })
+    .await
+}
+
+pub(crate) fn resolve_sdk_dir(
+    options: &RustCompileOptions,
+    env_dir: Option<std::ffi::OsString>,
+) -> FnResult<PathBuf> {
+    let path = options
+        .sdk_dir
+        .clone()
+        .or_else(|| env_dir.map(PathBuf::from))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("shamir-sdk")
+        });
+    let resolved = path.canonicalize().map_err(|error| FunctionError::Compute(format!("SDK directory {} unavailable: {error}; set RustCompileOptions::sdk_dir or SHAMIR_WASM_SDK_DIR to a trusted version-matched SDK source bundle", path.display())))?;
+    for required in [
+        resolved.join("Cargo.toml"),
+        resolved.join("src/lib.rs"),
+        resolved.join("../shamir-sdk-macros/Cargo.toml"),
+        resolved.join("../shamir-query-builder/Cargo.toml"),
+        resolved.join("../shamir-query-builder-macros/Cargo.toml"),
+        resolved.join("../shamir-query-types/Cargo.toml"),
+        resolved.join("../shamir-collections/Cargo.toml"),
+        resolved.join("../shamir-types/Cargo.toml"),
+    ] {
+        if !required.is_file() {
+            return Err(FunctionError::Compute(format!("invalid SDK bundle: missing {}; install the matching SDK and sibling path dependencies or set SHAMIR_WASM_SDK_DIR", required.display())));
+        }
+    }
+    Ok(resolved)
+}
+
+pub(crate) fn manifest_path(path: &std::path::Path) -> FnResult<String> {
+    let path = path.to_str().ok_or_else(|| FunctionError::Compute("SDK path is not UTF-8 and cannot be represented in Cargo.toml; choose a UTF-8 SDK path".into()))?;
+    #[cfg(windows)]
+    let normalized = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
+    };
+    #[cfg(windows)]
+    let path = normalized.as_str();
+    let mut escaped = String::from("\"");
+    for ch in path.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => escaped.push_str(&format!("\\u{:04X}", c as u32)),
+            c => escaped.push(c),
+        }
+    }
+    escaped.push('"');
+    Ok(escaped)
+}
+
+/// Compile with explicit SDK configuration and timeout.
+pub fn compile_rust_source_with_options(
+    source: &str,
+    timeout: Duration,
+    options: &RustCompileOptions,
+) -> FnResult<Vec<u8>> {
     // 1. Forbidden-macro scan — reject before we ever spawn cargo.
     if let Some(macro_name) = find_forbidden_macro(source) {
         return Err(FunctionError::Compute(format!(
@@ -624,6 +715,8 @@ pub fn compile_rust_source_with_timeout(source: &str, timeout: Duration) -> FnRe
         )));
     }
 
+    let sdk_path = resolve_sdk_dir(options, std::env::var_os("SHAMIR_WASM_SDK_DIR"))?;
+    let sdk_display = manifest_path(&sdk_path)?;
     check_toolchain()?;
 
     let tmpdir =
@@ -637,21 +730,6 @@ pub fn compile_rust_source_with_timeout(source: &str, timeout: Duration) -> FnRe
             .as_millis()
     );
 
-    // Compute absolute path to shamir-sdk from this crate's manifest dir.
-    let sdk_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("shamir-sdk")
-        .canonicalize()
-        .map_err(|e| FunctionError::Compute(format!("resolving sdk path: {e}")))?;
-
-    // On Windows, canonicalize() returns a UNC path (\\?\C:\...) that Cargo
-    // cannot parse in a path dependency. Strip the prefix.
-    let sdk_display = {
-        let s = sdk_path.display().to_string();
-        // Strip UNC prefix \\?\ if present.
-        s.strip_prefix(r"\\?\").unwrap_or(&s).replace('\\', "/")
-    };
-
     // Write Cargo.toml — includes a size-optimised release profile so the
     // guest .wasm is as small as possible (P3 of WASM_SLIMMING.md).
     let cargo_toml = format!(
@@ -664,7 +742,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-shamir-sdk = {{ path = "{sdk_display}" }}
+shamir-sdk = {{ path = {sdk_display}, version = "={}" }}
 
 [profile.release]
 opt-level = "z"
@@ -673,6 +751,7 @@ codegen-units = 1
 panic = "abort"
 strip = true
 "#,
+        env!("CARGO_PKG_VERSION"),
     );
     fs::write(tmpdir.path().join("Cargo.toml"), cargo_toml)
         .map_err(|e| FunctionError::Compute(format!("write Cargo.toml: {e}")))?;
@@ -692,22 +771,14 @@ strip = true
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    cmd.args([
-        "build",
-        "--target",
-        "wasm32-unknown-unknown",
-        "--release",
-        "--manifest-path",
-        tmpdir.path().join("Cargo.toml").to_str().unwrap_or(""),
-        "--target-dir",
-        target_dir.to_str().unwrap_or(""),
-    ])
-    // CRIT-6 part A: scrub the environment. `env_clear` drops every
-    // inherited variable; we then re-add only the allowlist built by
-    // `scrubbed_env` (PATH, temp dirs, cargo/rustup homes). No host
-    // secret can reach the guest compiler.
-    .env_clear()
-    .env_remove("CARGO_TARGET_DIR");
+    cargo_build_args(&mut cmd, &tmpdir.path().join("Cargo.toml"), &target_dir);
+    cmd
+        // CRIT-6 part A: scrub the environment. `env_clear` drops every
+        // inherited variable; we then re-add only the allowlist built by
+        // `scrubbed_env` (PATH, temp dirs, cargo/rustup homes). No host
+        // secret can reach the guest compiler.
+        .env_clear()
+        .env_remove("CARGO_TARGET_DIR");
     for (k, v) in scrubbed_env() {
         cmd.env(k, v);
     }
@@ -715,15 +786,24 @@ strip = true
     let (mut child, tree) = ProcessTree::spawn(&mut cmd)
         .map_err(|e| FunctionError::Compute(format!("cargo invocation: {e}")))?;
     let (out, err) = (child.stdout.take(), child.stderr.take());
-    let output = supervise(child, tree, out, err, timeout, TeardownFaults::default())
-        .map_err(FunctionError::Compute)?;
+    let output = supervise_bounded(
+        child,
+        tree,
+        out,
+        err,
+        timeout,
+        TeardownFaults::default(),
+        64 * 1024,
+    )
+    .map_err(FunctionError::Compute)?;
     let status = output.status;
     let stderr = output.stderr;
 
     if !status.success() {
         let stderr_text = String::from_utf8_lossy(&stderr);
         return Err(FunctionError::Compute(format!(
-            "cargo build failed:\n{stderr_text}"
+            "cargo build failed using SDK bundle {} (expected shamir-sdk version {}):\n{stderr_text}\nEnsure the trusted bundle includes its containing workspace and all sibling path dependencies, with matching versions.",
+            sdk_path.display(), env!("CARGO_PKG_VERSION")
         )));
     }
 
@@ -741,9 +821,21 @@ strip = true
 
     // P2 of WASM_SLIMMING.md — optional `wasm-opt -Oz` post-processing.
     // If binaryen is not installed the unoptimized artifact is returned as-is.
-    let wasm_bytes = maybe_wasm_opt(&wasm_bytes, tmpdir.path())?;
+    let wasm_bytes = maybe_wasm_opt(wasm_bytes, tmpdir.path())?;
 
     Ok(wasm_bytes)
+}
+
+pub(crate) fn cargo_build_args(
+    cmd: &mut Command,
+    manifest: &std::path::Path,
+    target: &std::path::Path,
+) {
+    cmd.args(["build", "--target", "wasm32-unknown-unknown", "--release"])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target);
 }
 
 /// Run `wasm-opt -Oz` on the compiled WASM if binaryen is available.
@@ -751,23 +843,31 @@ strip = true
 /// Returns the optimised bytes when `wasm-opt` is found and succeeds, or the
 /// original `wasm_bytes` unchanged when the tool is absent or fails.  Never
 /// returns an error from wasm-opt itself — graceful degradation only.
-fn maybe_wasm_opt(wasm_bytes: &[u8], work_dir: &std::path::Path) -> FnResult<Vec<u8>> {
+fn maybe_wasm_opt(wasm_bytes: Vec<u8>, work_dir: &std::path::Path) -> FnResult<Vec<u8>> {
+    maybe_wasm_opt_with_tool(wasm_bytes, work_dir, std::ffi::OsStr::new("wasm-opt"))
+}
+
+pub(crate) fn maybe_wasm_opt_with_tool(
+    wasm_bytes: Vec<u8>,
+    work_dir: &std::path::Path,
+    tool: &std::ffi::OsStr,
+) -> FnResult<Vec<u8>> {
     // Quick PATH check — same style as `check_toolchain`.
-    let probe = Command::new("wasm-opt").arg("--version").output();
+    let probe = Command::new(tool).arg("--version").output();
     if probe.is_err() || !probe.as_ref().unwrap().status.success() {
         log::debug!(
             "wasm-opt not found on PATH — skipping post-optimisation (WASM returned as-is)"
         );
-        return Ok(wasm_bytes.to_vec());
+        return Ok(wasm_bytes);
     }
 
     let input = work_dir.join("raw.wasm");
     let output = work_dir.join("opt.wasm");
 
-    fs::write(&input, wasm_bytes)
+    fs::write(&input, &wasm_bytes)
         .map_err(|e| FunctionError::Compute(format!("write raw.wasm for wasm-opt: {e}")))?;
 
-    let result = Command::new("wasm-opt")
+    let result = Command::new(tool)
         .args(["-Oz"])
         .arg(&input)
         .arg("-o")
@@ -791,11 +891,11 @@ fn maybe_wasm_opt(wasm_bytes: &[u8], work_dir: &std::path::Path) -> FnResult<Vec
                 "wasm-opt exited with {}: {stderr} — using unoptimised WASM",
                 o.status
             );
-            Ok(wasm_bytes.to_vec())
+            Ok(wasm_bytes)
         }
         Err(e) => {
             log::warn!("wasm-opt invocation failed: {e} — using unoptimised WASM");
-            Ok(wasm_bytes.to_vec())
+            Ok(wasm_bytes)
         }
     }
 }

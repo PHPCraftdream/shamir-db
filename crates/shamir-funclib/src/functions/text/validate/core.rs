@@ -17,7 +17,7 @@
 //!   patterns compiled once per call site via [`std::sync::LazyLock`].
 //! - `matches` compiles a user-supplied pattern; an invalid regex yields
 //!   `ScalarError("bad_pattern")`.
-//! - All functions are pure + deterministic (indexable).
+//! - All functions are pure + deterministic but remain unvouched for indexing.
 
 use crate::functions::text::regex_cache;
 use crate::registry::{arg_i64, arg_str, v_bool, FnEntry, ScalarError, ScalarRegistry};

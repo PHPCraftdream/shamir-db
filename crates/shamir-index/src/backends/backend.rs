@@ -7,6 +7,7 @@
 use crate::descriptor::IndexDescriptor;
 use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
+use shamir_storage::error::DbError;
 use shamir_storage::types::Store;
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
@@ -98,6 +99,57 @@ pub enum IndexResult {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+struct ContextualIoError {
+    message: String,
+    #[source]
+    source: std::io::Error,
+}
+
+/// Add DDL context without changing the database error variant or I/O source.
+pub fn contextualize_db_error(error: DbError, context: String) -> DbError {
+    match error {
+        DbError::NotFound(_) => DbError::NotFound(context),
+        DbError::KeyExists(_) => DbError::KeyExists(context),
+        DbError::DuplicateKey(_) => DbError::DuplicateKey(context),
+        DbError::Storage(_) => DbError::Storage(context),
+        DbError::RepoRequiresReopen(_) => DbError::RepoRequiresReopen(context),
+        DbError::Config(_) => DbError::Config(context),
+        DbError::Codec(_) => DbError::Codec(context),
+        DbError::Internal(_) => DbError::Internal(context),
+        DbError::Validation(_) => DbError::Validation(context),
+        DbError::Function(_) => DbError::Function(context),
+        DbError::ValidatorRejected(_) => DbError::ValidatorRejected(context),
+        DbError::ValidatorInvalid(_) => DbError::ValidatorInvalid(context),
+        DbError::Conflict(_) => DbError::Conflict(context),
+        DbError::VersionConflict(_) => DbError::VersionConflict(context),
+        DbError::IndexDrainInProgress(_) => DbError::IndexDrainInProgress(context),
+        DbError::AtomicBatchUnsupported(_) => DbError::AtomicBatchUnsupported(context),
+        DbError::Io(source) => DbError::Io(std::io::Error::new(
+            source.kind(),
+            ContextualIoError {
+                message: context,
+                source,
+            },
+        )),
+        structured @ (DbError::UniqueIndexCreationFailed(..)
+        | DbError::WriteCommittedVisibilityPending { .. }
+        | DbError::AsOfFutureVersion { .. }
+        | DbError::AsOfReopenRequired { .. }
+        | DbError::VisibilityFutureVersion { .. }
+        | DbError::VisibilityWaitInvalid { .. }
+        | DbError::AsOfVisibilityTimeout { .. }
+        | DbError::MigrationFrozen { .. }
+        | DbError::ResyncRequired(_)
+        | DbError::FollowerStateRefused { .. }
+        | DbError::SubscriptionCatalogue(_)
+        | DbError::ReplicationDestinationBound { .. }
+        | DbError::ReplicationDestinationQuarantined { .. }
+        | DbError::InternerQuotaExceeded { .. }) => structured,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
 pub enum IndexError {
     #[error("storage error: {0}")]
     Storage(String),
@@ -107,6 +159,34 @@ pub enum IndexError {
     NotFound(String),
     #[error("backend error: {0}")]
     Backend(String),
+    /// The original database error, including its source chain.
+    #[error("storage error: {0}")]
+    Db(#[source] Box<shamir_storage::error::DbError>),
+    #[error("n-gram {limit_kind} budget exceeded: limit {limit}, observed {observed}")]
+    TokenBudgetExceeded {
+        limit_kind: &'static str,
+        limit: u64,
+        observed: u64,
+    },
+}
+
+impl From<shamir_storage::error::DbError> for IndexError {
+    fn from(error: shamir_storage::error::DbError) -> Self {
+        Self::Db(Box::new(error))
+    }
+}
+
+impl From<IndexError> for shamir_storage::error::DbError {
+    fn from(error: IndexError) -> Self {
+        match error {
+            IndexError::Db(source) => *source,
+            other @ (IndexError::Storage(_)
+            | IndexError::TypeMismatch(_)
+            | IndexError::NotFound(_)
+            | IndexError::Backend(_)
+            | IndexError::TokenBudgetExceeded { .. }) => Self::Internal(other.to_string()),
+        }
+    }
 }
 
 #[async_trait]
@@ -246,11 +326,11 @@ pub trait IndexBackend: Send + Sync {
     /// tokenizer, so query terms match the way documents were indexed
     /// (stemming, n-grams, etc.). Default mirrors the legacy behaviour
     /// (whitespace split + lowercase) for backends without a real tokenizer.
-    fn tokenize_query(&self, query: &str) -> Vec<u64> {
-        query
+    fn tokenize_query(&self, query: &str) -> Result<Vec<u64>, IndexError> {
+        Ok(query
             .split_whitespace()
             .map(|w| crate::tokenizer::token_hash(&w.to_lowercase()))
-            .collect()
+            .collect())
     }
 
     /// Apply in-memory-only ops (e.g. BumpFtsStats). Called by

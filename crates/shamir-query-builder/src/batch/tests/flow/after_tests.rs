@@ -2,7 +2,10 @@
 
 use crate::batch::{Batch, BuildError};
 use crate::ddl;
+use crate::query::Query;
+use crate::wire::ToWire;
 use crate::write::{self, doc};
+use shamir_types::types::value::QueryValue;
 
 #[test]
 fn after_sets_field_on_dependent_entry() {
@@ -21,9 +24,6 @@ fn after_sets_field_on_dependent_entry() {
 
 #[test]
 fn after_wire_contains_after_for_dependent_only() {
-    use crate::wire::ToWire;
-    use shamir_types::types::value::QueryValue;
-
     let mut b = Batch::new();
     b.id(1);
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
@@ -137,8 +137,6 @@ fn try_build_catches_after_path_tail() {
 
 #[test]
 fn query_after_registers_dependency_equivalent_to_post_hoc_after() {
-    use crate::query::Query;
-
     let mut b = Batch::new();
     let mk = b.create_table("mk_tbl", ddl::create_table("users").repo("main"));
     let rows = b.query_after("rows", Query::from("users"), &[&mk]);
@@ -190,9 +188,6 @@ fn insert_after_registers_dependency_equivalent_to_post_hoc_after() {
 // conflict.
 #[test]
 fn query_after_and_batch_after_coexist_without_naming_conflict() {
-    use crate::query::Query;
-    use shamir_types::types::value::QueryValue;
-
     // `Query::after` — keyset pagination cursor.
     let q = Query::from("users")
         .order_by_asc("score")

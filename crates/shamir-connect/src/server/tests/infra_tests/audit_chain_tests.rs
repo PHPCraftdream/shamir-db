@@ -5,6 +5,23 @@ use crate::server::audit_chain::{
 };
 use std::sync::Arc;
 
+#[test]
+fn audit_error_display_reports_context() {
+    assert_eq!(
+        AuditError::SequenceGap {
+            at: 2,
+            expected: 3,
+            found: 5
+        }
+        .to_string(),
+        "sequence gap at 2: expected 3, found 5"
+    );
+    assert_eq!(
+        AuditError::Persistence("disk full".into()).to_string(),
+        "audit persistence: disk full"
+    );
+}
+
 // Independently derived HMAC-SHA256 outputs: the stdlib Python recipe in
 // IMPLEMENTATION_GUIDE.md (never the code under test) produced these values.
 const RU4_V1_EXPECTED_HMAC: Option<&str> =

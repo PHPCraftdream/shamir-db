@@ -151,7 +151,7 @@ Resumption tickets из browser path **не могут upgrade** в native sessi
 | RFC 9106 (Argon2) | Compliant | Argon2id v1.3 (0x13) |
 | RFC 5869 (HKDF) | Compliant | HKDF-SHA256 для anti-enumeration fake values |
 | RFC 8032 (Ed25519) | Compliant | `verify_strict`: reject non-canonical S, small-order pub, mixed-cofactor |
-| RFC 9266 (Channel Binding via TLS Exporter) | Compliant | Label `EXPORTER-ShamirDB-AUTH-v1`, ctx empty, L=32 |
+| Project-specific TLS exporter channel binding | ShamirDB §4.2 | Label `EXPORTER-ShamirDB-AUTH-v1`, ctx empty, L=32; not RFC 9266 `tls-exporter` |
 | RFC 5077 (Session Tickets) | Inspired | Self-contained AES-256-GCM encrypted ticket с AAD binding |
 | RFC 8265 (PRECIS) | Compliant | UsernameCaseMapped profile (NFC + casefold + ban control/format) |
 | NIST SP 800-63B | Mostly compliant | Min 12 chars (>NIST 8); salt 128 bits (>32). Argon2id не в NIST allow-list (FIPS profile в ROADMAP) |

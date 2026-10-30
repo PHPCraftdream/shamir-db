@@ -12,6 +12,7 @@
 
 use crate::codecs::interned::merge_storage_bytes;
 use crate::core::interner::InternerKey;
+use crate::record_view::RecordView;
 use crate::types::common::TMap;
 use crate::types::value::InnerValue;
 use bytes::Bytes;
@@ -293,7 +294,6 @@ fn merge_overwrite_middle_position_preserved() {
 
     // Extra structural check: verify key order in the output.
     // Decode the merged bytes and confirm entry order: 0, 1, 2.
-    use crate::record_view::RecordView;
     let view = RecordView::new(&got).expect("valid merged bytes");
     let ids: Vec<u64> = view.fields().map(|(k, _)| k.id()).collect();
     assert_eq!(ids, vec![0, 1, 2], "key order must be preserved");
@@ -315,7 +315,6 @@ fn merge_new_keys_appended_in_set_order() {
     ]);
     let got = assert_byte_identical("new_keys_set_order", &old, &set_map);
 
-    use crate::record_view::RecordView;
     let view = RecordView::new(&got).expect("valid merged bytes");
     let ids: Vec<u64> = view.fields().map(|(k, _)| k.id()).collect();
     // Old key first, then new keys in set_map iteration order (3, 1, 2).

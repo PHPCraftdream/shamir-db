@@ -3,7 +3,7 @@
 //! follower pull-loop is 386-b. Mutating ops are global-admin only
 //! (`Manage` on [`ResourcePath::Root`]); introspection requires `List`.
 
-use crate::access::{Action, ResourcePath};
+use crate::access::{Action, Actor, ResourcePath};
 use crate::query::admin::{
     AlterSubscriptionOp, CreatePublicationOp, CreateReplicationProfileOp, CreateSubscriptionOp,
     DropPublicationOp, DropReplicationProfileOp, DropSubscriptionOp, ReplStream, SubAction,
@@ -806,7 +806,6 @@ impl ShamirAdminExecutor {
         table: &crate::engine::table::TableManager,
         op: &crate::query::write::DeleteOp,
     ) -> Result<bool, BatchError> {
-        use crate::access::Actor;
         let err = batch_err;
         let repo = self
             .shamir

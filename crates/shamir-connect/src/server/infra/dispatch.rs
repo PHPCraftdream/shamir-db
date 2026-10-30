@@ -87,8 +87,9 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
     conn: &ConnectionServices,
 ) -> Result<DispatchOutcome> {
     let sid = envelope.session_id_array()?;
+    let now_ns = crate::common::time::UnixNanos::try_now()?.as_u64();
 
-    let session: Arc<Session> = match store.lookup(&sid) {
+    let session: Arc<Session> = match store.lookup_at(&sid, now_ns) {
         Some(s) => s,
         None => {
             return Ok(DispatchOutcome::Error(ErrorEnvelope::new(
@@ -111,10 +112,7 @@ pub async fn dispatch_request<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) -> u6
 
     // Post-auth per-session request-rate gate — same choke point the
     // view path enforces; owned dispatch must not bypass it.
-    if session
-        .check_post_auth_rate_limit(crate::common::time::UnixNanos::now().as_u64())
-        .is_some()
-    {
+    if session.check_post_auth_rate_limit(now_ns).is_some() {
         return Ok(DispatchOutcome::Error(ErrorEnvelope::new(
             envelope.request_id,
             "rate_limited",
@@ -149,8 +147,9 @@ pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) 
     conn: &ConnectionServices,
 ) -> Result<DispatchOutcome> {
     let sid = view.session_id_array()?;
+    let now_ns = crate::common::time::UnixNanos::try_now()?.as_u64();
 
-    let session: Arc<Session> = match store.lookup(sid) {
+    let session: Arc<Session> = match store.lookup_at(sid, now_ns) {
         Some(s) => s,
         None => {
             return Ok(DispatchOutcome::Error(ErrorEnvelope::new(
@@ -171,10 +170,7 @@ pub async fn dispatch_request_view<H: RequestHandler + ?Sized, F: Fn(&[u8; 16]) 
 
     // Post-auth per-session request-rate gate (task #608). Single choke
     // point covering every transport that routes through this function.
-    if session
-        .check_post_auth_rate_limit(crate::common::time::UnixNanos::now().as_u64())
-        .is_some()
-    {
+    if session.check_post_auth_rate_limit(now_ns).is_some() {
         return Ok(DispatchOutcome::Error(ErrorEnvelope::new(
             view.request_id,
             "rate_limited",

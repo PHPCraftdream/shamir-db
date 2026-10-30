@@ -42,7 +42,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use shamir_bench_utils::vector_data::clustered_vectors;
+use shamir_bench_utils::vector_data::{clustered_vectors, GENERATOR_REVISION};
 use shamir_engine::index2::backend::IndexBackend;
 use shamir_engine::index2::descriptor::IndexDescriptor;
 use shamir_engine::index2::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
@@ -303,7 +303,7 @@ fn print_report(cells: &[ColdStartMetrics]) {
          run the artefact directly — the perimeter guard blocks `cargo run`)"
     );
     println!(
-        "- **Dataset**: `clustered_vectors` — n={n}, dim={dim}, k_clusters=64, σ=0.1, seed=42"
+        "- **Dataset**: `clustered_vectors` — n={n}, dim={dim}, k_clusters=64, σ=0.1, seed=42, generator={GENERATOR_REVISION}"
     );
     println!(
         "- **HNSW**: M={M}, max_layer={MAX_LAYER}, ef_construct={EF_CONSTRUCTION}, ef_search={EF_SEARCH}"

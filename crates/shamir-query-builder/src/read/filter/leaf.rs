@@ -80,8 +80,8 @@ pub fn lte(field: impl IntoFieldPath, value: impl Into<FilterValue>) -> Filter {
 // `FilterValue`s with no record involved — the only comparison shape
 // meaningful inside a `when` guard (`QueryEntry.when`), which has no
 // per-row record to resolve a field path against. Typical usage compares
-// two `$query` refs, e.g. `value_gte(val::query_ref("balance"),
-// val::query_ref("amount"))` for "run this op iff balance >= amount".
+// two `$query` refs, e.g. `value_gte(val::qref_all("balance"),
+// val::qref_all("amount"))` for "run this op iff balance >= amount".
 
 /// `left == right` (value-vs-value, no field/record involved).
 pub fn value_eq(left: impl Into<FilterValue>, right: impl Into<FilterValue>) -> Filter {

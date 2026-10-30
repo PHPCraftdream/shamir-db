@@ -1,8 +1,7 @@
 use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_info::IndexInfo;
+use crate::base_index::infra::posting_cache::PostingCache;
 use crate::base_index::write_barrier_flags::WriteBarrierFlags;
-use bytes::Bytes;
-use dashmap::DashMap;
 use shamir_storage::types::Store;
 use shamir_tx::{IndexFamily, Provenance};
 use shamir_types::types::common::THasher;
@@ -11,8 +10,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-type PostingCache = DashMap<Bytes, (u64, Arc<[RecordId]>), THasher>;
 
 /// R0-B (#1008): [`Provenance`] for an op planned against `def` on the
 /// REGULAR (non-unique) base_index family. See
@@ -24,14 +21,6 @@ pub(super) fn regular_provenance(def: &IndexDefinition) -> Provenance {
 /// Log CREATE INDEX backfill progress at most this often (avoids spamming the
 /// log on every batch of a large table scan).
 pub(super) const BACKFILL_PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Maximum number of posting-list entries cached in memory per
-/// `IndexManager`. Hit on a cached entry is a single `HashMap::get`
-/// + `Arc::clone`; miss falls back to `info_store.get` + bincode
-///   deserialise. Capacity is intentionally small — typical workloads
-///   (admin UIs, filter-by-status, find-by-id) concentrate on a handful
-///   of values per index.
-pub(super) const POSTING_CACHE_CAP: usize = 512;
 
 /// #997: durable RENAME INDEX tombstone payload for the base_index REGULAR
 /// and UNIQUE (hash) families. Unlike the sorted family's
@@ -556,10 +545,7 @@ impl IndexManager {
                 has_indexes_flag,
                 has_indexes_unique_flag,
             ),
-            posting_cache: Arc::new(DashMap::with_capacity_and_hasher(
-                POSTING_CACHE_CAP,
-                THasher::default(),
-            )),
+            posting_cache: Arc::new(PostingCache::new()),
             posting_cache_generation: Arc::new(AtomicU64::new(0)),
             create_index_backfill_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             drop_index_pause_hook: Arc::new(arc_swap::ArcSwapOption::empty()),

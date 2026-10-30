@@ -48,7 +48,9 @@ pub(crate) async fn run_resume<F: Framer>(
 
     const RESUMPTION_TICKET_TTL_NS: u64 = 24 * shamir_connect::common::time::ns::HOUR;
 
-    let now_ns = UnixNanos::now().as_u64();
+    let now_ns = UnixNanos::try_now()
+        .map_err(|_| HandshakeError::BadProof { backoff_ms: 0 })?
+        .as_u64();
     let user_lookup = RedbUserStateLookup(&ctx.user_dir);
 
     let ok = match process_resume(

@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use bytes::Bytes;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::{RecordKey, Store};
+use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_types::types::record_id::RecordId;
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -385,12 +385,14 @@ struct CallCounts {
     remove_many: AtomicUsize,
     remove_many_items: AtomicUsize,
     batches: tokio::sync::Mutex<Vec<BatchCall>>,
+    fail_next: AtomicBool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum BatchCall {
     Put(Vec<(RecordKey, Bytes)>),
     Delete(Vec<RecordKey>),
+    Mixed(Vec<BatchCall>),
 }
 
 struct CountingStore {
@@ -434,6 +436,24 @@ impl Store for CountingStore {
             .push(BatchCall::Delete(keys.clone()));
         self.inner.remove_many(keys).await
     }
+    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        let calls = ops
+            .iter()
+            .map(|op| match op {
+                KvOp::Set(key, value) => BatchCall::Put(vec![(key.clone(), value.clone())]),
+                KvOp::Remove(key) => BatchCall::Delete(vec![key.clone()]),
+            })
+            .collect();
+        self.counts
+            .batches
+            .lock()
+            .await
+            .push(BatchCall::Mixed(calls));
+        if self.counts.fail_next.swap(false, SeqCst) {
+            return Err(DbError::Internal("injected batch failure".into()));
+        }
+        self.inner.transact(ops).await
+    }
     fn iter_stream(&self, batch_size: usize) -> TestStream {
         self.inner.iter_stream(batch_size)
     }
@@ -442,7 +462,7 @@ impl Store for CountingStore {
     }
 }
 
-/// Adjacent runs must be batched without moving puts across deletes.
+/// A mixed page must be passed as one ordered transaction.
 #[tokio::test]
 async fn drain_applies_mixed_put_delete_via_batched_calls() {
     let (info, src, _unused_dst) = make_stores();
@@ -509,35 +529,27 @@ async fn drain_applies_mixed_put_delete_via_batched_calls() {
     assert_eq!(applied, 5);
 
     assert_eq!(counts.set.load(SeqCst), 0);
-    assert_eq!(counts.set_many.load(SeqCst), 2);
-    assert_eq!(counts.set_many_items.load(SeqCst), 3);
+    assert_eq!(counts.set_many.load(SeqCst), 0);
     assert_eq!(counts.remove.load(SeqCst), 0);
-    assert_eq!(counts.remove_many.load(SeqCst), 1);
-    assert_eq!(counts.remove_many_items.load(SeqCst), 2);
+    assert_eq!(counts.remove_many.load(SeqCst), 0);
     assert_eq!(
         *counts.batches.lock().await,
-        vec![
-            BatchCall::Put(vec![
-                (
-                    RecordKey::from(put_ids[0].as_bytes().to_vec()),
-                    Bytes::from_static(b"v-0"),
-                ),
-                (
-                    RecordKey::from(put_ids[1].as_bytes().to_vec()),
-                    Bytes::from_static(b"v-1"),
-                ),
-            ]),
-            BatchCall::Delete(
-                del_ids
-                    .iter()
-                    .map(|id| RecordKey::from(id.as_bytes().to_vec()))
-                    .collect(),
-            ),
+        vec![BatchCall::Mixed(vec![
+            BatchCall::Put(vec![(
+                RecordKey::from(put_ids[0].as_bytes().to_vec()),
+                Bytes::from_static(b"v-0")
+            )]),
+            BatchCall::Put(vec![(
+                RecordKey::from(put_ids[1].as_bytes().to_vec()),
+                Bytes::from_static(b"v-1")
+            )]),
+            BatchCall::Delete(vec![RecordKey::from(del_ids[0].as_bytes().to_vec())]),
+            BatchCall::Delete(vec![RecordKey::from(del_ids[1].as_bytes().to_vec())]),
             BatchCall::Put(vec![(
                 RecordKey::from(put_ids[2].as_bytes().to_vec()),
-                Bytes::from_static(b"v-2"),
+                Bytes::from_static(b"v-2")
             )]),
-        ],
+        ])],
     );
 
     // Correctness: puts landed with the right values, deletes are gone.
@@ -553,6 +565,89 @@ async fn drain_applies_mixed_put_delete_via_batched_calls() {
             .get(RecordKey::from(id.as_bytes().to_vec()))
             .await
             .is_err());
+    }
+}
+
+#[tokio::test]
+async fn mixed_same_key_failure_replays_whole_page_for_both_drains() {
+    for final_drain in [false, true] {
+        let (info, src, _) = make_stores();
+        let raw = Arc::new(InMemoryStore::new());
+        let counts = Arc::new(CallCounts::default());
+        let dst: Arc<dyn Store> = Arc::new(CountingStore {
+            inner: raw.clone(),
+            counts: counts.clone(),
+        });
+        let shadow = Arc::new(MigrationShadowLog::new("retry".into(), info));
+        let state = MigrationState::new(
+            "retry".into(),
+            "t".into(),
+            "src".into(),
+            "dst".into(),
+            "memory".into(),
+            None,
+        );
+        let coord = MigrationCoordinator::new(state, shadow.clone(), src, dst, None);
+        coord.run_snapshot().await.unwrap();
+        if final_drain {
+            coord.mark_cutover_ready().await.unwrap();
+        }
+        let id = RecordId([42; 16]);
+        let lsns = shadow
+            .append_batch(vec![
+                ShadowOp::Put {
+                    record_id: id,
+                    value: b"first".to_vec(),
+                },
+                ShadowOp::Delete { record_id: id },
+                ShadowOp::Put {
+                    record_id: id,
+                    value: b"last".to_vec(),
+                },
+            ])
+            .await
+            .unwrap();
+        counts.fail_next.store(true, SeqCst);
+        let result = if final_drain {
+            coord.final_drain_and_commit().await
+        } else {
+            coord.drain_shadow_log().await
+        };
+        assert!(
+            matches!(result, Err(DbError::Internal(message)) if message == "injected batch failure")
+        );
+        assert_eq!(coord.state().await.last_lsn_applied, 0);
+        assert_eq!(
+            coord.phase().await,
+            if final_drain {
+                MigrationPhase::CutoverReady
+            } else {
+                MigrationPhase::Draining
+            }
+        );
+        let applied = if final_drain {
+            coord.final_drain_and_commit().await
+        } else {
+            coord.drain_shadow_log().await
+        }
+        .unwrap();
+        assert_eq!(applied, 3);
+        assert_eq!(coord.state().await.last_lsn_applied, *lsns.last().unwrap());
+        assert_eq!(
+            raw.get(RecordKey::from(id.as_bytes().to_vec()))
+                .await
+                .unwrap(),
+            Bytes::from_static(b"last")
+        );
+        let key = RecordKey::from(id.as_bytes().to_vec());
+        let expected = || {
+            BatchCall::Mixed(vec![
+                BatchCall::Put(vec![(key.clone(), Bytes::from_static(b"first"))]),
+                BatchCall::Delete(vec![key.clone()]),
+                BatchCall::Put(vec![(key.clone(), Bytes::from_static(b"last"))]),
+            ])
+        };
+        assert_eq!(*counts.batches.lock().await, vec![expected(), expected()]);
     }
 }
 

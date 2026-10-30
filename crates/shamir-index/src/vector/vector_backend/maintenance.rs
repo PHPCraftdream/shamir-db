@@ -15,7 +15,10 @@ use crate::vector::vector_backend::cutover::CompactionHooks;
 use crate::vector::vector_backend::slot::AdapterSlot;
 use crate::vector::vector_backend::target::CompactionTarget;
 use arc_swap::ArcSwap;
+use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::types::Store;
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -34,14 +37,42 @@ impl Drop for SnapshotFlightGuard {
     }
 }
 
+/// Choose an unused generation without consulting damaged metadata. Scan errors
+/// propagate; orphaned and unverified generations are deliberately retained.
+async fn unused_generation(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    mut candidate: u32,
+) -> Result<u32, SnapshotError> {
+    let prefix = format!("{keyspace}.g");
+    let mut stream = store.scan_prefix_stream(Bytes::from(prefix.clone()), MAINT_SCAN_BATCH);
+    let mut used = std::collections::BTreeSet::new();
+    while let Some(batch) = stream.next().await {
+        for (key, _) in batch? {
+            if let Ok(key) = std::str::from_utf8(key.as_ref()) {
+                if let Some((generation, _)) =
+                    key.strip_prefix(&prefix).and_then(|s| s.split_once('.'))
+                {
+                    if let Ok(generation) = generation.parse::<u32>() {
+                        used.insert(generation);
+                    }
+                }
+            }
+        }
+    }
+    while used.contains(&candidate) {
+        candidate = candidate.checked_add(1).ok_or_else(|| {
+            SnapshotError::Backend("no unused snapshot generation available".into())
+        })?;
+    }
+    Ok(candidate)
+}
+
 /// V2.3 (#402) — the body of the single-flight background snapshot task.
 ///
-/// Reads the current manifest to learn the active gen + its chunk counts,
-/// dumps a fresh generation (`gen+1`) from the live adapter, then atomically
-/// flips the manifest to the new gen and prunes the old gen's chunks + every
-/// delta chunk the new snapshot absorbed (index ≤ current HWM). The whole
-/// flip is ONE `Store::transact` so a backend that overrides `transact`
-/// exposes the new generation + the prune as a single all-or-nothing batch.
+/// Reads verified metadata to prune its generation after publishing a fresh
+/// one. If metadata is corrupt, it selects an unused generation from keys and
+/// publishes without pruning any old generation or delta.
 ///
 /// `adapter_arc` is the `Arc<dyn VectorAdapter>` captured at trigger time;
 /// we downcast to `&HnswAdapter` inside (the Arc outlives the dump). The
@@ -66,9 +97,9 @@ pub(super) async fn run_background_snapshot(
         .as_hnsw_adapter()
         .ok_or_else(|| SnapshotError::Backend("background snapshot on non-HnswAdapter".into()))?;
 
-    // Read the current manifest to learn the active gen + chunk counts. A
-    // missing manifest means no snapshot exists yet — we dump gen 1 and the
-    // flip's "old gen" prune is a no-op (old_gen=0, 0 chunks).
+    // Missing metadata has no verified old generation; corruption instead
+    // takes the preservation path below, without trusting any chunk counts.
+    let mut recovery = false;
     let (old_gen, old_graph_chunks, old_data_chunks, old_qgraph_chunks, old_qdata_chunks): (
         u32,
         u32,
@@ -83,10 +114,20 @@ pub(super) async fn run_background_snapshot(
             m.qgraph_chunks,
             m.qdata_chunks,
         ),
-        Err(SnapshotError::NotFound) => (0, 0, 0, 0, 0),
+        Err(SnapshotError::NotFound | SnapshotError::Corrupt(_)) => {
+            recovery = true;
+            (0, 0, 0, 0, 0)
+        }
         Err(e) => return Err(e),
     };
-    let new_gen = old_gen.wrapping_add(1);
+    let first_candidate = if recovery {
+        1
+    } else {
+        old_gen
+            .checked_add(1)
+            .ok_or_else(|| SnapshotError::Backend("snapshot generation exhausted".into()))?
+    };
+    let new_gen = unused_generation(info_store, keyspace, first_candidate).await?;
 
     // The new snapshot absorbs every delta chunk the graph has APPLIED so
     // far (indices `0..applied_prefix`). The boundary is sampled BEFORE the
@@ -129,6 +170,12 @@ pub(super) async fn run_background_snapshot(
         delta_applied_upto: new_delta_applied_upto,
     };
 
+    // Unverified metadata cannot authorize deletion of any generation or delta.
+    if recovery {
+        return snapshot::publish_manifest_without_prune(info_store, keyspace, final_manifest)
+            .await;
+    }
+
     // Atomic flip + prune. The old gen's chunks + sidecar are removed, every
     // delta chunk ≤ new_delta_applied_upto is removed, and the new manifest
     // is published — all in ONE transact.
@@ -165,11 +212,12 @@ impl VectorBackend {
     ) -> Result<(), IndexError> {
         let stored_hwm = snapshot::highest_delta_index(info_store, keyspace)
             .await
-            .map_err(|e| {
-                IndexError::Backend(format!(
+            .map_err(|e| match e {
+                SnapshotError::Db(error) => IndexError::Db(error),
+                other => IndexError::Backend(format!(
                     "delta HWM scan failed for index {} (keyspace {}): {} —                      refusing to seed next_delta_idx below the surviving chunks",
-                    index_name, keyspace, e
-                ))
+                    index_name, keyspace, other
+                )),
             })?;
         // Fresh index (no manifest, no chunks): keep the constructor seed.
         if manifest.is_none() && stored_hwm == 0 {

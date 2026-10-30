@@ -269,17 +269,49 @@ fn insert_constraint_fields(m: &mut TMap<String, QueryValue>, c: &ConstraintsDto
 
 // ── deserialisation helper (catalogue → DTO, de-interned) ──────────────────
 
+pub(super) fn checked_catalogue_rules(
+    value: Option<&QueryValue>,
+    interner: &Interner,
+) -> Result<Vec<FieldRuleDto>, crate::query::batch::BatchError> {
+    match value {
+        Some(qv) => dto_list_from_catalogue(qv, interner).map_err(|message| {
+            crate::query::batch::BatchError::QueryError {
+                alias: String::new(),
+                message,
+                code: Some("bad_schema".to_string()),
+            }
+        }),
+        None => Ok(Vec::new()),
+    }
+}
+
 /// Parse a catalogue-form schema (`List[Map]` with interned path ids) back
 /// into the wire DTO form (flat string paths). Used by add/remove/get.
-pub(super) fn dto_list_from_catalogue(qv: &QueryValue, interner: &Interner) -> Vec<FieldRuleDto> {
+pub(super) fn dto_list_from_catalogue(
+    qv: &QueryValue,
+    interner: &Interner,
+) -> Result<Vec<FieldRuleDto>, String> {
     let items = match qv {
         QueryValue::List(l) => l,
-        _ => return Vec::new(),
+        _ => return Ok(Vec::new()),
     };
-    items
+    for item in items {
+        if let Some(fk) = item.get("foreign_key") {
+            let map = fk.as_object().ok_or("invalid foreign key record")?;
+            for field in ["on_delete", "on_update"] {
+                if let Some(value) = map.get(field) {
+                    match value.as_str() {
+                        Some("no_action" | "restrict" | "cascade" | "set_null") => {}
+                        _ => return Err(format!("invalid foreign key {field}: {value:?}")),
+                    }
+                }
+            }
+        }
+    }
+    Ok(items
         .iter()
         .filter_map(|item| dto_one_from_catalogue(item, interner))
-        .collect()
+        .collect())
 }
 
 /// Parse one catalogue rule Map into a DTO (de-interning the path).

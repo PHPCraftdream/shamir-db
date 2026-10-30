@@ -29,7 +29,7 @@ impl RepoWalManager {
     /// `max(persisted_next_tx_id, max_inflight_txn_id + 1)`.
     pub fn new(initial_txn_id: u64, group: Arc<WalGroupCommit>) -> Self {
         Self {
-            next_txn_id: AtomicU64::new(initial_txn_id),
+            next_txn_id: AtomicU64::new(initial_txn_id.max(1)),
             group,
         }
     }

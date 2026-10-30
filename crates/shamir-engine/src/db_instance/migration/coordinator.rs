@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{RecordKey, Store};
+use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::time::unix_nanos;
 use std::sync::Arc;
@@ -382,46 +382,26 @@ impl MigrationCoordinator {
         Ok(copied)
     }
 
-    /// Apply entries in LSN order, batching only adjacent operations of
-    /// the same kind. Put runs retain input order (including duplicate keys):
-    /// `Store::set_many`'s sequential default and MemBuffer's ordered override
-    /// preserve last-writer-wins; other current backends inherit the default.
-    /// Returns `entries.len()` (every entry is applied; `set`/`remove`
-    /// on a store never surface a per-key "not found" error — a missing
-    /// key on `remove` just yields `false`, see `Store::remove`).
-    async fn apply_shadow_entries(&self, entries: &[ShadowEntry]) -> DbResult<u64> {
+    /// Apply the complete page in LSN order; a failed batch is replayed.
+    async fn apply_shadow_entries(&self, entries: Vec<ShadowEntry>) -> DbResult<u64> {
+        let count = entries.len() as u64;
         if entries.is_empty() {
             return Ok(0);
         }
-        let mut puts: Vec<(RecordKey, Bytes)> = Vec::new();
-        let mut deletes: Vec<RecordKey> = Vec::new();
-        for entry in entries {
-            match &entry.op {
-                ShadowOp::Put { record_id, value } => {
-                    if !deletes.is_empty() {
-                        self.dst_data
-                            .remove_many(std::mem::take(&mut deletes))
-                            .await?;
-                    }
-                    let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    puts.push((key, Bytes::from(value.clone())));
-                }
+        let ops = entries
+            .into_iter()
+            .map(|entry| match entry.op {
+                ShadowOp::Put { record_id, value } => KvOp::Set(
+                    RecordKey::from(record_id.as_bytes().to_vec()),
+                    Bytes::from(value),
+                ),
                 ShadowOp::Delete { record_id } => {
-                    if !puts.is_empty() {
-                        self.dst_data.set_many(std::mem::take(&mut puts)).await?;
-                    }
-                    let key = RecordKey::from(record_id.as_bytes().to_vec());
-                    deletes.push(key);
+                    KvOp::Remove(RecordKey::from(record_id.as_bytes().to_vec()))
                 }
-            }
-        }
-        if !puts.is_empty() {
-            self.dst_data.set_many(puts).await?;
-        }
-        if !deletes.is_empty() {
-            self.dst_data.remove_many(deletes).await?;
-        }
-        Ok(entries.len() as u64)
+            })
+            .collect();
+        self.dst_data.transact(ops).await?;
+        Ok(count)
     }
 
     /// S5c-X F3: crate-internal (called by the drain loops); the facade
@@ -439,10 +419,11 @@ impl MigrationCoordinator {
         };
 
         let entries = self.shadow_log.read_from(start_lsn).await?;
-        let applied = self.apply_shadow_entries(&entries).await?;
+        let last_lsn = entries.last().map(|entry| entry.lsn);
+        let applied = self.apply_shadow_entries(entries).await?;
 
-        if let Some(last) = entries.last() {
-            self.state.lock().await.last_lsn_applied = last.lsn;
+        if let Some(last_lsn) = last_lsn {
+            self.state.lock().await.last_lsn_applied = last_lsn;
         }
 
         Ok(applied)
@@ -555,11 +536,12 @@ impl MigrationCoordinator {
             if entries.is_empty() {
                 break;
             }
+            let last_lsn = entries.last().map(|entry| entry.lsn);
             applied = applied
-                .checked_add(self.apply_shadow_entries(&entries).await?)
+                .checked_add(self.apply_shadow_entries(entries).await?)
                 .ok_or_else(|| DbError::Internal("migration applied count overflow".into()))?;
-            if let Some(last) = entries.last() {
-                self.state.lock().await.last_lsn_applied = last.lsn;
+            if let Some(last_lsn) = last_lsn {
+                self.state.lock().await.last_lsn_applied = last_lsn;
             }
         }
         self.dst_data.flush().await?;

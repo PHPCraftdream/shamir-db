@@ -16,8 +16,7 @@
 //!   (`"int" "float" "dec" "string" "bool"`); an unknown name yields
 //!   `ScalarError("unknown_type")`.
 //!
-//! Every function is pure + deterministic (no clock/env access), so each may
-//! back a functional index.
+//! Every function is pure + deterministic, but is unvouched for indexing.
 
 use crate::registry::{v_bool, v_dec, v_int, v_str, FnEntry, ScalarError, ScalarRegistry};
 use rust_decimal::prelude::ToPrimitive;
@@ -175,11 +174,16 @@ fn cast_to_bool(v: &QueryValue) -> Result<QueryValue, ScalarError> {
         QueryValue::Int(n) => Ok(v_bool(*n != 0)),
         QueryValue::Dec(d) => Ok(v_bool(!d.is_zero())),
         QueryValue::F64(f) => Ok(v_bool(*f != 0.0)),
-        QueryValue::Str(s) => match s.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" => Ok(v_bool(true)),
-            "false" | "0" => Ok(v_bool(false)),
-            _ => Err(ScalarError::builtin("cast_failed")),
-        },
+        QueryValue::Str(s) => {
+            let text = s.trim();
+            if text.eq_ignore_ascii_case("true") || text == "1" {
+                Ok(v_bool(true))
+            } else if text.eq_ignore_ascii_case("false") || text == "0" {
+                Ok(v_bool(false))
+            } else {
+                Err(ScalarError::builtin("cast_failed"))
+            }
+        }
         _ => Err(ScalarError::builtin("cast_failed")),
     }
 }

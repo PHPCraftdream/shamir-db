@@ -788,7 +788,7 @@ impl Store for CachedStore {
             reply,
         })
         .await?;
-        value.ok_or_else(|| DbError::NotFound(format!("record not found: {:?}", key)))
+        value.ok_or_else(|| DbError::missing_key(&key))
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {

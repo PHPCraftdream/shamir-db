@@ -46,6 +46,29 @@ tls: {
 "
 }
 
+#[test]
+fn rv_server_a65118cc_plain_loopback_contract_matches_tcp() {
+    for (addr, expected) in [
+        ("127.23.4.5:7331", true),
+        ("[::1]:7331", true),
+        ("[::ffff:127.0.0.2]:7331", true),
+        ("[::ffff:192.0.2.1]:7331", false),
+        ("0.0.0.0:7331", false),
+        ("[::]:7331", false),
+        ("[::127.0.0.2]:7331", false),
+    ] {
+        let mut cfg: Config = ktav::from_str(minimal_tcp_tls()).expect("parse config");
+        cfg.listeners[0].addr = addr.to_owned();
+        cfg.listeners[0].profile = ProfileKind::Plain;
+        let transport = shamir_transport_tcp::listener::validate_addr(
+            addr.parse().expect("socket address"),
+            shamir_transport_tcp::listener::ListenerProfile::Plain,
+        );
+        assert_eq!(transport.is_ok(), expected, "transport {addr}");
+        assert_eq!(cfg.validate().is_ok(), expected, "server {addr}");
+    }
+}
+
 // =============== happy-path tests ===============
 
 #[test]
@@ -157,6 +180,12 @@ tls: {
     assert_eq!(cfg.listeners[3].profile, ProfileKind::TlsNoExport);
     assert_eq!(cfg.listeners[3].path.as_deref(), Some("/shamir/v1/browser"));
     assert_eq!(cfg.listeners[3].browser_origin_allowlist.len(), 2);
+    let mut invalid = cfg.clone();
+    invalid.listeners[3].browser_origin_allowlist = vec!["https://user@app.example.com".into()];
+    assert!(
+        invalid.validate().is_err(),
+        "malformed origin must fail configuration validation"
+    );
 
     // Listener 4: local IPC (Unix socket path / Windows pipe name).
     assert_eq!(cfg.listeners[4].kind, ListenerKind::Unix);

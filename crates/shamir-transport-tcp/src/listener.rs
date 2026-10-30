@@ -27,8 +27,8 @@ pub enum ListenerProfile {
     /// the JS environment can't access the exporter — `binding_mode = 0x02`).
     /// Allowed on any address.
     TlsNoExport,
-    /// Plain TCP (no TLS). Permitted ONLY on loopback addresses or Unix
-    /// domain sockets. The bind validator refuses non-loopback addresses
+    /// Plain TCP (no TLS). These TCP APIs accept only loopback addresses;
+    /// Unix domain sockets are handled separately. The validator refuses non-loopback addresses
     /// to fail closed on misconfiguration. Use case: same-host embedded
     /// scenarios where the protection model is process-isolation rather
     /// than transport encryption.
@@ -95,7 +95,5 @@ pub fn validate_addr(addr: SocketAddr, profile: ListenerProfile) -> Result<(), L
 }
 
 /// Common loopback addresses for documentation / examples / tests.
-#[allow(dead_code)]
 pub const LOOPBACK_V4: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-#[allow(dead_code)]
 pub const LOOPBACK_V6: IpAddr = IpAddr::V6(Ipv6Addr::LOCALHOST);

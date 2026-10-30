@@ -1,6 +1,7 @@
 //! Tests for Database, Repository, Table, Index, Buffer config DDL constructors,
 //! and `create_db` with `if_not_exists`.
 
+use crate::write::BuilderError;
 use shamir_query_types::admin::{BufferConfigDto, BufferConfigPatch, FkAction, ForeignKeyDto};
 use shamir_query_types::batch::BatchOp;
 use shamir_query_types::durability::{
@@ -635,7 +636,6 @@ fn field_null_type_tag_wire() {
 /// panic via `.expect`).
 #[test]
 fn add_schema_rule_without_rule_returns_err() {
-    use crate::write::BuilderError;
     let err = ddl::add_schema_rule("users").build().unwrap_err();
     assert_eq!(err, BuilderError::MissingRule);
 }

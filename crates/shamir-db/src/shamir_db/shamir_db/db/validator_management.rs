@@ -240,6 +240,7 @@ impl ShamirDb {
         .map_err(|e| DbError::Validation(e.to_string()))?;
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
+        // FxHasher is a noncryptographic diagnostic fingerprint, not integrity protection.
         let mut hasher = rustc_hash::FxHasher::default();
         wasm.hash(&mut hasher);
         let wasm_hash = format!("{:016x}", hasher.finish());

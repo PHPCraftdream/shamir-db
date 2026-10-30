@@ -137,12 +137,8 @@ pub(in crate::tx) async fn pre_commit_prelock(
         // `commit_interner_overlay`'s own delta output, so `existing`
         // already covers it regardless.
         //
-        // Fallback: a table whose `StagingStore` was populated outside the
-        // instrumented `TableManager` paths (`referenced_ids_captured() ==
-        // false` — e.g. a low-level test or future raw-apply path) still
-        // gets the old decode-based scan, scoped to just that table's bytes,
-        // so A8's correctness never depends on every staging call site
-        // remembering to capture ids.
+        // Fallback scans only currently staged sets whose ids were not captured.
+        // Raw and captured writes can coexist in the same table.
         let hwm = repo_interner.persisted_high_water() as u64;
         // Cheap dedup: build a set of ids already covered by this tx's delta.
         let mut existing: shamir_collections::TFxSet<u64> = shamir_collections::new_fx_set();
@@ -150,10 +146,7 @@ pub(in crate::tx) async fn pre_commit_prelock(
         let mut fallback_ids: shamir_collections::TFxMap<u64, ()> =
             shamir_collections::new_fx_map();
         for staging in tx.write_set.values() {
-            if staging.referenced_ids_captured() {
-                continue;
-            }
-            for bytes in staging.iter_set_bytes() {
+            for bytes in staging.iter_uncaptured_set_bytes() {
                 if let Ok(value) = InnerValue::from_bytes(bytes) {
                     shamir_tx::collect_referenced_ids(&value, &mut fallback_ids);
                 }

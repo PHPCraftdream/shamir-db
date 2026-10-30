@@ -47,7 +47,7 @@
 #        "NUMA: Node 1 [mem …]"
 #      These appear within 30–90 s of boot start even under TCG, before
 #      userland is reached.
-#   4. Exits 0 if 2 nodes found; exits 1 on timeout or wrong count.
+#   4. Exits 0 if configured nodes 0 and 1 are found; exits 1 otherwise.
 #
 # QEMU TOPOLOGY:
 #   -smp 4,sockets=2,cores=2,threads=1   4 vCPU across 2 sockets
@@ -68,6 +68,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/numa-smoke-oracle.sh"
 # WORKSPACE_DIR is exported for future Option B use (cargo cross-build).
 WORKSPACE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 export WORKSPACE_DIR
@@ -235,7 +236,6 @@ log "QEMU started (PID=${QEMU_PID})"
 
 log "Polling serial log for kernel NUMA messages (timeout=${BOOT_TIMEOUT}s)…"
 
-FOUND_NODES=0
 ELAPSED=0
 POLL_INTERVAL=5
 
@@ -247,12 +247,9 @@ while [[ ${ELAPSED} -lt ${BOOT_TIMEOUT} ]]; do
         break
     fi
 
-    if [[ -f "${SERIAL_LOG}" ]]; then
-        FOUND_NODES="$(grep -c 'NUMA: Node [0-9]' "${SERIAL_LOG}" 2>/dev/null || true)"
-        if [[ "${FOUND_NODES}" -ge 2 ]]; then
-            log "Found ${FOUND_NODES} NUMA node announcement(s)."
-            break
-        fi
+    if [[ -f "${SERIAL_LOG}" ]] && numa_has_configured_nodes < "${SERIAL_LOG}"; then
+        log "Found NUMA node announcements for configured IDs 0 and 1."
+        break
     fi
 
     sleep "${POLL_INTERVAL}"
@@ -267,8 +264,8 @@ log "--- Serial log tail (last 40 lines) ---"
 tail -n 40 "${SERIAL_LOG}" 2>/dev/null || log "(serial log is empty or missing)"
 log "--- End of serial log ---"
 
-if [[ "${FOUND_NODES}" -ge 2 ]]; then
-    log "PASS: guest kernel reported ${FOUND_NODES} NUMA node(s). 2-node topology correctly emulated."
+if [[ -f "${SERIAL_LOG}" ]] && numa_has_configured_nodes < "${SERIAL_LOG}"; then
+    log "PASS: guest kernel reported configured NUMA nodes 0 and 1."
     exit 0
 fi
 
@@ -278,7 +275,7 @@ cat "${SERIAL_LOG}" 2>/dev/null || log "(serial log is empty or missing)"
 log "--- End full serial log ---"
 
 if [[ ${ELAPSED} -ge ${BOOT_TIMEOUT} ]]; then
-    die "TIMEOUT after ${BOOT_TIMEOUT}s: observed ${FOUND_NODES}/2 NUMA nodes. See serial log above."
+    die "TIMEOUT after ${BOOT_TIMEOUT}s: configured NUMA nodes 0 and 1 not both observed. See serial log above."
 else
-    die "QEMU exited early; observed ${FOUND_NODES}/2 NUMA nodes. See serial log above."
+    die "QEMU exited early; configured NUMA nodes 0 and 1 not both observed. See serial log above."
 fi

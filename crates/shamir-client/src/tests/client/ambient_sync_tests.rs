@@ -201,13 +201,19 @@ async fn rv_client_1c219006_v2_execution_advertises_cold_epoch() {
     let (_server_to_client, client_reader) = tokio::io::duplex(64 * 1024);
     let mut batch = Batch::new();
     batch.query("read", shamir_query_builder::Query::from("items"));
+    batch.query(
+        "other",
+        shamir_query_builder::Query::with_repo("explicit-other", "items"),
+    );
     let client = Client::for_test(
         client_reader,
         client_to_server,
         crate::client::LifecycleHooks::default(),
     );
     client.set_server_query_version_for_test(2);
-    let execute = tokio::spawn(async move { client.execute("ic", batch.build()).await });
+    let mut batch = batch.build();
+    batch.interner_epochs.insert("explicit-other".into(), 42);
+    let execute = tokio::spawn(async move { client.execute("ic", batch).await });
     let mut prefix = [0u8; 4];
     server_reader
         .read_exact(&mut prefix)
@@ -226,8 +232,12 @@ async fn rv_client_1c219006_v2_execution_advertises_cold_epoch() {
     else {
         panic!("expected Execute");
     };
-    assert_eq!(batch.interner_epochs.len(), 1, "one distinct repo cursor");
-    assert_eq!(batch.interner_epochs.values().next(), Some(&0));
+    assert_eq!(batch.interner_epochs.len(), 2);
+    assert_eq!(batch.interner_epochs.get("explicit-other"), Some(&42));
+    assert!(batch
+        .interner_epochs
+        .iter()
+        .any(|(repo, epoch)| repo != "explicit-other" && *epoch == 0));
     execute.abort();
     let _ = execute.await;
 }
@@ -402,5 +412,5 @@ fn rv_client_1c219006_legacy_server_skips_advertisement() {
 fn rv_client_1c219006_v2_cold_cache_still_advertises() {
     // The cold-v2 path is intentionally retained for synchronization.
     assert!(should_advertise_interner_epochs(2, false));
-    assert!(!should_advertise_interner_epochs(2, true));
+    assert!(should_advertise_interner_epochs(2, true));
 }

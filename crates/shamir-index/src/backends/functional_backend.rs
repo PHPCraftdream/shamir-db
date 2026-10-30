@@ -123,7 +123,7 @@ impl FunctionalBackend {
             .scan_prefix_stream(Bytes::copy_from_slice(prefix), 1024);
         let mut all = Vec::new();
         while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(|e| IndexError::Storage(e.to_string()))?;
+            let batch = batch_result.map_err(IndexError::from)?;
             all.extend(batch);
         }
         Ok(all)
@@ -147,6 +147,8 @@ fn inner_is_top_level_nan(v: &InnerValue) -> bool {
     matches!(v, InnerValue::F64(f) if f.is_nan())
 }
 
+/// Hash a persisted posting identity; change only with an identity-version
+/// bump. Golden-vector tests guard the existing outputs.
 fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
     match val {
         InnerValue::Null => h.write_u8(0),
@@ -379,7 +381,7 @@ impl IndexBackend for FunctionalBackend {
             self.store
                 .remove(key_bytes)
                 .await
-                .map_err(|e| IndexError::Storage(e.to_string()))?;
+                .map_err(IndexError::from)?;
         }
         Ok(())
     }

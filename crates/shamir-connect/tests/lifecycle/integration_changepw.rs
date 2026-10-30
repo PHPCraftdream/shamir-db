@@ -36,6 +36,61 @@ fn make_session(user_id: [u8; 16], created_at_ns: u64, channel_binding: [u8; 32]
 }
 
 #[test]
+fn valid_proof_for_wrong_sid_is_rejected_and_consumed() {
+    let store = SessionStore::new();
+    let sid = [0xaa; 32];
+    let wrong_sid = [0xbb; 32];
+    let binding = [0x33; 32];
+    store.insert(sid, make_session([1; 16], 100, binding));
+    let session = store.lookup(&sid).unwrap();
+    let salt = [0x55; 16];
+    let kdf = fast_kdf();
+    let stored = DerivedKeys::derive(b"old correct password", &salt, &kdf)
+        .unwrap()
+        .stored_key;
+    let nonce = [7; 32];
+    let challenge = start_change_password_challenge(&session, salt, kdf, nonce, 200).unwrap();
+    let pending = session.pending_changepw_challenge.load_full();
+    let mut old = b"old correct password".to_vec();
+    let mut new = b"new even better password".to_vec();
+    let request = client_cp::build_request(
+        &NormalizedUsername::from_raw("alice").unwrap(),
+        &wrong_sid,
+        &nonce,
+        &challenge.server_nonce_cp,
+        &salt,
+        kdf,
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        &binding,
+        &mut old,
+        &mut new,
+        kdf,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_change_password_request_with_sid(
+            &session, &wrong_sid, salt, &stored, kdf, &request, kdf, 200
+        ),
+        Err(Error::AuthFailed)
+    ));
+    assert!(matches!(
+        verify_change_password_request_with_sid(
+            &session, &sid, salt, &stored, kdf, &request, kdf, 200
+        ),
+        Err(Error::AuthFailed)
+    ));
+    // The same proof is valid when the session actually owns the signed SID.
+    store.insert(wrong_sid, make_session([1; 16], 100, binding));
+    let other = store.lookup(&wrong_sid).unwrap();
+    other.pending_changepw_challenge.store(pending);
+    assert!(verify_change_password_request_with_sid(
+        &other, &wrong_sid, salt, &stored, kdf, &request, kdf, 200
+    )
+    .is_ok());
+}
+
+#[test]
 fn full_change_password_round_trip() {
     let store = SessionStore::new();
     let user_id = [1u8; 16];
@@ -62,7 +117,8 @@ fn full_change_password_round_trip() {
         kdf,
         client_nonce_cp,
         UnixNanos::now().as_u64(),
-    );
+    )
+    .unwrap();
 
     // Step 3-4: client builds request from old + new password.
     let mut old_buf = old_password.to_vec();
@@ -126,7 +182,8 @@ fn rejects_wrong_old_password() {
         kdf,
         client_nonce_cp,
         UnixNanos::now().as_u64(),
-    );
+    )
+    .unwrap();
 
     let mut old_buf = b"WRONG password".to_vec();
     let mut new_buf = b"new password".to_vec();
@@ -208,7 +265,8 @@ fn rejects_after_ttl_expiration() {
     // Issue challenge "long ago" (10 minutes back).
     let issued_at = UnixNanos::now().as_u64() - 10 * ns::MINUTE;
     let challenge =
-        start_change_password_challenge(&session_arc, salt, kdf, client_nonce_cp, issued_at);
+        start_change_password_challenge(&session_arc, salt, kdf, client_nonce_cp, issued_at)
+            .unwrap();
 
     let mut old_buf = b"correct".to_vec();
     let mut new_buf = b"new strong password 99".to_vec();
@@ -263,7 +321,8 @@ fn second_challenge_invalidates_first_multi_tab() {
         kdf,
         nonce_a,
         UnixNanos::now().as_u64(),
-    );
+    )
+    .unwrap();
 
     // Tab B starts before Tab A submits → overwrites pending state.
     let nonce_b = client_cp::build_challenge_request();
@@ -273,7 +332,8 @@ fn second_challenge_invalidates_first_multi_tab() {
         kdf,
         nonce_b,
         UnixNanos::now().as_u64(),
-    );
+    )
+    .unwrap();
 
     // Tab A computes proof using A's nonces.
     let mut old_buf = b"correct".to_vec();
@@ -325,7 +385,8 @@ fn proof_is_single_use_after_consume() {
 
     let nonce = client_cp::build_challenge_request();
     let challenge =
-        start_change_password_challenge(&session_arc, salt, kdf, nonce, UnixNanos::now().as_u64());
+        start_change_password_challenge(&session_arc, salt, kdf, nonce, UnixNanos::now().as_u64())
+            .unwrap();
 
     let mut old_buf = b"correct".to_vec();
     let mut new_buf = b"new strong password 99".to_vec();

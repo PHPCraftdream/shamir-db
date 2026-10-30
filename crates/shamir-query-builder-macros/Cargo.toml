@@ -13,7 +13,10 @@ doctest = false
 [dependencies]
 syn = { version = "2", features = ["full"] }
 quote = "1"
-proc-macro2 = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
+
+[dev-dependencies]
+qb = { package = "shamir-query-builder", path = "../shamir-query-builder" }
 
 [lints]
 workspace = true

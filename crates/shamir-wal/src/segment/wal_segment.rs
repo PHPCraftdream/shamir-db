@@ -18,7 +18,7 @@
 //! mirrors the same interface for in-memory repos / tests.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,7 +26,14 @@ use std::sync::{Arc, Mutex};
 use shamir_storage::error::{DbError, DbResult};
 use tokio::task::spawn_blocking;
 
+use super::frame_reader::{FrameRead, FrameReader, MAX_FRAME_BYTES};
 use crate::wal_entry_v2::WalEntryV2;
+
+#[cfg(test)]
+type AppendDelay = (
+    tokio::sync::oneshot::Sender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
 
 #[derive(Debug)]
 struct WalIoContext {
@@ -115,12 +122,10 @@ fn fsync_parent_dir(_path: &std::path::Path) -> DbResult<()> {
 ///     survives a process crash, lost only on power loss before `sync`).
 ///   - `sync`         → `fsync` (level 3: survives power loss).
 ///
-/// Single-writer BY CONSTRUCTION: the sole appender is the WAL group-commit
-/// coordinator's drain path (one window at a time — see
-/// `wal_group_commit.rs`). The `Arc<Mutex<File>>` is therefore UNCONTENDED on
-/// the hot path; it is retained, not removed, on purpose. (a) it is held
-/// ONLY on the blocking thread inside `spawn_blocking` (`append_batch` /
-/// `sync`), NEVER across an `.await`. (b) the `Arc` is mandatory regardless
+/// The group-commit coordinator normally serializes appends. Direct concurrent
+/// callers are serialized by the file mutex, including rollback and accounting.
+/// The mutex is held only on a blocking thread inside `spawn_blocking`
+/// (`append_batch` / `sync`), NEVER across an `.await`. The `Arc` is mandatory regardless
 /// of the lock — `spawn_blocking` needs a `'static` handle, so the file must
 /// be reference-counted to cross the closure boundary. (c) Historical bench
 /// observation: the WAL-append bench (`benches/wal_append.rs`, baseline
@@ -144,28 +149,30 @@ fn fsync_parent_dir(_path: &std::path::Path) -> DbResult<()> {
 /// the mandatory yield let concurrent SSI committers all validate before any
 /// published, defeating "exactly one wins"). So the lock stays, honestly
 /// annotated.
-#[allow(dead_code)]
 pub struct WalSegment {
     path: PathBuf,
     file: Arc<Mutex<File>>,
     next_seq: AtomicU64,
     /// Highest `commit_version` ever appended to this segment
-    /// (`fetch_max` on every `append_batch`). Drives segment-level
-    /// truncation: a sealed segment whose `max_committed <= durable_watermark`
-    /// is wholly durable in history and may be deleted (F6). Init 0.
+    /// (`fetch_max` on every `append_batch`). A sealed segment is eligible
+    /// for truncation only when its maximum is positive and at or below the
+    /// durable watermark and its separate retention pin is clear (F6). Init 0.
     max_committed: AtomicU64,
+    /// A zero-version or undecodable record permanently pins this segment.
+    retention_pin: AtomicBool,
     /// Running count of bytes written through `append_batch` (frame bytes
     /// only). Cheap rotation trigger — avoids a `metadata()` syscall on every
     /// append. Tracks exactly what we wrote; matches the on-disk size for a
-    /// freshly created segment (does not account for a pre-existing file's
-    /// bytes, which is fine — rotation only needs a monotonic growth signal).
-    bytes_written: AtomicU64,
+    /// freshly created or reopened segment.
+    bytes_written: Arc<AtomicU64>,
     /// Quarantine flag — set when a `write_all` or `sync_all` on this segment
     /// failed (audit §1.3). Once poisoned, the segment refuses further appends
     /// so the leader rotates to a brand-new file instead of stranding later
     /// acked commits behind a torn tail. A poisoned segment is never un-poisoned
     /// in-process — recovery on next open rebuilds from disk state.
-    poisoned: AtomicBool,
+    poisoned: Arc<AtomicBool>,
+    #[cfg(test)]
+    append_delay: Mutex<Option<AppendDelay>>,
     #[cfg(test)]
     fail_next_write_after: AtomicU64,
     /// Test-only fault seam: inject `PermissionDenied` at `File::open` for
@@ -183,7 +190,6 @@ pub struct WalSegment {
     fail_next_replay_read: AtomicBool,
 }
 
-#[allow(dead_code)]
 impl WalSegment {
     /// Open (creating if absent) an append-only segment at `path`.
     ///
@@ -233,8 +239,11 @@ impl WalSegment {
             file: Arc::new(Mutex::new(file)),
             next_seq: AtomicU64::new(0),
             max_committed: AtomicU64::new(0),
-            bytes_written: AtomicU64::new(existing_len),
-            poisoned: AtomicBool::new(false),
+            retention_pin: AtomicBool::new(false),
+            bytes_written: Arc::new(AtomicU64::new(existing_len)),
+            poisoned: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            append_delay: Mutex::new(None),
             #[cfg(test)]
             fail_next_write_after: AtomicU64::new(u64::MAX),
             #[cfg(test)]
@@ -250,12 +259,17 @@ impl WalSegment {
 
     /// Append a batch of encoded payloads in ONE blocking round-trip,
     /// flushing to the OS (level 2) but NOT fsync'ing. Returns the seq
-    /// assigned to the LAST entry. Batching amortises the spawn_blocking
+    /// assigned to the LAST entry. Sequence numbers are nonpersistent
+    /// per-handle ordinals, restart at zero on reopen, and may have gaps after
+    /// failed appends; they are not identifiers for persisted frames. An empty
+    /// batch returns the next ordinal instead. Batching amortises the spawn_blocking
     /// hop across all concurrent committers funnelled by the leader.
     ///
     /// Payloads must be [`WalEntryV2::encode`] output. Before sequence/version
-    /// or file mutation, only the frame length and magic/supported-version header
-    /// are validated; the body is not decoded here.
+    /// or file mutation, the frame length and header are validated. Bodies are
+    /// decoded for retention metadata; undecodable bodies conservatively pin.
+    /// Encoded payloads are limited to 64 MiB, matching recovery's frame cap;
+    /// older larger frames fail recovery without being truncated.
     ///
     /// On a `write_all` failure (e.g. ENOSPC mid-write) the segment is
     /// **quarantined**: the partial bytes are truncated back to the last
@@ -274,13 +288,22 @@ impl WalSegment {
                 self.path
             )));
         }
+        let mut payload_max = max_version;
+        let mut pinned = false;
         for payload in payloads.iter() {
-            if payload.len() > u32::MAX as usize {
-                return Err(DbError::Storage(
-                    "WalSegment payload exceeds u32 frame length".into(),
-                ));
+            if payload.len() > MAX_FRAME_BYTES {
+                return Err(DbError::Storage(format!(
+                    "WalSegment payload exceeds {MAX_FRAME_BYTES}-byte frame limit"
+                )));
             }
             WalEntryV2::validate_frame_header(payload)?;
+            match WalEntryV2::decode(payload) {
+                Ok(entry) => {
+                    payload_max = payload_max.max(entry.commit_version);
+                    pinned |= entry.commit_version == 0;
+                }
+                Err(_) => pinned = true,
+            }
         }
         if payloads.is_empty() {
             // Still fold the version in — an empty batch carrying a watermark
@@ -290,20 +313,24 @@ impl WalSegment {
         }
         let n = payloads.len() as u64;
         let last_seq = self.next_seq.fetch_add(n, Ordering::AcqRel) + n - 1;
-        self.max_committed.fetch_max(max_version, Ordering::AcqRel);
-        // The last-known-good byte offset BEFORE this batch — the boundary to
-        // roll back to if `write_all` fails partway through `buf`. Tracked
-        // incrementally by this struct; read here (not under the file lock) so
-        // the truncation target is a known frame boundary from a prior
-        // successful append.
-        let pre_batch_offset = self.bytes_written.load(Ordering::Acquire);
+        self.max_committed.fetch_max(payload_max, Ordering::AcqRel);
+        // Publish conservatively before dispatch; even a cancelled or failed
+        // write must never leave a possibly retained unversioned frame unpinned.
+        if pinned {
+            self.retention_pin.store(true, Ordering::Release);
+        }
         let file = Arc::clone(&self.file);
+        let bytes_written = Arc::clone(&self.bytes_written);
+        let poisoned = Arc::clone(&self.poisoned);
         let path = self.path.clone();
+        #[cfg(test)]
+        let delay = self.append_delay.lock().unwrap().take();
         #[cfg(test)]
         let fail_after = self.fail_next_write_after.swap(u64::MAX, Ordering::AcqRel);
         #[cfg(test)]
         let fail_rollback = self.fail_next_rollback.swap(false, Ordering::AcqRel);
-        let frame_bytes = spawn_blocking(move || -> DbResult<u64> {
+        // A cancelled caller detaches this closure; it still completes accounting.
+        spawn_blocking(move || -> DbResult<()> {
             // Coalesce all frames into one buffer → a single write() syscall
             // instead of 3N (len header + payload + crc per entry).
             // Frame format is unchanged: [u32 len LE][payload][u32 crc32 LE].
@@ -315,7 +342,18 @@ impl WalSegment {
                 buf.extend_from_slice(p);
                 buf.extend_from_slice(&crc.to_le_bytes());
             }
+            #[cfg(test)]
+            if let Some((entered, resume)) = delay {
+                let _ = entered.send(());
+                let _ = resume.recv();
+            }
             let mut f = file.lock().expect("WalSegment file mutex poisoned");
+            if poisoned.load(Ordering::Acquire) {
+                return Err(DbError::Storage(format!(
+                    "WalSegment append refused: segment {path:?} is poisoned (prior write/sync failure)"
+                )));
+            }
+            let pre_batch_offset = bytes_written.load(Ordering::Acquire);
             #[cfg(test)]
             let write_result = if fail_after != u64::MAX {
                 let prefix_len = (fail_after as usize).min(buf.len());
@@ -331,7 +369,10 @@ impl WalSegment {
             #[cfg(not(test))]
             let write_result = f.write_all(&buf);
             match write_result {
-                Ok(()) => Ok(buf.len() as u64),
+                Ok(()) => {
+                    bytes_written.fetch_add(buf.len() as u64, Ordering::AcqRel);
+                    Ok(())
+                }
                 Err(e) => {
                     // Partial write — `write_all` may have written some bytes
                     // before failing (ENOSPC, etc.). Truncate the file back to
@@ -342,7 +383,6 @@ impl WalSegment {
                     // denied. A failure here is catastrophic (the file is in
                     // an unknown state) — log loudly and surface it; the
                     // segment is poisoned below regardless.
-                    drop(f);
                     let do_trunc = || -> std::io::Result<()> {
                         let g = OpenOptions::new().write(true).open(&path)?;
                         g.set_len(pre_batch_offset)
@@ -362,35 +402,26 @@ impl WalSegment {
                              in an unknown state; it has been poisoned"
                         );
                     }
+                    poisoned.store(true, Ordering::Release);
                     Err(wal_io_error(format!("WalSegment append to {path:?}"), e))
                 }
             }
         })
         .await
-        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
-        match frame_bytes {
-            Ok(n) => {
-                self.bytes_written.fetch_add(n, Ordering::AcqRel);
-                Ok(last_seq)
-            }
-            Err(e) => {
-                // Quarantine: no future append may touch this file. The leader
-                // reacts by rotating to a fresh segment.
-                self.poisoned.store(true, Ordering::Release);
-                log::error!(
-                    "WalSegment {:?} poisoned after failed append: {} — \
-                     leader must rotate to a new segment; further appends refused",
-                    self.path,
-                    e
-                );
-                Err(e)
-            }
-        }
+        .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
+        Ok(last_seq)
     }
 
     /// Update the reopened segment's watermark from retained frame contents.
-    pub(crate) fn restore_max_committed(&self, max_version: u64) {
+    pub(crate) fn restore_retention(&self, max_version: u64, pinned: bool) {
         self.max_committed.fetch_max(max_version, Ordering::AcqRel);
+        if pinned {
+            self.retention_pin.store(true, Ordering::Release);
+        }
+    }
+
+    pub(crate) fn retention_pinned(&self) -> bool {
+        self.retention_pin.load(Ordering::Acquire)
     }
 
     /// Highest `commit_version` ever appended to this segment.
@@ -417,6 +448,7 @@ impl WalSegment {
     /// by rotating to a new segment rather than retrying on the same fd.
     pub async fn sync(&self) -> DbResult<()> {
         let file = Arc::clone(&self.file);
+        let poisoned = Arc::clone(&self.poisoned);
         #[cfg(test)]
         let fail_sync = self.fail_next_sync.swap(false, Ordering::AcqRel);
         let res = spawn_blocking(move || -> DbResult<()> {
@@ -432,12 +464,14 @@ impl WalSegment {
             };
             #[cfg(not(test))]
             let result = f.sync_all();
+            if result.is_err() {
+                poisoned.store(true, Ordering::Release);
+            }
             result.map_err(|e| wal_io_error("WalSegment sync".into(), e))
         })
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))?;
         if let Err(ref e) = res {
-            self.poisoned.store(true, Ordering::Release);
             log::error!(
                 "WalSegment {:?} poisoned after failed fsync: {} — \
                  leader must rotate to a new segment; further appends refused",
@@ -461,6 +495,19 @@ impl WalSegment {
     /// a fault by setting the flag directly.
     pub fn mark_poisoned(&self) {
         self.poisoned.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delay_next_append(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *self.append_delay.lock().unwrap() = Some((entered_tx, resume_rx));
+        (entered_rx, resume_tx)
     }
 
     #[cfg(test)]
@@ -500,54 +547,44 @@ impl WalSegment {
         // Read through an independent handle so repeated repair starts at byte zero.
         let path = self.path.clone();
         let repair_offset: Option<u64> = spawn_blocking(move || -> DbResult<Option<u64>> {
-            let mut buf = Vec::new();
-            let mut f = File::open(&path)
+            let f = File::open(&path)
                 .map_err(|e| wal_io_error(format!("WalSegment repair read {path:?}"), e))?;
-            f.read_to_end(&mut buf)
-                .map_err(|e| wal_io_error(format!("WalSegment repair read {path:?}"), e))?;
-            let mut pos = 0usize;
-            while pos < buf.len() {
-                if buf.len() - pos < 4 {
-                    break;
-                }
-                let len = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
-                    as usize;
-                let remaining = buf.len() - pos - 4;
-                if len > remaining || remaining - len < 4 {
-                    break;
-                }
-                let frame_end = pos + 4 + len + 4;
-                let payload = &buf[pos + 4..pos + 4 + len];
-                let crc_stored = u32::from_le_bytes([
-                    buf[pos + 4 + len],
-                    buf[pos + 5 + len],
-                    buf[pos + 6 + len],
-                    buf[pos + 7 + len],
-                ]);
-                if crc32fast::hash(payload) != crc_stored {
-                    if frame_end == buf.len() {
-                        break;
+            let len = f
+                .metadata()
+                .map_err(|e| wal_io_error(format!("WalSegment repair metadata {path:?}"), e))?
+                .len();
+            let mut reader = FrameReader::new(f, len, format!("WalSegment repair read {path:?}"));
+            let pos = loop {
+                match reader.next()? {
+                    FrameRead::End => return Ok(None),
+                    FrameRead::Incomplete { offset, .. } => break offset,
+                    FrameRead::Frame {
+                        offset,
+                        end,
+                        crc_ok,
+                        ..
+                    } if !crc_ok => {
+                        if end == len {
+                            break offset;
+                        }
+                        return Err(DbError::Storage(format!(
+                            "WalSegment repair found complete CRC-bad frame at byte offset {offset} in {path:?}; refusing to truncate possible valid suffix"
+                        )));
                     }
-                    return Err(DbError::Storage(format!(
-                        "WalSegment repair found complete CRC-bad frame at byte offset {pos} in {path:?}; refusing to truncate possible valid suffix"
-                    )));
+                    FrameRead::Frame { .. } => {}
                 }
-                pos = frame_end;
-            }
-            if pos == buf.len() {
-                return Ok(None); // file is already clean — no-op
-            }
+            };
             // Truncate back to the last good frame boundary. Open a fresh
             // write-mode handle: the segment's own handle is append-only,
             // which on Windows lacks GENERIC_WRITE so `set_len` is denied.
             let trunc_res = (|| -> std::io::Result<()> {
                 let g = OpenOptions::new().write(true).open(&path)?;
-                g.set_len(pos as u64)
+                g.set_len(pos)
             })();
             if let Err(e) = trunc_res {
                 return Err(wal_io_error(format!("WalSegment repair set_len {path:?}"), e));
             }
-            Ok(Some(pos as u64))
+            Ok(Some(pos))
         })
         .await
         .map_err(|e| DbError::Internal(format!("spawn_blocking join: {e}")))??;
@@ -670,7 +707,7 @@ impl WalSegment {
             #[cfg(not(test))]
             let _ = fail_open;
             let mut attempt = 0u32;
-            let mut f = loop {
+            let f = loop {
                 #[cfg(test)]
                 let opened = if fail_open {
                     Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
@@ -710,80 +747,57 @@ impl WalSegment {
                     }
                 }
             };
-            let mut buf = Vec::new();
             #[cfg(test)]
-            let read_result = if fail_read {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "injected WAL replay read failure",
-                ))
-            } else {
-                f.read_to_end(&mut buf)
-            };
+            if fail_read {
+                return Err(wal_io_error(
+                    format!("WalSegment replay read {path:?}"),
+                    std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "injected WAL replay read failure",
+                    ),
+                ));
+            }
             #[cfg(not(test))]
-            let read_result = {
-                let _ = fail_read;
-                f.read_to_end(&mut buf)
-            };
-            read_result.map_err(|e| wal_io_error(format!("WalSegment replay read {path:?}"), e))?;
+            let _ = fail_read;
+            let length = f
+                .metadata()
+                .map_err(|e| wal_io_error(format!("WalSegment replay metadata {path:?}"), e))?
+                .len();
+            let mut reader =
+                FrameReader::new(f, length, format!("WalSegment replay read {path:?}"));
             let mut out = Vec::new();
-            let mut pos = 0usize;
-            while pos < buf.len() {
-                if buf.len() - pos < 4 {
-                    if sealed {
-                        return Err(DbError::Storage(format!(
-                            "WalSegment replay (sealed) {path:?}: incomplete frame header at byte offset {pos}"
-                        )));
+            loop {
+                match reader.next()? {
+                    FrameRead::End => break,
+                    FrameRead::Incomplete { offset, header } => {
+                        if sealed {
+                            let part = if header { "frame header" } else { "frame" };
+                            return Err(DbError::Storage(format!(
+                                "WalSegment replay (sealed) {path:?}: incomplete {part} at byte offset {offset}"
+                            )));
+                        }
+                        break;
                     }
-                    break;
-                }
-                let len = u32::from_le_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]])
-                    as usize;
-                let remaining = buf.len() - pos - 4;
-                if len > remaining || remaining - len < 4 {
-                    if sealed {
-                        return Err(DbError::Storage(format!(
-                            "WalSegment replay (sealed) {path:?}: incomplete frame at byte offset {pos}"
-                        )));
+                    FrameRead::Frame {
+                        offset,
+                        payload,
+                        crc_ok,
+                        ..
+                    } => {
+                        if !crc_ok {
+                            if sealed {
+                                return Err(DbError::Storage(format!(
+                                    "WalSegment replay (sealed) {path:?}: CRC mismatch at byte offset {offset}"
+                                )));
+                            }
+                            log::warn!(
+                                "WalSegment replay: CRC mismatch at byte offset {offset}; discarding remaining data"
+                            );
+                            break;
+                        }
+                        out.push(WalEntryV2::decode(&payload)?);
                     }
-                    break;
                 }
-                let frame_end = pos + 4 + len + 4;
-                let payload = &buf[pos + 4..pos + 4 + len];
-                let crc_stored = u32::from_le_bytes([
-                    buf[pos + 4 + len],
-                    buf[pos + 5 + len],
-                    buf[pos + 6 + len],
-                    buf[pos + 7 + len],
-                ]);
-                if crc32fast::hash(payload) != crc_stored {
-                    if sealed {
-                        // Audit §1.8: a sealed segment is fully fsync'd
-                        // (I4), so a CRC mismatch is disk corruption, not
-                        // a crash tail. Silently discarding the valid tail
-                        // hides durable records. The frame format has no
-                        // magic/seq for resync, so this is a hard error —
-                        // an operator must decide. (Adding magic+seq for
-                        // single-frame-skip resync is a deferred follow-up:
-                        // it requires a WAL format version bump.)
-                        return Err(DbError::Storage(format!(
-                            "WalSegment replay (sealed) {:?}: CRC mismatch at byte \
-                             offset {pos} — on-disk corruption in a fully-fsync'd \
-                             sealed segment; the valid tail after this frame cannot \
-                             be trusted (no magic/seq for resync). Operator action \
-                             required (restore from backup / run doctor).",
-                            path
-                        )));
-                    }
-                    log::warn!(
-                        "WalSegment replay: CRC mismatch at byte offset {pos} \
-                         (full frame present but payload corrupted); \
-                         discarding this frame and all remaining data"
-                    );
-                    break;
-                }
-                out.push(WalEntryV2::decode(payload)?);
-                pos = frame_end;
             }
             Ok(out)
         })

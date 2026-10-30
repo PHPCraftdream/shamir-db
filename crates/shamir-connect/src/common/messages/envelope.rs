@@ -87,12 +87,12 @@ impl RequestEnvelope {
 /// ```
 ///
 /// Wire format identical to [`RequestEnvelope`] — verified by
-/// `request_envelope_ref_wire_compat_with_owning` integration test.
+/// `request_envelope_ref_wire_compat_with_owning_and_view` integration test.
 #[derive(Debug, Serialize)]
 pub struct RequestEnvelopeRef<'a> {
     /// Bearer session id (always 32 bytes).
     #[serde(with = "serde_bytes", rename = "sid")]
-    pub session_id: &'a [u8; 32],
+    pub session_id: &'a [u8; limits::SESSION_ID_BYTES],
     /// Optional client-side correlation id.
     #[serde(rename = "rid", default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<u32>,

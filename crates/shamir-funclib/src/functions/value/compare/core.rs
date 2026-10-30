@@ -24,10 +24,9 @@
 //!
 //! - **Numeric (rank 2):** All four numeric variants share rank 2 and
 //!   compare by *numeric value* across subtypes. `Int 5`, `Dec 5.0`,
-//!   and `F64 5.0` are `Equal`. Exact subtypes (Int, Dec) are compared
-//!   via [`Decimal`]; mixed comparisons involving `F64` or `Big` fall
-//!   back to `f64`. `NaN` sorts *last* among numerics, and
-//!   `NaN == NaN` (total-order requirement).
+//!   and F64 5.0 are equal. All comparisons are exact, including the
+//!   binary rational represented by a float. NaN sorts last and all NaNs
+//!   compare equal; signed zeros compare equal.
 //! - **Bool:** `false < true`.
 //! - **Str:** lexicographic via [`str::cmp`].
 //! - **Bin:** byte-lexicographic via slice `cmp`.
@@ -38,9 +37,7 @@
 //!   the same tail-length rule as List. Two structurally-equal containers
 //!   built in different insertion order still compare `Equal`.
 
-use num_bigint::BigInt;
-use rust_decimal::prelude::ToPrimitive;
-use rust_decimal::Decimal;
+use crate::functions::numeric_exact::ExactNumber;
 use shamir_types::types::common::{TMap, TSet};
 use shamir_types::types::value::QueryValue;
 use std::cmp::Ordering;
@@ -89,75 +86,14 @@ fn type_rank(v: &QueryValue) -> u8 {
 // Numeric cross-subtype comparison
 // ---------------------------------------------------------------------------
 
-/// Compare two numeric `QueryValue`s by *value* across subtypes.
-///
-/// Strategy:
-/// - Int vs Int: direct i64 comparison.
-/// - Dec vs Dec: direct Decimal comparison.
-/// - Big vs Big: direct BigInt comparison.
-/// - Int vs Dec / Dec vs Int: promote Int to Decimal.
-/// - Int vs Big / Big vs Int: exact via BigInt comparison (arbitrary
-///   precision, no lossy conversion).
-/// - Anything involving F64, or Dec vs Big: convert both sides to f64
-///   (lossy; a full Dec↔Big exact path is out of scope here).
-/// - NaN sorts last; NaN == NaN for totality.
+/// Compare exact numeric values, including infinities and NaNs.
 fn compare_numeric(a: &QueryValue, b: &QueryValue) -> Ordering {
-    // Fast paths for same-subtype.
     match (a, b) {
-        (QueryValue::Int(x), QueryValue::Int(y)) => return x.cmp(y),
-        (QueryValue::Dec(x), QueryValue::Dec(y)) => return x.cmp(y),
-        (QueryValue::F64(x), QueryValue::F64(y)) => return cmp_f64(*x, *y),
-        (QueryValue::Big(x), QueryValue::Big(y)) => return x.cmp(y),
-        _ => {}
+        (QueryValue::Int(x), QueryValue::Int(y)) => x.cmp(y),
+        (QueryValue::Dec(x), QueryValue::Dec(y)) => x.cmp(y),
+        (QueryValue::Big(x), QueryValue::Big(y)) => x.cmp(y),
+        _ => ExactNumber::from_value(a).compare(&ExactNumber::from_value(b)),
     }
-
-    // Cross-subtype: exact (Decimal) path for Int/Dec pairs.
-    match (a, b) {
-        (QueryValue::Int(x), QueryValue::Dec(d)) => return Decimal::from(*x).cmp(d),
-        (QueryValue::Dec(d), QueryValue::Int(y)) => return d.cmp(&Decimal::from(*y)),
-        // Int↔Big: exact via BigInt (arbitrary precision, no lossy f64 rounding).
-        (QueryValue::Int(x), QueryValue::Big(y)) => return BigInt::from(*x).cmp(y),
-        (QueryValue::Big(x), QueryValue::Int(y)) => return x.cmp(&BigInt::from(*y)),
-        _ => {}
-    }
-
-    // Anything else (F64 or Dec↔Big involved) -- convert to f64.
-    let fa = to_f64(a);
-    let fb = to_f64(b);
-    cmp_f64(fa, fb)
-}
-
-/// Total-order f64 comparison: NaN sorts last, NaN == NaN.
-fn cmp_f64(a: f64, b: f64) -> Ordering {
-    match (a.is_nan(), b.is_nan()) {
-        (true, true) => Ordering::Equal,
-        (true, false) => Ordering::Greater, // NaN last
-        (false, true) => Ordering::Less,
-        (false, false) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
-    }
-}
-
-/// Best-effort conversion to f64 for cross-subtype numeric comparison.
-fn to_f64(v: &QueryValue) -> f64 {
-    match v {
-        QueryValue::Int(n) => *n as f64,
-        QueryValue::F64(f) => *f,
-        QueryValue::Dec(d) => d.to_f64().unwrap_or(f64::NAN),
-        QueryValue::Big(b) => big_to_f64(b),
-        _ => f64::NAN,
-    }
-}
-
-/// Convert a BigInt to f64 (lossy but deterministic).
-fn big_to_f64(b: &BigInt) -> f64 {
-    b.to_f64().unwrap_or_else(|| {
-        // Extremely large BigInt that overflows f64 → use sign.
-        if b.sign() == num_bigint::Sign::Minus {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        }
-    })
 }
 
 /// Element-wise list comparison with recursive [`compare`].

@@ -6,7 +6,10 @@
 //! This is the main acceptance gate from the R0-a brief.
 
 use crate::wire::db_message::{DbRequest, DbResponse};
+use crate::wire::repl::REPL_CAP_IDENTITY_FENCE;
 use crate::wire::repl::{ReplRepoInfo, ReplRequest, ReplResponse};
+use serde::Serialize;
+use shamir_types::types::value::QueryValue;
 
 fn roundtrip_db_request(req: &DbRequest) -> DbRequest {
     let bytes = rmp_serde::to_vec_named(req).expect("serialize");
@@ -19,7 +22,6 @@ fn roundtrip_db_response(resp: &DbResponse) -> DbResponse {
 }
 
 fn repl_op_tag(req: &DbRequest) -> String {
-    use shamir_types::types::value::QueryValue;
     let bytes = rmp_serde::to_vec_named(req).unwrap();
     let map: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     map.get("op")
@@ -29,7 +31,6 @@ fn repl_op_tag(req: &DbRequest) -> String {
 }
 
 fn repl_kind_tag(resp: &DbResponse) -> String {
-    use shamir_types::types::value::QueryValue;
     let bytes = rmp_serde::to_vec_named(resp).unwrap();
     let map: QueryValue = rmp_serde::from_slice(&bytes).unwrap();
     map.get("kind")
@@ -241,9 +242,6 @@ fn repl_error_response_roundtrip() {
 /// `REPL_CAP_IDENTITY_FENCE` constant value (wire contract).
 #[test]
 fn repl_hello_capabilities_additive_serde() {
-    use crate::wire::repl::REPL_CAP_IDENTITY_FENCE;
-    use serde::Serialize;
-
     assert_eq!(REPL_CAP_IDENTITY_FENCE, "identity_fence");
 
     // Wire shape of a Hello written by an OLD build: no `capabilities` key.

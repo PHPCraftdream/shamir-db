@@ -8,7 +8,7 @@
 //! on an empty `scc::HashMap` → straight to the static builtin).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use scc::hash_map::Entry;
 use scc::HashMap as SccHashMap;
@@ -100,7 +100,6 @@ impl ScalarResolver {
     /// is shared across ALL callers via a `OnceLock`, so `builtins_only()` is
     /// allocation-free after the first call (one Arc for the process lifetime).
     pub fn builtins_only() -> Self {
-        use std::sync::OnceLock;
         static EMPTY: OnceLock<Arc<UserScalarLayer>> = OnceLock::new();
         let user = EMPTY.get_or_init(|| Arc::new(UserScalarLayer::new()));
         // Clone the Arc — cheap (refcount bump), no allocation.

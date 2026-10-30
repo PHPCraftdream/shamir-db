@@ -1,8 +1,33 @@
+use crate::builtin::map_argon2_join_error;
 use crate::{FnBatch, FnCtx, FunctionError, FunctionRegistry, Params};
 use argon2::{Algorithm, Argon2, Params as Argon2Params, Version};
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+#[tokio::test]
+async fn argon2_join_errors_distinguish_panics_and_cancellation() {
+    let string_panic =
+        tokio::task::spawn_blocking(|| std::panic::panic_any(String::from("specific panic")))
+            .await
+            .unwrap_err();
+    let non_string_panic = tokio::task::spawn_blocking(|| std::panic::panic_any(42_u32))
+        .await
+        .unwrap_err();
+    let task = tokio::spawn(std::future::pending::<()>());
+    task.abort();
+    let cancelled = task.await.unwrap_err();
+    assert!(
+        matches!(map_argon2_join_error(string_panic), FunctionError::Compute(message) if message.contains("argon2id") && message.contains("specific panic"))
+    );
+    assert!(
+        matches!(map_argon2_join_error(non_string_panic), FunctionError::Compute(message) if message.contains("argon2id") && message.contains("non-string panic payload"))
+    );
+    assert!(matches!(
+        map_argon2_join_error(cancelled),
+        FunctionError::Cancelled
+    ));
+}
 
 fn params(password: &[u8], salt: &[u8]) -> Params {
     let mut p = Params::new();

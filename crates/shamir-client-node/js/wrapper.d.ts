@@ -37,6 +37,7 @@ export interface ConnectOptions {
   port: number;
   serverName: string;
   username: string;
+  /** The owned native password buffer is zeroized on drop, not JS copies. */
   password: string;
   acceptNewHost?: boolean;
   trustedPin?: Buffer;
@@ -52,18 +53,28 @@ export interface ConnectOptions {
 }
 
 /**
- * A connected, authenticated client. `execute` accepts a plain JS object and
+ * A connected, authenticated client. This is a subset of the Rust SDK;
+ * subscriptions, cursors, local connections and resume are not exposed.
+ * `execute` accepts a plain JS object and
  * returns a plain JS object (msgpack encode/decode is handled internally).
  */
 export declare class ShamirClient {
   static connect(opts: ConnectOptions): Promise<ShamirClient>;
   serverPubKeyPin(): Buffer;
+  /** Empty after close; previously returned buffers remain caller-owned. */
   sessionId(): Buffer;
   expiresAtNs(): bigint;
+  /** No Node resume input; null after close. Previously returned buffers are not erased. */
   resumptionTicket(): Buffer | null;
   resumptionExpiresAtNs(): bigint | null;
   ping(): Promise<void>;
-  /** Execute a BatchRequest (plain JS object). Returns BatchResponse as a JS object. */
+  /**
+   * Low-level object FFI: pass a TS Batch builder's `build()` result.
+   * `Batch.execute(nodeClient, db)` is unsupported (no executeWithTouch);
+   * DTO reexports and a full adapter are deferred.
+   * Decoded 64-bit integers are number when safe, otherwise bigint. Supply
+   * bigint for unsafe integers; bigint inputs must fit int64 or uint64.
+   */
   execute(db: string, batch: object): Promise<object>;
   repl(req: Buffer): Promise<Buffer>;
   createScramUser(name: string, password: string, roles: string[]): Promise<Buffer>;

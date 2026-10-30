@@ -6,6 +6,7 @@
 //! DTO: serde shape, constructor, and the `keyset()` accessor.
 
 use shamir_types::mpack;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use crate::read::Pagination;
@@ -117,8 +118,6 @@ fn after_without_tiebreaker_wire_shape_unchanged() {
 /// wire and round-trips it losslessly.
 #[test]
 fn after_with_tiebreaker_round_trip() {
-    use shamir_types::types::record_id::RecordId;
-
     let id = RecordId::system("row-last-000");
     let key = vec![QueryValue::Int(20)];
     let p = Pagination::after_with_id(key.clone(), Some(3), Some(id));
@@ -171,7 +170,55 @@ fn keyset_accessor() {
     assert!(Pagination::page(1, 10).keyset().is_none());
 }
 
+#[test]
+fn after_equality_matches_messagepack_cross_product() {
+    let mut map_a = shamir_types::types::common::new_map();
+    let mut map_b = shamir_types::types::common::new_map();
+    map_a.insert("a".to_owned(), QueryValue::Int(1));
+    map_a.insert("b".to_owned(), QueryValue::Int(2));
+    map_b.insert("b".to_owned(), QueryValue::Int(2));
+    map_b.insert("a".to_owned(), QueryValue::Int(1));
+    let mut set = Default::default();
+    let _: &mut shamir_types::types::common::TSet<QueryValue> = &mut set;
+    set.insert(QueryValue::Int(1));
+    let values = vec![
+        QueryValue::Null,
+        QueryValue::Bool(false),
+        QueryValue::Int(1),
+        QueryValue::F64(0.0),
+        QueryValue::F64(-0.0),
+        QueryValue::F64(f64::from_bits(0x7ff8_0000_0000_0001)),
+        QueryValue::F64(f64::from_bits(0x7ff8_0000_0000_0002)),
+        QueryValue::Dec("1.0".parse().unwrap()),
+        QueryValue::Dec("1".parse().unwrap()),
+        QueryValue::Big(1.into()),
+        QueryValue::Big((-123456789_i64).into()),
+        QueryValue::Str("1".into()),
+        QueryValue::Str("1.0".into()),
+        QueryValue::Bin(vec![1]),
+        QueryValue::List(vec![QueryValue::Int(1)]),
+        QueryValue::Set(set),
+        QueryValue::Map(map_a),
+        QueryValue::Map(map_b),
+        QueryValue::List(vec![QueryValue::Str("1".into())]),
+        QueryValue::List(vec![QueryValue::Big(1.into())]),
+    ];
+    for a in &values {
+        for b in &values {
+            let expected = rmp_serde::to_vec_named(&vec![a]).unwrap()
+                == rmp_serde::to_vec_named(&vec![b]).unwrap();
+            assert_eq!(
+                Pagination::after(vec![a.clone()], None)
+                    == Pagination::after(vec![b.clone()], None),
+                expected,
+                "{a:?} vs {b:?}"
+            );
+        }
+    }
+}
+
 /// `After` is NOT the default (it is not `None`), so `is_none()` is false.
+
 #[test]
 fn after_is_not_none() {
     let p = Pagination::after(vec![QueryValue::Int(1)], None);

@@ -662,6 +662,11 @@ impl FnCtx {
         self
     }
 
+    pub(crate) fn with_shared_secret_grants(mut self, grants: Arc<TFxSet<String>>) -> Self {
+        self.secret_grants = grants;
+        self
+    }
+
     /// Builder: set the actor that initiated this invocation (R2).
     pub fn with_actor(mut self, actor: Actor) -> Self {
         self.actor = actor;

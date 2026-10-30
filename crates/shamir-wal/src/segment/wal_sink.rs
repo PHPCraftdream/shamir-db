@@ -1,9 +1,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use shamir_storage::error::DbResult;
 use tokio::sync::Notify;
 
+use super::mem_frames::MemFrames;
+use crate::segment::frame_reader::MAX_FRAME_BYTES;
 use crate::segment_set::SegmentSet;
 use crate::wal_entry_v2::WalEntryV2;
 use crate::wal_segment::WalSegment;
@@ -30,17 +32,6 @@ async fn file_sync_pause_point() {
     if FILE_PAUSE_NEXT_SYNC.swap(false, Ordering::AcqRel) {
         FILE_SYNC_PAUSED.notify_one();
         FILE_SYNC_RESUME.notified().await;
-    }
-}
-
-/// Keep `slot` at the minimum of its current value and `v` (`0` = unset).
-fn min_positive_fetch_min(slot: &AtomicU64, v: u64) {
-    let mut cur = slot.load(Ordering::Acquire);
-    while cur == 0 || v < cur {
-        match slot.compare_exchange_weak(cur, v, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return,
-            Err(actual) => cur = actual,
-        }
     }
 }
 
@@ -80,38 +71,19 @@ impl WalSink {
     }
 }
 
-/// In-RAM WAL sink — mirrors [`WalSegment`]'s interface but stores frames
-/// in a `Vec` instead of a file. Used by in-memory repos so the
+/// In-RAM WAL sink — mirrors [`WalSegment`]'s interface using immutable batches. Used by in-memory repos so the
 /// group-commit write path is identical to disk repos (one code path),
 /// while giving genuine in-process replay parity: the buffer lives in the
 /// same RAM as the repo and survives a *simulated* same-process "crash"
 /// exactly as `InMemoryStore` does.
 pub struct MemSink {
-    // Sanctioned std::sync::Mutex (CLAUDE.md "Banned in hot paths"): this is
-    // the in-memory / test sink only — production durability runs on
-    // `WalSink::File` (fsync-backed). Appends are serialised by the
-    // group-commit leader, so this lock sees a single writer and is NOT a
-    // hot production path. Held only for the O(1) push / clone, never across
-    // an `.await`.
-    //
-    // Each frame is paired with its batch `max_version` so the frame-level
-    // GC (`truncate_below`, I7) can drop the frames a sealed segment would
-    // drop on disk. `0` means "no versioned record" and pins the frame
-    // (never truncated by version, mirrors a sealed segment with
-    // `max_version == 0`, I5).
-    frames: Mutex<Vec<(u64, Vec<u8>)>>,
+    // O(1) head snapshot and batch publication; corpus work runs on blocking workers.
+    frames: Arc<MemFrames>,
     next_seq: AtomicU64,
     /// Highest `commit_version` ever appended (monotonic `fetch_max`).
     /// Mirrors [`WalSegment::max_committed`] so the in-RAM sink carries the
     /// same watermark for future frame-level GC (F6 truncation parity, I7).
     max_committed: AtomicU64,
-    /// O(1) truncation-eligibility mirror (RV-WAL-B8E9884C): the smallest
-    /// positive batch `max_version` among retained frames, or `0` when no
-    /// such frame exists. Updated under the `frames` mutex at every mutation
-    /// site (`append_batch`, `truncate_below`) so `has_truncatable` never
-    /// scans the collection. `0` also means "none": frame versions are
-    /// `u64 >= 0` and `0` pins a frame (never eligible).
-    min_truncatable: AtomicU64,
     /// Test-only fault-injection knob (audit §1.6 / task #531). When armed,
     /// the NEXT `append_batch` fails BEFORE any frame is pushed — a genuine
     /// failure of the real write path (not a simulated rollback), so the
@@ -140,10 +112,9 @@ pub struct MemSink {
 impl MemSink {
     fn new() -> Self {
         Self {
-            frames: Mutex::new(Vec::new()),
+            frames: Arc::new(MemFrames::default()),
             next_seq: AtomicU64::new(0),
             max_committed: AtomicU64::new(0),
-            min_truncatable: AtomicU64::new(0),
             fail_next_append: AtomicBool::new(false),
             fail_next_sync: AtomicBool::new(false),
             #[cfg(test)]
@@ -167,7 +138,7 @@ impl MemSink {
     }
 
     /// Test-only: arm the next `append_batch` to fail. The failing call
-    /// pushes NO frames (returns before the `frames.extend`), so the batch
+    /// pushes NO frames (returns before publication), so the batch
     /// leaves zero trace — mirroring a `File` sink quarantining a segment on
     /// a partial write. One-shot: the flag clears itself on the failing call.
     /// Cross-crate test seam remains in production Mem sinks.
@@ -180,8 +151,8 @@ impl MemSink {
     /// regression: `has_truncatable` must answer without taking this lock).
     #[doc(hidden)]
     #[cfg(test)]
-    pub(crate) fn frames_mutex_for_test(&self) -> &Mutex<Vec<(u64, Vec<u8>)>> {
-        &self.frames
+    pub(crate) fn with_frames_lock_for_test(&self, f: impl FnOnce()) {
+        self.frames.with_lock(f);
     }
 }
 
@@ -198,7 +169,7 @@ pub enum WalSink {
     /// level 2, sync_all = level 3. Truncation deletes whole sealed
     /// segments once their data is durable in history.
     File(SegmentSet),
-    /// In-RAM Vec-backed segment. append = push, sync = no-op (no fsync in
+    /// In-RAM immutable-batch segment. append = publish, sync = no-op (no fsync in
     /// RAM), replay = decode every stored payload.
     Mem(MemSink),
 }
@@ -229,6 +200,26 @@ impl WalSink {
             Self::Mem(mem) => mem,
             Self::File(_) => panic!("pause/fault injection is Mem-only"),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_mem_replay(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        self.mem_for_test().frames.pause_replay()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_mem_truncate(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        self.mem_for_test().frames.pause_truncate()
     }
 
     #[cfg(test)]
@@ -294,21 +285,36 @@ impl WalSink {
                         "MemSink injected append_batch failure (task #531)".into(),
                     ));
                 }
+                if payloads
+                    .iter()
+                    .any(|payload| payload.len() > MAX_FRAME_BYTES)
+                {
+                    return Err(shamir_storage::error::DbError::Storage(format!(
+                        "WalSegment payload exceeds {MAX_FRAME_BYTES}-byte frame limit"
+                    )));
+                }
                 m.max_committed.fetch_max(max_version, Ordering::AcqRel);
                 if payloads.is_empty() {
                     return Ok(m.next_seq.load(Ordering::Acquire));
                 }
                 let n = payloads.len() as u64;
                 let last_seq = m.next_seq.fetch_add(n, Ordering::AcqRel) + n - 1;
-                // CRC / torn-tail handling is unnecessary in RAM — store the
-                // payloads verbatim, each tagged with the batch `max_version`
-                // so frame-level GC (`truncate_below`, I7) mirrors a sealed
-                // segment's per-segment max_version reclaim.
-                let mut frames = m.frames.lock().expect("MemSink frames mutex poisoned");
-                frames.extend(payloads.into_iter().map(|p| (max_version, p)));
-                if max_version > 0 {
-                    min_positive_fetch_min(&m.min_truncatable, max_version);
-                }
+                let tagged: Vec<_> = payloads
+                    .into_iter()
+                    .map(|p| {
+                        let version = WalEntryV2::decode(&p)
+                            .map(|entry| entry.commit_version)
+                            .unwrap_or(0);
+                        m.max_committed.fetch_max(version, Ordering::AcqRel);
+                        let tag = if version == 0 {
+                            0
+                        } else {
+                            max_version.max(version)
+                        };
+                        (tag, p)
+                    })
+                    .collect();
+                m.frames.append(tagged);
                 Ok(last_seq)
             }
         }
@@ -387,14 +393,7 @@ impl WalSink {
     pub async fn replay(&self) -> DbResult<Vec<WalEntryV2>> {
         match self {
             Self::File(seg) => seg.replay().await,
-            Self::Mem(m) => {
-                let frames = m.frames.lock().expect("MemSink frames mutex poisoned");
-                let mut out = Vec::with_capacity(frames.len());
-                for (_version, payload) in frames.iter() {
-                    out.push(WalEntryV2::decode(payload)?);
-                }
-                Ok(out)
-            }
+            Self::Mem(m) => m.frames.replay().await,
         }
     }
 
@@ -404,28 +403,14 @@ impl WalSink {
     ///
     /// `File` delegates to [`SegmentSet::truncate_below`] (deletes whole
     /// sealed segments; the active segment and any pin are untouched).
-    /// `Mem` drops frames whose batch `max_version` is in `(0, durable]`,
+    /// `Mem` drops non-pinned frames whose batch `max_version` is in `(0, durable]`,
     /// keeping any pinned (`v == 0`) frame and any frame above the durable
     /// watermark (I7). fsync-gate (I2) is the caller's responsibility — it
     /// flushes history before invoking this.
     pub async fn truncate_below(&self, durable: u64) -> DbResult<usize> {
         match self {
             Self::File(segset) => segset.truncate_below(durable).await,
-            Self::Mem(m) => {
-                let mut frames = m.frames.lock().expect("MemSink frames mutex poisoned");
-                let before = frames.len();
-                frames.retain(|(v, _)| *v == 0 || *v > durable);
-                // Recompute the O(1) mirror from the retained set (we already
-                // hold the frames mutex, so no other writer can interleave).
-                let min = frames
-                    .iter()
-                    .filter(|(v, _)| *v > 0)
-                    .map(|(v, _)| *v)
-                    .min()
-                    .unwrap_or(0);
-                m.min_truncatable.store(min, Ordering::Release);
-                Ok(before - frames.len())
-            }
+            Self::Mem(m) => m.frames.truncate(durable).await,
         }
     }
 
@@ -433,15 +418,12 @@ impl WalSink {
     /// (relatively expensive) history-flush + truncate in the drainer so it
     /// fires only on a segment/frame boundary, never per-commit (I2).
     ///
-    /// `File`: any sealed segment with `0 < max_version <= durable`.
+    /// `File`: any unpinned sealed segment with `0 < max_version <= durable`.
     /// `Mem`: any frame with `0 < v <= durable`.
     pub fn has_truncatable(&self, durable: u64) -> bool {
         match self {
             Self::File(segset) => segset.has_truncatable(durable),
-            Self::Mem(m) => {
-                let min = m.min_truncatable.load(Ordering::Acquire);
-                min != 0 && min <= durable
-            }
+            Self::Mem(m) => m.frames.eligible(durable),
         }
     }
 

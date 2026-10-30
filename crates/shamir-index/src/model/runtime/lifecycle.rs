@@ -28,11 +28,11 @@
 //!                       └─────────────────────────────────────────────────── (no index)
 //! ```
 //!
-//! ## Why no `Dropping` / `Failed` enum variant?
+//! ## DROP and failed builds
 //!
-//! F-72's brief anticipated needing a `Dropping` variant (and a `Failed`
-//! variant for a cancelled build). F-76 DECIDED, per family, that neither is
-//! REQUIRED for the correctness property each task closes, because:
+//! F-72 anticipated `Dropping` and `Failed`. The shipped `IndexState` has a
+//! `Failed` variant for failed builds; DROP instead retires the definition.
+//! The lifecycle rationale is:
 //!
 //! - **DROP visibility (F-76):** the fix is "retire the definition from the
 //!   planner-visible snapshot FIRST, sweep postings SECOND". Retiring the
@@ -47,14 +47,13 @@
 //!   structure.
 //! - **CREATE crash (F-50 Step 3b):** a build interrupted mid-backfill leaves
 //!   `Building` durably on disk; the table-reopen self-heal re-backfills from
-//!   scratch. A `Failed` variant is not needed because `Building` already
-//!   encodes "interrupted, needs reconciliation" and the reconciliation path
+//!   scratch. `Failed` is also used for failed builds and remains
+//!   planner-invisible; the reconciliation path
 //!   is fully automatic (index2) or operator-invoked `doctor::repair()`
 //!   (base_index). See the per-family crash rows below.
 //!
-//! Adding the variants later is a backward-compatible enum change (bincode
-//! tags variants by ordinal; see [`crate::state`]'s forward-compat note), so
-//! this decision does not paint us into a corner.
+//! Persisted enum variants have append-only bincode ordinals; compatibility
+//! with older readers must be considered before adding any new variant.
 //!
 //! ## The four families
 //!

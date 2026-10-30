@@ -3,6 +3,7 @@
 
 use shamir_query_types::read::{OrderByItem, ReadQuery};
 use shamir_types::mpack;
+use shamir_types::types::record_id::RecordId;
 
 use crate::filter::{self, FilterExt};
 use crate::query::Query;
@@ -942,8 +943,6 @@ fn test_after_with_id_none_omits_after_id_key() {
 /// query and round-trips it losslessly through the wire codec.
 #[test]
 fn test_after_with_id_round_trips_tiebreaker() {
-    use shamir_types::types::record_id::RecordId;
-
     let id = RecordId::system("last-row-0000");
     let rq = Query::from("users")
         .order_by_asc("score")

@@ -19,15 +19,32 @@ use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConf
 #[derive(Clone)]
 pub struct WasmEngine {
     engine: Engine,
+    pooling_memory_ceiling: Option<usize>,
     /// Test-only handle to observe cache hits through the public constructor.
     #[cfg(test)]
     store: Option<Arc<DiskCacheStore>>,
 }
 
+/// Engine allocator settings. Larger ceilings reserve more address space per pool slot.
+#[derive(Debug, Clone)]
+pub struct WasmEngineOptions {
+    pub pooling_memory_ceiling: usize,
+    pub pooling: bool,
+}
+
+impl Default for WasmEngineOptions {
+    fn default() -> Self {
+        Self {
+            pooling_memory_ceiling: WasmLimits::default().max_memory_bytes,
+            pooling: std::env::var_os("SHAMIR_WASM_NO_POOL").is_none(),
+        }
+    }
+}
+
 impl WasmEngine {
     /// Creates an engine without a persistent compilation cache.
     pub fn new() -> FnResult<Self> {
-        Self::build(None)
+        Self::with_options(WasmEngineOptions::default())
     }
 
     /// Creates an engine with a best-effort, private incremental cache.
@@ -35,16 +52,57 @@ impl WasmEngine {
     /// `dir` is the DATA directory; the cache store derives the
     /// `<data_dir>/cache/wasm` layout itself.
     pub fn with_compile_cache(dir: PathBuf) -> FnResult<Self> {
-        Self::build(Some(dir))
+        Self::with_compile_cache_and_options(dir, WasmEngineOptions::default())
     }
 
-    fn build(cache_dir: Option<PathBuf>) -> FnResult<Self> {
-        Self::build_with_ticker(cache_dir, Self::spawn_epoch_ticker)
+    /// Creates an engine with explicit allocator options.
+    pub fn with_options(options: WasmEngineOptions) -> FnResult<Self> {
+        Self::build_with_options(None, options, Self::spawn_epoch_ticker)
     }
 
+    /// Creates a cached engine with explicit allocator options.
+    pub fn with_compile_cache_and_options(
+        dir: PathBuf,
+        options: WasmEngineOptions,
+    ) -> FnResult<Self> {
+        Self::build_with_options(Some(dir), options, Self::spawn_epoch_ticker)
+    }
+
+    #[cfg(test)]
     pub(crate) fn build_with_ticker(
         cache_dir: Option<PathBuf>,
         spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
+    ) -> FnResult<Self> {
+        Self::build_with_options(cache_dir, WasmEngineOptions::default(), spawn_ticker)
+    }
+
+    fn build_with_options(
+        cache_dir: Option<PathBuf>,
+        options: WasmEngineOptions,
+        spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
+    ) -> FnResult<Self> {
+        Self::build_with_engine_factory(cache_dir, options, spawn_ticker, Engine::new)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build_with_failing_pool(options: WasmEngineOptions) -> FnResult<Self> {
+        let mut first = true;
+        Self::build_with_engine_factory(None, options, Self::spawn_epoch_ticker, |config| {
+            if std::mem::take(&mut first) {
+                Err(wasmtime::Error::msg(
+                    "injected pooling initialization failure",
+                ))
+            } else {
+                Engine::new(config)
+            }
+        })
+    }
+
+    fn build_with_engine_factory(
+        cache_dir: Option<PathBuf>,
+        options: WasmEngineOptions,
+        spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
+        mut create_engine: impl FnMut(&wasmtime::Config) -> wasmtime::Result<Engine>,
     ) -> FnResult<Self> {
         let store = cache_dir.map(|dir| Arc::new(DiskCacheStore::new(dir)));
         let mut config = wasmtime::Config::new();
@@ -70,7 +128,7 @@ impl WasmEngine {
         // By default, use the pooling allocator for slot reuse under
         // concurrency. Set `SHAMIR_WASM_NO_POOL=1` (any value) to
         // force the on-demand allocator — useful for A/B benchmarking.
-        let use_pooling = std::env::var("SHAMIR_WASM_NO_POOL").is_err();
+        let use_pooling = options.pooling;
 
         if use_pooling {
             // ── Pooling allocator ────────────────────────────────────
@@ -85,10 +143,8 @@ impl WasmEngine {
             // within a 64-bit address space, and RSS stays near zero
             // until actual use.
             //
-            // `max_memory_size` is set to match `WasmLimits::max_memory_bytes`
-            // (64 MiB) so the pooling allocator's per-slot cap is consistent
-            // with the per-Store `ResourceLimiter`.
-            let pooling_config = Self::build_pooling_config();
+            // The configured pool ceiling is checked against each function's limits.
+            let pooling_config = Self::build_pooling_config(options.pooling_memory_ceiling);
             config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
         }
 
@@ -98,14 +154,14 @@ impl WasmEngine {
                 .map_err(|error| FunctionError::Compute(error.to_string()))?;
         }
 
-        let engine = if use_pooling {
+        let (engine, pooling_memory_ceiling) = if use_pooling {
             // Try creating the Engine with pooling; on any error (platform
             // constraints, address-space limits, etc.) fall back gracefully
             // to the default on-demand allocator.
-            match Engine::new(&config) {
+            match create_engine(&config) {
                 Ok(engine) => {
                     log::info!("Wasmtime pooling allocator enabled");
-                    engine
+                    (engine, Some(options.pooling_memory_ceiling))
                 }
                 Err(pool_err) => {
                     log::warn!(
@@ -113,12 +169,19 @@ impl WasmEngine {
                          falling back to on-demand allocator: {pool_err}"
                     );
                     config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
-                    Engine::new(&config).map_err(|e| FunctionError::Compute(e.to_string()))?
+                    (
+                        create_engine(&config)
+                            .map_err(|e| FunctionError::Compute(e.to_string()))?,
+                        None,
+                    )
                 }
             }
         } else {
-            log::info!("Wasmtime pooling allocator disabled via SHAMIR_WASM_NO_POOL env var");
-            Engine::new(&config).map_err(|e| FunctionError::Compute(e.to_string()))?
+            log::info!("Wasmtime pooling allocator disabled by engine options");
+            (
+                create_engine(&config).map_err(|e| FunctionError::Compute(e.to_string()))?,
+                None,
+            )
         };
         if let Some(store) = &store {
             if let Err(error) = store.bind(&engine) {
@@ -128,6 +191,7 @@ impl WasmEngine {
         spawn_ticker(&engine)?;
         Ok(Self {
             engine,
+            pooling_memory_ceiling,
             #[cfg(test)]
             store,
         })
@@ -176,10 +240,8 @@ impl WasmEngine {
         })
     }
 
-    /// Build a [`PoolingAllocationConfig`] whose limits are compatible
-    /// with [`WasmLimits::default()`] and the per-Store
-    /// [`ResourceLimiter`](wasmtime::ResourceLimiter).
-    fn build_pooling_config() -> PoolingAllocationConfig {
+    /// Build a [`PoolingAllocationConfig`] for the configured memory ceiling.
+    fn build_pooling_config(ceiling: usize) -> PoolingAllocationConfig {
         let mut pool = PoolingAllocationConfig::new();
 
         // ── Slot counts ──────────────────────────────────────────
@@ -198,10 +260,7 @@ impl WasmEngine {
         pool.max_tables_per_module(1);
 
         // ── Memory size ──────────────────────────────────────────
-        // Must be ≥ WasmLimits::max_memory_bytes (64 MiB) so the
-        // per-Store ResourceLimiter can grow up to its cap without
-        // hitting the pool ceiling first.
-        pool.max_memory_size(WasmLimits::default().max_memory_bytes);
+        pool.max_memory_size(ceiling);
 
         // Keep a few pages resident after deallocation to avoid
         // page faults on the next re-use of the same slot.
@@ -213,6 +272,23 @@ impl WasmEngine {
         pool.max_unused_warm_slots(32);
 
         pool
+    }
+
+    /// Effective pooling ceiling, or `None` for an on-demand allocator.
+    pub fn pooling_memory_ceiling(&self) -> Option<usize> {
+        self.pooling_memory_ceiling
+    }
+
+    pub(crate) fn validate_limits(&self, limits: &WasmLimits) -> FnResult<()> {
+        if let Some(ceiling) = self.pooling_memory_ceiling {
+            if limits.max_memory_bytes > ceiling {
+                return Err(FunctionError::Compute(format!(
+                    "requested WASM memory limit {} bytes exceeds pooling ceiling {} bytes; configure a larger pooling_memory_ceiling or use on-demand allocation",
+                    limits.max_memory_bytes, ceiling
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Access the underlying Wasmtime engine.

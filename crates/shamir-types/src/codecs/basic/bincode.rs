@@ -27,6 +27,11 @@ where
 
 /// Deserialize bytes to an owned value using bincode.
 ///
+/// This helper provides no recursion-depth protection. For untrusted input,
+/// use it only with statically nonrecursive roots; recursive roots require a
+/// type-specific decoder that enforces depth during deserialization. Byte and
+/// allocation limits are separate from a recursion-depth limit.
+///
 /// ```rust,ignore
 /// fn main() -> Result<(), shamir_types::codecs::CodecError> {
 ///     use shamir_types::codecs::basic::{from_bytes, to_bytes};

@@ -193,32 +193,65 @@ async fn demux_frame_without_rid_is_dropped() {
     assert_eq!(rx2.await.unwrap().unwrap(), b"p2");
 }
 
-/// A garbage frame that cannot be decoded as either envelope must be dropped;
-/// remaining waiters still get their responses.
+/// Invalid frames terminate the connection even while the peer remains open.
 #[tokio::test]
-async fn demux_garbage_frame_is_dropped() {
+async fn demux_garbage_frame_drains_waiters() {
     let state = make_state();
     let rx1 = register(&state, 1);
     let rx2 = register(&state, 2);
-
     let (mut writer, reader) = tokio::io::duplex(4096);
-
     let task = tokio::spawn(reader_task(
         reader,
         state.clone(),
         make_guard(&state),
         make_hooks(),
     ));
-
     write_garbage(&mut writer).await;
-    write_response(&mut writer, 1, b"ok1").await;
-    write_response(&mut writer, 2, b"ok2").await;
-    writer.shutdown().await.expect("shutdown");
+    let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        (rx1.await.unwrap(), rx2.await.unwrap())
+    })
+    .await
+    .expect("waiters must drain while peer stays open");
+    assert!(matches!(
+        a,
+        Err(ClientError::ConnectionClosed(CloseCause::Protocol(_)))
+    ));
+    assert!(matches!(
+        b,
+        Err(ClientError::ConnectionClosed(CloseCause::Protocol(_)))
+    ));
+    task.await.expect("reader task");
+    drop(writer);
+}
 
-    task.await.expect("reader_task panicked");
-
-    assert_eq!(rx1.await.unwrap().unwrap(), b"ok1");
-    assert_eq!(rx2.await.unwrap().unwrap(), b"ok2");
+#[tokio::test]
+async fn ambiguous_duplicate_and_trailing_envelopes_close_connection() {
+    let cases: &[&[u8]] = &[
+        b"\x82\xa3res\xc4\x01x\xa5error\xa1e",
+        b"\x82\xa3res\xc4\x01x\xa3res\xc4\x01y",
+        b"\x81\xa3res\xc4\x01x\xc1",
+    ];
+    for frame in cases {
+        let state = make_state();
+        let rx = register(&state, 1);
+        let (mut writer, reader) = tokio::io::duplex(4096);
+        let task = tokio::spawn(reader_task(
+            reader,
+            state.clone(),
+            make_guard(&state),
+            make_hooks(),
+        ));
+        write_frame(&mut writer, frame).await.expect("write frame");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+            .await
+            .expect("terminal")
+            .expect("sender");
+        assert!(matches!(
+            outcome,
+            Err(ClientError::ConnectionClosed(CloseCause::Protocol(_)))
+        ));
+        task.await.expect("reader");
+    }
 }
 
 /// On EOF, every in-flight waiter must receive

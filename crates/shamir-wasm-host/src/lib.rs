@@ -30,7 +30,8 @@ pub use builtin::{
     Visibility,
 };
 pub use compile::{
-    compile_rust_source, compile_rust_source_blocking, compile_rust_source_with_timeout,
+    compile_rust_source, compile_rust_source_blocking, compile_rust_source_blocking_with_options,
+    compile_rust_source_with_options, compile_rust_source_with_timeout, RustCompileOptions,
     WASM_COMPILE_TIMEOUT,
 };
 pub use gateway::{
@@ -41,7 +42,10 @@ pub use runtime::{
     BatchContext, FnAdapter, FnBatch, FnCtx, FnResult, FunctionError, FunctionRegistry, GlobalVars,
     GlobalsQuota, GlobalsQuotaError, Params, ShamirFunction,
 };
-pub use wasm::{verify_wasm_module, WasmEngine, WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS};
+pub use wasm::{
+    verify_wasm_module, WasmEngine, WasmEngineOptions, WasmFunction, WasmLimits,
+    SANCTIONED_HOST_IMPORTS,
+};
 
 #[cfg(test)]
 pub(crate) use wasm::test_linker_and_store;

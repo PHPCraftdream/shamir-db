@@ -23,6 +23,12 @@ const ALLOCATOR_CONFIG: sefer_alloc::LargeCacheConfig = sefer_alloc::LargeCacheC
 #[global_allocator]
 static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config(ALLOCATOR_CONFIG);
 
+#[cfg(test)]
+#[path = "security/service/tests/bootstrap_cli_tests.rs"]
+mod bootstrap_cli_tests;
+#[path = "security/service/bootstrap_stdin.rs"]
+mod bootstrap_stdin;
+
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
@@ -34,7 +40,7 @@ use shamir_server::doctor;
 use shamir_server::server::BootstrapMode;
 use shamir_server::service::ServiceAction;
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(name = "shamir-server", version, about = "ShamirDB production server")]
 struct Cli {
     /// Path to the `.ktav` config file.
@@ -45,7 +51,9 @@ struct Cli {
     #[arg(long, value_name = "NAME")]
     bootstrap_user: Option<String>,
 
-    /// Optional password for the bootstrap superuser. If omitted, a random
+    /// Optional password for the bootstrap superuser. Avoid argv: it may be
+    /// exposed in process lists and shell history; prefer --bootstrap-password-stdin.
+    /// If omitted, a random
     /// 32-byte token is generated and printed once at WARN level. The token
     /// is also written to `data_dir/bootstrap_token.txt` by default —
     /// override the output path with `--bootstrap-token-path`. The token
@@ -55,8 +63,12 @@ struct Cli {
     #[arg(long, value_name = "PASSWORD")]
     bootstrap_password: Option<String>,
 
+    /// Read one UTF-8 bootstrap password line from stdin (maximum 4096 bytes).
+    #[arg(long, conflicts_with_all = ["bootstrap_password", "skip_bootstrap"])]
+    bootstrap_password_stdin: bool,
+
     /// Override the output path for the random bootstrap token (only used
-    /// when `--bootstrap-password` is omitted). Recommend a tmpfs path
+    /// when neither password option is supplied). Recommend a tmpfs path
     /// (e.g. `/run/shamir/bootstrap_token.txt`) so the token is never
     /// captured by a `backup --to` snapshot of `data_dir`.
     #[arg(long, value_name = "PATH")]
@@ -218,6 +230,31 @@ enum Subcmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+fn bootstrap_mode(
+    skip: bool,
+    argv_password: Option<String>,
+    stdin_password: Option<Zeroizing<Vec<u8>>>,
+    username: Option<String>,
+    token_path: Option<PathBuf>,
+) -> BootstrapMode {
+    if skip {
+        BootstrapMode::Skip
+    } else if let Some(password) =
+        stdin_password.or_else(|| argv_password.map(|pw| Zeroizing::new(pw.into_bytes())))
+    {
+        BootstrapMode::Password {
+            username: username
+                .unwrap_or_else(|| shamir_server::bootstrap::DEFAULT_BOOTSTRAP_NAME.to_string()),
+            password,
+        }
+    } else {
+        BootstrapMode::RandomToken {
+            username,
+            token_path,
+        }
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -409,21 +446,21 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
     tracing::info!(data_dir = ?config.data_dir, "shamir-server boot");
 
     // Construct bootstrap policy from CLI flags.
-    let bootstrap = if cli.skip_bootstrap {
-        BootstrapMode::Skip
-    } else if let Some(pw) = cli.bootstrap_password {
-        BootstrapMode::Password {
-            username: cli
-                .bootstrap_user
-                .unwrap_or_else(|| shamir_server::bootstrap::DEFAULT_BOOTSTRAP_NAME.to_string()),
-            password: Zeroizing::new(pw.into_bytes()),
-        }
+    let stdin_password = if cli.bootstrap_password_stdin {
+        Some(
+            tokio::task::spawn_blocking(|| bootstrap_stdin::read_password(std::io::stdin().lock()))
+                .await??,
+        )
     } else {
-        BootstrapMode::RandomToken {
-            username: cli.bootstrap_user,
-            token_path: cli.bootstrap_token_path,
-        }
+        None
     };
+    let bootstrap = bootstrap_mode(
+        cli.skip_bootstrap,
+        cli.bootstrap_password,
+        stdin_password,
+        cli.bootstrap_user,
+        cli.bootstrap_token_path,
+    );
 
     // SIGHUP → live log-level reload.  Unix-only (no SIGHUP on Windows).
     // The task runs until the process exits; `_sighup_task` keeps the

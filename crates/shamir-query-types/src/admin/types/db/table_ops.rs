@@ -34,7 +34,7 @@ pub struct CreateTableOp {
 
 /// Drop a table.
 ///
-/// Requires `hmac` over `b"drop_table\0<db_in_use>\0<repo>\0<table>"`.
+/// Requires a hex HMAC-SHA256 tag over the canonical v2 operation encoding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DropTableOp {

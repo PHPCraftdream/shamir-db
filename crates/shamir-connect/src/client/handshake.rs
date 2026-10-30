@@ -18,7 +18,7 @@
 
 use crate::client::rotation::{verify_rotation_in_progress, RotationRecovery};
 use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
-use crate::common::crypto::{constant_time_eq, random_array, sha256};
+use crate::common::crypto::{constant_time_eq, sha256, try_random_array};
 use crate::common::error::{Error, Result};
 use crate::common::identity::{build_identity_input, verify_identity};
 use crate::common::kdf_params::{validate_client_kdf_safe, KdfParams};
@@ -152,10 +152,10 @@ impl HandshakeBuilder {
                 "no pinned_hash AND --accept-new-host not set",
             ));
         }
-        let mut client_nonce = random_array::<{ limits::CLIENT_NONCE_BYTES }>();
+        let mut client_nonce = try_random_array::<{ limits::CLIENT_NONCE_BYTES }>()?;
         if client_nonce.iter().all(|&b| b == 0) {
             // Astronomically improbable, but spec §3.2 forbids — re-roll.
-            client_nonce = random_array::<{ limits::CLIENT_NONCE_BYTES }>();
+            client_nonce = try_random_array::<{ limits::CLIENT_NONCE_BYTES }>()?;
         }
         Ok(ClientHandshake {
             username: self.username,

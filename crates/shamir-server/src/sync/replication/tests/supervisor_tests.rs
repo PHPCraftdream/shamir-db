@@ -467,14 +467,14 @@ async fn duplicate_destination_refuses_second_source() {
         )
         .await
         .unwrap();
+    let leader = build_db().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     let factory: ReplSourceFactory = Arc::new(move |_| {
         count.fetch_add(1, Ordering::AcqRel);
-        Arc::new(AlwaysGapReplSource { gap_at: 100 }) as Arc<dyn ReplSource>
+        Arc::new(InProcessReplSource::new((*leader).clone())) as Arc<dyn ReplSource>
     });
-    let sup =
-        SubscriptionSupervisor::new(follower.clone(), factory, "follower-1").with_max_iterations(0);
+    let sup = SubscriptionSupervisor::new(follower.clone(), factory, "follower-1");
     sup.reconcile().await;
     assert_eq!(calls.load(Ordering::Acquire), 1);
     assert_eq!(sup.active_count(), 1);

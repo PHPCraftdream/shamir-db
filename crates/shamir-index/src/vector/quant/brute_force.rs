@@ -6,15 +6,8 @@
 //! a fresh `Arc<BruteSnap>` via `ArcSwap`. Readers grab the current
 //! snapshot with one atomic load — no locks.
 //!
-//! Layout: snapshot is a parallel-array struct
-//! (`rids` / `vecs` / `norms`) plus a `HashMap<RecordId, usize>` index
-//! for O(1) upsert/delete. Norms are precomputed at insert so cosine
-//! search doesn't re-scan the stored vector on every distance call.
-//!
-//! Write coalescing: the actor task drains every queued op via
-//! `try_recv` before publishing, so a burst of M upserts pays ONE
-//! `Arc<BruteSnap>` clone instead of M (the original
-//! `(**snap.load()).clone()`-per-op pattern was O(M·N)).
+//! Snapshots share immutable bounded chunks; the writer owns the lookup index
+//! and copies only chunks modified since the previous publication.
 //!
 //! Search: top-k is computed with a bounded `BinaryHeap` of size k
 //! (O(N log k)) instead of a full sort over all N entries (O(N log N)).
@@ -35,20 +28,37 @@ use tokio::task::JoinHandle;
 /// Maximum allowed top-k value. Mirrors `HnswAdapter::MAX_TOPK`.
 const MAX_TOPK: u32 = 10_000;
 
-/// Parallel-array snapshot. Lock-free read: a search loads the `Arc`
-/// once and scans the three slices.
-#[derive(Default)]
+const CHUNK_LEN: usize = 128;
+
+#[derive(Clone)]
+struct Row {
+    rid: RecordId,
+    vector: Vec<f32>,
+    norm: f32,
+}
+
+#[derive(Clone, Default)]
 struct BruteSnap {
-    rids: Vec<RecordId>,
-    vecs: Vec<Vec<f32>>,
-    /// Precomputed L2 norm of each stored vector (used only by Cosine;
-    /// kept unconditionally so the snapshot layout is metric-agnostic
-    /// and the per-search hot loop has no metric-specific branches on
-    /// the stored side).
-    norms: Vec<f32>,
-    /// `rid -> position in the parallel arrays`. Maintained by the
-    /// writer task so upsert / delete are O(1) lookups.
+    chunks: Vec<Arc<Vec<Row>>>,
+    len: usize,
+}
+
+#[derive(Default)]
+struct BruteWork {
+    snap: BruteSnap,
     index: TFxMap<RecordId, usize>,
+}
+
+#[cfg(test)]
+#[path = "../tests/quant/brute_force_internal_tests.rs"]
+mod internal_tests;
+#[cfg(test)]
+#[path = "../tests/backend/brute_force_internal_tests.rs"]
+mod shutdown_tests;
+
+enum ShutdownFailure {
+    Poisoned,
+    Join(tokio::task::JoinError),
 }
 
 enum WriteOp {
@@ -61,7 +71,11 @@ pub struct BruteForceAdapter {
     metric: VectorMetric,
     write_tx: mpsc::Sender<WriteOp>,
     snapshot: Arc<ArcSwap<BruteSnap>>,
+    // Teardown-only slot: acquired once by consuming shutdown, never across await;
+    // no search/write path acquires it, so contention is not expected.
     join: std::sync::Mutex<Option<JoinHandle<()>>>,
+    #[cfg(test)]
+    worker_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Default bounded-channel capacity (mirrors `IndexActor`'s default).
@@ -80,16 +94,14 @@ impl BruteForceAdapter {
             // Working state owned by this task — never shared, so we
             // mutate in place and publish a fresh `Arc<BruteSnap>`
             // once per drained batch (NOT once per op).
-            let mut work = BruteSnap::default();
+            let mut work = BruteWork::default();
             while let Some(first) = rx.recv().await {
                 apply_op(&mut work, first);
-                // Coalesce: drain everything else already queued so
-                // M ops cost ONE publish (one Arc allocation + one
-                // O(N) clone of the snapshot arrays).
+                // Drain the queued burst before publishing shared chunks.
                 while let Ok(op) = rx.try_recv() {
                     apply_op(&mut work, op);
                 }
-                snap_for_task.store(Arc::new(clone_snap(&work)));
+                snap_for_task.store(Arc::new(work.snap.clone()));
             }
         });
 
@@ -99,6 +111,8 @@ impl BruteForceAdapter {
             write_tx,
             snapshot,
             join: std::sync::Mutex::new(Some(join)),
+            #[cfg(test)]
+            worker_hook: None,
         }
     }
 
@@ -127,10 +141,26 @@ impl BruteForceAdapter {
     }
 
     pub async fn shutdown(self) {
+        self.shutdown_with_report(|event| match event {
+            ShutdownFailure::Poisoned => log::error!("brute-force shutdown: join lock poisoned"),
+            ShutdownFailure::Join(error) => log::error!("brute-force writer task failed: {error}"),
+        })
+        .await;
+    }
+
+    async fn shutdown_with_report(self, mut report: impl FnMut(ShutdownFailure)) {
         drop(self.write_tx);
-        let join = self.join.lock().expect("brute-force join lock").take();
+        let (join, poisoned) = match self.join.lock() {
+            Ok(mut slot) => (slot.take(), false),
+            Err(err) => (err.into_inner().take(), true),
+        };
+        if poisoned {
+            report(ShutdownFailure::Poisoned);
+        }
         if let Some(j) = join {
-            let _ = j.await;
+            if let Err(error) = j.await {
+                report(ShutdownFailure::Join(error));
+            }
         }
     }
 }
@@ -140,44 +170,45 @@ fn norm_of(v: &[f32]) -> f32 {
     dot_product(v, v).sqrt()
 }
 
-fn apply_op(work: &mut BruteSnap, op: WriteOp) {
+fn apply_op(work: &mut BruteWork, op: WriteOp) {
     match op {
-        WriteOp::Upsert(rid, vec) => {
-            let n = norm_of(&vec);
+        WriteOp::Upsert(rid, vector) => {
+            let row = Row {
+                rid,
+                norm: norm_of(&vector),
+                vector,
+            };
             if let Some(&pos) = work.index.get(&rid) {
-                work.vecs[pos] = vec;
-                work.norms[pos] = n;
+                Arc::make_mut(&mut work.snap.chunks[pos / CHUNK_LEN])[pos % CHUNK_LEN] = row;
             } else {
-                let pos = work.rids.len();
-                work.rids.push(rid);
-                work.vecs.push(vec);
-                work.norms.push(n);
+                let pos = work.snap.len;
+                if pos.is_multiple_of(CHUNK_LEN) {
+                    work.snap
+                        .chunks
+                        .push(Arc::new(Vec::with_capacity(CHUNK_LEN)));
+                }
+                Arc::make_mut(&mut work.snap.chunks[pos / CHUNK_LEN]).push(row);
+                work.snap.len += 1;
                 work.index.insert(rid, pos);
             }
         }
         WriteOp::Delete(rid) => {
             if let Some(pos) = work.index.remove(&rid) {
-                // swap_remove keeps O(1) but renames the last entry's
-                // index slot.
-                let last = work.rids.len() - 1;
-                work.rids.swap_remove(pos);
-                work.vecs.swap_remove(pos);
-                work.norms.swap_remove(pos);
+                let last = work.snap.len - 1;
+                let last_chunk = last / CHUNK_LEN;
+                let moved = Arc::make_mut(&mut work.snap.chunks[last_chunk])
+                    .pop()
+                    .expect("nonempty final brute-force chunk");
                 if pos != last {
-                    let moved_rid = work.rids[pos];
-                    work.index.insert(moved_rid, pos);
+                    work.index.insert(moved.rid, pos);
+                    Arc::make_mut(&mut work.snap.chunks[pos / CHUNK_LEN])[pos % CHUNK_LEN] = moved;
+                }
+                work.snap.len -= 1;
+                if work.snap.chunks[last_chunk].is_empty() {
+                    work.snap.chunks.pop();
                 }
             }
         }
-    }
-}
-
-fn clone_snap(src: &BruteSnap) -> BruteSnap {
-    BruteSnap {
-        rids: src.rids.clone(),
-        vecs: src.vecs.clone(),
-        norms: src.norms.clone(),
-        index: src.index.clone(),
     }
 }
 
@@ -284,50 +315,21 @@ impl VectorAdapter for BruteForceAdapter {
             k.min(MAX_TOPK)
         };
         let snap = self.snapshot.load_full();
-        let k_usize = k as usize;
         let metric = self.metric;
-        let query_norm = match metric {
-            VectorMetric::Cosine => norm_of(query),
-            _ => 0.0,
-        };
-
-        let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(k_usize.saturating_add(1));
-
-        // Committed snapshot.
-        for i in 0..snap.rids.len() {
-            let d = Self::distance_with_stored_norm(
-                metric,
-                query,
-                query_norm,
-                &snap.vecs[i],
-                snap.norms[i],
-            );
-            push_topk(&mut heap, k_usize, snap.rids[i], d);
-        }
-
-        // Staged (in-tx) vectors — caller's own un-committed writes.
-        if let Some(staged) = staged {
-            for (rid, vec) in staged {
-                if vec.len() != self.dim as usize {
-                    return Err(VectorError::DimMismatch {
-                        expected: self.dim,
-                        got: u32::try_from(vec.len()).unwrap_or(u32::MAX),
-                    });
-                }
-                let stored_norm = match metric {
-                    VectorMetric::Cosine => norm_of(vec),
-                    _ => 0.0,
-                };
-                let d =
-                    Self::distance_with_stored_norm(metric, query, query_norm, vec, stored_norm);
-                push_topk(&mut heap, k_usize, *rid, d);
+        let dim = self.dim;
+        let query = query.to_vec();
+        let staged = staged.map(<[(RecordId, Vec<f32>)]>::to_vec);
+        #[cfg(test)]
+        let worker_hook = self.worker_hook.clone();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(hook) = worker_hook {
+                hook();
             }
-        }
-
-        // Drain heap → ascending distance order.
-        let mut out: Vec<(RecordId, f32)> = heap.into_iter().map(|e| (e.rid, e.dist)).collect();
-        out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-        Ok(out)
+            exact_search(&snap, metric, dim, &query, k as usize, staged.as_deref())
+        })
+        .await
+        .map_err(|error| VectorError::Internal(format!("brute-force search worker: {error}")))?
     }
 
     fn dim(&self) -> u32 {
@@ -335,6 +337,57 @@ impl VectorAdapter for BruteForceAdapter {
     }
 
     fn len(&self) -> usize {
-        self.snapshot.load().rids.len()
+        self.snapshot.load().len
     }
+}
+
+fn exact_search(
+    snap: &BruteSnap,
+    metric: VectorMetric,
+    dim: u32,
+    query: &[f32],
+    k_usize: usize,
+    staged: Option<&[(RecordId, Vec<f32>)]>,
+) -> Result<Vec<(RecordId, f32)>, VectorError> {
+    let query_norm = match metric {
+        VectorMetric::Cosine => norm_of(query),
+        _ => 0.0,
+    };
+    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::with_capacity(k_usize.saturating_add(1));
+    for row in snap.chunks.iter().flat_map(|chunk| chunk.iter()) {
+        let d = BruteForceAdapter::distance_with_stored_norm(
+            metric,
+            query,
+            query_norm,
+            &row.vector,
+            row.norm,
+        );
+        push_topk(&mut heap, k_usize, row.rid, d);
+    }
+    // Preserve the existing independent staged-candidate semantics.
+    if let Some(staged) = staged {
+        for (rid, vec) in staged {
+            if vec.len() != dim as usize {
+                return Err(VectorError::DimMismatch {
+                    expected: dim,
+                    got: u32::try_from(vec.len()).unwrap_or(u32::MAX),
+                });
+            }
+            let stored_norm = match metric {
+                VectorMetric::Cosine => norm_of(vec),
+                _ => 0.0,
+            };
+            let d = BruteForceAdapter::distance_with_stored_norm(
+                metric,
+                query,
+                query_norm,
+                vec,
+                stored_norm,
+            );
+            push_topk(&mut heap, k_usize, *rid, d);
+        }
+    }
+    let mut out: Vec<(RecordId, f32)> = heap.into_iter().map(|e| (e.rid, e.dist)).collect();
+    out.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    Ok(out)
 }

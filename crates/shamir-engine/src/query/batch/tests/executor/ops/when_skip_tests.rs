@@ -20,6 +20,39 @@ use super::super::common::{setup_resolver, setup_resolver_with_scalars, TxTestRe
 /// A `when` that evaluates to `true` (against the empty synthetic record)
 /// executes the op normally: `skipped: false`, real records.
 #[tokio::test]
+async fn switch_without_cases_executes_default_exactly_once() {
+    let resolver = setup_resolver().await;
+    let mut batch = Batch::new();
+    batch.id(1);
+    let cases: Vec<(&str, Filter, shamir_query_types::batch::BatchOp)> = Vec::new();
+    let default = write::insert("users").row(doc().set("name", "switch-default").unwrap());
+    let handles = batch.switch(cases, ("default", default));
+    assert_eq!(handles.len(), 1);
+    let request = batch.try_build().unwrap();
+    let response = execute_batch(&request, &resolver, None, None, Actor::System, "test")
+        .await
+        .unwrap();
+    assert!(!response.results["default"].skipped);
+    let mut read = Batch::new();
+    read.id(2);
+    read.query(
+        "rows",
+        Query::from("users").where_eq("name", "switch-default"),
+    );
+    let response = execute_batch(
+        &read.try_build().unwrap(),
+        &resolver,
+        None,
+        None,
+        Actor::System,
+        "test",
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.results["rows"].records.len(), 1);
+}
+
+#[tokio::test]
 async fn when_true_executes_op_normally() {
     let resolver = setup_resolver().await;
 

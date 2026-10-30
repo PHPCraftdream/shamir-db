@@ -10,6 +10,8 @@
 use crate::common::types::{BindingMode, TransportKind};
 use crate::server::session::{Session, SessionPermissions};
 use shamir_tunables::instance_defaults::POST_AUTH_RATE_LIMIT_PER_SEC;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 fn fresh_session(now_ns: u64) -> Session {
     Session::new(
@@ -95,9 +97,6 @@ fn single_request_on_fresh_session_is_always_allowed() {
 /// simultaneously as the OS scheduler allows.
 #[test]
 fn concurrent_callers_never_admit_more_than_the_burst_budget() {
-    use std::sync::{Arc, Barrier};
-    use std::thread;
-
     let now_ns = 1_000_000_000u64;
     let session = Arc::new(fresh_session(now_ns));
     let burst = POST_AUTH_RATE_LIMIT_PER_SEC as usize;

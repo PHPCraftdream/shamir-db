@@ -5,7 +5,7 @@ use super::planner_tests::read_entry;
 use crate::batch::planner::BatchPlanner;
 use crate::batch::{BatchError, BatchLimits, BatchOp, QueryEntry};
 use crate::filter::{Cond, Filter, FilterValue};
-use crate::write::InsertOp;
+use crate::write::{InsertOp, UpdateOp};
 
 // -------------------------------------------------------------------------
 // #663 — close the remaining gaps in the #651/#641 field-based-comparison
@@ -323,6 +323,26 @@ fn insert_entry(op: InsertOp) -> QueryEntry {
 }
 
 #[test]
+fn planner_dependency_matches_buffered_marker_decode() {
+    let marker = FilterValue::query_ref("source");
+    let op = insert_op_with_marker_field("orders", "user_id", &marker);
+    let value = op.values[0].get("user_id").unwrap();
+    assert_eq!(
+        FilterValue::try_from_query_value_ref(value).unwrap(),
+        marker
+    );
+    let mut queries = new_map();
+    queries.insert("source".to_owned(), read_entry("users"));
+    queries.insert("write".to_owned(), insert_entry(op));
+    let plan = BatchPlanner::plan(&queries, &BatchLimits::default()).unwrap();
+    assert!(plan.dependencies["write"].contains("source"));
+    assert_eq!(
+        plan.edge_provenance["write"]["source"],
+        crate::batch::EdgeKind::DataFlow
+    );
+}
+
+#[test]
 fn insert_write_value_cond_with_field_based_condition_is_rejected_at_plan_time() {
     let field_based_cond = FilterValue::Cond {
         cond: Box::new(Cond::new(
@@ -364,8 +384,6 @@ fn insert_write_value_cond_with_field_based_condition_is_rejected_at_plan_time()
 
 #[test]
 fn update_set_value_cond_with_field_based_condition_is_rejected_at_plan_time() {
-    use crate::write::UpdateOp;
-
     let field_based_cond = FilterValue::Cond {
         cond: Box::new(Cond::new(
             Filter::Like {

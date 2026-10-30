@@ -20,11 +20,9 @@ pub struct CreateDbOp {
 
 /// Drop a database.
 ///
-/// Requires an `hmac` field — hex-encoded HMAC-SHA256 tag over
-/// `b"drop_db\0<db_name>"` keyed by the session HMAC key
-/// (`SHA256("shamir-db hmac key v1\0" || session_id)`). Missing /
-/// wrong tag → request rejected with `hmac_required` /
-/// `hmac_mismatch`. See `query_buffer_config.rs` design notes.
+/// Requires a hex HMAC-SHA256 tag over the canonical v2 operation encoding,
+/// keyed by `SHA256("shamir-db hmac key v1\0" || session_id)`.
+/// A missing or incorrect tag is rejected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DropDbOp {

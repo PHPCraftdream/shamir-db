@@ -604,10 +604,16 @@ async fn empty_tx_fast_path_assigns_no_version_and_no_wal() {
         "empty fast-path pins commit_version to the snapshot version"
     );
     assert!(out.materialized(), "empty fast-path is Complete");
-    assert_eq!(
-        wal.recover().await.unwrap().len(),
-        wal_len_before,
+    // The background drainer may truncate the already-durable tx #1 entry, so
+    // the count can only shrink; the empty tx must never add an entry.
+    let wal_after = wal.recover().await.unwrap();
+    assert!(
+        wal_after.len() <= wal_len_before,
         "empty fast-path must append no WAL entry"
+    );
+    assert!(
+        wal_after.iter().all(|entry| entry.commit_version <= v1),
+        "empty fast-path must not write a WAL entry for a later version"
     );
 
     // Real tx #2 → gets V+1 (the empty tx consumed no version slot — P0c).

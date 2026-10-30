@@ -45,7 +45,7 @@ pub struct IndexDefinition {
     /// R0-B (#1008): in-memory-only instance identity, minted fresh on every
     /// CREATE and bumped on every RENAME (mirrors
     /// `SortedIndexDefinition::instance_epoch` — see that field's doc for the
-    /// full rationale, and `index_write_op.rs::Provenance` for how the
+    /// full rationale, and `shamir_tx::Provenance` for how the
     /// commit-time reconcile in `shamir-engine::tx::pre_commit` uses it to
     /// distinguish a DROP+CREATE-same-name (ABA) from the SAME live
     /// instance). `#[serde(skip)]` — mirrors the existing

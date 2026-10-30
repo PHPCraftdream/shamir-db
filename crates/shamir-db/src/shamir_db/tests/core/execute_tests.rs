@@ -268,6 +268,54 @@ async fn test_execute_unknown_db() {
 // Migration ops -- Phase A stubs return "not yet implemented"
 // ============================================================================
 #[tokio::test]
+async fn concurrent_migration_start_rejects_duplicate_source() {
+    let shamir = setup_shamir().await;
+    shamir.enable_experimental_migration_api();
+    let make_request = |destination| {
+        let mut batch = Batch::new();
+        batch.id(1);
+        batch
+            .try_op(
+                "mig",
+                shamir_query_builder::ddl::start_migration("users", destination, "in_memory")
+                    .hmac("x"),
+            )
+            .unwrap();
+        batch.to_request_via_msgpack().unwrap()
+    };
+    let a = make_request("cold_a");
+    let b = make_request("cold_b");
+    let (first, second) = tokio::join!(shamir.execute("testdb", &a), shamir.execute("testdb", &b));
+    assert_ne!(first.is_ok(), second.is_ok());
+}
+
+#[tokio::test]
+async fn migration_identity_is_database_scoped() {
+    let shamir = setup_shamir().await;
+    shamir.enable_experimental_migration_api();
+    let second = shamir.create_db("otherdb").await.unwrap();
+    second
+        .add_repo(
+            RepoConfig::new("main", BoxRepoFactory::in_memory())
+                .add_table(TableConfig::new("users")),
+        )
+        .await
+        .unwrap();
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch
+        .try_op(
+            "mig",
+            shamir_query_builder::ddl::start_migration("users", "cold", "in_memory").hmac("x"),
+        )
+        .unwrap();
+    let request = batch.to_request_via_msgpack().unwrap();
+    shamir.execute("testdb", &request).await.unwrap();
+    shamir.execute("otherdb", &request).await.unwrap();
+    assert!(shamir.execute("testdb", &request).await.is_err());
+}
+
+#[tokio::test]
 async fn test_migration_lifecycle_in_memory() {
     use shamir_query_builder::ddl;
 

@@ -34,11 +34,9 @@ use crate::core::topology::Topology;
 ///
 /// # Single-node degradation
 ///
-/// When `topology.num_nodes() == 1` there is exactly one replica,
-/// [`load_local`](Self::load_local) always hits it, and [`rcu`](Self::rcu) /
-/// [`store`](Self::store) update one cell — identical to a bare `ArcSwap<T>`,
-/// with no mirror loop. Consumers therefore use `NodeReplicated<T>`
-/// unconditionally: it costs nothing on single-socket, Windows, or CI.
+/// When `topology.num_nodes() == 1` there is exactly one replica and writes
+/// have no mirror loop. `load_local` still queries the topology and resolves
+/// the replica before loading its `ArcSwap`; routing is constant-time.
 pub struct NodeReplicated<T> {
     topology: Arc<dyn Topology>,
     /// One cell per node; `replicas.len() == max(num_nodes, 1)`.

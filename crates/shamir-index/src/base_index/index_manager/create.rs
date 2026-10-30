@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
@@ -36,8 +37,6 @@ impl IndexManager {
     /// флашится в `info_store` через `set_many`. Пиковая память
     /// ограничена размером батча, а не размером всей таблицы.
     pub async fn create_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use futures::StreamExt;
-
         let name_interned = index_def.name_interned;
 
         // P0-3 (#959) sub-bug 3b: reject CREATE INDEX for a name whose DROP
@@ -299,14 +298,16 @@ impl IndexManager {
                 .set_many(posting_writes)
                 .await
                 .map_err(|e| {
-                    shamir_storage::error::DbError::Internal(format!(
+                    let detail = format!(
                         "CREATE INDEX '{name_interned}': the index definition was \
                      durably registered as Building (Phase 1 persist succeeded), \
                      but the backfill posting write (Phase 2) failed: {e}. The \
                      index is NOT queryable — it remains permanently Building \
                      (planner-invisible) until rebuilt. Call TableManager::verify() \
                      to confirm state, or TableManager::repair() to rebuild it."
-                    ))
+                    );
+                    log::error!("{}", detail);
+                    crate::backend::contextualize_db_error(e, detail)
                 })?;
         }
         for ik in cache_index_keys {
@@ -351,7 +352,7 @@ impl IndexManager {
         // in THIS process's memory but durably Building on disk — enrich
         // the error so the caller knows the state split and how to resolve.
         self.flip_to_ready(name_interned).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "CREATE INDEX '{name_interned}': the backfill completed and the \
                  index was flipped to Ready in memory, but the final durable \
                  persist of the Ready state (Phase 3) failed: {e}. The index is \
@@ -359,7 +360,9 @@ impl IndexManager {
                  restart will reload it as Building (planner-invisible). Call \
                  TableManager::verify() to confirm state, or \
                  TableManager::repair() to rebuild it."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         log::info!(
@@ -433,8 +436,6 @@ impl IndexManager {
     where
         S: futures::Stream<Item = DbResult<Vec<(RecordId, InnerValue)>>> + Unpin,
     {
-        use futures::StreamExt;
-
         let name_interned = index_def.name_interned;
 
         // P0-3 (#959) sub-bug 3b: reject CREATE for a name whose DROP is
@@ -557,7 +558,7 @@ impl IndexManager {
         // P1-2 (#967): Phase 3 persist — same enrichment as
         // `create_index_from_records` (see that method's matching comment).
         self.flip_to_ready(name_interned).await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "CREATE INDEX '{name_interned}': the backfill completed and the \
                  index was flipped to Ready in memory, but the final durable \
                  persist of the Ready state (Phase 3) failed: {e}. The index is \
@@ -565,7 +566,9 @@ impl IndexManager {
                  restart will reload it as Building (planner-invisible). Call \
                  TableManager::verify() to confirm state, or \
                  TableManager::repair() to rebuild it."
-            ))
+            );
+            log::error!("{}", detail);
+            crate::backend::contextualize_db_error(e, detail)
         })?;
 
         log::info!(

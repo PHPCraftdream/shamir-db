@@ -24,6 +24,33 @@ fn assert_io_cause(error: &shamir_storage::error::DbError, kind: std::io::ErrorK
 }
 
 #[tokio::test]
+async fn rv_wal_79483da7_concurrent_success_survives_delayed_failure() {
+    let dir = TempDir::new().unwrap();
+    let path = seg_path(&dir);
+    let seg = Arc::new(WalSegment::open(path.clone()).await.unwrap());
+    let (entered, resume) = seg.delay_next_append();
+    seg.inject_partial_write_failure(7);
+    let failing_seg = Arc::clone(&seg);
+    let failing = tokio::spawn(async move {
+        failing_seg
+            .append_batch(Arc::new(vec![entry(2, 20).encode().unwrap()]), 20)
+            .await
+    });
+    entered.await.unwrap();
+    let payload = entry(1, 10).encode().unwrap();
+    let expected_len = (payload.len() + 8) as u64;
+    seg.append_batch(Arc::new(vec![payload]), 10).await.unwrap();
+    resume.send(()).unwrap();
+    assert!(failing.await.unwrap().is_err());
+    assert!(seg.is_poisoned());
+    assert_eq!(seg.approx_len_bytes(), expected_len);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), expected_len);
+    let replayed = seg.replay().await.unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].txn_id, 1);
+}
+
+#[tokio::test]
 async fn rv_wal_5839ff0d_append_preserves_io_cause() {
     let dir = TempDir::new().unwrap();
     let seg = WalSegment::open(seg_path(&dir)).await.unwrap();

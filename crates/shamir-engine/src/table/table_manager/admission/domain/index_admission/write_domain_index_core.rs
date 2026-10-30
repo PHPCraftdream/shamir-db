@@ -348,11 +348,13 @@ impl TableManager {
         )
         .await
         .map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "DROP INDEX '{name}': failed to persist the durable drop tombstone: {e}. \
                      The backend was NOT retired and postings were NOT swept — the \
                      index is still fully intact. Retry the DROP."
-            ))
+            );
+            log::error!("{}", detail);
+            shamir_index::backend::contextualize_db_error(e, detail)
         })?;
 
         // P0-3a (#1038) step 2.5: raise the reader-drain gate's intent flag
@@ -390,13 +392,18 @@ impl TableManager {
 
         // Sweep the (now orphan, planner-invisible) posting entries.
         backend.drop_all().await.map_err(|e| {
-            shamir_storage::error::DbError::Internal(format!(
+            let detail = format!(
                 "DROP INDEX '{name}': a durable drop tombstone was persisted and \
                      the backend was retired from the planner-visible registry, but \
                      the posting sweep failed: {e}. On restart, recovery will resume \
                      the sweep idempotently and finish the drop. Call \
                      TableManager::verify() to confirm state."
-            ))
+            );
+            log::error!("{}", detail);
+            shamir_index::backend::contextualize_db_error(
+                shamir_storage::error::DbError::from(e),
+                detail,
+            )
         })?;
 
         // P0-3a (#1038) step 4.5: the sweep finished — explicitly release the
@@ -422,13 +429,15 @@ impl TableManager {
         crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP INDEX '{name}': a durable drop tombstone was persisted, \
                      the backend was retired, and the posting sweep completed, but \
                      persisting the reduced index metadata failed: {e}. On restart, \
                      recovery will finish the drop idempotently. Call \
                      TableManager::verify() to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(e, detail)
             })?;
 
         // #1067: Write terminal Succeeded status BEFORE clearing the
@@ -468,13 +477,15 @@ impl TableManager {
         crate::index2::persistence::clear_from_dropping_index2(drop_id, &self.info_store)
             .await
             .map_err(|e| {
-                shamir_storage::error::DbError::Internal(format!(
+                let detail = format!(
                     "DROP INDEX '{name}': the drop is essentially complete (tombstone \
                      persisted, backend retired, sweep done, reduced metadata persisted), \
                      but clearing the drop tombstone failed: {e}. On restart, recovery \
                      will clear the tombstone as a no-op. Call TableManager::verify() \
                      to confirm state."
-                ))
+                );
+                log::error!("{}", detail);
+                shamir_index::backend::contextualize_db_error(e, detail)
             })?;
         Ok(true)
     }

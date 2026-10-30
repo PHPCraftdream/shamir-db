@@ -71,6 +71,11 @@ pub fn lit(v: impl Into<FilterValue>) -> FilterValue {
 /// stored `u64 > i64::MAX` field. There is no longer any silent wrapping
 /// (the old `v as i64` sign-flipped `u64::MAX` to `-1`).
 ///
+/// This equality guarantee does not imply representation-independent ordering,
+/// ranges or membership. String/String ordering is lexical; Big/String
+/// ordering is numeric. `Between`, `In`, and `InSet` retain their existing
+/// scalar-extraction limits and do not support every storage representation.
+///
 /// For all other integer widths, use `lit(v)` (which goes through
 /// `From<i8/i16/i32/i64/u8/u16/u32>`).
 pub fn lit_u64(v: u64) -> FilterValue {

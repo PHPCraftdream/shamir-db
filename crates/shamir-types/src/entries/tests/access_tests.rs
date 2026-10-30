@@ -1,6 +1,6 @@
 use crate::access::{
-    action_perm, class_of, permits, principal64, trace_access, Action, Actor, Mode, Perm,
-    PermClass, ResourceMeta, ResourcePath, OWNER_SYSTEM,
+    action_perm, class_of, permits, principal64, trace_access, AccessError, Action, Actor, Mode,
+    Perm, PermClass, ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
 use crate::mpack;
 
@@ -34,6 +34,20 @@ fn rv_types_65dde5b8_owner_field_distinguishes_absent_from_system() {
         Some(Actor::System)
     );
 }
+#[test]
+fn access_denial_escapes_controls_without_changing_path_identity() {
+    let path = ResourcePath::function("é\n\t\u{1b}");
+    let raw = path.to_string();
+    let error = AccessError {
+        actor: Actor::User(42),
+        path: raw.clone(),
+        action: Action::Execute,
+    };
+    assert_eq!(raw, "fn://é\n\t\u{1b}");
+    assert!(error.to_string().contains(r"fn://é\n\t\u{1b}"));
+    assert_eq!(error.path, raw);
+}
+
 #[test]
 fn system_is_default() {
     assert_eq!(Actor::default(), Actor::System);

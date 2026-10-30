@@ -3,7 +3,7 @@
 //! `auth_message` is a byte string that **must** be reproducible bit-exactly
 //! between client and server (and between Rust and JS implementations) — any
 //! mismatch causes SCRAM proof verification to fail. Test vectors live in
-//! `crates/shamir-connect/test-vectors/auth_v1/`.
+//! `crates/shamir-connect/test-vectors/`.
 //!
 //! Layout (149 bytes for default kdf params and 5-byte username):
 //!
@@ -77,9 +77,9 @@ impl AuthMessage {
             return Err(Error::InvalidInput("server_nonce all-zero"));
         }
 
-        // Pre-allocate exact size where possible (header 14 + len2 + var + 32+32+16
-        // + 4+4+4 + 1+1+1 + 32 + 1 = 142 + username_len).
-        let mut bytes = Vec::with_capacity(142 + username.len());
+        let mut bytes = Vec::with_capacity(
+            AUTH_V1.len() + 2 + username.len() + 32 + 32 + 16 + 4 + 4 + 4 + 1 + 1 + 1 + 32 + 1,
+        );
 
         bytes.extend_from_slice(AUTH_V1); // 14
         bytes.extend_from_slice(&(username.len() as u16).to_be_bytes()); // 2

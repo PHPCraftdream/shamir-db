@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use shamir_engine::tx::commit::{PostWalPrePublishHook, TEST_POST_WAL_PRE_PUBLISH_HOOK};
+#[cfg(feature = "fjall")]
 use shamir_engine::tx::ChangeOp;
 use shamir_engine::tx::IsolationLevel;
 use shamir_query_builder::write::doc;

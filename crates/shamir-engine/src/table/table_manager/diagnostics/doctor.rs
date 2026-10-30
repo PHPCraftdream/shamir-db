@@ -645,18 +645,15 @@ impl TableManager {
                 .await?;
         }
 
-        // Unique indexes: keep the clone-based rebuild for now — streaming
-        // the unique family is deferred (see this fix's audit backlog entry;
-        // uniqueness validation during backfill needs its own design pass,
-        // out of scope here). Use the shared seam helper: routes
-        // attached→log / unattached→data_store.
+        // Unique indexes share one decoded snapshot under the repair barrier;
+        // duplicate validation still considers the entire table for each definition.
         let all_records: Vec<(
             shamir_types::types::record_id::RecordId,
             shamir_types::types::value::InnerValue,
         )> = self.collect_all_current_records().await?;
         for def in unique_defs.iter() {
             self.index_manager_ref()
-                .create_unique_index_from_records(def.clone(), all_records.clone())
+                .create_unique_index_from_records_borrowed(def.clone(), &all_records)
                 .await?;
         }
         // Sorted indexes don't have a create+backfill helper —

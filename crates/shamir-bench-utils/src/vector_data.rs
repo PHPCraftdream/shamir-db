@@ -47,12 +47,24 @@ pub const LCG_INC: u64 = 1442695040888963407;
 /// Revision of the dataset generator (algorithm + constants) — surface
 /// this in every published report so artefacts identify the code that
 /// produced them. Bump whenever generation output could change.
-pub const GENERATOR_REVISION: &str = "clustered_vectors/1";
+pub const GENERATOR_REVISION: &str = "clustered_vectors/2";
+
+/// Bounds must be finite and strictly increasing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidRangeBounds;
+
+impl std::fmt::Display for InvalidRangeBounds {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("range bounds must be finite and strictly increasing")
+    }
+}
+
+impl std::error::Error for InvalidRangeBounds {}
 
 /// A tiny deterministic linear-congruential generator.
 ///
-/// `state ← state * MULT + INC (mod 2^64)`; the high 32 bits are returned as
-/// the random payload (low bits of an LCG have poor entropy). No global state,
+/// `state ← state * MULT + INC (mod 2^64)`; the high 24 bits supply each
+/// floating-point draw (low bits of an LCG have poor entropy). No global state,
 /// no locking — pure value type, cloneable, seedable.
 #[derive(Clone, Debug)]
 pub struct Lcg {
@@ -74,17 +86,31 @@ impl Lcg {
         self.state
     }
 
-    /// Uniform `f32` in `[0, 1)`. Uses the high 32 bits.
+    /// Uniform `f32` in `[0, 1)`, using the high 24 bits in one step.
     #[inline]
     pub fn next_f32(&mut self) -> f32 {
-        let high = (self.next_u64() >> 32) as u32;
-        (high as f32) / (1u64 << 32) as f32
+        (self.next_u64() >> 40) as f32 * (1.0 / 16_777_216.0)
     }
 
-    /// Uniform `f32` in `[lo, hi)`.
+    /// Sample `[lo, hi)` in one step. Invalid bounds return NaN without a step.
     #[inline]
     pub fn next_range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.next_f32()
+        self.try_next_range(lo, hi).unwrap_or(f32::NAN)
+    }
+
+    /// Sample `[lo, hi)` using f64 interpolation and one RNG step.
+    ///
+    /// # Errors
+    /// Returns [`InvalidRangeBounds`] without advancing the generator if either
+    /// bound is nonfinite or `lo >= hi`.
+    #[inline]
+    pub fn try_next_range(&mut self, lo: f32, hi: f32) -> Result<f32, InvalidRangeBounds> {
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return Err(InvalidRangeBounds);
+        }
+        let fraction = f64::from(self.next_f32());
+        let value = (f64::from(lo) + (f64::from(hi) - f64::from(lo)) * fraction) as f32;
+        Ok(value.max(lo).min(hi.next_down()))
     }
 
     /// Standard-normal sample via the polar Box-Muller transform.

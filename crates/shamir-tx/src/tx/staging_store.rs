@@ -32,7 +32,7 @@ use std::sync::Arc;
 ///
 /// `as_inner` decodes on demand (cold read-your-own-write / commit remap).
 #[derive(Debug, Clone)]
-pub struct StagedRow(Bytes);
+pub struct StagedRow(Bytes, bool);
 
 impl StagedRow {
     /// Identity — return the held bytes.
@@ -85,19 +85,8 @@ pub struct StagingStore {
     probe_index: scc::HashMap<u64, StagedFieldIndex, THasher>,
     overwritten: Vec<usize>,
     probe_built: std::sync::atomic::AtomicBool,
-    /// #1205 (A8 amortization): `true` once every `Set` staged into this
-    /// store came from a `TableManager` write path that captured its
-    /// `InternerKey` ids into `TxContext::referenced_interner_ids` at stage
-    /// time (see that field's doc comment). `pre_commit_prelock`'s A8 scan
-    /// trusts this flag to skip its decode-based fallback for this table.
-    ///
-    /// Starts `false` — a `StagingStore` populated directly (low-level
-    /// tests, or any future raw-apply path that bypasses `TableManager`'s
-    /// insert/update methods) is conservatively treated as uncaptured until
-    /// [`mark_referenced_ids_captured`](Self::mark_referenced_ids_captured)
-    /// proves otherwise, so A8's correctness never depends on every staging
-    /// call site remembering to opt in.
-    referenced_ids_captured: bool,
+    /// Indices written by the most recent set or set_many call.
+    last_set: Vec<usize>,
 }
 
 impl StagingStore {
@@ -108,30 +97,26 @@ impl StagingStore {
             probe_index: scc::HashMap::with_hasher(THasher::default()),
             overwritten: Vec::new(),
             probe_built: std::sync::atomic::AtomicBool::new(false),
-            referenced_ids_captured: false,
+            last_set: Vec::new(),
         }
     }
 
-    /// Opt back in: mark this store's MOST RECENT `set`/`set_many` call as
-    /// having had its `InternerKey` ids captured (by the caller) into
-    /// `TxContext::referenced_interner_ids`.
-    ///
-    /// Must be called IMMEDIATELY after the `set`/`set_many` it vouches
-    /// for — any staging call in between (this store has no other mutator
-    /// per the single-writer-per-tx invariant) would silently reset the
-    /// flag back to `false` first. Any call site that does NOT call this
-    /// leaves A8 on its decode fallback for the whole table, which is
-    /// always correct, just not free — so this must only be called when
-    /// the caller is certain it captured every id.
+    /// Mark only the rows written by the immediately preceding set/set_many.
+    /// The caller must have captured every referenced id in those values.
     pub fn mark_referenced_ids_captured(&mut self) {
-        self.referenced_ids_captured = true;
+        for i in self.last_set.drain(..) {
+            if let Some((_, StagedOp::Set(row))) = self.writes.get_index_mut(i) {
+                row.1 = true;
+            }
+        }
     }
 
-    /// Whether every `Set` staged so far into this store had its
-    /// referenced `InternerKey` ids captured at stage time (see
-    /// [`mark_referenced_ids_captured`](Self::mark_referenced_ids_captured)).
+    /// Whether all currently staged sets have captured their referenced ids.
     pub fn referenced_ids_captured(&self) -> bool {
-        self.referenced_ids_captured
+        self.writes.values().all(|op| match op {
+            StagedOp::Set(row) => row.1,
+            StagedOp::Remove => true,
+        })
     }
 
     /// Borrow the base store this staging buffer wraps.
@@ -178,39 +163,38 @@ impl StagingStore {
 
     /// Stage a set (creates or overwrites).
     ///
-    /// #1205: resets [`referenced_ids_captured`](Self::referenced_ids_captured)
-    /// to `false` — this plain path does not know whether the caller
-    /// captured `v`'s referenced ids. A caller that DID capture them calls
-    /// [`mark_referenced_ids_captured`](Self::mark_referenced_ids_captured)
-    /// immediately afterward to opt back in; any staging call that skips
-    /// that (a raw/uninstrumented caller, or a later plain `set`/`set_many`
-    /// on the same store) conservatively lands A8 back on its decode
-    /// fallback for the whole table.
+    /// Unmarked writes require the A8 decode fallback, independently per key.
     pub fn set(&mut self, k: RecordKey, v: Bytes) {
-        let (i, old) = self.writes.insert_full(k, StagedOp::Set(StagedRow(v)));
+        self.last_set.clear();
+        let (i, old) = self
+            .writes
+            .insert_full(k, StagedOp::Set(StagedRow(v, false)));
         if old.is_some() && *self.probe_built.get_mut() {
             self.overwritten.push(i);
         }
-        self.referenced_ids_captured = false;
+        self.last_set.push(i);
     }
 
     /// Stage multiple sets in a single synchronous pass — no `.await` per key.
     ///
-    /// Equivalent to calling `set(k, v)` for each `(k, v)` in `items`,
-    /// including the [`referenced_ids_captured`](Self::referenced_ids_captured)
-    /// reset — see `set`'s doc.
+    /// Equivalent to calling `set(k, v)` for each `(k, v)` in `items`.
+    /// Each written key is initially uncaptured until explicitly marked.
     pub fn set_many(&mut self, items: impl IntoIterator<Item = (RecordKey, Bytes)>) {
+        self.last_set.clear();
         for (k, v) in items {
-            let (i, old) = self.writes.insert_full(k, StagedOp::Set(StagedRow(v)));
+            let (i, old) = self
+                .writes
+                .insert_full(k, StagedOp::Set(StagedRow(v, false)));
             if old.is_some() && *self.probe_built.get_mut() {
                 self.overwritten.push(i);
             }
+            self.last_set.push(i);
         }
-        self.referenced_ids_captured = false;
     }
 
     /// Stage a remove.
     pub fn remove(&mut self, k: RecordKey) {
+        self.last_set.clear();
         let (i, old) = self.writes.insert_full(k, StagedOp::Remove);
         if old.is_some() && *self.probe_built.get_mut() {
             self.overwritten.push(i);
@@ -357,15 +341,19 @@ impl StagingStore {
 
     /// Iterate the bytes of every staged `Set` op (borrowed, no clone).
     ///
-    /// #1205: `pre_commit_prelock`'s A8 scan uses this ONLY as a fallback
-    /// for a table whose [`referenced_ids_captured`](Self::referenced_ids_captured)
-    /// is `false` — i.e. bytes staged outside the instrumented
-    /// `TableManager` write paths. The common case (every table staged via
-    /// `TableManager` insert/update) never calls this.
+    /// All staged sets, regardless of capture status.
     pub fn iter_set_bytes(&self) -> impl Iterator<Item = &Bytes> {
         self.writes.values().filter_map(|op| match op {
             StagedOp::Set(row) => Some(&row.0),
             StagedOp::Remove => None,
+        })
+    }
+
+    /// Borrow only staged set bytes whose referenced IDs were not captured.
+    pub fn iter_uncaptured_set_bytes(&self) -> impl Iterator<Item = &Bytes> {
+        self.writes.values().filter_map(|op| match op {
+            StagedOp::Set(row) if !row.1 => Some(&row.0),
+            _ => None,
         })
     }
 
@@ -383,13 +371,18 @@ impl StagingStore {
     where
         F: FnMut(&Bytes) -> Result<Bytes, String>,
     {
+        self.last_set.clear();
         self.probe_index.clear_sync();
         self.overwritten.clear();
         *self.probe_built.get_mut() = false;
         for op in self.writes.values_mut() {
             if let StagedOp::Set(row) = op {
                 let bytes = row.as_bytes();
-                *row = StagedRow(f(&bytes)?);
+                let rewritten = f(&bytes)?;
+                if rewritten != bytes {
+                    row.1 = false;
+                }
+                row.0 = rewritten;
             }
         }
         Ok(())

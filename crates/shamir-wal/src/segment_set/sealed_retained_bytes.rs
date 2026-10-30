@@ -1,6 +1,7 @@
 use super::set::*;
 
 pub(super) async fn measure(segment_set: &SegmentSet) -> DbResult<u64> {
+    let gate = segment_set.lock_truncation().await;
     let paths: Vec<PathBuf> = {
         let guard = segment_set
             .inner
@@ -9,6 +10,7 @@ pub(super) async fn measure(segment_set: &SegmentSet) -> DbResult<u64> {
         guard.sealed.iter().map(|meta| meta.path.clone()).collect()
     };
     spawn_blocking(move || {
+        let _gate = gate;
         paths.into_iter().try_fold(0u64, |total, path| {
             let size = std::fs::metadata(&path)
                 .map_err(|error| DbError::Storage(format!("WAL metadata {path:?}: {error}")))?

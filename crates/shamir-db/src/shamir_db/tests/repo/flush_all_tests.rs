@@ -4,16 +4,19 @@
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::doc;
 use shamir_query_builder::write;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::Query;
 
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
+#[cfg(feature = "fjall")]
 use crate::shamir_db::SystemStoreConfig;
 use crate::ShamirDb;
 
 /// Re-open the system store, retrying briefly while the previous session's
 /// store still holds the redb file lock (the MemBuffer-wrapped store releases
 /// the lock a few ms after the owning `ShamirDb` is dropped).
+#[cfg(feature = "fjall")]
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
@@ -31,6 +34,7 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// explicit `flush()` drains the buffer. This test proves that `flush_all`
 /// drains every repo's buffers so the data survives a full drop-and-reopen
 /// cycle, closing the buffered-commit loss window on graceful shutdown.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn buffered_commit_survives_graceful_flush_all() {
     let dir = tempfile::tempdir().unwrap();

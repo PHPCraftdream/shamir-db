@@ -17,7 +17,6 @@ use rustls::sign::CertifiedKey;
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerAuthOk, ServerChallenge};
 use shamir_connect::common::crypto::{sha256, Ed25519Keypair};
 use shamir_connect::common::kdf_params::KdfParams;
-use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::config::{ListenerPolicy, ServerSecrets};
@@ -31,88 +30,23 @@ use shamir_transport_tcp::tls::{
     make_server_config_from_pem, AppLayerServerAuth,
 };
 
-use serde::{Deserialize, Serialize};
+#[path = "fixtures/handshake.rs"]
+mod handshake_fixture;
+use handshake_fixture::{
+    fast_kdf, make_user, WireAuthInit, WireAuthOk, WireChallenge, WireClientProof,
+};
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use zeroize::Zeroizing;
 
 // ----------------------------------------------------------------------------
 // Wire frames (test-local subset of the spec — protocol layer is transport-
 // agnostic so this transport binding chooses its own envelope encoding).
 // ----------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize)]
-struct WireAuthInit {
-    user: String,
-    #[serde(with = "serde_bytes")]
-    client_nonce: Vec<u8>, // 32 bytes
-    binding_mode: u8,
-    version: u8,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireChallenge {
-    #[serde(with = "serde_bytes")]
-    salt: Vec<u8>, // 16 bytes
-    memory_kb: u32,
-    time: u32,
-    parallelism: u32,
-    argon2_version: u8,
-    #[serde(with = "serde_bytes")]
-    server_nonce: Vec<u8>, // 32 bytes
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireClientProof {
-    #[serde(with = "serde_bytes")]
-    client_proof: Vec<u8>, // 32 bytes
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireAuthOk {
-    #[serde(with = "serde_bytes")]
-    server_signature: Vec<u8>, // 32
-    #[serde(with = "serde_bytes")]
-    server_pub_key: Vec<u8>, // 32
-    #[serde(with = "serde_bytes")]
-    identity_sig: Vec<u8>, // 64
-    #[serde(with = "serde_bytes")]
-    session_id: Vec<u8>, // 32
-    expires_at_ns: u64,
-}
-
 // ----------------------------------------------------------------------------
 // Test
 // ----------------------------------------------------------------------------
-
-fn fast_kdf() -> KdfParams {
-    // Faster than the spec floor — deliberate for test runtime. Tests must
-    // pass `validate_client_limits` on the client side.
-    KdfParams {
-        memory_kb: 19_456,
-        time: 2,
-        parallelism: 1,
-        argon2_version: 0x13,
-    }
-}
-
-fn make_user(password: &[u8]) -> (UserRecord, NormalizedUsername) {
-    let username = NormalizedUsername::from_raw("alice").unwrap();
-    let salt = [0x42u8; 16];
-    let kdf = fast_kdf();
-    let derived = DerivedKeys::derive(password, &salt, &kdf).unwrap();
-    let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
-    server_key_z.copy_from_slice(&derived.server_key[..]);
-    let record = UserRecord {
-        salt,
-        stored_key: derived.stored_key,
-        server_key: server_key_z,
-        kdf_params: kdf,
-        tickets_invalid_before_ns: 0,
-    };
-    (record, username)
-}
 
 #[tokio::test]
 async fn full_handshake_over_tcp_tls() {
@@ -280,7 +214,12 @@ async fn full_handshake_over_tcp_tls() {
 
     // Compute proof
     let mut password_buf = password.to_vec();
-    let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
+    let (hs, proof, derived, am) = tokio::task::spawn_blocking(move || {
+        let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
+        (hs, proof, derived, am)
+    })
+    .await
+    .unwrap();
 
     // Send proof
     let proof_wire = WireClientProof {

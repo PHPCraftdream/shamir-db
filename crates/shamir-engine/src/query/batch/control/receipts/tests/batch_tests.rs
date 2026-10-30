@@ -353,6 +353,43 @@ async fn repository_bounded_default_preflights_call_before_prior_write() {
     assert_eq!(gate.version_allocation_high_water_mark(), 0);
 }
 
+#[tokio::test]
+async fn receipt_preflight_reuses_root_classification_and_matches_fallback() {
+    let resolver = BoundedResolver(fixture().await);
+    let mut batch = Batch::new();
+    batch.call_in_repo("call", "unavailable", "default", Vec::<i32>::new());
+    let mut request = batch.build();
+    request.transactional = true;
+    let metadata = shamir_query_types::batch::RequestMetadata::collect(&request.queries, "test");
+    let cached = super::super::policy::validate(&request, &resolver, Some(&metadata))
+        .await
+        .unwrap_err();
+    let fallback = super::super::policy::validate(&request, &resolver, None)
+        .await
+        .unwrap_err();
+    assert_eq!(cached.code(), fallback.code());
+    assert_eq!(cached.code(), Some("validation"));
+
+    // For a non-transactional request the root early return depends on the
+    // write classification, so a deliberately different cache proves the root
+    // path consumes it. Production metadata always comes from this request.
+    request.transactional = false;
+    let genuine = shamir_query_types::batch::RequestMetadata::collect(&request.queries, "test");
+    assert!(
+        super::super::policy::validate(&request, &resolver, Some(&genuine))
+            .await
+            .is_err()
+    );
+    let mut different =
+        shamir_query_types::batch::RequestMetadata::collect(&request.queries, "test");
+    *different.writes.get_mut("call").unwrap() = false;
+    assert!(
+        super::super::policy::validate(&request, &resolver, Some(&different))
+            .await
+            .is_ok()
+    );
+}
+
 #[test]
 fn receipt_accounting_includes_metadata_and_nested_envelope_key() {
     let plain = crate::query::read::QueryResult::default();

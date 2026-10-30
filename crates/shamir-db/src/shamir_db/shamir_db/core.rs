@@ -5,7 +5,7 @@ use crate::engine::db_instance::db_instance::DbInstance;
 use crate::repl_binding::SubscriptionLease;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
-use shamir_collections::THasher;
+use shamir_collections::{TFxMap, THasher};
 use shamir_engine::function::{
     EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, WasmEngine, WasmFunction,
     WasmLimits,
@@ -14,6 +14,7 @@ use shamir_engine::repo::durability_policy::{effective_wal_segment_bytes, resolv
 use shamir_engine::validator::{RecordValidator, ValidatorRegistry, WasmRecordValidator};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -105,7 +106,7 @@ pub struct ShamirDb {
     /// Database-global variables shared across all function invocations.
     pub(super) globals: Arc<GlobalVars>,
     /// Network egress allowlist (host patterns). Default empty = deny all.
-    pub(super) net_allowlist: Arc<Vec<String>>,
+    pub(super) net_allowlist: Arc<super::super::gateway::net_grants::NetGrantsCache>,
     /// Per-function metadata (visibility, security, secret_grants).
     /// Populated on create/load, updated on rename, removed on drop.
     /// Wrapped in `Arc` so all clones share one map — function metadata
@@ -294,7 +295,9 @@ impl ShamirDb {
             functions,
             wasm_engine,
             globals,
-            net_allowlist: Arc::new(Vec::new()),
+            net_allowlist: Arc::new(super::super::gateway::net_grants::NetGrantsCache::new(
+                Vec::new(),
+            )),
             function_meta: Arc::new(DashMap::with_hasher(THasher::default())),
             group_id_lock: Arc::new(Mutex::new(())),
             db_create_lock: Arc::new(Mutex::new(())),
@@ -358,6 +361,13 @@ impl ShamirDb {
         // `table_by_token` resolves and Put/Delete/Index ops actually replay
         // for disk-backed repos.
         let table_records = shamir.system_store.load_tables().await?;
+        let mut tables_by_repo: TFxMap<(&str, &str), Vec<&QueryValue>> = TFxMap::default();
+        for table in &table_records {
+            if let (Some(db), Some(repo)) = (table["db_name"].as_str(), table["repo_name"].as_str())
+            {
+                tables_by_repo.entry((db, repo)).or_default().push(table);
+            }
+        }
         for rec in &repo_records {
             let db_name = rec["db_name"].as_str().ok_or_else(|| {
                 DbError::Internal("repository catalogue row is missing db_name".to_string())
@@ -382,10 +392,8 @@ impl ShamirDb {
                     // V2 recovery's `table_by_token` resolved nothing —
                     // Put/Delete/Index replay was silently skipped.
                     let mut config = RepoConfig::new(repo_name, factory);
-                    for trec in &table_records {
-                        if trec["db_name"].as_str() == Some(db_name)
-                            && trec["repo_name"].as_str() == Some(repo_name)
-                        {
+                    if let Some(tables) = tables_by_repo.get(&(db_name, repo_name)) {
+                        for trec in tables {
                             if let Some(table_name) = trec["table_name"].as_str() {
                                 let mut tcfg = TableConfig::new(table_name);
                                 if trec["enable_indexes"].as_bool().unwrap_or(false) {
@@ -419,11 +427,10 @@ impl ShamirDb {
                 )));
             }
         }
-
-        // Load persisted functions; registry collisions are fatal so rejected
-        // catalogue artifacts cannot publish contradictory function metadata.
+        // Decode all metadata before registering recovered functions.
         let fn_records = shamir.system_store.load_functions().await?;
-        for rec in &fn_records {
+        super::catalog::with_checked_function_metadata(&fn_records, |metadata| async {
+        for (rec, meta) in fn_records.iter().zip(metadata) {
             let name = match rec["name"].as_str() {
                 Some(n) => n.to_string(),
                 None => continue,
@@ -480,8 +487,7 @@ impl ShamirDb {
                             name
                         )));
                     }
-                    // Populate in-memory metadata only after artifact registration succeeds.
-                    let meta = FunctionMeta::from_record(rec);
+                    // Publish metadata after registration succeeds.
                     let _ = shamir.function_meta.insert(name.clone(), meta);
                 }
                 Err(e) => {
@@ -493,6 +499,8 @@ impl ShamirDb {
                 }
             }
         }
+        Ok::<(), DbError>(())
+        }).await??;
 
         // Load persisted WASM validators from the validator catalogue and
         // register them (S1). Mirrors the function loading block above.
@@ -878,11 +886,9 @@ impl ShamirDb {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     pub(super) fn factory_from_meta(engine: &str, path: Option<&str>) -> Option<BoxRepoFactory> {
-        // Each backend is gated by its cargo feature; an unknown engine
-        // string OR a backend that wasn't built into this binary returns
-        // `None`. The system_store's recorded engine name doesn't
-        // disappear when the feature is off — we just refuse to
-        // re-attach the repo.
+        // Unavailable backends return None; recorded engine names remain intact.
+        #[cfg(not(feature = "fjall"))]
+        let _ = path;
         match engine {
             "in_memory" => Some(BoxRepoFactory::in_memory()),
             #[cfg(feature = "fjall")]
@@ -907,6 +913,8 @@ impl ShamirDb {
     /// wrapped kind `"fjall"` — relabeling it raw would make the boot path
     /// drop the buffer layer on reopen.
     fn storage_type_inner(factory: &BoxRepoFactory, top: bool) -> &'static str {
+        #[cfg(not(feature = "fjall"))]
+        let _ = top;
         match factory {
             BoxRepoFactory::InMemory(_) => "in_memory",
             #[cfg(feature = "fjall")]
@@ -960,9 +968,6 @@ impl ShamirDb {
         table_name: &str,
         op_id_str: &str,
     ) -> Result<Option<crate::query::read::DdlOpStatus>, shamir_storage::error::DbError> {
-        use shamir_types::types::record_id::RecordId;
-        use std::str::FromStr;
-
         // Parse the op_id from the string representation.
         let op_id = RecordId::from_str(op_id_str).map_err(|error| {
             shamir_storage::error::DbError::Validation(format!("Invalid op_id format: {error}"))

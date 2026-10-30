@@ -92,7 +92,8 @@ pub enum ClientError {
     #[error("write committed; never resend: {message}")]
     WriteCommittedVisibilityPending { message: String },
 
-    /// Server returned a request_id that doesn't match what we sent.
+    /// Reserved for compatibility; this variant is not currently emitted.
+    /// Its fields describe the sent and received request IDs.
     #[error("request_id mismatch: sent {sent:?}, got {got:?}")]
     RequestIdMismatch { sent: Option<u32>, got: Option<u32> },
 
@@ -151,6 +152,10 @@ pub enum CloseCause {
     PeerEof,
     /// Read error from the transport (formatted `std::io::Error`).
     Io(Arc<str>),
+    /// An invalid post-handshake frame was received.
+    Protocol(Arc<str>),
+    /// The connection cannot allocate another unique request id.
+    RequestIdExhausted,
     /// Explicit [`Client::close()`](crate::Client::close).
     LocalClose,
     /// The [`Client`](crate::Client) was dropped without an explicit close.
@@ -165,6 +170,8 @@ impl std::fmt::Display for CloseCause {
         match self {
             CloseCause::PeerEof => write!(f, "peer eof"),
             CloseCause::Io(e) => write!(f, "io: {e}"),
+            CloseCause::Protocol(e) => write!(f, "protocol: {e}"),
+            CloseCause::RequestIdExhausted => write!(f, "request id exhausted"),
             CloseCause::LocalClose => write!(f, "local close"),
             CloseCause::ClientDropped => write!(f, "client dropped"),
             CloseCause::ReaderCancelled => write!(f, "reader cancelled"),

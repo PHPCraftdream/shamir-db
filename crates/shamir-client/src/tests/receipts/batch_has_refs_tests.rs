@@ -9,7 +9,7 @@ use shamir_query_types::batch::{BatchOp, BatchRequest, ForEachOp, QueryEntry, Re
 use shamir_query_types::filter::{
     Cond, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall, ValueCompareOp,
 };
-use shamir_query_types::read::{Select, Temporal};
+use shamir_query_types::read::{ReadQuery, Select, Temporal};
 use shamir_query_types::write::DeleteOp;
 use shamir_query_types::TableRef;
 use shamir_types::types::value::QueryValue;
@@ -17,7 +17,6 @@ use shamir_types::types::value::QueryValue;
 use crate::interner_cache::ops::batch_has_refs;
 
 fn read_op(field: &str, value: FilterValue) -> BatchOp {
-    use shamir_query_types::read::ReadQuery;
     BatchOp::Read(ReadQuery {
         from: TableRef::new("t"),
         select: Select::all(),

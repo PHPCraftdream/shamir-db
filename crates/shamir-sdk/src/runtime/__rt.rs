@@ -1,6 +1,13 @@
 //! Hidden runtime helpers used by code generated from `#[shamir_sdk_macros::function]`.
 //!
 //! Nothing in this module is part of the public SDK surface.
+//!
+//! Interoperable exchange-buffer pointers and lengths are nonnegative signed
+//! i32 fields. Their byte ranges must fit in guest linear memory and lie in
+//! the lower 2 GiB. The host's final packed-result reader extracts unsigned
+//! fields; that does not relax the signed contract for SDK exchange buffers.
+//! Bounds checks do not prove allocation provenance or ownership: host replies
+//! must still refer to live, uniquely transferred `shamir_alloc` allocations.
 
 use crate::error::{Error, Result};
 use crate::params::Params;
@@ -27,6 +34,15 @@ pub fn encode_value(value: &Value) -> Result<Vec<u8>> {
     rmp_serde::to_vec(value).map_err(|e| Error::codec(format!("encode value: {e}")))
 }
 
+/// Convert an exchange buffer to signed ABI fields after checking its range.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn guest_buffer_fields(ptr: usize, len: usize) -> Result<(i32, i32)> {
+    let ptr = i32::try_from(ptr).map_err(|_| Error::host("guest buffer pointer out of range"))?;
+    let len = i32::try_from(len).map_err(|_| Error::host("guest buffer length out of range"))?;
+    validate_response_range(ptr, len, 1u64 << 31)?;
+    Ok((ptr, len))
+}
+
 /// An owned request buffer handed to a host import.
 ///
 /// The host reads the bytes synchronously during the extern call, so the
@@ -43,19 +59,25 @@ impl RequestBuffer {
     /// Encode `value` into an owned request buffer.
     pub fn encode(value: &Value) -> Result<Self> {
         let bytes = encode_value(value)?;
+        #[cfg(target_arch = "wasm32")]
+        guest_buffer_fields(bytes.as_ptr() as usize, bytes.len())?;
         #[cfg(test)]
         LIVE_REQUEST_BUFFERS.fetch_add(1, Ordering::SeqCst);
         Ok(Self { bytes })
     }
 
     /// Pointer to the first byte, for the `(ptr, len)` host-import ABI.
+    #[cfg(target_arch = "wasm32")]
     pub fn ptr(&self) -> i32 {
-        self.bytes.as_ptr() as i32
+        guest_buffer_fields(self.bytes.as_ptr() as usize, self.bytes.len())
+            .unwrap_or_else(|error| raise(&error))
+            .0
     }
 
     /// Byte length, for the `(ptr, len)` host-import ABI.
     pub fn len(&self) -> i32 {
-        self.bytes.len() as i32
+        i32::try_from(self.bytes.len())
+            .unwrap_or_else(|_| trap("request length outside guest ABI range"))
     }
 
     /// Whether the buffer is empty.
@@ -89,11 +111,32 @@ pub(crate) fn live_request_buffers() -> usize {
 /// cancellation) drops the `Store` — which drops the entire guest linear
 /// memory — after the result bytes have been copied out. The leak is thus
 /// bounded per invocation by the host-side instance/Store teardown.
+#[cfg(target_arch = "wasm32")]
 pub fn leak_result(bytes: Vec<u8>) -> i64 {
-    let len = bytes.len() as u64;
-    let ptr = bytes.as_ptr() as usize as u64;
+    let ptr = bytes.as_ptr() as usize;
+    let len = bytes.len();
+    if ptr > i32::MAX as usize
+        || len > i32::MAX as usize
+        || (ptr as u64 + len as u64) > (1u64 << 31)
+    {
+        trap("result outside guest ABI range");
+    }
     core::mem::forget(bytes);
-    ((ptr << 32) | (len & 0xFFFF_FFFF)) as i64
+    (((ptr as u64) << 32) | len as u64) as i64
+}
+
+/// Check signed ABI fields and the complete range before reconstructing
+/// ownership. This cannot establish allocation provenance or uniqueness.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn validate_response_range(ptr: i32, len: i32, memory_bytes: u64) -> Result<()> {
+    if ptr < 0 || len < 0 || (ptr == 0 && len > 0) {
+        return Err(Error::host("invalid host response pointer or length"));
+    }
+    let end = ptr as u64 + len as u64;
+    if end > (1u64 << 31) || end > memory_bytes {
+        return Err(Error::host("host response range outside guest memory"));
+    }
+    Ok(())
 }
 
 /// Owned view of a host-import response buffer.
@@ -118,18 +161,22 @@ impl ResponseBytes {
     /// Take ownership of a `shamir_alloc`-produced `(ptr, len)` range.
     ///
     /// # Safety
-    /// `ptr..ptr+len` must be a live allocation made by guest `shamir_alloc`
-    /// with exactly `len` capacity (cap == len), and must not be freed
-    /// elsewhere.
-    pub unsafe fn from_raw(ptr: i32, len: i32) -> Self {
+    /// For a nonempty response, `ptr..ptr+len` must be a live, initialized,
+    /// uniquely owned allocation made by guest `shamir_alloc` with exactly
+    /// `len` capacity, and must not be freed elsewhere. Numerical range checks
+    /// do not establish these ownership and provenance requirements.
+    #[cfg(target_arch = "wasm32")]
+    pub unsafe fn from_raw(ptr: i32, len: i32) -> Result<Self> {
+        let memory_bytes = core::arch::wasm32::memory_size(0) as u64 * 65536;
+        validate_response_range(ptr, len, memory_bytes)?;
         #[cfg(test)]
         if len > 0 {
             LIVE_RESPONSE_BYTES.fetch_add(1, Ordering::SeqCst);
         }
-        Self {
+        Ok(Self {
             ptr: ptr as usize,
             len,
-        }
+        })
     }
 
     /// Test-only constructor from a native pointer (no `i32` truncation).
@@ -155,7 +202,8 @@ impl ResponseBytes {
         if self.len == 0 {
             return &[];
         }
-        // Safety: see `from_raw`.
+        // SAFETY: the constructors require a live, initialized allocation;
+        // it remains uniquely owned by this guard and is not mutated here.
         unsafe { core::slice::from_raw_parts(self.ptr as *const u8, self.len as usize) }
     }
 }
@@ -163,7 +211,8 @@ impl ResponseBytes {
 impl Drop for ResponseBytes {
     fn drop(&mut self) {
         if self.len > 0 {
-            // Safety: cap == len by shamir_alloc's construction.
+            // SAFETY: the constructor requires a live, uniquely transferred
+            // Vec allocation with capacity and initialized length both equal to len.
             drop(unsafe {
                 Vec::from_raw_parts(self.ptr as *mut u8, self.len as usize, self.len as usize)
             });
@@ -227,14 +276,15 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
 pub fn raise(error: &Error) -> ! {
     let message = sanitize_trap_message(error.message());
     #[cfg(target_arch = "wasm32")]
+    let (ptr, len) = match guest_buffer_fields(message.as_ptr() as usize, message.len()) {
+        Ok(fields) => fields,
+        Err(_) => core::arch::wasm32::unreachable(),
+    };
+    #[cfg(target_arch = "wasm32")]
     {
         // SAFETY: `message` remains alive and readable for the synchronous host import.
         unsafe {
-            crate::runtime::host_imports::raise_error(
-                error.kind().abi_code(),
-                message.as_ptr() as i32,
-                message.len() as i32,
-            );
+            crate::runtime::host_imports::raise_error(error.kind().abi_code(), ptr, len);
         }
         core::arch::wasm32::unreachable();
     }

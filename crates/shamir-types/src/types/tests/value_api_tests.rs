@@ -134,6 +134,28 @@ fn set_path_single_segment_on_non_map_root_errors() {
     );
 }
 
+#[test]
+fn set_path_unicode_and_empty_segments_preserve_diagnostics() {
+    for path in ["é.猫", ".é", "é..猫", "é.", "..é."] {
+        let mut value = map(&[]);
+        assert_eq!(value.set_path(path, QueryValue::Int(1)).unwrap(), None);
+        assert_eq!(value.get_path(path), Some(&QueryValue::Int(1)));
+    }
+
+    for (path, blocked, expected) in [
+        ("é.猫.x", "é", "é.猫"),
+        (".é.x", "", "é"),
+        ("é..猫", "é", "é."),
+        ("é.", "é", "é."),
+        ("..é.x", ".", "é"),
+    ] {
+        let mut value = map(&[]);
+        value.set_path(blocked, QueryValue::Int(7)).unwrap();
+        let err = value.set_path(path, QueryValue::Int(1)).unwrap_err();
+        assert!(matches!(err, ValueError::NotAMap { path } if path == expected));
+    }
+}
+
 // ── Index<&str> ───────────────────────────────────────────────────────────────
 //
 // The existing `impl Index<&str> for Value<String>` uses a sentinel-null

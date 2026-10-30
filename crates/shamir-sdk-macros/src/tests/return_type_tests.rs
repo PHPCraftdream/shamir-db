@@ -6,6 +6,40 @@ use crate::{
 };
 use quote::ToTokens;
 
+#[test]
+fn rv_sdk_macros_c8189c06_attribute_arguments() {
+    let default: crate::SdkPath = syn::parse_str("").unwrap();
+    assert_eq!(default.0.to_token_stream().to_string(), ":: shamir_sdk");
+    let explicit: crate::SdkPath = syn::parse_str("crate = renamed::sdk,").unwrap();
+    assert_eq!(explicit.0.to_token_stream().to_string(), "renamed :: sdk");
+    for invalid in [
+        "unknown = sdk",
+        "crate =",
+        "crate = sdk, crate = sdk",
+        "crate = sdk extra",
+        "crate(sdk)",
+    ] {
+        assert!(
+            syn::parse_str::<crate::SdkPath>(invalid).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn rv_sdk_macros_c8189c06_substitutes_generated_paths() {
+    let input: syn::ItemFn = syn::parse_quote! {
+        async fn sample(p: renamed::Params) -> renamed::Result<renamed::Value> {
+            Ok(renamed::Value::Null)
+        }
+    };
+    let output = expand_scalar(input, &syn::parse_quote!(::renamed))
+        .unwrap()
+        .to_string();
+    assert!(output.contains(":: renamed :: __rt"));
+    assert!(!output.contains("shamir_sdk"));
+}
+
 fn rt(src: &str) -> bool {
     is_result_value_return(&syn::parse_str(src).unwrap())
 }
@@ -74,10 +108,10 @@ fn rv_sdk_macros_966aa3ad_raw_function_identifier_builds_valid_helper_name() {
     for (kind, source) in cases {
         let fn_item = syn::parse_str::<syn::ItemFn>(source).unwrap();
         let expansion = match kind {
-            "validator" => expand_validator(fn_item).unwrap(),
-            "function" => expand_function(fn_item).unwrap(),
-            "procedure" => expand_procedure(fn_item).unwrap(),
-            _ => expand_scalar(fn_item).unwrap(),
+            "validator" => expand_validator(fn_item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            "function" => expand_function(fn_item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            "procedure" => expand_procedure(fn_item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            _ => expand_scalar(fn_item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
         }
         .to_string();
         assert!(
@@ -99,7 +133,9 @@ pub async fn v(_r: shamir_sdk::Value, _o: Option<shamir_sdk::Value>, _c: shamir_
 #[test]
 fn rv_sdk_macros_4db0d871_expansion_traps_on_decode_and_missing_record() {
     let fn_item = syn::parse_str::<syn::ItemFn>(VALIDATOR_SRC).unwrap();
-    let s = expand_validator(fn_item).unwrap().to_string();
+    let s = expand_validator(fn_item, &syn::parse_quote!(::shamir_sdk))
+        .unwrap()
+        .to_string();
     // Decode failure must raise: the decode match arm's Err branch must call
     // `raise` before the `record` extraction happens.
     let dec = s
@@ -129,7 +165,9 @@ fn rv_sdk_macros_4db0d871_expansion_traps_on_decode_and_missing_record() {
 #[test]
 fn rv_sdk_macros_2638faff_validator_moves_values_and_drops_payload_before_await() {
     let fn_item = syn::parse_str::<syn::ItemFn>(VALIDATOR_SRC).unwrap();
-    let expansion = expand_validator(fn_item).unwrap().to_string();
+    let expansion = expand_validator(fn_item, &syn::parse_quote!(::shamir_sdk))
+        .unwrap()
+        .to_string();
     assert!(
         expansion.contains("params . into_raw ()"),
         "got: {expansion}"
@@ -176,10 +214,10 @@ fn rv_sdk_macros_fb968c81_all_emitters_return_spanned_signature_errors() {
     for (kind, source, expected) in cases {
         let item = syn::parse_str::<syn::ItemFn>(source).unwrap();
         let error = match kind {
-            "#[validator]" => expand_validator(item).unwrap_err(),
-            "#[function]" => expand_function(item).unwrap_err(),
-            "#[procedure]" => expand_procedure(item).unwrap_err(),
-            _ => expand_scalar(item).unwrap_err(),
+            "#[validator]" => expand_validator(item, &syn::parse_quote!(::shamir_sdk)).unwrap_err(),
+            "#[function]" => expand_function(item, &syn::parse_quote!(::shamir_sdk)).unwrap_err(),
+            "#[procedure]" => expand_procedure(item, &syn::parse_quote!(::shamir_sdk)).unwrap_err(),
+            _ => expand_scalar(item, &syn::parse_quote!(::shamir_sdk)).unwrap_err(),
         };
         assert!(error.to_string().contains(expected), "{kind}: {error}");
         assert!(
@@ -194,7 +232,7 @@ fn rv_sdk_macros_fb968c81_all_emitters_return_spanned_signature_errors() {
     let scalar_ctx =
         syn::parse_str::<syn::ItemFn>("pub async fn s(c: Ctx) -> Result<Value> { todo!() }")
             .unwrap();
-    let error = expand_scalar(scalar_ctx).unwrap_err();
+    let error = expand_scalar(scalar_ctx, &syn::parse_quote!(::shamir_sdk)).unwrap_err();
     assert!(error.to_string().contains("must not take Ctx"));
 }
 
@@ -209,10 +247,10 @@ fn rv_sdk_macros_0a76d271_all_emitters_have_unsafe_contract_and_guards() {
     for (kind, source) in cases {
         let item = syn::parse_str::<syn::ItemFn>(source).unwrap();
         let expansion = match kind {
-            "validator" => expand_validator(item).unwrap(),
-            "function" => expand_function(item).unwrap(),
-            "procedure" => expand_procedure(item).unwrap(),
-            _ => expand_scalar(item).unwrap(),
+            "validator" => expand_validator(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            "function" => expand_function(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            "procedure" => expand_procedure(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            _ => expand_scalar(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
         };
         let file = syn::parse2::<syn::File>(expansion).unwrap();
         let entry = file
@@ -274,10 +312,10 @@ fn rv_sdk_macros_9ac2b50c_forward_patterns_as_hygienic_arguments() {
         let item = syn::parse_str::<syn::ItemFn>(source).unwrap();
         let original_sig = item.sig.clone();
         let expansion = match kind {
-            "validator" => expand_validator(item).unwrap(),
-            "function" => expand_function(item).unwrap(),
-            "procedure" => expand_procedure(item).unwrap(),
-            _ => expand_scalar(item).unwrap(),
+            "validator" => expand_validator(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            "function" => expand_function(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            "procedure" => expand_procedure(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
+            _ => expand_scalar(item, &syn::parse_quote!(::shamir_sdk)).unwrap(),
         };
         let parsed = syn::parse2::<syn::File>(expansion.clone())
             .unwrap_or_else(|error| panic!("{kind}: {error}\n{expansion}"));

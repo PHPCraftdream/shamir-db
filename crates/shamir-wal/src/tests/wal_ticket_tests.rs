@@ -208,6 +208,94 @@ async fn uncontended_mem_append_finishes_in_one_poll() {
     assert_eq!(sink.replay().await.unwrap().len(), 2);
 }
 
+// Each paused window receives a new arrival before it finishes. The old
+// drain-until-empty leader enters the third paused window instead of returning.
+#[tokio::test]
+async fn sustained_arrivals_do_not_hold_original_leader() {
+    let sink = Arc::new(WalSink::mem());
+    let group = WalGroupCommit::new(Arc::clone(&sink));
+    sink.arm_pause_next_append();
+    let (first, leader) = group.append_ticketed(payload(1), 1, WalDurability::Buffered);
+    tokio::pin!(leader);
+    assert!(poll_once(leader.as_mut()).await.is_pending());
+    sink.wait_append_paused().await;
+
+    let (_, second) = group.append_ticketed(payload(2), 2, WalDurability::Buffered);
+    tokio::pin!(second);
+    assert!(poll_once(second.as_mut()).await.is_pending());
+    sink.arm_pause_next_append();
+    sink.resume_append();
+    assert!(poll_once(leader.as_mut()).await.is_pending());
+    sink.wait_append_paused().await;
+
+    let (_, third) = group.append_ticketed(payload(3), 3, WalDurability::Buffered);
+    tokio::pin!(third);
+    assert!(poll_once(third.as_mut()).await.is_pending());
+    sink.arm_pause_next_append();
+    sink.resume_append();
+    assert_eq!(poll_once(leader.as_mut()).await, Poll::Ready(Ok(())));
+    assert_eq!(first.state(), WalTicketState::Acked);
+    sink.wait_append_paused().await;
+    let (_, fourth) = group.append_ticketed(payload(4), 4, WalDurability::Buffered);
+    tokio::pin!(fourth);
+    assert!(poll_once(fourth.as_mut()).await.is_pending());
+    sink.resume_append();
+    assert_eq!(second.await, Ok(()));
+    assert_eq!(third.await, Ok(()));
+    assert_eq!(fourth.await, Ok(()));
+    let ids: Vec<_> = sink
+        .replay()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.txn_id)
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
+// A cancelled queued follower cannot be relied upon to elect the next leader.
+#[tokio::test]
+async fn cancelled_follower_is_written_after_leader_handoff() {
+    let sink = Arc::new(WalSink::mem());
+    let group = WalGroupCommit::new(Arc::clone(&sink));
+    sink.arm_pause_next_append();
+    let (_, leader) = group.append_ticketed(payload(1), 1, WalDurability::Buffered);
+    tokio::pin!(leader);
+    assert!(poll_once(leader.as_mut()).await.is_pending());
+    sink.wait_append_paused().await;
+    let (_, second) = group.append_ticketed(payload(2), 2, WalDurability::Buffered);
+    tokio::pin!(second);
+    assert!(poll_once(second.as_mut()).await.is_pending());
+    sink.arm_pause_next_append();
+    sink.resume_append();
+    assert!(poll_once(leader.as_mut()).await.is_pending());
+    sink.wait_append_paused().await;
+
+    let (cancelled, completion) = group.append_ticketed(payload(3), 3, WalDurability::Buffered);
+    let mut completion = Box::pin(completion);
+    assert!(poll_once(completion.as_mut()).await.is_pending());
+    drop(completion);
+    sink.arm_pause_next_append();
+    sink.resume_append();
+    assert_eq!(poll_once(leader.as_mut()).await, Poll::Ready(Ok(())));
+    sink.wait_append_paused().await;
+    let (_, witness) = group.append_ticketed(payload(4), 4, WalDurability::Buffered);
+    tokio::pin!(witness);
+    assert!(poll_once(witness.as_mut()).await.is_pending());
+    sink.resume_append();
+    assert_eq!(witness.await, Ok(()));
+    assert_eq!(cancelled.state(), WalTicketState::Acked);
+    assert_eq!(second.await, Ok(()));
+    let ids: Vec<_> = sink
+        .replay()
+        .await
+        .unwrap()
+        .iter()
+        .map(|e| e.txn_id)
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
+}
+
 // Red before the fix: `complete()` used `notify_one`, so of N awaiters parked
 // on ONE shared ticket exactly one was woken and the other N-1 stayed parked
 // forever on a deadline-less select — a lost wakeup on the batched append

@@ -463,6 +463,44 @@ async fn effective_fn_actor_switches_on_setuid() {
     assert_eq!(effective, Actor::User(10));
 }
 
+#[tokio::test]
+async fn malformed_metadata_never_escalates_setuid_or_definer() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let caller = Actor::User(42);
+    for (name, setuid) in [("bad_setuid", true), ("bad_definer", false)] {
+        let mut fields = shamir_types::types::common::new_map();
+        fields.insert(
+            "name".into(),
+            shamir_types::types::value::QueryValue::Str(name.into()),
+        );
+        fields.insert(
+            "security".into(),
+            shamir_types::types::value::QueryValue::Str("definer".into()),
+        );
+        fields.insert(
+            "secret_grants".into(),
+            shamir_types::types::value::QueryValue::List(vec![
+                shamir_types::types::value::QueryValue::Int(1),
+            ]),
+        );
+        let mode = Mode::with_setuid(0o755, setuid);
+        shamir
+            .system_store()
+            .save_function(
+                name,
+                &shamir_types::types::value::QueryValue::Map(fields),
+                &ResourceMeta {
+                    owner: Actor::User(10),
+                    group: None,
+                    mode,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(shamir.effective_fn_actor(name, &caller).await, caller);
+    }
+}
+
 // Verify fail-closed: a missing (or unreadable) function record must
 // never escalate the caller to Actor::System via an open()-default.
 #[tokio::test]

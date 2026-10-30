@@ -22,12 +22,15 @@
 
 use crate::common::crypto::{
     aes256gcm_cipher, aes256gcm_decrypt_in_place_with_cipher, aes256gcm_encrypt_with_cipher,
-    random_array, Aes256GcmCipher,
+    try_random_array, Aes256GcmCipher,
 };
 use crate::common::domain_tags::TICKET_V1;
 use crate::common::error::{Error, Result};
 use crate::common::types::{BindingMode, TransportKind};
 use serde::{Deserialize, Serialize};
+
+/// Only supported resumption ticket format version.
+pub const TICKET_VERSION: u8 = 2;
 
 /// Plaintext fields of the ticket. Encoded as msgpack (canonical form
 /// by msgpack-rs default — sufficient for v2 since AAD does not depend on
@@ -111,14 +114,16 @@ pub struct TicketWire {
 impl TicketWire {
     /// Serialize to flat byte string `version || nonce || u16_be(ciphertext_len)
     /// || ciphertext || tag`.
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let len = u16::try_from(self.ciphertext.len())
+            .map_err(|_| Error::InvalidInput("ticket: ciphertext too long"))?;
         let mut out = Vec::with_capacity(1 + 12 + 2 + self.ciphertext.len() + 16);
         out.push(self.version);
         out.extend_from_slice(&self.nonce);
-        out.extend_from_slice(&(self.ciphertext.len() as u16).to_be_bytes());
+        out.extend_from_slice(&len.to_be_bytes());
         out.extend_from_slice(&self.ciphertext);
         out.extend_from_slice(&self.tag);
-        out
+        Ok(out)
     }
 
     /// Parse from bytes.
@@ -169,10 +174,13 @@ pub fn encrypt_ticket_with_cipher(
     cipher: &Aes256GcmCipher,
     plain: &TicketPlain,
 ) -> Result<TicketWire> {
+    if plain.version != TICKET_VERSION {
+        return Err(Error::InvalidInput("ticket: unsupported version"));
+    }
     let plaintext = rmp_serde::to_vec_named(plain)
         .map_err(|e| Error::Encoding(format!("ticket msgpack: {e}")))?;
 
-    let nonce = random_array::<12>();
+    let nonce = try_random_array::<12>()?;
     let aad = build_aad(plain.version);
 
     let ct_with_tag = aes256gcm_encrypt_with_cipher(cipher, &nonce, &plaintext, &aad)?;
@@ -180,6 +188,9 @@ pub fn encrypt_ticket_with_cipher(
         return Err(Error::Crypto("AES-GCM: short output"));
     }
     let split = ct_with_tag.len() - 16;
+    if split > u16::MAX as usize {
+        return Err(Error::InvalidInput("ticket: ciphertext too long"));
+    }
     let ciphertext = ct_with_tag[..split].to_vec();
     let mut tag = [0u8; 16];
     tag.copy_from_slice(&ct_with_tag[split..]);
@@ -221,7 +232,7 @@ pub fn decrypt_ticket_with_ciphers(
     previous_cipher: Option<&Aes256GcmCipher>,
     wire: &TicketWire,
 ) -> Result<TicketPlain> {
-    if wire.version != 2 {
+    if wire.version != TICKET_VERSION {
         return Err(Error::InvalidInput("ticket: unsupported version"));
     }
     let aad = build_aad(wire.version);

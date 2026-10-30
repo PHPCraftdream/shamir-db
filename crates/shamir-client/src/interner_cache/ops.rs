@@ -13,8 +13,10 @@
 //! Full dumps and ambient deltas establish completeness; touches add sparse mappings.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use serde::Deserialize;
 use serde_bytes::ByteBuf;
 use shamir_collections::TFxMap;
 use shamir_query_builder::batch::Batch;
@@ -25,11 +27,15 @@ use shamir_query_types::read::{QueryRecord, QueryResult};
 use shamir_query_types::write::{DeleteOp, InsertOp, SetOp, UpdateOp};
 use shamir_types::codecs::interned::{query_value_to_storage_bytes, record_view_deintern_with};
 use shamir_types::core::interner::InternerKey;
-use shamir_types::record_view::RecordView;
-use shamir_types::types::value::{QueryValue, Value};
+use shamir_types::record_view::{RecordValue, RecordView};
+use shamir_types::types::value::{InnerValue, QueryValue, Value};
 
 use crate::error::{client_batch_error, ClientError};
 use crate::Client;
+
+#[cfg(test)]
+#[path = "../tests/interner/ops_tests.rs"]
+mod tests;
 
 /// Parsed `interner_dump` admin payload.
 ///
@@ -381,18 +387,16 @@ impl Client {
         }
 
         // Field names are pre-touched per repo; preserve result alias provenance.
-        let mut per_repo: TFxMap<String, Vec<String>> = TFxMap::default();
+        let mut per_repo: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for entry in batch.queries.values() {
             collect_field_names(&entry.op, &mut per_repo);
         }
 
         // Touch each repo's unknown fields; warm cache adds no roundtrip.
-        for (repo, mut names) in per_repo {
-            names.sort_unstable();
-            names.dedup();
-            let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for (repo, names) in per_repo {
+            let refs: Vec<&str> = names.into_iter().collect();
             if !refs.is_empty() {
-                self.touch_fields(db, &repo, &refs).await?;
+                self.touch_fields(db, repo, &refs).await?;
             }
         }
 
@@ -453,7 +457,7 @@ impl Client {
 /// Recurses into nested `Value::Map`s so that a record like
 /// `{ "profile": { "age": 30 } }` registers both "profile" and "age". The
 /// repo is read from the op's table-ref.
-fn collect_field_names(op: &BatchOp, out: &mut TFxMap<String, Vec<String>>) {
+fn collect_field_names<'a>(op: &'a BatchOp, out: &mut BTreeMap<&'a str, BTreeSet<&'a str>>) {
     let (repo, values): (&str, Vec<&QueryValue>) = match op {
         BatchOp::Insert(InsertOp {
             insert_into,
@@ -470,24 +474,32 @@ fn collect_field_names(op: &BatchOp, out: &mut TFxMap<String, Vec<String>>) {
     if values.is_empty() {
         return;
     }
-    let bucket = out.entry(repo.to_string()).or_default();
+    let bucket = out.entry(repo).or_default();
     for v in values {
         collect_map_keys(v, bucket);
     }
 }
 
 /// Recursively collect map keys from a `Value::Map` (and its nested maps).
-fn collect_map_keys(v: &QueryValue, out: &mut Vec<String>) {
-    if let Value::Map(m) = v {
-        for (k, child) in m.iter() {
-            out.push(k.clone());
-            collect_map_keys(child, out);
+fn collect_map_keys<'a>(v: &'a QueryValue, out: &mut BTreeSet<&'a str>) {
+    match v {
+        Value::Map(m) => {
+            for (k, child) in m {
+                out.insert(k.as_str());
+                collect_map_keys(child, out);
+            }
         }
-    } else if let Value::List(items) = v {
-        // A list of records (e.g. insert values carried as a list of maps).
-        for item in items {
-            collect_map_keys(item, out);
+        Value::List(items) => {
+            for item in items {
+                collect_map_keys(item, out);
+            }
         }
+        Value::Set(items) => {
+            for item in items {
+                collect_map_keys(item, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -641,7 +653,7 @@ fn encode_record_idmsgpack(
         })
     };
     query_value_to_storage_bytes(qv, &intern)
-        .map(|bytes| bytes.to_vec())
+        .map(Vec::from)
         .map_err(|e| ClientError::Protocol(format!("id-keyed record encode: {e}")))
 }
 
@@ -688,11 +700,11 @@ async fn deintern_query_result(
 ) -> Result<(), ClientError> {
     for record in &mut result.records {
         if let QueryRecord::IdBytes(ref bytes) = *record {
-            let mut value = try_deintern_map(bytes.as_ref(), field_map);
+            let mut value = try_deintern_map(bytes.as_ref(), field_map)?;
             if value.is_none() && !refreshed.contains_key(repo) {
                 client.refresh_repo(db, repo).await?;
                 refreshed.insert(repo.to_string(), ());
-                value = try_deintern_map(bytes.as_ref(), field_map);
+                value = try_deintern_map(bytes.as_ref(), field_map)?;
             }
             let qv = value.ok_or_else(|| {
                 ClientError::Protocol(format!(
@@ -707,10 +719,45 @@ async fn deintern_query_result(
 fn try_deintern_map(
     bytes: &[u8],
     field_map: &crate::interner_cache::FieldMap,
-) -> Option<QueryValue> {
-    let view = RecordView::new(bytes)
-        .map_err(|e| tracing::warn!("de-intern: RecordView::new failed: {:?}", e))
-        .ok()?;
+) -> Result<Option<QueryValue>, ClientError> {
+    let invalid = || ClientError::Protocol("de-intern: malformed id-keyed row".into());
+    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
+    decoder.set_max_depth(128);
+    InnerValue::deserialize(&mut decoder).map_err(|_| invalid())?;
+    if decoder.get_ref().position() != bytes.len() as u64 {
+        return Err(invalid());
+    }
+    let view = RecordView::new(bytes).map_err(|_| invalid())?;
+    if !complete_map(&view) {
+        return Err(invalid());
+    }
     let resolver = |id: u64| field_map.name_of(id);
-    record_view_deintern_with(&view, &resolver).ok()
+    Ok(record_view_deintern_with(&view, &resolver).ok())
+}
+
+fn complete_map(view: &RecordView<'_>) -> bool {
+    let mut ids = BTreeSet::new();
+    for (key, value) in view.fields() {
+        if !ids.insert(key.id()) || !complete_value(&value) {
+            return false;
+        }
+    }
+    ids.len() == view.len()
+}
+
+fn complete_value(value: &RecordValue<'_>) -> bool {
+    match value {
+        RecordValue::Map(view) => complete_map(view),
+        RecordValue::Arr(seq) => {
+            let mut count = 0;
+            for value in seq.iter() {
+                if !complete_value(&value) {
+                    return false;
+                }
+                count += 1;
+            }
+            count == seq.len()
+        }
+        _ => true,
+    }
 }

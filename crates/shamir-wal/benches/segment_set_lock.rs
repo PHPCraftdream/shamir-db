@@ -1,28 +1,25 @@
-//! Isolated contention probe for `SegmentSet::inner: std::sync::Mutex<Inner>`.
+//! End-to-end concurrent append workloads bypassing `WalGroupCommit`.
 //!
-//! This benchmark measures `SegmentSet::append_batch`'s own lock contention
-//! directly, bypassing `WalGroupCommit`'s leader-election and `pending` queue
-//! entirely. Multiple concurrent tasks call `SegmentSet::append_batch` without
-//! any serialization, which tests the lock's behavior under its worst-case
-//! scenario (all N callers contend simultaneously, for the whole run).
+//! These scenarios exercise `SegmentSet::append_batch` directly, including
+//! scheduling, framing and file writes. They do not isolate lock cost, check
+//! replay, or inject failures. Concurrent tasks need not contend simultaneously.
 //!
 //! **Two scenarios, two different questions:**
 //!
-//! - `raw_append/n_*` (single fan-out-and-join per iteration) — a lock
-//!   CORRECTNESS stress test, not a cost measurement. See the methodology
+//! - `raw_append/n_*` (single fan-out-and-join per iteration) — a
+//!   concurrent append workload, not a correctness test or lock cost measurement. See the methodology
 //!   warning on `fan_out_raw` below: with only one `append_batch` call per
-//!   spawned task, the timed region is dominated by one-shot `tokio::spawn`
-//!   / `JoinHandle::await` overhead, not by the mutex. A `#1109` review
+//!   spawned task, the timed region includes one-shot `tokio::spawn`
+//!   / `JoinHandle::await` overhead as well as append work. A `#1109` review
 //!   found this shape had previously been misread as "per-append latency
 //!   improving 5x under concurrency" — that reading divided a
 //!   spawn-N-and-join-N round trip by N and mistook amortization of the
 //!   fixed per-iteration harness overhead for the lock getting cheaper
-//!   under contention, which is not physically possible (contention can
-//!   only add wait time, never remove it). Kept here only for its original
-//!   purpose: proving `append_batch` stays correct under worst-case,
-//!   all-N-contend concurrency.
-//! - `sustained_append/n_*` — sustained END-TO-END append throughput under
-//!   contention. Each of the `N` concurrent tasks performs `APPENDS_PER_TASK`
+//!   under contention. Dividing a round-trip time by N does not isolate
+//!   mutex acquisition. The workload checks returned
+//!   results, not replay integrity or failure handling.
+//! - `sustained_append/n_*` — sustained END-TO-END append throughput with
+//!   concurrent callers. Each of the `N` concurrent tasks performs `APPENDS_PER_TASK`
 //!   sequential `append_batch` calls in a loop; the one-time `tokio::spawn`/join
 //!   overhead is paid once per task and amortized over many appends.
 //!   **This is NOT an isolated mutex-acquisition measurement**: the timed
@@ -36,22 +33,14 @@
 //!   The harness reports `ns/op` treating the WHOLE n-task
 //!   run as one op (it has no visibility into the nested loop) — divide the
 //!   printed `ns/op` by `N * APPENDS_PER_TASK` by hand to get mean
-//!   per-append END-TO-END cost while N tasks sustain contention throughout
-//!   the whole timed window. See `fan_out_sustained`'s doc comment for the
-//!   exact arithmetic.
+//!   per-append END-TO-END cost for the concurrent workload.
 //!
 //! **IMPORTANT**: Both scenarios create an ARTIFICIAL situation that never
 //! occurs in production (the real system serializes all `SegmentSet` access
 //! through `WalGroupCommit`'s single elected leader — see
 //! `segment_set.rs`'s struct doc). Neither scenario's absolute numbers are a
-//! production latency prediction; `sustained_append` answers "how expensive
-//! is one lock acquisition+critical-section under sustained contention",
-//! which is the number needed to judge whether `SegmentSet::inner` would be
-//! a bottleneck IF the single-writer architecture were ever violated or
-//! revisited. The single-writer argument itself — only the group-commit
-//! leader ever calls into `SegmentSet` — is what actually establishes
-//! "negligible in production today"; see `CLAUDE.md`'s
-//! `SegmentSet::inner` entry.
+//! production latency prediction; `sustained_append` measures end-to-end
+//! throughput for direct concurrent callers, not an isolated lock acquisition.
 //!
 //! **Withdrawn claims**: no number printed by this bench reproduces the
 //! historical "4.4×" or "~63×" ratios, and none of them measures isolated
@@ -76,11 +65,9 @@ const SEG_MAX_BYTES: u64 = 1 << 30; // 1 GiB
 
 /// Sequential `append_batch` calls per task in the `sustained_append`
 /// scenario. Large enough that the one-time `tokio::spawn` + final
-/// `JoinHandle::await` overhead per task (paid once) is negligible next to
-/// the aggregate cost of `APPENDS_PER_TASK` real appends (paid
-/// `APPENDS_PER_TASK` times) — i.e. large enough to measure sustained
-/// per-append end-to-end cost rather than re-measuring spawn/join overhead
-/// under a different name.
+/// `JoinHandle::await` overhead per task is amortized over
+/// `APPENDS_PER_TASK` appends. The workload measures end-to-end time,
+/// not isolated lock cost or per-call latency.
 ///
 /// The payload template is encoded ONCE at setup and cloned per append, so the
 /// timed region contains no bincode encode work — only the unavoidable
@@ -94,25 +81,16 @@ fn payload() -> Vec<u8> {
 }
 
 /// Run `n` concurrent `append_batch` calls directly against `segset`, ONE
-/// call per spawned task. NO serialization — all N tasks contend on
-/// `SegmentSet::inner`'s mutex simultaneously.
+/// call per spawned task. Calls may overlap; simultaneous contention is not guaranteed.
 ///
 /// **Methodology warning (do not use this to derive a per-append latency
 /// figure — see `#1109`):** because each task only calls `append_batch`
 /// once, the timed region (the whole fan-out-and-join round trip) is
-/// dominated by one-shot `tokio::spawn`/`JoinHandle::await` scheduling
-/// overhead, not by the mutex's own cost. Dividing the reported per-iteration
-/// time by `n` does NOT recover a clean "per single append" cost — it mixes
-/// in the (roughly n-invariant) spawn/join overhead, diluted differently at
-/// each `n`. A prior interpretation did exactly this division and read the
-/// resulting falling curve as "the lock gets 5x cheaper under contention",
-/// which cannot be correct (contention can only add wait time to a mutex
-/// acquisition, never subtract it) — the falling curve was amortization of
-/// fixed overhead across more real work, not the lock improving. This
-/// function is kept for what it's actually good at: proving `append_batch`
-/// stays correct (no lost/corrupted entries, no deadlock) under worst-case,
-/// all-N-contend-at-once concurrency. For a per-acquisition cost estimate,
-/// see `fan_out_sustained` / the `sustained_append` scenario below.
+/// includes one-shot `tokio::spawn`/`JoinHandle::await` scheduling
+/// overhead as well as append work. Dividing the reported per-iteration
+/// time by `n` does NOT recover a clean per-call latency or mutex cost.
+/// This workload checks returned results only; it does not check replay or failures.
+/// `fan_out_sustained` measures end-to-end cost, not lock acquisition.
 async fn fan_out_raw(segset: Arc<SegmentSet>, n: usize, version_base: u64) {
     let mut handles = Vec::with_capacity(n);
     for w in 0..n {
@@ -131,10 +109,8 @@ async fn fan_out_raw(segset: Arc<SegmentSet>, n: usize, version_base: u64) {
 }
 
 /// Run `n` concurrent tasks, each performing `APPENDS_PER_TASK` SEQUENTIAL
-/// `append_batch` calls in a loop, then join all `n`. All `n` tasks run for
-/// the entire duration, so — unlike `fan_out_raw` — this sustains real
-/// contention on `SegmentSet::inner` across many appends per task, not
-/// just one.
+/// `append_batch` calls in a loop, then join all `n`. Scheduling does not
+/// guarantee simultaneous contention throughout the run.
 ///
 /// Workload scope: this times END-TO-END sustained appends — payload clone,
 /// frame validation, blocking dispatch (`spawn_blocking`) and the file
@@ -148,8 +124,7 @@ async fn fan_out_raw(segset: Arc<SegmentSet>, n: usize, version_base: u64) {
 /// reported `ns/op` for a given `n` by `n * APPENDS_PER_TASK`: the one-time
 /// `tokio::spawn`/join overhead (paid once per task, `n` times total) is
 /// amortized over `n * APPENDS_PER_TASK` appends instead of just `n` of
-/// them, so it no longer dominates the way it does in `fan_out_raw` at low
-/// `n`.
+/// them; its contribution is not independently measured.
 async fn fan_out_sustained(
     segset: Arc<SegmentSet>,
     n: usize,
@@ -185,14 +160,9 @@ fn main() {
 
     // ── Direct SegmentSet append, no WalGroupCommit serialization ────────
     //
-    // Lock CORRECTNESS stress test, NOT a per-append cost measurement — see
-    // `fan_out_raw`'s doc comment. Every concurrent task calls append_batch
-    // directly, once, — no leader election, no pending queue, NO
-    // serialization at all. This is the worst-case *correctness* scenario
-    // for the lock (all N contend simultaneously); it does NOT isolate
-    // per-acquisition cost, because the timed region is dominated by
-    // one-shot spawn/join overhead at low n. Use `sustained_append` below
-    // for the cost question.
+    // Concurrent end-to-end workload, NOT a correctness test or isolated
+    // lock-cost measurement. Each task appends once and checks its result;
+    // neither replay nor failure handling is exercised.
     for &n in CONCURRENCY {
         let dir = tempfile::TempDir::new().expect("tempdir");
         let setup_rt = tokio::runtime::Builder::new_multi_thread()
@@ -238,7 +208,7 @@ fn main() {
     // this closure (i.e. one whole "spawn `n` tasks, each does
     // `APPENDS_PER_TASK` sequential appends, join `n`" run) as ONE op — it
     // has no visibility into the `n * APPENDS_PER_TASK` real appends nested
-    // inside. To read genuine per-append latency, divide the reported
+    // inside. To read mean end-to-end cost, divide the reported
     // `ns/op` for `sustained_append/n_{n}` by `n * APPENDS_PER_TASK`
     // (constants defined above/at the call site). This is a manual
     // division at report-reading time, not a division hidden inside the
@@ -271,23 +241,14 @@ fn main() {
         });
     }
 
-    // ── Append + truncate concurrent stress test ──────────────────────────
+    // ── Concurrent append + truncate workload ──────────────────────────────
     //
-    // The doc comment in `segment_set.rs` claims: "The single-writer model is
-    // the group-commit leader (the sole appender) plus the truncator (rare);
-    // they do not contend on a hot path." This test forces a concurrent
-    // append + truncate scenario to verify that the lock behavior is
-    // acceptable even when both paths overlap.
+    // Concurrent append + truncate workload; it checks returned results but
+    // neither replay nor failure handling, and does not isolate lock cost.
     //
-    // Note: this is NOT the production pattern (truncation is a rare
-    // background drainer operation, not per-commit). This is a stress test
-    // for lock correctness under edge-case concurrency, not a realistic
-    // workload measurement.
-    //
-    // We run this at N=16 only (high enough to stress the lock, low enough
-    // to keep the bench wall-time reasonable). The append tasks submit
-    // entries with version numbers 1..16, then the truncator deletes all
-    // of them (versioned 1..16 are all <= durable_watermark 16).
+    // We run this at N=16 only to limit bench wall-time. The append tasks submit
+    // entries with increasing versions; the truncator requests deletion below
+    // the current watermark. The active segment need not be deleted.
     {
         let n: usize = 16;
         let dir = tempfile::TempDir::new().expect("tempdir");
@@ -324,12 +285,9 @@ fn main() {
                 // Spawn a truncator that tries to delete all entries up to
                 // version N (the durable watermark). This will race with the
                 // appends — some may still be in-flight when truncate runs.
-                // The lock must handle this safely (the real system never hits
-                // this pattern, but we test lock correctness under it).
                 let segset_trunc = Arc::clone(&segset);
                 let truncator = tokio::spawn(async move {
-                    // Small delay to let some appends finish — not required
-                    // for correctness, just creates a mixed overlap pattern.
+                    // Small delay encourages overlap but does not guarantee it.
                     tokio::time::sleep(tokio::time::Duration::from_micros(10)).await;
                     let _ = segset_trunc
                         .truncate_below(base + n as u64)

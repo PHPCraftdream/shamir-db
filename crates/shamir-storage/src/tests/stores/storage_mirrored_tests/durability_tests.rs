@@ -1,6 +1,7 @@
 #![allow(deprecated)]
 
 use crate::error::DbResult;
+use crate::storage_cached::CachedStore;
 use crate::storage_in_memory::InMemoryStore;
 use crate::storage_mirrored::{is_durable_table_config, MirroredStore};
 use crate::tests::types_tests::collect_stream;
@@ -296,7 +297,6 @@ async fn f77_supports_atomic_transact_is_honest_for_every_backend() {
     // guaranteed even when the inner backend is genuinely atomic. The
     // flag is therefore NOT re-derived from inner: CachedStore reports
     // `false` for every inner (F-77 honesty contract, cache layer).
-    use crate::storage_cached::CachedStore;
     let cached_over_mem: Arc<dyn Store> = Arc::new(
         CachedStore::new_sync(Arc::new(InMemoryStore::new()))
             .await

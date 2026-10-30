@@ -2,22 +2,24 @@
 //! replication destination fail closed; status/DESCRIBE stay readable;
 //! healthy and non-replicated repos are unaffected.
 
+use crate::engine::repo::repo_types::BoxRepoFactory;
+use crate::engine::repo::RepoConfig;
+use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
+#[cfg(feature = "fjall")]
+use crate::shamir_db::SystemStoreConfig;
+use crate::{DbError, ShamirDb};
 use shamir_query_builder::batch::Batch;
+#[cfg(feature = "fjall")]
+use shamir_query_builder::ddl::drop_replication_profile;
 use shamir_query_builder::ddl::{
-    alter_subscription, drop_replication_profile, drop_subscription, list_subscriptions,
-    repl_scope, replication_profile, subscription,
+    alter_subscription, drop_subscription, list_subscriptions, repl_scope, replication_profile,
+    subscription,
 };
 use shamir_query_builder::doc;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::batch::{BatchError, BatchResponse};
-
-use crate::engine::repo::repo_types::BoxRepoFactory;
-use crate::engine::repo::RepoConfig;
-use crate::shamir_db::execute::SKIP_READ_QUARANTINE_FOR_TEST;
-use crate::shamir_db::SystemStoreConfig;
-use crate::{DbError, ShamirDb};
 
 /// In-memory ShamirDb with db "testdb", repos "main" + "side" (each with a
 /// "users" table).
@@ -251,10 +253,8 @@ async fn t5_healthy_and_non_replicated_repos_unaffected() {
     assert!(read_users(&shamir, "main").await.is_err());
 }
 
-/// The quarantine survives a full reopen (cache rebuilt from the persisted
-/// rows). Repos are registered through the PERSISTING facade
-/// (`ShamirDb::add_repo`) so they reload from the catalogue. DROP of a
-/// quarantined subscription is refused before AND after the restart.
+/// Quarantine survives reopening and subscription drop is refused.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn t6_quarantine_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -789,6 +789,7 @@ async fn t13_replacement_seed_rebinds_quarantined_row_then_resume() {
 /// Evidence row 3 (REOPEN leg): DROP the profile and REOPEN — the bound
 /// destination STILL refuses: the durable row binding (not the profile) is
 /// the quarantine authority.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
     let dir = tempfile::tempdir().unwrap();
@@ -858,7 +859,7 @@ async fn t14_bound_destination_stays_refused_after_profile_drop_and_reopen() {
 /// `matches_scope` admission rule, `catalogue.rs` — exactly ONE stream) and
 /// the two rows OVERLAP on `testdb/main`; lifting one quarantine must NOT
 /// unblock the destination the other still covers.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "fjall"))]
 #[tokio::test]
 async fn t15_replacement_rebind_survives_reopen_and_resume_requires_full_recovery() {
     let dir = tempfile::tempdir().unwrap();

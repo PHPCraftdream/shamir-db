@@ -6,12 +6,14 @@
 //! `index/` module is rewritten in terms of `index2::IndexBackend`.
 //!
 //! Architectural invariants (must hold across all impls):
-//! - **Lock-free**: `scc::HashMap` (CAS) for registries,
-//!   `arc_swap::ArcSwap` for RCU-style snapshot reads, `AtomicU*`
-//!   counters. NO `std::sync::Mutex` / `RwLock` / `parking_lot`.
+//! - **Read-mostly concurrency**: `scc::HashMap` for registries,
+//!   `arc_swap::ArcSwap` for RCU-style snapshots, and `AtomicU*`
+//!   counters. Concurrent maps may acquire internal locks; short synchronous
+//!   mutexes are permitted for cold coordination and teardown, with their
+//!   contention model documented and no guard held across `.await`.
 //! - **Async**: `IndexBackend` is `#[async_trait]`. Stateful backends
 //!   (FTS / Vector) submit writes via `tokio::sync::mpsc` to a
-//!   single applier task — readers never block.
+//!   single applier task — snapshot reads do not take the writer's lock.
 //! - **Zero-copy**: `PostingKeyRef<'a>` decodes from raw bytes
 //!   without allocations.
 //! - **O(1)** where possible: hashmap dispatch, atomic counters.

@@ -58,11 +58,18 @@ SCRAM (полный Argon2id handshake) выполняется как обычн
 `0600` (owner read/write only) СРАЗУ после `bind`, до принятия первого
 соединения — сервер отказывает в старте, если `chmod` не удался.
 
+Принятый условный риск: имя сокета публикуется при `bind` до `chmod`;
+если другой локальный пользователь способен пройти к родительскому каталогу,
+он может подключиться в этом интервале. Последующий `chmod` не закрывает уже
+установленные соединения. Проверка владельца и отсутствия чужой записи в
+родительском каталоге не гарантирует запрет traversal. Рекомендуется каталог
+сокета, принадлежащий effective user сервера, с правами `0700`.
+
 ### 5.2. Windows Named Pipe
 Каждый pipe instance создаётся с явным DACL, ограничивающим доступ SID-у
 текущего процесса-сервера (`D:P(A;;GA;;;<sid>)` — protected DACL,
 Generic-All единственному principal). `PIPE_REJECT_REMOTE_CLIENTS`
-установлен (tokio's `ServerOptions` default) — pipe недостижим по SMB с
+явно установлен в `true` через tokio `ServerOptions` — pipe недостижим по SMB с
 удалённого хоста независимо от DACL.
 
 ### 5.3. Что это НЕ означает
@@ -189,3 +196,10 @@ no new provisioning code was needed for this transport.
   instance-rotation у Named Pipe listener — у Unix socket не требуется,
   `accept()` тривиально повторно входит)
 - Audit event `auth_success` содержит `transport: "unix"`
+
+The socket is published before its permissions are changed to `0600`. If the
+initial mode permits access, another user able to traverse the parent can
+connect in that interval; chmod does not revoke an established connection.
+This conditional exposure is accepted. Use a socket parent owned by the
+effective user with mode `0700` to prevent other users traversing it. The
+existing parent checks require ownership and no group/world write, not `0700`.

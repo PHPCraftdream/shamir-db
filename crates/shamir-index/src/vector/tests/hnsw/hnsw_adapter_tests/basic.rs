@@ -27,6 +27,55 @@ pub(in crate::vector::tests) fn random_vec(dim: usize, seed: u64) -> Vec<f32> {
     v
 }
 
+#[test]
+fn small_f32_search_scores_borrowed_vectors_before_other_maps() {
+    let source = include_str!("../../../hnsw_adapter/vector_impl.rs");
+    let branch = source
+        .split("} else if self.len() <= BRUTE_FORCE_MAX {")
+        .nth(1)
+        .expect("small f32 branch")
+        .split("} else {")
+        .next()
+        .expect("branch end");
+    let scan = branch
+        .split("self.state.vectors.iter_sync(|i, v| {")
+        .nth(1)
+        .expect("vectors scan")
+        .split("});")
+        .next()
+        .expect("scan end");
+    assert!(scan.contains("dist.eval(query, v)"));
+    assert!(!scan.contains("clone("));
+    assert!(!scan.contains("self.state.deleted"));
+    assert!(!scan.contains("self.state.rid_map"));
+}
+
+#[tokio::test]
+async fn small_f32_search_scores_live_replacements_for_each_metric() {
+    for metric in [VectorMetric::L2, VectorMetric::Dot, VectorMetric::Cosine] {
+        let adapter = HnswAdapter::new(2, metric, HnswConfig::default());
+        adapter.upsert(rid(1), &[1.0, 0.0]).await.unwrap();
+        adapter.upsert(rid(2), &[0.0, 1.0]).await.unwrap();
+        adapter.upsert(rid(1), &[2.0, 0.0]).await.unwrap();
+        adapter.delete(rid(2)).await.unwrap();
+        adapter.upsert(rid(3), &[0.0, 2.0]).await.unwrap();
+        let results = adapter
+            .search(&[2.0, 0.0], 4, SearchOpts::default(), None)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].0, rid(1));
+        assert_eq!(results[1].0, rid(3));
+        let expected = match metric {
+            VectorMetric::L2 => (0.0, 8.0_f32.sqrt()),
+            VectorMetric::Dot => (0.0, 1.0),
+            VectorMetric::Cosine => (0.0, 1.0),
+        };
+        assert!((results[0].1 - expected.0).abs() < 1e-5);
+        assert!((results[1].1 - expected.1).abs() < 1e-5);
+    }
+}
+
 #[tokio::test]
 async fn basic_cosine_search() {
     let adapter = HnswAdapter::new(

@@ -11,6 +11,14 @@ crate-type = ["cdylib"]
 test = false
 doctest = false
 
+[[test]]
+name = "error_wire"
+path = "src/tests/error_wire.rs"
+
+[[test]]
+name = "secrets_lifecycle"
+path = "src/tests/secrets_lifecycle.rs"
+
 [dependencies]
 shamir-client       = { path = "../shamir-client" }
 shamir-query-types  = { path = "../shamir-query-types" }

@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
@@ -60,8 +59,8 @@ use super::accept_loops::{
     accept_loop_ws_native, WsAcceptParams,
 };
 use super::helpers::{
-    browser_origin_policy_from, default_node_id, kdf_from_config, log_bootstrap_outcome,
-    AcceptPath, REPL_RECONCILE_INTERVAL,
+    boot_now_ns, browser_origin_policy_from, default_node_id, kdf_from_config,
+    log_bootstrap_outcome, AcceptPath, REPL_RECONCILE_INTERVAL,
 };
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
@@ -165,7 +164,7 @@ impl ServerLauncher {
         // `consume_bootstrap_token()` clears the bookkeeping row (order
         // matters); the token path is likewise read before consume.
         {
-            let now_ns = UnixNanos::now().as_u64();
+            let now_ns = boot_now_ns()?;
             if meta.bootstrap_token_expired(now_ns) {
                 let expired_username = meta.bootstrap_username();
 
@@ -230,6 +229,7 @@ impl ServerLauncher {
                 token_path,
             } => {
                 let name = username.as_deref().unwrap_or(DEFAULT_BOOTSTRAP_NAME);
+                let now_ns = boot_now_ns()?;
                 let outcome = ensure_superuser(
                     &user_dir,
                     &config.data_dir,
@@ -242,7 +242,6 @@ impl ServerLauncher {
                     token_path: Some(path),
                 } = &outcome
                 {
-                    let now_ns = UnixNanos::now().as_u64();
                     if let Err(e) = meta.set_bootstrap_token(
                         name,
                         shamir_connect::common::crypto::sha256(tok.as_bytes()),
@@ -271,7 +270,7 @@ impl ServerLauncher {
         let lockout_sink: Arc<dyn LockoutSnapshotSink> =
             Arc::new(MetaLockoutSink::new(meta.clone()));
         let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink(lockout_sink));
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = boot_now_ns()?;
         // Rate-limit buckets are persisted by the SAME periodic task as
         // lockout (one 60s tick writes both). On boot the depleted-bucket
         // state is rehydrated conservatively: token levels survive but each
@@ -484,6 +483,7 @@ impl ServerLauncher {
             repl_cfg.replicator_user.clone(),
             repl_cfg.replicator_password.clone(),
             repl_cfg.server_name.clone(),
+            repl_cfg.upstream_pins.clone(),
         )
         .unwrap_or_else(|| {
             // No creds → a stub factory that yields a never-connecting source.
@@ -538,6 +538,7 @@ impl ServerLauncher {
             meta.identity_state()
                 .map_err(|e| BootError::ServerMeta(e.to_string()))?,
         );
+        tracing::info!(pin = %hex::encode(shamir_connect::common::crypto::sha256(&identity.current_pub())), "server Ed25519 identity SHA-256 pin");
         let identity_seed = meta
             .current_identity_seed()
             .map_err(|e| BootError::ServerMeta(e.to_string()))?;
@@ -813,8 +814,10 @@ impl ServerLauncher {
                     let limiter = conn_limiter.clone();
                     let per_ip = per_ip_limiter.clone();
                     let path = l.path.clone().unwrap_or_else(|| NATIVE_WS_PATH.to_string());
-                    let policy =
-                        BrowserOriginPolicy::allow(l.browser_origin_allowlist.iter().cloned());
+                    let policy = Arc::new(
+                        BrowserOriginPolicy::try_allow(l.browser_origin_allowlist.iter().cloned())
+                            .map_err(BootError::Bind)?,
+                    );
                     listener_tasks.push(tokio::spawn(accept_loop_ws_native(
                         listener,
                         acceptor,
@@ -870,7 +873,10 @@ impl ServerLauncher {
                         token,
                         limiter,
                         per_ip,
-                        WsAcceptParams { path, policy },
+                        WsAcceptParams {
+                            path,
+                            policy: Arc::new(policy),
+                        },
                     )));
                     local_addr
                 }

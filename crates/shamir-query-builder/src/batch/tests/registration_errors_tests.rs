@@ -11,6 +11,19 @@ use crate::query::Query;
 use crate::write::{self, doc};
 
 #[test]
+fn owned_request_preserves_deferred_error_precedence() {
+    let mut batch = Batch::new();
+    batch.query(
+        "dup",
+        Query::from("t").where_eq("id", crate::val::qref_all("missing")),
+    );
+    batch.query("dup", Query::from("other"));
+    let borrowed = batch.try_build().unwrap_err();
+    assert!(matches!(&borrowed, BuildError::DuplicateAlias { alias } if alias == "dup"));
+    assert_eq!(batch.try_into_request().unwrap_err(), borrowed);
+}
+
+#[test]
 fn rv_query_builder_63b52b5c_duplicate_alias_keeps_first_op_and_errors() {
     let mut b = Batch::new();
     b.query("dup", Query::from("first_table"));

@@ -463,6 +463,12 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         .await
         .unwrap();
 
+    // Model a legacy manifest update; its companion must not remain stale.
+    info_store
+        .remove(bytes::Bytes::from(format!("{}.integrity", keyspace)).into())
+        .await
+        .unwrap();
+
     // The orphan delta chunks 0/1 are still present (no prune ran).
     let orphan0 = info_store
         .get(bytes::Bytes::from(format!("{}.delta.{:010}", keyspace, 0u64)).into())

@@ -11,9 +11,27 @@ use thiserror::Error;
 /// Result alias for connection protocol operations.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Environmental failures that cannot safely be substituted with defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum EnvironmentError {
+    /// The operating system could not supply entropy.
+    #[error("OS entropy unavailable")]
+    Entropy,
+    /// System time predates the Unix epoch.
+    #[error("system clock before unix epoch")]
+    ClockBeforeEpoch,
+    /// Unix nanoseconds cannot fit in u64.
+    #[error("system clock exceeds unix nanosecond range")]
+    ClockOverflow,
+}
+
 /// Connection protocol errors.
 #[derive(Debug, Error)]
 pub enum Error {
+    /// Environmental entropy or clock failure; never exposed to peers.
+    #[error(transparent)]
+    Environment(#[from] EnvironmentError),
+
     /// Generic authentication failure — what the wire sees.
     /// All real failure causes (unknown user, bad password, bad proof, lockout)
     /// collapse to this in client-visible responses (spec §14.1).
@@ -137,6 +155,7 @@ impl Error {
             // Internal failure causes: explicitly collapsed to the generic
             // wire error (spec §14.4). Exhaustive — a new variant that is not
             // classified here fails to compile.
+            Error::Environment(_) => Error::AuthFailed,
             Error::ServerAuthFailed => Error::AuthFailed,
             Error::ServerSignatureInvalid => Error::AuthFailed,
             Error::ServerIdentityChanged => Error::AuthFailed,

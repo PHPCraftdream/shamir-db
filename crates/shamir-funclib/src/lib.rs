@@ -19,6 +19,8 @@
 //! functions, string keys are MORE natural (no interner needed). Callers
 //! at the engine/wasm-host boundary convert to/from `InnerValue` as needed.
 
+use std::sync::OnceLock;
+
 pub mod registry;
 pub mod scalar_resolver;
 
@@ -74,7 +76,6 @@ pub fn register_builtins() -> registry::ScalarRegistry {
 /// on first use. This is the canonical home of the built-in registry;
 /// `shamir_wasm_host::builtin_scalars()` delegates here.
 pub fn static_builtin() -> &'static registry::ScalarRegistry {
-    use std::sync::OnceLock;
     static REG: OnceLock<registry::ScalarRegistry> = OnceLock::new();
     REG.get_or_init(register_builtins)
 }

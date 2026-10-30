@@ -2,6 +2,7 @@
 #![allow(clippy::disallowed_types)]
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_types::types::record_id::RecordId;
 use tempfile::TempDir;
@@ -222,8 +223,6 @@ async fn mem_sync_returns_ok() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_fsync_fires_for_buffered() {
-    use std::time::Duration;
-
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(tracked_group(Arc::clone(&sink)));
@@ -253,8 +252,6 @@ async fn background_fsync_fires_for_buffered() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_fsync_skips_when_idle() {
-    use std::time::Duration;
-
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(tracked_group(Arc::clone(&sink)));
@@ -270,8 +267,6 @@ async fn background_fsync_skips_when_idle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_fsync_exits_on_drop() {
-    use std::time::Duration;
-
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(tracked_group(Arc::clone(&sink)));
@@ -439,8 +434,6 @@ async fn append_many_empty_is_noop() {
 /// waiting for durability).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn background_fsync_clears_dirty_on_success() {
-    use std::time::Duration;
-
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(open_sink(&dir).await);
     let gc = Arc::new(tracked_group(Arc::clone(&sink)));

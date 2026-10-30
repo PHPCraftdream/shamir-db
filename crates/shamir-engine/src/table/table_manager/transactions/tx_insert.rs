@@ -326,7 +326,7 @@ impl TableManager {
                     let mut ops = backend
                         .plan_insert_tx(*rid, v, tx_id)
                         .await
-                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                        .map_err(shamir_storage::error::DbError::from)?;
                     // F-1 (#1027): this inlined loop (kept inline to amortize
                     // the `all_backends()` snapshot across the whole batch)
                     // must stamp the REAL live instance epoch exactly like
@@ -544,7 +544,7 @@ impl TableManager {
                     let mut ops = backend
                         .plan_insert_tx(*rid, view, tx_id)
                         .await
-                        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                        .map_err(shamir_storage::error::DbError::from)?;
                     // F-1 (#1027): see the identical comment in
                     // `insert_tx_many` — this inlined loop must stamp the
                     // REAL live instance epoch or the op is silently

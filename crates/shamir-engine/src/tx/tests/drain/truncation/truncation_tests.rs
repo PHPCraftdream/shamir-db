@@ -87,6 +87,7 @@ async fn truncation_collapses_wal_after_drain() {
     const N: usize = 12;
 
     let repo = make_mem_repo();
+    repo.disable_background_drainer_for_test();
     repo.add_table_for_test(TableConfig::new("t"));
     let tbl = repo.get_table("t").await.unwrap();
     let gate = repo.tx_gate().await.unwrap();

@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use shamir_engine::function::{
     check_url_allowed_resolved, HttpRequest, HttpResponse, NetGateway, NetGatewayError, ResolvedPin,
 };
+use std::num::NonZeroUsize;
 use std::path::Path;
 use tokio::io::AsyncReadExt;
 
@@ -41,17 +42,48 @@ pub(crate) fn validate_curl_request(req: &HttpRequest) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) use super::curl_supervisor::LifecycleEvent;
+
 /// Network gateway that delegates to the system `curl` binary.
 ///
 /// Holds an allowlist of host patterns. Empty allowlist = deny everything.
 /// Runs the SSRF guard before building any curl config files.
 pub struct CurlNetGateway {
     allowlist: Vec<String>,
+    response_limit: NonZeroUsize,
+    #[cfg(test)]
+    observer: Option<tokio::sync::mpsc::UnboundedSender<LifecycleEvent>>,
 }
 
 impl CurlNetGateway {
+    /// Creates a gateway with a 16 MiB maximum response body.
     pub fn new(allowlist: Vec<String>) -> Self {
-        Self { allowlist }
+        Self::with_response_limit(allowlist, NonZeroUsize::new(16 * 1024 * 1024).unwrap())
+    }
+
+    /// Creates a gateway with an explicit positive response-body limit in bytes.
+    pub fn with_response_limit(allowlist: Vec<String>, response_limit: NonZeroUsize) -> Self {
+        Self {
+            allowlist,
+            response_limit,
+            #[cfg(test)]
+            observer: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_observer(
+        mut self,
+        observer: tokio::sync::mpsc::UnboundedSender<LifecycleEvent>,
+    ) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn response_limit(&self) -> usize {
+        self.response_limit.get()
     }
 }
 
@@ -87,7 +119,6 @@ impl NetGateway for CurlNetGateway {
 
         let config_path = tmp_dir.path().join("curl.cfg");
         let body_in_path = tmp_dir.path().join("body_in");
-        let body_out_path = tmp_dir.path().join("body_out");
         let headers_out_path = tmp_dir.path().join("headers_out");
 
         // 3. Write request body to temp file (if non-empty).
@@ -133,12 +164,9 @@ impl NetGateway for CurlNetGateway {
 
         cfg.push_str("silent\n");
         cfg.push_str("show-error\n");
+        // Flush decoded body bytes promptly so the supervisor can enforce its limit during receipt.
+        cfg.push_str("no-buffer\n");
         cfg.push_str("max-time = \"30\"\n");
-        cfg.push_str(&format!(
-            "output = \"{}\"\n",
-            path_to_forward_slash(&body_out_path)
-        ));
-        cfg.push_str("write-out = \"%{http_code}\"\n");
         cfg.push_str(&format!(
             "dump-header = \"{}\"\n",
             path_to_forward_slash(&headers_out_path)
@@ -151,85 +179,15 @@ impl NetGateway for CurlNetGateway {
                 source,
             })?;
 
-        // 5. Invoke curl -K <config>.
-        let output = match tokio::process::Command::new("curl")
-            .arg("-K")
-            .arg(&config_path)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                return if e.kind() == std::io::ErrorKind::NotFound {
-                    Err(NetGatewayError::Io {
-                        operation: "egress unavailable: curl not found",
-                        source: e,
-                    })
-                } else {
-                    Err(NetGatewayError::Io {
-                        operation: "curl spawn error",
-                        source: e,
-                    })
-                }
-            }
-        }
-
-        // Cleanup happens when tmp_dir drops at the end of this scope.
-        ;
-
-        if !output.status.success() && output.stdout.is_empty() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NetGatewayError::Transport(format!(
-                "egress: curl failed: {stderr}"
-            )));
-        }
-
-        // 6. Parse status code from stdout (write-out).
-        let status_str = String::from_utf8_lossy(&output.stdout);
-        let status: u16 = status_str.trim().parse().map_err(|_| {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            NetGatewayError::Transport(format!(
-                "egress: could not parse HTTP status from curl output: '{status_str}' (stderr: {stderr})"
-            ))
-        })?;
-
-        // Status 000 means curl couldn't connect / complete the request.
-        if status == 0 {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(NetGatewayError::Transport(format!(
-                "egress: curl request failed (status 000): {stderr}"
-            )));
-        }
-
-        // 7. Read response body from output file.
-        let body = if body_out_path.exists() {
-            let mut buf = Vec::new();
-            let mut f = tokio::fs::File::open(&body_out_path)
-                .await
-                .map_err(|source| NetGatewayError::Io {
-                    operation: "could not open response body file",
-                    source,
-                })?;
-            f.read_to_end(&mut buf)
-                .await
-                .map_err(|source| NetGatewayError::Io {
-                    operation: "could not read response body",
-                    source,
-                })?;
-            buf
-        } else {
-            Vec::new()
-        };
-
-        // 8. Parse response headers from dump-header file.
-        let headers = parse_response_headers(&headers_out_path).await;
-
-        // Temp files cleaned up when tmp_dir drops here.
-        Ok(HttpResponse {
-            status,
-            headers,
-            body,
-        })
+        super::curl_supervisor::run(
+            tmp_dir,
+            config_path,
+            headers_out_path,
+            self.response_limit.get(),
+            #[cfg(test)]
+            self.observer.clone(),
+        )
+        .await
     }
 }
 
@@ -239,25 +197,27 @@ fn path_to_forward_slash(path: &Path) -> String {
     path.display().to_string().replace('\\', "/")
 }
 
-/// Build curl config `resolve = "host:port:ip"` lines that pin the connection
-/// to the exact IP(s) the SSRF guard validated (finding 2c DNS-rebind fix).
-///
-/// One `resolve` entry per validated IP — curl accepts the flag repeatedly for
-/// the same `host:port` and tries the addresses in order. When `pinned_ips` is
-/// empty (the exact-allowlist-match path, where no DNS resolution happened and
-/// there is nothing to rebind) this returns an empty string, so no pin is
-/// emitted and curl resolves the exact operator-allowed host itself.
+/// Build one curl resolve entry containing all guard-validated addresses.
+/// An empty pin set emits no entry for the exact-allowlist path.
 pub(crate) fn build_resolve_lines(pin: &ResolvedPin) -> String {
-    let mut out = String::new();
-    for ip in &pin.pinned_ips {
-        out.push_str(&format!(
-            "resolve = \"{}:{}:{}\"\n",
-            escape_curl_value(&pin.host),
-            pin.port,
-            ip
-        ));
+    if pin.pinned_ips.is_empty() {
+        return String::new();
     }
-    out
+    let addresses = pin
+        .pinned_ips
+        .iter()
+        .map(|ip| match ip {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "resolve = \"{}:{}:{}\"\n",
+        escape_curl_value(&pin.host),
+        pin.port,
+        addresses
+    )
 }
 
 /// Escape a value for curl config file double-quoted strings.
@@ -278,22 +238,52 @@ pub(crate) fn escape_curl_value(s: &str) -> String {
 ///
 /// The file starts with the status line (HTTP/1.1 200 OK\r\n),
 /// then header lines. We skip the status line and parse Key: Value pairs.
-async fn parse_response_headers(path: &Path) -> Vec<(String, String)> {
+pub(in crate::shamir_db) async fn parse_response_headers(
+    path: &Path,
+) -> Result<(u16, Vec<(String, String)>), NetGatewayError> {
+    // The supervisor bounds stdout while receiving; no response-body file is read.
     let mut headers = Vec::new();
-    if let Ok(bytes) = tokio::fs::read(path).await {
-        let text = String::from_utf8_lossy(&bytes);
-        for line in text.lines() {
-            let line = line.trim_end_matches('\r');
-            // Skip status line and empty lines
-            if line.starts_with("HTTP/") || line.is_empty() {
-                continue;
-            }
-            if let Some(colon) = line.find(':') {
-                let name = line[..colon].trim().to_string();
-                let value = line[colon + 1..].trim().to_string();
-                headers.push((name, value));
-            }
+    const HEADER_LIMIT: usize = 1024 * 1024;
+    let read_error = |error| {
+        log::warn!(
+            "egress: failed to read response headers at {}: {error}",
+            path.display()
+        );
+        NetGatewayError::Transport(format!("egress: failed to read response headers: {error}"))
+    };
+    let file = tokio::fs::File::open(path).await.map_err(read_error)?;
+    let mut bytes = Vec::new();
+    file.take((HEADER_LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(read_error)?;
+    if bytes.len() > HEADER_LIMIT {
+        log::warn!(
+            "egress: response headers at {} exceed {HEADER_LIMIT} bytes",
+            path.display()
+        );
+        return Err(NetGatewayError::Transport(format!(
+            "egress: response headers exceed {HEADER_LIMIT} bytes"
+        )));
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let mut status = None;
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.starts_with("HTTP/") {
+            status = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok());
+        } else if let Some(colon) = line.find(':') {
+            headers.push((
+                line[..colon].trim().to_string(),
+                line[colon + 1..].trim().to_string(),
+            ));
         }
     }
-    headers
+    let status = status
+        .filter(|s| *s != 0)
+        .ok_or_else(|| NetGatewayError::Transport("egress: missing HTTP status".into()))?;
+    Ok((status, headers))
 }

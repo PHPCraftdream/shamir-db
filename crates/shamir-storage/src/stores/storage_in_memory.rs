@@ -165,9 +165,9 @@ impl AtomicBatch for InMemoryAtomicBatch {
 /// the previous DashMap.
 ///
 /// `transact` inherits the default sequential semantics — partial state
-/// may be observable to concurrent readers under heavy contention. Disk
-/// backends (redb, sled, fjall, persy, nebari, canopy) provide
-/// transactional atomicity for workloads that require it; the in-memory
+/// may be observable to concurrent readers under heavy contention. Fjall
+/// supports atomic batch writes, subject to its documented read visibility
+/// limitations; the in-memory
 /// backend is a fully-supported deployment target for embedded /
 /// ephemeral / cache-tier use cases.
 pub struct InMemoryStore {
@@ -214,7 +214,7 @@ impl Store for InMemoryStore {
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
         self.data
             .peek_with(&key, |_, v| v.clone())
-            .ok_or_else(|| DbError::NotFound(format!("record not found: {:?}", key)))
+            .ok_or_else(|| DbError::missing_key(&key))
     }
 
     async fn remove(&self, key: RecordKey) -> DbResult<bool> {
@@ -366,7 +366,3 @@ impl Store for InMemoryStore {
         })
     }
 }
-
-// ============================================================================
-// Tests
-// ============================================================================

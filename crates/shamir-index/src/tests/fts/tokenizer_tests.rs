@@ -47,6 +47,14 @@ fn unicode_mixed() {
     assert_eq!(tokens, vec!["foo123", "bar", "baz"]);
 }
 
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn rv_index_605eec5d_golden_token_hash() {
+    assert_eq!(token_hash("hello"), 0x1513_6c07_c8bc_e6e4);
+    assert_eq!(token_hash("привет"), 0x0113_43a5_da6e_3f18);
+    assert_eq!(token_hash(""), 0xf456_d268_76d7_2d91);
+}
+
 #[test]
 fn token_hash_deterministic() {
     assert_eq!(token_hash("hello"), token_hash("hello"));

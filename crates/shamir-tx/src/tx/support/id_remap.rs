@@ -69,11 +69,8 @@ pub fn remap_value<S: BuildHasher>(value: &mut InnerValue, remap: &HashMap<u64, 
     }
 }
 
-/// Decode `Bytes` as `InnerValue`, apply [`remap_value`], re-encode.
-///
-/// Returns `Err` only on serde failure. If `remap` is empty this is a
-/// no-op decode+encode round-trip — caller can skip the call when the
-/// remap is empty.
+/// Decode and remap keys, retaining the original bytes when no id changes.
+/// Decode errors are returned even for an empty remap.
 // hasher-generic boundary: caller supplies the hasher (THasher at every call site)
 #[allow(clippy::disallowed_types)]
 pub fn remap_inner_value_bytes<S: BuildHasher>(
@@ -82,8 +79,30 @@ pub fn remap_inner_value_bytes<S: BuildHasher>(
 ) -> Result<Bytes, rmp_serde::encode::Error> {
     let mut value = InnerValue::from_bytes(&bytes)
         .map_err(|e| rmp_serde::encode::Error::Syntax(format!("decode failed: {e}")))?;
-    remap_value(&mut value, remap);
-    value.to_bytes()
+    if has_remapped_key(&value, &|id| remap.get(&id).is_some_and(|new| *new != id)) {
+        remap_value(&mut value, remap);
+        value.to_bytes()
+    } else {
+        Ok(bytes)
+    }
+}
+
+fn has_remapped_key(value: &InnerValue, changes: &impl Fn(u64) -> bool) -> bool {
+    match value {
+        InnerValue::Map(map) => map
+            .iter()
+            .any(|(key, child)| changes(key.id()) || has_remapped_key(child, changes)),
+        InnerValue::List(items) => items.iter().any(|item| has_remapped_key(item, changes)),
+        InnerValue::Set(items) => items.iter().any(|item| has_remapped_key(item, changes)),
+        InnerValue::Null
+        | InnerValue::Bool(_)
+        | InnerValue::Int(_)
+        | InnerValue::F64(_)
+        | InnerValue::Dec(_)
+        | InnerValue::Big(_)
+        | InnerValue::Str(_)
+        | InnerValue::Bin(_) => false,
+    }
 }
 
 /// Recursively walk `value` and collect every `InternerKey` id used as a

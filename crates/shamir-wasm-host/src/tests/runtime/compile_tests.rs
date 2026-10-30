@@ -1,10 +1,42 @@
-use crate::compile::test_find_forbidden_macro;
+#[cfg(unix)]
+use crate::compile::cargo_build_args;
+use crate::compile::{maybe_wasm_opt_with_tool, test_find_forbidden_macro};
+use crate::wasm::run_compile_blocking;
 use crate::{
     compile_rust_source, compile_rust_source_with_timeout, FnBatch, FnCtx, FunctionError, Params,
     ShamirFunction, WasmEngine, WasmFunction, WasmLimits, WASM_COMPILE_TIMEOUT,
 };
 use shamir_types::types::value::QueryValue;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(unix)]
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::Command;
 use std::sync::Arc;
+
+#[cfg(unix)]
+#[test]
+fn cargo_arguments_preserve_non_utf8_paths() {
+    let manifest = PathBuf::from(std::ffi::OsString::from_vec(b"manifest-\xff".to_vec()));
+    let target = PathBuf::from(std::ffi::OsString::from_vec(b"target-\xfe".to_vec()));
+    let mut command = Command::new("cargo");
+    cargo_build_args(&mut command, &manifest, &target);
+    let args: Vec<_> = command.get_args().collect();
+    assert_eq!(args[5], manifest.as_os_str());
+    assert_eq!(args[7], target.as_os_str());
+}
+
+#[test]
+fn missing_optimizer_returns_original_allocation() {
+    let dir = tempfile::tempdir().unwrap();
+    let bytes = vec![1, 2, 3, 4];
+    let pointer = bytes.as_ptr();
+    let absent = dir.path().join("missing-wasm-opt");
+    let result = maybe_wasm_opt_with_tool(bytes, dir.path(), absent.as_os_str()).unwrap();
+    assert_eq!(result, [1, 2, 3, 4]);
+    assert_eq!(result.as_ptr(), pointer);
+}
 
 pub(super) const DOUBLE_SOURCE: &str = r#"
 use shamir::prelude::*;
@@ -109,7 +141,6 @@ fn forbidden_include_bytes_macro_is_rejected() {
 #[test]
 fn legit_source_with_env_word_is_accepted_by_filter() {
     // Local lexeme-level assertion — does not spawn cargo.
-    use crate::compile::test_find_forbidden_macro;
     let src = r#"
 // This comment mentions env! and option_env! on purpose — comments must not trip the filter.
 let environment = "env! include_str! option_env!";
@@ -126,7 +157,6 @@ let _ = environment;
 /// still be caught (the filter skips comment text but scans real code).
 #[test]
 fn forbidden_macro_after_comment_is_caught() {
-    use crate::compile::test_find_forbidden_macro;
     let src = r#"
 // a comment that says env! — fine
 let _x = env!("LEAKED");
@@ -138,7 +168,6 @@ let _x = env!("LEAKED");
 /// because the preceding char is an identifier char.
 #[test]
 fn prefixed_macro_lookalike_is_not_flagged() {
-    use crate::compile::test_find_forbidden_macro;
     assert_eq!(test_find_forbidden_macro("myenv!(\"X\")"), None);
     assert_eq!(test_find_forbidden_macro("xinclude!(\"y\")"), None);
 }
@@ -151,7 +180,6 @@ fn prefixed_macro_lookalike_is_not_flagged() {
 /// input; it must return `None`, not crash the compiling thread.
 #[test]
 fn forbidden_name_as_bare_source_suffix_does_not_panic() {
-    use crate::compile::test_find_forbidden_macro;
     assert_eq!(test_find_forbidden_macro("pub fn get_env"), None);
     assert_eq!(test_find_forbidden_macro("env"), None);
     assert_eq!(test_find_forbidden_macro("include"), None);
@@ -186,7 +214,6 @@ fn rv_wasm_host_5e65e165_forbidden_macro_detected_across_comment_and_whitespace_
 /// Block-comment and raw-string bodies are skipped.
 #[test]
 fn forbidden_macro_text_in_strings_and_comments_is_ignored() {
-    use crate::compile::test_find_forbidden_macro;
     // NOTE: outer raw string uses `r##" … "##` so the inner `r#" … "#` in
     // `s2` does not prematurely terminate it (raw strings can't nest with
     // the same hash count).
@@ -550,8 +577,6 @@ async fn from_binary_blocking_matches_sync_behavior() {
 /// shared `run_compile_blocking` helper used by `from_binary_blocking`.
 #[tokio::test]
 async fn blocking_compile_join_failure_maps_to_compute_error() {
-    use crate::wasm::run_compile_blocking;
-
     let result: Result<(), FunctionError> =
         run_compile_blocking(|| -> Result<(), FunctionError> {
             panic!("deliberate blocking-task panic");

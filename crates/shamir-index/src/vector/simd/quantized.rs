@@ -445,16 +445,20 @@ unsafe fn weighted_bilinear_neon(
 
     let msp = min_scale.as_ptr();
     let ssp = scales_sq.as_ptr();
-    let xp = qx.as_ptr();
-    let yp = qy.as_ptr();
-
     let mut i = 0usize;
     while i < chunks * 4 {
-        // Load 4 u8 lanes, widen u8 -> u16 -> u32 -> f32.
-        let xv_u8 = vld1_lane_u32(xp.add(i) as *const u32, vdup_n_u32(0), 0);
-        let yv_u8 = vld1_lane_u32(yp.add(i) as *const u32, vdup_n_u32(0), 0);
-        let xv_u8x8 = vreinterpret_u8_u32(xv_u8);
-        let yv_u8x8 = vreinterpret_u8_u32(yv_u8);
+        // Four indexed byte reads are in bounds because i + 4 <= n. Inserting
+        // byte lanes explicitly preserves their order without a u32 load.
+        let mut xv_u8x8 = vdup_n_u8(0);
+        xv_u8x8 = vset_lane_u8(qx[i], xv_u8x8, 0);
+        xv_u8x8 = vset_lane_u8(qx[i + 1], xv_u8x8, 1);
+        xv_u8x8 = vset_lane_u8(qx[i + 2], xv_u8x8, 2);
+        xv_u8x8 = vset_lane_u8(qx[i + 3], xv_u8x8, 3);
+        let mut yv_u8x8 = vdup_n_u8(0);
+        yv_u8x8 = vset_lane_u8(qy[i], yv_u8x8, 0);
+        yv_u8x8 = vset_lane_u8(qy[i + 1], yv_u8x8, 1);
+        yv_u8x8 = vset_lane_u8(qy[i + 2], yv_u8x8, 2);
+        yv_u8x8 = vset_lane_u8(qy[i + 3], yv_u8x8, 3);
         let xv_u16 = vmovl_u8(xv_u8x8);
         let yv_u16 = vmovl_u8(yv_u8x8);
         let xv_u32 = vmovl_u16(vget_low_u16(xv_u16));
@@ -599,7 +603,7 @@ unsafe fn weighted_sq_diff_avx2(scales_sq: &[f32], qx: &[u8], qy: &[u8]) -> f32 
 }
 
 /// NEON path: identical u8→f32 widening as `weighted_bilinear_neon`
-/// (`vld1_lane_u32`/`vmovl_u8`/`vmovl_u16`/`vcvtq_f32_u32`), then
+/// (byte lane insertion/`vmovl_u8`/`vmovl_u16`/`vcvtq_f32_u32`), then
 /// `acc = vfmaq(acc, scales_sq, diff*diff)` where `diff = xv − yv`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
@@ -614,16 +618,20 @@ unsafe fn weighted_sq_diff_neon(scales_sq: &[f32], qx: &[u8], qy: &[u8]) -> f32 
     let mut acc = vdupq_n_f32(0.0);
 
     let ssp = scales_sq.as_ptr();
-    let xp = qx.as_ptr();
-    let yp = qy.as_ptr();
-
     let mut i = 0usize;
     while i < chunks * 4 {
-        // Load 4 u8 lanes, widen u8 -> u16 -> u32 -> f32.
-        let xv_u8 = vld1_lane_u32(xp.add(i) as *const u32, vdup_n_u32(0), 0);
-        let yv_u8 = vld1_lane_u32(yp.add(i) as *const u32, vdup_n_u32(0), 0);
-        let xv_u8x8 = vreinterpret_u8_u32(xv_u8);
-        let yv_u8x8 = vreinterpret_u8_u32(yv_u8);
+        // Four indexed byte reads are in bounds because i + 4 <= n. Inserting
+        // byte lanes explicitly preserves their order without a u32 load.
+        let mut xv_u8x8 = vdup_n_u8(0);
+        xv_u8x8 = vset_lane_u8(qx[i], xv_u8x8, 0);
+        xv_u8x8 = vset_lane_u8(qx[i + 1], xv_u8x8, 1);
+        xv_u8x8 = vset_lane_u8(qx[i + 2], xv_u8x8, 2);
+        xv_u8x8 = vset_lane_u8(qx[i + 3], xv_u8x8, 3);
+        let mut yv_u8x8 = vdup_n_u8(0);
+        yv_u8x8 = vset_lane_u8(qy[i], yv_u8x8, 0);
+        yv_u8x8 = vset_lane_u8(qy[i + 1], yv_u8x8, 1);
+        yv_u8x8 = vset_lane_u8(qy[i + 2], yv_u8x8, 2);
+        yv_u8x8 = vset_lane_u8(qy[i + 3], yv_u8x8, 3);
         let xv_u16 = vmovl_u8(xv_u8x8);
         let yv_u16 = vmovl_u8(yv_u8x8);
         let xv_u32 = vmovl_u16(vget_low_u16(xv_u16));
@@ -764,13 +772,15 @@ unsafe fn weighted_linear_neon(weights: &[f32], codes: &[u8]) -> f32 {
     let mut acc = vdupq_n_f32(0.0);
 
     let wp = weights.as_ptr();
-    let cp = codes.as_ptr();
-
     let mut i = 0usize;
     while i < chunks * 4 {
-        // Load 4 u8 lanes, widen u8 -> u16 -> u32 -> f32.
-        let cv_u8 = vld1_lane_u32(cp.add(i) as *const u32, vdup_n_u32(0), 0);
-        let cv_u8x8 = vreinterpret_u8_u32(cv_u8);
+        // Four indexed byte reads are in bounds because i + 4 <= n. Inserting
+        // byte lanes explicitly preserves their order without a u32 load.
+        let mut cv_u8x8 = vdup_n_u8(0);
+        cv_u8x8 = vset_lane_u8(codes[i], cv_u8x8, 0);
+        cv_u8x8 = vset_lane_u8(codes[i + 1], cv_u8x8, 1);
+        cv_u8x8 = vset_lane_u8(codes[i + 2], cv_u8x8, 2);
+        cv_u8x8 = vset_lane_u8(codes[i + 3], cv_u8x8, 3);
         let cv_u16 = vmovl_u8(cv_u8x8);
         let cv_u32 = vmovl_u16(vget_low_u16(cv_u16));
         let cv = vcvtq_f32_u32(cv_u32);

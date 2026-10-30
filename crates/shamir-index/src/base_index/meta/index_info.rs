@@ -91,7 +91,7 @@ impl std::ops::Deref for StatusAtom {
 /// thread's node-local `Arc<Vec<...>>` replica; writes
 /// (`add_index`/`remove_index`) copy-on-write and mirror to all node
 /// replicas. On single-socket machines (dev, Windows, CI) there is exactly
-/// one replica, giving identical performance to a bare `ArcSwap`. On
+/// one replica; local reads still perform topology routing. On
 /// multi-socket NUMA machines each node reads its own replica without
 /// crossing a socket interconnect. Replaces the previous per-node
 /// `ArcSwap<Vec<…>>` (post-#292) with per-node replication (NUMA N3 step).
@@ -143,7 +143,7 @@ impl<'de> Deserialize<'de> for IndexInfo {
         let map: BTreeMap<u64, IndexDefinition> = BTreeMap::deserialize(deserializer)?;
         let vec: Vec<IndexDefinition> = map.into_values().collect();
         Ok(Self {
-            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
+            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect_cached(), vec),
             status: StatusAtom::default(),
             #[cfg(test)]
             iter_count: Arc::new(AtomicUsize::new(0)),
@@ -155,7 +155,7 @@ impl IndexInfo {
     /// Create empty IndexInfo
     pub fn new() -> Self {
         Self {
-            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), Vec::new()),
+            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect_cached(), Vec::new()),
             status: StatusAtom(Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8()))),
             #[cfg(test)]
             iter_count: Arc::new(AtomicUsize::new(0)),
@@ -172,7 +172,7 @@ impl IndexInfo {
         }
         let vec: Vec<IndexDefinition> = dedup.into_values().collect();
         Self {
-            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
+            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect_cached(), vec),
             status: StatusAtom(Arc::new(AtomicU8::new(IndexStatus::Actual.as_u8()))),
             #[cfg(test)]
             iter_count: Arc::new(AtomicUsize::new(0)),
@@ -211,7 +211,10 @@ impl IndexInfo {
                             .map(IndexDefinition::from)
                             .collect();
                         Ok(Self {
-                            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), vec),
+                            indexes: shamir_numa::NodeReplicated::new(
+                                shamir_numa::detect_cached(),
+                                vec,
+                            ),
                             status: StatusAtom(Arc::new(AtomicU8::new(
                                 IndexStatus::Actual.as_u8(),
                             ))),
@@ -367,7 +370,10 @@ impl Clone for IndexInfo {
         // through either instance COW-replace their own replicas independently.
         let snap = Arc::clone(&*self.indexes.load_local());
         Self {
-            indexes: shamir_numa::NodeReplicated::new(shamir_numa::detect(), (*snap).clone()),
+            indexes: shamir_numa::NodeReplicated::new(
+                shamir_numa::detect_cached(),
+                (*snap).clone(),
+            ),
             status: self.status.clone(),
             #[cfg(test)]
             iter_count: Arc::new(AtomicUsize::new(0)),
@@ -396,3 +402,7 @@ impl PartialEq for IndexInfo {
 }
 
 impl Eq for IndexInfo {}
+
+#[cfg(test)]
+#[path = "tests/index_info_tests.rs"]
+mod tests;

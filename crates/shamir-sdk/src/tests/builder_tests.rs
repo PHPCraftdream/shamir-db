@@ -17,6 +17,20 @@ use shamir_query_builder::batch::{Batch, BuildError};
 use shamir_query_builder::query::Query;
 
 #[test]
+fn execute_owned_maps_validation_error_like_borrowed_without_host_call() {
+    let mut batch = Batch::new();
+    batch.query("dup", Query::from("first"));
+    batch.query("dup", Query::from("second"));
+    let borrowed = Db::new().execute(&batch).unwrap_err();
+    let owned = Db::new().execute_owned(batch).unwrap_err();
+    assert_eq!(borrowed.kind(), ErrorKind::User);
+    assert_eq!(owned.kind(), borrowed.kind());
+    assert_eq!(owned.message(), borrowed.message());
+    assert!(owned.message().starts_with("execute: invalid batch: "));
+    assert!(owned.message().contains("already registered"));
+}
+
+#[test]
 fn rv_sdk_6d2497ca_execute_maps_production_encoding_failure_to_codec() {
     let mut batch = Batch::new();
     batch.id("q");

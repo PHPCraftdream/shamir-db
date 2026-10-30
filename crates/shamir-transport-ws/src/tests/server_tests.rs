@@ -732,3 +732,53 @@ async fn rv_transport_ws_6c58de5c_native_disallowed_origin_is_origin_rejected() 
         other => panic!("expected OriginRejected(NotAllowed), got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn browser_origin_rejections_do_not_reflect_and_distinguish_non_text() {
+    for (header, status, expected) in [
+        (
+            Some(http::HeaderValue::from_static(
+                "https://distinctive.evil.example",
+            )),
+            StatusCode::FORBIDDEN,
+            crate::browser::OriginRejected::NotAllowed("https://distinctive.evil.example".into()),
+        ),
+        (
+            Some(http::HeaderValue::from_bytes(b"\xff").expect("obs-text")),
+            StatusCode::FORBIDDEN,
+            crate::browser::OriginRejected::NotAllowed("<invalid header>".into()),
+        ),
+        (
+            None,
+            StatusCode::BAD_REQUEST,
+            crate::browser::OriginRejected::Missing,
+        ),
+    ] {
+        let (server_io, client_io) = duplex(65536);
+        let server = tokio::spawn(async move {
+            accept_browser_ws(
+                server_io,
+                crate::server::BROWSER_WS_PATH,
+                &BrowserOriginPolicy::empty(),
+            )
+            .await
+        });
+        let req = ws_request_header(crate::server::BROWSER_WS_PATH, "Origin", header);
+        let err = tokio_tungstenite::client_async(req, client_io)
+            .await
+            .expect_err("upgrade rejected");
+        match err {
+            tokio_tungstenite::tungstenite::Error::Http(resp) => {
+                assert_eq!(resp.status(), status);
+                if status == StatusCode::FORBIDDEN {
+                    assert_eq!(resp.body().as_deref(), Some(&b"origin not allowed"[..]));
+                }
+            }
+            other => panic!("expected HTTP rejection: {other:?}"),
+        }
+        match server.await.expect("join") {
+            Err(WsAcceptError::OriginRejected(actual)) => assert_eq!(actual, expected),
+            other => panic!("expected typed rejection: {other:?}"),
+        }
+    }
+}

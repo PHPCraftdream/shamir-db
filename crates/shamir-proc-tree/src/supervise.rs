@@ -65,14 +65,40 @@ struct PipeReader {
     bytes: Option<Vec<u8>>,
 }
 impl PipeReader {
-    fn start<R: Read + Send + 'static>(name: &'static str, reader: Option<R>) -> io::Result<Self> {
+    fn start<R: Read + Send + 'static>(
+        name: &'static str,
+        reader: Option<R>,
+        limit: Option<usize>,
+    ) -> io::Result<Self> {
         let (tx, rx) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name(format!("{name}-reader"))
             .spawn(move || {
                 let mut bytes = Vec::new();
                 if let Some(mut reader) = reader {
-                    let _ = reader.read_to_end(&mut bytes);
+                    if let Some(limit) = limit {
+                        let mut chunk = [0_u8; 8192];
+                        let mut truncated = false;
+                        loop {
+                            match reader.read(&mut chunk) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    let keep = n.min(limit.saturating_sub(bytes.len()));
+                                    bytes.extend_from_slice(&chunk[..keep]);
+                                    truncated |= keep < n;
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                                    continue
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        if truncated {
+                            bytes.extend_from_slice(TRUNCATION_MARKER);
+                        }
+                    } else {
+                        let _ = reader.read_to_end(&mut bytes);
+                    }
                 }
                 let _ = tx.send(bytes);
             })?;
@@ -117,20 +143,48 @@ enum Outcome {
     Failed(String),
 }
 
+pub const TRUNCATION_MARKER: &[u8] = b"\n[output truncated]\n";
+
 pub fn supervise<O: Read + Send + 'static, E: Read + Send + 'static>(
+    child: Child,
+    tree: crate::ProcessTree,
+    stdout: Option<O>,
+    stderr: Option<E>,
+    timeout: Duration,
+    faults: TeardownFaults,
+) -> Result<Output, String> {
+    supervise_inner(child, tree, stdout, stderr, timeout, faults, None)
+}
+
+/// Supervise a process tree while retaining at most `limit` bytes per pipe.
+/// Excess output is drained and a truncation marker is appended when needed.
+pub fn supervise_bounded<O: Read + Send + 'static, E: Read + Send + 'static>(
+    child: Child,
+    tree: crate::ProcessTree,
+    stdout: Option<O>,
+    stderr: Option<E>,
+    timeout: Duration,
+    faults: TeardownFaults,
+    limit: usize,
+) -> Result<Output, String> {
+    supervise_inner(child, tree, stdout, stderr, timeout, faults, Some(limit))
+}
+
+fn supervise_inner<O: Read + Send + 'static, E: Read + Send + 'static>(
     mut child: Child,
     mut tree: crate::ProcessTree,
     stdout: Option<O>,
     stderr: Option<E>,
     timeout: Duration,
     faults: TeardownFaults,
+    limit: Option<usize>,
 ) -> Result<Output, String> {
     let mut spawn_failure = None;
-    let mut out = PipeReader::start("stdout", stdout).unwrap_or_else(|error| {
+    let mut out = PipeReader::start("stdout", stdout, limit).unwrap_or_else(|error| {
         spawn_failure.get_or_insert(format!("pipe reader spawn failed: {error}"));
         PipeReader::absent("stdout")
     });
-    let mut err = PipeReader::start("stderr", stderr).unwrap_or_else(|error| {
+    let mut err = PipeReader::start("stderr", stderr, limit).unwrap_or_else(|error| {
         spawn_failure.get_or_insert(format!("pipe reader spawn failed: {error}"));
         PipeReader::absent("stderr")
     });

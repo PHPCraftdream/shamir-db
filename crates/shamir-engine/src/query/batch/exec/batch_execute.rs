@@ -157,9 +157,18 @@ pub(in crate::query::batch) async fn plan_and_validate_batch(
     resolver: &dyn TableResolver,
     scope: &ExecScope,
 ) -> Result<BatchPlan, BatchError> {
+    plan_and_validate_with_metadata(request, resolver, scope, None).await
+}
+
+async fn plan_and_validate_with_metadata(
+    request: &BatchRequest,
+    resolver: &dyn TableResolver,
+    scope: &ExecScope,
+    metadata: Option<&shamir_query_types::batch::RequestMetadata>,
+) -> Result<BatchPlan, BatchError> {
     // Validate receipt policy before planning or dispatch, including unchecked
     // test callers and recursively executed bodies.
-    crate::query::batch::receipts::validate(request, resolver).await?;
+    crate::query::batch::receipts::validate(request, resolver, metadata).await?;
     // Validate all executable filter/value/projection surfaces before planning
     // or running any operation, including nested batch/foreach bodies.
     validate_executable_guards(&request.queries)?;
@@ -185,7 +194,9 @@ pub(in crate::query::batch) async fn plan_and_validate_batch(
     }
     // 4.C: cross-repo guard for transactional batches.
     if request.transactional {
-        let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+        let repos = metadata
+            .map(|m| m.repos.clone())
+            .unwrap_or_else(|| shamir_query_types::batch::distinct_repos(&request.queries));
         if repos.len() > 1 {
             let mut repos: Vec<String> = repos.into_iter().collect();
             repos.sort();
@@ -209,11 +220,18 @@ async fn flush_if_synced_durability(
     request: &BatchRequest,
     resolver: &dyn TableResolver,
     db_name: &str,
+    scope: &ExecScope,
+    depth: usize,
 ) -> Result<(), BatchError> {
     if !matches!(request.durability, Some(RequestDurability::Synced)) {
         return Ok(());
     }
-    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    let repos = if depth == 0 {
+        scope.root_metadata().map(|m| m.repos.clone())
+    } else {
+        None
+    }
+    .unwrap_or_else(|| shamir_query_types::batch::distinct_repos(&request.queries));
     for repo_name in repos {
         let repo = resolver
             .resolve_repo(&repo_name)
@@ -291,7 +309,12 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
         // already elapsed.
         scope.check()?;
 
-        let mut plan = plan_and_validate_batch(request, resolver, scope).await?;
+        let metadata = if depth == 0 {
+            scope.root_metadata()
+        } else {
+            None
+        };
+        let mut plan = plan_and_validate_with_metadata(request, resolver, scope, metadata).await?;
 
         // 3. Execute — branch on transactional.
         let (all_results, tx_info) = if request.transactional {
@@ -331,7 +354,7 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
         // 3.5. Durability: if `synced`, flush every distinct repo the batch
         // touched before building the response so the write survives an
         // immediate hard crash.
-        flush_if_synced_durability(request, resolver, db_name).await?;
+        flush_if_synced_durability(request, resolver, db_name, scope, depth).await?;
 
         // 4. Filter results for response
         let results = crate::query::batch::receipts::filter(all_results, request);
@@ -430,7 +453,7 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
         };
 
         // 3.5. Durability: same as `execute_batch_impl`.
-        flush_if_synced_durability(request, resolver, db_name).await?;
+        flush_if_synced_durability(request, resolver, db_name, scope, depth).await?;
 
         // 4. Filter results for response
         Ok(crate::query::batch::receipts::filter(all_results, request))
@@ -776,7 +799,12 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
     BatchError,
 > {
     // Determine target repo (cross-repo guard already enforced single).
-    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    let repos = if depth == 0 {
+        scope.root_metadata().map(|m| m.repos.clone())
+    } else {
+        None
+    }
+    .unwrap_or_else(|| shamir_query_types::batch::distinct_repos(&request.queries));
     let repo_name = repos.into_iter().next().unwrap_or_default();
 
     if repo_name.is_empty() {

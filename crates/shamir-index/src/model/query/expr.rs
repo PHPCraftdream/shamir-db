@@ -10,14 +10,20 @@
 //! touch is `materialize_at` on the `Field` leaf — the `RecordRef` trait's
 //! documented escape hatch.
 
+use std::cell::{Cell, OnceCell};
+
 use serde::{Deserialize, Serialize};
-use shamir_types::core::interner::InternerKey;
+use shamir_funclib::registry::ScalarError;
+use shamir_types::codecs::interned::common::intern_string_key;
+use shamir_types::codecs::interned::{inner_value_to_query_value_with, query_value_to_inner_with};
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::record_view::RecordRef;
-use shamir_types::types::value::InnerValue;
+use shamir_types::types::value::{InnerValue, QueryValue};
 use smallvec::SmallVec;
 
 /// A pure, deterministic expression that transforms a record's field
 /// value into a computed index key.
+/// Bincode persists variant ordinals: never reorder or remove variants; append only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IndexExpr {
     /// Extract a field by interned path.
@@ -84,8 +90,6 @@ impl IndexExpr {
         rec: &(impl RecordRef + ?Sized),
         resolver: Option<&shamir_funclib::scalar_resolver::ScalarResolver>,
     ) -> Result<InnerValue, ExprError> {
-        use shamir_funclib::registry::ScalarError;
-        use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
         match self {
             IndexExpr::Field(path) => {
                 let ipath: SmallVec<[InternerKey; 4]> =
@@ -171,26 +175,58 @@ impl IndexExpr {
 
             IndexExpr::Scalar { name, inner } => {
                 let val = inner.eval_with_scalars(rec, resolver)?;
-                // Convert InnerValue → QueryValue for the scalar call.
-                // We use a scratch interner for the conversion; scalar leaves
-                // (Str/Int/Bool/F64) don't need it, but Map/List would.
-                let scratch = shamir_types::core::interner::Interner::new();
-                let qv_arg = inner_value_to_query_value(&val, &scratch)
-                    .map_err(|e| ExprError::ScalarError(e.to_string()))?;
+                // Each scalar invocation gets a fresh scratch namespace, just as
+                // before; only map-key conversion initializes the interner.
+                let scratch = OnceCell::new();
+                let qv_arg = scalar_to_query(&val, &scratch)?;
                 let resolver = resolver.ok_or_else(|| {
                     ExprError::ScalarError("no scalar resolver available".to_string())
                 })?;
                 let result_qv = resolver
                     .call_indexable(name, std::slice::from_ref(&qv_arg))
                     .map_err(|e: ScalarError| ExprError::ScalarError(e.code))?;
-                // Convert QueryValue → InnerValue for the index key.
-                let result_iv = query_value_to_inner(&result_qv, &scratch)
-                    .map_err(|e| ExprError::ScalarError(e.to_string()))?;
-                Ok(result_iv)
+                scalar_from_query(&result_qv, &scratch)
             }
         }
     }
 }
+
+fn scalar_to_query(
+    value: &InnerValue,
+    scratch: &OnceCell<Interner>,
+) -> Result<QueryValue, ExprError> {
+    let missing = Cell::new(None);
+    inner_value_to_query_value_with(value, &|id| {
+        let resolved = scratch
+            .get_or_init(Interner::new)
+            .with_str(&InternerKey::new(id), str::to_owned);
+        if resolved.is_none() {
+            missing.set(Some(id));
+        }
+        resolved
+    })
+    .map_err(|error| match missing.get() {
+        Some(id) => ExprError::ScalarError(format!(
+            "Failed to decode data: Interned key not found: {:?}",
+            InternerKey::new(id)
+        )),
+        None => ExprError::ScalarError(error.to_string()),
+    })
+}
+
+fn scalar_from_query(
+    value: &QueryValue,
+    scratch: &OnceCell<Interner>,
+) -> Result<InnerValue, ExprError> {
+    query_value_to_inner_with(value, &|key| {
+        intern_string_key(scratch.get_or_init(Interner::new), key)
+    })
+    .map_err(|error| ExprError::ScalarError(error.to_string()))
+}
+
+#[cfg(test)]
+#[path = "../../tests/fts/scalar_lazy_tests.rs"]
+mod scalar_lazy_tests;
 
 fn resolve_path(val: &InnerValue, path: &[u64]) -> Result<InnerValue, ExprError> {
     let mut current = val;

@@ -96,19 +96,16 @@ pub(in crate::query::batch) async fn execute_in_open_tx_with_scope(
     tx: &mut shamir_tx::TxContext,
     scope: &ExecScope,
 ) -> Result<BatchResponse, BatchError> {
-    let (request, actor, db_name) = auth.into_parts();
-    let actor = &actor;
-    let start = Instant::now();
-
-    // Single-repo guard (mirrors `execute_batch`). The handle pins exactly
-    // one repo; a batch spanning more than one repo is rejected.
-    let repos = shamir_query_types::batch::distinct_repos(&request.queries);
+    let repos = &auth.metadata().repos;
     if repos.len() > 1 {
-        let mut repos: Vec<String> = repos.into_iter().collect();
+        let mut repos: Vec<String> = repos.iter().cloned().collect();
         repos.sort();
         return Err(BatchError::CrossRepoNotSupported { repos });
     }
 
+    let (request, actor, db_name) = auth.into_parts();
+    let actor = &actor;
+    let start = Instant::now();
     let effective = request.limits.clamped_to(scope.limits());
     let mut plan = shamir_query_types::batch::BatchPlanner::plan(&request.queries, &effective)?;
     validate_tables(&request.queries, resolver, &effective, scope.limits()).await?;

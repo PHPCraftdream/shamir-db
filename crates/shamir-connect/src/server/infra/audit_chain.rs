@@ -388,9 +388,10 @@ impl AuditChain {
 
 /// Errors raised by [`AuditChain::verify_chain`] /
 /// [`AuditChain::verify_against_checkpoint`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AuditError {
     /// Entry's `seq` doesn't match the expected position.
+    #[error("sequence gap at {at}: expected {expected}, found {found}")]
     SequenceGap {
         /// Index of the entry in the verified slice.
         at: usize,
@@ -400,24 +401,29 @@ pub enum AuditError {
         found: u64,
     },
     /// Entry's `prev_hmac` doesn't match the previous entry's `hmac`.
+    #[error("audit chain broken at {at}")]
     ChainBroken {
         /// Index where the chain link was found broken.
         at: usize,
     },
     /// Persistence failure (message preserved without requiring `Error: Clone`).
+    #[error("audit persistence: {0}")]
     Persistence(String),
     /// A field exceeds the maximum length representable by its canonical prefix.
+    #[error("audit field too long: {field}")]
     FieldTooLong {
         /// Name of the field whose encoded length exceeded its prefix.
         field: &'static str,
     },
     /// Entry's `hmac` doesn't match its canonical bytes.
+    #[error("audit HMAC mismatch at {at}")]
     HmacMismatch {
         /// Index where the hmac mismatch was found.
         at: usize,
     },
     /// Persisted checkpoint is past the loaded entries — trailing entries
     /// were truncated.
+    #[error("audit truncation: checkpoint {checkpoint_seq}, final sequence {final_seq}")]
     TruncationDetected {
         /// Persisted `next_seq` from the checkpoint.
         checkpoint_seq: u64,
@@ -425,14 +431,6 @@ pub enum AuditError {
         final_seq: u64,
     },
 }
-
-impl core::fmt::Display for AuditError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for AuditError {}
 
 /// Pluggable backend for streaming audit entries to durable storage.
 ///

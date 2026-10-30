@@ -1,7 +1,7 @@
 //! Client-side `changePassword` flow (spec §12.5).
 
 use crate::common::changepw::{build_auth_message_cp, ChangePwAuthMessageInputs};
-use crate::common::crypto::{hmac_sha256, random_array};
+use crate::common::crypto::{hmac_sha256, try_random_array};
 use crate::common::error::Result;
 use crate::common::kdf_params::KdfParams;
 use crate::common::password::validate_password;
@@ -11,9 +11,14 @@ use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::common::wire::ChangePwRequest;
 
-/// Step 1: client emits `changePasswordChallenge { client_nonce_cp }`.
+/// Step 1: legacy wrapper; panics on OS entropy failure.
 pub fn build_challenge_request() -> [u8; 32] {
-    random_array::<32>()
+    try_build_challenge_request().expect("OS RNG failure")
+}
+
+/// Build a challenge nonce, propagating OS entropy failure.
+pub fn try_build_challenge_request() -> Result<[u8; 32]> {
+    Ok(try_random_array::<32>()?)
 }
 
 /// Step 3-4: client computes proof_old + new material and builds the
@@ -70,7 +75,7 @@ pub fn build_request(
     }
 
     // Derive material from NEW password (with recommended params).
-    let new_salt = random_array::<{ limits::SALT_BYTES }>();
+    let new_salt = try_random_array::<{ limits::SALT_BYTES }>()?;
     let derived_new =
         DerivedKeys::derive(new_pw.as_slice(), &new_salt, &new_kdf_params_recommendation)?;
 

@@ -81,6 +81,7 @@ fn rv_sdk_8190492d_request_buffer_drops_after_use() {
         assert_eq!(__rt::live_request_buffers(), 1);
         assert_eq!(buf.len(), 1); // msgpack positive fixint = 1 byte
         assert!(!buf.is_empty());
+        #[cfg(target_arch = "wasm32")]
         assert!(buf.ptr() != 0);
     }
     assert_eq!(__rt::live_request_buffers(), 0);

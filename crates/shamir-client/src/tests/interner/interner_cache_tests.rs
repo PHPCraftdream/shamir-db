@@ -86,7 +86,7 @@ fn make_config(temp: &TempDir) -> Config {
 /// Boot a server + connect a client. The closure receives an owned client and
 /// must return it (the fixture closes it). This sidesteps the HRTB dance that
 /// a borrowed closure would require.
-async fn with_client<F, Fut>(f: F)
+pub(super) async fn with_client<F, Fut>(f: F)
 where
     F: FnOnce(Client) -> Fut,
     Fut: std::future::Future<Output = Client>,

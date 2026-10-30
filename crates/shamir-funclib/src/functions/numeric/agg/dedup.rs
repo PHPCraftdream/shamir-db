@@ -1,16 +1,8 @@
-//! Hash buckets for distinct aggregates. The comparator's mixed-numeric
-//! equality may be non-transitive, so it must never be an Eq implementation
-//! on a set/map key. It is used only inside the matching hash bucket, retaining
-//! legacy first-representative semantics.
-//!
-//! Equal-under-compare values hash alike recursively (including unordered
-//! Set/Map). Expected O(N) for well-distributed keys, not a worst-case bound:
-//! collisions and large values with the same lossy f64 image can make bucket
-//! scans linear.
+//! Hash buckets for distinct aggregates. Equal-under-compare values hash alike
+//! recursively, including unordered sets and maps; collisions are compared.
 
 use crate::compare;
-use num_bigint::Sign;
-use rust_decimal::prelude::ToPrimitive;
+use crate::functions::numeric_exact::ExactNumber;
 use shamir_collections::THasher;
 use shamir_types::types::value::QueryValue;
 use std::cmp::Ordering;
@@ -35,30 +27,9 @@ fn hash_into<H: std::hash::Hasher>(v: &QueryValue, state: &mut H) {
             state.write_u8(1);
             b.hash(state);
         }
-        QueryValue::Int(n) => {
+        QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_) | QueryValue::Big(_) => {
             state.write_u8(2);
-            hash_f64(*n as f64, state);
-        }
-        QueryValue::F64(f) => {
-            state.write_u8(2);
-            hash_f64(*f, state);
-        }
-        QueryValue::Dec(d) => {
-            state.write_u8(2);
-            hash_f64(d.to_f64().unwrap_or(f64::NAN), state);
-        }
-        QueryValue::Big(b) => {
-            state.write_u8(2);
-            hash_f64(
-                b.to_f64().unwrap_or_else(|| {
-                    if b.sign() == Sign::Minus {
-                        f64::NEG_INFINITY
-                    } else {
-                        f64::INFINITY
-                    }
-                }),
-                state,
-            );
+            ExactNumber::from_value(v).hash(state);
         }
         QueryValue::Str(s) => {
             state.write_u8(3);
@@ -95,17 +66,6 @@ fn hash_into<H: std::hash::Hasher>(v: &QueryValue, state: &mut H) {
 
 fn hash_one(v: &QueryValue) -> u64 {
     THasher::default().hash_one(HashView(v))
-}
-
-fn hash_f64<H: std::hash::Hasher>(value: f64, state: &mut H) {
-    let bits = if value.is_nan() {
-        f64::NAN.to_bits()
-    } else if value == 0.0 {
-        0.0f64.to_bits()
-    } else {
-        value.to_bits()
-    };
-    bits.hash(state);
 }
 
 pub(super) fn same_bucket(a: &QueryValue, b: &QueryValue) -> bool {

@@ -144,6 +144,11 @@ impl Client {
         unsafe { request_scratch_capacity_bytes_for_test(expected_capacity) }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_next_request_id_for_test(&self, id: u32) {
+        self.next_request_id.store(id, Ordering::Relaxed);
+    }
+
     /// 32-byte session id assigned by the server.
     pub fn session_id(&self) -> [u8; 32] {
         self.session_id
@@ -258,8 +263,10 @@ impl Client {
             !batch.interner_epochs.is_empty(),
         ) {
             for repo in shamir_query_types::batch::distinct_repos(&batch.queries) {
-                let epoch = self.interner_cache().get_or_create(db, &repo).epoch();
-                batch.interner_epochs.insert(repo, epoch);
+                batch
+                    .interner_epochs
+                    .entry(repo.clone())
+                    .or_insert_with(|| self.interner_cache().get_or_create(db, &repo).epoch());
             }
         }
 
@@ -405,7 +412,8 @@ impl Client {
     /// Poll a DDL operation's status by its operation ID.
     ///
     /// Returns the full `DdlOpStatus` if found, `None` if the operation is unknown
-    /// (GC'd, never existed, or a pre-RFC op that had no op_id).
+    /// (GC'd, never existed, or a pre-RFC op that had no op_id). Unsupported
+    /// operations and other server errors are returned as [`ClientError::Db`].
     ///
     /// This is the mechanism that allows a client to learn whether a crashed-and-recovered
     /// DDL op actually completed after a server restart.
@@ -424,20 +432,6 @@ impl Client {
         };
         match self.roundtrip(&req).await? {
             DbResponse::DdlOpStatus { status } => Ok(status),
-            DbResponse::Error { code, message } => {
-                // Treat `not_supported` as "feature unavailable" rather than a hard error.
-                // Old servers don't understand `GetDdlOpStatus` and return this code.
-                if code == "not_supported" {
-                    return Err(ClientError::Protocol(format!(
-                        "GetDdlOpStatus not supported by server: {}",
-                        message
-                    )));
-                }
-                Err(ClientError::Db {
-                    code: code.clone(),
-                    message: message.clone(),
-                })
-            }
             other => Err(ClientError::Protocol(format!(
                 "expected DdlOpStatus, got {other:?}"
             ))),
@@ -485,7 +479,19 @@ impl Client {
         // zero copies of `session_id` or the request body. The whole encode
         // happens inside the `with` closure so the `RefCell` borrow is
         // released before any `.await`.
-        let rid = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let rid =
+            match self
+                .next_request_id
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+            {
+                Ok(id) => id,
+                Err(_) => {
+                    self.state.shutdown(CloseCause::RequestIdExhausted);
+                    return Err(ClientError::ConnectionClosed(
+                        self.state.cause().unwrap_or(CloseCause::RequestIdExhausted),
+                    ));
+                }
+            };
         let envelope_bytes: Zeroizing<Vec<u8>> =
             REQ_BUF.with(|cell| -> Result<Zeroizing<Vec<u8>>, ClientError> {
                 let mut buf = cell.borrow_mut();
@@ -519,7 +525,13 @@ impl Client {
             if let Some(cause) = reg.closed.cause() {
                 return Err(ClientError::ConnectionClosed(cause));
             }
-            let _ = reg.map.insert_sync(rid, tx);
+            if reg.map.insert_sync(rid, tx).is_err() {
+                self.state
+                    .shutdown(CloseCause::Protocol(Arc::from("request id collision")));
+                return Err(ClientError::ConnectionClosed(
+                    self.state.cause().unwrap_or(CloseCause::ReaderCancelled),
+                ));
+            }
             // Close-vs-register recheck: an insert that landed after
             // shutdown's drain must not strand a waiter — remove our entry
             // and fail with the published cause.
@@ -634,6 +646,6 @@ impl Drop for Client {
 }
 
 /// Version gate for ambient interner epoch work; smart pre-touch remains unconditional.
-pub(crate) fn should_advertise_interner_epochs(server_version: u8, has_epochs: bool) -> bool {
-    server_version >= 2 && !has_epochs
+pub(crate) fn should_advertise_interner_epochs(server_version: u8, _has_epochs: bool) -> bool {
+    server_version >= 2
 }

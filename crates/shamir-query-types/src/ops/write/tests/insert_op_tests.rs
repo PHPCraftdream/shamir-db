@@ -2,6 +2,7 @@
 //! pass-through field.
 
 use serde_bytes::ByteBuf;
+use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
 use crate::write::InsertOp;
@@ -22,7 +23,6 @@ fn table_ref() -> TableRef {
 fn insert_op_old_payload_defaults_records_idmsgpack_to_empty() {
     // Old wire payload: only `insert_into` (as string — TableRef wire format)
     // + `values`, no `records_idmsgpack`.
-    use shamir_types::mpack;
     let old: InsertOp = rmp_serde::from_slice(
         &rmp_serde::to_vec_named(&mpack!({
             "insert_into": "users",

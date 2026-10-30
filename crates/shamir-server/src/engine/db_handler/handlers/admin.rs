@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use shamir_connect::common::crypto::random_array;
+use shamir_connect::common::crypto::try_random_array;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::time::UnixNanos;
@@ -55,7 +55,7 @@ pub(crate) async fn derive_scram_record(
     // wipes on Drop, so we don't need an explicit `.zeroize()` call —
     // both the success and error paths drop `pw_buf` before returning.
     let pw_buf: Zeroizing<Vec<u8>> = Zeroizing::new(password.into_bytes());
-    let salt: [u8; 16] = random_array();
+    let salt: [u8; 16] = try_random_array().map_err(|e| e.to_string())?;
 
     // Argon2id is CPU-heavy — delegate to spawn_blocking so the runtime
     // worker is free to make progress on other tasks during derivation.
@@ -319,7 +319,15 @@ pub(crate) async fn set_superuser(
     }
 
     // 4. Op itself.
-    let now_ns = UnixNanos::now().as_u64();
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(_) => {
+            return DbResponse::Error {
+                code: "auth_failed".into(),
+                message: "authentication failed".into(),
+            }
+        }
+    };
     match admin.user_dir.set_superuser(&user, on, now_ns) {
         Ok(_) => DbResponse::SuperuserSet { user, on },
         Err(e) => {
@@ -405,7 +413,15 @@ pub(crate) async fn set_replicator(
     }
 
     // 4. Op itself.
-    let now_ns = UnixNanos::now().as_u64();
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(_) => {
+            return DbResponse::Error {
+                code: "auth_failed".into(),
+                message: "authentication failed".into(),
+            }
+        }
+    };
     match admin.user_dir.set_replicator(&user, on, now_ns) {
         Ok(_) => DbResponse::ReplicatorSet { user, on },
         Err(e) => {
@@ -461,9 +477,30 @@ pub(crate) async fn change_password_challenge(
         };
     };
 
-    let now_ns = UnixNanos::now().as_u64();
-    let view =
-        start_change_password_challenge(session, record.salt, record.kdf_params, nonce, now_ns);
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(_) => {
+            return DbResponse::Error {
+                code: "auth_failed".into(),
+                message: "authentication failed".into(),
+            }
+        }
+    };
+    let view = match start_change_password_challenge(
+        session,
+        record.salt,
+        record.kdf_params,
+        nonce,
+        now_ns,
+    ) {
+        Ok(view) => view,
+        Err(_) => {
+            return DbResponse::Error {
+                code: "auth_failed".into(),
+                message: "authentication failed".into(),
+            }
+        }
+    };
 
     DbResponse::ChangePasswordChallenge {
         server_nonce_cp: view.server_nonce_cp.to_vec(),
@@ -530,7 +567,15 @@ pub(crate) async fn change_password_verify(
         new_server_key: server_key_new,
     };
 
-    let now_ns = UnixNanos::now().as_u64();
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(_) => {
+            return DbResponse::Error {
+                code: "auth_failed".into(),
+                message: "authentication failed".into(),
+            }
+        }
+    };
     let apply = match verify_change_password_request_with_sid(
         session,
         &session.session_id,

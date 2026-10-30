@@ -53,7 +53,9 @@
 use crate::common::crypto::hmac_sha256;
 use crate::common::time::{ns, UnixNanos};
 use dashmap::DashMap;
+use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
+use std::hash::BuildHasherDefault;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -253,8 +255,8 @@ pub enum LockoutSnapshotError {
 /// [`Self::with_snapshot_sink`] / [`Self::persist_snapshot`].
 #[derive(Default)]
 pub struct InMemoryLockoutStore {
-    failures: DashMap<PairKey, FailureState>,
-    lockouts: DashMap<PairKey, LockoutState>,
+    failures: DashMap<PairKey, FailureState, BuildHasherDefault<FxHasher>>,
+    lockouts: DashMap<PairKey, LockoutState, BuildHasherDefault<FxHasher>>,
     /// Optional metric: total locked-out events ever observed.
     total_lockouts: AtomicU64,
     /// Optional durable backend. `None` for in-memory-only deployments

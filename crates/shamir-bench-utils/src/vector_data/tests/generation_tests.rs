@@ -16,7 +16,7 @@ fn sq_l2(a: &[f32], b: &[f32]) -> f64 {
 /// code exposed no version at all; on unfixed code this cannot even compile).
 #[test]
 fn rv_bench_utils_126e5e6f_generator_revision_is_pinned() {
-    assert_eq!(GENERATOR_REVISION, "clustered_vectors/1");
+    assert_eq!(GENERATOR_REVISION, "clustered_vectors/2");
     assert!(!GENERATOR_REVISION.is_empty());
 }
 

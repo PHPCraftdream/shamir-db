@@ -1,6 +1,7 @@
 use bytes::Bytes;
-use futures::StreamExt;
-use shamir_storage::error::DbResult;
+use futures::stream::unfold;
+use futures::{StreamExt, TryStreamExt};
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{KvOp, RecordKey};
 use shamir_tunables::store_defaults::HISTORY_SCAN_BATCH;
 #[cfg(test)]
@@ -220,22 +221,50 @@ impl MvccStore {
         // Phase 3: ascending by version, resolve ts per version.
         entries.sort_by_key(|(v, _)| *v);
         entries.dedup_by_key(|(v, _)| *v);
-        let mut out = Vec::with_capacity(entries.len());
-        for (version, value) in entries {
-            // The commit-time stamp lives in `pending_ts` until the version is
-            // durable (reclaimed by `gc_overlay_to` after the history write),
-            // so a miss there means the ts is already in `history`.
-            let ts_millis = match self.pending_ts.get_sync(&version).map(|e| *e.get()) {
-                Some(ts) => Some(ts),
-                None => self.lookup_ts(version).await,
-            };
-            out.push(VersionEntry {
+        let mut stamps: Vec<Option<u64>> = entries
+            .iter()
+            .map(|(version, _)| self.pending_ts.get_sync(version).map(|e| *e.get()))
+            .collect();
+        let misses: Vec<usize> = stamps
+            .iter()
+            .enumerate()
+            .filter_map(|(i, ts)| ts.is_none().then_some(i))
+            .collect();
+        for chunk in misses.chunks(HISTORY_SCAN_BATCH) {
+            let keys = chunk.iter().map(|&i| ts_key(entries[i].0).into()).collect();
+            match self.history.get_many(keys).await {
+                Ok(values) => {
+                    for (&i, value) in chunk.iter().zip(values) {
+                        stamps[i] = value.and_then(|value| {
+                            let bytes: [u8; 8] = value.as_ref().try_into().ok()?;
+                            Some(u64::from_le_bytes(bytes))
+                        });
+                    }
+                }
+                Err(error) => {
+                    log::warn!("batch timestamp lookup failed: {error}; retrying individually");
+                    for &i in chunk {
+                        stamps[i] = self.lookup_ts(entries[i].0).await;
+                    }
+                }
+            }
+        }
+        Ok(entries
+            .into_iter()
+            .zip(stamps)
+            .map(|((version, value), ts_millis)| VersionEntry {
                 version,
                 value,
                 ts_millis,
-            });
-        }
-        Ok(out)
+            })
+            .collect())
+    }
+
+    /// Return histories in input order using bounded shared archive scans.
+    /// Scans may include unrelated keys in gaps. If a scan fails, retry
+    /// individual keys in input order, returning the first retry error.
+    pub async fn history_of_many(&self, keys: &[&[u8]]) -> DbResult<Vec<Vec<VersionEntry>>> {
+        super::history_many::history_of_many(self, keys).await
     }
 
     /// cancel-safe: yes — a single synchronous `cells.entry_sync`
@@ -704,8 +733,6 @@ impl MvccStore {
         at_version: u64,
         include_tombstones: bool,
     ) -> impl futures::Stream<Item = DbResult<Vec<(Bytes, Bytes)>>> + Send {
-        use futures::stream::unfold;
-
         let history = Arc::clone(&self.history);
         // R3: capture committed floor at stream-open time (explicit parameter).
         let floor = at_version;
@@ -801,30 +828,9 @@ impl MvccStore {
     /// N sequential single-key `history.get` round-trips over the whole
     /// matched set).
     ///
-    /// **Partition, don't force-batch the fallback path.** Classifying a
-    /// key is a cheap in-memory `current_version` lookup (a `RecordCell`
-    /// map read, no I/O), so every input key is classified up front:
-    ///
-    /// - **Direct-path** (`cur_v > 0 && cur_v <= snapshot_version` — the
-    ///   COMMON case: no concurrent write landed on this key since the
-    ///   snapshot was pinned). The overlay is probed first per key (also
-    ///   in-memory, no I/O) — an overlay hit resolves immediately without
-    ///   ever touching `history`. The overlay-MISS subset's
-    ///   `encode_version_key(key, cur_v)` physical keys are collected into
-    ///   ONE `Vec` and resolved via a SINGLE `self.history.get_many(..)`
-    ///   call — this is the actual win: N sequential single-key gets
-    ///   collapse into one vectored call (disk backends override
-    ///   `get_many` to collapse N `spawn_blocking` calls into one).
-    /// - **Fallback-path** (`cur_v == 0` cold-start, or `cur_v >
-    ///   snapshot_version` — a concurrent write landed on THIS key after
-    ///   the snapshot was pinned, requiring the range-scan-newest-visible
-    ///   fallback in [`Self::resolve_read`]): kept on the EXISTING per-key
-    ///   `resolve_read` call, unbatched. This is intentionally NOT batched
-    ///   here — it is the rare path (fires only when a concurrent writer
-    ///   touched the SAME key after the caller's snapshot was pinned), and
-    ///   batching the range-scan fallback itself is a separate, harder
-    ///   problem (a versioned-index rewrite) explicitly out of scope for
-    ///   this "cheap first step" optimization.
+    /// Direct overlay misses are batched through `history.get_many`. Cold and
+    /// snapshot fallback reads are resolved with bounded ordered concurrency;
+    /// their cell is re-probed after the batch read to preserve races with writes.
     ///
     /// Results are reassembled in the ORIGINAL input `keys` order — callers
     /// never need to re-sort or track which subset a given result came
@@ -883,34 +889,32 @@ impl MvccStore {
             self.history.get_many(miss_keys).await?
         };
 
-        // Phase 3: assemble the output vector in input order.
-        let mut out: Vec<Option<Bytes>> = Vec::with_capacity(len);
-        for (i, slot) in slots.iter().enumerate() {
-            match slot {
-                Slot::Resolved(val) => out.push(val.clone()),
-                Slot::HistoryMiss { miss_idx, cur_v } => match &miss_results[*miss_idx] {
-                    Some(val) if val.is_empty() => out.push(None), // tombstone
-                    Some(val) => out.push(Some(val.clone())),
-                    // RV-TX-2CB455A7: exact-version miss ⇒ that version was
-                    // attempted and aborted — fall back below it instead of
-                    // masking the prior committed value.
-                    None if *cur_v > 0 => {
-                        let val = self
-                            .resolve_read(&keys[i], snapshot_version.min(cur_v - 1), 0)
-                            .await?;
-                        out.push(val);
+        // Ordered buffering overlaps independent reads while returning the first
+        // error in input order. Cold slots must re-probe after the batch await.
+        futures::stream::iter(slots.into_iter().enumerate().map(|(i, slot)| {
+            let miss_results = &miss_results;
+            async move {
+                match slot {
+                    Slot::Resolved(val) => Ok(val),
+                    Slot::HistoryMiss { miss_idx, cur_v } => match &miss_results[miss_idx] {
+                        Some(val) if val.is_empty() => Ok(None),
+                        Some(val) => Ok(Some(val.clone())),
+                        None if cur_v > 0 => {
+                            self.resolve_read(&keys[i], snapshot_version.min(cur_v - 1), 0)
+                                .await
+                        }
+                        None => Ok(None),
+                    },
+                    Slot::Fallback => {
+                        let cur_v = self.current_version(&keys[i]);
+                        self.resolve_read(&keys[i], snapshot_version, cur_v).await
                     }
-                    None => out.push(None), // not found
-                },
-                Slot::Fallback => {
-                    let cur_v = self.current_version(&keys[i]);
-                    let val = self.resolve_read(&keys[i], snapshot_version, cur_v).await?;
-                    out.push(val);
                 }
             }
-        }
-
-        Ok(out)
+        }))
+        .buffered(16)
+        .try_collect()
+        .await
     }
 
     /// T1c: look up the recorded commit timestamp (millis) for `version`.
@@ -926,7 +930,11 @@ impl MvccStore {
                     None
                 }
             }
-            Err(_) => None,
+            Err(DbError::NotFound(_)) => None,
+            Err(error) => {
+                log::warn!("timestamp lookup failed for version {version}: {error}");
+                None
+            }
         }
     }
 }

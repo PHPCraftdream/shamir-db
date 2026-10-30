@@ -72,7 +72,7 @@ pub use interner_delta::InternerDelta;
 pub use limit_kind::LimitKind;
 pub use options::{IndexVisibility, IsolationLevel, RequestDurability};
 pub use planner::BatchPlanner;
-pub use query_entry::{collect_required_access, distinct_repos, QueryEntry};
+pub use query_entry::{collect_required_access, distinct_repos, QueryEntry, RequestMetadata};
 pub use reference::{QueryPath, QueryReference, ReferenceParseError};
 pub use result_encoding::ResultEncoding;
 pub use sub_batch_op::SubBatchOp;

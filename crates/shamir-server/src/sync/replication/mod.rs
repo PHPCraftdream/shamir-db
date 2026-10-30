@@ -36,6 +36,7 @@ pub use prod_factory::build_prod_factory;
 // construct it; the transport module itself stays private.
 pub use source::ReplSource;
 pub use supervisor::{ReplSourceFactory, Subscription, SubscriptionSupervisor};
+pub use transport::replication_config::{ReplicationConfig, UpstreamPins};
 pub use transport::replicator_password::ReplicatorPassword;
 pub use wire_source::WireReplSource;
 

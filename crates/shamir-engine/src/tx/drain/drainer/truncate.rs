@@ -11,6 +11,22 @@ use crate::tx::materialize::interner_delta_safe_to_truncate;
 use super::Drainer;
 
 impl Drainer {
+    async fn seed_startup(
+        &self,
+        repo: &RepoInstance,
+        entries: Vec<shamir_wal::WalEntryV2>,
+    ) -> DbResult<()> {
+        let _replay_guard = self.replaying.lock().await;
+        let durable = repo.tx_gate().await?.durable_watermark();
+        self.seed_from_recover(
+            entries
+                .into_iter()
+                .filter(|entry| entry.commit_version > durable)
+                .collect(),
+        );
+        Ok(())
+    }
+
     /// CRIT-2 (#436): re-check every version in `pending_unsafe` against the
     /// CURRENT interner hwm (dropping any that are now confirmed safe), then
     /// compute the truncation ceiling as `min(durable_watermark,
@@ -210,7 +226,11 @@ impl Drainer {
             if let Some(this) = drainer.upgrade() {
                 match repo.repo_wal().await {
                     Ok(wal) => match wal.recover().await {
-                        Ok(entries) => this.seed_from_recover(entries),
+                        Ok(entries) => {
+                            if let Err(e) = this.seed_startup(&repo, entries).await {
+                                log::warn!("drainer spawn: seed failed: {e}");
+                            }
+                        }
                         Err(e) => {
                             log::warn!(
                                 "drainer spawn: wal.recover() for seed failed: {e}; \
@@ -273,3 +293,7 @@ impl Drainer {
         });
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/drain/startup_seed_tests.rs"]
+mod startup_seed_tests;

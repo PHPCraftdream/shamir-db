@@ -2,6 +2,7 @@
 //!
 //! All test data is built with `mpack!` — no raw wire-format strings.
 
+use serde_bytes::ByteBuf;
 use shamir_types::mpack;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -12,6 +13,25 @@ use crate::read::QueryRecord;
 use crate::write::InsertedRecord;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn opaque_rows_do_not_equal_null_or_each_other() {
+    let first = QueryRecord::IdBytes(ByteBuf::from(vec![1]));
+    let second = QueryRecord::IdBytes(ByteBuf::from(vec![2]));
+    let null = QueryRecord::Direct(QueryValue::Null);
+    let inserted = QueryRecord::Inserted(InsertedRecord {
+        id: None,
+        fields: QueryValue::Null,
+    });
+    assert_eq!(first, first.clone());
+    assert_ne!(first, second);
+    assert_ne!(first, null);
+    assert_ne!(null, first);
+    assert_ne!(second, null);
+    assert_ne!(null, second);
+    assert_eq!(null, inserted);
+    assert_eq!(inserted, null);
+}
 
 fn direct_row() -> QueryRecord {
     QueryRecord::Direct(mpack!({
@@ -75,7 +95,6 @@ fn as_value_inserted_direct_owned() {
 
 #[test]
 fn as_value_id_bytes_returns_null() {
-    use serde_bytes::ByteBuf;
     let row = QueryRecord::IdBytes(ByteBuf::from(vec![0x01, 0x02]));
     let v = row.as_value();
     assert_eq!(*v, QueryValue::Null);
@@ -99,7 +118,6 @@ fn get_value_direct_absent_returns_none() {
 #[test]
 fn get_value_non_direct_returns_none() {
     // Only Direct supports get_value borrow; Inserted and IdBytes return None.
-    use serde_bytes::ByteBuf;
     let ins_row = inserted_direct_row();
     assert!(ins_row.get_value("name").is_none());
 
@@ -293,4 +311,36 @@ fn fg1_query_record_visit_u64_u64_max_becomes_big_exact() {
         }
         other => panic!("expected Direct(Big(u64::MAX)), got {other:?}"),
     }
+}
+
+#[test]
+fn inserted_scalar_accessors_use_fields_not_synthetic_id() {
+    let row = QueryRecord::Inserted(InsertedRecord {
+        id: Some(RecordId::system("scalar-id")),
+        fields: mpack!({
+            "positive": 42,
+            "negative": @(mpack!(-5)),
+            "yes": true,
+            "no": false,
+            "_id": 7
+        }),
+    });
+    assert_eq!(row.get_value_i64("positive"), Some(42));
+    assert_eq!(row.get_value_u64("positive"), Some(42));
+    assert_eq!(row.get_value_i64("negative"), Some(-5));
+    assert_eq!(row.get_value_u64("negative"), None);
+    assert_eq!(row.get_value_bool("yes"), Some(true));
+    assert_eq!(row.get_value_bool("no"), Some(false));
+    assert_eq!(row.get_value_i64("yes"), None);
+    assert_eq!(row.get_value_bool("positive"), None);
+    assert_eq!(row.get_value_i64("missing"), None);
+    assert_eq!(row.get_value_u64("missing"), None);
+    assert_eq!(row.get_value_bool("missing"), None);
+    assert_eq!(row.get_value_i64("_id"), Some(7));
+    assert_eq!(row.get_value_u64("_id"), Some(7));
+    assert_eq!(row.get_value_bool("_id"), None);
+    let no_field_id = inserted_direct_row();
+    assert_eq!(no_field_id.get_value_i64("_id"), None);
+    assert_eq!(no_field_id.get_value_u64("_id"), None);
+    assert_eq!(no_field_id.get_value_bool("_id"), None);
 }

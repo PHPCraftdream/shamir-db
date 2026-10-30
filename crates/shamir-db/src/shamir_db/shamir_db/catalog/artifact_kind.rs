@@ -11,7 +11,31 @@
 //! catalogue migrates transparently and existing WASM artifacts keep working
 //! unchanged. Nothing reads `kind` to branch yet — this is plumbing only.
 
+use crate::DbError;
+use shamir_engine::function::FunctionMeta;
 use shamir_types::types::value::QueryValue;
+
+/// Decode every row before exposing any to the recovery registration loop.
+pub(in crate::shamir_db::shamir_db) async fn with_checked_function_metadata<
+    T,
+    F: std::future::Future<Output = T>,
+>(
+    records: &[QueryValue],
+    visit: impl FnOnce(Vec<FunctionMeta>) -> F,
+) -> Result<T, DbError> {
+    let metadata = records
+        .iter()
+        .enumerate()
+        .map(|(index, rec)| {
+            FunctionMeta::try_from_record(rec).map_err(|error| {
+                DbError::Function(format!(
+                    "invalid function metadata in catalogue row {index}: {error}"
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(visit(metadata).await)
+}
 
 /// Catalogue field name used to persist the artifact origin.
 pub const KIND_FIELD: &str = "kind";

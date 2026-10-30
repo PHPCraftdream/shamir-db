@@ -1,8 +1,11 @@
 //! Pagination — LIMIT/OFFSET, page-based, and keyset (seek) pagination.
 
+use std::fmt::{self, Write};
+
 use serde::{Deserialize, Serialize};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
+use shamir_types::types::value::Value::{Big, Bin, Bool, Dec, Int, List, Map, Null, Set, Str, F64};
 
 /// Pagination mode for queries.
 ///
@@ -83,9 +86,8 @@ pub enum Pagination {
 
 /// Manual equality because `QueryValue` does not implement `PartialEq`.
 ///
-/// For the `After` variant the seek tuple is compared by canonical
-/// MessagePack encoding (`rmp_serde::to_vec_named`); the offset-based variants
-/// compare their `u64` fields directly.
+/// For `After`, values are compared in their MessagePack wire representation.
+/// Big integers compared with strings or decimals require a decimal allocation.
 impl PartialEq for Pagination {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -120,16 +122,79 @@ impl PartialEq for Pagination {
                     limit: lim2,
                     after_id: aid2,
                 },
-            ) => lim1 == lim2 && aid1 == aid2 && key_bytes(k1) == key_bytes(k2),
+            ) => lim1 == lim2 && aid1 == aid2 && sequence_eq(k1.iter(), k2.iter()),
             (Pagination::None, Pagination::None) => true,
             _ => false,
         }
     }
 }
 
-/// Encode a seek-tuple slice to canonical MessagePack bytes for equality.
-fn key_bytes(key: &[QueryValue]) -> Vec<u8> {
-    rmp_serde::to_vec_named(key).expect("serializing Vec<QueryValue> is infallible")
+// Decimal Display writes into a bounded stack buffer (96-bit coefficient and
+// scale at most 28), preserving scale and signed-zero formatting.
+struct DecimalText {
+    bytes: [u8; 64],
+    len: usize,
+}
+
+impl Write for DecimalText {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.len.checked_add(text.len()).ok_or(fmt::Error)?;
+        let target = self.bytes.get_mut(self.len..end).ok_or(fmt::Error)?;
+        target.copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn decimal_eq_text(decimal: &impl fmt::Display, text: &str) -> bool {
+    let mut buffer = DecimalText {
+        bytes: [0; 64],
+        len: 0,
+    };
+    write!(&mut buffer, "{decimal}").is_ok() && &buffer.bytes[..buffer.len] == text.as_bytes()
+}
+
+fn sequence_eq<'a>(
+    left: impl ExactSizeIterator<Item = &'a QueryValue>,
+    right: impl ExactSizeIterator<Item = &'a QueryValue>,
+) -> bool {
+    left.len() == right.len() && left.zip(right).all(|(a, b)| wire_value_eq(a, b))
+}
+
+// Mirror QueryValue::serialize, including cross-variant string and sequence
+// representations and insertion order. BigInt's decimal Display allocates;
+// confine that cost to comparisons against another string-shaped variant.
+fn wire_value_eq(left: &QueryValue, right: &QueryValue) -> bool {
+    match (left, right) {
+        (Null, Null) => true,
+        (Bool(a), Bool(b)) => a == b,
+        (Int(a), Int(b)) => a == b,
+        (F64(a), F64(b)) => a.to_bits() == b.to_bits(),
+        (Str(a), Str(b)) => a == b,
+        (Big(a), Big(b)) => a == b,
+        (Dec(a), Str(b)) | (Str(b), Dec(a)) => decimal_eq_text(a, b),
+        (Dec(a), Dec(b)) => {
+            let mut text = DecimalText {
+                bytes: [0; 64],
+                len: 0,
+            };
+            write!(&mut text, "{a}").is_ok()
+                && std::str::from_utf8(&text.bytes[..text.len]).is_ok_and(|s| decimal_eq_text(b, s))
+        }
+        (Big(a), Str(b)) | (Str(b), Big(a)) => a.to_string() == *b,
+        (Big(a), Dec(b)) | (Dec(b), Big(a)) => decimal_eq_text(b, &a.to_string()),
+        (Bin(a), Bin(b)) => a == b,
+        (List(a), List(b)) => sequence_eq(a.iter(), b.iter()),
+        (Set(a), Set(b)) => sequence_eq(a.iter(), b.iter()),
+        (List(a), Set(b)) | (Set(b), List(a)) => sequence_eq(a.iter(), b.iter()),
+        (Map(a), Map(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|((ka, va), (kb, vb))| ka == kb && wire_value_eq(va, vb))
+        }
+        _ => false,
+    }
 }
 
 /// Serde `with`-module: represent `Option<RecordId>` on the wire as an
@@ -343,7 +408,7 @@ impl PaginationInfo {
                     total_pages: Option::None,
                     current_page,
                     page_size: Some(page_size),
-                    has_next: false, // unknown without total — caller should set via has_next_hint
+                    has_next: false, // unknown without total — caller can set via with_has_next
                     has_prev,
                 }
             }

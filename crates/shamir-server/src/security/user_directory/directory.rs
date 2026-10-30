@@ -294,8 +294,8 @@ impl FjallUserDirectory {
         })
     }
 
-    fn fresh_user_id() -> [u8; 16] {
-        shamir_connect::common::crypto::random_array::<16>()
+    fn fresh_user_id() -> Result<[u8; 16]> {
+        Ok(shamir_connect::common::crypto::try_random_array::<16>()?)
     }
 
     /// Mint a `user_id` whose 63-bit [`principal64`] projection is non-zero
@@ -311,7 +311,7 @@ impl FjallUserDirectory {
         // 2^-63-per-attempt event; generous headroom, not expected to loop.
         const MAX_ATTEMPTS: u32 = 16;
         for _ in 0..MAX_ATTEMPTS {
-            let user_id = Self::fresh_user_id();
+            let user_id = Self::fresh_user_id()?;
             let projected = principal64(user_id);
             if projected == 0 {
                 continue; // reserved for OWNER_SYSTEM/Actor::System — re-mint

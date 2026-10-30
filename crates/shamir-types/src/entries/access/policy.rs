@@ -75,6 +75,9 @@ pub fn permits(actor: &Actor, meta: &ResourceMeta, action: Action, in_group: boo
 /// This function was named `authorize` until the #546 hardening pass;
 /// it was renamed to make this no-op trace role unmistakable at call sites.
 pub fn trace_access(actor: &Actor, path: &ResourcePath, action: Action) -> Result<(), AccessError> {
-    log::trace!("shomer: {actor} {action} on {path}");
+    log::trace!(
+        "shomer: {actor} {action} on {}",
+        super::escape_resource_diagnostic(&path.to_string())
+    );
     Ok(())
 }

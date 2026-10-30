@@ -1,6 +1,10 @@
+use std::borrow::Cow;
+
 use shamir_types::types::value::QueryValue;
 
-use crate::access::{Actor, Mode, ResourceMeta, ResourcePath};
+use crate::access::{
+    escape_resource_diagnostic, Actor, Mode, ResourceMeta, ResourcePath, ResourcePathRef,
+};
 use crate::{DbError, DbResult};
 
 use super::super::ShamirDb;
@@ -60,69 +64,87 @@ impl ShamirDb {
     /// `open()` fallback is `FunctionFolder` (#118, implicit folders that
     /// were never explicitly `CREATE`d) — see that branch's comment.
     pub async fn resource_meta(&self, path: &ResourcePath) -> DbResult<ResourceMeta> {
+        self.resource_meta_ref(path.as_ref()).await
+    }
+
+    pub(super) async fn resource_meta_ref(
+        &self,
+        path: ResourcePathRef<'_>,
+    ) -> DbResult<ResourceMeta> {
         let table_path = match path {
-            // Record and Index inherit their Table's meta.
-            ResourcePath::Record {
+            ResourcePathRef::Record {
                 db, store, table, ..
             }
-            | ResourcePath::Index {
+            | ResourcePathRef::Index {
                 db, store, table, ..
-            } => ResourcePath::table(db, store, table),
-            ResourcePath::Table { .. } => path.clone(),
-            _ => path.clone(),
+            } => ResourcePathRef::Table { db, store, table },
+            _ => path,
         };
 
-        match &table_path {
-            ResourcePath::Database { db } => match self.system_store.load_database(db).await {
+        match table_path {
+            ResourcePathRef::Database { db } => match self.system_store.load_database(db).await {
                 Ok(Some(r)) => checked_meta(&r, "database"),
                 Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                 Err(e) => {
-                    log::warn!("resource_meta: failed to load database '{}' meta: {e}", db);
+                    log::warn!(
+                        "resource_meta: failed to load database '{}' meta: {}",
+                        escape_resource_diagnostic(db),
+                        escape_resource_diagnostic(&e.to_string())
+                    );
                     Err(e)
                 }
             },
-            ResourcePath::Store { db, store } => {
+            ResourcePathRef::Store { db, store } => {
                 match self.system_store.load_repository(db, store).await {
                     Ok(Some(r)) => checked_meta(&r, "repository"),
                     Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                     Err(e) => {
                         log::warn!(
-                            "resource_meta: failed to load store '{}/{}' meta: {e}",
-                            db,
-                            store
+                            "resource_meta: failed to load store '{}/{}' meta: {}",
+                            escape_resource_diagnostic(db),
+                            escape_resource_diagnostic(store),
+                            escape_resource_diagnostic(&e.to_string())
                         );
                         Err(e)
                     }
                 }
             }
-            ResourcePath::Table { db, store, table } => {
+            ResourcePathRef::Table { db, store, table } => {
                 match self.system_store.load_table_record(db, store, table).await {
                     Ok(Some(r)) => checked_meta(&r, "table"),
                     Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                     Err(e) => {
                         log::warn!(
-                            "resource_meta: failed to load table '{}/{}/{}' meta: {e}",
-                            db,
-                            store,
-                            table
+                            "resource_meta: failed to load table '{}/{}/{}' meta: {}",
+                            escape_resource_diagnostic(db),
+                            escape_resource_diagnostic(store),
+                            escape_resource_diagnostic(table),
+                            escape_resource_diagnostic(&e.to_string())
                         );
                         Err(e)
                     }
                 }
             }
-            ResourcePath::Function { name } => match self.system_store.load_function(name).await {
+            ResourcePathRef::Function { name } => match self.system_store.load_function(name).await
+            {
                 Ok(Some(r)) => checked_meta(&r, "function"),
                 Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                 Err(e) => {
                     log::warn!(
-                        "resource_meta: failed to load function '{}' meta: {e}",
-                        name
+                        "resource_meta: failed to load function '{}' meta: {}",
+                        escape_resource_diagnostic(name),
+                        escape_resource_diagnostic(&e.to_string())
                     );
                     Err(e)
                 }
             },
-            ResourcePath::FunctionFolder { path } => {
-                let path_key = path.join("/");
+            ResourcePathRef::FunctionFolder { .. }
+            | ResourcePathRef::FunctionFolderPrefix { .. } => {
+                let path_key: Cow<'_, str> = match table_path {
+                    ResourcePathRef::FunctionFolder { path } => Cow::Owned(path.join("/")),
+                    ResourcePathRef::FunctionFolderPrefix { prefix } => Cow::Borrowed(prefix),
+                    _ => unreachable!(),
+                };
                 match self.system_store.load_function_folder(&path_key).await {
                     Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
                     // Read persisted meta if the folder was explicitly created;
@@ -133,19 +155,23 @@ impl ShamirDb {
                     Ok(None) => Ok(ResourceMeta::default()),
                     Err(e) => {
                         log::warn!(
-                            "resource_meta: failed to load function folder '{}' meta: {e}",
-                            path_key
+                            "resource_meta: failed to load function folder '{}' meta: {}",
+                            escape_resource_diagnostic(&path_key),
+                            escape_resource_diagnostic(&e.to_string())
                         );
                         Err(e)
                     }
                 }
             }
-            ResourcePath::FunctionNamespace => {
+            ResourcePathRef::FunctionNamespace => {
                 match self.system_store.load_setting("fn_namespace_meta").await {
                     Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
                     Ok(None) => Ok(ResourceMeta::default()), // genuinely absent — still open by design
                     Err(e) => {
-                        log::warn!("resource_meta: failed to load function namespace meta: {e}");
+                        log::warn!(
+                            "resource_meta: failed to load function namespace meta: {}",
+                            escape_resource_diagnostic(&e.to_string())
+                        );
                         Err(e)
                     }
                 }
@@ -167,7 +193,7 @@ impl ShamirDb {
             // to root" (creating a top-level database) was already
             // narrowed to owner-only (task #552). An operator who wants
             // open listing can explicitly `chmod` via `set_resource_meta`.
-            ResourcePath::Root => match self.system_store.load_setting("root_meta").await {
+            ResourcePathRef::Root => match self.system_store.load_setting("root_meta").await {
                 Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
                 Ok(None) => Ok(ResourceMeta {
                     owner: Actor::System,
@@ -175,7 +201,10 @@ impl ShamirDb {
                     mode: 0o751,
                 }),
                 Err(e) => {
-                    log::warn!("resource_meta: failed to load root meta: {e}");
+                    log::warn!(
+                        "resource_meta: failed to load root meta: {}",
+                        escape_resource_diagnostic(&e.to_string())
+                    );
                     Err(e)
                 }
             },
@@ -184,7 +213,7 @@ impl ShamirDb {
             // directive: POSIX-style mode gate, not an OS sandbox). Distinct
             // from Root's default (0o751, task #615/#620) — WasmCompiler's
             // open-Other default is intentional and out of scope here.
-            ResourcePath::WasmCompiler => {
+            ResourcePathRef::WasmCompiler => {
                 match self.system_store.load_setting("wasm_compiler_meta").await {
                     Ok(Some(v)) => Ok(ResourceMeta::from_record(&v)),
                     Ok(None) => Ok(ResourceMeta {
@@ -193,7 +222,10 @@ impl ShamirDb {
                         mode: 0o755,
                     }),
                     Err(e) => {
-                        log::warn!("resource_meta: failed to load wasm compiler meta: {e}");
+                        log::warn!(
+                            "resource_meta: failed to load wasm compiler meta: {}",
+                            escape_resource_diagnostic(&e.to_string())
+                        );
                         Err(e)
                     }
                 }
@@ -212,7 +244,7 @@ impl ShamirDb {
             // alive). Only System can then manage a User resource in the
             // no-directory case; regular access-control on opaque ids is
             // otherwise unchanged.
-            ResourcePath::User { name } => {
+            ResourcePathRef::User { name } => {
                 let owner = self
                     .principal_resolver()
                     .and_then(|r| r.resolve_by_name(name))
@@ -233,9 +265,8 @@ impl ShamirDb {
             // Any OTHER error from `resolve_group_id` (e.g. a real storage/
             // catalogue-read failure) must propagate as `Err`, not collapse
             // into a fail-open default-open ResourceMeta.
-            ResourcePath::Group { name } => {
-                let group_ref = crate::query::admin::GroupRef::Name { name: name.clone() };
-                let group_id = match self.resolve_group_id(&group_ref).await {
+            ResourcePathRef::Group { name } => {
+                let group_id = match self.resolve_group_name(name).await {
                     Ok(id) => id,
                     Err(DbError::NotFound(_)) => return Ok(ResourceMeta::open()),
                     Err(e) => return Err(e),
@@ -248,14 +279,20 @@ impl ShamirDb {
                     }),
                     Ok(None) => Ok(ResourceMeta::open()),
                     Err(e) => {
-                        log::warn!("resource_meta: failed to load group '{}' meta: {e}", name);
+                        log::warn!(
+                            "resource_meta: failed to load group '{}' meta: {}",
+                            escape_resource_diagnostic(name),
+                            escape_resource_diagnostic(&e.to_string())
+                        );
                         Err(e)
                     }
                 }
             }
             // Record/Index already resolved to Table above; if something
             // slips through, return open.
-            ResourcePath::Record { .. } | ResourcePath::Index { .. } => Ok(ResourceMeta::open()),
+            ResourcePathRef::Record { .. } | ResourcePathRef::Index { .. } => {
+                Ok(ResourceMeta::open())
+            }
         }
     }
 

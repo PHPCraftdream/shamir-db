@@ -23,21 +23,19 @@
 //! * **Topology behind a trait** ([`Topology`]) — production code depends on
 //!   `Arc<dyn Topology>`, tests inject [`MockTopology`]. NUMA-aware logic is
 //!   testable without real multi-socket hardware (DI mock).
-//! * **Single-node degradation** — on a single-socket box (most dev machines,
-//!   Windows, CI runners) [`FallbackSingleNodeTopology`] reports one node,
-//!   [`NodeReplicated`] holds one replica, and behaviour is identical to a
-//!   bare `ArcSwap` — zero overhead, no `cfg`-gates at the call site.
+//! * **Single-node degradation** — a one-node topology gives one replica and
+//!   no write mirror loop. Local loads still query the topology and resolve a
+//!   replica before loading the `ArcSwap`, with constant-time routing.
 //! * **False-sharing defence** ([`CachePadded`]) — per-node `ArcSwap` cells
 //!   are aligned to a cache line so independent nodes never ping-pong a shared
 //!   line (Herlihy & Shavit §8; Drepper §6.4).
 //!
-//! # Scope of this version (Фаза 1)
+//! # Scope
 //!
-//! Platform-independent skeleton only: the trait, the mock, the single-node
-//! fallback, the `NodeReplicated` primitive, the cache-padding helper, and the
-//! Linux `cpulist` parser ([`parse_cpulist`]). The real `LinuxTopology`
-//! (`/sys` probe + `sched_setaffinity`) and QEMU-based integration tests land
-//! in Фаза 1b — see `docs/dev-artifacts/research/NUMA-DESIGN-2026-06-29.md`.
+//! Linux discovery and affinity, the single-node fallback, mock topology,
+//! replication, cache padding, and cpulist parsing are implemented. CI has a
+//! QEMU topology smoke harness; full Rust integration inside the guest remains
+//! future work.
 
 mod core;
 mod error;
@@ -47,7 +45,9 @@ pub use core::{CachePadded, CpuId, NodeId, NodeReplicated, Topology};
 pub use error::AffinityError;
 #[cfg(target_os = "linux")]
 pub use platform::LinuxTopology;
-pub use platform::{detect, parse_cpulist, FallbackSingleNodeTopology, MockTopology};
+pub use platform::{
+    detect, detect_cached, parse_cpulist, FallbackSingleNodeTopology, MockTopology,
+};
 
 #[cfg(test)]
 mod tests;

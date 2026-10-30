@@ -35,5 +35,13 @@ path = "tests/h9/function_rooted_result_853fc350.rs"
 name = "validator_rooted_return_853fc350"
 path = "tests/h9/validator_rooted_return_853fc350.rs"
 
+[[test]]
+name = "renamed_consumers"
+path = "tests/h9/renamed_consumers.rs"
+
+[[test]]
+name = "consumer_compile"
+path = "tests/h9/consumer_compile.rs"
+
 [lints]
 workspace = true

@@ -7,9 +7,9 @@
 //! §5.3; `Documentation/ABI/stable/sysfs-devices-node`).
 //!
 //! The parser is pure (no I/O, no syscalls) so it is fully unit-testable on
-//! every platform — the file reads that feed it live in the forthcoming
-//! `LinuxTopology` (Фаза 1b). It is exposed publicly because it is also useful
-//! standalone for tooling that inspects `/proc` / `/sys` cpu masks.
+//! every platform — `LinuxTopology` reads those files
+//! on Linux. The parser is also useful standalone for tooling that inspects
+//! `/proc` / `/sys` CPU masks.
 
 use crate::core::node::CpuId;
 

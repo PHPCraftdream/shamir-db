@@ -1,6 +1,7 @@
 use std::hint::black_box;
 use std::sync::Arc;
 include!("bench_allocator.rs");
+#[cfg(feature = "fjall")]
 #[path = "engine_perf/boot_k_functions.rs"]
 mod boot_k;
 #[path = "engine_perf/common.rs"]
@@ -383,6 +384,7 @@ fn main() {
     // not something tunable by shrinking N further.
     // --------------------------------------------------------------------
 
+    #[cfg(feature = "fjall")]
     {
         let count = BULK_COUNT;
         let id = format!("bulk_insert_fjall/{count}");
@@ -421,6 +423,7 @@ fn main() {
     // I/O-bound exception: same fjall persistent-backend disk cost as
     // `bulk_insert_fjall` above — every commit hits disk, so calibrated N=1
     // is expected and accepted. Kept at the smallest cell only (BULK_COUNT).
+    #[cfg(feature = "fjall")]
     {
         let count = BULK_COUNT;
         let id = format!("bulk_insert_membuffer_fjall/{count}");
@@ -976,6 +979,7 @@ fn main() {
     }
 
     // ── boot_k_functions: persistent catalogue reopen; helper owns cells ──
+    #[cfg(feature = "fjall")]
     boot_k::register_cells(&mut h);
     h.run();
 }

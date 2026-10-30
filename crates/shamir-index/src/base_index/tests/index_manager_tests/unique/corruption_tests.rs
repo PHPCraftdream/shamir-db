@@ -10,6 +10,68 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
+#[tokio::test]
+async fn borrowed_unique_backfill_matches_owned_and_rejects_duplicates() {
+    let (_, _, borrowed) = create_manager();
+    let (_, _, owned) = create_manager();
+    let def = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    let alice = InnerValue::Str("Alice".to_string());
+    let bob = InnerValue::Str("Bob".to_string());
+    let records = vec![
+        (RecordId::new(), create_test_value(&[(1, alice.clone())])),
+        (RecordId::new(), create_test_value(&[(1, bob.clone())])),
+    ];
+    borrowed
+        .create_unique_index_from_records_borrowed(def.clone(), &records)
+        .await
+        .unwrap();
+    owned
+        .create_unique_index_from_records(def.clone(), records.clone())
+        .await
+        .unwrap();
+    for (value, (id, _)) in [alice.clone(), bob].into_iter().zip(&records) {
+        let borrowed_id = borrowed
+            .lookup_by_unique_index(1001, std::slice::from_ref(&value))
+            .await
+            .unwrap();
+        let owned_id = owned.lookup_by_unique_index(1001, &[value]).await.unwrap();
+        assert_eq!(borrowed_id, Some(*id));
+        assert_eq!(borrowed_id, owned_id);
+    }
+
+    let duplicates = vec![
+        (RecordId::new(), create_test_value(&[(1, alice.clone())])),
+        (RecordId::new(), create_test_value(&[(1, alice.clone())])),
+        (RecordId::new(), create_test_value(&[(1, alice)])),
+    ];
+    let (_, _, borrowed_duplicate) = create_manager();
+    let (_, _, owned_duplicate) = create_manager();
+    let borrowed_err = borrowed_duplicate
+        .create_unique_index_from_records_borrowed(def.clone(), &duplicates)
+        .await
+        .unwrap_err();
+    let owned_err = owned_duplicate
+        .create_unique_index_from_records(def, duplicates.clone())
+        .await
+        .unwrap_err();
+    for error in [borrowed_err, owned_err] {
+        match error {
+            shamir_storage::error::DbError::UniqueIndexCreationFailed(name, count, sample) => {
+                assert_eq!(name, "1001");
+                assert_eq!(count, 3);
+                assert_eq!(sample, "<duplicate indexed values>");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+    assert_eq!(duplicates.len(), 3);
+    assert!(borrowed_duplicate
+        .lookup_by_unique_index(1001, &[InnerValue::Str("Alice".to_string())])
+        .await
+        .unwrap()
+        .is_none());
+}
+
 // ============================================================================
 // validate_unique_for_create_with_defs — unit tests
 // ============================================================================

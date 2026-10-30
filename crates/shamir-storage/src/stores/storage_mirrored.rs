@@ -34,18 +34,8 @@ use crate::types::{KvOp, RecordKey, RecordStream, Store};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
-
-/// System-record prefix — the first 4 bytes of every `RecordId::system`
-/// key (see `shamir_types::types::record_id::RecordId::system` /
-/// `SYSTEM_RECORD_PREFIX`). Kept as a local literal since the constant
-/// itself is private to `shamir-types`; `RecordId::is_system` performs
-/// the equivalent check for the `RecordId` type directly.
-const SYSTEM_RECORD_PREFIX: [u8; 4] = [0, 0, 0, 0];
-
-/// Total byte length of every `RecordId::system(..)`-derived key
-/// (`4`-byte zero prefix + up to 12 name bytes, zero-padded).
-const SYSTEM_KEY_LEN: usize = 16;
 
 /// Allowlist of system-record tags (the trimmed `key[4..16]`, NUL bytes
 /// stripped) that are durable TABLE CONFIGURATION and therefore belong
@@ -171,15 +161,14 @@ const INTERNER_CHUNK_PREFIX: &str = "i.d";
 /// index / vector snapshot keys are ASCII strings like
 /// `"<keyspace>.g0.data.000000"`, never 16 bytes).
 pub fn is_durable_table_config(key: &RecordKey) -> bool {
-    let bytes = key.as_slice();
-    if bytes.len() != SYSTEM_KEY_LEN {
+    let Some(id) = RecordId::try_from_bytes(key.as_slice()) else {
         return false;
-    }
-    if bytes[0..4] != SYSTEM_RECORD_PREFIX {
+    };
+    if !id.is_system() {
         return false;
     }
 
-    let tag_bytes = &bytes[4..16];
+    let tag_bytes = &id.as_bytes()[4..];
     // Trim trailing NUL padding — `RecordId::system` zero-pads the
     // 12-byte name field, so a short tag like "internals" is stored
     // as "internals\0\0\0".

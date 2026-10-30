@@ -14,7 +14,9 @@
 //!     password: Zeroizing::new(b"correct horse battery staple".to_vec()),
 //!     accept_new_host: true,
 //!     trusted_pin: None,
+//!     connect_timeout: None,
 //!     handshake_timeout: None,
+//!     request_timeout: None,
 //! })
 //! .await?;
 //!
@@ -44,6 +46,7 @@ pub use client::subscription;
 pub use client::subscription::SubscriptionHandle;
 pub use client::{
     bound_until, resolve_host, Client, ConnectLocalOptions, ConnectOptions, ResumeOptions,
+    SecureResumeOptions,
 };
 pub mod visibility;
 pub use error::{ClientError, CloseCause};

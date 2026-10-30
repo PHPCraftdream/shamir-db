@@ -17,6 +17,7 @@ mod policy;
 mod resource_meta;
 mod resource_path;
 
+pub use super::resource_path_ref::*;
 pub use access_error::*;
 pub use action::*;
 pub use identity::*;

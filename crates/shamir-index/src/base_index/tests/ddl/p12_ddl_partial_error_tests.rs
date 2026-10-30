@@ -11,20 +11,27 @@
 //! later-phase failure and assert the enriched error text.
 
 use crate::base_index::index_definition::IndexDefinition;
+use crate::base_index::index_info::IndexInfo;
 use crate::base_index::index_info_item::IndexInfoItem;
+use crate::base_index::index_keys::{build_index_key_from_record, build_posting_key};
 use crate::base_index::index_manager::IndexManager;
+use crate::base_index::index_record_key::IndexRecordKey;
+use crate::base_index::sorted_index_definition::SortedIndexDefinition;
+use crate::base_index::sorted_index_manager::SortedIndexManager;
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
+use shamir_tunables::store_defaults::{FULL_SCAN_BATCH, MAINT_SCAN_BATCH};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::common::new_map;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 // Same underlying type as `shamir_storage::types::RecordStream` (which is
 // `pub(crate)`). Defining our own alias works because Rust type aliases are
@@ -43,6 +50,9 @@ struct FaultyStore {
     set_count: AtomicU64,
     /// When `true`, the next `remove_many` call returns an error.
     fail_remove_many: AtomicBool,
+    remove_batches: Mutex<Vec<usize>>,
+    fail_remove_on_nth: AtomicU64,
+    remove_count: AtomicU64,
 }
 
 impl FaultyStore {
@@ -53,6 +63,9 @@ impl FaultyStore {
             fail_set_on_nth: AtomicU64::new(0),
             set_count: AtomicU64::new(0),
             fail_remove_many: AtomicBool::new(false),
+            remove_batches: Mutex::new(Vec::new()),
+            fail_remove_on_nth: AtomicU64::new(0),
+            remove_count: AtomicU64::new(0),
         }
     }
 }
@@ -91,7 +104,11 @@ impl Store for FaultyStore {
         self.inner.set_many(items).await
     }
     async fn remove_many(&self, keys: Vec<RecordKey>) -> DbResult<Vec<bool>> {
-        if self.fail_remove_many.load(Ordering::SeqCst) {
+        self.remove_batches.lock().unwrap().push(keys.len());
+        let count = self.remove_count.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.fail_remove_many.load(Ordering::SeqCst)
+            || count == self.fail_remove_on_nth.load(Ordering::SeqCst)
+        {
             return Err(DbError::Storage("injected remove_many failure".to_string()));
         }
         self.inner.remove_many(keys).await
@@ -101,6 +118,126 @@ impl Store for FaultyStore {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+#[tokio::test]
+async fn paged_drop_sweeps_preserve_neighbors() {
+    let faulty = Arc::new(FaultyStore::new(Arc::new(InMemoryStore::new())));
+    let store: Arc<dyn Store> = faulty.clone();
+    let regular = IndexManager::new(Arc::new(InMemoryStore::new()), store.clone())
+        .await
+        .unwrap();
+    regular
+        .create_index(IndexDefinition::new(41, vec![IndexInfoItem::new(vec![1])]))
+        .await
+        .unwrap();
+    let sorted = SortedIndexManager::new(store.clone()).await.unwrap();
+    sorted
+        .register(SortedIndexDefinition::new(42, vec![1]))
+        .await
+        .unwrap();
+    for (prefix, count) in [
+        (
+            IndexRecordKey::new(false, 41).to_prefix_bytes(),
+            FULL_SCAN_BATCH + 1,
+        ),
+        (
+            Bytes::copy_from_slice(&shamir_types::core::sorted_index_layout::sorted_prefix(42)),
+            MAINT_SCAN_BATCH + 1,
+        ),
+    ] {
+        for n in 0..count {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(&(n as u64).to_be_bytes());
+            store
+                .set(Bytes::from(key).into(), Bytes::new())
+                .await
+                .unwrap();
+        }
+    }
+    let neighbor = Bytes::from_static(b"unrelated-neighbor");
+    store
+        .set(neighbor.clone().into(), Bytes::from_static(b"keep"))
+        .await
+        .unwrap();
+    regular.drop_index(41, None, None).await.unwrap();
+    let regular_batches = std::mem::take(&mut *faulty.remove_batches.lock().unwrap());
+    assert!(regular_batches.len() >= 2);
+    assert!(regular_batches.iter().all(|n| *n <= FULL_SCAN_BATCH));
+    sorted.drop_index(42, None, None).await.unwrap();
+    let sorted_batches = std::mem::take(&mut *faulty.remove_batches.lock().unwrap());
+    assert!(sorted_batches.len() >= 2);
+    assert!(sorted_batches.iter().all(|n| *n <= MAINT_SCAN_BATCH));
+    assert_eq!(
+        store.get(neighbor.into()).await.unwrap(),
+        Bytes::from_static(b"keep")
+    );
+    assert_eq!(regular.entry_count(41, false).await.unwrap(), 0);
+    let sorted_prefix =
+        Bytes::copy_from_slice(&shamir_types::core::sorted_index_layout::sorted_prefix(42));
+    assert!(store
+        .scan_prefix_stream(sorted_prefix, MAINT_SCAN_BATCH)
+        .next()
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn drop_failure_after_first_page_recovers_without_touching_neighbor() {
+    let faulty = Arc::new(FaultyStore::new(Arc::new(InMemoryStore::new())));
+    let store: Arc<dyn Store> = faulty.clone();
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let manager = IndexManager::new(data.clone(), store.clone())
+        .await
+        .unwrap();
+    manager
+        .create_index(IndexDefinition::new(41, vec![IndexInfoItem::new(vec![1])]))
+        .await
+        .unwrap();
+    let prefix = IndexRecordKey::new(false, 41).to_prefix_bytes();
+    let mut keys = Vec::new();
+    for n in 0..(FULL_SCAN_BATCH + 1) {
+        let mut key = prefix.to_vec();
+        key.extend_from_slice(&(n as u64).to_be_bytes());
+        let key = Bytes::from(key);
+        store.set(key.clone().into(), Bytes::new()).await.unwrap();
+        keys.push(key);
+    }
+    let neighbor = Bytes::from_static(b"unrelated-neighbor");
+    store
+        .set(neighbor.clone().into(), Bytes::from_static(b"keep"))
+        .await
+        .unwrap();
+    faulty.remove_count.store(0, Ordering::SeqCst);
+    faulty.fail_remove_on_nth.store(2, Ordering::SeqCst);
+    assert!(manager.drop_index(41, None, None).await.is_err());
+    assert_eq!(faulty.remove_count.load(Ordering::SeqCst), 2);
+    assert!(store.get(keys[0].clone().into()).await.is_err());
+    assert!(store
+        .get(keys[FULL_SCAN_BATCH].clone().into())
+        .await
+        .is_ok());
+    let tombstones = IndexManager::load_dropping_set_standalone(false, &store)
+        .await
+        .unwrap();
+    assert!(tombstones.iter().any(|(name, _)| *name == 41));
+    drop(manager);
+    faulty.fail_remove_on_nth.store(0, Ordering::SeqCst);
+    let recovered = IndexManager::new(data, store.clone()).await.unwrap();
+    assert!(store
+        .scan_prefix_stream(prefix, FULL_SCAN_BATCH)
+        .next()
+        .await
+        .is_none());
+    assert_eq!(
+        store.get(neighbor.into()).await.unwrap(),
+        Bytes::from_static(b"keep")
+    );
+    assert!(IndexManager::load_dropping_set_standalone(false, &store)
+        .await
+        .unwrap()
+        .is_empty());
+    drop(recovered);
+}
 
 fn make_value(field_key: u64, field_val: &str) -> InnerValue {
     let mut map = new_map();
@@ -219,10 +356,6 @@ async fn p12_create_index_phase3_persist_failure_enriched() {
 /// The error must mention the tombstone and that recovery will resume.
 #[tokio::test]
 async fn p12_drop_index_sweep_failure_enriched() {
-    use crate::base_index::index_info::IndexInfo;
-    use crate::base_index::index_keys::{build_index_key_from_record, build_posting_key};
-    use shamir_types::types::record_id::RecordId;
-
     let faulty = Arc::new(FaultyStore::new(
         Arc::new(InMemoryStore::new()) as Arc<dyn Store>
     ));

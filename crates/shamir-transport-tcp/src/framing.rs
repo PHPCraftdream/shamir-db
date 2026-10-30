@@ -184,15 +184,16 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     payload: &[u8],
 ) -> Result<(), FrameError> {
-    if payload.len() > MAX_FRAME_SIZE_DEFAULT {
-        return Err(FrameError::TooLarge {
-            actual: payload.len(),
-            max: MAX_FRAME_SIZE_DEFAULT,
-        });
-    }
-    if payload.is_empty() {
-        return Err(FrameError::EmptyPayload);
-    }
+    write_frame_with_cap(writer, payload, MAX_FRAME_SIZE_DEFAULT).await
+}
+
+/// Write a data frame subject to an explicit payload cap.
+pub async fn write_frame_with_cap<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+    max_frame_size: usize,
+) -> Result<(), FrameError> {
+    validate_payload_len(payload.len(), max_frame_size)?;
     let len = payload.len() as u32;
     // Holds the secret-bearing envelope copy: wiped on drop.
     let mut buf = Zeroizing::new(Vec::with_capacity(4 + payload.len()));
@@ -227,15 +228,17 @@ pub async fn write_frame_into<W: AsyncWrite + Unpin>(
     payload: &[u8],
     scratch: &mut Vec<u8>,
 ) -> Result<(), FrameError> {
-    if payload.len() > MAX_FRAME_SIZE_DEFAULT {
-        return Err(FrameError::TooLarge {
-            actual: payload.len(),
-            max: MAX_FRAME_SIZE_DEFAULT,
-        });
-    }
-    if payload.is_empty() {
-        return Err(FrameError::EmptyPayload);
-    }
+    write_frame_into_with_cap(writer, payload, scratch, MAX_FRAME_SIZE_DEFAULT).await
+}
+
+/// Write using reusable storage and an explicit payload cap.
+pub async fn write_frame_into_with_cap<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    payload: &[u8],
+    scratch: &mut Vec<u8>,
+    max_frame_size: usize,
+) -> Result<(), FrameError> {
+    validate_payload_len(payload.len(), max_frame_size)?;
     let len = payload.len() as u32;
     scratch.clear();
     scratch.reserve(4 + payload.len());
@@ -279,6 +282,15 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
     writer: &mut W,
     buf: &[u8],
 ) -> Result<(), FrameError> {
+    write_frame_prereserved_with_cap(writer, buf, MAX_FRAME_SIZE_DEFAULT).await
+}
+
+/// Write a preframed buffer subject to an explicit payload cap.
+pub async fn write_frame_prereserved_with_cap<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    buf: &[u8],
+    max_frame_size: usize,
+) -> Result<(), FrameError> {
     // Defensive: verify the length prefix matches the buffer size. This
     // catches caller bugs that would silently produce corrupt frames.
     // The check is O(1) (two loads + one comparison) — negligible vs. the
@@ -292,10 +304,10 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
     }
     // The payload length on the wire must match what's in the buffer.
     let actual_payload = buf.len() - 4;
-    if declared_len > MAX_FRAME_SIZE_DEFAULT {
+    if declared_len > max_frame_size {
         return Err(FrameError::TooLarge {
             actual: declared_len,
-            max: MAX_FRAME_SIZE_DEFAULT,
+            max: max_frame_size,
         });
     }
     if declared_len != actual_payload {
@@ -305,5 +317,20 @@ pub async fn write_frame_prereserved<W: AsyncWrite + Unpin>(
     }
     writer.write_all(buf).await?;
     writer.flush().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "tests/framing_length_tests.rs"]
+mod framing_length_tests;
+
+fn validate_payload_len(len: usize, cap: usize) -> Result<(), FrameError> {
+    let max = cap.min(u32::MAX as usize).min(usize::MAX - 4);
+    if len > max {
+        return Err(FrameError::TooLarge { actual: len, max });
+    }
+    if len == 0 {
+        return Err(FrameError::EmptyPayload);
+    }
     Ok(())
 }

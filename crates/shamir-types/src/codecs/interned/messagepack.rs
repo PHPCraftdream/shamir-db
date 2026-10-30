@@ -145,11 +145,14 @@ fn read_str<'a>(cur: &mut std::io::Cursor<&'a [u8]>, len: usize) -> Result<&'a s
 fn read_bin(cur: &mut std::io::Cursor<&[u8]>, len: usize) -> Result<Vec<u8>, CodecError> {
     let pos = cur.position() as usize;
     let data = cur.get_ref();
-    if pos + len > data.len() {
-        return Err(CodecError::Decode("unexpected EOF reading binary".into()));
-    }
-    let v = data[pos..pos + len].to_vec();
-    cur.set_position((pos + len) as u64);
+    let end = pos
+        .checked_add(len)
+        .ok_or_else(|| CodecError::Decode("unexpected EOF reading binary".into()))?;
+    let v = data
+        .get(pos..end)
+        .ok_or_else(|| CodecError::Decode("unexpected EOF reading binary".into()))?
+        .to_vec();
+    cur.set_position(end as u64);
     Ok(v)
 }
 
@@ -654,10 +657,11 @@ pub fn merge_storage_bytes(
         // If this key is being overridden by set_map, emit the new value bytes;
         // otherwise copy the old value bytes verbatim (round-trip stable).
         if let Some(new_val) = set_map.get(&InternerKey::new(entry.id)) {
-            let new_val_bytes = new_val.to_bytes().map_err(|e| {
-                CodecError::Encode(format!("merge_storage_bytes: value encode error: {}", e))
-            })?;
-            buf.extend_from_slice(&new_val_bytes);
+            new_val
+                .serialize(&mut rmp_serde::Serializer::new(&mut buf))
+                .map_err(|e| {
+                    CodecError::Encode(format!("merge_storage_bytes: value encode error: {}", e))
+                })?;
         } else {
             buf.extend_from_slice(&old_bytes[entry.val_start..entry.val_end]);
         }
@@ -667,16 +671,15 @@ pub fn merge_storage_bytes(
     for (key, val) in &new_keys {
         // Write the key as InternerKey::serialize → msgpack bin (variable-width LE).
         // This is the exact same encoding the storage codec uses for keys.
-        let key_bytes = rmp_serde::to_vec(key).map_err(|e| {
-            CodecError::Encode(format!("merge_storage_bytes: key encode error: {}", e))
-        })?;
-        buf.extend_from_slice(&key_bytes);
+        key.serialize(&mut rmp_serde::Serializer::new(&mut buf))
+            .map_err(|e| {
+                CodecError::Encode(format!("merge_storage_bytes: key encode error: {}", e))
+            })?;
 
-        // Write the value.
-        let val_bytes = val.to_bytes().map_err(|e| {
-            CodecError::Encode(format!("merge_storage_bytes: value encode error: {}", e))
-        })?;
-        buf.extend_from_slice(&val_bytes);
+        val.serialize(&mut rmp_serde::Serializer::new(&mut buf))
+            .map_err(|e| {
+                CodecError::Encode(format!("merge_storage_bytes: value encode error: {}", e))
+            })?;
     }
 
     Ok(Bytes::from(buf))
