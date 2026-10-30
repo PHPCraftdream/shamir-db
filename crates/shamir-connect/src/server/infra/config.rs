@@ -1,6 +1,7 @@
 //! Server-side configuration: per-listener policies and global secrets.
 
 use crate::common::types::BindingMode;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Per-listener policy describing the **single** acceptable `binding_mode`.
 ///
@@ -23,7 +24,9 @@ impl ListenerPolicy {
 /// on real deployments.
 ///
 /// Custom [`Debug`] impl redacts both secrets (spec IMPL §4 NORMATIVE).
-#[derive(Clone)]
+/// Dropping or explicitly zeroizing this value wipes its owned arrays, not
+/// copies held by callers or expanded cipher schedules.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ServerSecrets {
     /// Anti-enumeration HKDF IKM (rotated on schedule).
     pub server_secret: [u8; 32],

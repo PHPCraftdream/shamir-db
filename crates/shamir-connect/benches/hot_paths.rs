@@ -574,11 +574,11 @@ fn main() {
     }
 
     // Wire framing for ticket.
-    let wire_bytes = wire.to_bytes();
+    let wire_bytes = wire.to_bytes().unwrap();
     {
         let wire = wire.clone();
         h.bench("protocol_construction/ticket_wire_to_bytes", move || {
-            let bytes = wire.to_bytes();
+            let bytes = wire.to_bytes().unwrap();
             black_box(bytes);
         });
     }

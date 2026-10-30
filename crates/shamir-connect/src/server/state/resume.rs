@@ -10,7 +10,9 @@
 //! IMPLEMENTATION_GUIDE NORMATIVE) — wired here as a trait so callers can
 //! plug in their durable backend.
 
-use crate::common::crypto::{aes256gcm_cipher, random_array, random_bytes, Aes256GcmCipher};
+use crate::common::crypto::{
+    aes256gcm_cipher, try_random_array, try_random_bytes, Aes256GcmCipher,
+};
 use crate::common::error::{Error, Result};
 use crate::common::time::UnixNanos;
 use crate::common::types::{limits, BindingMode, TransportKind};
@@ -19,7 +21,7 @@ use crate::server::rotation::ServerIdentityState;
 use crate::server::session::{Session, SessionPermissions, SessionStore, MAX_SESSIONS_PER_USER};
 use crate::server::ticket::{
     check_anti_downgrade, decrypt_ticket_with_ciphers, encrypt_ticket, encrypt_ticket_with_cipher,
-    ticket_limits, validate_ticket_enums, TicketPlain, TicketWire,
+    ticket_limits, validate_ticket_enums, TicketPlain, TicketWire, TICKET_VERSION,
 };
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
@@ -113,7 +115,10 @@ impl ConsumedCounterStore for InMemoryConsumedCounters {
         new_counter: u64,
     ) -> AdvanceOutcome {
         let key = (*user_id, *family_id);
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = match UnixNanos::try_now() {
+            Ok(now) => now.as_u64(),
+            Err(_) => return AdvanceOutcome::StorageFailed,
+        };
         let mut accepted = AdvanceOutcome::Replayed;
         self.map
             .entry(key)
@@ -141,16 +146,17 @@ impl ConsumedCounterStore for InMemoryConsumedCounters {
 ///
 /// **Optim #3:** AES-256-GCM ciphers are pre-scheduled once at construction
 /// time and reused across every resume. Rebuilding the key schedule per
-/// call (~10% of AES-GCM total time) is eliminated.
+/// call (~10% of AES-GCM total time) is eliminated. Owned raw keys are wiped
+/// on drop; caller-owned copies and expanded cipher schedules are not covered.
 pub struct ResumeConfig {
     /// Current `ticket_key` for AES-GCM. Private (RV-CONNECT-B11F48CA):
     /// [`Self::ciphers`] permanently initializes its `OnceLock` caches, so a
     /// public mutable key would let callers swap the key AFTER the caches
     /// were warmed, leaving ciphers bound to the old key active. Set once at
     /// construction; read via [`Self::ticket_key`] / [`Self::ticket_key_previous`].
-    ticket_key: [u8; 32],
+    ticket_key: zeroize::Zeroizing<[u8; 32]>,
     /// Optional previous `ticket_key` for 24h overlap. Private, see above.
-    ticket_key_previous: Option<[u8; 32]>,
+    ticket_key_previous: Option<zeroize::Zeroizing<[u8; 32]>>,
     /// Strict mode: refuse browser → native upgrade (spec §6.1).
     pub allow_browser_ticket_upgrade: bool,
     /// Refuse plain → TLS upgrade (spec §6.4).
@@ -171,8 +177,8 @@ impl ResumeConfig {
         disable_plain_ticket_upgrade: bool,
     ) -> Self {
         Self {
-            ticket_key,
-            ticket_key_previous,
+            ticket_key: zeroize::Zeroizing::new(ticket_key),
+            ticket_key_previous: ticket_key_previous.map(zeroize::Zeroizing::new),
             allow_browser_ticket_upgrade,
             disable_plain_ticket_upgrade,
             cached_current: std::sync::OnceLock::new(),
@@ -188,7 +194,7 @@ impl ResumeConfig {
 
     /// Previous ticket key, if configured (read-only view).
     pub fn ticket_key_previous(&self) -> Option<&[u8; 32]> {
-        self.ticket_key_previous.as_ref()
+        self.ticket_key_previous.as_deref()
     }
 
     /// Get (lazily-constructed, then cached) AES-GCM ciphers for the current
@@ -299,7 +305,7 @@ pub fn process_resume(
     let wire = TicketWire::from_bytes(request.ticket_wire_bytes).map_err(|_| Error::AuthFailed)?;
 
     // Step 2: validate envelope.version (we only accept v2).
-    if wire.version != 2 {
+    if wire.version != TICKET_VERSION {
         return Err(Error::AuthFailed);
     }
 
@@ -399,24 +405,10 @@ pub fn process_resume(
     // `docs/dev-artifacts/design/resumption-ticket-channel-binding-512-decision.md`
     // for the full RFC 9266 reasoning and threat-model analysis.
 
-    // Step 11: atomic per-(user, family) counter CAS.
-    // Optim #2: `plain.ticket_family_id` is `ByteArray<16>` — no copy/parse.
-    let family_id: [u8; 16] = *plain.ticket_family_id.as_ref();
-    match counters.try_advance(&user_id, &family_id, plain.family_counter) {
-        AdvanceOutcome::Accepted => {}
-        AdvanceOutcome::Replayed => return Err(Error::AuthFailed),
-        AdvanceOutcome::StorageFailed => {
-            // RV-CONNECT-ECE3E157: persistence failure is NOT a replay.
-            log::warn!(
-                "resume: consumed-counter persistence failed (family_counter={})",
-                plain.family_counter
-            );
-            return Err(Error::StorageFailed);
-        }
-    }
+    let session_id = try_random_array::<{ limits::SESSION_ID_BYTES }>()?;
 
+    // Prepare all fallible refresh work before consuming the replay counter.
     // Step 12: create new Session.
-    let session_id = random_array::<{ limits::SESSION_ID_BYTES }>();
     let expires_at_ns = now_ns.saturating_add(session_max_age_ns);
 
     // Step 12 + 13 fused.
@@ -442,7 +434,7 @@ pub fn process_resume(
     // read path) — the live Session below is built from `state`, not `plain`.
     let (resumption_ticket, resumption_expires_at_ns) = if issue_refresh {
         let new_plain = TicketPlain {
-            version: 2,
+            version: TICKET_VERSION,
             user_id: plain.user_id,           // ByteArray<16>: Copy
             username_nfc: plain.username_nfc, // moved (ticket's own field)
             transport_kind_at_auth: transport_at_auth,
@@ -455,13 +447,26 @@ pub fn process_resume(
             identity_key_version: plain.identity_key_version,
         };
         // Optim #3: reuse cached current cipher for re-encrypt.
-        let wire = encrypt_ticket_with_cipher(current_cipher, &new_plain)
-            .map_err(|_| Error::AuthFailed)?;
+        let wire = encrypt_ticket_with_cipher(current_cipher, &new_plain)?;
 
-        (Some(wire.to_bytes()), Some(new_plain.expires_at_ns))
+        (Some(wire.to_bytes()?), Some(new_plain.expires_at_ns))
     } else {
         (None, None)
     };
+
+    // Consume the counter only after entropy and ticket serialization succeed.
+    let family_id: [u8; 16] = *plain.ticket_family_id.as_ref();
+    match counters.try_advance(&user_id, &family_id, plain.family_counter) {
+        AdvanceOutcome::Accepted => {}
+        AdvanceOutcome::Replayed => return Err(Error::AuthFailed),
+        AdvanceOutcome::StorageFailed => {
+            log::warn!(
+                "resume: consumed-counter persistence failed (family_counter={})",
+                plain.family_counter
+            );
+            return Err(Error::StorageFailed);
+        }
+    }
 
     // Step 12: build the Session from the directory's CURRENT state —
     // `state.username` / `state.roles` / `state.superuser` — NOT from the
@@ -523,10 +528,10 @@ pub fn issue_initial_ticket(
     ttl_ns: u64,
 ) -> Result<(Vec<u8>, u64)> {
     let mut family = [0u8; limits::TICKET_FAMILY_ID_BYTES];
-    random_bytes(&mut family);
+    try_random_bytes(&mut family)?;
 
     let plain = TicketPlain {
-        version: 2,
+        version: TICKET_VERSION,
         user_id: serde_bytes::ByteArray::new(user_id),
         username_nfc,
         transport_kind_at_auth,
@@ -539,7 +544,7 @@ pub fn issue_initial_ticket(
         identity_key_version,
     };
     let wire = encrypt_ticket(ticket_key, &plain).map_err(|_| Error::AuthFailed)?;
-    Ok((wire.to_bytes(), plain.expires_at_ns))
+    Ok((wire.to_bytes()?, plain.expires_at_ns))
 }
 
 /// Lookup adapter: implement [`UserStateLookup`] for any closure.

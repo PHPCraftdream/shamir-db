@@ -28,6 +28,13 @@ use crate::user_directory::FjallUserDirectory;
 
 use crate::bootstrap::BootstrapOutcome;
 
+/// Read the boot clock without substituting a timestamp on failure.
+pub(super) fn boot_now_ns() -> Result<u64, BootError> {
+    Ok(UnixNanos::try_now()
+        .map_err(|e| BootError::ServerMeta(e.to_string()))?
+        .as_u64())
+}
+
 /// Per-listener loop dispatch — picked at config-validation time, used at
 /// boot to decide which `accept_loop_*` to spawn.
 pub(super) enum AcceptPath {

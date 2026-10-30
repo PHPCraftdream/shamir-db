@@ -9,8 +9,8 @@
 //! drift in the composite constructions fails LOUDLY, and a second
 //! implementation (browser/TS SDK) has concrete bytes to check against.
 //!
-//! Every `expected` value was captured by running the real function once with
-//! the fixed inputs (see commit message / §16 note), NOT hand-computed.
+//! Most `expected` values were captured by running the real function once;
+//! the change-password and bootstrap vectors below are independently assembled.
 //!
 //! Coherent fixed scenario: all vectors share the same username="alice",
 //! nonces, salt, kdf_params=DEFAULT, transport/binding/exporter as
@@ -18,6 +18,8 @@
 //! (auth_message → Argon2id → SCRAM proofs → identity_sig → …).
 
 use crate::common::auth_message::{AuthMessage, AuthMessageInputs};
+use crate::common::bootstrap_message::build_bootstrap_input;
+use crate::common::changepw::{build_auth_message_cp, ChangePwAuthMessageInputs};
 use crate::common::crypto::{
     aes256gcm_decrypt, aes256gcm_encrypt, argon2id, ed25519_verify_strict, Ed25519Keypair,
 };
@@ -30,6 +32,78 @@ use crate::common::scram::{build_client_proof, build_server_signature, DerivedKe
 use crate::common::types::{BindingMode, ProtocolVersion, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::server::ticket::TicketPlain;
+
+// Independent layouts assembled from the documented field widths; bootstrap's
+// SHA-256 was computed with Python hashlib, not the production builder.
+#[derive(serde::Deserialize)]
+struct ChangePwVector {
+    username: String,
+    session_id_hex: String,
+    client_nonce_hex: String,
+    server_nonce_hex: String,
+    salt_hex: String,
+    channel_binding_hex: String,
+    transport_kind: u8,
+    binding_mode: u8,
+    memory_kb: u32,
+    time: u32,
+    parallelism: u32,
+    argon2_version: u8,
+    expected_hex: String,
+}
+
+#[test]
+fn change_password_complete_byte_vector() {
+    let v: ChangePwVector = toml::from_str(include_str!(
+        "../../../../test-vectors/changepw_message.toml"
+    ))
+    .unwrap();
+    let user = NormalizedUsername::from_raw(&v.username).unwrap();
+    let actual = build_auth_message_cp(ChangePwAuthMessageInputs {
+        username: &user,
+        session_id: &hex_to_array(&v.session_id_hex),
+        client_nonce_cp: &hex_to_array(&v.client_nonce_hex),
+        server_nonce_cp: &hex_to_array(&v.server_nonce_hex),
+        salt: &hex_to_array(&v.salt_hex),
+        kdf_params: KdfParams {
+            memory_kb: v.memory_kb,
+            time: v.time,
+            parallelism: v.parallelism,
+            argon2_version: v.argon2_version,
+        },
+        transport_kind: TransportKind::from_u8(v.transport_kind).unwrap(),
+        binding_mode: BindingMode::from_u8(v.binding_mode).unwrap(),
+        channel_binding_at_auth: &hex_to_array(&v.channel_binding_hex),
+    })
+    .unwrap();
+    assert_eq!(hex::encode(actual), v.expected_hex);
+}
+
+#[derive(serde::Deserialize)]
+struct BootstrapVector {
+    server_pub_key_hex: String,
+    transport_kind: u8,
+    tls_exporter_hex: String,
+    client_nonce_hex: String,
+    server_time_ns: u64,
+    expected_hex: String,
+}
+
+#[test]
+fn bootstrap_complete_byte_vector() {
+    let v: BootstrapVector = toml::from_str(include_str!(
+        "../../../../test-vectors/bootstrap_message.toml"
+    ))
+    .unwrap();
+    let actual = build_bootstrap_input(
+        &hex_to_array(&v.server_pub_key_hex),
+        TransportKind::from_u8(v.transport_kind).unwrap(),
+        &hex_to_array(&v.tls_exporter_hex),
+        &hex_to_array(&v.client_nonce_hex),
+        v.server_time_ns,
+    );
+    assert_eq!(hex::encode(actual), v.expected_hex);
+}
 
 // --- shared deserialization helpers ---
 

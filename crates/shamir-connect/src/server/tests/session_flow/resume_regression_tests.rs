@@ -12,6 +12,148 @@ use crate::server::resume::{
 };
 use crate::server::rotation::ServerIdentityState;
 use crate::server::session::SessionStore;
+use crate::server::ticket::{
+    decrypt_ticket, encrypt_ticket, encrypt_ticket_with_cipher, TicketPlain, TicketWire,
+};
+
+#[test]
+fn resume_entropy_failure_does_not_consume_counter_or_publish_session() {
+    let cfg = config();
+    let users = lookup_map();
+    let store = SessionStore::new();
+    let counters = InMemoryConsumedCounters::new();
+    let identity = ServerIdentityState::fresh();
+    let now = ns::HOUR * 1_000;
+    let (ticket, _) = issue_initial_ticket(
+        cfg.ticket_key(),
+        USER,
+        "u".into(),
+        BindingMode::TlsExporter.as_u8(),
+        BindingMode::TlsExporter.as_u8(),
+        [0x77; 32],
+        0,
+        now,
+        ns::HOUR,
+    )
+    .unwrap();
+    let req = request(&ticket, [0xab; 32]);
+    let result = crate::common::crypto::with_entropy_failure_after(1, || {
+        process_resume(
+            &req,
+            &cfg,
+            &counters,
+            &users,
+            &store,
+            &identity,
+            24 * ns::HOUR,
+            1000,
+            now,
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(Error::Environment(
+            crate::common::error::EnvironmentError::Entropy
+        ))
+    ));
+    assert!(counters.is_empty());
+    assert_eq!(store.len(), 0);
+    assert!(process_resume(
+        &req,
+        &cfg,
+        &counters,
+        &users,
+        &store,
+        &identity,
+        24 * ns::HOUR,
+        1000,
+        now
+    )
+    .is_ok());
+}
+
+#[test]
+fn warmed_rotation_ciphers_accept_both_keys() {
+    let cfg = ResumeConfig::new([1; 32], Some([2; 32]), true, false);
+    let plain = TicketPlain {
+        version: 2,
+        user_id: [1; 16].into(),
+        username_nfc: "alice".into(),
+        transport_kind_at_auth: 1,
+        binding_mode_at_auth: 1,
+        channel_binding_at_auth: [2; 32].into(),
+        ticket_family_id: [3; 16].into(),
+        original_auth_at_ns: 1,
+        expires_at_ns: 2,
+        family_counter: 0,
+        identity_key_version: 0,
+    };
+    let (current, previous) = cfg.ciphers();
+    let current_wire = encrypt_ticket(&[1; 32], &plain).unwrap();
+    let previous_wire = encrypt_ticket(&[2; 32], &plain).unwrap();
+    assert_eq!(
+        crate::server::ticket::decrypt_ticket_with_ciphers(current, previous, &current_wire)
+            .unwrap(),
+        plain
+    );
+    let (current, previous) = cfg.ciphers();
+    assert_eq!(
+        crate::server::ticket::decrypt_ticket_with_ciphers(current, previous, &previous_wire)
+            .unwrap(),
+        plain
+    );
+    assert_eq!(cfg.ticket_key(), &[1; 32]);
+    assert_eq!(cfg.ticket_key_previous(), Some(&[2; 32]));
+}
+
+#[test]
+fn ticket_wire_bounds_and_supported_version() {
+    for len in [0, u16::MAX as usize] {
+        let wire = TicketWire {
+            version: 2,
+            nonce: [1; 12],
+            ciphertext: vec![2; len],
+            tag: [3; 16],
+        };
+        assert_eq!(
+            TicketWire::from_bytes(&wire.to_bytes().unwrap()).unwrap(),
+            wire
+        );
+    }
+    let oversized = TicketWire {
+        version: 2,
+        nonce: [1; 12],
+        ciphertext: vec![2; 65536],
+        tag: [3; 16],
+    };
+    assert!(oversized.to_bytes().is_err());
+    let mut plain = TicketPlain {
+        version: 2,
+        user_id: [1; 16].into(),
+        username_nfc: "alice".into(),
+        transport_kind_at_auth: 1,
+        binding_mode_at_auth: 1,
+        channel_binding_at_auth: [2; 32].into(),
+        ticket_family_id: [3; 16].into(),
+        original_auth_at_ns: 1,
+        expires_at_ns: 2,
+        family_counter: 0,
+        identity_key_version: 0,
+    };
+    let key = [4; 32];
+    let wire = encrypt_ticket(&key, &plain).unwrap();
+    assert_eq!(decrypt_ticket(&key, None, &wire).unwrap(), plain);
+    plain.version = 3;
+    assert!(encrypt_ticket(&key, &plain).is_err());
+    assert!(encrypt_ticket_with_cipher(
+        &crate::common::crypto::aes256gcm_cipher(&key).unwrap(),
+        &plain
+    )
+    .is_err());
+    plain.version = 2;
+    plain.username_nfc = "x".repeat(65536);
+    assert!(encrypt_ticket(&key, &plain).is_err());
+}
 
 const USER: [u8; 16] = [0x5au8; 16];
 

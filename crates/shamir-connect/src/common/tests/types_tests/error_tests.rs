@@ -5,7 +5,7 @@
 //! oracle "fails"), so the §14 collapse set can never silently drift.
 
 use crate::common::model::admit::AdmitReject;
-use crate::common::model::error::Error;
+use crate::common::model::error::{EnvironmentError, Error};
 
 use std::mem::discriminant;
 
@@ -45,6 +45,10 @@ fn rv_connect_94e37810_to_wire_collapse_set_oracle() {
     assert_collapse(Error::BootstrapFailed, Error::BootstrapFailed);
 
     // Collapses to AuthFailed (internal cause / disclosure-unsafe).
+    assert_collapse(
+        Error::Environment(EnvironmentError::Entropy),
+        Error::AuthFailed,
+    );
     assert_collapse(Error::ServerAuthFailed, Error::AuthFailed);
     assert_collapse(Error::ServerSignatureInvalid, Error::AuthFailed);
     assert_collapse(Error::ServerIdentityChanged, Error::AuthFailed);

@@ -9,7 +9,9 @@
 //!
 //! This module provides a counting semaphore using `std::sync::atomic`
 //! (no async runtime dependency — it works for both sync and async
-//! Argon2 callers via a blocking `wait()` or non-blocking `try_acquire()`).
+//! Argon2 callers via blocking `acquire()` / `acquire_until()` or non-blocking
+//! `try_acquire()`). Async callers must run blocking acquisition in
+//! `tokio::task::spawn_blocking`, not on an async executor worker.
 //!
 //! Production servers pair this with [`crate::server::rate_limit`] (which
 //! caps `auth_init` arrival rate) so the queue depth in front of the
