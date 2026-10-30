@@ -157,14 +157,13 @@ mod tests {
 
         for _ in 0..n {
             let id = RecordId::from_ts(ts);
-            // Upper 8 bytes must be identical (same ts).
-            assert_eq!(
-                &id.as_bytes()[..8],
-                &RecordId::from_ts(ts).as_bytes()[..8],
-                // This checks layout only — both share the same ts input,
-                // so the first 8 bytes MUST match. We actually verify
-                // against a reference encoding below.
-            );
+            let relative = ts.saturating_sub(1_769_817_600_000_000);
+            let expected = if (0..(1i64 << 32)).contains(&relative) {
+                1i64 << 32
+            } else {
+                relative
+            };
+            assert_eq!(&id.as_bytes()[..8], &expected.to_be_bytes());
             assert!(ids.insert(id), "duplicate RecordId in batch");
 
             let mut tail = [0u8; 8];

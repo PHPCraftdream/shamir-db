@@ -8,9 +8,14 @@
 //! hot paths — enum dispatch monomorphises the `tokenize` call and removes
 //! vtable indirection.
 
+use rustc_hash::FxHasher;
 use shamir_collections::TFxSet;
 use std::borrow::Cow;
+use std::hash::Hasher;
+use std::sync::OnceLock;
 
+use crate::backends::backend::IndexError;
+use crate::fts::ngram_budget;
 use crate::kind::StemLanguage;
 
 pub trait Tokenizer: Send + Sync {
@@ -33,6 +38,14 @@ pub enum TokenizerEnum {
 }
 
 impl TokenizerEnum {
+    /// Tokenize with per-value n-gram limits; returned tokens borrow only from `text`.
+    pub fn try_tokenize<'a>(&self, text: &'a str) -> Result<Vec<Cow<'a, str>>, IndexError> {
+        match self {
+            Self::Ngram(t) => ngram_budget::try_tokenize(text, t.n),
+            Self::Whitespace(_) | Self::Unicode(_) | Self::Full(_) => Ok(self.tokenize(text)),
+        }
+    }
+
     #[inline]
     pub fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
         match self {
@@ -122,41 +135,13 @@ impl Tokenizer for NgramTokenizer {
                     start = Some(i);
                 }
             } else if let Some(s) = start.take() {
-                emit_ngrams(&text[s..i], self.n, &mut tokens);
+                ngram_budget::emit(&text[s..i], self.n, &mut tokens);
             }
         }
         if let Some(s) = start {
-            emit_ngrams(&text[s..], self.n, &mut tokens);
+            ngram_budget::emit(&text[s..], self.n, &mut tokens);
         }
         tokens
-    }
-}
-
-/// Lowercase a word, then emit character n-grams (or the whole word if
-/// shorter than `n`).
-///
-/// Uses `char_indices` to find UTF-8 char boundaries directly in the
-/// lowercased string — no `Vec<char>` allocation, no per-gram iterator
-/// collect. Each n-gram is a `&str` slice of `lowered`; only the final
-/// `Cow::Owned` wrapping touches the heap (one allocation per gram vs.
-/// two previously).
-fn emit_ngrams<'a>(word: &str, n: usize, out: &mut Vec<Cow<'a, str>>) {
-    let lowered = word.to_lowercase();
-    // Collect byte offsets of each char boundary (O(len), one pass).
-    let boundaries: Vec<usize> = lowered
-        .char_indices()
-        .map(|(i, _)| i)
-        .chain(std::iter::once(lowered.len()))
-        .collect();
-    let char_count = boundaries.len() - 1; // boundaries has len+1 entries
-    if char_count <= n {
-        out.push(Cow::Owned(lowered));
-    } else {
-        for i in 0..=char_count - n {
-            let start = boundaries[i];
-            let end = boundaries[i + n];
-            out.push(Cow::Owned(lowered[start..end].to_owned()));
-        }
     }
 }
 
@@ -287,7 +272,6 @@ fn lowerd_str<'a>(cow: &'a Cow<'a, str>) -> &'a str {
 }
 
 fn english_stopwords() -> &'static TFxSet<&'static str> {
-    use std::sync::OnceLock;
     static SET: OnceLock<TFxSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
@@ -302,7 +286,6 @@ fn english_stopwords() -> &'static TFxSet<&'static str> {
 }
 
 fn russian_stopwords() -> &'static TFxSet<&'static str> {
-    use std::sync::OnceLock;
     static SET: OnceLock<TFxSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
@@ -443,10 +426,9 @@ pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> TokenizerEnum {
     }
 }
 
-/// Hash a token to u64 for posting keys.
+/// Hash a token to its persisted posting identity. Change only with an identity
+/// version bump; golden-vector tests guard the existing identity.
 pub fn token_hash(token: &str) -> u64 {
-    use rustc_hash::FxHasher;
-    use std::hash::Hasher;
     let mut h = FxHasher::default();
     h.write(token.as_bytes());
     h.finish()

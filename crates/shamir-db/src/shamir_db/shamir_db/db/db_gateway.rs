@@ -385,24 +385,8 @@ impl ShamirDb {
     /// report / a follow-up would need to intersect via pattern-subsumption
     /// rather than string equality).
     pub(crate) fn build_net_gateway(&self, fn_name: &str) -> Arc<dyn NetGateway> {
-        let net_grants = self.function_meta(fn_name).map(|m| m.net_grants);
-        let effective = match net_grants {
-            // No catalogue entry (builtin, not a user function going
-            // through `CreateFunctionOptions`): fall back to the full
-            // DB-wide allowlist — a different code path from "explicit
-            // empty grants" below.
-            None => self.net_allowlist.to_vec(),
-            // Explicitly empty grants: NO egress at all (task #609).
-            Some(grants) if grants.is_empty() => Vec::new(),
-            // Non-empty grants: intersect with the DB-wide allowlist so the
-            // function is scoped to the OVERLAP, never beyond the DB ceiling.
-            Some(grants) => self
-                .net_allowlist
-                .iter()
-                .filter(|host| grants.contains(host))
-                .cloned()
-                .collect(),
-        };
-        Arc::new(crate::shamir_db::CurlNetGateway::new(effective))
+        let meta = self.function_meta.get(fn_name);
+        self.net_allowlist
+            .gateway(meta.as_ref().map(|m| m.net_grants.as_slice()))
     }
 }

@@ -34,7 +34,8 @@ use std::sync::Arc;
 use thiserror::Error;
 use zeroize::Zeroizing;
 
-use shamir_connect::common::crypto::random_bytes;
+use shamir_connect::common::crypto::try_random_bytes;
+use shamir_connect::common::error::EnvironmentError;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::bootstrap::BootstrapState;
 use shamir_connect::server::config::ServerSecrets;
@@ -173,6 +174,9 @@ struct PersistedTimes {
 /// Errors returned by [`ServerMetaStore`].
 #[derive(Debug, Error)]
 pub enum MetaError {
+    /// Operating system entropy or clock failure.
+    #[error("environment: {0}")]
+    Environment(#[from] EnvironmentError),
     /// fjall keyspace open / get / insert / persist failures.
     #[error("fjall: {0}")]
     Fjall(#[from] fjall::Error),
@@ -279,18 +283,18 @@ impl ServerMetaStore {
 
     /// One-shot durable init.
     fn write_initial_state(&self) -> Result<(), MetaError> {
-        let now = UnixNanos::now().as_u64();
+        let now = UnixNanos::try_now()?.as_u64();
 
         let mut server_secret = [0u8; 32];
-        random_bytes(&mut server_secret);
+        try_random_bytes(&mut server_secret)?;
         let mut lockout_secret = [0u8; 32];
-        random_bytes(&mut lockout_secret);
+        try_random_bytes(&mut lockout_secret)?;
         let mut audit_chain_key = [0u8; 32];
-        random_bytes(&mut audit_chain_key);
+        try_random_bytes(&mut audit_chain_key)?;
         let mut ticket_key = [0u8; 32];
-        random_bytes(&mut ticket_key);
+        try_random_bytes(&mut ticket_key)?;
         let mut ed25519_seed = [0u8; 32];
-        random_bytes(&mut ed25519_seed);
+        try_random_bytes(&mut ed25519_seed)?;
 
         let secrets = PersistedSecrets {
             server_secret: Zeroizing::new(server_secret.to_vec()),
@@ -337,7 +341,7 @@ impl ServerMetaStore {
     }
 
     fn touch_last_started_at(&self) -> Result<(), MetaError> {
-        let now = UnixNanos::now().as_u64();
+        let now = UnixNanos::try_now()?.as_u64();
         let _guard = self.write_lock.lock();
         let mut times: PersistedTimes = match self.get(KEY_TIMES)? {
             Some(t) => t,

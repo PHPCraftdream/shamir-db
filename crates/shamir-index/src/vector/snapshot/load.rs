@@ -12,17 +12,26 @@ use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
 use serde::{Deserialize, Serialize};
 use shamir_storage::types::{KvOp, RecordKey, Store};
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::io::Write;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 use super::codec::{
     chunk_key, manifest_key, map_meta_err, sidecar_key, ChunkHeader, HNSW_RS_VERSION,
-    QUANT_METHOD_SQ8, SNAPSHOT_SUPPORTED_VERSIONS,
 };
+use super::legacy::{decode_manifest, decode_sidecar};
+use super::manifest::{integrity_bytes, integrity_key, validate_basename, verify_integrity};
 use super::quantized_load::load_quantized_graph;
-use super::{OldGenerationChunks, QuantMeta, SnapshotError, SnapshotManifest, SnapshotSidecar};
+use super::{OldGenerationChunks, QuantMeta, SnapshotError, SnapshotManifest};
+
+#[cfg(test)]
+#[path = "tests/replay_tests.rs"]
+mod replay_tests;
+
+const REPLAY_BATCH_LIMIT: usize = 128;
 
 // ============================================================================
 // Load path
@@ -36,21 +45,40 @@ use super::{OldGenerationChunks, QuantMeta, SnapshotError, SnapshotManifest, Sna
 /// counts to drive the prune).
 ///
 /// V5.3 (#412): accepts both v1 and v2 manifests (see
-/// [`SNAPSHOT_SUPPORTED_VERSIONS`]). A v3+ manifest is refused with
+/// [`super::codec::SNAPSHOT_SUPPORTED_VERSIONS`]). A v3+ manifest is refused with
 /// `VersionMismatch`.
 pub async fn read_manifest(
     store: &Arc<dyn Store>,
     keyspace: &str,
 ) -> Result<SnapshotManifest, SnapshotError> {
-    let manifest_bytes = store.get(manifest_key(keyspace)).await?;
-    let manifest: SnapshotManifest = MetaEnvelope::open(&manifest_bytes).map_err(map_meta_err)?;
-    if !SNAPSHOT_SUPPORTED_VERSIONS.contains(&manifest.format_version) {
-        return Err(SnapshotError::VersionMismatch(format!(
-            "snapshot format version {} not in supported set {:?}",
-            manifest.format_version, SNAPSHOT_SUPPORTED_VERSIONS
-        )));
-    }
+    let (manifest, _) = read_metadata(store, keyspace).await?;
     Ok(manifest)
+}
+
+// Keep the verified bytes together: never re-fetch a sidecar after its CRC.
+async fn read_metadata(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+) -> Result<(SnapshotManifest, Bytes), SnapshotError> {
+    let manifest_bytes = store.get(manifest_key(keyspace)).await?;
+    let manifest = decode_manifest(&manifest_bytes)?;
+    let sidecar = store
+        .get(sidecar_key(keyspace, manifest.gen))
+        .await
+        .map_err(|error| match error {
+            shamir_storage::error::DbError::NotFound(_) => {
+                SnapshotError::Corrupt("missing snapshot sidecar".into())
+            }
+            other => other.into(),
+        })?;
+    match store.get(integrity_key(keyspace)).await {
+        Ok(integrity) => verify_integrity(&integrity, &manifest_bytes, &sidecar)?,
+        Err(shamir_storage::error::DbError::NotFound(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    // Legacy snapshots may lack a companion; still reject malformed sidecars.
+    decode_sidecar(&sidecar)?;
+    Ok((manifest, sidecar))
 }
 
 /// Load the snapshot stored under `keyspace` and rebuild a working
@@ -69,9 +97,9 @@ pub async fn read_manifest(
 ///    so `is_fitted == true`, the u8 graph + quantizer + `vectors_u8` are
 ///    all live, and post-load search goes the quantized path.
 ///
-/// Accepts both v1 and v2 sidecars (back-compat). A v1 sidecar has
-/// `quantization == None` and no qgraph sections → the load is identical to
-/// the pre-#412 path.
+/// The v1 and v2 sidecar layouts decode, but graph loading requires the
+/// supported `hnsw_rs` version. Version 0.3.4 is rejected with
+/// `VersionMismatch`; the backend can rebuild from source instead.
 pub async fn load_snapshot(
     store: &Arc<dyn Store>,
     keyspace: &str,
@@ -86,18 +114,38 @@ pub(crate) async fn load_snapshot_with_intent(
     quantization: Option<crate::kind::VectorQuantization>,
 ) -> Result<HnswAdapter, SnapshotError> {
     // ---- 1. manifest -----------------------------------------------------
-    let manifest = read_manifest(store, keyspace).await?;
+    let (manifest, sidecar_bytes) = read_metadata(store, keyspace).await?;
     let gen = manifest.gen;
 
     // ---- 2. sidecar ------------------------------------------------------
-    let sidecar_bytes = store.get(sidecar_key(keyspace, gen)).await?;
-    let sidecar: SnapshotSidecar = MetaEnvelope::open(&sidecar_bytes).map_err(map_meta_err)?;
-    if !SNAPSHOT_SUPPORTED_VERSIONS.contains(&sidecar.format_version) {
-        return Err(SnapshotError::VersionMismatch(format!(
-            "sidecar format version {} not in supported set {:?}",
-            sidecar.format_version, SNAPSHOT_SUPPORTED_VERSIONS
-        )));
+    let sidecar = decode_sidecar(&sidecar_bytes)?;
+    let dim = sidecar.dim as usize;
+    if dim == 0
+        || sidecar.m == 0
+        || sidecar.max_layer == 0
+        || sidecar.max_layer > 16
+        || sidecar.ef_construction == 0
+        || sidecar.vectors.iter().any(|(_, v)| v.len() != dim)
+        || sidecar.vectors_u8.iter().any(|(_, v)| v.len() != dim)
+    {
+        return Err(SnapshotError::Corrupt(
+            "invalid dimensions or HNSW parameters".into(),
+        ));
     }
+    let quantized = sidecar.quantization.is_some();
+    if quantized != (manifest.qgraph_chunks > 0 && manifest.qdata_chunks > 0)
+        || (!quantized && (manifest.qgraph_chunks != 0 || manifest.qdata_chunks != 0))
+    {
+        return Err(SnapshotError::Corrupt(
+            "inconsistent quantized graph sections".into(),
+        ));
+    }
+    let used_basename = if quantized {
+        &manifest.qbasename
+    } else {
+        &manifest.basename
+    };
+    validate_basename(used_basename)?;
 
     // ---- 3. fetch + verify + reassemble both f32 files -------------------
     //
@@ -147,17 +195,15 @@ pub(crate) async fn load_snapshot_with_intent(
     // For a quantized snapshot the qgraph/qdata chunks are present. We
     // reassemble + crc them here, then extend the cross-section crc32 to
     // cover them (the dump path hashed all four sections together).
-    let quant_meta: Option<QuantMeta> = match &sidecar.quantization {
+    let quantizer: Option<Arc<Sq8Quantizer>> = match &sidecar.quantization {
         Some(blob) => {
-            let meta: QuantMeta = bincode::deserialize(blob)?;
-            // Refuse an unknown method — we only know "sq8" today.
-            if meta.method != QUANT_METHOD_SQ8 {
-                return Err(SnapshotError::VersionMismatch(format!(
-                    "unknown quantization method {} (supported: {})",
-                    meta.method, QUANT_METHOD_SQ8
-                )));
-            }
-            Some(meta)
+            let meta: QuantMeta = bincode::deserialize(blob).map_err(|error| {
+                SnapshotError::Corrupt(format!("quantizer metadata decode: {error}"))
+            })?;
+            Some(Arc::new(
+                meta.try_to_quantizer(dim)
+                    .map_err(|error| SnapshotError::Corrupt(error.into()))?,
+            ))
         }
         None => None,
     };
@@ -193,7 +239,7 @@ pub(crate) async fn load_snapshot_with_intent(
 
     // ---- 4. write temp files, Box::leak HnswIo, load f32 graph (CPU/IO) --
     //
-    // #418 — for a quantized snapshot (`quant_meta.is_some()`) the dump path
+    // #418 — for a quantized snapshot (`quantizer.is_some()`) the dump path
     // emitted ZERO-length f32 sections (the fitted adapter had dropped its
     // f32 graph post-fit). We skip the f32 file load entirely and substitute
     // a throwaway empty `Hnsw::new(...)` stub: `from_parts_with_quantization`
@@ -230,7 +276,7 @@ pub(crate) async fn load_snapshot_with_intent(
         )));
     }
 
-    let hnsw: Arc<Hnsw<'static, f32, ShamirDist>> = if quant_meta.is_some() {
+    let hnsw: Arc<Hnsw<'static, f32, ShamirDist>> = if quantizer.is_some() {
         // #418 — quantized snapshot: no f32 graph on disk. Build a tiny empty
         // stub (capacity 1) — `from_parts_with_quantization` drops it on
         // assembly, so the size is irrelevant; we just need the right shape.
@@ -269,21 +315,27 @@ pub(crate) async fn load_snapshot_with_intent(
             let leaked_io: &'static HnswIo =
                 Box::leak(Box::new(HnswIo::new(load_dir.path(), &basename)));
             let hnsw: Hnsw<'static, f32, ShamirDist> =
-                leaked_io.load_hnsw_with_dist(dist).map_err(|e| {
-                    SnapshotError::Io(format!("hnsw_rs load_hnsw_with_dist failed: {e}"))
-                })?;
+                catch_unwind(AssertUnwindSafe(|| leaked_io.load_hnsw_with_dist(dist)))
+                    .map_err(|_| SnapshotError::Corrupt("hnsw_rs f32 parser panicked".into()))?
+                    .map_err(|e| {
+                        SnapshotError::Corrupt(format!("hnsw_rs f32 parser failed: {e}"))
+                    })?;
             Ok::<_, SnapshotError>(Arc::new(hnsw))
         })
         .await
         .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??
     };
 
-    // Sanity: the loaded graph retained every point the sidecar claims, and
-    // the build params match what we persisted. (`m` and `max_layer` are
-    // advisory — `get_*` reads them off the loaded structure.) Skipped for a
-    // quant stub (#418): the stub is empty by design.
-    if quant_meta.is_none() {
-        debug_assert_build_params(&hnsw, m, max_layer, ef_construction);
+    // Compare the persisted parameters against the loaded f32 graph. The
+    // quantized branch compares its u8 graph below, not the throwaway stub.
+    if quantizer.is_none()
+        && (hnsw.get_max_nb_connection() != m
+            || hnsw.get_max_level() != max_layer
+            || hnsw.get_ef_construction() != ef_construction)
+    {
+        return Err(SnapshotError::Corrupt(
+            "graph build parameters mismatch".into(),
+        ));
     }
 
     // ---- 4b. V5.3 (#412): load the u8 graph (if quantized) ---------------
@@ -298,9 +350,7 @@ pub(crate) async fn load_snapshot_with_intent(
     // public signature.
     #[allow(clippy::type_complexity)] // local carrier tuple — see comment above
     let hnsw_u8_opt: Option<(Arc<Hnsw<'static, u8, ShamirDistU8>>, Arc<Sq8Quantizer>)> =
-        if let Some(meta) = &quant_meta {
-            // Reconstruct the quantizer from the stored params.
-            let quantizer = Arc::new(meta.to_quantizer());
+        if let Some(quantizer) = quantizer {
             let qbasename = manifest.qbasename.clone();
             let qload_dir = tempfile::tempdir()?;
             let qgraph_bytes_move = qgraph_bytes.clone();
@@ -318,6 +368,14 @@ pub(crate) async fn load_snapshot_with_intent(
             })
             .await
             .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+            if hnsw_u8.get_max_nb_connection() != m
+                || hnsw_u8.get_max_level() != max_layer
+                || hnsw_u8.get_ef_construction() != ef_construction
+            {
+                return Err(SnapshotError::Corrupt(
+                    "quantized graph build parameters mismatch".into(),
+                ));
+            }
             Some((hnsw_u8, quantizer))
         } else {
             None
@@ -510,25 +568,32 @@ fn decode_delta_chunk(bytes: &[u8]) -> Result<Vec<DeltaOp>, SnapshotError> {
     MetaEnvelope::<Vec<DeltaOp>>::open(bytes).map_err(map_meta_err)
 }
 
-/// Replay every delta chunk with index strictly greater than
+/// Replay every delta chunk with index greater than or equal to
 /// `delta_applied_upto` against the live `adapter`. Used by
 /// `VectorBackend::restore_on_open` after a successful `load_snapshot`: the
 /// base graph reflects the snapshot's generation, and the delta chunks carry
 /// every mutation committed since that snapshot was taken.
 ///
 /// Walks the keyspace via `scan_prefix_stream` (lexicographic key order ==
-/// numeric chunk order thanks to the zero-padding). Each chunk's ops are
-/// applied via `VectorAdapter::upsert` / `delete` — the same path Phase 5d
-/// uses, so the replayed graph is byte-for-byte equivalent to the live graph
-/// that produced the chunks. A chunk with index ≤ `delta_applied_upto` is
-/// skipped (it was already absorbed into the snapshot's graph).
+/// numeric chunk order thanks to the zero-padding). Contiguous upserts are
+/// dispatched in bounded batches; deletes flush the preceding batch so that
+/// operations on a repeated record remain ordered. A chunk with index below
+/// `delta_applied_upto` was already absorbed into the snapshot.
 pub async fn replay_delta(
     store: &Arc<dyn Store>,
     keyspace: &str,
     delta_applied_upto: u64,
     adapter: &HnswAdapter,
 ) -> Result<u64, SnapshotError> {
-    use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
+    replay_delta_with_adapter(store, keyspace, delta_applied_upto, adapter).await
+}
+
+async fn replay_delta_with_adapter(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    delta_applied_upto: u64,
+    adapter: &dyn VectorAdapter,
+) -> Result<u64, SnapshotError> {
     let prefix = delta_scan_prefix(keyspace);
     let mut stream = store.scan_prefix_stream(prefix.into(), MAINT_SCAN_BATCH);
     let mut highest_seen: u64 = delta_applied_upto;
@@ -558,15 +623,17 @@ pub async fn replay_delta(
                 continue;
             }
             let ops = decode_delta_chunk(&val)?;
+            let mut upserts = Vec::with_capacity(REPLAY_BATCH_LIMIT);
             for op in ops {
                 match op {
                     DeltaOp::Upsert(rid, vec) => {
-                        adapter
-                            .upsert(rid, &vec)
-                            .await
-                            .map_err(|e| SnapshotError::Backend(format!("delta upsert: {e}")))?;
+                        upserts.push((rid, vec));
+                        if upserts.len() == REPLAY_BATCH_LIMIT {
+                            flush_replay_upserts(adapter, &mut upserts).await?;
+                        }
                     }
                     DeltaOp::Delete(rid) => {
+                        flush_replay_upserts(adapter, &mut upserts).await?;
                         adapter
                             .delete(rid)
                             .await
@@ -574,12 +641,27 @@ pub async fn replay_delta(
                     }
                 }
             }
+            flush_replay_upserts(adapter, &mut upserts).await?;
             if idx > highest_seen {
                 highest_seen = idx;
             }
         }
     }
     Ok(highest_seen)
+}
+
+async fn flush_replay_upserts(
+    adapter: &dyn VectorAdapter,
+    upserts: &mut Vec<(RecordId, Vec<f32>)>,
+) -> Result<(), SnapshotError> {
+    if !upserts.is_empty() {
+        adapter
+            .upsert_batch(upserts)
+            .await
+            .map_err(|e| SnapshotError::Backend(format!("delta upsert: {e}")))?;
+        upserts.clear();
+    }
+    Ok(())
 }
 
 /// Atomically flip the manifest to a new generation, prune the superseded
@@ -631,16 +713,43 @@ pub async fn flip_generation(
     }
 
     // Publish the new manifest — the generation flip itself.
+    let sidecar_bytes = store.get(sidecar_key(keyspace, new_manifest.gen)).await?;
     let manifest_env = MetaEnvelope::new(new_manifest);
     let manifest_bytes = manifest_env
         .encode()
         .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    ops.push(KvOp::Set(
+        integrity_key(keyspace),
+        integrity_bytes(&manifest_bytes, &sidecar_bytes),
+    ));
     ops.push(KvOp::Set(
         manifest_key(keyspace),
         Bytes::from(manifest_bytes),
     ));
 
     store.transact(ops).await?;
+    Ok(())
+}
+
+/// Publish an absorption boundary and its companion without deleting any keys.
+pub(crate) async fn publish_manifest_without_prune(
+    store: &Arc<dyn Store>,
+    keyspace: &str,
+    manifest: SnapshotManifest,
+) -> Result<(), SnapshotError> {
+    let sidecar = store.get(sidecar_key(keyspace, manifest.gen)).await?;
+    let manifest_bytes = MetaEnvelope::new(manifest)
+        .encode()
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    store
+        .transact(vec![
+            KvOp::Set(
+                integrity_key(keyspace),
+                integrity_bytes(&manifest_bytes, &sidecar),
+            ),
+            KvOp::Set(manifest_key(keyspace), Bytes::from(manifest_bytes)),
+        ])
+        .await?;
     Ok(())
 }
 
@@ -652,7 +761,6 @@ pub async fn highest_delta_index(
     store: &Arc<dyn Store>,
     keyspace: &str,
 ) -> Result<u64, SnapshotError> {
-    use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
     let prefix = delta_scan_prefix(keyspace);
     let mut stream = store.scan_prefix_stream(prefix.into(), MAINT_SCAN_BATCH);
     let mut highest: u64 = 0;
@@ -674,37 +782,4 @@ pub async fn highest_delta_index(
         }
     }
     Ok(highest)
-}
-
-/// Debug-only build-param sanity check. `get_*` on the loaded graph reads
-/// the persisted structure; a mismatch would mean our sidecar lied about the
-/// build params (a codec bug, not a corrupt-graph case — the per-chunk and
-/// cross-section crcs already vouched for byte fidelity).
-#[cfg(debug_assertions)]
-fn debug_assert_build_params(
-    hnsw: &Hnsw<'static, f32, ShamirDist>,
-    m: u8,
-    max_layer: usize,
-    ef_construction: usize,
-) {
-    debug_assert_eq!(hnsw.get_max_nb_connection(), m, "sidecar m mismatch");
-    debug_assert_eq!(
-        hnsw.get_max_level(),
-        max_layer,
-        "sidecar max_layer mismatch"
-    );
-    debug_assert_eq!(
-        hnsw.get_ef_construction(),
-        ef_construction,
-        "sidecar ef_construction mismatch"
-    );
-}
-
-#[cfg(not(debug_assertions))]
-fn debug_assert_build_params(
-    _hnsw: &Hnsw<'static, f32, ShamirDist>,
-    _m: u8,
-    _max_layer: usize,
-    _ef_construction: usize,
-) {
 }

@@ -213,7 +213,7 @@ fn rejects_v1_ticket_post_cutover() {
         ciphertext: Vec::new(),
         tag: [0u8; 16],
     };
-    let v1_bytes = v1_wire.to_bytes();
+    let v1_bytes = v1_wire.to_bytes().unwrap();
     assert_eq!(v1_bytes[0], 1, "sanity: first byte is the v1 version");
 
     let req = ResumeRequest {

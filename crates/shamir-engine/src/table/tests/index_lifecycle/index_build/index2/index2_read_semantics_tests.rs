@@ -292,7 +292,7 @@ async fn rv_index_dc5c642e_fts_page_keeps_valid_rows_after_high_rank_candidates_
         .await
         .unwrap()
         .unwrap();
-    let query_tokens = lease.backend.tokenize_query("hello");
+    let query_tokens = lease.backend.tokenize_query("hello").unwrap();
     let ranked = match lease
         .backend
         .lookup(IndexQuery::Fts {

@@ -66,7 +66,21 @@ fn inserted_record_sorted_key_order() {
     );
 }
 
-/// No-id variant: only fields are serialized, no `_id` injection.
+#[test]
+fn idless_non_map_values_round_trip() {
+    for fields in [
+        QueryValue::Null,
+        QueryValue::Int(42),
+        QueryValue::Bin(vec![1, 2, 3]),
+        QueryValue::List(vec![QueryValue::Int(1), QueryValue::Bool(true)]),
+    ] {
+        let original = InsertedRecord { id: None, fields };
+        let bytes = rmp_serde::to_vec_named(&original).unwrap();
+        let decoded: InsertedRecord = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, original);
+    }
+}
+
 #[test]
 fn inserted_record_no_id_serialization() {
     let rec = InsertedRecord {

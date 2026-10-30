@@ -14,7 +14,6 @@ use shamir_types::types::value::{InnerValue, QueryValue, Value};
 use smallvec::SmallVec;
 
 use crate::query::filter::caches::cond_cache::{compile_cond_cached, cond_cache_get};
-use crate::query::filter::caches::field_path_cache::field_ref_key;
 use crate::query::filter::caches::query_ref_cache::query_ref_key;
 use crate::query::filter::evaluation::filter_node::CompactPath;
 use crate::query::filter::evaluation::runtime::core::eval_context::FilterContext;
@@ -322,7 +321,7 @@ pub fn resolve_filter_query(
             // avoids re-allocating a `Vec<u64>` and re-issuing one
             // `Interner::get_ind` (DashMap shard lookup) PER SEGMENT, PER
             // record. The cache key is the CONTENT of THIS `FieldRef` node
-            // (its `path`, via `field_ref_key`) — see
+            // (its `path`) — see
             // `field_path_cache.rs`'s doc comment. When
             // `ctx.field_path_cache` is `None` (every caller that hasn't
             // opted in: WHERE, `when`, `for_each`'s `over`, write-value
@@ -334,7 +333,7 @@ pub fn resolve_filter_query(
             // path is defeated if every hit still re-allocates a copy of it.
             let owned_ipath;
             let ipath: &[InternerKey] =
-                match ctx.field_path_cache.and_then(|c| c.get(&field_ref_key(fv))) {
+                match ctx.field_path_cache.and_then(|c| c.get(path.as_slice())) {
                     Some(cached) if ctx.interner_overlay.is_none() => cached.as_slice(),
                     Some(_) | None => {
                         let keys = path

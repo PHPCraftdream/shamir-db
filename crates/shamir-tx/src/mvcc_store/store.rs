@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use bytes::{BufMut, Bytes, BytesMut};
+use futures::StreamExt;
 use scc::HashMap as SccHashMap;
 use scc::TreeIndex;
 use shamir_collections::THasher;
@@ -15,14 +16,14 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::KvOp;
 use shamir_storage::types::RecordKey;
 use shamir_storage::types::Store;
+use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 
+use super::key_lock::KeyLock as KeyLockInner;
 use super::Retention;
 use crate::repo_tx_gate::RepoTxGate;
 use crate::version_codec::encode_version_key;
 use crate::version_guard::VersionGuard;
 use crate::versioned_overlay::VersionedOverlay;
-
-use super::key_lock::KeyLock as KeyLockInner;
 
 // ============================================================================
 // T1c — per-version commit timestamp namespace.
@@ -216,7 +217,7 @@ impl MvccStore {
     /// #1032 test seam: hold `drain_exclusive` externally so a test can
     /// deterministically prove `write_committed_batch_to_history`/
     /// `drain_to_history` back off / block on contention, without timing.
-    /// Intra-crate only (`crate::tests::mvcc_store_tests`) — `#[cfg(test)]`
+    /// Intra-crate only (`crate::mvcc_store::tests`) — `#[cfg(test)]`
     /// is correct here, unlike the cross-crate pause hooks elsewhere in this
     /// codebase that must stay production-compiled.
     #[cfg(test)]
@@ -289,7 +290,6 @@ impl MvccStore {
         if durable_watermark == 0 {
             return;
         }
-        // Overlay: drop everything <= durable_watermark (floor irrelevant).
         self.overlay.gc_upto(durable_watermark, u64::MAX);
 
         // pending_ts hygiene: remove any stamp for an already-durable version.
@@ -370,9 +370,6 @@ impl MvccStore {
     /// Phase 3: rebuild the ts-index from the history store's ts-keys.
     /// Called lazily on first `version_at_or_before_ts` if `ts_index_ready` is false.
     pub(crate) async fn ts_index_rebuild(&self) -> DbResult<()> {
-        use futures::StreamExt;
-        use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
-
         // Clear any partial entries from a previous failed rebuild before retrying.
         self.ts_index_ready.store(false, Ordering::Release);
         let stream = self.history.iter_stream(MAINT_SCAN_BATCH);
@@ -424,12 +421,6 @@ impl MvccStore {
     pub fn clock_millis(&self) -> u64 {
         self.now_millis()
     }
-
-    // L2: `record_ts` and `record_ts_at` REMOVED — ts is now written
-    // atomically inside the same `history.transact` batch as the data op
-    // in every write path (set_versioned, set_versioned_many,
-    // delete_versioned, write_committed_to_history). No separate ts write.
-
     /// Resolve a versioned read of `key` visible at `snapshot_version`, given
     /// its current cached version `cur_v`. Direct path (`cur_v > 0 && cur_v <= snapshot`):
     /// read the log at `encode_version_key(key, cur_v)`. Fallback: range-scan
@@ -540,14 +531,14 @@ impl MvccStore {
     /// removal itself fails the versions are NOT settled: fail-stop — the
     /// guards are never dropped (the floor stalls below them),
     /// `requires_reopen` is set and further writes are refused.
-    async fn compensate_failed_write(
+    async fn compensate_failed_write<'a>(
         &self,
         guards: Vec<VersionGuard>,
-        keys: &[RecordKey],
+        keys: impl IntoIterator<Item = &'a RecordKey>,
         versions: &[u64],
     ) {
         let mut ops: Vec<KvOp> = Vec::with_capacity(versions.len() * 2);
-        for (key, &v) in keys.iter().zip(versions.iter()) {
+        for (key, &v) in keys.into_iter().zip(versions.iter()) {
             ops.push(KvOp::Remove(encode_version_key(key, v).into()));
             ops.push(KvOp::Remove(ts_key(v).into()));
         }
@@ -565,6 +556,9 @@ impl MvccStore {
     }
 
     async fn set_versioned_inner(&self, key: RecordKey, value: Bytes, wait: bool) -> DbResult<u64> {
+        if value.is_empty() {
+            return Err(DbError::Validation("empty value is a tombstone".into()));
+        }
         self.ensure_writable()?;
         // Single log append: every prior version is already in the log from
         // when it was written as current. No other store is written.
@@ -600,7 +594,7 @@ impl MvccStore {
         if let Err(e) = self.history.transact(write_ops).await {
             // RV-TX-2CB455A7: remove the attempted version+ts keys before the
             // guard settles as Aborted, so the failed version is absent.
-            self.compensate_failed_write(vec![guard], &[key_snapshot], &[new_v])
+            self.compensate_failed_write(vec![guard], std::iter::once(&key_snapshot), &[new_v])
                 .await;
             return Err(e);
         }
@@ -684,11 +678,14 @@ impl MvccStore {
         items: Vec<(RecordKey, Bytes)>,
         wait: bool,
     ) -> DbResult<u64> {
-        self.ensure_writable()?;
         if items.is_empty() {
             // No records written — return 0. The caller should not emit
             // a changefeed event for an empty batch.
             return Ok(0);
+        }
+        self.ensure_writable()?;
+        if items.iter().any(|(_, value)| value.is_empty()) {
+            return Err(DbError::Validation("empty value is a tombstone".into()));
         }
 
         // Phase 1 (bump-first): assign a fresh version per key and update the
@@ -711,7 +708,6 @@ impl MvccStore {
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         // capacity: one data-op + one ts-op per item.
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
-        let keys: Vec<RecordKey> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
             old_versions.push(self.current_version(key));
             let guard = self.gate.assign_next_version_guarded();
@@ -727,13 +723,16 @@ impl MvccStore {
             history_ops.push(KvOp::Set(ts_key(new_v).into(), ts_val.clone()));
         }
 
-        // Single batched write to the log (data + ts, atomic).
         if !history_ops.is_empty() {
             if let Err(e) = self.history.transact(history_ops).await {
                 // RV-TX-2CB455A7: remove every attempted version+ts key
                 // before the guards settle as Aborted.
-                self.compensate_failed_write(guards, &keys, &new_versions)
-                    .await;
+                self.compensate_failed_write(
+                    guards,
+                    items.iter().map(|(key, _)| key),
+                    &new_versions,
+                )
+                .await;
                 return Err(e);
             }
         }
@@ -771,7 +770,7 @@ impl MvccStore {
         }
         // T1b.2 + L6: per-key count-aware vacuum for every key in the batch.
         // old_versions[i] is the prior version captured before publish_cell.
-        for (key, &old_v) in keys.iter().zip(old_versions.iter()) {
+        for ((key, _), &old_v) in items.iter().zip(old_versions.iter()) {
             if self.vacuum_key(key, old_v).await.is_err() {
                 self.vacuum_needs_scan.store(true, Ordering::Release);
             }
@@ -833,9 +832,12 @@ impl MvccStore {
         items: Vec<(RecordKey, Bytes)>,
         wait: bool,
     ) -> DbResult<u64> {
-        self.ensure_writable()?;
         if items.is_empty() {
             return Ok(0);
+        }
+        self.ensure_writable()?;
+        if items.iter().any(|(_, value)| value.is_empty()) {
+            return Err(DbError::Validation("empty value is a tombstone".into()));
         }
 
         // Phase 1 (bump-first): assign a fresh version per key and update the
@@ -847,7 +849,6 @@ impl MvccStore {
         let ts_ms = self.now_millis();
         let ts_val = Bytes::from(ts_ms.to_le_bytes().to_vec());
         let mut history_ops: Vec<KvOp> = Vec::with_capacity(items.len() * 2);
-        let keys: Vec<RecordKey> = items.iter().map(|(k, _)| k.clone()).collect();
         for (key, value) in &items {
             let guard = self.gate.assign_next_version_guarded();
             let new_v = guard.version();
@@ -862,13 +863,16 @@ impl MvccStore {
             history_ops.push(KvOp::Set(ts_key(new_v).into(), ts_val.clone()));
         }
 
-        // Single batched write to the log (data + ts, atomic).
         if !history_ops.is_empty() {
             if let Err(e) = self.history.transact(history_ops).await {
                 // RV-TX-2CB455A7: remove every attempted version+ts key
                 // before the guards settle as Aborted.
-                self.compensate_failed_write(guards, &keys, &new_versions)
-                    .await;
+                self.compensate_failed_write(
+                    guards,
+                    items.iter().map(|(key, _)| key),
+                    &new_versions,
+                )
+                .await;
                 return Err(e);
             }
         }
@@ -893,7 +897,7 @@ impl MvccStore {
         }
         // Vacuum with old_v=0: append-only no-op in L6 fast path (CurrentOnly
         // + no snapshots), or scan path (independent of old_v) otherwise.
-        for key in &keys {
+        for (key, _) in &items {
             if self.vacuum_key(key, 0).await.is_err() {
                 self.vacuum_needs_scan.store(true, Ordering::Release);
             }
@@ -956,7 +960,7 @@ impl MvccStore {
         if let Err(e) = self.history.transact(write_ops).await {
             // RV-TX-2CB455A7: remove the attempted version+ts keys before the
             // guard settles as Aborted.
-            self.compensate_failed_write(vec![guard], std::slice::from_ref(&key), &[new_v])
+            self.compensate_failed_write(vec![guard], std::iter::once(&key), &[new_v])
                 .await;
             return Err(e);
         }

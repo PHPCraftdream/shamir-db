@@ -197,7 +197,7 @@ impl TableManager {
             let mut ops = backend
                 .plan_insert_tx(rid, rec, tx_id)
                 .await
-                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                .map_err(shamir_storage::error::DbError::from)?;
             // R0-B (#1008): the backend only knows its OWN construction-time
             // descriptor snapshot — stamp the REAL live instance epoch from
             // the registry (see `index2_provenance`'s doc for why this
@@ -347,7 +347,7 @@ impl TableManager {
             let mut ops = backend
                 .plan_update_tx(rid, old, new, tx_id)
                 .await
-                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                .map_err(shamir_storage::error::DbError::from)?;
             self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }
@@ -373,7 +373,7 @@ impl TableManager {
             let mut ops = backend
                 .plan_update_tx(rid, old, new, tx_id)
                 .await
-                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                .map_err(shamir_storage::error::DbError::from)?;
             self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }
@@ -401,7 +401,7 @@ impl TableManager {
             let mut ops = backend
                 .plan_delete_tx(rid, rec, tx_id)
                 .await
-                .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+                .map_err(shamir_storage::error::DbError::from)?;
             self.stamp_index2_provenance(&backend, &mut ops).await;
             all_ops.extend(ops);
         }

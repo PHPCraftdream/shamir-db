@@ -379,7 +379,7 @@ pub enum DbResponse {
         ///   sealed WAL back under `durability.wal_retention_max_bytes`).
         /// - Foreign keys: `fk_violation`, `fk_restrict`, `fk_cascade_depth`,
         ///   `fk_requires_index`, `fk_actions`, `fk_on_update`,
-        ///   `fk_restrict`, `fk_update_unsupported_new_value`.
+        ///   `fk_update_unsupported_new_value`.
         ///
         /// A `QueryError` may also carry a structured `code` verbatim (e.g.
         /// `bad_hmac`, `fk_*`); untagged legacy errors fall back to `query`.

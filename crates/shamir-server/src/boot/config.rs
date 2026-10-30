@@ -118,57 +118,7 @@ pub struct Config {
     pub replication: Option<ReplicationConfig>,
 }
 
-/// Follower-side replication settings.
-///
-/// Minimal for 386-c: a single `replicator` account (username + password)
-/// used to authenticate every outbound upstream connection, plus an optional
-/// stable `node_id` advertised in `ReplHello` (§5.2). When `node_id` is
-/// omitted the boot path derives one from the machine hostname (falling back
-/// to a random id), so followers still have a stable-enough identity.
-///
-/// TODO(386-c): a per-subscription credential store (keyed by the
-/// subscription's `upstream`) replaces this single shared account — the
-/// current shape only supports one leader identity for all subscriptions.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReplicationConfig {
-    /// Stable follower identity advertised to leaders. When omitted the boot
-    /// path derives one from the hostname.
-    #[serde(default)]
-    pub node_id: Option<String>,
-    /// Username of the `replicator`-role account used to authenticate every
-    /// outbound upstream connection.
-    #[serde(default)]
-    pub replicator_user: Option<String>,
-    /// Password for [`Self::replicator_user`]. Without it (and a user) the
-    /// wire source cannot connect — reconcile logs and skips.
-    #[serde(default)]
-    pub replicator_password: Option<crate::replication::ReplicatorPassword>,
-    /// Decode replicated Put payloads before allocating a version. Adds per-Put
-    /// decoding cost; rejects undecodable records without schema/validator/DAC
-    /// checks. Defaults to false (Trusted, preserving existing behavior).
-    #[serde(default)]
-    pub validate_replicated_payload: bool,
-    /// SNI hostname to present to the upstream's TLS layer. Defaults to
-    /// `localhost` (matching the self-signed cert the server generates).
-    #[serde(default = "default_repl_server_name")]
-    pub server_name: String,
-}
-
-impl Default for ReplicationConfig {
-    fn default() -> Self {
-        Self {
-            node_id: None,
-            replicator_user: None,
-            replicator_password: None,
-            validate_replicated_payload: false,
-            server_name: default_repl_server_name(),
-        }
-    }
-}
-
-fn default_repl_server_name() -> String {
-    "localhost".to_string()
-}
+pub use crate::replication::{ReplicationConfig, UpstreamPins};
 
 /// Observability HTTP server (`/healthz`, `/readyz`, `/metrics`, `/info`).
 #[derive(Debug, Clone, Deserialize)]
@@ -938,11 +888,10 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
     // 4. Plain profile: loopback only.
     if l.profile == ProfileKind::Plain && !is_loopback_ip(addr.ip()) {
         return Err(ConfigError::Validation(format!(
-            "listeners[{idx}] profile=plain requires a loopback address (127.0.0.0/8 or ::1); got {}",
+            "listeners[{idx}] profile=plain requires a loopback address (127.0.0.0/8, ::1, or IPv4-mapped 127.0.0.0/8); got {}",
             addr
         )));
     }
-
     // 5. Browser endpoint: must have a non-empty Origin allowlist.
     if l.kind == ListenerKind::Ws
         && l.profile == ProfileKind::TlsNoExport
@@ -952,7 +901,12 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
             "listeners[{idx}] (ws + tls_no_export, browser endpoint) requires non-empty browser_origin_allowlist (spec §9)"
         )));
     }
-
+    if l.kind == ListenerKind::Ws {
+        shamir_transport_ws::BrowserOriginPolicy::try_allow(
+            l.browser_origin_allowlist.iter().cloned(),
+        )
+        .map_err(ConfigError::Validation)?;
+    }
     Ok(())
 }
 
@@ -991,6 +945,7 @@ fn validate_kdf(kdf: &KdfConfig) -> Result<(), String> {
 fn is_loopback_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) if let Some(v4) = v6.to_ipv4_mapped() => v4.is_loopback(),
         IpAddr::V6(v6) => v6.is_loopback(),
     }
 }

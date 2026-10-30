@@ -12,6 +12,7 @@ use crate::common::kdf_params::KdfParams;
 use crate::common::types::limits;
 use crate::server::session::{Session, SessionStore};
 use crate::server::user_record::UserRecord;
+use dashmap::mapref::entry::Entry;
 use rustc_hash::FxHasher;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
@@ -326,7 +327,6 @@ impl UserDirectory for InMemoryUserDirectory {
     fn insert(&self, username: String, record: UserRecord) -> Result<[u8; 16]> {
         // §B13: atomic check-and-insert via DashMap entry — two concurrent
         // `insert` calls with the same username must not both succeed.
-        use dashmap::mapref::entry::Entry;
         match self.by_name.entry(username) {
             Entry::Occupied(_) => Err(Error::InvalidInput("user already exists")),
             Entry::Vacant(slot) => {

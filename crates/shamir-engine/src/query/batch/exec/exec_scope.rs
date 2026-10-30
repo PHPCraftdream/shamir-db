@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use shamir_query_types::batch::RequestMetadata;
 use shamir_storage::error::DbError;
 
 use crate::query::batch::result_size::ResultSize;
@@ -85,6 +86,7 @@ pub struct ExecScope {
     work: AtomicU64,
     bytes: AtomicU64,
     enforce_result_size: bool,
+    root_metadata: Option<RequestMetadata>,
 }
 
 impl ExecScope {
@@ -103,7 +105,17 @@ impl ExecScope {
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             enforce_result_size,
+            root_metadata: None,
         }
+    }
+
+    pub(in crate::query::batch) fn with_root_metadata(mut self, metadata: RequestMetadata) -> Self {
+        self.root_metadata = Some(metadata);
+        self
+    }
+
+    pub(in crate::query::batch) fn root_metadata(&self) -> Option<&RequestMetadata> {
+        self.root_metadata.as_ref()
     }
 
     /// Tighten the cooperative deadline without changing whole-second wire limits.
@@ -143,6 +155,7 @@ impl ExecScope {
             work: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             enforce_result_size: false,
+            root_metadata: None,
         }
     }
 

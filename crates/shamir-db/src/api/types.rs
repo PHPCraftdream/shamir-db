@@ -1,5 +1,7 @@
-#![allow(deprecated)]
-
+#[allow(
+    deprecated,
+    reason = "Legacy API DTO retains UserValue for source compatibility"
+)]
 use crate::types::value::UserValue;
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +9,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// This legacy API is not used by the production client/server transport;
 /// new integrations should use the query and wire types instead.
+#[allow(
+    deprecated,
+    reason = "Legacy API DTO retains UserValue for source compatibility"
+)]
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub enum Command {
     /// Inserts or updates a value for a given key.
@@ -32,6 +38,10 @@ pub struct Request {
 }
 
 /// Compatibility-only response DTO; no production transport sends this type.
+#[allow(
+    deprecated,
+    reason = "Legacy API DTO retains UserValue for source compatibility"
+)]
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct Response {
     /// The ID of the request this response corresponds to.

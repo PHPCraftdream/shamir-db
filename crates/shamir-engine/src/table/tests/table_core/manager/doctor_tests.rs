@@ -241,6 +241,26 @@ async fn repair_streams_multiple_regular_indexes_correctly() {
 }
 
 #[tokio::test]
+async fn repair_rebuilds_multiple_unique_indexes() {
+    let (table, _repo) = seeded(10).await;
+    table
+        .create_unique_index("by_score_unique", &["score"])
+        .await
+        .unwrap();
+    table.counter().set_to(999).await.unwrap();
+
+    let report = table.repair().await.unwrap();
+    assert_eq!(report.records_scanned, 10);
+    let after = table.verify().await.unwrap();
+    assert!(after.is_healthy(), "{after:?}");
+    assert_eq!(after.unique_indexes.len(), 2);
+    for index in &after.unique_indexes {
+        assert_eq!(index.expected_entries, 10);
+        assert_eq!(index.actual_entries, 10);
+    }
+}
+
+#[tokio::test]
 async fn repair_heals_drifted_counter() {
     let (table, _repo) = seeded(15).await;
     // Force the cached counter out of sync with data.

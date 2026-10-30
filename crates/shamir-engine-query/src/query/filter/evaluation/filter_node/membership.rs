@@ -176,21 +176,6 @@ fn exact_numeric_scan(set: &TSet<QueryValue>, probe: &QueryValue) -> bool {
         })
 }
 
-/// [`exact_numeric_scan`]'s index-returning sibling for
-/// `ContainsAllSet`'s bitmask scan.
-#[inline]
-fn exact_numeric_scan_index(set: &TSet<QueryValue>, probe: &QueryValue) -> Option<usize> {
-    if !probe_needs_exact_scan(probe) {
-        return None;
-    }
-    set.iter().position(|m| {
-        matches!(
-            m,
-            QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Dec(_) | QueryValue::Big(_)
-        ) && numeric_eq_values(m, probe)
-    })
-}
-
 #[inline]
 fn exact_i64_equal_to_f64(f: f64) -> Option<i64> {
     const I64_MIN_AS_F64: f64 = -9223372036854775808.0; // -2^63, exact
@@ -279,59 +264,60 @@ pub(super) fn set_contains_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) 
     }
 }
 
-/// Coercing `get_index_of` for `ContainsAllSet`'s bitmask scan.
-///
-/// Mirrors [`set_contains_coercing_qv`] but returns the INDEX of whichever
-/// coercion-equivalent representation is present (`values` is a `TSet`, i.e.
-/// an `IndexSet` — `get_index_of` is an O(1) lookup, no clone/removal of the
-/// set itself). This replaces the old `swap_remove_coercing_qv`, which
-/// mutated a per-record `values.clone()` — cloning every required
-/// `QueryValue` (including any owned `String`/`Vec<u8>` payload) on EVERY
-/// row just to track which ones had been found so far.
-#[inline]
-fn index_of_coercing_qv(set: &TSet<QueryValue>, qv: &QueryValue) -> Option<usize> {
-    match qv {
+fn matching_indices(
+    values: &TSet<QueryValue>,
+    numeric: &[usize],
+    item: &QueryValue,
+    mut mark: impl FnMut(usize),
+) {
+    if matches!(item, QueryValue::Big(_) | QueryValue::Dec(_)) {
+        for (index, required) in values.iter().enumerate() {
+            if numeric_eq_values(item, required) {
+                mark(index);
+            }
+        }
+        return;
+    }
+    if matches!(
+        item,
+        QueryValue::Int(_) | QueryValue::F64(_) | QueryValue::Str(_)
+    ) {
+        for &index in numeric {
+            if values
+                .get_index(index)
+                .is_some_and(|required| numeric_eq_values(item, required))
+            {
+                mark(index);
+            }
+        }
+    }
+    let mut probe = |candidate: &QueryValue| {
+        if let Some(index) = values.get_index_of(candidate) {
+            if numeric_eq_values(item, candidate) {
+                mark(index);
+            }
+        }
+    };
+    match item {
+        QueryValue::F64(f) if f.is_nan() => {}
         QueryValue::Int(n) => {
-            if let Some(i) = set.get_index_of(qv) {
-                return Some(i);
-            }
-            let f = *n as f64;
-            if cmp_i64_f64(*n, f) == Some(Ordering::Equal) {
-                if let Some(i) = set.get_index_of(&QueryValue::F64(f)) {
-                    return Some(i);
-                }
-            }
-            exact_numeric_scan_index(set, qv)
+            probe(item);
+            probe(&QueryValue::F64(*n as f64));
         }
         QueryValue::F64(f) => {
-            // NaN matches nothing (the ONE rule) — skip the hashed probes
-            // (Value::PartialEq would equate NaNs).
-            if f.is_nan() {
-                return None;
+            probe(item);
+            if let Some(n) = exact_i64_equal_to_f64(*f) {
+                probe(&QueryValue::Int(n));
             }
-            if let Some(i) = set.get_index_of(qv) {
-                return Some(i);
-            }
-            if f.is_finite() {
-                if let Some(n) = exact_i64_equal_to_f64(*f) {
-                    if let Some(i) = set.get_index_of(&QueryValue::Int(n)) {
-                        return Some(i);
-                    }
-                }
-            }
-            exact_numeric_scan_index(set, qv)
         }
-        QueryValue::Dec(_) | QueryValue::Big(_) => set
-            .get_index_of(qv)
-            .or_else(|| exact_numeric_scan_index(set, qv)),
-        _ => set.get_index_of(qv),
+        QueryValue::Str(_) | QueryValue::Null | QueryValue::Bool(_) | QueryValue::Bin(_) => {
+            probe(item)
+        }
+        QueryValue::List(_) | QueryValue::Set(_) | QueryValue::Map(_) => {}
+        _ => {}
     }
 }
 
-/// `$contains_all` membership scan for `ContainsAllSet` — dispatches on the
-/// field's container kind, then tracks "found" required values via a
-/// bitmask keyed by INDEX into `values` (see [`contains_all_scan`]) instead
-/// of cloning the whole required-values set per record.
 #[inline]
 pub(super) fn contains_all_set_match(field_qv: &QueryValue, values: &TSet<QueryValue>) -> bool {
     match field_qv {
@@ -358,15 +344,20 @@ fn contains_all_scan<'a>(
     if n == 0 {
         return true;
     }
+    let numeric: smallvec::SmallVec<[usize; 4]> = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            matches!(value, QueryValue::Big(_) | QueryValue::Dec(_)).then_some(index)
+        })
+        .collect();
     if n <= 64 {
         let target: u64 = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
         let mut seen: u64 = 0;
         for item in field_items {
-            if let Some(idx) = index_of_coercing_qv(values, item) {
-                seen |= 1u64 << idx;
-                if seen == target {
-                    return true;
-                }
+            matching_indices(values, &numeric, item, |idx| seen |= 1u64 << idx);
+            if seen == target {
+                return true;
             }
         }
         seen == target
@@ -374,14 +365,14 @@ fn contains_all_scan<'a>(
         let mut seen = vec![false; n];
         let mut remaining = n;
         for item in field_items {
-            if let Some(idx) = index_of_coercing_qv(values, item) {
+            matching_indices(values, &numeric, item, |idx| {
                 if !seen[idx] {
                     seen[idx] = true;
                     remaining -= 1;
-                    if remaining == 0 {
-                        return true;
-                    }
                 }
+            });
+            if remaining == 0 {
+                return true;
             }
         }
         remaining == 0

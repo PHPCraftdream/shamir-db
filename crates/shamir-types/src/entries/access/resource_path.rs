@@ -1,5 +1,20 @@
 use std::fmt;
 
+use crate::entries::resource_path_ref::ResourcePathRef;
+
+/// Escape control characters at diagnostic boundaries without changing path identity.
+pub fn escape_resource_diagnostic(value: &str) -> String {
+    let mut escaped = String::new();
+    for ch in value.chars() {
+        if ch.is_control() {
+            escaped.extend(ch.escape_default());
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped
+}
+
 /// Uniform, traversable address of a securable resource in the tree.
 ///
 /// The tree (see `ACCESS_HIERARCHY.md`):
@@ -140,54 +155,55 @@ impl ResourcePath {
         Self::Group { name: name.into() }
     }
 
-    /// The containing resource, or `None` for the root.
-    ///
-    /// Record/Index resolve to their Table (inheritance); the top-level
-    /// containers (Database, FunctionNamespace, User, Group) resolve to Root.
-    pub fn parent(&self) -> Option<Self> {
+    /// Borrow this address without allocating.
+    pub fn as_ref(&self) -> ResourcePathRef<'_> {
         match self {
-            Self::Root => None,
-            Self::Database { .. }
-            | Self::FunctionNamespace
-            | Self::WasmCompiler
-            | Self::User { .. }
-            | Self::Group { .. } => Some(Self::Root),
-            Self::Store { db, .. } => Some(Self::database(db.clone())),
-            Self::Table { db, store, .. } => Some(Self::store(db.clone(), store.clone())),
+            Self::Root => ResourcePathRef::Root,
+            Self::Database { db } => ResourcePathRef::Database { db },
+            Self::Store { db, store } => ResourcePathRef::Store { db, store },
+            Self::Table { db, store, table } => ResourcePathRef::Table { db, store, table },
             Self::Record {
-                db, store, table, ..
-            }
-            | Self::Index {
-                db, store, table, ..
-            } => Some(Self::table(db.clone(), store.clone(), table.clone())),
-            Self::FunctionFolder { path } => {
-                if path.len() > 1 {
-                    Some(Self::function_folder(path[..path.len() - 1].to_vec()))
-                } else {
-                    Some(Self::FunctionNamespace)
-                }
-            }
-            Self::Function { name } => {
-                if let Some(pos) = name.rfind('/') {
-                    let segments = name[..pos].split('/').map(str::to_owned).collect();
-                    Some(Self::function_folder(segments))
-                } else {
-                    Some(Self::FunctionNamespace)
-                }
-            }
+                db,
+                store,
+                table,
+                key,
+            } => ResourcePathRef::Record {
+                db,
+                store,
+                table,
+                key,
+            },
+            Self::Index {
+                db,
+                store,
+                table,
+                index,
+            } => ResourcePathRef::Index {
+                db,
+                store,
+                table,
+                index,
+            },
+            Self::FunctionNamespace => ResourcePathRef::FunctionNamespace,
+            Self::WasmCompiler => ResourcePathRef::WasmCompiler,
+            Self::FunctionFolder { path } => ResourcePathRef::FunctionFolder { path },
+            Self::Function { name } => ResourcePathRef::Function { name },
+            Self::User { name } => ResourcePathRef::User { name },
+            Self::Group { name } => ResourcePathRef::Group { name },
         }
     }
 
-    /// Ancestor containers, nearest first, up to and including `Root`
-    /// (excludes `self`). The gate requires `Execute` (traverse) on each.
+    /// The containing resource, or `None` for the root.
+    pub fn parent(&self) -> Option<Self> {
+        self.as_ref().parent().map(ResourcePathRef::to_owned)
+    }
+
+    /// Ancestor containers, nearest first, up to and including `Root`.
     pub fn ancestors(&self) -> Vec<Self> {
-        let mut out = Vec::with_capacity(4);
-        let mut current = self.parent();
-        while let Some(parent) = current {
-            current = parent.parent();
-            out.push(parent);
-        }
-        out
+        self.as_ref()
+            .ancestors()
+            .map(ResourcePathRef::to_owned)
+            .collect()
     }
 }
 

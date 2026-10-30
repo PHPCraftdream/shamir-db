@@ -21,6 +21,7 @@ use shamir_db::engine::table::TableConfig;
 use shamir_db::engine::validator::WriteOp;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::shamir_db::shamir_db::ArtifactKind;
+#[cfg(feature = "fjall")]
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{FnBatch, FnCtx, Params};
@@ -290,6 +291,7 @@ async fn native_validator_with_stop_flag() {
 // ========================================================================
 
 /// Open a Fjall-backed ShamirDb, tolerating lock-release delays.
+#[cfg(feature = "fjall")]
 async fn init_fjall_retry(path: &std::path::Path) -> ShamirDb {
     for _ in 0..50 {
         match ShamirDb::init(SystemStoreConfig::Fjall(path.to_path_buf())).await {
@@ -310,6 +312,7 @@ async fn init_fjall_retry(path: &std::path::Path) -> ShamirDb {
     panic!("lock was not released within the retry window");
 }
 
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn boot_tolerates_native_validator_row() {
     let tmp = tempfile::tempdir().unwrap();
@@ -393,6 +396,7 @@ async fn boot_tolerates_native_validator_row() {
     }
 }
 
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn boot_native_validator_re_register_works() {
     let tmp = tempfile::tempdir().unwrap();
@@ -669,6 +673,7 @@ async fn drop_refuses_bound_native_validator() {
 // Phase 4 — boot diagnostic: unresolved native artifacts surfaced
 // ========================================================================
 
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn unresolved_native_artifacts_lists_unregistered_after_reopen() {
     let tmp = tempfile::tempdir().unwrap();

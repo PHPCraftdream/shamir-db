@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::KvOp;
 use shamir_types::record_view::RecordRef;
@@ -15,7 +16,7 @@ use crate::base_index::index_record_key::IndexRecordKey;
 use crate::write_ops::IndexWriteOp;
 use crate::IndexState;
 
-use super::inner::{regular_provenance, IndexManager, POSTING_CACHE_CAP};
+use super::inner::{regular_provenance, IndexManager};
 
 impl IndexManager {
     /// Обработчик события создания записи.
@@ -120,10 +121,18 @@ impl IndexManager {
         let defs = self.indexes.snapshot();
         for def in defs.iter() {
             let provenance = regular_provenance(def);
+            let in_flight =
+                def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
             for (rid, value) in items.clone() {
                 if let Some(irk) =
                     build_index_key_from_record(false, def.name_interned, value, &def.paths)
                 {
+                    if in_flight {
+                        if let Some(dirty_set) = self.get_or_create_dirty_set(def.name_interned) {
+                            dirty_set.lock().unwrap().insert(*rid);
+                        }
+                        continue;
+                    }
                     let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, rid);
                     ops.push(IndexWriteOp::SetPosting {
@@ -394,8 +403,6 @@ impl IndexManager {
         name_interned: u64,
         values: &[InnerValue],
     ) -> DbResult<Option<Arc<[RecordId]>>> {
-        use futures::StreamExt;
-
         // P0-3a (#1011): acquire the reader-drain guard as the FIRST statement
         // — before `build_index_key`, before the posting-cache probe, before
         // anything that touches the shared `info_store` keyspace. `None` means a
@@ -405,9 +412,9 @@ impl IndexManager {
         // collapsing `None` into an empty `Some` would silently convert the
         // rare "incomplete" into a rare "wrongly empty", which is strictly
         // worse than the pre-fix status quo. See `crate::reader_drain_gate`'s
-        // module doc for the placement invariant: this guard is always the
-        // INNERMOST synchronization primitive on the read path, so acquiring no
-        // other lock while it is held keeps no lock inversion constructible.
+        // module doc for the placement invariant: do not take outer DDL or
+        // lifecycle locks while holding the guard. Leaf cache shard locks do
+        // not wait on the drain gate and are released before asynchronous work.
         let Some(_guard) = self.reader_gate.enter() else {
             return Ok(None);
         };
@@ -432,14 +439,14 @@ impl IndexManager {
             .posting_cache_generation
             .load(std::sync::atomic::Ordering::Acquire);
         if let Some(cached) = self.posting_cache.get(&index_key) {
-            let (cached_generation, values) = cached.value();
-            if *cached_generation == generation
+            let (cached_generation, values) = cached;
+            if cached_generation == generation
                 && self
                     .posting_cache_generation
                     .load(std::sync::atomic::Ordering::Acquire)
                     == generation
             {
-                return Ok(Some(Arc::clone(values)));
+                return Ok(Some(values));
             }
         }
 
@@ -484,14 +491,6 @@ impl IndexManager {
             hook.wait_at_window().await;
         }
 
-        // Bounded cache — evict an arbitrary entry on overflow.
-        if self.posting_cache.len() >= POSTING_CACHE_CAP {
-            if let Some(victim) = self.posting_cache.iter().next() {
-                let k = victim.key().clone();
-                drop(victim);
-                self.posting_cache.remove(&k);
-            }
-        }
         let record_ids_arc: Arc<[RecordId]> = Arc::from(record_ids);
         // Validate the scan's generation in the SAME atomic cell writers bump:
         // publication proceeds only while the epoch is still the sampled one,
@@ -507,7 +506,7 @@ impl IndexManager {
             .is_ok();
         if publish_allowed {
             self.posting_cache
-                .insert(index_key, (scan_generation, Arc::clone(&record_ids_arc)));
+                .insert(index_key, scan_generation, Arc::clone(&record_ids_arc));
         }
 
         Ok(Some(record_ids_arc))
@@ -560,7 +559,6 @@ impl IndexManager {
     /// Count entries for one regular or unique index — used by the
     /// doctor's verify pass.
     pub async fn entry_count(&self, name_interned: u64, unique: bool) -> DbResult<u64> {
-        use futures::StreamExt;
         let prefix = IndexRecordKey::new(unique, name_interned).to_prefix_bytes();
         let mut count: u64 = 0;
         let stream = self.info_store.scan_prefix_stream(prefix, 1024);

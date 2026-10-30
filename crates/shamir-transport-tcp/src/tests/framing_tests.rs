@@ -277,3 +277,55 @@ async fn rv_transport_tcp_3a576732_empty_write_rejected_not_close_sentinel() {
         "writers emitted bytes for an empty payload"
     );
 }
+
+#[tokio::test]
+async fn explicit_writer_caps_validate_before_writing() {
+    let mut output = Vec::new();
+    let mut scratch = vec![9];
+    let payload = b"abc";
+    assert!(matches!(
+        crate::framing::write_frame_with_cap(&mut output, payload, 2).await,
+        Err(FrameError::TooLarge { actual: 3, max: 2 })
+    ));
+    assert!(matches!(
+        crate::framing::write_frame_into_with_cap(&mut output, payload, &mut scratch, 2).await,
+        Err(FrameError::TooLarge { actual: 3, max: 2 })
+    ));
+    assert_eq!(scratch, [9]);
+    let framed = frame(payload);
+    assert!(matches!(
+        crate::framing::write_frame_prereserved_with_cap(&mut output, &framed, 2).await,
+        Err(FrameError::TooLarge { actual: 3, max: 2 })
+    ));
+    assert!(output.is_empty());
+    assert!(matches!(
+        crate::framing::write_frame_prereserved_with_cap(&mut output, &[0, 0, 0, 2, 1], 3).await,
+        Err(FrameError::MalformedBuffer(_))
+    ));
+    assert!(output.is_empty());
+    crate::framing::write_frame_with_cap(&mut output, payload, 3)
+        .await
+        .unwrap();
+    assert_eq!(output, framed);
+    output.clear();
+    crate::framing::write_frame_into_with_cap(&mut output, payload, &mut scratch, 3)
+        .await
+        .unwrap();
+    assert_eq!(output, framed);
+    output.clear();
+    crate::framing::write_frame_prereserved_with_cap(&mut output, &framed, 3)
+        .await
+        .unwrap();
+    assert_eq!(output, framed);
+    output.clear();
+    write_frame(&mut output, payload).await.unwrap();
+    assert_eq!(output, framed);
+    output.clear();
+    write_frame_into(&mut output, payload, &mut scratch)
+        .await
+        .unwrap();
+    assert_eq!(output, framed);
+    output.clear();
+    write_frame_prereserved(&mut output, &framed).await.unwrap();
+    assert_eq!(output, framed);
+}

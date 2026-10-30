@@ -430,6 +430,7 @@ async fn run_follower_loop_internal(
         // A hello that already trips fencing is fatal — propagate.
         Err(e @ ReplError::StaleLeaderEpoch { .. })
         | Err(e @ ReplError::Seed(_))
+        | Err(e @ ReplError::UpstreamKeyMismatch { .. })
         | Err(e @ ReplError::IdentityMismatch { .. }) => return Err(e),
         Err(e) => {
             // A transient hello failure: we cannot seed the epoch, so treat
@@ -452,7 +453,6 @@ async fn run_follower_loop_internal(
         leader_epoch = max_seen_epoch,
         "follower_loop: started"
     );
-
     let mut backoff_ms = INITIAL_BACKOFF_MS;
     let mut iter = 0usize;
     // Rule (round 13 G2): unsupervised loop (lease: None) = never writes; supervised loop = writes with its lease generation; tests driving a supervised loop must attach the row's REAL binding_generation (no 0 special-case in production — 0 is fenced out as stale).
@@ -601,6 +601,7 @@ async fn run_follower_loop_internal(
             Ok(r) => r,
             Err(e @ ReplError::StaleLeaderEpoch { .. })
             | Err(e @ ReplError::ReopenRequired { .. })
+            | Err(e @ ReplError::UpstreamKeyMismatch { .. })
             | Err(e @ ReplError::IdentityMismatch { .. })
             | Err(e @ ReplError::Seed(_)) => return Err(e),
             Err(e) => {

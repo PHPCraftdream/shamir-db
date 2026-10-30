@@ -10,7 +10,7 @@
 //! on the graph type or the snapshot codec (it lives in the sidecar, which
 //! is a plain bincode blob). The [`Sq8Quantizer`](crate::vector::sq8::Sq8Quantizer)
 //! round-trip is: `QuantMeta::from_quantizer` at dump time,
-//! `QuantMeta::to_quantizer` at load time.
+//! `QuantMeta::try_to_quantizer` validates persisted parameters at load time.
 
 use crate::vector::sq8::Sq8Quantizer;
 use serde::{Deserialize, Serialize};
@@ -49,12 +49,34 @@ impl QuantMeta {
         }
     }
 
-    /// Reconstruct an [`Sq8Quantizer`] from the stored params at load time.
+    /// Validate persisted parameters before invoking the infallible public API.
+    pub(crate) fn try_to_quantizer(
+        &self,
+        expected_dim: usize,
+    ) -> Result<Sq8Quantizer, &'static str> {
+        if self.method != crate::vector::snapshot::QUANT_METHOD_SQ8 {
+            return Err("unknown quantization method");
+        }
+        if self.dim == 0
+            || self.dim != expected_dim
+            || self.mins.len() != self.dim
+            || self.scales.len() != self.dim
+        {
+            return Err("invalid quantizer dimensions");
+        }
+        if self.mins.iter().any(|v| !v.is_finite())
+            || self.scales.iter().any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err("invalid quantizer parameters");
+        }
+        Ok(self.to_quantizer())
+    }
+
+    /// Reconstruct an [`Sq8Quantizer`] from trusted parameters.
     ///
     /// This recomputes the `min_sq_sum` constant from `mins` (an `O(dim)`
-    /// pass) — see the struct doc for why it is not serialised. Panics if
-    /// `method != "sq8"` (the load path guards on the method tag before
-    /// calling this; a foreign method is refused with `VersionMismatch`).
+    /// pass). Panics if the method or parameter lengths are invalid. Snapshot
+    /// loading uses the fallible validation path before calling this method.
     pub fn to_quantizer(&self) -> Sq8Quantizer {
         // Sq8Quantizer does not expose a `from_parts` constructor in #411;
         // we round-trip via `fit` on a synthetic zero vector to recompute
@@ -77,35 +99,5 @@ impl QuantMeta {
         // Overwrite the fit-derived params with the stored ones.
         q.overwrite_params(&self.mins, &self.scales);
         q
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::vector::quant_meta::*;
-
-    /// `from_quantizer` ↔ `to_quantizer` round-trips the params exactly.
-    #[test]
-    fn quant_meta_round_trips_sq8_params() {
-        let training: Vec<Vec<f32>> = (0..50)
-            .map(|i| {
-                (0..8)
-                    .map(|j| (i as f32 * 0.1) + (j as f32 * 0.01))
-                    .collect()
-            })
-            .collect();
-        let q = Sq8Quantizer::fit(&training, 8);
-        let meta = QuantMeta::from_quantizer(&q);
-        assert_eq!(meta.method, "sq8");
-        assert_eq!(meta.dim, 8);
-        let q2 = meta.to_quantizer();
-        assert_eq!(q2.dim(), q.dim());
-        assert_eq!(q2.mins(), q.mins());
-        assert_eq!(q2.scales(), q.scales());
-        // Dequantize is identical (min_sq_sum is recomputed consistently).
-        let v = training[0].clone();
-        let codes = q.quantize(&v);
-        let codes2 = q2.quantize(&v);
-        assert_eq!(codes, codes2);
     }
 }

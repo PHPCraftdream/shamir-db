@@ -148,7 +148,10 @@ fn rejects_all_zero_client_nonce() {
     })
     .unwrap_err();
 
-    matches!(err, crate::common::Error::InvalidInput(_));
+    assert!(matches!(
+        err,
+        crate::common::Error::InvalidInput("client_nonce all-zero")
+    ));
 }
 
 #[test]
@@ -172,7 +175,10 @@ fn rejects_all_zero_server_nonce() {
     })
     .unwrap_err();
 
-    matches!(err, crate::common::Error::InvalidInput(_));
+    assert!(matches!(
+        err,
+        crate::common::Error::InvalidInput("server_nonce all-zero")
+    ));
 }
 
 #[test]

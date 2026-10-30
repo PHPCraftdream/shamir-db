@@ -1,4 +1,4 @@
-//! Single-node topology for non-Linux platforms and single-socket Linux.
+//! Single-node fallback topology.
 
 use crate::core::node::{CpuId, NodeId};
 use crate::core::topology::Topology;
@@ -6,11 +6,9 @@ use crate::error::AffinityError;
 
 /// A topology that reports exactly one UMA node owning every CPU.
 ///
-/// Used on Windows, macOS, single-socket Linux, and anywhere the real
-/// `LinuxTopology` probe finds `< 2` nodes. With this topology a
-/// [`NodeReplicated`](crate::NodeReplicated) collapses to a single replica and
-/// behaves identically to a bare `ArcSwap` — the zero-overhead path that lets
-/// consumers use `NodeReplicated` unconditionally.
+/// Used on non-Linux platforms and when Linux discovery fails. A
+/// [`NodeReplicated`](crate::NodeReplicated) has one replica, but local loads
+/// still query the topology and resolve the replica.
 pub struct FallbackSingleNodeTopology {
     cores: Vec<CpuId>,
 }

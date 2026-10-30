@@ -16,8 +16,31 @@
 //! test binaries need no fixture crate at runtime; the lineage test below
 //! keeps the mirror in check.
 
+use crate::vector::quant_meta::QuantMeta;
 use crate::vector::sq8::Sq8Quantizer;
 use shamir_bench_utils::vector_data::{Lcg as BenchLcg, LCG_INC, LCG_MULT};
+
+/// `from_quantizer` ↔ `to_quantizer` round-trips the params exactly.
+#[test]
+fn quant_meta_round_trips_sq8_params() {
+    let training: Vec<Vec<f32>> = (0..50)
+        .map(|i| {
+            (0..8)
+                .map(|j| (i as f32 * 0.1) + (j as f32 * 0.01))
+                .collect()
+        })
+        .collect();
+    let q = Sq8Quantizer::fit(&training, 8);
+    let meta = QuantMeta::from_quantizer(&q);
+    assert_eq!(meta.method, "sq8");
+    assert_eq!(meta.dim, 8);
+    let q2 = meta.to_quantizer();
+    assert_eq!(q2.dim(), q.dim());
+    assert_eq!(q2.mins(), q.mins());
+    assert_eq!(q2.scales(), q.scales());
+    let v = training[0].clone();
+    assert_eq!(q.quantize(&v), q2.quantize(&v));
+}
 
 // ----- deterministic RNG (mirrors shamir_bench_utils::Lcg lineage) --------
 
@@ -38,12 +61,16 @@ impl Lcg {
     }
     #[inline]
     fn next_f32(&mut self) -> f32 {
-        let high = (self.next_u64() >> 32) as u32;
-        (high as f32) / (1u64 << 32) as f32
+        (self.next_u64() >> 40) as f32 * (1.0 / 16_777_216.0)
     }
     #[inline]
     fn next_range(&mut self, lo: f32, hi: f32) -> f32 {
-        lo + (hi - lo) * self.next_f32()
+        if !lo.is_finite() || !hi.is_finite() || lo >= hi {
+            return f32::NAN;
+        }
+        let fraction = f64::from(self.next_f32());
+        let value = (f64::from(lo) + (f64::from(hi) - f64::from(lo)) * fraction) as f32;
+        value.max(lo).min(hi.next_down())
     }
     /// Standard-normal via polar Box-Muller (same shape as bench-utils).
     fn next_gaussian(&mut self) -> f32 {
@@ -61,7 +88,7 @@ impl Lcg {
 
 /// Clustered dataset generator: `n` points of `dim` around `k_clusters`
 /// centroids in `[-1, 1]^dim` with per-dim Gaussian noise of std `sigma`.
-/// Mirrors `shamir_bench_utils::clustered_vectors` byte-for-byte in shape.
+/// Mirrors `shamir_bench_utils::clustered_vectors` for the valid test inputs below.
 fn clustered(n: usize, dim: usize, k: usize, sigma: f32, seed: u64) -> Vec<Vec<f32>> {
     assert!(k > 0);
     let mut rng = Lcg::new(seed);
@@ -520,6 +547,26 @@ fn rv_bench_utils_a7605ff1_lcg_lineage_matches_bench_utils() {
                 "seed {seed}: u64 stream drifted"
             );
         }
+        for _ in 0..64 {
+            assert_eq!(
+                local.next_f32(),
+                canon.next_f32(),
+                "seed {seed}: uniform drifted"
+            );
+        }
+        for (lo, hi) in [
+            (-1.0, 1.0),
+            (1.0, f32::from_bits(0x3f80_0001)),
+            (-f32::MAX, f32::MAX),
+        ] {
+            assert_eq!(
+                local.next_range(lo, hi),
+                canon.next_range(lo, hi),
+                "seed {seed}: range drifted"
+            );
+        }
+        assert!(local.next_range(1.0, 1.0).is_nan());
+        assert!(canon.next_range(1.0, 1.0).is_nan());
         for _ in 0..64 {
             assert_eq!(
                 local.next_gaussian(),

@@ -24,6 +24,8 @@ mod ddl;
 mod inner;
 mod plan;
 mod scan;
+#[cfg(test)]
+mod tests;
 
 pub use crate::base_index::sorted_index_definition::SortedIndexDefinition;
 // Re-export so existing callers that import `SortedIndexDefinition` from this

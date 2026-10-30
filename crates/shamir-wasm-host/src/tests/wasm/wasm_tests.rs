@@ -1,3 +1,4 @@
+use crate::wasm::encode_params;
 use crate::{
     FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction, WasmEngine,
     WasmFunction, WasmLimits,
@@ -6,6 +7,30 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use wasmtime::Module;
+
+#[test]
+fn borrowed_params_encoding_matches_query_value_map() {
+    let mut nested = new_map();
+    nested.insert("bytes".to_string(), QueryValue::Bin(vec![0, 255, 1]));
+    nested.insert(
+        "items".to_string(),
+        QueryValue::List(vec![
+            QueryValue::Null,
+            QueryValue::Int(-42),
+            QueryValue::Str("שלום".into()),
+        ]),
+    );
+    let mut params = Params::new();
+    params.set("nested", QueryValue::Map(nested));
+    params.set("flag", QueryValue::Bool(true));
+    for params in [Params::new(), params] {
+        let expected = QueryValue::Map(params.raw().clone()).to_bytes().unwrap();
+        assert_eq!(
+            encode_params(&params).unwrap().as_slice(),
+            expected.as_ref()
+        );
+    }
+}
 
 /// WAT module implementing the identity echo ABI.
 ///

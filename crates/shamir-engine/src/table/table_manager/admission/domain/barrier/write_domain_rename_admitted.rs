@@ -376,7 +376,8 @@ impl TableManager {
                             );
                         }
                     }
-                    return Err(shamir_storage::error::DbError::Internal(detail));
+                    log::error!("{}", detail);
+                    return Err(shamir_index::backend::contextualize_db_error(e, detail));
                 }
             }
 
@@ -417,12 +418,14 @@ impl TableManager {
                 .clear_from_renaming(false, old_id)
                 .await
                 .map_err(|e| {
-                    shamir_storage::error::DbError::Internal(format!(
+                    let detail = format!(
                         "RENAME INDEX '{old_name}' → '{new_name}': the rename is \
                          complete (new index created, old dropped), but clearing \
                          the rename tombstone failed: {e}. On restart, recovery \
                          will reconcile. Call TableManager::verify() to confirm state."
-                    ))
+                    );
+                    log::error!("{}", detail);
+                    shamir_index::backend::contextualize_db_error(e, detail)
                 })?;
         }
 
@@ -541,7 +544,8 @@ impl TableManager {
                             );
                         }
                     }
-                    return Err(shamir_storage::error::DbError::Internal(detail));
+                    log::error!("{}", detail);
+                    return Err(shamir_index::backend::contextualize_db_error(e, detail));
                 }
             }
 
@@ -583,12 +587,14 @@ impl TableManager {
                 .clear_from_renaming(true, old_id)
                 .await
                 .map_err(|e| {
-                    shamir_storage::error::DbError::Internal(format!(
+                    let detail = format!(
                         "RENAME INDEX '{old_name}' → '{new_name}': the unique rename \
                          is complete (old dropped, new created), but clearing the \
                          rename tombstone failed: {e}. On restart, recovery will \
                          reconcile. Call TableManager::verify() to confirm state."
-                    ))
+                    );
+                    log::error!("{}", detail);
+                    shamir_index::backend::contextualize_db_error(e, detail)
                 })?;
         }
 

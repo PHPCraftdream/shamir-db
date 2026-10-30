@@ -25,7 +25,7 @@ use super::helpers::{run_until_cancelled, IPC_PEER_ADDR};
 /// argument limit.
 pub(super) struct WsAcceptParams {
     pub(super) path: String,
-    pub(super) policy: BrowserOriginPolicy,
+    pub(super) policy: Arc<BrowserOriginPolicy>,
 }
 
 /// TCP+TLS accept loop. The accept_loop itself never blocks: every step

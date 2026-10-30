@@ -13,6 +13,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[cfg(test)]
+#[path = "../../tests/runtime/actor_shutdown_tests.rs"]
+mod shutdown_tests;
+
 pub struct IndexActor<Op: Send + 'static, Snap: Send + Sync + 'static> {
     write_tx: mpsc::Sender<Op>,
     pub(crate) snapshot: Arc<ArcSwap<Snap>>,
@@ -97,10 +101,17 @@ impl<Op: Send + 'static, Snap: Send + Sync + 'static> IndexActor<Op, Snap> {
     }
 
     /// Stop accepting new ops and wait for the applier task to drain.
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(self) {
+        self.shutdown_with_report(|error| log::error!("index actor task failed: {error}"))
+            .await;
+    }
+
+    async fn shutdown_with_report(mut self, report: impl FnOnce(tokio::task::JoinError)) {
         drop(self.write_tx);
         if let Some(join) = self.join.take() {
-            let _ = join.await;
+            if let Err(error) = join.await {
+                report(error);
+            }
         }
     }
 }

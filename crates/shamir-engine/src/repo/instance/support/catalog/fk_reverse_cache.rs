@@ -376,19 +376,19 @@ impl FkReverseCache {
         if state.cache.is_some() {
             return Ok(FkSnapshot { state });
         }
-        let _guard = self.build_lock.lock().await;
-        let state = self.state.load_full();
-        if state.cache.is_some() {
-            return Ok(FkSnapshot { state });
-        }
         loop {
+            let guard = self.build_lock.lock().await;
             let captured = self.state.load_full();
+            if captured.cache.is_some() {
+                return Ok(FkSnapshot { state: captured });
+            }
             let all_entries = build().await?;
             fire_post_gencheck_pre_publish_test_hook().await;
             if let Some(state) = self.try_publish(&captured, all_entries) {
                 fire_post_publish_pre_return_test_hook().await;
                 return Ok(FkSnapshot { state });
             }
+            drop(guard);
             tokio::task::yield_now().await;
         }
     }

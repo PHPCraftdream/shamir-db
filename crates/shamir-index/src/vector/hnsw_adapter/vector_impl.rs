@@ -572,14 +572,15 @@ impl VectorAdapter for HnswAdapter {
                 let dist = ShamirDist {
                     metric: self.metric,
                 };
-                // Snapshot (internal, vector) pairs — the index is tiny here.
-                let mut pairs: Vec<(usize, Vec<f32>)> = Vec::with_capacity(128);
+                // Score while borrowing each vector; release the vectors map guard
+                // before consulting deleted or rid_map to avoid nested map locks.
+                let mut scores: Vec<(usize, f32)> = Vec::with_capacity(128);
                 self.state.vectors.iter_sync(|i, v| {
-                    pairs.push((*i, v.clone()));
+                    scores.push((*i, dist.eval(query, v)));
                     true
                 });
-                let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(pairs.len());
-                for (internal, v) in pairs {
+                let mut out: Vec<(RecordId, f32)> = Vec::with_capacity(scores.len());
+                for (internal, score) in scores {
                     // DEADLOCK FIX (#589 class, commit `7a4abf62`):
                     // `contains_sync`, NOT `contains_async` — `deleted` is
                     // mutated via `insert_sync` and scanned via `iter_sync`
@@ -592,7 +593,7 @@ impl VectorAdapter for HnswAdapter {
                     // `rid_map` is scanned via `iter_sync` in `for_each_rid_map`
                     // (snapshot serialisation) on the SAME worker threads.
                     if let Some(rid) = self.state.rid_map.read_sync(&internal, |_, r| *r) {
-                        out.push((rid, dist.eval(query, &v)));
+                        out.push((rid, score));
                     }
                 }
                 out

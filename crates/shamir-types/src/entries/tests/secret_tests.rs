@@ -30,3 +30,16 @@ fn from_str_and_string() {
     let from_string: SecretString = "world".to_owned().into();
     assert_eq!(from_string.reveal(), "world");
 }
+
+#[test]
+fn secret_lifecycle_empty_and_unicode() {
+    for text in ["", "пароль 🔐"] {
+        let secret = SecretString::from(text);
+        let clone = secret.clone();
+        assert_eq!(format!("{:?}", secret), "SecretString(***)");
+        let bytes = rmp_serde::to_vec(&secret).unwrap();
+        assert_eq!(bytes, rmp_serde::to_vec(text).unwrap());
+        assert_eq!(clone.into_inner(), text);
+        assert_eq!(secret.reveal(), text);
+    }
+}

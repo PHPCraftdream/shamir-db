@@ -50,24 +50,10 @@ impl ClearRaceHook {
     }
 }
 
-/// Task #535 round 2: deterministic test seam for the NARROWER gap an `@fl`
-/// adversarial pass found in round 1's fix — a writer that publishes
-/// `dirty_nonempty.store(true)` then STALLS across an `.await` before its own
-/// `dirty.insert()` completes (e.g. mid-loop in `insert_many`/`set_many`/
-/// `remove_many`, which yield at `cache.insert(...).await` every iteration).
-/// If `drain_once`'s clear-and-verify sequence runs entirely inside that
-/// stall (both `is_empty()` checks see the map without this writer's
-/// not-yet-landed entry), round 1's verify-after-clear has nothing to
-/// observe and restore — the writer's LATER insert then lands with the
-/// sentinel stuck `false`. Closed on the writer side by republishing
-/// `store(true)` immediately after each `dirty.insert()`, not just before.
-///
-/// This hook parks `insert_many` between its first and second loop
-/// iteration (after item 0's `dirty.insert` + round-2 republish + cache
-/// write, before item 1's `dirty.insert`) so a test can drive a real
-/// `drain_once` into that exact window, then release the writer and prove
-/// item 1 (inserted AFTER the drain already cleared the sentinel) is still
-/// visible thanks to its own post-insert republish.
+/// Parks `insert_many` between its first and second items so a test can
+/// drain the first item before the second is published. The former boolean
+/// sentinel was replaced by `dirty_count`; reads probe dirty unconditionally.
+/// The oracle checks the count and visibility of the second item.
 #[derive(Default)]
 pub(crate) struct BatchInsertPauseHook {
     /// Fired once `insert_many` has parked after its first iteration.

@@ -78,6 +78,50 @@ impl From<ReadQuery> for QueryEntry {
     }
 }
 
+/// Metadata derived from one static preorder walk of a root request.
+#[derive(Debug, Clone)]
+pub struct RequestMetadata {
+    /// Write classification for each root alias, including static nested bodies.
+    pub writes: TMap<String, bool>,
+    /// Repositories referenced by data operations at any depth.
+    pub repos: TFxSet<String>,
+    /// Unique access requirements in first-encounter order.
+    pub required_access: Vec<(Action, ResourcePath)>,
+}
+
+impl RequestMetadata {
+    /// Collect root metadata without evaluating runtime gates or loop lengths.
+    pub fn collect(queries: &TMap<String, QueryEntry>, db: &str) -> Self {
+        let mut metadata = Self {
+            writes: TMap::default(),
+            repos: TFxSet::default(),
+            required_access: Vec::new(),
+        };
+        let mut seen = TFxSet::default();
+        let mut root = None;
+        for visit in BatchTreeVisitor::new(queries) {
+            if visit.depth == 0 {
+                metadata.writes.insert(visit.alias.to_owned(), false);
+                root = Some(visit.alias);
+            }
+            if visit.entry.op.is_write_leaf() {
+                if let Some(value) = root.and_then(|alias| metadata.writes.get_mut(alias)) {
+                    *value = true;
+                }
+            }
+            if let Some(table) = visit.entry.op.table_ref() {
+                metadata.repos.insert(table.repo.clone());
+            }
+            if let Some(access) = visit.entry.op.required_access(db) {
+                if seen.insert(access.clone()) {
+                    metadata.required_access.push(access);
+                }
+            }
+        }
+        metadata
+    }
+}
+
 /// Returns the set of distinct repository names referenced by the
 /// data queries in `queries`. Admin ops (which return `none` from
 /// `BatchOp::table_ref`) do not contribute. `BatchOp::Batch`/`BatchOp::

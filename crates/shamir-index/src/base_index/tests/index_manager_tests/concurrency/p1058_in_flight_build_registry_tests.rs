@@ -114,6 +114,36 @@ async fn test_scenario_1_not_in_flight_update_normal_ops() {
 // ============================================================================
 
 #[tokio::test]
+async fn batch_creation_captures_only_matching_in_flight_records() {
+    let (_, _, manager) = create_manager();
+    let building = IndexDefinition::new(1001, vec![IndexInfoItem::new(vec![1])]);
+    let ready = IndexDefinition::new(1002, vec![IndexInfoItem::new(vec![1])]);
+    manager.create_index(building.clone()).await.unwrap();
+    manager.create_index(ready).await.unwrap();
+    let mut building = building;
+    building.state = IndexState::Building;
+    manager.indexes.add_index(building);
+    manager.mark_build_in_flight(1001);
+
+    let first = RecordId::new();
+    let second = RecordId::new();
+    let missing = RecordId::new();
+    let value = create_test_value(&[(1, InnerValue::Str("alice".into()))]);
+    let other = create_test_value(&[(2, InnerValue::Str("other".into()))]);
+    let pairs = [(&first, &value), (&second, &value), (&missing, &other)];
+    let ops = manager.plan_records_created_batch(pairs).await.unwrap();
+    assert_eq!(ops.len(), 2);
+    assert!(ops
+        .iter()
+        .all(|op| matches!(op, IndexWriteOp::SetPosting { .. })));
+    let dirty = manager.drain_dirty_set(1001);
+    assert_eq!(dirty.len(), 2);
+    assert!(dirty.contains(&first));
+    assert!(dirty.contains(&second));
+    assert!(!dirty.contains(&missing));
+}
+
+#[tokio::test]
 async fn test_scenario_2_in_flight_capture_to_dirty_set() {
     let (_, _, manager) = create_manager();
 

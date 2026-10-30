@@ -17,9 +17,13 @@ use std::sync::Arc;
 use crate::{DbError, DbResult};
 use shamir_engine::query::filter::{query_value_to_filter_value as qv_to_fv_literal, FilterValue};
 use shamir_engine::repo::RepoWritePermit;
-use shamir_engine::validator::schema::{FieldRule, SchemaValidator};
+use shamir_engine::validator::schema::constraints::{Constraints, Num};
+use shamir_engine::validator::schema::type_tag::TypeTag;
+use shamir_engine::validator::schema::{
+    CompareOp, CrossFieldCompare, FieldRule, FkAction, SchemaValidator,
+};
 use shamir_engine::validator::{RecordValidator, ValidatorBinding, WriteOp};
-use shamir_types::core::interner::Interner;
+use shamir_types::core::interner::{Interner, InternerKey};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
@@ -107,9 +111,6 @@ fn parse_one_rule_default(qv: &QueryValue, item: &QueryValue) -> Option<FilterVa
 
 /// Parse one rule map, de-interning the `path` field ids.
 fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule> {
-    use shamir_engine::validator::schema::constraints::Constraints;
-    use shamir_types::core::interner::InternerKey;
-
     // ── path (required) ────────────────────────────────────────────
     let path_ids = item
         .get("path")
@@ -275,7 +276,6 @@ fn parse_one_rule(item: &QueryValue, interner: &Interner) -> DbResult<FieldRule>
 
 /// Map a persisted type-tag string to [`TypeTag`].
 fn parse_type_tag(s: &str) -> DbResult<shamir_engine::validator::schema::type_tag::TypeTag> {
-    use shamir_engine::validator::schema::type_tag::TypeTag;
     match s {
         "string" => Ok(TypeTag::String),
         "int" => Ok(TypeTag::Int),
@@ -300,7 +300,6 @@ fn parse_num_constraint(
     item: &QueryValue,
     field: &str,
 ) -> Option<shamir_engine::validator::schema::constraints::Num> {
-    use shamir_engine::validator::schema::constraints::Num;
     let v = item.get(field)?;
     if let Some(i) = v.as_i64() {
         Some(Num::Int(i))
@@ -373,7 +372,6 @@ fn parse_fk_action(
     fk_map: &QueryValue,
     field: &str,
 ) -> DbResult<shamir_engine::validator::schema::FkAction> {
-    use shamir_engine::validator::schema::FkAction;
     let Some(v) = fk_map.get(field) else {
         return Ok(FkAction::NoAction);
     };
@@ -416,8 +414,6 @@ fn parse_fk_action(
 fn parse_cross_field_compare(
     item: &QueryValue,
 ) -> DbResult<Option<shamir_engine::validator::schema::CrossFieldCompare>> {
-    use shamir_engine::validator::schema::{CompareOp, CrossFieldCompare};
-
     // Outer key absent → no compare constraint.
     let v = match item.get("compare") {
         Some(v) => v,

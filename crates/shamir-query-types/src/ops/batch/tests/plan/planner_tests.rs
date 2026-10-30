@@ -5,7 +5,7 @@ use crate::batch::planner::BatchPlanner;
 use crate::batch::{
     BatchError, BatchLimits, BatchOp, BatchRequest, QueryEntry, ResultEncoding, SubBatchOp,
 };
-use crate::filter::FilterValue;
+use crate::filter::{Cond, Filter, FilterExpr, FilterExprOp, FilterValue, FnCall};
 use crate::read::ReadQuery;
 
 // -------------------------------------------------------------------------
@@ -456,8 +456,6 @@ fn after_self_reference_with_path_tail_yields_after_path_ignored_not_circular() 
 
 #[test]
 fn where_query_ref_nested_in_cond_then_is_extracted_as_dependency() {
-    use crate::filter::{Cond, Filter};
-
     let mut queries: TMap<String, QueryEntry> = new_map();
     queries.insert("check".to_string(), read_entry("check"));
 
@@ -531,8 +529,6 @@ fn where_query_ref_nested_in_cond_then_is_extracted_as_dependency() {
 
 #[test]
 fn where_query_ref_nested_in_expr_args_is_extracted_as_dependency() {
-    use crate::filter::{Filter, FilterExpr, FilterExprOp};
-
     let mut queries: TMap<String, QueryEntry> = new_map();
     queries.insert("base".to_string(), read_entry("base"));
 
@@ -583,8 +579,6 @@ fn where_query_ref_nested_in_expr_args_is_extracted_as_dependency() {
 
 #[test]
 fn where_query_ref_nested_in_fn_call_args_is_extracted_as_dependency() {
-    use crate::filter::{Filter, FnCall};
-
     let mut queries: TMap<String, QueryEntry> = new_map();
     queries.insert("src".to_string(), read_entry("src"));
 
@@ -941,5 +935,45 @@ fn rv_query_types_8257acb4_deep_marker_value_skips_serde() {
     assert!(
         matches!(res, Err(BatchError::NestingTooDeep { .. })),
         "over-deep marker value must skip serde and hit the extraction depth bound"
+    );
+}
+
+#[test]
+fn planning_preserves_alias_stage_and_edge_order() {
+    let mut queries = new_map();
+    let mut last = read_entry_with_query_ref("last", "first");
+    last.after = vec!["second".into(), "first".into(), "second".into()];
+    queries.insert("last".into(), last);
+    queries.insert("second".into(), read_entry("second"));
+    queries.insert("first".into(), read_entry("first"));
+    let mut final_entry = read_entry_with_query_ref("final", "last");
+    final_entry.after.push("second".into());
+    queries.insert("final".into(), final_entry);
+    let plan = BatchPlanner::plan(&queries, &BatchLimits::default()).unwrap();
+    assert_eq!(plan.aliases, ["last", "second", "first", "final"]);
+    assert_eq!(
+        plan.stages,
+        vec![vec!["second", "first"], vec!["last"], vec!["final"]]
+    );
+    assert_eq!(
+        plan.dependencies["last"]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["first", "second"]
+    );
+    assert_eq!(
+        plan.edge_provenance["last"]
+            .iter()
+            .map(|(k, v)| (k.as_str(), *v))
+            .collect::<Vec<_>>(),
+        [
+            ("first", crate::batch::EdgeKind::Both),
+            ("second", crate::batch::EdgeKind::Explicit)
+        ]
+    );
+    assert_eq!(
+        plan.edge_provenance["final"]["last"],
+        crate::batch::EdgeKind::DataFlow
     );
 }

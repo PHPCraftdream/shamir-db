@@ -62,7 +62,7 @@ impl TableManager {
                     Ok(None) => return Ok(None),
                 };
                 let backend = lease.backend;
-                let tokens: Vec<u64> = backend.tokenize_query(query);
+                let tokens = backend.tokenize_query(query).map_err(DbError::from)?;
                 let fts_mode = if mode == "or" {
                     FtsMode::OrAny
                 } else {
@@ -78,8 +78,8 @@ impl TableManager {
                         limit: limit.map(|k| k as usize),
                     })
                     .await
-                    .ok();
-                Ok(result.map(Into::into))
+                    .map_err(DbError::from)?;
+                Ok(Some(result.into()))
             }
             Filter::VectorSimilarity {
                 field,
@@ -109,7 +109,7 @@ impl TableManager {
                         },
                     })
                     .await
-                    .map_err(|e| DbError::Internal(e.to_string()))?;
+                    .map_err(DbError::from)?;
                 Ok(Some(result.into()))
             }
             Filter::Computed {
@@ -140,8 +140,8 @@ impl TableManager {
                         keys: smallvec::smallvec![hash.to_vec()],
                     })
                     .await
-                    .ok();
-                Ok(result.map(Into::into))
+                    .map_err(DbError::from)?;
+                Ok(Some(result.into()))
             }
             _ => Ok(None),
         }

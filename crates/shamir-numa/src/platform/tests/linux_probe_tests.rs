@@ -64,6 +64,32 @@ fn rv_numa_dc25aac1_empty_first_node_is_a_valid_topology() {
 }
 
 #[test]
+fn explicit_out_of_range_node_is_rejected_without_affinity_syscall() {
+    let topology = LinuxTopology::probe_with(|path| match path {
+        "/sys/devices/system/node/online" => Ok("7,2,7".to_owned()),
+        p if p.ends_with("node2/cpulist") => Ok("4-5".to_owned()),
+        _ => Ok("8-9".to_owned()),
+    })
+    .unwrap();
+    assert_eq!(
+        topology.cores_on_node(NodeId(0)),
+        &[crate::CpuId(4), crate::CpuId(5)]
+    );
+    assert_eq!(
+        topology.cores_on_node(NodeId(1)),
+        &[crate::CpuId(8), crate::CpuId(9)]
+    );
+    assert!(topology.cores_on_node(NodeId(2)).is_empty());
+    assert!(matches!(
+        topology.pin_current_thread_to_node(NodeId(2)),
+        Err(AffinityError::NodeOutOfRange {
+            requested: 2,
+            available: 2
+        })
+    ));
+}
+
+#[test]
 fn probe_on_real_linux_host_succeeds() {
     let topo = LinuxTopology::probe().expect("Linux host must expose /sys/devices/system/node");
     assert!(topo.num_nodes() >= 1);

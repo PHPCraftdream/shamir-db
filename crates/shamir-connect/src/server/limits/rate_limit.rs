@@ -8,7 +8,7 @@
 //!
 //! ## Constants (per spec §8 table)
 //!
-//! - `RATE_LIMIT_AUTH_INIT_PER_SUBNET = 10/sec` (sliding window).
+//! - `RATE_LIMIT_AUTH_INIT_PER_SUBNET = 10/sec` (token bucket).
 //! - Subnet granularity: `/24 IPv4` or `/64 IPv6` (same as lockout).
 //!
 //! ## Restart warmup window (spec §8.6 NORMATIVE)
@@ -86,7 +86,7 @@ pub enum RateDecision {
     },
 }
 
-/// Per-subnet sliding-window rate limiter for `auth_init`.
+/// Per-subnet token-bucket rate limiter for `auth_init`.
 pub trait RateLimiter: Send + Sync {
     /// Check + consume one token for `subnet` at `now_ns`. Honors the spec
     /// §8.6 warmup window if `now_ns < startup_at_ns + WARMUP_WINDOW_NS`.

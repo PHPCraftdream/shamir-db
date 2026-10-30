@@ -15,6 +15,113 @@ use crate::query::read::exec::pre_intern_select_keys;
 use shamir_query_types::read::select::{Select, SelectItem};
 use shamir_storage::error::DbError;
 use shamir_types::core::interner::{Interner, InternerQuota};
+use shamir_types::{mpack, types::value::QueryValue};
+
+#[test]
+fn downstream_mpack_negative_object_values() {
+    let objects = [
+        mpack!({
+            "first": -1,
+            "middle": -2.5,
+            "last": -3,
+            "nested": {
+                "first": -4.5,
+                "middle": -5,
+                "last": -6.5
+            }
+        }),
+        mpack!({
+            "first": -1,
+            "middle": -2.5,
+            "last": -3,
+            "nested": {
+                "first": -4.5,
+                "middle": -5,
+                "last": -6.5,
+            },
+        }),
+        mpack!({
+            "first": -1.5,
+            "middle": -2,
+            "last": -3.5,
+            "nested": {
+                "first": -4,
+                "middle": -5.5,
+                "last": -6
+            }
+        }),
+        mpack!({
+            "first": -1.5,
+            "middle": -2,
+            "last": -3.5,
+            "nested": {
+                "first": -4,
+                "middle": -5.5,
+                "last": -6,
+            },
+        }),
+    ];
+    let final_values = [
+        mpack!({
+            "other": true,
+            "last": -7
+        }),
+        mpack!({
+            "other": true,
+            "last": -7,
+        }),
+        mpack!({
+            "other": true,
+            "last": -7.5
+        }),
+        mpack!({
+            "other": true,
+            "last": -7.5,
+        }),
+    ];
+    for (index, object) in final_values.iter().enumerate() {
+        let expected = if index < 2 {
+            QueryValue::Int(-7)
+        } else {
+            QueryValue::F64(-7.5)
+        };
+        assert_eq!(object.get_path("last"), Some(&expected));
+    }
+    for (index, object) in objects.iter().enumerate() {
+        let expected = if index < 2 {
+            [
+                QueryValue::Int(-1),
+                QueryValue::F64(-2.5),
+                QueryValue::Int(-3),
+                QueryValue::F64(-4.5),
+                QueryValue::Int(-5),
+                QueryValue::F64(-6.5),
+            ]
+        } else {
+            [
+                QueryValue::F64(-1.5),
+                QueryValue::Int(-2),
+                QueryValue::F64(-3.5),
+                QueryValue::Int(-4),
+                QueryValue::F64(-5.5),
+                QueryValue::Int(-6),
+            ]
+        };
+        for (path, value) in [
+            "first",
+            "middle",
+            "last",
+            "nested.first",
+            "nested.middle",
+            "nested.last",
+        ]
+        .iter()
+        .zip(expected.iter())
+        {
+            assert_eq!(object.get_path(path), Some(value));
+        }
+    }
+}
 
 fn select_with_alias(alias: &str) -> Select {
     Select {
@@ -34,7 +141,8 @@ fn rv_types_2eb39dfd_pre_intern_select_keys_at_cap_returns_typed_error() {
             max_names: 1,
             max_bytes: 1,
         },
-    );
+    )
+    .unwrap();
 
     // Alias interned first consumes the whole quota budget.
     let occupied = select_with_alias("a");
@@ -61,7 +169,8 @@ fn rv_types_2eb39dfd_pre_intern_select_keys_under_cap_ok() {
             max_names: 16,
             max_bytes: 1024,
         },
-    );
+    )
+    .unwrap();
     pre_intern_select_keys(&select_with_alias("total"), &interner, |name| {
         interner.get_ind(name).map(|id| id.id())
     })
@@ -78,7 +187,8 @@ fn rv_types_2eb39dfd_having_new_alias_at_cap_surfaces_code() {
             max_names: 3,
             max_bytes: 1_048_576,
         },
-    );
+    )
+    .unwrap();
     let records = make_records(&interner);
     assert_eq!(interner.quota_usage().0, 3);
     let refs = new_map();

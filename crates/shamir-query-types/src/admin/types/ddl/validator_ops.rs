@@ -63,7 +63,7 @@ pub struct RenameValidatorOp {
 /// ```text
 /// {
 ///   "bind_validator": "v_age",
-///   "table": { "db": "testdb", "repo": "main", "table": "users" },
+///   "db": "testdb", "repo": "main", "table": "users",
 ///   "ops": ["insert", "update"],
 ///   "priority": 1500
 /// }
@@ -83,7 +83,7 @@ pub struct BindValidatorOp {
 /// Unbind a validator from a table.
 ///
 /// ```text
-/// { "unbind_validator": "v_age", "table": { "db": "testdb", "repo": "main", "table": "users" } }
+/// { "unbind_validator": "v_age", "db": "testdb", "repo": "main", "table": "users" }
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

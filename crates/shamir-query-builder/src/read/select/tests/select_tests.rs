@@ -2,6 +2,7 @@
 //! wire shape and round-tripped through msgpack.
 
 use shamir_query_types::read::SelectItem;
+use shamir_query_types::read::{SelectExpr, SelectExprValue};
 use shamir_types::mpack;
 
 use crate::select::*;
@@ -120,8 +121,6 @@ fn test_func_nested_args() {
 
 #[test]
 fn test_expr_as_literal_only() {
-    use shamir_query_types::read::{SelectExpr, SelectExprValue};
-
     assert_wire(
         expr_as(
             "five",
@@ -154,8 +153,6 @@ fn test_expr_as_literal_only() {
 
 #[test]
 fn test_expr_as_field_arithmetic() {
-    use shamir_query_types::read::SelectExpr;
-
     assert_wire(
         expr_as(
             "total",
@@ -188,8 +185,6 @@ fn test_expr_as_field_arithmetic() {
 
 #[test]
 fn test_expr_no_alias_omits_alias_key() {
-    use shamir_query_types::read::{SelectExpr, SelectExprValue};
-
     assert_wire(
         expr(SelectExpr::Literal {
             value: SelectExprValue::Int(1),

@@ -4,8 +4,8 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::access::{
-    permits, trace_access, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
-    OWNER_SYSTEM,
+    escape_resource_diagnostic, permits, trace_access, AccessError, Action, Actor, Mode,
+    ResourceMeta, ResourcePath, ResourcePathRef, OWNER_SYSTEM,
 };
 use crate::DbResult;
 
@@ -63,8 +63,8 @@ impl ShamirDb {
         };
 
         // Traversal: each ancestor needs Execute.
-        for anc in path.ancestors() {
-            let anc_meta = match Self::meta_memo(self, &anc, memo).await {
+        for anc in path.as_ref().ancestors() {
+            let anc_meta = match Self::meta_memo(self, anc, memo).await {
                 Ok(m) => m,
                 Err(e) => {
                     // Fail-closed: a real catalogue-read error on an
@@ -72,9 +72,10 @@ impl ShamirDb {
                     // through to a default-open `permits` check.
                     log::warn!(
                         "authorize_access: resource_meta failed for ancestor '{}' \
-                         (actor={actor}, action={}): {e}",
-                        anc,
-                        Action::Execute
+                         (actor={actor}, action={}): {}",
+                        escape_resource_diagnostic(&anc.to_string()),
+                        Action::Execute,
+                        escape_resource_diagnostic(&e.to_string())
                     );
                     return Err(AccessError {
                         actor: actor.clone(),
@@ -83,7 +84,24 @@ impl ShamirDb {
                     });
                 }
             };
-            let in_group = self.resolve_in_group(user_id, &anc_meta, memo).await;
+            let in_group = self
+                .resolve_in_group(user_id, &anc_meta, memo)
+                .await
+                .map_err(|e| {
+                    log::warn!(
+                        "authorize_access: group lookup failed for ancestor '{}' \
+                         (actor={actor}, action={}, group={:?}): {}",
+                        escape_resource_diagnostic(&anc.to_string()),
+                        Action::Execute,
+                        anc_meta.group,
+                        escape_resource_diagnostic(&e.to_string())
+                    );
+                    AccessError {
+                        actor: actor.clone(),
+                        path: anc.to_string(),
+                        action: Action::Execute,
+                    }
+                })?;
             if !permits(actor, &anc_meta, Action::Execute, in_group) {
                 return Err(AccessError {
                     actor: actor.clone(),
@@ -94,7 +112,7 @@ impl ShamirDb {
         }
 
         // Target check.
-        let meta = match Self::meta_memo(self, path, memo).await {
+        let meta = match Self::meta_memo(self, path.as_ref(), memo).await {
             Ok(m) => m,
             Err(e) => {
                 // Fail-closed: a real catalogue-read error on the target
@@ -102,8 +120,9 @@ impl ShamirDb {
                 // default-open `permits` check.
                 log::warn!(
                     "authorize_access: resource_meta failed for target '{}' \
-                     (actor={actor}, action={action}): {e}",
-                    path
+                     (actor={actor}, action={action}): {}",
+                    escape_resource_diagnostic(&path.to_string()),
+                    escape_resource_diagnostic(&e.to_string())
                 );
                 return Err(AccessError {
                     actor: actor.clone(),
@@ -112,7 +131,23 @@ impl ShamirDb {
                 });
             }
         };
-        let in_group = self.resolve_in_group(user_id, &meta, memo).await;
+        let in_group = self
+            .resolve_in_group(user_id, &meta, memo)
+            .await
+            .map_err(|e| {
+                log::warn!(
+                    "authorize_access: group lookup failed for target '{}' \
+                     (actor={actor}, action={action}, group={:?}): {}",
+                    escape_resource_diagnostic(&path.to_string()),
+                    meta.group,
+                    escape_resource_diagnostic(&e.to_string())
+                );
+                AccessError {
+                    actor: actor.clone(),
+                    path: path.to_string(),
+                    action,
+                }
+            })?;
         if permits(actor, &meta, action, in_group) {
             Ok(())
         } else {
@@ -126,35 +161,35 @@ impl ShamirDb {
 
     async fn meta_memo(
         &self,
-        path: &ResourcePath,
+        path: ResourcePathRef<'_>,
         memo: Option<&super::batch_gate::AclMemo>,
     ) -> DbResult<ResourceMeta> {
         if let Some(memo) = memo {
-            if let Some(meta) = memo.metas.get(path).map(|entry| entry.clone()) {
+            if let Some(meta) = memo.meta(path) {
                 return Ok(meta);
             }
         }
-        let meta = self.resource_meta(path).await?;
+        let meta = self.resource_meta_ref(path).await?;
         if let Some(memo) = memo {
-            memo.metas.insert(path.clone(), meta.clone());
+            memo.insert_meta(path, meta.clone());
         }
         Ok(meta)
     }
 
     /// Resolve whether the user belongs to the group specified in `meta`.
     ///
-    /// Returns `false` if the meta has no group or the lookup fails.
+    /// Returns `false` if the meta has no group; lookup errors propagate.
     async fn resolve_in_group(
         &self,
         user_id: u64,
         meta: &ResourceMeta,
         memo: Option<&super::batch_gate::AclMemo>,
-    ) -> bool {
+    ) -> DbResult<bool> {
         match meta.group {
             Some(gid) => {
                 if let Some(memo) = memo {
                     if let Some(value) = memo.membership.get(&(user_id, gid)).map(|entry| *entry) {
-                        return value;
+                        return Ok(value);
                     }
                 }
                 match self.user_in_group(user_id, gid).await {
@@ -162,13 +197,81 @@ impl ShamirDb {
                         if let Some(memo) = memo {
                             memo.membership.insert((user_id, gid), value);
                         }
-                        value
+                        Ok(value)
                     }
-                    Err(_) => false,
+                    Err(e) => Err(e),
                 }
             }
-            None => false,
+            None => Ok(false),
         }
+    }
+
+    pub(in crate::shamir_db::shamir_db) async fn authorize_invocation(
+        &self,
+        name: &str,
+        caller: &Actor,
+    ) -> Result<Actor, AccessError> {
+        let path = ResourcePath::function(name);
+        if matches!(caller, Actor::System | Actor::Admin(_)) {
+            trace_access(caller, &path, Action::Execute)?;
+            return Ok(self.effective_fn_actor(name, caller).await);
+        }
+        let denied = || AccessError {
+            actor: caller.clone(),
+            path: path.to_string(),
+            action: Action::Execute,
+        };
+        let (root, namespace) =
+            self.system_store
+                .load_invocation_settings()
+                .await
+                .map_err(|e| {
+                    log::warn!(
+                        "authorize_invocation: settings lookup failed for '{}' \
+                     (actor={caller}): {}",
+                        escape_resource_diagnostic(&path.to_string()),
+                        escape_resource_diagnostic(&e.to_string())
+                    );
+                    denied()
+                })?;
+        let record = self.system_store.load_function(name).await.map_err(|e| {
+            log::warn!(
+                "authorize_invocation: function lookup failed for '{}' (actor={caller}): {}",
+                escape_resource_diagnostic(&path.to_string()),
+                escape_resource_diagnostic(&e.to_string())
+            );
+            denied()
+        })?;
+        let meta = match &record {
+            Some(rec @ QueryValue::Map(_)) => ResourceMeta::from_record(rec),
+            Some(_) => return Err(denied()),
+            None => ResourceMeta::default(),
+        };
+        let memo = super::batch_gate::AclMemo::default();
+        memo.insert_meta(
+            ResourcePathRef::Root,
+            root.as_ref()
+                .map(ResourceMeta::from_record)
+                .unwrap_or(ResourceMeta {
+                    owner: Actor::System,
+                    group: None,
+                    mode: 0o751,
+                }),
+        );
+        memo.insert_meta(
+            ResourcePathRef::FunctionNamespace,
+            namespace
+                .as_ref()
+                .map(ResourceMeta::from_record)
+                .unwrap_or_default(),
+        );
+        memo.insert_meta(path.as_ref(), meta);
+        self.authorize_access_in(caller, &path, Action::Execute, Some(&memo))
+            .await?;
+        Ok(record
+            .as_ref()
+            .map(|rec| Self::effective_fn_actor_from_record(rec, caller))
+            .unwrap_or_else(|| caller.clone()))
     }
 
     /// Resolve the effective actor for function invocation.
@@ -248,12 +351,19 @@ impl ShamirDb {
         let Ok(Some(rec)) = self.system_store.load_function(fn_name).await else {
             return caller.clone();
         };
-        let res_meta = ResourceMeta::from_record(&rec);
-        let fn_meta = FunctionMeta::from_record(&rec);
+        Self::effective_fn_actor_from_record(&rec, caller)
+    }
+
+    fn effective_fn_actor_from_record(rec: &QueryValue, caller: &Actor) -> Actor {
+        // Malformed metadata never escalates: the caller is kept unchanged.
+        let Ok(fn_meta) = FunctionMeta::try_from_record(rec) else {
+            return caller.clone();
+        };
+        let res_meta = ResourceMeta::from_record(rec);
         // Fail-closed owner lookup for escalation: `None` (owner field
         // absent) must resolve to the caller, never to
         // `from_record`'s System default. See the doc comment above.
-        let escalated_owner = || ResourceMeta::owner_field(&rec).unwrap_or_else(|| caller.clone());
+        let escalated_owner = || ResourceMeta::owner_field(rec).unwrap_or_else(|| caller.clone());
         match fn_meta.security {
             // Explicit definer request → always run as the function owner,
             // irrespective of the legacy POSIX setuid mode bit.

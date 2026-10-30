@@ -18,6 +18,7 @@
 //! `result == Int(1)` fails. Re-applying the fix makes it pass.
 
 use async_trait::async_trait;
+use shamir_collections::TFxSet;
 use shamir_types::access::Actor;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
@@ -26,6 +27,40 @@ use crate::{
     FnBatch, FnCtx, FunctionError, FunctionRegistry, Params, ShamirFunction, WasmEngine,
     WasmFunction, WasmLimits,
 };
+
+struct GrantsProbe(Arc<TFxSet<String>>);
+
+#[async_trait]
+impl ShamirFunction for GrantsProbe {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        Ok(QueryValue::Bool(Arc::ptr_eq(ctx.secret_grants(), &self.0)))
+    }
+}
+
+#[tokio::test]
+async fn nested_call_shares_parent_grants_allocation() {
+    let engine = Arc::new(WasmEngine::new().unwrap());
+    let caller =
+        Arc::new(WasmFunction::from_wat(engine, CALLER_PROBE_WAT, WasmLimits::default()).unwrap());
+    let reg = Arc::new(FunctionRegistry::new());
+    let ctx = FnCtx::new()
+        .with_registry(reg.clone())
+        .with_secret_grants(["SECRET".to_string()]);
+    reg.register("caller", caller).unwrap();
+    reg.register("probe", Arc::new(GrantsProbe(ctx.secret_grants().clone())))
+        .unwrap();
+    assert_eq!(
+        reg.invoke("caller", &ctx, &FnBatch::new(), &Params::new())
+            .await
+            .unwrap(),
+        QueryValue::Bool(true)
+    );
+}
 
 // ── Native probe ───────────────────────────────────────────────────────────
 

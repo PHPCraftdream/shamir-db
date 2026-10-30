@@ -79,4 +79,5 @@ pub fn cancel_cursor(cursor_id: impl Into<CursorId>) -> DbRequest {
 }
 
 #[cfg(test)]
+#[path = "cursor/tests/mod.rs"]
 mod tests;

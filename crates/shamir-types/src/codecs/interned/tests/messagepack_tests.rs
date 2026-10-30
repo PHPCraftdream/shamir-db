@@ -905,3 +905,13 @@ fn f28fafbf_golden_set_is_msgpack_array_in_insertion_order() {
         InnerValue::List(vec![InnerValue::Int(1), InnerValue::Str("a".into())]),
     );
 }
+
+#[test]
+fn maximum_bin32_length_returns_error() {
+    let bytes = [0xc6, 0xff, 0xff, 0xff, 0xff];
+    assert!(crate::codecs::interned::messagepack::msgpack_to_inner(
+        &crate::core::interner::Interner::new(),
+        &bytes
+    )
+    .is_err());
+}

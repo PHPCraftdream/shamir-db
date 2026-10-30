@@ -99,7 +99,8 @@ fn rv_types_5dd242f6_errors_are_typed_and_rejected_collision_leaves_quota() {
             max_names: 2,
             max_bytes: 32,
         },
-    );
+    )
+    .unwrap();
     interner.touch_with_id("fixed", 1).unwrap();
     assert!(matches!(
         interner.touch_with_id("other", 1),
@@ -130,7 +131,8 @@ fn rv_types_reverse_set_failures_refund_and_do_not_publish() {
             max_names: 4,
             max_bytes: 32,
         },
-    );
+    )
+    .unwrap();
     let generation = interner.generation();
     Interner::fail_next_reverse_set_for_test();
     assert!(matches!(
@@ -159,7 +161,8 @@ fn rv_types_automatic_id_overflow_refunds_quota() {
             max_names: 1,
             max_bytes: 8,
         },
-    );
+    )
+    .unwrap();
     interner.set_current_id_for_test(u64::MAX);
     let generation = interner.generation();
     assert!(matches!(

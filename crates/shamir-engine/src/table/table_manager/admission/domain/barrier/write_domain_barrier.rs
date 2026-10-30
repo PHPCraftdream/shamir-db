@@ -190,6 +190,7 @@ impl TableManager {
             };
 
         let mgr = Self {
+            token: super::table_token_for(&name),
             name,
             table: Arc::new(table),
             info_store: Arc::clone(&info_store),
@@ -349,11 +350,29 @@ impl TableManager {
                         failed_recovery_ids.push(recovered_id);
                         continue;
                     }
-                    // Re-run the backfill (the same `backfill_index2_backend`
-                    // `create_index_v2` uses). Errors propagate: a backfill
-                    // failure on reopen is a genuine data-integrity problem,
-                    // not a transient issue.
-                    mgr.backfill_index2_backend(backend.as_ref()).await?;
+                    // All backfill errors propagate except the actionable ngram budget failure.
+                    match mgr.backfill_index2_backend(backend.as_ref()).await {
+                        Ok(()) => {}
+                        Err(crate::index2::IndexError::TokenBudgetExceeded { .. }) => {
+                            let reason = format!(
+                                "index '{}' (id={recovered_id}): an indexed record exceeds the ngram token budget; shorten or delete the record, then call TableManager::repair(), or DROP INDEX. Repair alone is insufficient.",
+                                backend.descriptor().name
+                            );
+                            log::error!("{reason}");
+                            let backend_name = backend.descriptor().name.clone();
+                            mgr.index2_registry.insert(backend).await.map_err(|e| {
+                                Self::duplicate_persisted_index2_name_error(
+                                    &backend_name,
+                                    recovered_id,
+                                    &e,
+                                )
+                            })?;
+                            mgr.index2_registry.set_failed(recovered_id, reason).await;
+                            failed_recovery_ids.push(recovered_id);
+                            continue;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
                     let backend_name = backend.descriptor().name.clone();
                     mgr.index2_registry.insert(backend).await.map_err(|e| {
                         Self::duplicate_persisted_index2_name_error(&backend_name, recovered_id, &e)

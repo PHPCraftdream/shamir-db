@@ -249,6 +249,13 @@ impl From<InternerError> for DbError {
 }
 
 impl DbError {
+    pub(crate) fn missing_key(key: &crate::types::RecordKey) -> Self {
+        Self::NotFound(format!(
+            "record not found (key length: {} bytes)",
+            key.len()
+        ))
+    }
+
     /// Build [`DbError::ResyncRequired`] for a quarantined `db`/`repo`.
     pub fn resync_required(db: &str, repo: &str, reason: String) -> Self {
         DbError::ResyncRequired(Box::new(ResyncRequiredInfo {

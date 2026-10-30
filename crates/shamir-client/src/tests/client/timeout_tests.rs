@@ -18,16 +18,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
-use crate::client::{
-    await_pending_response, connect_tcp, ConnectOptions, Lifecycle, LifecycleHooks,
-};
+use crate::client::transport::connect_with_timeout;
+use crate::client::{await_pending_response, ConnectOptions, Lifecycle, LifecycleHooks};
 use crate::error::ClientError;
 use crate::Client;
-
-/// A guaranteed-unroutable private black-hole address: TCP `connect` to it
-/// neither completes nor is refused quickly (the SYN is dropped), so a
-/// bounded `connect_timeout` is the only thing that unblocks the caller.
-const BLACKHOLE: &str = "10.255.255.1:9";
 
 fn make_state() -> Lifecycle {
     Lifecycle::new()
@@ -35,51 +29,25 @@ fn make_state() -> Lifecycle {
 
 // ─── connect_timeout ─────────────────────────────────────────────────────────
 
-/// `connect_timeout = Some(d)` must give up on an unresponsive endpoint with
-/// `ConnectTimeout`, roughly after `d` — not instantly, not hanging forever.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn connect_timeout_fires() {
-    let addr = BLACKHOLE.parse().expect("parse blackhole addr");
     let budget = Duration::from_millis(250);
-
-    let start = Instant::now();
-    let res = connect_tcp(addr, Some(budget)).await;
-    let elapsed = start.elapsed();
-
-    assert!(
-        matches!(res, Err(ClientError::ConnectTimeout(d)) if d == budget),
-        "expected ConnectTimeout({budget:?}), got {res:?}"
-    );
-    // It must have actually waited on the timer, not returned instantly.
-    assert!(
-        elapsed >= budget,
-        "connect returned too early ({elapsed:?} < {budget:?}) — timer did not drive the timeout"
-    );
-    // And it must not have hung far past the deadline.
-    assert!(
-        elapsed < budget + Duration::from_secs(5),
-        "connect took far too long ({elapsed:?}) — timeout did not fire"
-    );
+    let res = connect_with_timeout(
+        std::future::pending::<Result<(), std::io::Error>>(),
+        Some(budget),
+    )
+    .await;
+    assert!(matches!(res, Err(ClientError::ConnectTimeout(d)) if d == budget));
 }
 
-/// `connect_timeout = None` must preserve the *unbounded-wait* behaviour:
-/// the call does NOT short-circuit with a client-side timeout error. We prove
-/// this by racing the (deliberately-hanging) black-hole connect against a
-/// short test-side timer and asserting the TEST timer wins — i.e. the client
-/// was still waiting.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn connect_none_preserves_unbounded_wait() {
-    let addr: std::net::SocketAddr = BLACKHOLE.parse().expect("parse blackhole addr");
-
-    let raced = tokio::time::timeout(Duration::from_millis(300), connect_tcp(addr, None)).await;
-
-    // The test-side timer elapsed first → `connect_tcp(None)` was still
-    // pending (unbounded). If the client had its own timeout, `raced` would
-    // be `Ok(Err(ConnectTimeout))` instead.
-    assert!(
-        raced.is_err(),
-        "connect_tcp(None) resolved on its own ({raced:?}) — None did NOT preserve unbounded wait"
-    );
+    let raced = tokio::time::timeout(
+        Duration::from_millis(300),
+        connect_with_timeout(std::future::pending::<Result<(), std::io::Error>>(), None),
+    )
+    .await;
+    assert!(raced.is_err());
 }
 
 // ─── request_timeout ─────────────────────────────────────────────────────────

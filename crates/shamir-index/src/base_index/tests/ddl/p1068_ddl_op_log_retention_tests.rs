@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use shamir_query_types::read::{DdlOpKind, DdlOpState, DdlOpStatus};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -24,6 +25,19 @@ use crate::base_index::ddl_op_log::{
 /// this test needs to change with it, same as any other test-side mirror of
 /// an implementation constant.
 const DDL_OP_LOG_EVICTION_CHECK_INTERVAL: usize = 100;
+
+#[test]
+fn ddl_timestamp_clamps_pre_epoch() {
+    let epoch = std::time::UNIX_EPOCH;
+    assert_eq!(
+        ddl_op_log::timestamp_millis(epoch - std::time::Duration::from_secs(1)),
+        0
+    );
+    assert_eq!(
+        ddl_op_log::timestamp_millis(epoch + std::time::Duration::from_millis(123)),
+        123
+    );
+}
 
 fn fresh_store() -> Arc<dyn Store> {
     Arc::new(InMemoryStore::new()) as Arc<dyn Store>
@@ -202,7 +216,6 @@ async fn revert_check_in_progress_survives_invariant_fails_without_the_guard() {
     // the bug the real `maybe_evict_terminal_records_with_cap` guards
     // against (classifying InProgress as non-terminal before collecting
     // eviction candidates).
-    use futures::StreamExt;
     let prefix = bytes::Bytes::from_static(b"ddl_op:");
     let stream = info_store.scan_prefix_stream(prefix, 256);
     futures::pin_mut!(stream);

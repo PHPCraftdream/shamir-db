@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use shamir_types::secret::SecretString;
 
+/// Bincode persists variant ordinals: never reorder or remove variants; append only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IndexKind {
     Btree {
@@ -20,6 +21,7 @@ pub enum IndexKind {
     Vector(Box<VectorConfig>),
 }
 
+/// Bincode persists variant ordinals: never reorder or remove variants; append only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TokenizerKind {
     Whitespace,

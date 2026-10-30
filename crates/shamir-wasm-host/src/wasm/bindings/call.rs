@@ -158,7 +158,7 @@ pub(in crate::wasm) fn host_call(
             .with_depth(next_depth)
             .with_depth_limit(depth_limit)
             .with_actor(actor)
-            .with_secret_grants(secret_grants.iter().cloned())
+            .with_shared_secret_grants(secret_grants)
             .with_fuel_budget(fuel_pool.clone());
         #[cfg(test)]
         if let Some(obs) = observer.clone() {

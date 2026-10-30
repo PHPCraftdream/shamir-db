@@ -557,3 +557,29 @@ async fn rv_types_2eb39dfd_rejected_name_absent_after_reopen() {
     assert!(persisted.get_ind("accepted-prefix-2").is_some());
     assert!(persisted.get_ind("rejected-suffix").is_none());
 }
+
+#[tokio::test]
+async fn conflicting_legacy_and_delta_hydration_is_fatal() {
+    for (id, name) in [(1, "different"), (2, "alpha")] {
+        let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+        let legacy = vec![(InternerKey::new(1), UserKey::from_str("alpha"))];
+        let delta = vec![(InternerKey::new(id), UserKey::from_str(name))];
+        store
+            .set(
+                MetaKey::Internals.as_record_id().to_bytes().into(),
+                bincode::to_bytes(&legacy).unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .set(
+                RecordId::system("i.d000000000").to_bytes().into(),
+                bincode::to_bytes(&delta).unwrap(),
+            )
+            .await
+            .unwrap();
+        let manager = InternerManager::new(store);
+        assert!(matches!(manager.get().await, Err(DbError::Codec(_))));
+        assert!(manager.interner_cell().get().is_none());
+    }
+}

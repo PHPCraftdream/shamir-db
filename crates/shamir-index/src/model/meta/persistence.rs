@@ -131,8 +131,7 @@ pub async fn save_index2_metadata_with_pending(
     let key = meta_key_indexes();
     info_store
         .set(key.to_bytes().into(), Bytes::from(bytes))
-        .await
-        .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
+        .await?;
     Ok(())
 }
 

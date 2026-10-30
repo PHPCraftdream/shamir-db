@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use shamir_connect::common::crypto::random_array;
+use shamir_connect::common::crypto::try_random_array;
 use shamir_connect::common::error::{Error as ConnectError, Result as ConnectResult};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
@@ -129,7 +129,7 @@ pub fn ensure_superuser(
         }
         BootstrapPolicy::RandomToken(override_path) => {
             // 32 random bytes -> ~43 char base64-url-no-pad.
-            let raw: [u8; 32] = random_array();
+            let raw: [u8; 32] = try_random_array().map_err(ConnectError::from)?;
             let token = URL_SAFE_NO_PAD.encode(raw);
             password_buf.extend_from_slice(token.as_bytes());
             token_path_override = override_path;
@@ -138,7 +138,7 @@ pub fn ensure_superuser(
     };
 
     // Derive SCRAM keys.
-    let salt: [u8; 16] = random_array();
+    let salt: [u8; 16] = try_random_array().map_err(ConnectError::from)?;
     let derived = DerivedKeys::derive(&password_buf, &salt, kdf)?;
 
     let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
@@ -236,7 +236,7 @@ pub(crate) async fn rotate_bootstrap_credential_to_random(
     // original token — length doesn't matter here since Argon2id hashes it
     // regardless, but reusing the same encoding keeps this obviously
     // parallel to the token-generation code above.
-    let raw: [u8; 32] = random_array();
+    let raw: [u8; 32] = try_random_array().map_err(|e| e.to_string())?;
     let random_password = URL_SAFE_NO_PAD.encode(raw);
     let record = derive_scram_record(random_password, kdf).await?;
     user_dir

@@ -220,7 +220,7 @@ pub struct ConstraintsDto {
 /// Serde helper: skip serializing a `bool` field when it is `false` (the default).
 #[doc(hidden)]
 pub fn is_false(v: &bool) -> bool {
-    !v
+    crate::admin::types::db_ops::is_false(v)
 }
 
 /// Foreign-key reference descriptor (wire form).

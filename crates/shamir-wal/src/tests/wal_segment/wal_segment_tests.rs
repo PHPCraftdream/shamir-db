@@ -180,7 +180,10 @@ async fn rv_wal_5a825f98_oversized_middle_length_fails_sealed() {
     oversized[second..second + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     std::fs::write(&path, &oversized).unwrap();
     assert!(seg.replay_sealed().await.is_err());
-    assert_eq!(seg.replay().await.unwrap().len(), 1);
+    // An existing frame above the payload ceiling fails recovery in every mode
+    // instead of being truncated as a torn tail.
+    let error = seg.replay().await.unwrap_err().to_string();
+    assert!(error.contains("payload limit"), "{error}");
 }
 
 #[tokio::test]

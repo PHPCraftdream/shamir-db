@@ -7,7 +7,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::write::BuilderError;
 
-pub use shamir_query_types::write::UpdateReturnMode;
+use shamir_query_types::write::UpdateReturnMode;
 
 /// Builder for [`UpdateOp`].
 pub struct Update {

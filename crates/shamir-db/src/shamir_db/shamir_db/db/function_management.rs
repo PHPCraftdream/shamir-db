@@ -193,6 +193,7 @@ impl ShamirDb {
         .map_err(|e| DbError::Function(e.to_string()))?;
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
+        // FxHasher is a noncryptographic diagnostic fingerprint, not integrity protection.
         let mut hasher = rustc_hash::FxHasher::default();
         wasm.hash(&mut hasher);
         let wasm_hash = format!("{:016x}", hasher.finish());
@@ -214,6 +215,7 @@ impl ShamirDb {
             opts.net_grants.clone(),
         );
 
+        // Legacy informational metadata, not a replacement counter.
         let version = 1u64;
         let mut m = shamir_types::types::common::new_map();
         m.insert(
@@ -299,7 +301,6 @@ impl ShamirDb {
         }
 
         // Populate in-memory metadata.
-        let _ = self.function_meta.remove(name);
         let _ = self.function_meta.insert(name.to_string(), meta);
 
         Ok(())
@@ -657,7 +658,8 @@ impl ShamirDb {
     /// Default is empty (deny all). Must be called before any function
     /// invocation that uses `ctx.http_fetch()`.
     pub fn set_net_allowlist(&mut self, allowlist: Vec<String>) {
-        self.net_allowlist = Arc::new(allowlist);
+        self.net_allowlist =
+            Arc::new(super::super::super::gateway::net_grants::NetGrantsCache::new(allowlist));
     }
 
     /// Invoke a function by name with the given parameters.
@@ -676,16 +678,10 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.authorize_access(
-            &caller,
-            &ResourcePath::Function {
-                name: name.to_string(),
-            },
-            Action::Execute,
-        )
-        .await
-        .map_err(|e| DbError::Function(e.to_string()))?;
-        let actor = self.effective_fn_actor(name, &caller).await;
+        let actor = self
+            .authorize_invocation(name, &caller)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let ctx = self.build_invoke_ctx(name, actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::new(), &params)
@@ -715,16 +711,10 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.authorize_access(
-            &caller,
-            &ResourcePath::Function {
-                name: name.to_string(),
-            },
-            Action::Execute,
-        )
-        .await
-        .map_err(|e| DbError::Function(e.to_string()))?;
-        let actor = self.effective_fn_actor(name, &caller).await;
+        let actor = self
+            .authorize_invocation(name, &caller)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let ctx = self.build_invoke_ctx(name, actor);
         self.functions
             .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
@@ -764,16 +754,10 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.authorize_access(
-            &caller,
-            &ResourcePath::Function {
-                name: name.to_string(),
-            },
-            Action::Execute,
-        )
-        .await
-        .map_err(|e| DbError::Function(e.to_string()))?;
-        let actor = self.effective_fn_actor(name, &caller).await;
+        let actor = self
+            .authorize_invocation(name, &caller)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let gateway = Arc::new(super::db_gateway::FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
@@ -818,16 +802,10 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        self.authorize_access(
-            &caller,
-            &ResourcePath::Function {
-                name: name.to_string(),
-            },
-            Action::Execute,
-        )
-        .await
-        .map_err(|e| DbError::Function(e.to_string()))?;
-        let actor = self.effective_fn_actor(name, &caller).await;
+        let actor = self
+            .authorize_invocation(name, &caller)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?;
         let gateway = Arc::new(super::db_gateway::FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),

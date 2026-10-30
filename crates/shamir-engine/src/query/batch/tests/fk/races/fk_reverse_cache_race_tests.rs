@@ -80,6 +80,34 @@ use crate::repo::fk_reverse_cache::{
 };
 use crate::repo::{FkReverseCache, ReverseFkEntry, TaggedReverseFkEntry};
 
+async fn cas_loss_releases_lock_to_queued_waiter(hook: &PostGenCheckPrePublishHook) {
+    let cache = Arc::new(FkReverseCache::new());
+    let reached_before = hook.reached.load(Ordering::SeqCst);
+    hook.armed.store(true, Ordering::SeqCst);
+    // Poll both futures explicitly so the first is parked and the waiter queued.
+    let first = cache.get_or_build_by_parent("parent", || async {
+        Ok::<_, Infallible>(vec![tagged(old_entry())])
+    });
+    tokio::pin!(first);
+    assert!(futures::poll!(&mut first).is_pending());
+    assert_eq!(hook.reached.load(Ordering::SeqCst), reached_before + 1);
+    let waiter = cache.get_or_build_by_parent("parent", || async {
+        Ok::<_, Infallible>(vec![tagged(new_entry())])
+    });
+    tokio::pin!(waiter);
+    assert!(futures::poll!(&mut waiter).is_pending());
+    cache.invalidate();
+    hook.resume.notify_one();
+    let (published, first_result) =
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(&mut waiter, &mut first)
+        })
+        .await
+        .expect("queued waiter and first builder must complete");
+    assert_eq!(published.unwrap().to_vec(), vec![new_entry()]);
+    assert_eq!(first_result.unwrap().to_vec(), vec![new_entry()]);
+}
+
 // B06 red counterfactual: the old post-publish reread returns an empty slice
 // after invalidate(), even though the CAS successfully published new_entry().
 #[tokio::test]
@@ -543,6 +571,9 @@ async fn concurrent_invalidate_strictly_between_gencheck_and_publish_never_over_
         calls_before_next,
         "the next call must hit the warm cache (no rebuild)"
     );
+
+    // Reuse this test's installed OnceLock hook for the queued-waiter case.
+    cas_loss_releases_lock_to_queued_waiter(&hook).await;
 }
 
 // ============================================================================

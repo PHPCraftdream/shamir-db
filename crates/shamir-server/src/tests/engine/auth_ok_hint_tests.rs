@@ -15,6 +15,42 @@ use shamir_connect::server::rotation::ServerIdentityState;
 use crate::connection::auth_ok_hints::auth_ok_hints;
 use crate::connection::wire::AuthOk;
 
+fn auth_ok_exact_fixture(hinted: bool) -> Vec<u8> {
+    // Independent MessagePack specification: fixarray, bin8 fields and fixints.
+    let mut bytes = vec![if hinted { 0x9a } else { 0x98 }, 0xc4, 32];
+    bytes.extend([1; 32]);
+    bytes.extend([0xc4, 32]);
+    bytes.extend([2; 32]);
+    bytes.extend([0xc4, 64]);
+    bytes.extend([3; 64]);
+    bytes.extend([0xc4, 32]);
+    bytes.extend([4; 32]);
+    bytes.extend([7, 0xc4, 0, 0, 1]);
+    if hinted {
+        bytes.extend([0xc0, 0xc3]);
+    }
+    bytes
+}
+
+#[test]
+fn rv_server_8999f6b7_base_and_hinted_byte_exact() {
+    for hinted in [false, true] {
+        let fixture = auth_ok_exact_fixture(hinted);
+        let actual = auth_ok(None, hinted.then_some(true));
+        assert_eq!(rmp_serde::to_vec(&actual).unwrap(), fixture);
+        let decoded: ClientAuthOk = rmp_serde::from_slice(&fixture).unwrap();
+        assert_eq!(decoded.server_signature, vec![1; 32]);
+        assert_eq!(decoded.server_pub_key, vec![2; 32]);
+        assert_eq!(decoded.identity_sig, vec![3; 64]);
+        assert_eq!(decoded.session_id, vec![4; 32]);
+        assert_eq!(decoded.expires_at_ns, 7);
+        assert!(decoded.resumption_ticket.is_empty());
+        assert_eq!(decoded.resumption_expires_at_ns, 0);
+        assert_eq!(decoded.server_query_version, 1);
+        assert_eq!(decoded.kdf_upgrade_required, hinted.then_some(true));
+    }
+}
+
 #[derive(Serialize)]
 struct LegacyAuthOk<'a> {
     #[serde(with = "serde_bytes")]

@@ -31,6 +31,7 @@
 //! reintroducing the read-then-write race `insert_ticket` was built to avoid.
 
 use crate::backend::{IndexBackend, IndexError};
+use crate::kind::IndexKind;
 use crate::reader_drain_gate::ReaderDrainGate;
 use crate::state::IndexState;
 use shamir_collections::THasher;
@@ -111,9 +112,28 @@ struct BackendEntry {
     failure_reason: Option<String>,
 }
 
+fn kind_tag(kind: &IndexKind) -> &'static str {
+    match kind {
+        IndexKind::Btree { .. } => "btree",
+        IndexKind::Fts { .. } => "fts",
+        IndexKind::Functional(_) => "functional",
+        IndexKind::Vector(_) => "vector",
+    }
+}
+
+type FieldKindKey = (&'static str, Vec<u64>);
+type CandidateBucket = Vec<(u32, u64)>;
+
+fn candidate_key(desc: &crate::descriptor::IndexDescriptor) -> Option<FieldKindKey> {
+    desc.paths
+        .first()
+        .map(|path| (kind_tag(&desc.kind), path.clone()))
+}
+
 pub struct IndexRegistry {
     by_id: scc::HashMap<u32, BackendEntry, THasher>,
     by_name: scc::HashMap<u64, u32, THasher>,
+    by_field_kind: scc::HashMap<FieldKindKey, CandidateBucket, THasher>,
     next_id: AtomicU32,
     /// F-50: bumped on every successful `insert` / `remove_by_id`. Read with
     /// [`generation`](Self::generation) to gate commit-time re-derivation.
@@ -148,6 +168,7 @@ impl IndexRegistry {
         Self {
             by_id: scc::HashMap::with_hasher(THasher::default()),
             by_name: scc::HashMap::with_hasher(THasher::default()),
+            by_field_kind: scc::HashMap::with_hasher(THasher::default()),
             next_id: AtomicU32::new(1),
             generation: AtomicU64::new(0),
             reader_gate: ReaderDrainGate::new(),
@@ -299,12 +320,25 @@ impl IndexRegistry {
             )
             .await
             .map_err(|_| IndexError::Backend(format!("index id {id} already registered")))?;
-        self.by_name
-            .insert_async(name_interned, id)
-            .await
-            .map_err(|_| {
-                IndexError::Backend(format!("index name {name_interned} already registered"))
-            })?;
+        if self.by_name.insert_async(name_interned, id).await.is_err() {
+            self.by_id.remove_async(&id).await;
+            return Err(IndexError::Backend(format!(
+                "index name {name_interned} already registered"
+            )));
+        }
+        if let Some(key) = candidate_key(d) {
+            if self
+                .by_field_kind
+                .update_async(&key, |_, ids| ids.push((id, my_gen)))
+                .await
+                .is_none()
+            {
+                let _ = self
+                    .by_field_kind
+                    .insert_async(key, vec![(id, my_gen)])
+                    .await;
+            }
+        }
         // P0-2 (2b): advance generation AFTER successful publish.
         self.generation.fetch_max(my_gen, Ordering::Release);
         Ok(())
@@ -438,6 +472,18 @@ impl IndexRegistry {
             // backend's own `descriptor().name_interned` would try to remove
             // the STALE old key from `by_name`, leaving a dangling entry
             // under the new name.
+            if let Some(key) = candidate_key(entry.backend.descriptor()) {
+                let remaining = self
+                    .by_field_kind
+                    .update_async(&key, |_, ids| {
+                        ids.retain(|candidate| *candidate != (id, entry.gen));
+                        ids.is_empty()
+                    })
+                    .await;
+                if remaining == Some(true) {
+                    self.by_field_kind.remove_async(&key).await;
+                }
+            }
             let _ = self.by_name.remove_async(&entry.name_interned).await;
             // F-50: a removal changes the queryable backend set, so advance
             // the generation — a tx that staged against the now-removed
@@ -606,41 +652,10 @@ impl IndexRegistry {
     /// intentionally NOT state-filtered (and also NOT drain-gated, as all its
     /// callers are DDL-writer or introspection, not read-dispatch).
     ///
-    /// # #1091 investigation (2026-08-11): O(N) scan, NOT yet converted to a
-    /// reverse index — here is exactly why, and what unblocks it
-    ///
-    /// This is an O(N) `by_id.iter_async` scan over every registered
-    /// backend, not urgent at current per-table index counts (typically
-    /// single digits). `by_name` (above) is the proven template for adding
-    /// a reverse index HERE too: it's a second `scc::HashMap` maintained
-    /// alongside `by_id` inside [`insert`](Self::insert)/
-    /// [`remove_by_id`](Self::remove_by_id), with `insert()`'s own ordering
-    /// (`by_id` write BEFORE `by_name` write; see that method's doc) already
-    /// proving the "two maps out of sync" hazard `BackendEntry::gen`'s doc
-    /// warns about is avoidable, not fundamental — [`get_by_name`] composes
-    /// "look up in the side map, then re-verify in `by_id`" exactly the way
-    /// a `by_field_kind` reverse index would.
-    ///
-    /// **What actually blocks copying that template directly:** the
-    /// candidate key is `(kind_tag, field_path)`, and a `scc::HashMap`
-    /// reverse index needs that key to map to AT MOST ONE `id` at a time.
-    /// `table_manager_index_mgmt.rs`'s `create_index_v2` handler has an
-    /// EXPLICIT one-per-table uniqueness check for the `vector` kind only
-    /// ("table already has a vector index" — VR-10/#432, staged-vector
-    /// promote is keyed per-table not per-index). No equivalent check was
-    /// found for `fts`/`functional`/`btree` during this investigation —
-    /// meaning two FTS backends on the SAME `field_path` with different
-    /// tokenizers may be a legitimate, currently-supported configuration
-    /// this scan silently tolerates (returns whichever `Ready` match
-    /// `iter_async`'s arbitrary order finds first). A single-id-per-key
-    /// reverse index would need to either (a) confirm and enforce
-    /// `(kind, field_path)` uniqueness for every family before adding the
-    /// index (a DDL-layer change, out of scope here), or (b) support
-    /// multiple ids per key and pick one the same way the current scan
-    /// implicitly does (arbitrary iteration order) — at which point the
-    /// "fix" doesn't actually reduce complexity, just relocates the
-    /// ambiguity. Confirm uniqueness (or the multi-id design) before
-    /// attempting the reverse-index conversion.
+    /// Candidate lookup is O(k) in the matching bucket, not the registry size.
+    /// Multiple indexes may match; any authoritative Ready candidate may win.
+    /// Candidate IDs carry their insertion generation to reject remove/recreate
+    /// ABA races. The bucket is copied before awaiting authoritative lookups.
     pub async fn lease_by_field_and_kind(
         &self,
         field_path: &[u64],
@@ -655,31 +670,42 @@ impl IndexRegistry {
             )));
         };
 
-        let mut found = None;
-        self.by_id
-            .iter_async(|_, entry| {
-                // Planner Ready-gate: skip a Building backend so reads never
-                // observe partial postings.
-                if entry.state != IndexState::Ready {
-                    return true;
-                }
-                let desc = entry.backend.descriptor();
-                let kind_matches = matches!(
-                    (&desc.kind, kind_tag),
-                    (crate::kind::IndexKind::Fts { .. }, "fts")
-                        | (crate::kind::IndexKind::Functional(_), "functional")
-                        | (crate::kind::IndexKind::Vector(_), "vector")
-                        | (crate::kind::IndexKind::Btree { .. }, "btree")
-                );
-                if kind_matches && !desc.paths.is_empty() && desc.paths[0] == field_path {
-                    found = Some(entry.backend.clone());
-                    return false;
-                }
-                true
-            })
-            .await;
-
-        Ok(found.map(|backend| BackendLease { backend, _guard }))
+        let tag = match kind_tag {
+            "fts" => "fts",
+            "functional" => "functional",
+            "vector" => "vector",
+            "btree" => "btree",
+            _ => return Ok(None),
+        };
+        let key = (tag, field_path.to_vec());
+        let candidates = self
+            .by_field_kind
+            .read_async(&key, |_, ids| ids.clone())
+            .await
+            .unwrap_or_default();
+        for (id, generation) in candidates {
+            let backend = self
+                .by_id
+                .read_async(&id, |_, entry| {
+                    let desc = entry.backend.descriptor();
+                    if entry.gen == generation
+                        && desc.id == id
+                        && entry.state == IndexState::Ready
+                        && self::kind_tag(&desc.kind) == tag
+                        && desc.paths.first().is_some_and(|path| path == field_path)
+                    {
+                        Some(Arc::clone(&entry.backend))
+                    } else {
+                        None
+                    }
+                })
+                .await
+                .flatten();
+            if let Some(backend) = backend {
+                return Ok(Some(BackendLease { backend, _guard }));
+            }
+        }
+        Ok(None)
     }
 }
 

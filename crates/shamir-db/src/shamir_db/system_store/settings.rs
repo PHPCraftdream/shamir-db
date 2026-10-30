@@ -11,6 +11,46 @@ use super::store::{
 use super::SystemStore;
 
 impl SystemStore {
+    pub(crate) async fn load_invocation_settings(
+        &self,
+    ) -> DbResult<(Option<QueryValue>, Option<QueryValue>)> {
+        #[cfg(test)]
+        self.invocation_settings_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let table = self.table(TABLE_SETTINGS).await?;
+        let refs = crate::types::common::new_map();
+        let ctx = table.info_store_read_view().filter_context(&refs).await?;
+        let query = crate::query::read::ReadQuery::new(TABLE_SETTINGS).filter(
+            crate::query::filter::Filter::Or {
+                filters: ["root_meta", "fn_namespace_meta"]
+                    .iter()
+                    .map(|key| crate::query::filter::Filter::Eq {
+                        field: vec!["key".to_string()],
+                        value: crate::query::filter::FilterValue::String((*key).to_string()),
+                    })
+                    .collect(),
+            },
+        );
+        let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(crate::DbError::Internal(
+                "corrupt settings catalogue".to_string(),
+            ));
+        }
+        let mut root = None;
+        let mut namespace = None;
+        for record in result.records {
+            let key = record.get_value_owned("key");
+            match key.as_ref().and_then(QueryValue::as_str) {
+                Some("root_meta") if root.is_none() => root = record.get_value_owned("value"),
+                Some("fn_namespace_meta") if namespace.is_none() => {
+                    namespace = record.get_value_owned("value");
+                }
+                _ => {}
+            }
+        }
+        Ok((root, namespace))
+    }
     /// Save a setting.
     pub async fn save_setting(&self, key: &str, value: &QueryValue) -> DbResult<()> {
         let table = self.table(TABLE_SETTINGS).await?;
@@ -29,6 +69,9 @@ impl SystemStore {
 
     /// Load a setting.
     pub async fn load_setting(&self, key: &str) -> DbResult<Option<QueryValue>> {
+        #[cfg(test)]
+        self.invocation_settings_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let table = self.table(TABLE_SETTINGS).await?;
         let refs = crate::types::common::new_map();
         let ctx = table.info_store_read_view().filter_context(&refs).await?;
@@ -39,6 +82,12 @@ impl SystemStore {
             },
         );
         let result = table.read(&query, &ctx).await?;
+        if !result.corrupt_records.is_empty() {
+            return Err(crate::DbError::Internal(format!(
+                "corrupt setting {key} catalogue: {} corrupt records",
+                result.corrupt_records.len()
+            )));
+        }
         Ok(result
             .records
             .into_iter()

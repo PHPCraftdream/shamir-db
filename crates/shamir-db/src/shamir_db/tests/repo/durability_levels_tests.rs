@@ -1,15 +1,24 @@
 //! Tests for per-request durability levels (v1: `buffered` vs `synced`).
 
+#[cfg(feature = "fjall")]
 use shamir_query_builder::batch::{Batch, Durability};
+#[cfg(feature = "fjall")]
 use shamir_query_builder::doc;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::write;
+#[cfg(feature = "fjall")]
 use shamir_query_builder::Query;
 
+#[cfg(feature = "fjall")]
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
+#[cfg(feature = "fjall")]
 use crate::engine::table::TableConfig;
+#[cfg(feature = "fjall")]
 use crate::shamir_db::SystemStoreConfig;
+#[cfg(feature = "fjall")]
 use crate::ShamirDb;
 
+#[cfg(feature = "fjall")]
 async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
     for _ in 0..100 {
         match ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone())).await {
@@ -27,6 +36,7 @@ async fn reinit_with_retry(sys_path: std::path::PathBuf) -> ShamirDb {
 /// synced path flushes every repo's buffers before building the
 /// BatchResponse, so the data is on disk before the caller receives
 /// the ack.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn synced_batch_survives_immediate_drop() {
     let dir = tempfile::tempdir().unwrap();
@@ -84,6 +94,7 @@ async fn synced_batch_survives_immediate_drop() {
 /// dropped — making a loss-on-drop assertion non-deterministic.
 /// The synced test above is the deterministic guarantee; this test
 /// verifies the default path is accepted and produces correct results.
+#[cfg(feature = "fjall")]
 #[tokio::test]
 async fn buffered_batch_executes_successfully() {
     // FLAKE-2: install a logger so the engine's `shutdown stage slow` warnings

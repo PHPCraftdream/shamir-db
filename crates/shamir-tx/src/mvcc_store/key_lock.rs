@@ -1,5 +1,9 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use scc::HashMap;
+use shamir_collections::THasher;
+use shamir_storage::types::RecordKey;
 
 // ============================================================================
 // Level-3 pessimistic locking — wound-wait, deadlock-free by construction.
@@ -78,6 +82,9 @@ impl KeyLockState {
 pub struct KeyLock {
     pub(crate) state: tokio::sync::Mutex<KeyLockState>,
     pub(crate) notify: tokio::sync::Notify,
+    // Modified under the registry entry lock, except holders which mirrors state.
+    leases: AtomicUsize,
+    pub(crate) holders: AtomicUsize,
 }
 
 impl KeyLock {
@@ -85,6 +92,59 @@ impl KeyLock {
         Self {
             state: tokio::sync::Mutex::new(KeyLockState::default()),
             notify: tokio::sync::Notify::new(),
+            leases: AtomicUsize::new(0),
+            holders: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// Pins the registry identity through every await, including cancellation.
+pub(crate) struct LockLease<'a> {
+    registry: &'a HashMap<RecordKey, Arc<KeyLock>, THasher>,
+    key: RecordKey,
+    pub(crate) lock: Arc<KeyLock>,
+}
+
+impl<'a> LockLease<'a> {
+    pub(crate) fn acquire(
+        registry: &'a HashMap<RecordKey, Arc<KeyLock>, THasher>,
+        key: RecordKey,
+        insert: bool,
+    ) -> Option<Self> {
+        // Sync entry operations cannot hand a bucket lock to a suspended task;
+        // that handoff can deadlock runtime workers using synchronous access.
+        let lock = match registry.entry_sync(key.clone()) {
+            scc::hash_map::Entry::Occupied(entry) => {
+                entry.get().leases.fetch_add(1, Ordering::Relaxed);
+                Arc::clone(entry.get())
+            }
+            scc::hash_map::Entry::Vacant(entry) if insert => {
+                let lock = Arc::new(KeyLock::new());
+                lock.leases.store(1, Ordering::Relaxed);
+                entry.insert_entry(Arc::clone(&lock));
+                lock
+            }
+            scc::hash_map::Entry::Vacant(_) => return None,
+        };
+        Some(Self {
+            registry,
+            key,
+            lock,
+        })
+    }
+}
+
+impl Drop for LockLease<'_> {
+    fn drop(&mut self) {
+        if let scc::hash_map::Entry::Occupied(entry) = self.registry.entry_sync(self.key.clone()) {
+            let lock = entry.get();
+            // Acquisition and retirement share the entry lock; all state users
+            // hold leases, and publish the holder count before releasing them.
+            debug_assert!(Arc::ptr_eq(lock, &self.lock));
+            let previous = lock.leases.fetch_sub(1, Ordering::Relaxed);
+            if previous == 1 && lock.holders.load(Ordering::Acquire) == 0 {
+                let _ = entry.remove_entry();
+            }
         }
     }
 }

@@ -5,7 +5,7 @@ use shamir_query_types::read::{SelectExpr, SelectItem};
 
 use crate::val::IntoFieldPath;
 
-pub use shamir_query_types::read::{AggFunc, AggregateField};
+use shamir_query_types::read::{AggFunc, AggregateField};
 
 // ── wildcard ────────────────────────────────────────────────────────
 

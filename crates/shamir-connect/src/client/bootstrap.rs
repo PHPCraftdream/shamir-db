@@ -5,7 +5,7 @@
 //! cannot harvest the token + password by impersonating the server.
 
 use crate::common::bootstrap_message::build_bootstrap_input;
-use crate::common::crypto::{constant_time_eq, random_array, sha256, Ed25519Keypair};
+use crate::common::crypto::{constant_time_eq, sha256, try_random_array, Ed25519Keypair};
 use crate::common::error::{Error, Result};
 use crate::common::identity::verify_identity;
 use crate::common::kdf_params::KdfParams;
@@ -16,7 +16,7 @@ use crate::common::time::ns;
 use crate::common::types::{limits, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::common::wire::{
-    make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
+    try_make_bootstrap_challenge, BootstrapChallenge, BootstrapHello, BootstrapRequest,
 };
 use zeroize::Zeroizing;
 
@@ -24,11 +24,16 @@ use zeroize::Zeroizing;
 /// Per spec §11.3.4 (d).
 pub const BOOTSTRAP_CLOCK_SKEW_NS: u64 = 60 * ns::SECOND;
 
-/// Generate a `bootstrap_hello` — caller transmits this as the first wire frame.
+/// Legacy wrapper; panics on OS entropy failure.
 pub fn build_hello() -> BootstrapHello {
-    BootstrapHello {
-        client_nonce: random_array::<32>(),
-    }
+    try_build_hello().expect("OS RNG failure")
+}
+
+/// Generate a bootstrap hello, propagating entropy failure.
+pub fn try_build_hello() -> Result<BootstrapHello> {
+    Ok(BootstrapHello {
+        client_nonce: try_random_array::<32>()?,
+    })
 }
 
 /// Verify a [`BootstrapChallenge`] received from the server.
@@ -96,7 +101,7 @@ pub fn build_request(
     // cannot validate; this is the client's only chance).
     validate_password(pw.as_slice())?;
     kdf_params.validate_client_limits()?;
-    let salt = random_array::<{ limits::SALT_BYTES }>();
+    let salt = try_random_array::<{ limits::SALT_BYTES }>()?;
     let derived = DerivedKeys::derive(pw.as_slice(), &salt, &kdf_params)?;
 
     let mut server_key_bytes = [0u8; 32];
@@ -127,8 +132,9 @@ pub fn run_local_bootstrap_with(
     kdf_params: KdfParams,
     now_ns: u64,
 ) -> Result<BootstrapRequest> {
-    let hello = build_hello();
-    let challenge = make_bootstrap_challenge(keypair, transport_kind, tls_exporter, &hello);
+    let mut password = WipeOnDrop::new(password);
+    let hello = try_build_hello()?;
+    let challenge = try_make_bootstrap_challenge(keypair, transport_kind, tls_exporter, &hello)?;
     verify_challenge(
         pinned_hash,
         transport_kind,
@@ -137,5 +143,5 @@ pub fn run_local_bootstrap_with(
         &challenge,
         now_ns,
     )?;
-    build_request(token, user, password, kdf_params)
+    build_request(token, user, password.as_mut_slice(), kdf_params)
 }

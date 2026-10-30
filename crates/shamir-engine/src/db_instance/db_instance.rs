@@ -8,7 +8,11 @@ use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-/// Manages multiple repositories
+/// Manages multiple repositories.
+///
+/// Trusted native-embedding surface: raw operations do not authorize an actor.
+/// For untrusted requests use facade execution with
+/// [`crate::query::batch::Authorized`] and the `shamir-db` live ACL gate.
 #[derive(Clone)]
 pub struct DbInstance {
     repos: Arc<DashMap<String, RepoInstance, THasher>>,
@@ -95,7 +99,9 @@ impl DbInstance {
         }
     }
 
-    /// Get a table from a specific repository
+    /// Get a table from a specific repository.
+    ///
+    /// This raw handle is for trusted embedding and performs no actor authorization.
     pub async fn get_table(&self, repo_name: &str, table_name: &str) -> DbResult<TableManager> {
         // Clone the `RepoInstance` out and DROP the DashMap shard guard
         // BEFORE the delegated `.await` — same guard-across-await hazard
@@ -152,7 +158,9 @@ impl DbInstance {
         self.repos.iter().map(|r| r.table_count()).sum()
     }
 
-    /// Get a repository instance directly
+    /// Get a repository instance directly.
+    ///
+    /// This raw handle is for trusted embedding and performs no actor authorization.
     pub fn get_repo(&self, repo_name: &str) -> Option<RepoInstance> {
         self.repos.get(repo_name).map(|r| r.clone())
     }

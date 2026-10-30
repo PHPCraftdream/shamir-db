@@ -13,6 +13,7 @@ use crate::batch::{
     RequestDurability, ResultEncoding, SubBatchOp, VisibilityWait,
 };
 use crate::read::ReadQuery;
+use crate::wire::{DbRequest, CURRENT_QUERY_LANG_VERSION};
 
 fn entry() -> QueryEntry {
     QueryEntry::from(ReadQuery::new("t"))
@@ -219,8 +220,6 @@ fn rv_collections_da7d2cd3_stream_preflight_valid_batch_controls() {
 
 #[test]
 fn rv_collections_da7d2cd3_stream_preflight_does_not_cap_arbitrary_record_maps() {
-    use crate::wire::{DbRequest, CURRENT_QUERY_LANG_VERSION};
-
     // Real wire shape of an Insert op (field-name-keyed record values),
     // serialized structurally: the record map holds 1001 distinct field
     // names and must NOT be capped as an alias collection.

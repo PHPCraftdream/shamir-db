@@ -2,14 +2,14 @@
 
 Bit-exact reference values for spec compliance. **Release blocker per AUTH §16.**
 
-All vectors are FIXED, byte-exact, computed by running the REAL Rust crypto
-functions with fixed inputs (not hand-computed). A second implementation
-(browser/TS SDK) reproduces each pinned `expected` value bit-for-bit.
+Most existing cryptographic vectors are fixed values computed by the Rust crypto
+functions. The complete message-layout fixtures listed below were independently
+assembled from their explicit inputs.
 
 ## Location & format
 
-Vectors live here in `crates/shamir-connect/test-vectors/` as **per-vector
-JSON+TOML pairs** (git-diffable, human-readable, one file per category):
+Vectors live here in `crates/shamir-connect/test-vectors/`. Existing crypto
+vectors use JSON+TOML pairs; the two message-layout fixtures are TOML-only.
 
 - `.json` — canonical cross-language source of truth (a browser/TS SDK loads
   these directly).
@@ -42,7 +42,9 @@ tls_exporter) so they chain end-to-end: auth_message → Argon2id → SCRAM proo
 
 | File | Category | What it pins |
 |---|---|---|
-| `auth_message_default.{json,toml}` | auth_message | 149-byte canonical auth_message (spec §16 inline example) |
+| `auth_message_default.{json,toml}` | auth_message | 148-byte canonical auth_message (spec §16 inline example) |
+| `changepw_message.toml` | password change | Complete message bytes and inputs |
+| `bootstrap_message.toml` | bootstrap | Complete message bytes and inputs |
 | `kdf_canonical_string_default.{json,toml}` | kdf_canonical_string | 13-byte BE serialization of KdfParams |
 | `argon2id_default.{json,toml}` | Argon2id | 32-byte salted_password for `"hello world!1"` + fixed salt + DEFAULT params |
 | `scram_flow_default.{json,toml}` | SCRAM chain | client_key / server_key / stored_key / client_proof / server_signature over the pinned auth_message |

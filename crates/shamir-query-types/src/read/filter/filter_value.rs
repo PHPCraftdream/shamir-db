@@ -1,6 +1,6 @@
 //! FilterValue — value types supported in filters.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use shamir_types::types::value::QueryValue;
 
 use super::{Cond, FieldPath, FilterExpr, FnCall};
@@ -56,6 +56,22 @@ pub enum FilterValue {
 }
 
 impl FilterValue {
+    /// Convert a query value, rejecting values that cannot be decoded as a filter.
+    pub fn try_from_query_value(value: QueryValue) -> Result<Self, FilterValueConversionError> {
+        Self::try_from_query_value_ref(&value)
+    }
+
+    /// Decode a borrowed query value using the filter wire decoder.
+    pub fn try_from_query_value_ref(
+        value: &QueryValue,
+    ) -> Result<Self, FilterValueConversionError> {
+        if let Some(literal) = query_value_to_filter_value(value) {
+            return Ok(literal);
+        }
+        Self::deserialize(buffered_value::BufferedValue(value))
+            .map_err(|error| FilterValueConversionError::Decode(error.to_string()))
+    }
+
     pub fn is_null(&self) -> bool {
         matches!(self, FilterValue::Null)
     }
@@ -162,21 +178,26 @@ impl<T: Into<FilterValue>> From<Vec<T>> for FilterValue {
     }
 }
 
+/// Failure to decode a query value as a filter value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilterValueConversionError {
+    /// The encoded query value is not a supported filter value.
+    Decode(String),
+}
+
+impl std::fmt::Display for FilterValueConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode(message) => write!(f, "filter value decoding failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for FilterValueConversionError {}
+
 impl From<QueryValue> for FilterValue {
-    /// Convert a `QueryValue` into the equivalent `FilterValue`.
-    ///
-    /// Conversion strategy (three-tier, no silent loss):
-    /// 1. **Direct match** — literal variants (Null/Bool/Int/F64/Str/Bin/List)
-    ///    are converted without serialisation via [`query_value_to_filter_value`].
-    /// 2. **Msgpack fallback** — `Map` (used for expression defaults such as
-    ///    `{"$fn": ...}`) and exotic numeric types (Dec/Big/Set) go through
-    ///    the msgpack round-trip, which preserves the `FilterValue` serde
-    ///    shape faithfully for expression variants.
-    /// 3. **Last resort** — if both paths fail (malformed Map that doesn't
-    ///    decode as any `FilterValue` variant), returns `FilterValue::Null`
-    ///    with a `debug_assert!` so the bug is caught in dev/test runs.
-    ///    Production keeps boot-resilience (no panic), but the assert catches
-    ///    any regression in test suites.
+    /// Legacy lossy compatibility adapter: invalid values panic in debug builds
+    /// and become `Null` in release builds. Prefer `try_from_query_value`.
     fn from(qv: QueryValue) -> Self {
         // Tier 1: direct literal conversion (no allocation for common case).
         if let Some(fv) = query_value_to_filter_value(&qv) {
@@ -257,5 +278,102 @@ pub fn filter_value_to_query_value(fv: &FilterValue) -> Option<QueryValue> {
         }
         // Expression variants — not literals.
         _ => None,
+    }
+}
+
+mod buffered_value {
+
+    use serde::de::value::{Error, MapAccessDeserializer, MapDeserializer, SeqDeserializer};
+    use serde::de::{Deserializer, IntoDeserializer, Visitor};
+    use shamir_types::types::value::QueryValue;
+
+    pub(super) struct BufferedValue<'a>(pub(super) &'a QueryValue);
+
+    impl<'de> IntoDeserializer<'de, Error> for BufferedValue<'de> {
+        type Deserializer = Self;
+        fn into_deserializer(self) -> Self {
+            self
+        }
+    }
+
+    impl<'de> Deserializer<'de> for BufferedValue<'de> {
+        type Error = Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.0 {
+                QueryValue::Null => visitor.visit_unit(),
+                QueryValue::Bool(v) => visitor.visit_bool(*v),
+                QueryValue::Int(v) => visitor.visit_i64(*v),
+                QueryValue::F64(v) => visitor.visit_f64(*v),
+                QueryValue::Dec(v) => visitor.visit_string(v.to_string()),
+                QueryValue::Big(v) => visitor.visit_string(v.to_string()),
+                QueryValue::Str(v) => visitor.visit_borrowed_str(v),
+                QueryValue::Bin(v) => visitor.visit_borrowed_bytes(v),
+                QueryValue::List(v) => {
+                    let mut seq = SeqDeserializer::<_, Error>::new(v.iter().map(BufferedValue));
+                    let result = visitor.visit_seq(&mut seq)?;
+                    seq.end()?;
+                    Ok(result)
+                }
+                QueryValue::Set(v) => {
+                    let mut seq = SeqDeserializer::<_, Error>::new(v.iter().map(BufferedValue));
+                    let result = visitor.visit_seq(&mut seq)?;
+                    seq.end()?;
+                    Ok(result)
+                }
+                QueryValue::Map(v) => {
+                    let mut map = MapDeserializer::<_, Error>::new(
+                        v.iter().map(|(k, v)| (k.as_str(), BufferedValue(v))),
+                    );
+                    let result = visitor.visit_map(&mut map)?;
+                    map.end()?;
+                    Ok(result)
+                }
+            }
+        }
+
+        fn deserialize_option<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
+            match self.0 {
+                QueryValue::Null => visitor.visit_none(),
+                _ => visitor.visit_some(self),
+            }
+        }
+        fn deserialize_newtype_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            visitor.visit_newtype_struct(self)
+        }
+        fn deserialize_enum<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            _: &'static [&'static str],
+            visitor: V,
+        ) -> Result<V::Value, Error> {
+            match self.0 {
+                QueryValue::Str(value) => visitor.visit_enum(value.as_str().into_deserializer()),
+                QueryValue::Int(value) => visitor.visit_enum(
+                    u32::try_from(*value)
+                        .map_err(serde::de::Error::custom)?
+                        .into_deserializer(),
+                ),
+                QueryValue::Map(value) if value.len() == 1 => visitor.visit_enum(
+                    MapAccessDeserializer::new(MapDeserializer::<_, Error>::new(
+                        value.iter().map(|(k, v)| (k.as_str(), BufferedValue(v))),
+                    )),
+                ),
+                _ => Err(serde::de::Error::custom(
+                    "expected enum identifier or single-entry map",
+                )),
+            }
+        }
+        fn is_human_readable(&self) -> bool {
+            false
+        }
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+            bytes byte_buf unit unit_struct seq tuple tuple_struct map struct identifier ignored_any
+        }
     }
 }

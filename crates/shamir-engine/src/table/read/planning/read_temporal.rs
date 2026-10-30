@@ -5,7 +5,6 @@
 
 use std::time::Instant;
 
-use futures::future::join_all;
 use futures::StreamExt;
 
 use crate::query::filter::eval_context::FilterContext;
@@ -661,39 +660,11 @@ impl TableManager {
     }
 }
 
-/// Vectorized sibling of [`shamir_tx::MvccStore::history_of`] for callers
-/// that need the full version timeline of MANY record ids (`read_history`'s
-/// matched-record set). Mirrors `MvccStore::get_at_many`'s vectorization
-/// shape — chunked at `FULL_SCAN_BATCH`, the same page size `read_as_of`
-/// already batches `get_at_many` at — but `history_of` has no native
-/// multi-key store primitive to collapse into (each key's version range
-/// lives at a different, non-adjacent physical location, unlike
-/// `get_at_many`'s single-version point lookups, which DO collapse into one
-/// `history.get_many` call): dispatching each chunk's `history_of` calls
-/// CONCURRENTLY (mirrors the `join_all` pattern already used for per-table
-/// fan-out in `tx::materialize`) is the achievable win here, overlapping N
-/// per-record round-trips (each itself a range-scan stream plus a
-/// `lookup_ts` await per archived version) instead of serializing them.
-///
-/// Results are returned in the SAME order as `ids`. `join_all` preserves
-/// input order in its output, and results are drained in that same order
-/// with `?` — so the FIRST id (in input order) whose lookup failed is the
-/// one whose error propagates, matching the previous sequential loop's
-/// error-selection exactly, even though the lookups themselves ran
-/// concurrently.
+/// Bounded multi-key archive scans preserve input ordering and share scan errors.
 async fn history_of_many(
     mvcc: &shamir_tx::MvccStore,
     ids: &[RecordId],
 ) -> DbResult<Vec<Vec<shamir_tx::VersionEntry>>> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut out = Vec::with_capacity(ids.len());
-    for chunk in ids.chunks(FULL_SCAN_BATCH) {
-        let futs = chunk.iter().map(|id| mvcc.history_of(id.as_bytes()));
-        for result in join_all(futs).await {
-            out.push(result?);
-        }
-    }
-    Ok(out)
+    let keys: Vec<&[u8]> = ids.iter().map(|id| id.as_bytes().as_slice()).collect();
+    mvcc.history_of_many(&keys).await
 }

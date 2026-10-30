@@ -5,6 +5,7 @@
 //! no storage side-effects.
 
 use bytes::Bytes;
+use scc::hash_map::Entry::{self, Occupied, Vacant};
 use shamir_collections::{TFxMap, TFxSet, THasher};
 use shamir_types::access::Actor;
 use shamir_types::types::record_id::RecordId;
@@ -567,7 +568,6 @@ impl TxContext {
         // entry_async requires await; use the sync entry on a non-async
         // context. scc 2.x HashIndex/HashMap both expose a sync `entry` for
         // the unconditional insert path.
-        use scc::hash_map::Entry;
         match self.locked_keys.entry_sync((table_token, key)) {
             Entry::Occupied(_) => {}
             Entry::Vacant(e) => {
@@ -725,7 +725,6 @@ impl TxContext {
     /// the key at the post-commit version, defeating the abort.
     pub fn record_read_shared(&self, table_id: u64, key: Bytes, version: u64) {
         if self.isolation == IsolationLevel::Serializable {
-            use scc::hash_map::Entry::{Occupied, Vacant};
             match self.read_set.entry_sync((table_id, key)) {
                 // First-read-wins: keep the earliest observed version.
                 Occupied(_) => {}

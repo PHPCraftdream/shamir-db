@@ -3435,7 +3435,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
- "unicode-normalization",
  "zeroize",
 ]
 
@@ -3444,7 +3443,6 @@ name = "shamir-db"
 version = "0.1.0-alpha.1"
 dependencies = [
  "arc-swap",
- "argon2",
  "async-trait",
  "base64",
  "bench-scale-tool",
@@ -3455,10 +3453,8 @@ dependencies = [
  "futures",
  "log",
  "rand 0.9.4",
- "rcgen",
  "rmp-serde",
  "rustc-hash 2.1.2",
- "rustls",
  "sefer-alloc",
  "serde",
  "serial_test",
@@ -3473,7 +3469,6 @@ dependencies = [
  "shamir-types",
  "tempfile",
  "tokio",
- "tokio-rustls",
  "wat",
 ]
 
@@ -3682,6 +3677,7 @@ dependencies = [
  "shamir-query-builder-macros",
  "shamir-query-types",
  "shamir-types",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3690,6 +3686,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
+ "shamir-query-builder",
  "syn 2.0.114",
 ]
 
@@ -3859,12 +3856,8 @@ name = "shamir-transport-ws"
 version = "0.1.0-alpha.1"
 dependencies = [
  "futures-util",
- "hex",
  "http",
- "rmp-serde",
  "rustls",
- "serde",
- "serde_bytes",
  "shamir-connect",
  "shamir-transport-tcp",
  "thiserror 2.0.21",
@@ -3959,7 +3952,6 @@ dependencies = [
  "log",
  "rustix 1.1.4",
  "scc",
- "serde",
  "sha2",
  "shamir-collections",
  "shamir-funclib",

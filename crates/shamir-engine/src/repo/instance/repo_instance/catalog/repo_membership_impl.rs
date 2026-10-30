@@ -42,6 +42,8 @@ impl RepoInstance {
         }
     }
 
+    /// Trusted embedding: the returned raw table handle does not authorize actors.
+    ///
     /// cancel-safe: yes — uses `OnceCell::get_or_try_init`. On cancel
     /// inside the init closure, the cell remains empty so subsequent
     /// calls retry; no partial table is exposed. The clone of the cell

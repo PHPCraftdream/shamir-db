@@ -2,6 +2,7 @@
 //! (write) path of the snapshot codec. The load path + delta-log live in
 //! [`super::load`].
 
+use super::manifest::{integrity_bytes, integrity_key};
 use crate::kind::VectorMetric;
 use crate::meta_envelope::MetaEnvelope;
 use crate::vector::hnsw_adapter::HnswAdapter;
@@ -28,17 +29,15 @@ const CHUNK_SIZE: usize = 1 << 20; // 1 MiB
 /// V5.3 (#412): bumped 1 → 2. A v2 sidecar MAY carry a `quantization:
 /// Some(bincode(QuantMeta))` field; the u8 graph (if quantized) is stored
 /// as additional chunks under the same generation. A v2 sidecar with
-/// `quantization == None` is semantically equivalent to a v1 snapshot
-/// (non-quantized f32 path). The load path accepts BOTH v1 and v2
-/// (back-compat — see [`SNAPSHOT_SUPPORTED_VERSIONS`]).
+/// `quantization == None` uses the non-quantized f32 path. The v1 and v2
+/// metadata layouts decode separately; loading either also requires a supported
+/// `hnsw_rs` graph version.
 pub(crate) const SNAPSHOT_FORMAT_VERSION: u16 = 2;
 
-/// Snapshot format versions this build can load. V5.3 (#412) accepts both
-/// v1 (the original f32-only codec) and v2 (the quantization-aware codec).
-/// A dump from a future v3 is refused with `VersionMismatch`. A v1 dump
-/// loads on a v2 build via the back-compat path: no quantization meta is
-/// present, so the adapter is constructed un-fitted (f32-only) — exactly
-/// the pre-#412 behaviour.
+/// Metadata layout versions decoded by this build. Graph loading additionally
+/// requires the supported `hnsw_rs` version; 0.3.4 is rejected with
+/// `VersionMismatch`, allowing the backend to rebuild from source. Future
+/// unsupported metadata versions are also rejected.
 pub(crate) const SNAPSHOT_SUPPORTED_VERSIONS: &[u16] = &[1, 2];
 
 /// The V5.3 (#412) marker stamped into `QuantMeta::method` for the SQ8
@@ -274,6 +273,8 @@ pub enum SnapshotError {
     Serde(String),
     #[error("snapshot backend error: {0}")]
     Backend(String),
+    #[error("snapshot storage error: {0}")]
+    Db(#[source] Box<DbError>),
     #[error("snapshot not found (no manifest for keyspace)")]
     NotFound,
 }
@@ -288,7 +289,7 @@ impl From<DbError> for SnapshotError {
     fn from(e: DbError) -> Self {
         match e {
             DbError::NotFound(_) => SnapshotError::NotFound,
-            other => SnapshotError::Backend(other.to_string()),
+            other => SnapshotError::Db(Box::new(other)),
         }
     }
 }
@@ -537,7 +538,7 @@ pub async fn dump_snapshot_with_gen(
         .map_err(|e| SnapshotError::Serde(e.to_string()))?;
     ops.push(KvOp::Set(
         sidecar_key(keyspace, gen),
-        Bytes::from(sidecar_bytes),
+        Bytes::from(sidecar_bytes.clone()),
     ));
 
     // ---- 4. build the manifest -------------------------------------------
@@ -579,6 +580,10 @@ pub async fn dump_snapshot_with_gen(
     // because we don't know the prior gen's chunk counts here without
     // reading its manifest; leaving stale chunks is harmless for V2.1
     // since the manifest points unambiguously at the new gen.
+    ops.push(KvOp::Set(
+        integrity_key(keyspace),
+        integrity_bytes(&manifest_bytes, &sidecar_bytes),
+    ));
     ops.push(KvOp::Set(
         manifest_key(keyspace),
         Bytes::from(manifest_bytes),

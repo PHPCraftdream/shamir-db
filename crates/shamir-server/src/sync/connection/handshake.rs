@@ -52,7 +52,13 @@ pub(super) fn audit_emit(
     sid_prefix: Option<&[u8; 8]>,
     result: &str,
 ) {
-    let now_ns = UnixNanos::now().as_u64();
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(error) => {
+            tracing::error!(%error, "audit clock unavailable");
+            return;
+        }
+    };
     let prefix = sid_prefix.copied().unwrap_or([0u8; 8]);
     if let Err(error) = ctx.audit.append(
         event,
@@ -83,15 +89,15 @@ pub(crate) static CLOCK_OVERRIDE_NS: std::sync::atomic::AtomicU64 =
 
 /// The in-handshake clock: real time in production, the pinned
 /// `CLOCK_OVERRIDE_NS` value in tests when one is set.
-fn now_unix_nanos() -> u64 {
+fn now_unix_nanos() -> Result<u64, shamir_connect::common::error::EnvironmentError> {
     #[cfg(test)]
     {
         let pinned = CLOCK_OVERRIDE_NS.load(Ordering::Relaxed);
         if pinned != 0 {
-            return pinned;
+            return Ok(pinned);
         }
     }
-    UnixNanos::now().as_u64()
+    Ok(UnixNanos::try_now()?.as_u64())
 }
 
 /// Spec §8 `HANDSHAKE_TIMEOUT = max(15s, kdf_time × 5)` — the absolute
@@ -207,7 +213,7 @@ async fn run_handshake<F: Framer>(
     // RV-SERVER-17329FC9: `mut` — re-captured after the awaited proof read
     // (see the `ProofOutcome::Accepted` arm) so the bootstrap-TTL gate below
     // is evaluated at proof time, not at authentication-start time.
-    let mut now_ns = now_unix_nanos();
+    let mut now_ns = now_unix_nanos().map_err(|_| HandshakeError::BadProof { backoff_ms: 0 })?;
     let uhash = username_hash(&ctx.secrets.lockout_secret, username.as_bytes());
     let pair: PairKey = (subnet, uhash);
     if ctx.lockout.is_locked_out(pair, now_ns) {
@@ -378,7 +384,7 @@ async fn run_handshake<F: Framer>(
             // (and everything downstream: lockout registration, session
             // grant, ticket issue) is judged at proof time, not at the
             // stale authentication-start timestamp.
-            now_ns = now_unix_nanos();
+            now_ns = now_unix_nanos().map_err(|_| HandshakeError::BadProof { backoff_ms: 0 })?;
             *ok
         }
         ProofOutcome::Rejected => {
@@ -522,7 +528,7 @@ async fn run_handshake<F: Framer>(
     // Admission timestamp sampled ONCE here (NOT the pre-challenge clock
     // from step 2) and passed to both `Session::new` and `admit`, so the
     // all-active/idle classification uses the true login instant.
-    let admit_ns = UnixNanos::now().as_u64();
+    let admit_ns = UnixNanos::try_now().map_err(|_| HandshakeError::BadProof { backoff_ms: 0 })?.as_u64();
     let session = Session::new(
         user_id,
         username.as_str().to_string(),
@@ -738,7 +744,13 @@ pub async fn handle_connection<F>(
     let subnet = subnet_of(peer_addr.ip());
 
     // Pre-handshake: rate-limit per-subnet.
-    let now_ns = UnixNanos::now().as_u64();
+    let now_ns = match UnixNanos::try_now() {
+        Ok(now) => now.as_u64(),
+        Err(_) => {
+            bounded_shutdown(&mut framer).await;
+            return;
+        }
+    };
     match ctx.rate_limit.check(subnet, now_ns) {
         RateDecision::Allowed => {}
         RateDecision::RateLimited { retry_after_secs } => {

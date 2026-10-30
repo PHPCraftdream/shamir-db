@@ -38,6 +38,7 @@ use crate::query::filter::{Filter, FilterValue};
 use shamir_index::base_index::index_info_item::IndexInfoItem;
 use shamir_index::base_index::index_keys::build_index_key_from_record;
 use shamir_query_builder::val::lit_u64;
+use shamir_query_builder::{filter, val};
 use shamir_types::core::interner::Interner;
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::common::new_map;
@@ -71,6 +72,59 @@ fn tree_big_record(interner: &Interner, field: &str, value: u64) -> InnerValue {
     let mut map = new_map();
     map.insert(key, InnerValue::Big(BigInt::from(value)));
     InnerValue::Map(map)
+}
+
+const LOW: u64 = 9_999_999_999_999_999_999;
+const HIGH: u64 = 10_000_000_000_000_000_000;
+
+fn string_record(interner: &Interner, value: u64) -> InnerValue {
+    let key = interner.touch_ind("n").unwrap().into_key();
+    let mut map = new_map();
+    map.insert(key, InnerValue::Str(value.to_string()));
+    InnerValue::Map(map)
+}
+
+fn assert_contract(record: &impl RecordRef, interner: &Interner, value: u64, string: bool) {
+    let refs = empty_refs();
+    let ctx = FilterContext::new(interner, &refs);
+    let matches = |filter: Filter| compile_filter(&filter, interner).matches(record, &ctx);
+    let other = if value == LOW { HIGH } else { LOW };
+    assert!(matches(filter::eq("n", lit_u64(value))));
+    assert!(!matches(filter::eq("n", lit_u64(other))));
+    // String/String is lexical; Big/String is numeric.
+    assert_eq!(
+        matches(filter::lt("n", lit_u64(other))),
+        if string { value == HIGH } else { value == LOW }
+    );
+    assert_eq!(
+        matches(filter::gt("n", lit_u64(other))),
+        if string { value == LOW } else { value == HIGH }
+    );
+    assert!(matches(filter::gte("n", lit_u64(value))));
+    assert!(matches(filter::lte("n", lit_u64(value))));
+    // Between only extracts ScalarRef, so Big/raw-u64 are unsupported.
+    assert_eq!(
+        matches(filter::between("n", lit_u64(value), lit_u64(value))),
+        string
+    );
+    // Literal InSet and dynamic In share the same scalar extraction limit.
+    assert_eq!(matches(filter::in_("n", [lit_u64(value)])), string);
+    assert!(!matches(filter::in_("n", [lit_u64(other)])));
+    assert_eq!(matches(filter::in_("n", [val::col("n")])), string);
+}
+
+#[test]
+fn lit_u64_order_range_and_membership_storage_contract() {
+    let interner = Interner::new();
+    for value in [LOW, HIGH] {
+        let tree = tree_big_record(&interner, "n", value);
+        let text = string_record(&interner, value);
+        let bytes = raw_uint64_record(&interner, "n", value);
+        let lens = RecordView::new(&bytes).unwrap();
+        assert_contract(&tree, &interner, value, false);
+        assert_contract(&text, &interner, value, true);
+        assert_contract(&lens, &interner, value, false);
+    }
 }
 
 #[test]

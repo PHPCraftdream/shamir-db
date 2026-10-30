@@ -109,7 +109,7 @@ impl core::fmt::Debug for Session {
         f.debug_struct("Session")
             .field("user_id", &"<REDACTED:16>")
             .field("username", &"<REDACTED>")
-            .field("permissions", &"<RwLock>")
+            .field("permissions", &"<immutable snapshot>")
             .field("created_at_ns", &self.created_at_ns)
             .field("transport_kind", &self.transport_kind)
             .field("binding_mode", &self.binding_mode)
@@ -131,12 +131,6 @@ pub struct Session {
     /// can derive the per-session HMAC key for destructive-op
     /// validation without consulting the store.
     pub session_id: [u8; limits::SESSION_ID_BYTES],
-    /// Cached HMAC key derived from `session_id`. Populated by
-    /// `SessionStore::insert` right after the session_id is
-    /// stamped (or lazily on first `hmac_key()` call). Avoids
-    /// the per-op SHA-256 redo on every destructive op in a
-    /// batch.
-    hmac_key_cache: std::sync::OnceLock<[u8; 32]>,
     /// Stable user identifier.
     pub user_id: [u8; 16],
     /// Username (post-NFC, UsernameCaseMapped).
@@ -242,7 +236,6 @@ impl Session {
     ) -> Self {
         Self {
             session_id: [0u8; limits::SESSION_ID_BYTES],
-            hmac_key_cache: std::sync::OnceLock::new(),
             user_id,
             username,
             permissions,
@@ -262,9 +255,7 @@ impl Session {
     /// Derive the per-session HMAC key from `session_id`. Delegates to
     /// the shared [`crate::common::crypto::derive_session_hmac_key`] so
     /// server and client compute byte-identical keys from one definition
-    /// (task #604) — same shape `hmac_key()` returns, factored out so
-    /// `SessionStore::insert` can warm the cache immediately after
-    /// stamping `session_id`.
+    /// (task #604).
     fn derive_hmac_key(session_id: &[u8; limits::SESSION_ID_BYTES]) -> [u8; 32] {
         crate::common::crypto::derive_session_hmac_key(session_id)
     }
@@ -283,9 +274,7 @@ impl Session {
     /// about each specific drop/clear op. That's the formal
     /// guardrail we want on destructive DDL.
     pub fn hmac_key(&self) -> [u8; 32] {
-        *self
-            .hmac_key_cache
-            .get_or_init(|| Self::derive_hmac_key(&self.session_id))
+        Self::derive_hmac_key(&self.session_id)
     }
 
     /// Update `last_activity_ns` to current wall-clock.
@@ -490,11 +479,6 @@ impl SessionStore {
     ) -> Admission {
         session.session_id = session_id;
         let user_id = session.user_id;
-        // Warm the HMAC key cache while we still own the Session (see the
-        // old `insert` doc): SHA-256 over 23+32 bytes, once at auth time.
-        let _ = session
-            .hmac_key_cache
-            .set(Session::derive_hmac_key(&session_id));
         let arc = Arc::new(session);
 
         // by_user guard: all cap accounting for this user happens under it.

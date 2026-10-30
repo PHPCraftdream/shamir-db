@@ -21,4 +21,4 @@ mod tests;
 pub use process_tree_unix::ProcessTree;
 #[cfg(windows)]
 pub use process_tree_windows::ProcessTree;
-pub use supervise::{supervise, TeardownFaults};
+pub use supervise::{supervise, supervise_bounded, TeardownFaults, TRUNCATION_MARKER};

@@ -19,7 +19,7 @@ use shamir_connect::common::envelope::{
     ErrorEnvelope, RequestEnvelope, RequestEnvelopeView, ResponseEnvelope,
 };
 use shamir_connect::common::kdf_params::KdfParams;
-use shamir_connect::common::scram::DerivedKeys;
+use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
@@ -42,57 +42,20 @@ use shamir_transport_tcp::tls::{
     make_server_config_from_pem, AppLayerServerAuth,
 };
 
-use serde::{Deserialize, Serialize};
+#[path = "fixtures/handshake.rs"]
+mod handshake_fixture;
+use handshake_fixture::{
+    fast_kdf, make_user, WireAuthInit, WireAuthOk, WireChallenge, WireClientProof,
+};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
-use zeroize::Zeroizing;
 
 // ---------------------------------------------------------------------------
 // Wire frames for the handshake (transport-binding-local, see TRANSPORT_TCP §6).
 // Post-handshake messages use `RequestEnvelope`/`ResponseEnvelope` from spec.
 // ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize)]
-struct WireAuthInit {
-    user: String,
-    #[serde(with = "serde_bytes")]
-    client_nonce: Vec<u8>,
-    binding_mode: u8,
-    version: u8,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireChallenge {
-    #[serde(with = "serde_bytes")]
-    salt: Vec<u8>,
-    memory_kb: u32,
-    time: u32,
-    parallelism: u32,
-    argon2_version: u8,
-    #[serde(with = "serde_bytes")]
-    server_nonce: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireClientProof {
-    #[serde(with = "serde_bytes")]
-    client_proof: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WireAuthOk {
-    #[serde(with = "serde_bytes")]
-    server_signature: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    server_pub_key: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    identity_sig: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    session_id: Vec<u8>,
-    expires_at_ns: u64,
-}
 
 // ---------------------------------------------------------------------------
 // Echo handler — application-level dispatch.
@@ -118,32 +81,6 @@ impl RequestHandler for EchoHandler {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn fast_kdf() -> KdfParams {
-    KdfParams {
-        memory_kb: 19_456,
-        time: 2,
-        parallelism: 1,
-        argon2_version: 0x13,
-    }
-}
-
-fn make_user(password: &[u8]) -> (UserRecord, NormalizedUsername) {
-    let username = NormalizedUsername::from_raw("alice").unwrap();
-    let salt = [0x42u8; 16];
-    let kdf = fast_kdf();
-    let derived = DerivedKeys::derive(password, &salt, &kdf).unwrap();
-    let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
-    server_key_z.copy_from_slice(&derived.server_key[..]);
-    let record = UserRecord {
-        salt,
-        stored_key: derived.stored_key,
-        server_key: server_key_z,
-        kdf_params: kdf,
-        tickets_invalid_before_ns: 0,
-    };
-    (record, username)
-}
 
 // ---------------------------------------------------------------------------
 // Test
@@ -206,7 +143,6 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         // negative response) we sleep until target_constant_time_ms is
         // reached. Defeats the real-vs-fake user timing oracle that
         // branch-equivalent code alone cannot close (SECURITY_MODEL §9.2).
-        use shamir_connect::common::latency::{target_constant_time_ms, LatencyPadGuard};
         let pad_guard = LatencyPadGuard::start();
 
         let init_bytes = read_frame(&mut r, MAX_FRAME_SIZE_DEFAULT).await.unwrap();
@@ -374,7 +310,12 @@ async fn echo_full_pipeline_with_session_and_invalidation() {
         server_nonce,
     };
     let mut password_buf = password.to_vec();
-    let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
+    let (hs, proof, derived, am) = tokio::task::spawn_blocking(move || {
+        let (proof, derived, am) = hs.process_challenge(&challenge, &mut password_buf).unwrap();
+        (hs, proof, derived, am)
+    })
+    .await
+    .unwrap();
 
     // proof
     let bytes = rmp_serde::to_vec(&WireClientProof {
