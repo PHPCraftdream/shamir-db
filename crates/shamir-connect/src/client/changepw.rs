@@ -11,7 +11,10 @@ use crate::common::types::{limits, BindingMode, TransportKind};
 use crate::common::username::NormalizedUsername;
 use crate::common::wire::ChangePwRequest;
 
-/// Step 1: legacy wrapper; panics on OS entropy failure.
+/// Step 1: legacy wrapper; prefer [`try_build_challenge_request`].
+///
+/// # Panics
+/// Panics on OS entropy failure.
 pub fn build_challenge_request() -> [u8; 32] {
     try_build_challenge_request().expect("OS RNG failure")
 }

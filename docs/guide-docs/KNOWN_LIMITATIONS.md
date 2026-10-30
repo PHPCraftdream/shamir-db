@@ -596,6 +596,7 @@ artifact).
   Existing cross-interner/next-hop coverage:
   `crates/shamir-engine/src/tx/tests/replication_interner_tests.rs:97-148`
   (source inspected, not executed here).
+- **Upstream identity pinning.** `[replication].upstream_pins` maps a normalized upstream address (so `tcp://`, `tls://` and bare `host:port` identify the same key) to a list of 64-hex SHA256 hashes of the leader Ed25519 public key. Configured pins are the only durable, verified enrollment. Without one, the first successful connection in each process is trusted (TOFU), logged at `warn` with a ready-to-paste enrollment line, then enforced for the rest of that process; learned pins are not persisted and must be re-learned after every restart. The leader logs its own identity pin at `info` on boot for out-of-band comparison. During leader-key rotation, add the new pin alongside the old one during the 7-day overlap; otherwise the subscription stops with `upstream_key_mismatch`. Sources: `crates/shamir-server/src/sync/replication/transport/prod_factory.rs` and `crates/shamir-server/src/sync/replication/transport/replication_config.rs`.
 - **Follower secondary indexes are unsupported and fail closed.** An event
   touching a table with any index (hash, unique, sorted, FTS, functional or
   vector) is rejected before any data or version is applied; the typed

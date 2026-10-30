@@ -1,6 +1,8 @@
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
+use crate::connection::wire::AuthOk;
+
 use shamir_connect::common::auth_message::{AuthMessage, AuthMessageInputs};
 use shamir_connect::common::crypto::sha256;
 use shamir_connect::common::identity::build_identity_input;
@@ -13,32 +15,36 @@ use shamir_connect::server::handshake::{AuthInitView, AuthOkView, ServerHandshak
 use shamir_connect::server::rotation::ServerIdentityState;
 
 use crate::connection::auth_ok_hints::auth_ok_hints;
-use crate::connection::wire::AuthOk;
+use crate::connection::wire::ResumeOkWire;
 
-fn auth_ok_exact_fixture(hinted: bool) -> Vec<u8> {
-    // Independent MessagePack specification: fixarray, bin8 fields and fixints.
-    let mut bytes = vec![if hinted { 0x9a } else { 0x98 }, 0xc4, 32];
-    bytes.extend([1; 32]);
-    bytes.extend([0xc4, 32]);
-    bytes.extend([2; 32]);
-    bytes.extend([0xc4, 64]);
-    bytes.extend([3; 64]);
-    bytes.extend([0xc4, 32]);
-    bytes.extend([4; 32]);
-    bytes.extend([7, 0xc4, 0, 0, 1]);
-    if hinted {
-        bytes.extend([0xc0, 0xc3]);
-    }
-    bytes
+// Shared wire fixtures (L4-RV-SERVER-8999F6B7): committed msgpack bytes under
+// crates/shamir-connect/test-vectors/, consumed by the server's production
+// `AuthOk` / `ResumeOkWire` DTOs here and by the client's production
+// `WireAuthOk` / `WireResumeOk` DTOs in
+// crates/shamir-client/src/tests/wire/wire_version_tests.rs.
+fn auth_ok_base_fixture() -> &'static [u8] {
+    include_bytes!("../../../../shamir-connect/test-vectors/auth_ok_base.msgpack")
+}
+fn auth_ok_hinted_fixture() -> &'static [u8] {
+    include_bytes!("../../../../shamir-connect/test-vectors/auth_ok_hinted.msgpack")
+}
+fn resume_ok_fixture() -> &'static [u8] {
+    include_bytes!("../../../../shamir-connect/test-vectors/resume_ok.msgpack")
 }
 
 #[test]
 fn rv_server_8999f6b7_base_and_hinted_byte_exact() {
-    for hinted in [false, true] {
-        let fixture = auth_ok_exact_fixture(hinted);
+    for (hinted, fixture) in [
+        (false, auth_ok_base_fixture()),
+        (true, auth_ok_hinted_fixture()),
+    ] {
         let actual = auth_ok(None, hinted.then_some(true));
-        assert_eq!(rmp_serde::to_vec(&actual).unwrap(), fixture);
-        let decoded: ClientAuthOk = rmp_serde::from_slice(&fixture).unwrap();
+        let encoded = rmp_serde::to_vec(&actual).unwrap();
+        assert_eq!(
+            encoded, fixture,
+            "production AuthOk encoding must match the shared fixture"
+        );
+        let decoded: AuthOk = rmp_serde::from_slice(fixture).unwrap();
         assert_eq!(decoded.server_signature, vec![1; 32]);
         assert_eq!(decoded.server_pub_key, vec![2; 32]);
         assert_eq!(decoded.identity_sig, vec![3; 64]);
@@ -47,8 +53,60 @@ fn rv_server_8999f6b7_base_and_hinted_byte_exact() {
         assert!(decoded.resumption_ticket.is_empty());
         assert_eq!(decoded.resumption_expires_at_ns, 0);
         assert_eq!(decoded.server_query_version, 1);
+        assert!(decoded.rotation_in_progress.is_none());
         assert_eq!(decoded.kdf_upgrade_required, hinted.then_some(true));
     }
+}
+
+#[test]
+fn rv_server_8999f6b7_shared_fixtures_decode_production_dtos() {
+    // Base and hinted fixtures decode through the production server AuthOk.
+    for fixture in [auth_ok_base_fixture(), auth_ok_hinted_fixture()] {
+        let decoded: AuthOk = rmp_serde::from_slice(fixture).expect("decode shared AuthOk fixture");
+        assert_eq!(decoded.session_id, vec![4; 32]);
+        assert_eq!(decoded.server_query_version, 1);
+    }
+    // Resume fixture decodes through the production server ResumeOkWire.
+    let resume: ResumeOkWire =
+        rmp_serde::from_slice(resume_ok_fixture()).expect("decode shared ResumeOk fixture");
+    assert_eq!(resume.session_id, vec![0xAB; 32]);
+    assert_eq!(resume.expires_at_ns, 99);
+    assert!(resume.resumption_ticket.is_empty());
+    assert_eq!(resume.resumption_expires_at_ns, 0);
+    assert_eq!(resume.server_query_version, 2);
+    // The server's own resume encoding is byte-identical to the fixture.
+    let reencoded = rmp_serde::to_vec(&ResumeOkWire {
+        session_id: vec![0xAB; 32],
+        expires_at_ns: 99,
+        resumption_ticket: Vec::new(),
+        resumption_expires_at_ns: 0,
+        server_query_version: 2,
+    })
+    .expect("encode ResumeOkWire");
+    assert_eq!(reencoded, resume_ok_fixture());
+}
+
+#[derive(Deserialize)]
+struct ClientAuthOk {
+    #[serde(with = "serde_bytes")]
+    server_signature: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    server_pub_key: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    identity_sig: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    session_id: Vec<u8>,
+    expires_at_ns: u64,
+    #[serde(default, with = "serde_bytes")]
+    resumption_ticket: Vec<u8>,
+    #[serde(default)]
+    resumption_expires_at_ns: u64,
+    #[serde(default)]
+    server_query_version: u8,
+    #[serde(default)]
+    rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
+    #[serde(default)]
+    kdf_upgrade_required: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -84,29 +142,6 @@ fn auth_ok(
         rotation_in_progress: rotation,
         kdf_upgrade_required: kdf,
     }
-}
-
-#[derive(Deserialize)]
-struct ClientAuthOk {
-    #[serde(with = "serde_bytes")]
-    server_signature: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    server_pub_key: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    identity_sig: Vec<u8>,
-    #[serde(with = "serde_bytes")]
-    session_id: Vec<u8>,
-    expires_at_ns: u64,
-    #[serde(default, with = "serde_bytes")]
-    resumption_ticket: Vec<u8>,
-    #[serde(default)]
-    resumption_expires_at_ns: u64,
-    #[serde(default)]
-    server_query_version: u8,
-    #[serde(default)]
-    rotation_in_progress: Option<shamir_connect::common::wire::RotationInProgressWire>,
-    #[serde(default)]
-    kdf_upgrade_required: Option<bool>,
 }
 
 #[test]

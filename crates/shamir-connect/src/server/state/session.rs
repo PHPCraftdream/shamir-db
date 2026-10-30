@@ -283,6 +283,11 @@ impl Session {
     /// (~100 ns). Hot-path callers processing many requests per batch should
     /// use [`Session::touch_at`] instead and reuse a single timestamp
     /// captured by the transport layer.
+    ///
+    /// Legacy wrapper; prefer [`Session::touch_at`].
+    ///
+    /// # Panics
+    /// Panics when the system clock is invalid.
     pub fn touch(&self) {
         self.touch_at(UnixNanos::now().as_u64());
     }
@@ -609,6 +614,11 @@ impl SessionStore {
     /// returns immediately without consulting the clock. Hot-path callers
     /// should still prefer [`SessionStore::lookup_at`] to share one
     /// timestamp across multiple session touches.
+    ///
+    /// Legacy wrapper; prefer [`SessionStore::lookup_at`].
+    ///
+    /// # Panics
+    /// Panics when the system clock is invalid (on hit only).
     pub fn lookup(&self, sid: &[u8; limits::SESSION_ID_BYTES]) -> Option<Arc<Session>> {
         // Touch under the shard guard: admission's idle recheck (remove_if)
         // takes the shard write lock, so it observes this touch.

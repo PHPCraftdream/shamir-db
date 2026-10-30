@@ -341,6 +341,11 @@ impl InMemoryLockoutStore {
     /// snapshot path. Holds map shards only long enough to clone
     /// `(key, value)` pairs; no locks are held across an .await
     /// boundary (this is a synchronous function).
+    ///
+    /// Legacy wrapper; panicking clock read.
+    ///
+    /// # Panics
+    /// Panics when the system clock is invalid.
     pub fn snapshot(&self) -> LockoutSnapshot {
         let captured_at_ns = UnixNanos::now().as_u64();
         let mut failures = Vec::with_capacity(self.failures.len());

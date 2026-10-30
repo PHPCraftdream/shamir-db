@@ -232,6 +232,10 @@ enum Subcmd {
     },
 }
 
+fn bootstrap_argv_warning_needed(argv_password: &Option<String>) -> bool {
+    argv_password.is_some()
+}
+
 fn bootstrap_mode(
     skip: bool,
     argv_password: Option<String>,
@@ -454,6 +458,10 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
     } else {
         None
     };
+    let argv_password_used = bootstrap_argv_warning_needed(&cli.bootstrap_password);
+    if argv_password_used {
+        tracing::warn!("--bootstrap-password supplied via argv may be visible in process lists and shell history; prefer --bootstrap-password-stdin or the default random-token file");
+    }
     let bootstrap = bootstrap_mode(
         cli.skip_bootstrap,
         cli.bootstrap_password,
