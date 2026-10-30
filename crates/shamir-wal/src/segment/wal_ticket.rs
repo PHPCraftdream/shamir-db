@@ -43,6 +43,13 @@ impl fmt::Display for WalAppendError {
 impl std::error::Error for WalAppendError {}
 
 impl From<WalAppendError> for DbError {
+    /// Legacy completion conversion (RV-WAL-C55C2D47): deliberately returns
+    /// `DbError::Storage` with the fixed, path-free outcome text of
+    /// [`WalAppendError`] and DISCARDS the underlying sink cause. This
+    /// preserves the classification/match shape of the legacy `DbResult`
+    /// entry points and keeps WAL file paths out of client-visible errors.
+    /// Callers that need the original cause use the ticketed API and
+    /// [`WalTicket::failure_cause`], which retains the `Arc<DbError>`.
     fn from(error: WalAppendError) -> Self {
         Self::Storage(error.to_string())
     }

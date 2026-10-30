@@ -556,3 +556,41 @@ async fn rv_wal_5839ff0d_open_error_preserves_io_kind() {
         "expected preserved ErrorKind, got: {err}"
     );
 }
+
+// Red before the fix (RV-WAL-4470BEF3): a payload with a supported frame
+// header but an undecodable body was pinned and written as a well-formed
+// frame, which then hard-failed replay. The append path must reject the
+// body BEFORE any file mutation and leave the segment replayable.
+#[tokio::test]
+async fn rv_wal_4470bef3_invalid_body_append_writes_nothing_and_replay_is_unaffected() {
+    let dir = TempDir::new().unwrap();
+    let seg = WalSegment::open(seg_path(&dir)).await.unwrap();
+
+    // Supported header (WAL2 magic, current version) + garbage body:
+    // passes validate_frame_header, fails WalEntryV2::decode.
+    let mut invalid = Vec::new();
+    invalid.extend_from_slice(&crate::WAL_V2_MAGIC);
+    invalid.push(crate::WAL_V2_VERSION);
+    invalid.extend_from_slice(&[0xFF, 0xFF]);
+
+    let result = seg.append_batch(Arc::new(vec![invalid]), 30).await;
+    let err = match result {
+        Ok(_) => panic!("invalid body must be rejected"),
+        Err(e) => e,
+    };
+    assert!(
+        err.to_string().contains("not a decodable WalEntryV2 body"),
+        "typed rejection must name the undecodable body: {err}"
+    );
+
+    // Nothing was written: the file is still empty and replay is clean.
+    assert_eq!(seg.approx_len_bytes(), 0);
+    assert!(seg.replay().await.unwrap().is_empty());
+
+    // A following append + replay of the segment is unaffected.
+    let good = entry(1, 10).encode().unwrap();
+    seg.append_batch(Arc::new(vec![good]), 10).await.unwrap();
+    let replayed = seg.replay().await.unwrap();
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(replayed[0].commit_version, 10);
+}

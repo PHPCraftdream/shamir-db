@@ -1,12 +1,6 @@
 //! Append-only, file-backed WAL segment.
 //!
-//! The existing [`crate::WalManager`] is KV-backed — it writes markers
-//! into a `Store` and inherits whatever durability the backend chooses
-//! (level 1: in-process buffer, or level 3: write + fsync). It cannot
-//! express level 2 (data in the OS page cache, surviving a *process*
-//! crash but lost on power loss).
-//!
-//! `WalSegment` is the real append-only file that separates those two
+//! `WalSegment` is the real append-only file backing the WAL's durability
 //! tiers: [`append_batch`](WalSegment::append_batch) does `write()` +
 //! userspace flush (level 2), while [`sync`](WalSegment::sync) does
 //! `fsync` (level 3). This split is the foundation of the durability
@@ -157,6 +151,14 @@ pub struct WalSegment {
     /// (`fetch_max` on every `append_batch`). A sealed segment is eligible
     /// for truncation only when its maximum is positive and at or below the
     /// durable watermark and its separate retention pin is clear (F6). Init 0.
+    ///
+    /// Reopen caveat (RV-WAL-48749F97): a bare [`WalSegment::open`] of an
+    /// existing non-empty segment starts at 0 with the retention pin clear.
+    /// Only frames appended through this handle (plus anything restored by
+    /// [`crate::SegmentSet::open`], which replays retained active frames via
+    /// `restore_retention`) are reflected. Truncation eligibility is decided
+    /// ONLY by `SegmentSet`; never treat the handle-local maximum as a durable
+    /// cross-segment watermark.
     max_committed: AtomicU64,
     /// A zero-version or undecodable record permanently pins this segment.
     retention_pin: AtomicBool,
@@ -192,6 +194,15 @@ pub struct WalSegment {
 
 impl WalSegment {
     /// Open (creating if absent) an append-only segment at `path`.
+    ///
+    /// Reopen watermark caveat (RV-WAL-48749F97): a bare open of an existing
+    /// non-empty segment starts with `max_committed = 0` and the retention
+    /// pin clear — the file is NOT scanned. The handle-local values cover only
+    /// frames appended through this handle plus anything restored by
+    /// [`crate::SegmentSet::open`] (which replays retained active frames and
+    /// calls `restore_retention`). Truncation eligibility is decided only by
+    /// `SegmentSet`; direct-open callers must not use [`Self::max_committed`]
+    /// as a durable cross-segment watermark.
     ///
     /// **Audit §1.9 (Linux directory fsync):** when the segment file is
     /// NEWLY created (did not exist before this call), the parent directory
@@ -266,10 +277,13 @@ impl WalSegment {
     /// hop across all concurrent committers funnelled by the leader.
     ///
     /// Payloads must be [`WalEntryV2::encode`] output. Before sequence/version
-    /// or file mutation, the frame length and header are validated. Bodies are
-    /// decoded for retention metadata; undecodable bodies conservatively pin.
-    /// Encoded payloads are limited to 64 MiB, matching recovery's frame cap;
-    /// older larger frames fail recovery without being truncated.
+    /// accounting or any file mutation, the frame length, header AND body are
+    /// validated: a payload with a supported header that fails
+    /// [`WalEntryV2::decode`] is rejected with a typed error and nothing is
+    /// written or sequenced (a frame that replay would later hard-fail on must
+    /// never reach the file). Encoded payloads are limited to 64 MiB, matching
+    /// recovery's frame cap; older larger frames fail recovery without being
+    /// truncated.
     ///
     /// On a `write_all` failure (e.g. ENOSPC mid-write) the segment is
     /// **quarantined**: the partial bytes are truncated back to the last
@@ -302,7 +316,15 @@ impl WalSegment {
                     payload_max = payload_max.max(entry.commit_version);
                     pinned |= entry.commit_version == 0;
                 }
-                Err(_) => pinned = true,
+                Err(e) => {
+                    // RV-WAL-4470BEF3: a supported header with an undecodable
+                    // body would produce a well-formed frame that replay later
+                    // hard-fails on. Reject BEFORE sequencing, watermark or
+                    // file mutation. Path-free Storage text (3F10E8A1 policy).
+                    return Err(DbError::Storage(format!(
+                        "WalSegment append rejected: payload is not a decodable WalEntryV2 body ({e})"
+                    )));
+                }
             }
         }
         if payloads.is_empty() {
@@ -425,6 +447,13 @@ impl WalSegment {
     }
 
     /// Highest `commit_version` ever appended to this segment.
+    ///
+    /// Handle-local only (RV-WAL-48749F97): a bare [`Self::open`] of an
+    /// existing non-empty segment starts at 0 — the file is not scanned.
+    /// The value covers frames appended through this handle plus anything
+    /// restored by [`crate::SegmentSet::open`]. Truncation eligibility is
+    /// decided only by `SegmentSet`; do not use this as a durable
+    /// cross-segment watermark.
     pub fn max_committed(&self) -> u64 {
         self.max_committed.load(Ordering::Acquire)
     }
@@ -490,10 +519,12 @@ impl WalSegment {
         self.poisoned.load(Ordering::Acquire)
     }
 
-    /// Mark this segment poisoned. Production code does this internally on a
-    /// write/fsync failure; exposed (pub(crate)-ish) for tests that simulate
-    /// a fault by setting the flag directly.
-    pub fn mark_poisoned(&self) {
+    /// Crate-test fault hook (RV-WAL-5DFE355F): mark this segment poisoned
+    /// so tests can simulate the write/fsync-failure quarantine state.
+    /// Production code poisons internally on a write/fsync failure; this
+    /// hook is compiled only under `cfg(test)` and is not public API.
+    #[cfg(test)]
+    pub(crate) fn mark_poisoned(&self) {
         self.poisoned.store(true, Ordering::Release);
     }
 
