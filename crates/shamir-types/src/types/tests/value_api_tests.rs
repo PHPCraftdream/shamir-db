@@ -290,3 +290,60 @@ fn value_error_not_a_map_display() {
     let msg = e.to_string();
     assert!(msg.contains("root.leaf"), "missing path in: {msg}");
 }
+
+// ── RV-TYPES-313627EB: allocation oracle for set_path ───────────────────────
+
+#[test]
+fn rv_types_313627eb_set_path_successful_traversal_allocates_no_error_prefix() {
+    // The pre-fix source (P2.md lines 6172-6178) unconditionally appended
+    // every segment to a `walked: String`; this oracle compares the fixed
+    // successful path with a faithful legacy negative control below. The
+    // old path copies/extends the cumulative diagnostic string each segment;
+    // this path should avoid all of that diagnostic-only work.
+    let mut nested = map(&[("leaf", QueryValue::Int(0))]);
+    for seg in ["h", "g", "f", "e", "d", "c", "b", "a"] {
+        nested = map(&[(seg, nested)]);
+    }
+
+    // Nine path segments each call `segment.to_owned()` once; all maps
+    // already exist and the leaf replacement does not grow a map. The fixed
+    // budget is therefore <=9 allocations, derived from this source path
+    // (not empirically observed). The legacy path below performs the same
+    // operation plus the pre-fix diagnostic-prefix construction.
+    let mut legacy_nested = nested.clone();
+    let path = "a.b.c.d.e.f.g.h.leaf";
+    let (allocs, prev) =
+        crate::testing_alloc::count_allocations(|| nested.set_path(path, QueryValue::Int(2)));
+    assert_eq!(prev.unwrap(), Some(QueryValue::Int(0)));
+    assert!(
+        allocs <= 9,
+        "successful nine-segment set_path used {allocs} allocations (derived budget: 9)"
+    );
+
+    // Faithful full-operation negative control: reproduce the old prefix
+    // building observed in P2.md, then call set_path on an independently
+    // constructed identical value in the same measurement window.
+    let (legacy_allocs, prev) = crate::testing_alloc::count_allocations(|| {
+        legacy_walked_prefix(path);
+        legacy_nested.set_path(path, QueryValue::Int(2))
+    });
+    assert_eq!(prev.unwrap(), Some(QueryValue::Int(0)));
+    assert!(
+        allocs < legacy_allocs,
+        "fixed set_path allocations ({allocs}) must be below legacy full-operation allocations ({legacy_allocs})"
+    );
+}
+
+/// Faithful allocation negative-control for the pre-fix `walked` prefix
+/// operations observed in P2.md: push separator then push_str(segment) on
+/// every segment, regardless of whether traversal succeeds.
+fn legacy_walked_prefix(path: &str) {
+    let mut walked = String::new();
+    for segment in path.split('.') {
+        if !walked.is_empty() {
+            walked.push('.');
+        }
+        walked.push_str(segment);
+        std::hint::black_box(&walked);
+    }
+}

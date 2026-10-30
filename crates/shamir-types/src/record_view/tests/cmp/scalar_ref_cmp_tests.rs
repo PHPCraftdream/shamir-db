@@ -8,6 +8,7 @@ use num_bigint::BigInt;
 
 use crate::record_view::scalar_ref::{scalar_ref_cmp, scalar_ref_numeric_eq};
 use crate::record_view::ScalarRef;
+use crate::types::common::new_map_wc;
 use crate::types::value::{InnerValue, QueryValue};
 
 // ── Int / Int ───────────────────────────────────────────────────────────────
@@ -192,7 +193,6 @@ fn dec_cross_type_f64() {
 
 #[test]
 fn container_returns_none() {
-    use crate::types::common::new_map_wc;
     // ScalarRef::Str vs InnerValue::Map → None.
     assert_eq!(
         scalar_ref_cmp(ScalarRef::Str("x"), &InnerValue::Map(new_map_wc(0))),
