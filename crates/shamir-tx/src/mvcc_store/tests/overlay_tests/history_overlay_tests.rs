@@ -367,10 +367,10 @@ async fn history_timestamp_batch_failure_retries_and_keeps_unknown_age() {
     );
     history.fail_many.store(false, Ordering::Relaxed);
     history.fail_get.store(true, Ordering::Relaxed);
-    let entries = mvcc.history_of(b"k").await.unwrap();
-    assert_eq!(
-        entries.iter().map(|e| e.ts_millis).collect::<Vec<_>>(),
-        vec![None, None]
+    let failed = mvcc.history_of(b"k").await;
+    assert!(
+        matches!(failed, Err(DbError::Storage(message)) if message == "injected I/O fault"),
+        "a failing individual timestamp retry is reported, not folded into unknown age"
     );
     assert_eq!(history.get_many_calls.load(Ordering::Relaxed), 2);
     history.fail_get.store(false, Ordering::Relaxed);
