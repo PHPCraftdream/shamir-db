@@ -246,7 +246,8 @@ async fn rv_types_2eb39dfd_overlay_commit_over_cap_typed_code() {
             max_names: 1,
             max_bytes: 64,
         },
-    );
+    )
+    .unwrap();
     base.touch_ind("base").unwrap();
     let overlay = SccHashMap::with_hasher(THasher::default());
     let _ = overlay.insert_sync("new_key".to_string(), OVERLAY_ID_BASE + 1);

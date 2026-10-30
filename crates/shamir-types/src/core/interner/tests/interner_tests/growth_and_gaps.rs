@@ -86,7 +86,8 @@ fn rv_types_5dd242f6_rejected_collision_leaves_quota_unchanged() {
             max_names: 2,
             max_bytes: 32,
         },
-    );
+    )
+    .unwrap();
     interner.touch_with_id("fixed", 1).unwrap();
     assert!(matches!(
         interner.touch_with_id("other", 1),
@@ -196,7 +197,8 @@ fn test_gap_semantics_unchanged_with_oncelock_spine() {
         (InternerKey::new(1), UserKey::from_str("a")),
         (InternerKey::new(3), UserKey::from_str("c")),
         (InternerKey::new(4), UserKey::from_str("d")),
-    ]);
+    ])
+    .unwrap();
 
     // entries_after: captures 1, 3, 4 (above-gap entries not lost) but the
     // high-water mark freezes at 1 (just before the gap at id 2).
@@ -257,7 +259,8 @@ fn test_entries_after_trailing_doubling_capacity_is_a_gap() {
 /// recaptures from before the hole.
 #[test]
 fn entries_after_recaptures_filled_gap_below_cursor() {
-    let interner = Interner::with_state(vec![(InternerKey::new(2), UserKey::from_str("upper"))]);
+    let interner =
+        Interner::with_state(vec![(InternerKey::new(2), UserKey::from_str("upper"))]).unwrap();
     let (initial, initial_cursor) = interner.entries_after(0);
     assert_eq!(
         initial.iter().map(|(k, _)| k.id()).collect::<Vec<_>>(),
@@ -287,7 +290,8 @@ fn entries_after_captures_entries_above_gap() {
     let interner = Interner::with_state(vec![
         (InternerKey::new(1), UserKey::from_str("a")),
         (InternerKey::new(3), UserKey::from_str("c")),
-    ]);
+    ])
+    .unwrap();
 
     let (entries, new_high) = interner.entries_after(0);
 

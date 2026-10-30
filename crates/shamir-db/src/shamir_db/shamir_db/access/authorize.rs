@@ -4,8 +4,8 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::access::{
-    permits, trace_access, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath,
-    OWNER_SYSTEM,
+    escape_resource_diagnostic, permits, trace_access, AccessError, Action, Actor, Mode,
+    ResourceMeta, ResourcePath, ResourcePathRef, OWNER_SYSTEM,
 };
 use crate::DbResult;
 
@@ -63,8 +63,8 @@ impl ShamirDb {
         };
 
         // Traversal: each ancestor needs Execute.
-        for anc in path.ancestors() {
-            let anc_meta = match Self::meta_memo(self, &anc, memo).await {
+        for anc in path.as_ref().ancestors() {
+            let anc_meta = match Self::meta_memo(self, anc, memo).await {
                 Ok(m) => m,
                 Err(e) => {
                     // Fail-closed: a real catalogue-read error on an
@@ -72,9 +72,10 @@ impl ShamirDb {
                     // through to a default-open `permits` check.
                     log::warn!(
                         "authorize_access: resource_meta failed for ancestor '{}' \
-                         (actor={actor}, action={}): {e}",
-                        anc,
-                        Action::Execute
+                         (actor={actor}, action={}): {}",
+                        escape_resource_diagnostic(&anc.to_string()),
+                        Action::Execute,
+                        escape_resource_diagnostic(&e.to_string())
                     );
                     return Err(AccessError {
                         actor: actor.clone(),
@@ -88,10 +89,12 @@ impl ShamirDb {
                 .await
                 .map_err(|e| {
                     log::warn!(
-                        "authorize_access: group lookup failed for ancestor '{anc}' \
-                         (actor={actor}, action={}, group={:?}): {e}",
+                        "authorize_access: group lookup failed for ancestor '{}' \
+                         (actor={actor}, action={}, group={:?}): {}",
+                        escape_resource_diagnostic(&anc.to_string()),
                         Action::Execute,
-                        anc_meta.group
+                        anc_meta.group,
+                        escape_resource_diagnostic(&e.to_string())
                     );
                     AccessError {
                         actor: actor.clone(),
@@ -109,7 +112,7 @@ impl ShamirDb {
         }
 
         // Target check.
-        let meta = match Self::meta_memo(self, path, memo).await {
+        let meta = match Self::meta_memo(self, path.as_ref(), memo).await {
             Ok(m) => m,
             Err(e) => {
                 // Fail-closed: a real catalogue-read error on the target
@@ -117,8 +120,9 @@ impl ShamirDb {
                 // default-open `permits` check.
                 log::warn!(
                     "authorize_access: resource_meta failed for target '{}' \
-                     (actor={actor}, action={action}): {e}",
-                    path
+                     (actor={actor}, action={action}): {}",
+                    escape_resource_diagnostic(&path.to_string()),
+                    escape_resource_diagnostic(&e.to_string())
                 );
                 return Err(AccessError {
                     actor: actor.clone(),
@@ -132,9 +136,11 @@ impl ShamirDb {
             .await
             .map_err(|e| {
                 log::warn!(
-                    "authorize_access: group lookup failed for target '{path}' \
-                     (actor={actor}, action={action}, group={:?}): {e}",
-                    meta.group
+                    "authorize_access: group lookup failed for target '{}' \
+                     (actor={actor}, action={action}, group={:?}): {}",
+                    escape_resource_diagnostic(&path.to_string()),
+                    meta.group,
+                    escape_resource_diagnostic(&e.to_string())
                 );
                 AccessError {
                     actor: actor.clone(),
@@ -155,17 +161,17 @@ impl ShamirDb {
 
     async fn meta_memo(
         &self,
-        path: &ResourcePath,
+        path: ResourcePathRef<'_>,
         memo: Option<&super::batch_gate::AclMemo>,
     ) -> DbResult<ResourceMeta> {
         if let Some(memo) = memo {
-            if let Some(meta) = memo.metas.get(path).map(|entry| entry.clone()) {
+            if let Some(meta) = memo.meta(path) {
                 return Ok(meta);
             }
         }
-        let meta = self.resource_meta(path).await?;
+        let meta = self.resource_meta_ref(path).await?;
         if let Some(memo) = memo {
-            memo.metas.insert(path.clone(), meta.clone());
+            memo.insert_meta(path, meta.clone());
         }
         Ok(meta)
     }
@@ -215,17 +221,24 @@ impl ShamirDb {
             path: path.to_string(),
             action: Action::Execute,
         };
-        let (root, namespace) = self
-            .system_store
-            .load_invocation_settings()
-            .await
-            .map_err(|e| {
-                log::warn!("authorize_invocation: settings lookup failed for '{path}' (actor={caller}): {e}");
-                denied()
-            })?;
+        let (root, namespace) =
+            self.system_store
+                .load_invocation_settings()
+                .await
+                .map_err(|e| {
+                    log::warn!(
+                        "authorize_invocation: settings lookup failed for '{}' \
+                     (actor={caller}): {}",
+                        escape_resource_diagnostic(&path.to_string()),
+                        escape_resource_diagnostic(&e.to_string())
+                    );
+                    denied()
+                })?;
         let record = self.system_store.load_function(name).await.map_err(|e| {
             log::warn!(
-                "authorize_invocation: function lookup failed for '{path}' (actor={caller}): {e}"
+                "authorize_invocation: function lookup failed for '{}' (actor={caller}): {}",
+                escape_resource_diagnostic(&path.to_string()),
+                escape_resource_diagnostic(&e.to_string())
             );
             denied()
         })?;
@@ -235,8 +248,8 @@ impl ShamirDb {
             None => ResourceMeta::default(),
         };
         let memo = super::batch_gate::AclMemo::default();
-        memo.metas.insert(
-            ResourcePath::Root,
+        memo.insert_meta(
+            ResourcePathRef::Root,
             root.as_ref()
                 .map(ResourceMeta::from_record)
                 .unwrap_or(ResourceMeta {
@@ -245,14 +258,14 @@ impl ShamirDb {
                     mode: 0o751,
                 }),
         );
-        memo.metas.insert(
-            ResourcePath::FunctionNamespace,
+        memo.insert_meta(
+            ResourcePathRef::FunctionNamespace,
             namespace
                 .as_ref()
                 .map(ResourceMeta::from_record)
                 .unwrap_or_default(),
         );
-        memo.metas.insert(path.clone(), meta);
+        memo.insert_meta(path.as_ref(), meta);
         self.authorize_access_in(caller, &path, Action::Execute, Some(&memo))
             .await?;
         Ok(record

@@ -4,7 +4,7 @@ use crate::core::interner::{Interner, InternerKey};
 
 #[test]
 fn test_with_state_empty() {
-    let interner = Interner::with_state(vec![]);
+    let interner = Interner::with_state(vec![]).unwrap();
     assert!(interner.is_empty());
     assert_eq!(interner.len(), 0);
 }

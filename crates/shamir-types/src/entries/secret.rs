@@ -4,7 +4,7 @@
 //! - a manual `Debug` that prints `"SecretString(***)"` (never the value),
 //! - `Serialize`/`Deserialize` that pass through the inner value unchanged
 //!   (so the wire encoding keeps `"password"` as a plain string),
-//! - `Drop` that zeroizes the heap buffer before freeing it.
+//! - `Drop` that zeroizes the heap buffer before freeing it with the `crypto` feature.
 
 use std::fmt;
 
@@ -13,11 +13,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::Zeroize;
 
 /// A `String` whose `Debug` output is redacted and whose contents are
-/// zeroized on drop.
+/// zeroized on drop when the `crypto` feature is enabled.
 ///
 /// Use this for any field that carries a cleartext secret (password,
 /// shared secret) that travels on the wire as a plain string value
 /// but must not leak through `{:?}` / `tracing` / log output.
+/// Equality is not constant-time and must not be used for authentication.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretString {
     inner: String,
@@ -65,12 +66,18 @@ impl<'de> Deserialize<'de> for SecretString {
 }
 
 #[cfg(feature = "crypto")]
+fn wipe(inner: &mut String) {
+    inner.zeroize();
+}
+
+#[cfg(all(test, feature = "crypto"))]
+#[path = "tests/secret_wipe_tests.rs"]
+mod secret_wipe_tests;
+
+#[cfg(feature = "crypto")]
 impl Drop for SecretString {
     fn drop(&mut self) {
-        // Zeroize the heap buffer in-place before deallocation.
-        // Safety: we are in `drop`, so no other references exist.
-        let bytes = unsafe { self.inner.as_bytes_mut() };
-        bytes.zeroize();
+        wipe(&mut self.inner);
     }
 }
 

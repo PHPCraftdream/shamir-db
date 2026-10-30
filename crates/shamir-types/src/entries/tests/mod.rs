@@ -3,5 +3,6 @@
 
 pub mod access_mode_card_tests;
 pub mod access_tests;
+pub mod resource_path_ref_tests;
 pub mod secret_tests;
 pub mod time_tests;
