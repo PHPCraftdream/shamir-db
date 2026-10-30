@@ -829,6 +829,14 @@ impl RepoTxGate {
         self.raise_published(version);
     }
 
+    /// Test fixture seam: plain-store `last_committed_version`, downward too, to
+    /// synthesize a lagging published marker. Never use on a production path.
+    #[doc(hidden)]
+    pub fn set_published_for_fixture(&self, version: u64) {
+        self.last_committed_version
+            .store(version, Ordering::Release);
+    }
+
     /// Test/bench seam: force-settle every version through `version`, then publish.
     /// Never use on a production write path: it closes pending and missing slots.
     #[doc(hidden)]

@@ -3,8 +3,9 @@
 //! The lagging published marker below is a SYNTHETIC fixture, not a
 //! reproduction of a production commit: apply_committed_visible eagerly
 //! raises last_committed to 11 today. Parking v10 alone would NOT make the
-//! old online build fail. publish_committed(W) deliberately separates the
-//! published marker from the allocation high water after materializing v11.
+//! old online build fail. set_published_for_fixture(W) deliberately separates
+//! the published marker from the allocation high water after materializing v11
+//! (publish_committed is monotonic and cannot lower it).
 
 use std::sync::Arc;
 
@@ -63,7 +64,7 @@ async fn table_at_gap() -> (
         11,
         "materialization eagerly publishes"
     );
-    gate.publish_committed(gate.completion().watermark());
+    gate.set_published_for_fixture(gate.completion().watermark());
     assert_eq!(gate.last_committed(), 9);
     assert_eq!(gate.version_allocation_high_water_mark(), 11);
     (tbl, mvcc, gate, parked, rid)
