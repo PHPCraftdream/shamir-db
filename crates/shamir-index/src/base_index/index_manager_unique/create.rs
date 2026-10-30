@@ -4,6 +4,7 @@ use crate::base_index::index_keys::build_index_key_from_record;
 use crate::base_index::index_manager::IndexManager;
 use crate::base_index::write_barrier_flags::UNIQUE_INDEX_EXISTS;
 use bytes::Bytes;
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 use shamir_storage::types::RecordKey;
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
@@ -31,8 +32,6 @@ impl IndexManager {
     ///   - количество записей с дублирующимися значениями
     ///   - пример дублирующегося значения
     pub async fn create_unique_index(&self, index_def: IndexDefinition) -> DbResult<()> {
-        use futures::StreamExt;
-
         // Scan data_store into a decoded vec, then delegate to the
         // shared build logic in create_unique_index_from_records.
         //
@@ -358,10 +357,9 @@ impl IndexManager {
                         index_name: index_name_str.to_string(),
                     },
                     state: shamir_query_types::read::DdlOpState::Succeeded {
-                        completed_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_millis() as u64,
+                        completed_at: crate::base_index::ddl_op_log::timestamp_millis(
+                            std::time::SystemTime::now(),
+                        ),
                     },
                 };
                 // Do not swallow status-write errors — log loudly.

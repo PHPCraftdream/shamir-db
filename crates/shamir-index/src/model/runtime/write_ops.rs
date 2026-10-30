@@ -2,6 +2,7 @@
 
 use crate::backend::{IndexBackend, IndexError};
 use crate::descriptor::IndexDescriptor;
+use shamir_collections::TFxMap;
 use shamir_storage::types::{KvOp, Store};
 use std::sync::Arc;
 
@@ -159,9 +160,6 @@ pub async fn apply_index_ops_at_commit(
         // BumpFtsStats now carries provenance (R0-B/#1063), so we can
         // match it to the correct backend by comparing
         // (name_interned, instance_epoch) pairs.
-        use shamir_collections::TFxMap;
-        use shamir_tx::IndexWriteOp;
-
         let mut ops_by_backend: TFxMap<(u64, u64), Vec<IndexWriteOp>> = TFxMap::default();
         for op in &in_memory_ops {
             if let IndexWriteOp::BumpFtsStats { provenance, .. } = op {
@@ -178,14 +176,17 @@ pub async fn apply_index_ops_at_commit(
         // by its name_interned from the registry. However, we only have access to backends
         // directly, so we'll match by name_interned only and let the provenance check ensure
         // the epoch is correct via the commit-time reconcile (retract_stale_provenance_ops).
+        let mut backends_by_name = TFxMap::default();
+        for backend in backends {
+            backends_by_name
+                .entry(backend.descriptor().name_interned)
+                .or_insert(backend);
+        }
         for ((name_interned, _instance_epoch), ops) in ops_by_backend {
             // Find backend by name_interned (the instance_epoch check already happened
             // in retract_stale_provenance_ops, so any backend we find here is guaranteed
             // to have the correct epoch).
-            if let Some(backend) = backends
-                .iter()
-                .find(|b| b.descriptor().name_interned == name_interned)
-            {
+            if let Some(backend) = backends_by_name.get(&name_interned) {
                 if !ops.is_empty() {
                     backend.apply_in_memory(&ops).await?;
                 }

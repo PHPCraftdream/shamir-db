@@ -13,6 +13,7 @@ use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use smallvec::SmallVec;
 use std::collections::BTreeSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub(super) struct DummyBackend(pub(super) IndexDescriptor);
@@ -44,6 +45,186 @@ fn make(id: u32, name_interned: u64) -> Arc<dyn IndexBackend> {
         SmallVec::new(),
         IndexKind::Btree { unique: false },
     )))
+}
+
+fn make_field(id: u32, name: u64, field: u64) -> Arc<dyn IndexBackend> {
+    Arc::new(DummyBackend(IndexDescriptor::new(
+        id,
+        format!("idx_{id}"),
+        name,
+        SmallVec::from_vec(vec![vec![field]]),
+        IndexKind::Btree { unique: false },
+    )))
+}
+
+struct CountingBackend {
+    descriptor: IndexDescriptor,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl IndexBackend for CountingBackend {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn descriptor(&self) -> &IndexDescriptor {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        &self.descriptor
+    }
+    async fn lookup(&self, _: IndexQuery) -> Result<IndexResult, IndexError> {
+        Ok(IndexResult::Set(BTreeSet::new()))
+    }
+    async fn rebuild(&self, _: Arc<dyn Store>) -> Result<(), IndexError> {
+        Ok(())
+    }
+    async fn drop_all(&self) -> Result<(), IndexError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn reverse_candidate_absent_bucket_skips_unrelated_descriptors() {
+    let reg = IndexRegistry::new();
+    let mut backends = Vec::new();
+    for id in 1..=32 {
+        let backend = Arc::new(CountingBackend {
+            descriptor: IndexDescriptor::new(
+                id,
+                format!("idx_{id}"),
+                id as u64,
+                SmallVec::from_vec(vec![vec![id as u64]]),
+                IndexKind::Btree { unique: false },
+            ),
+            calls: AtomicUsize::new(0),
+        });
+        reg.insert(backend.clone()).await.unwrap();
+        backends.push(backend);
+    }
+    for backend in &backends {
+        backend.calls.store(0, Ordering::SeqCst);
+    }
+    assert!(reg
+        .lease_by_field_and_kind(&[999], "btree")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(backends
+        .iter()
+        .all(|backend| backend.calls.load(Ordering::SeqCst) == 0));
+}
+
+#[tokio::test]
+async fn reverse_candidates_multiple_states_rename_and_recreation() {
+    let reg = IndexRegistry::new();
+    reg.insert(make_field(1, 101, 7)).await.unwrap();
+    reg.insert(make_field(2, 102, 7)).await.unwrap();
+    let selected = reg
+        .lease_by_field_and_kind(&[7], "btree")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!([1, 2].contains(&selected.backend.descriptor().id));
+    drop(selected);
+    reg.set_state(1, IndexState::Building).await;
+    assert_eq!(
+        reg.lease_by_field_and_kind(&[7], "btree")
+            .await
+            .unwrap()
+            .unwrap()
+            .backend
+            .descriptor()
+            .id,
+        2
+    );
+    reg.set_failed(2, "failed").await;
+    assert!(reg
+        .lease_by_field_and_kind(&[7], "btree")
+        .await
+        .unwrap()
+        .is_none());
+    reg.set_state(1, IndexState::Ready).await;
+    assert!(reg.rename_entry(101, "renamed".into(), 201).await);
+    assert_eq!(
+        reg.lease_by_field_and_kind(&[7], "btree")
+            .await
+            .unwrap()
+            .unwrap()
+            .backend
+            .descriptor()
+            .id,
+        1
+    );
+    reg.remove_by_id(1).await.unwrap();
+    assert!(reg
+        .lease_by_field_and_kind(&[7], "btree")
+        .await
+        .unwrap()
+        .is_none());
+    reg.insert(make_field(1, 301, 8)).await.unwrap();
+    assert!(reg
+        .lease_by_field_and_kind(&[7], "btree")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        reg.lease_by_field_and_kind(&[8], "btree")
+            .await
+            .unwrap()
+            .unwrap()
+            .backend
+            .descriptor()
+            .id,
+        1
+    );
+    assert!(reg
+        .lease_by_field_and_kind(&[8], "unknown")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn reverse_candidates_rejected_registrations_do_not_publish() {
+    let reg = IndexRegistry::new();
+    reg.insert(make_field(1, 101, 7)).await.unwrap();
+    assert!(reg.insert(make_field(2, 101, 8)).await.is_err());
+    assert!(reg.insert(make_field(1, 102, 9)).await.is_err());
+    assert!(reg
+        .lease_by_field_and_kind(&[8], "btree")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(reg
+        .lease_by_field_and_kind(&[9], "btree")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn reverse_candidate_lease_holds_drain_and_blocks_new_readers() {
+    let reg = IndexRegistry::new();
+    reg.insert(make_field(1, 101, 7)).await.unwrap();
+    let lease = reg
+        .lease_by_field_and_kind(&[7], "btree")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reg.reader_gate().in_flight_count(), 1);
+    let drain = reg.reader_gate().begin_drop();
+    assert!(reg.lease_by_field_and_kind(&[7], "btree").await.is_err());
+    let mut waiter = Box::pin(drain.wait_for_drain());
+    assert!(futures::poll!(&mut waiter).is_pending());
+    drop(lease);
+    waiter.as_mut().await;
+    drop(waiter);
+    assert_eq!(reg.reader_gate().in_flight_count(), 0);
+    drop(drain);
+    assert!(reg
+        .lease_by_field_and_kind(&[7], "btree")
+        .await
+        .unwrap()
+        .is_some());
 }
 
 #[tokio::test]

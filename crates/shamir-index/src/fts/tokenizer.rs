@@ -12,6 +12,7 @@ use rustc_hash::FxHasher;
 use shamir_collections::TFxSet;
 use std::borrow::Cow;
 use std::hash::Hasher;
+use std::sync::OnceLock;
 
 use crate::backends::backend::IndexError;
 use crate::fts::ngram_budget;
@@ -271,7 +272,6 @@ fn lowerd_str<'a>(cow: &'a Cow<'a, str>) -> &'a str {
 }
 
 fn english_stopwords() -> &'static TFxSet<&'static str> {
-    use std::sync::OnceLock;
     static SET: OnceLock<TFxSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
@@ -286,7 +286,6 @@ fn english_stopwords() -> &'static TFxSet<&'static str> {
 }
 
 fn russian_stopwords() -> &'static TFxSet<&'static str> {
-    use std::sync::OnceLock;
     static SET: OnceLock<TFxSet<&'static str>> = OnceLock::new();
     SET.get_or_init(|| {
         [
