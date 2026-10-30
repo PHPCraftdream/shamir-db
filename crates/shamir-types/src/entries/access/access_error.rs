@@ -2,7 +2,7 @@ use super::{Action, Actor};
 
 /// Access denied (constructed by the real policy check in P4).
 #[derive(Debug, thiserror::Error)]
-#[error("access denied: {actor} cannot {action} on {path}")]
+#[error("access denied: {actor} cannot {action} on {}", super::escape_resource_diagnostic(.path.as_str()))]
 pub struct AccessError {
     pub actor: Actor,
     /// The rendered resource path (kept as a `String`, not the full

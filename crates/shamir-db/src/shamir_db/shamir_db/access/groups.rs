@@ -381,23 +381,21 @@ impl ShamirDb {
                 }
                 Ok(*id)
             }
-            crate::query::admin::GroupRef::Name { name } => {
-                // A complete snapshot can answer positively in O(1), but an
-                // absent name is not proof of absence: a replaced/mutated
-                // catalogue table or a failed snapshot rebuild must be read
-                // through the live catalogue so storage errors propagate.
-                if let Some(Some(id)) = self.system_store.group_id_by_name(name) {
-                    return Ok(id);
-                }
-                let groups = self.system_store.load_groups().await?;
-                let id = groups
-                    .iter()
-                    .find(|g| g.get("name").and_then(|v| v.as_str()) == Some(name.as_str()))
-                    .and_then(|g| g.get("group_id").and_then(|v| v.as_u64()))
-                    .ok_or_else(|| DbError::NotFound(format!("group '{}' not found", name)))?;
-                Ok(id)
-            }
+            crate::query::admin::GroupRef::Name { name } => self.resolve_group_name(name).await,
         }
+    }
+
+    pub(super) async fn resolve_group_name(&self, name: &str) -> DbResult<u64> {
+        // A miss in the snapshot must fall through to the live catalogue.
+        if let Some(Some(id)) = self.system_store.group_id_by_name(name) {
+            return Ok(id);
+        }
+        let groups = self.system_store.load_groups().await?;
+        groups
+            .iter()
+            .find(|g| g.get("name").and_then(|v| v.as_str()) == Some(name))
+            .and_then(|g| g.get("group_id").and_then(|v| v.as_u64()))
+            .ok_or_else(|| DbError::NotFound(format!("group '{}' not found", name)))
     }
 
     /// Get the members of a group.

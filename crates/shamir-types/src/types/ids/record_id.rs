@@ -21,6 +21,9 @@ const CUSTOM_EPOCH_MICROS: i64 = 1_769_817_600_000_000;
 const SYSTEM_RECORD_PREFIX: &[u8] = &[0, 0, 0, 0];
 const SYSTEM_PREFIX_TIMESTAMP_BOUNDARY: i64 = 1i64 << 32;
 
+/// Identifier, not a secret or capability: possession must not grant access.
+/// Timestamp-generated IDs disclose their relative timestamp, and their random
+/// tails use a non-cryptographic PRNG and must not be treated as unpredictable.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecordId(pub [u8; 16]);
 

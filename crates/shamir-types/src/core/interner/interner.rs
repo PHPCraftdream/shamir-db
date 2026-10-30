@@ -126,7 +126,33 @@ impl Interner {
 
     /// Creates a new Interner from a pre-existing state.
     /// This is used to "hydrate" interner from a persistent store.
-    pub fn with_state(initial_data: Vec<(InternerKey, UserKey)>) -> Self {
+    pub fn with_state(initial_data: Vec<(InternerKey, UserKey)>) -> Result<Self, InternerError> {
+        let mut ids = shamir_collections::TFxMap::default();
+        let mut names = shamir_collections::TFxMap::default();
+        for (key, name) in &initial_data {
+            let id = key.id();
+            if id == 0 {
+                return Err(InternerError::ReservedId);
+            }
+            if let Some(existing) = ids.insert(id, name.as_str()) {
+                if existing != name.as_str() {
+                    return Err(InternerError::IdConflict {
+                        id,
+                        existing: existing.to_owned(),
+                        requested: name.as_str().to_owned(),
+                    });
+                }
+            }
+            if let Some(existing) = names.insert(name.as_str(), id) {
+                if existing != id {
+                    return Err(InternerError::NameConflict {
+                        name: name.as_str().to_owned(),
+                        existing,
+                        requested: id,
+                    });
+                }
+            }
+        }
         // Fx-hashed distinct-name view of the hydrated data — the quota
         // counters must reflect distinct names, not duplicate tuples.
         let names: shamir_collections::TFxSet<&str> =
@@ -147,18 +173,22 @@ impl Interner {
         // +1 because vec is sized to hold index `max_id` (which is
         // the highest id assigned), plus the sentinel at 0. Unassigned
         // ids stay as unset `OnceLock`s (read as `None` — a gap).
-        let mut reverse: Vec<OnceLock<Arc<str>>> = Vec::with_capacity((max_id as usize) + 1);
-        reverse.resize_with((max_id as usize) + 1, OnceLock::new);
+        let size = usize::try_from(max_id)
+            .ok()
+            .and_then(|id| id.checked_add(1))
+            .ok_or(InternerError::IdCollision { id: max_id })?;
+        let mut reverse: Vec<OnceLock<Arc<str>>> = Vec::with_capacity(size);
+        reverse.resize_with(size, OnceLock::new);
 
         for (interned_key, user_key) in initial_data {
             let id = interned_key.id();
             let arc: Arc<str> = Arc::from(user_key.as_str());
             map_user_to_interned.insert(user_key, interned_key);
-            // Fresh vec, exclusive `&mut` — set is guaranteed to succeed.
+            // Identical recaptures may already have populated this slot.
             let _ = reverse[id as usize].set(arc);
         }
 
-        Interner {
+        Ok(Interner {
             map_user_to_interned,
             reverse: ArcSwap::from_pointee(reverse),
             reverse_write_lock: std::sync::Mutex::new(()),
@@ -169,11 +199,14 @@ impl Interner {
             counters: QuotaCounters::new(count, bytes),
             #[cfg(test)]
             all_entries_calls: std::sync::atomic::AtomicUsize::new(0),
-        }
+        })
     }
 
     /// Creates an interner with cumulative admission limits and hydrated counters.
-    pub fn with_quota(initial_data: Vec<(InternerKey, UserKey)>, quota: InternerQuota) -> Self {
+    pub fn with_quota(
+        initial_data: Vec<(InternerKey, UserKey)>,
+        quota: InternerQuota,
+    ) -> Result<Self, InternerError> {
         Self::with_labeled_quota(initial_data, quota, String::new())
     }
 
@@ -182,11 +215,11 @@ impl Interner {
         initial_data: Vec<(InternerKey, UserKey)>,
         quota: InternerQuota,
         label: String,
-    ) -> Self {
-        let mut interner = Self::with_state(initial_data);
+    ) -> Result<Self, InternerError> {
+        let mut interner = Self::with_state(initial_data)?;
         interner.quota = Some(quota);
         interner.quota_label = label;
-        interner
+        Ok(interner)
     }
 
     /// Returns the admitted distinct-name and UTF-8 byte counters.

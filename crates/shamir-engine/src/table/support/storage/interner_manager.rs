@@ -289,7 +289,12 @@ impl InternerManager {
                 if let Some(q) = test_quota {
                     quota = q;
                 }
-                let interner = Interner::with_labeled_quota(entries, quota, label);
+                let interner =
+                    Interner::with_labeled_quota(entries, quota, label).map_err(|e| {
+                        shamir_storage::error::DbError::Codec(format!(
+                            "Corrupt interner state: {e}"
+                        ))
+                    })?;
                 last_persisted_generation.store(interner.generation() as usize, Ordering::Release);
                 // Acceptance 9: warn once at load when at/above 80% of
                 // either limit (new names will be refused soon).

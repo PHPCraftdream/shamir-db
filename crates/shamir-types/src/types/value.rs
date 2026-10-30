@@ -663,7 +663,8 @@ impl Value<String> {
     ) -> Result<Option<Value<String>>, ValueError> {
         let mut segments = path.split('.').peekable();
         let mut cur = self;
-        let mut walked = String::new();
+        let mut walked_len = 0;
+        let mut first = true;
 
         loop {
             let segment = match segments.next() {
@@ -675,11 +676,8 @@ impl Value<String> {
                 }
             };
 
-            // Build the "walked so far" path for error messages.
-            if !walked.is_empty() {
-                walked.push('.');
-            }
-            walked.push_str(segment);
+            walked_len += segment.len() + usize::from(!first);
+            first = false;
 
             if segments.peek().is_none() {
                 // Leaf: insert / replace.
@@ -688,7 +686,9 @@ impl Value<String> {
                         return Ok(m.insert(segment.to_owned(), value));
                     }
                     _ => {
-                        return Err(ValueError::NotAMap { path: walked });
+                        return Err(ValueError::NotAMap {
+                            path: path[..walked_len].trim_start_matches('.').to_owned(),
+                        });
                     }
                 }
             } else {
@@ -700,7 +700,9 @@ impl Value<String> {
                             .or_insert_with(|| Value::Map(new_map()));
                     }
                     _ => {
-                        return Err(ValueError::NotAMap { path: walked });
+                        return Err(ValueError::NotAMap {
+                            path: path[..walked_len].trim_start_matches('.').to_owned(),
+                        });
                     }
                 }
             }
