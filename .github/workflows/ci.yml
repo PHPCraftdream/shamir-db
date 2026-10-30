@@ -1224,7 +1224,7 @@ jobs:
 # CI-03b deliverable 4: the aggregate merge gate — the ONE required check.
 # `if: always()` + full `needs:` so it evaluates even when jobs were
 # skipped, and the stdlib script scripts/ci/gates/merge_gate_check.py
-# (unit tests: scripts/ci/tests/test_merge_gate_check.py) decides from
+# (unit tests: scripts/ci/tests/gates/merge/test_merge_gate_check.py) decides from
 # toJSON(needs): failure/cancelled anywhere fails; skipped fails unless
 # by design for the tier (draft PR: full tier skipped, fast must pass;
 # ready/master/dispatch: fast skipped by design). A DRAFT PR always
