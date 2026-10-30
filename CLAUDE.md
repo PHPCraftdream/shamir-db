@@ -416,6 +416,18 @@ CI is segmented into two tiers to keep the shared runner pool responsive
   engine feature cells) run only on `workflow_dispatch` and a weekly schedule
   (CI-05: the macOS runner queue was the merge bottleneck), so a macOS-only
   failure surfaces there, not at ready.
+* **test-build — the compile budget, split from the run.** The full matrix
+  compiles the workspace lib test binaries ONCE per OS in `test-build`
+  (`timeout-minutes: 60`, the only job with a long limit) and packs them
+  into a nextest archive consumed only by the lib `test` job; `integration`
+  builds in place. The build steps (and the rust-cache shared key
+  `test-archive-v1`) live in `.github/actions/build-test-archive`, also used
+  by `cache-warm.yml`. The workflow-level `CARGO_TERM_COLOR` and
+  `RUST_BACKTRACE` env blocks must stay identical because rust-cache hashes
+  those environment values. After the default branch changes `Cargo.lock` or
+  the toolchain, run `gh workflow run cache-warm.yml --ref master` in the
+  repository whose CI is used; the weekly Saturday schedule keeps the cache
+  from expiring.
 * All three workflows cancel superseded PR runs via `concurrency`.
 * **Explicit triggers of the FULL tier on a draft (the ONLY two).**
   1. The commit-message marker: the line `[ci full]` alone on its own line

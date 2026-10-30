@@ -45,6 +45,7 @@ FULL_OK = NEEDS(
     fast="skipped",
     fmt="success",
     clippy="success",
+    test__build="success",
     test="success",
     integration="success",
     ts__unit="success",
@@ -64,6 +65,7 @@ DRAFT_OK = NEEDS(
     fast="success",
     fmt="skipped",
     clippy="skipped",
+    test__build="skipped",
     test="skipped",
     integration="skipped",
     ts__unit="skipped",
@@ -213,7 +215,7 @@ class EvaluateTests(unittest.TestCase):
 
     def test_required_jobs_list_excludes_fast_tier_only_job(self):
         self.assertNotIn("engine-features-fast", mgc.REQUIRED_JOBS)
-        self.assertEqual(len(mgc.REQUIRED_JOBS), 16)
+        self.assertEqual(len(mgc.REQUIRED_JOBS), 17)
         self.assertIn("plan", mgc.REQUIRED_JOBS)
         self.assertIn("deny", mgc.REQUIRED_JOBS)
 
