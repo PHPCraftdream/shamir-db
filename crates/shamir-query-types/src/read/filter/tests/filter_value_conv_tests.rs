@@ -8,6 +8,8 @@
 //! - `From<QueryValue> for FilterValue` uses the direct path for literals
 //!   (no silent Null) and falls back to msgpack for Map/expression defaults.
 
+// `shamir_types::mpack!` expands to unqualified recursive `mpack!` calls.
+use shamir_types::mpack;
 use shamir_types::types::common::{new_map, TSet};
 use shamir_types::types::value::QueryValue;
 
