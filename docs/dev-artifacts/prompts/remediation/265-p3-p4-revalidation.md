@@ -73,7 +73,7 @@ OUTPUT FORMAT (strict): 1) SECOND-PASS SUMMARY: counts of AGREE/DISAGREE, list e
 
 First-pass claims (id | first verdict | first risk | first evidence | first recipe | first note):
 
-Selection rule: every `FIXED` and `CHANGED` verdict of pass 1; every `PARTIAL`; every `UNVERIFIABLE`; every `high` / `medium` `STILL_OPEN`; and a stratified random sample of the `low` / `nit` `STILL_OPEN` verdicts (about 14% per crate, seed 20261030). Sessions of about 20-25 cards each. If the disagreement rate on the sample exceeds 10%, widen the sample.
+Selection rule (as executed): pass 1 closed 412 of the 509 cards as `FIXED` (the P2 sprint fixed most facets together with their parent mechanisms), 64 as `PARTIAL`, 26 stay `STILL_OPEN` (all low/nit), 3 `REFUTED`, 2 `CHANGED`, 2 `UNVERIFIABLE`. Because the `FIXED` stratum is 81% of the cards and every `FIXED` removes a finding from the backlog, the P2 rule "every `FIXED` / `CHANGED` / `PARTIAL` / `UNVERIFIABLE`, every `high`/`medium` `STILL_OPEN`, a sample of `low`/`nit` `STILL_OPEN`" degenerates into ALL 509 cards: pass 2 re-decides every card independently, in 21 sessions of 24-25 cards (batches `S01`-`S21`, same crate order as pass 1, first-pass claim shown next to each card).
 
 ## Aggregation
 
