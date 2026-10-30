@@ -1,5 +1,10 @@
 //! Tests for the `q!` proc-macro.
 
+use crate::batch::Batch;
+use crate::val::{col, func, qref};
+use crate::wire::ToWire;
+use shamir_query_types::call::CallOp;
+use shamir_query_types::filter::FilterValue;
 use shamir_query_types::read::ReadQuery;
 use shamir_types::mpack;
 
@@ -333,7 +338,6 @@ fn q_agg_fn_median() {
 
 #[test]
 fn q_func_in_select() {
-    use crate::val::col;
     let from_macro = q!(
         from users
         select func("strings/upper", [col("name")]) as up
@@ -527,8 +531,6 @@ fn q_insert_multiple_rows() {
 
 #[test]
 fn q_insert_with_computed_field() {
-    use crate::val::{col, func};
-
     let from_macro = q!(insert into users values {
         "email" => "Alice@X.COM",
         "email_norm" => func("strings/lower", [col("email")])
@@ -631,8 +633,6 @@ fn q_upsert_key_value() {
 
 #[test]
 fn q_write_composes_into_batch() {
-    use crate::batch::Batch;
-
     let mut batch_macro = Batch::new();
     batch_macro.insert("a", q!(insert into users values { "name" => "Alice" }));
 
@@ -662,9 +662,6 @@ fn q_write_composes_into_batch() {
 
 #[test]
 fn q_call_ident_name_with_literals() {
-    use shamir_query_types::call::CallOp;
-    use shamir_query_types::filter::FilterValue;
-
     let op: CallOp = q!(call my_proc(1, "v"));
     assert_eq!(op.call, "my_proc");
     assert_eq!(op.repo, "main");
@@ -675,8 +672,6 @@ fn q_call_ident_name_with_literals() {
 
 #[test]
 fn q_call_string_literal_name() {
-    use shamir_query_types::call::CallOp;
-
     let op: CallOp = q!(call "reports/daily"(2024, "Q1"));
     assert_eq!(op.call, "reports/daily");
     assert_eq!(op.params.len(), 2);
@@ -684,8 +679,6 @@ fn q_call_string_literal_name() {
 
 #[test]
 fn q_call_no_args() {
-    use shamir_query_types::call::CallOp;
-
     let op: CallOp = q!(call ping());
     assert_eq!(op.call, "ping");
     assert!(op.params.is_empty());
@@ -693,8 +686,6 @@ fn q_call_no_args() {
 
 #[test]
 fn q_call_wire_msgpack() {
-    use shamir_query_types::call::CallOp;
-
     let op: CallOp = q!(call my_fn(42, "hello", true));
     let bytes = rmp_serde::to_vec_named(&op).expect("serialize");
     let got: shamir_types::types::value::QueryValue =
@@ -709,9 +700,6 @@ fn q_call_wire_msgpack() {
 
 #[test]
 fn q_call_with_query_ref_expr() {
-    use crate::val::qref;
-    use shamir_query_types::call::CallOp;
-
     let op: CallOp = q!(call process(qref("users", "[0].id"), 100));
     assert_eq!(op.call, "process");
     assert_eq!(op.params.len(), 2);
@@ -724,9 +712,6 @@ fn q_call_with_query_ref_expr() {
 
 #[test]
 fn q_call_composes_into_batch() {
-    use crate::batch::Batch;
-    use crate::wire::ToWire;
-
     let mut b = Batch::new();
     b.op("p", q!(call my_proc(1, "x")));
     let qv = b.build().to_query_value().unwrap();

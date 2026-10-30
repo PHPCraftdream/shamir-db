@@ -3677,6 +3677,7 @@ dependencies = [
  "shamir-query-builder-macros",
  "shamir-query-types",
  "shamir-types",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -3685,6 +3686,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "proc-macro2",
  "quote",
+ "shamir-query-builder",
  "syn 2.0.114",
 ]
 

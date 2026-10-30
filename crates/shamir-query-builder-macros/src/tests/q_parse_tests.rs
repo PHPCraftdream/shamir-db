@@ -19,6 +19,21 @@ fn q_err(src: &str) -> String {
 }
 
 #[test]
+fn rv_query_builder_macros_ec1b86b3_clause_keywords_in_expressions() {
+    for src in [
+        "from t where foo.select == 1 select foo.select",
+        "from t where x == group_by select x",
+        "from t where x == call(limit) order_by x asc",
+        "from t where (x == limit || y == offset) limit 3",
+        "from t group_by x having x == offset select x",
+        "update t set { \"x\" => 1 } where foo.select == 2",
+        "delete from t where x == group_by",
+    ] {
+        assert!(parse_q(src).is_ok(), "{src}");
+    }
+}
+
+#[test]
 fn rv_query_builder_macros_002c0148_raw_identifier_normalizes_table() {
     let rendered = crate::query_parse_lower::render(&parse_q("from r#users").unwrap()).unwrap();
     assert!(rendered.contains("Query :: from (\"users\")"), "{rendered}");

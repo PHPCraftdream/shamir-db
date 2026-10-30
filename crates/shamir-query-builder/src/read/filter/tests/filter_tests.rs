@@ -3,6 +3,7 @@
 //! round-tripped through msgpack.
 
 use shamir_query_types::filter::Filter;
+use shamir_query_types::filter::FilterValue;
 use shamir_types::mpack;
 
 use crate::filter::*;
@@ -194,7 +195,6 @@ fn test_value_lte() {
 /// scenario shape ("balance >= amount").
 #[test]
 fn test_value_gte_with_query_ref() {
-    use shamir_query_types::filter::FilterValue;
     assert_wire(
         value_gte(
             FilterValue::query_ref_with_path("balance_check", "[0].balance"),

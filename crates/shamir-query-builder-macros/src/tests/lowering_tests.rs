@@ -1,6 +1,4 @@
-//! Token-rendering tests for `q!` lowering (RV-QUERY-BUILDER-MACROS-36328515,
-//! 2C459E8E, 30DA1AC8, 7E797992): expansions must reference only
-//! `::shamir_query_builder` paths and honour the repo-qualified call form.
+//! Token-rendering tests for `q!` lowering and root-path hygiene.
 
 use crate::query_parse::QMacro;
 use crate::{filter_lower, query_parse_lower};
@@ -25,10 +23,63 @@ fn render_q(src: &str) -> String {
 }
 
 #[test]
+fn rv_query_builder_macros_02993b77_all_forms_use_supplied_root() {
+    for form in [
+        "from r.t where x == 1 select x as y order_by x asc",
+        "insert into r.t values { \"x\" => 1 }",
+        "update r.t set { \"x\" => 1 } where x == 1",
+        "delete from r.t where x == 1",
+        "upsert r.t key { \"x\" => 1 } value { \"y\" => 2 }",
+        "call r.p(1)",
+    ] {
+        let qm = parse_q(form).unwrap();
+        let rendered = qm
+            .to_tokens(&quote::quote! { ::alternate_root })
+            .unwrap()
+            .to_string();
+        assert!(rendered.contains("alternate_root"), "{form}: {rendered}");
+        assert!(
+            !rendered.contains("shamir_query_builder"),
+            "{form}: {rendered}"
+        );
+    }
+}
+
+#[test]
+fn rv_query_builder_macros_a690bea8_predicate_lowering_avoids_temporary_collections() {
+    let source = include_str!("../filter_lower.rs");
+    let predicate = source
+        .split_once("fn lower_predicate_call(")
+        .unwrap()
+        .1
+        .split_once("// ── field-path extraction")
+        .unwrap()
+        .0;
+    assert!(!predicate.contains("iter().collect()"));
+    assert!(!predicate.contains("ident.to_string()"));
+}
+
+#[test]
+fn rv_query_builder_macros_ec1b86b3_filter_parser_does_not_reparse_prefixes() {
+    let source = include_str!("../query_parse.rs");
+    let parser = source
+        .split_once("fn parse_filter_expr(")
+        .unwrap()
+        .1
+        .split_once("fn is_clause_keyword(")
+        .unwrap()
+        .0;
+    assert!(!parser.contains("parse2::<Expr>"));
+    assert!(!parser.contains("Group::new"));
+}
+
+#[test]
 fn rv_query_builder_macros_002c0148_raw_filter_identifier_normalizes() {
     let ts: TokenStream2 = "r#type == 1".parse().unwrap();
     let expr: syn::Expr = parse2(ts).unwrap();
-    let rendered = filter_lower::lower_expr(&expr).unwrap().to_string();
+    let rendered = filter_lower::lower_expr(&expr, &quote::quote! { ::shamir_query_builder })
+        .unwrap()
+        .to_string();
     assert!(rendered.contains("\"type\""));
     assert!(!rendered.contains("r#type"));
 }
@@ -44,7 +95,7 @@ fn rv_query_builder_macros_eee42189_generated_chain_retains_sequence() {
 fn rv_query_builder_macros_eee42189_loop_accumulates_fragments_without_reinterpolation() {
     let source = include_str!("../query_parse_lower.rs");
     let doc_map = source
-        .split_once("fn lower_doc_map(doc: &DocMapAst)")
+        .split_once("fn lower_doc_map(doc: &DocMapAst, root: &TokenStream2)")
         .expect("doc-map lowering should exist")
         .1
         .split_once("/// Emit a table constructor prefix")
@@ -186,7 +237,8 @@ fn rv_query_builder_macros_30da1ac8_clause_named_field_at_expr_start_rejected() 
 fn rv_query_builder_macros_7e797992_predicate_field_arg_wording() {
     let ts: TokenStream2 = "like(1, \"x\")".parse().unwrap();
     let expr: syn::Expr = parse2(ts).unwrap();
-    let err = filter_lower::lower_expr(&expr).unwrap_err();
+    let err =
+        filter_lower::lower_expr(&expr, &quote::quote! { ::shamir_query_builder }).unwrap_err();
     assert_eq!(
         err.to_string(),
         "filter!: expected a field name (ident) or dotted field path (e.g. `address.city`)"
