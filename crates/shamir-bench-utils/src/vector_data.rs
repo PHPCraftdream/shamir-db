@@ -1,10 +1,10 @@
 //! Seeded clustered vector-dataset generator for vector benchmarks.
 //!
-//! Shared between the criterion bench (V0.3, `benches/vector_search.rs`) and
-//! the recall/RSS report tool (V0.4, `examples/vector_report.rs`). Lives here
-//! so both tools see **byte-identical** datasets for the same `(n, dim, k, σ,
-//! seed)` tuple — recall numbers are only comparable when the underlying data
-//! is reproducible.
+//! Shared between the fixed-iteration bench harness (`benches/vector_search.rs`)
+//! and the recall/RSS report tool (`examples/vector_report.rs`). Lives here so
+//! both tools see **byte-identical** datasets for the same
+//! `(GENERATOR_REVISION, n, dim, k, σ, seed)` key — recall numbers are only
+//! comparable when the underlying data is reproducible.
 //!
 //! # Distribution
 //!

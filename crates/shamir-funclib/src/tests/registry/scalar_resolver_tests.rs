@@ -65,7 +65,12 @@ async fn argon_worker_panic_maps_to_scalar_error() {
         )
         .await
         .unwrap();
-    assert_eq!(result.unwrap_err().code, "scalar_task_failed");
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "scalar_task_failed");
+    assert!(
+        crate::registry::SCALAR_ERROR_CODES.contains(&error.code.as_str()),
+        "resolver-generated error code must be catalogued"
+    );
 }
 
 #[test]
@@ -155,6 +160,20 @@ fn rv_funclib_4936c6ed_resolver_dispatch_and_fallback() {
             .call("strict", &[QueryValue::Int(1), QueryValue::Int(2)])
             .unwrap(),
         v_str("n=2".into())
+    );
+}
+
+#[test]
+fn rv_funclib_24c30e50_not_indexable_uses_catalogue_code() {
+    let layer = UserScalarLayer::new();
+    layer.register("not_vouched", constant_entry(1));
+    let resolver = ScalarResolver::new(Arc::new(layer));
+    let error = resolver.call_indexable("not_vouched", &[]).unwrap_err();
+
+    assert_eq!(error.code, "not_indexable");
+    assert!(
+        crate::registry::SCALAR_ERROR_CODES.contains(&error.code.as_str()),
+        "resolver-generated error code must be catalogued"
     );
 }
 

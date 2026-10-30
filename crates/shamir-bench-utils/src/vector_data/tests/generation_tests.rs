@@ -54,12 +54,31 @@ fn dimensions_and_counts_are_correct() {
 }
 
 #[test]
+fn rv_bench_utils_f53f775f_zero_noise_preserves_round_robin_construction_identity() {
+    let n = 12;
+    let k = 4;
+    let ds = clustered_vectors(n, 6, k, 0.0, 99);
+
+    for (row, vector) in ds.vectors.iter().enumerate() {
+        let constructed_cluster = row % k;
+        assert_eq!(
+            vector, &ds.centroids[constructed_cluster],
+            "zero-noise row {row} must be an exact copy of its round-robin centroid"
+        );
+    }
+}
+
+#[test]
 fn round_robin_balances_clusters() {
-    // n divisible by k → perfectly balanced assignment via round-robin.
+    // A geometric nearest-centroid assignment is not the construction label:
+    // noisy points can cross Voronoi boundaries even though row assignment is
+    // deterministic round-robin (pinned separately above at zero noise).
     let n = 40;
     let k = 4;
     let ds = clustered_vectors(n, 4, k, 0.05, 99);
-    // Each point's nearest centroid (by construction it is its own cluster).
+    // Nearest-centroid assignments need not equal the construction labels;
+    // this noisy geometric balance check is distinct from the zero-noise
+    // per-row round-robin identity test above.
     let mut counts = vec![0usize; k];
     for v in &ds.vectors {
         let (idx, _) = ds

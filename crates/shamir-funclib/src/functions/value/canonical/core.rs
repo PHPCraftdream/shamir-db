@@ -18,15 +18,18 @@
 //! before `"aa"`). Interned numeric keys sort by MessagePack uint encoding, and
 //! the hash is stable only within one interner instance. `_prev_hash` is
 //! excluded only at the top level and only if the key serializes as the
-//! MessagePack string `"_prev_hash"`; nested instances are ordinary data.
+//! MessagePack string `"_prev_hash"`; numeric/interned keys are not excluded,
+//! and nested instances are ordinary data.
 //!
 //! # Determinism contract
 //!
 //! - Two values differing ONLY in map-key order produce the SAME hash.
 //! - Any change to data (a value, a key name, an element) changes the hash.
-//! - The reserved top-level key [`PREV_HASH_FIELD`] is EXCLUDED, which breaks
-//!   the CAS self-reference: a record's hash must not depend on the prev-hash
-//!   it asserts.
+//! - The reserved top-level key [`PREV_HASH_FIELD`] is EXCLUDED only when it
+//!   is a string key serializing as the MessagePack string `"_prev_hash"`;
+//!   interned numeric keys are not excluded. This breaks the CAS self-reference
+//!   for the string-keyed protocol field: a record's hash must not depend on the
+//!   prev-hash it asserts.
 
 use crate::registry::{FnEntry, ScalarError, ScalarRegistry};
 use serde::Serialize;
@@ -34,9 +37,10 @@ use shamir_types::types::value::{QueryValue, Value};
 use std::hash::Hash;
 
 /// Reserved top-level field carrying the expected hash of the previous version
-/// of a record in the sequenced-write / optimistic-CAS protocol. It is
-/// EXCLUDED from [`canonical_hash`] / [`canonical_bytes`] at the top level so
-/// the record's hash does not depend on the prev-hash it asserts.
+/// of a record in the sequenced-write / optimistic-CAS protocol. String keys
+/// serializing as the MessagePack string `"_prev_hash"` are EXCLUDED from
+/// [`canonical_hash`] / [`canonical_bytes`] at the top level; interned numeric
+/// keys and nested occurrences are not excluded.
 pub const PREV_HASH_FIELD: &str = "_prev_hash";
 /// Leading bytes available to future canonical format markers; v1 has no prefix.
 pub const CANONICAL_V1_RESERVED_MARKERS: std::ops::RangeInclusive<u8> = 0x0b..=0xff;
