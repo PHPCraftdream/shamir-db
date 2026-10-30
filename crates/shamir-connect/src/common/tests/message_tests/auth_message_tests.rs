@@ -123,8 +123,8 @@ fn header_is_exactly_shamir_auth_v1() {
     })
     .unwrap();
 
-    // First 13 bytes are the header.
-    assert_eq!(&am.as_bytes()[..13], b"SHAMIR-AUTH-v1");
+    // First 14 bytes are the header.
+    assert_eq!(&am.as_bytes()[..14], b"SHAMIR-AUTH-v1");
 }
 
 #[test]
@@ -202,6 +202,6 @@ fn length_matches_formula_for_default_inputs() {
     })
     .unwrap();
 
-    // Per spec §16: 13 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 148
-    assert_eq!(am.len(), 148);
+    // Per spec §16: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 149
+    assert_eq!(am.len(), 149);
 }

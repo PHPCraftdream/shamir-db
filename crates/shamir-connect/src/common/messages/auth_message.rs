@@ -5,10 +5,10 @@
 //! mismatch causes SCRAM proof verification to fail. Test vectors live in
 //! `crates/shamir-connect/test-vectors/`.
 //!
-//! Layout (148 bytes for default kdf params and 5-byte username):
+//! Layout (149 bytes for default kdf params and 5-byte username):
 //!
 //! ```text
-//! "SHAMIR-AUTH-v1"                              (13 bytes ASCII fixed header)
+//! "SHAMIR-AUTH-v1"                              (14 bytes ASCII fixed header)
 //! u16_be(byte_len(username_nfc)) || username_nfc
 //! client_nonce(32)
 //! server_nonce(32)
@@ -81,7 +81,7 @@ impl AuthMessage {
             AUTH_V1.len() + 2 + username.len() + 32 + 32 + 16 + 4 + 4 + 4 + 1 + 1 + 1 + 32 + 1,
         );
 
-        bytes.extend_from_slice(AUTH_V1); // 13
+        bytes.extend_from_slice(AUTH_V1); // 14
         bytes.extend_from_slice(&(username.len() as u16).to_be_bytes()); // 2
         bytes.extend_from_slice(username); // var
         bytes.extend_from_slice(inputs.client_nonce); // 32
@@ -104,12 +104,12 @@ impl AuthMessage {
         &self.bytes
     }
 
-    /// Total length (148 bytes for default 5-char username + default kdf params).
+    /// Total length (149 bytes for default 5-char username + default kdf params).
     pub fn len(&self) -> usize {
         self.bytes.len()
     }
 
-    /// Empty-check (always false since header alone is 13 bytes).
+    /// Empty-check (always false since header alone is 14 bytes).
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
