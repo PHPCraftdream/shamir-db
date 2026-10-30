@@ -113,21 +113,33 @@ fn p34_12_codec_prefix_free() {
     }
     fn gen(rng: &mut XorShift, depth: u32) -> InnerValue {
         let pick = rng.next() % 10;
-        match (pick, depth) {
-            (0, 0) | (1, 0) | (2, 0) => Value::Int(rng.next() as i64),
-            (3, _) => Value::Str({
-                let len = (rng.next() % 300) as usize;
-                "x".repeat(len)
-            }),
-            (4, _) => Value::Bin((0..rng.next() % 300).map(|_| rng.next() as u8).collect()),
-            (5, 0) => Value::F64(f64::from_bits(rng.next())),
-            (6, _) | (7, _) | (8, _) if depth < 3 => {
+        // Below the nesting cap only leaves are generated, so the recursion
+        // is bounded whatever the random draws are.
+        if depth >= 3 {
+            return match pick % 3 {
+                0 => Value::Int(rng.next() as i64),
+                1 => Value::Str("y".repeat((rng.next() % 40) as usize)),
+                _ => Value::Bin((0..rng.next() % 40).map(|_| rng.next() as u8).collect()),
+            };
+        }
+        match pick {
+            0..=2 => Value::Int(rng.next() as i64),
+            3 => Value::Str("x".repeat((rng.next() % 300) as usize)),
+            4 => Value::Bin((0..rng.next() % 300).map(|_| rng.next() as u8).collect()),
+            5 => {
+                // A top-level NaN has no encoding; keep the corpus encodable.
+                let f = f64::from_bits(rng.next());
+                if f.is_nan() {
+                    Value::Int(0)
+                } else {
+                    Value::F64(f)
+                }
+            }
+            6 | 7 => {
                 let n = (rng.next() % 5 + 1) as usize;
                 Value::List((0..n).map(|_| gen(rng, depth + 1)).collect())
             }
-            (6, _) | (7, _) if depth >= 3 => Value::Int(rng.next() as i64),
-            (8, _) if depth >= 3 => Value::Str("y".repeat((rng.next() % 40) as usize)),
-            _ if depth < 3 => {
+            8 => {
                 let n = (rng.next() % 4 + 1) as usize;
                 let mut m = new_map::<InternerKey, InnerValue>();
                 for _ in 0..n {
