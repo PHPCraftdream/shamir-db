@@ -1,5 +1,6 @@
 use shamir_collections::TMap;
-use shamir_query_types::batch::BatchOp;
+use shamir_query_types::batch::{BatchOp, BatchPlanner, SubBatchOp};
+use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_query_types::subscribe::{DeliverMode, EventMask};
 use shamir_query_types::TableRef;
@@ -8,6 +9,44 @@ use crate::batch::subscribe::{SourceBuilder, Subscribe};
 use crate::batch::Batch;
 use crate::bind;
 use crate::{filter, val};
+
+#[test]
+fn subscription_scoped_refs_match_planner() {
+    let source = SourceBuilder::table(TableRef::new("messages"))
+        .filter(filter::eq("id", val::qref_all("inner")))
+        .build();
+    let mut inner = Batch::new();
+    inner.query(
+        "child",
+        crate::query::Query::from("messages").where_eq("id", val::qref_all("nested")),
+    );
+    let mut bind = shamir_collections::new_map();
+    bind.insert("arg".into(), val::qref_all("binding"));
+    let modes = [
+        DeliverMode::Records,
+        DeliverMode::Keys,
+        DeliverMode::Batch(SubBatchOp {
+            batch: inner.build(),
+            bind,
+        }),
+        DeliverMode::Call(CallOp {
+            call: "notify".into(),
+            repo: "main".into(),
+            params: vec![val::qref_all("delivery")],
+        }),
+    ];
+    for mode in modes {
+        let mut op = Subscribe::source(source.clone()).build();
+        op.deliver = mode;
+        let mut batch = Batch::new();
+        batch.subscribe("sub", op);
+        let request = batch.build();
+        // The planner's wildcard arm ignores Subscribe, including its sources
+        // and all delivery payloads, when extracting outer dependencies.
+        assert!(BatchPlanner::plan(&request.queries, &request.limits).is_ok());
+        assert!(batch.try_build().is_ok());
+    }
+}
 
 #[test]
 fn subscribe_table_round_trip() {

@@ -1,8 +1,9 @@
 use crate::batch::Batch;
+use crate::batch::IntoBatchOp;
 use crate::query::Query;
 use crate::val::*;
 use crate::wire::ToWire;
-use shamir_query_types::batch::BatchOp;
+use shamir_query_types::batch::{BatchOp, BatchPlanner};
 use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_types::types::value::QueryValue;
@@ -10,6 +11,19 @@ use shamir_types::types::value::QueryValue;
 // ============================================================================
 // Batch::call — basic construction
 // ============================================================================
+
+#[test]
+fn call_missing_reference_matches_planner() {
+    let mut batch = Batch::new();
+    batch.call(
+        "call",
+        "proc",
+        [FilterValue::Array(vec![qref_all("missing")])],
+    );
+    let request = batch.build();
+    assert!(BatchPlanner::plan(&request.queries, &request.limits).is_err());
+    assert!(batch.try_build().is_err());
+}
 
 #[test]
 fn call_builds_call_op_with_params() {
@@ -136,8 +150,6 @@ fn call_handle_column_ref() {
 
 #[test]
 fn into_batch_op_call_op() {
-    use crate::batch::IntoBatchOp;
-
     let op = CallOp {
         call: "fn".to_string(),
         params: vec![],

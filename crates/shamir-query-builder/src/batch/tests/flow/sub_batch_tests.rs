@@ -1,5 +1,6 @@
 //! Tests for `Batch::sub_batch`, `IntoBatchOp for SubBatchOp`, and `val::param`.
 
+use crate::batch::IntoBatchOp;
 use shamir_collections::new_map;
 use shamir_query_types::batch::{BatchOp, SubBatchOp};
 use shamir_query_types::filter::FilterValue;
@@ -139,8 +140,6 @@ fn sub_batch_handle_for_outer_ref() {
 
 #[test]
 fn into_batch_op_for_sub_batch_op() {
-    use crate::batch::IntoBatchOp;
-
     let sub = SubBatchOp {
         batch: Batch::new().build(),
         bind: new_map(),

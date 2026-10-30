@@ -9,6 +9,7 @@ use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{BatchOp, BatchRequest, QueryEntry};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{ReadQuery, Select, SelectItem};
+use shamir_types::types::value::QueryValue;
 
 impl Batch {
     // ── wire encoding (build + encode in one step) ─────────────────
@@ -71,15 +72,40 @@ impl Batch {
 
     /// Build with client-side validation.
     ///
-    /// Serializes each entry's op to a [`QueryValue`] tree via msgpack, walks
-    /// for `"$query"` map keys, normalizes the base alias (strip `@`, cut at
-    /// `[`/`.`), and checks:
+    /// Walks typed operations for `$query` references, using a msgpack
+    /// round-trip for operations without a typed walker. Normalizes each base
+    /// alias (strip `@`, cut at `[`/`.`), and checks:
     /// - the base alias exists as a key in `queries`
     /// - the base alias is not the referencing entry's own alias
     ///
     /// Also validates `after` entries: each must reference a known alias
     /// and must not reference the entry's own alias.
     pub fn try_build(&self) -> Result<BatchRequest, BuildError> {
+        self.validate()?;
+        Ok(self.build())
+    }
+
+    /// Validate and move the accumulated request without cloning its payloads.
+    pub fn try_into_request(self) -> Result<BatchRequest, BuildError> {
+        self.validate()?;
+        Ok(BatchRequest {
+            id: self.id,
+            name: self.name,
+            transactional: self.transactional,
+            isolation: self.isolation,
+            visibility_wait: self.visibility_wait,
+            durability: self.durability,
+            index_visibility: self.index_visibility,
+            queries: self.queries,
+            return_all: self.return_all,
+            return_only: self.return_only,
+            limits: self.limits,
+            interner_epochs: self.interner_epochs,
+            result_encoding: self.result_encoding,
+        })
+    }
+
+    fn validate(&self) -> Result<(), BuildError> {
         // Surface deferred registration errors first — they happened at a
         // specific registration call site and must not be lost by later calls.
         if let Some(err) = self.deferred_errors.first() {
@@ -158,7 +184,7 @@ impl Batch {
                 }
             }
         }
-        Ok(self.build())
+        Ok(())
     }
 
     // ── internal ───────────────────────────────────────────────────
@@ -244,6 +270,10 @@ impl Batch {
     /// - ...
     /// - default → `when: NOT(case1_condition OR case2_condition OR ...)`
     ///
+    /// Lowering K cases clones earlier conditions into later guards, producing
+    /// O(K²) filter nodes and deep-clone work. Changing the wire representation
+    /// requires a separate design decision.
+    ///
     /// `cases` is `(alias, condition, op)` triples; `default` is
     /// `(alias, op)`. Returns the [`Handle`]s for every case (in order)
     /// followed by the default's `Handle`.
@@ -327,7 +357,6 @@ impl Batch {
 /// Walking the `QueryValue::Map` for the `"$query"` key mirrors the planner's
 /// logic directly on the msgpack-decoded tree.
 fn collect_query_refs(value: &shamir_types::types::value::QueryValue, out: &mut Vec<String>) {
-    use shamir_types::types::value::QueryValue;
     match value {
         QueryValue::Map(map) => {
             // Reserved-key marker convention mirroring the planner's
@@ -546,15 +575,10 @@ fn collect_read_query_refs(q: &ReadQuery, out: &mut Vec<String>) {
 
 /// Collect all `$query` refs from a single entry's `op`.
 ///
-/// Typed fast path (no serialization) for the 5 ops that carry the bulk of
-/// real-world payload size — `Read`/`Insert`/`Update`/`Set`/`Delete`, each
-/// individually audited (see this section's module doc) for every field
-/// that can carry a `Filter`/`FilterValue`/`QueryValue`. Every OTHER
-/// `BatchOp` variant (DDL/admin/introspection/`Batch`/`ForEach`/`Call`/etc.)
-/// falls back to the original, unconditionally-correct msgpack round-trip
-/// via [`collect_query_refs`] — deliberately, not yet individually audited
-/// (see this section's module doc for why extending the fast path further
-/// was deferred).
+/// Typed fast paths cover read, write, call, subscribe, sub-batch and for-each
+/// operations. Subscribe has no outer dependencies, matching the planner;
+/// sub-batch and for-each only inspect values in the outer scope. Other
+/// operations use the conservative msgpack round-trip.
 pub(super) fn collect_op_query_refs(alias: &str, op: &BatchOp) -> Result<Vec<String>, BuildError> {
     let mut refs = Vec::new();
     match op {
@@ -575,6 +599,14 @@ pub(super) fn collect_op_query_refs(alias: &str, op: &BatchOp) -> Result<Vec<Str
             collect_query_refs(&s.value, &mut refs);
         }
         BatchOp::Delete(d) => collect_filter_refs(&d.where_clause, &mut refs),
+        BatchOp::Call(call) => {
+            for value in &call.params {
+                collect_filter_value_refs(value, &mut refs);
+            }
+        }
+        // The planner treats subscriptions as independent operations; their
+        // filters and delivery payloads execute in subscription scope.
+        BatchOp::Subscribe(_) => {}
         // Sub-batch / for_each: outer deps come EXCLUSIVELY from `bind`
         // values / `over` (planner.rs `extract_entry_deps`, the
         // `BatchOp::Batch` / `BatchOp::ForEach` arms). Do NOT descend into

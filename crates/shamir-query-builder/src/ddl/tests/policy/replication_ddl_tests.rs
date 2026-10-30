@@ -1,5 +1,6 @@
 //! Tests for the replication DDL builders (10 ops + `repl_scope` helper).
 
+use crate::write::BuilderError;
 use shamir_query_types::admin::{ReplDirection, ReplMode, SubAction};
 use shamir_query_types::batch::BatchOp;
 
@@ -271,7 +272,6 @@ fn alter_subscription_set_profile() {
 /// (formerly a panic via `.expect`).
 #[test]
 fn alter_subscription_without_action_returns_err() {
-    use crate::write::BuilderError;
     let err = ddl::alter_subscription("sub1").build().unwrap_err();
     assert_eq!(err, BuilderError::MissingAction);
 }

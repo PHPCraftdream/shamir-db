@@ -1,5 +1,7 @@
+use crate::batch::IntoBatchOp;
 use shamir_collections::{new_map, TMap};
 use shamir_query_types::batch::ResultEncoding;
+use shamir_query_types::batch::{BatchLimits, BatchOp};
 use shamir_types::mpack;
 use shamir_types::types::value::QueryValue;
 
@@ -13,6 +15,28 @@ use crate::write::{self, doc};
 // ============================================================================
 // return_flagged → return_all=false, return_only=None
 // ============================================================================
+
+#[test]
+fn owned_request_matches_reusable_borrowed_request_and_moves_insert_payload() {
+    let mut batch = Batch::named("owned");
+    let payload = String::from("allocation-identity");
+    let pointer = payload.as_ptr();
+    let mut record = new_map();
+    record.insert("body".to_string(), QueryValue::Str(payload));
+    batch.insert("items", write::insert("items").row(QueryValue::Map(record)));
+    let first = rmp_serde::to_vec_named(&batch.try_build().unwrap()).unwrap();
+    let second = rmp_serde::to_vec_named(&batch.try_build().unwrap()).unwrap();
+    let owned = batch.try_into_request().unwrap();
+    assert_eq!(first, second);
+    assert_eq!(first, rmp_serde::to_vec_named(&owned).unwrap());
+    match &owned.queries["items"].op {
+        BatchOp::Insert(insert) => match &insert.values[0]["body"] {
+            QueryValue::Str(value) => assert_eq!(value.as_ptr(), pointer),
+            other => panic!("expected string payload, got {other:?}"),
+        },
+        other => panic!("expected insert, got {other:?}"),
+    }
+}
 
 #[test]
 fn return_flagged_sets_return_all_false_and_no_return_only() {
@@ -459,7 +483,6 @@ fn build_error_serialization_failed_display() {
 
 #[test]
 fn op_escape_hatch() {
-    use shamir_query_types::batch::BatchOp;
     let mut b = Batch::new();
     let rq = Query::from("users").build();
     b.op("esc", BatchOp::Read(rq));
@@ -471,7 +494,6 @@ fn op_escape_hatch() {
 
 #[test]
 fn op_silent_escape_hatch() {
-    use shamir_query_types::batch::BatchOp;
     let mut b = Batch::new();
     let rq = Query::from("users").build();
     b.op_silent("esc", BatchOp::Read(rq));
@@ -543,7 +565,6 @@ fn batch_request_round_trip() {
 
 #[test]
 fn batch_custom_limits() {
-    use shamir_query_types::batch::BatchLimits;
     let mut b = Batch::new();
     let custom = BatchLimits {
         max_queries: 5,
@@ -577,7 +598,6 @@ fn handle_alias_bare() {
 
 #[test]
 fn into_batch_op_insert_op() {
-    use crate::batch::IntoBatchOp;
     let op = write::insert("t").row(doc().set("a", 1).unwrap()).build();
     let batch_op = op.into_batch_op();
     match batch_op {
@@ -588,7 +608,6 @@ fn into_batch_op_insert_op() {
 
 #[test]
 fn into_batch_op_update_op() {
-    use crate::batch::IntoBatchOp;
     let op = write::update("t")
         .where_(filter::eq("id", 1))
         .set(doc().set("x", 2).unwrap())
@@ -603,7 +622,6 @@ fn into_batch_op_update_op() {
 
 #[test]
 fn into_batch_op_set_op() {
-    use crate::batch::IntoBatchOp;
     let op = write::upsert("t")
         .key(shamir_types::mpack!("k"))
         .value(doc().set("v", 1).unwrap())
@@ -618,7 +636,6 @@ fn into_batch_op_set_op() {
 
 #[test]
 fn into_batch_op_delete_op() {
-    use crate::batch::IntoBatchOp;
     let op = write::delete("t")
         .where_(filter::eq("id", 1))
         .build()

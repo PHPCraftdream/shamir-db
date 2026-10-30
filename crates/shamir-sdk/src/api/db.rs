@@ -175,6 +175,26 @@ impl Db {
         // alias, unknown after/when handle) and unresolved `$query` refs must
         // surface here, not be sent silently to the host.
         let req = batch_request(batch)?;
+        self.execute_request(req)
+    }
+
+    /// Validate and execute an owned batch without cloning its request payload.
+    #[cfg(feature = "query-builder")]
+    pub fn execute_owned(
+        &self,
+        batch: shamir_query_builder::batch::Batch,
+    ) -> crate::Result<shamir_query_builder::BatchResponse> {
+        let req = batch
+            .try_into_request()
+            .map_err(|e| crate::Error::user(format!("execute: invalid batch: {e}")))?;
+        self.execute_request(req)
+    }
+
+    #[cfg(feature = "query-builder")]
+    fn execute_request(
+        &self,
+        req: shamir_query_builder::BatchRequest,
+    ) -> crate::Result<shamir_query_builder::BatchResponse> {
         let bytes = map_execute_encoding(execute_encoding_result(&req))?;
         let resp_bytes = crate::host_imports::db_execute(&bytes);
         if resp_bytes.is_empty() {

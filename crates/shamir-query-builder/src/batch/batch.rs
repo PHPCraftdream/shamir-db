@@ -913,10 +913,9 @@ impl Batch {
 
     /// Fallible mirror of [`Batch::op`]: build `op` via [`TryIntoBatchOp`] and
     /// add it, returning a typed [`BuilderError`] when a required builder field
-    /// was never set instead of panicking. This is the only fallible entry
-    /// method for [`crate::ddl::AlterSubscriptionBuilder`] (which has no
-    /// dedicated non-try method, mirroring how the panicking path uses plain
-    /// `.op(...)` for it today).
+    /// was never set. This is the fallible entry method for
+    /// [`crate::ddl::AlterSubscriptionBuilder`], which has no dedicated
+    /// registration method.
     pub fn try_op(
         &mut self,
         alias: impl Into<String>,

@@ -16,12 +16,13 @@
 /// Produced by the `build()` methods of [`crate::write::Delete`],
 /// [`crate::write::Update`], [`crate::write::Upsert`],
 /// [`crate::ddl::AddSchemaRuleBuilder`] and [`crate::ddl::AlterSubscriptionBuilder`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum BuilderError {
     /// [`crate::write::Delete::build`] was called without [`crate::write::Delete::where_`].
     ///
     /// The `DeleteOp` wire type requires a filter — omitting it would delete
     /// every row in the table, so the builder rejects an unset WHERE clause.
+    #[error("Delete::build() requires a where clause — call .where_(filter) before .build()")]
     MissingWhereClause,
     /// [`crate::write::Update::build`] was called without [`crate::write::Update::set`].
     ///
@@ -29,69 +30,33 @@ pub enum BuilderError {
     /// worst; the builder refuses to ship one. Note a *deliberate*
     /// `.set(QueryValue::Null)` still builds successfully — this only fires
     /// when `.set()` was never called.
+    #[error("Update::build() requires a set payload — call .set(doc) before .build()")]
     MissingSetValue,
     /// [`crate::write::Upsert::build`] was called without [`crate::write::Upsert::key`].
+    #[error("Upsert::build() requires a key — call .key(doc) before .build()")]
     MissingKey,
     /// [`crate::write::Upsert::build`] was called without [`crate::write::Upsert::value`].
+    #[error("Upsert::build() requires a value — call .value(doc) before .build()")]
     MissingValue,
     /// [`crate::ddl::AddSchemaRuleBuilder::build`] was called without
     /// [`crate::ddl::AddSchemaRuleBuilder::rule`].
+    #[error("AddSchemaRuleBuilder::build() requires a rule — call .rule(r) before .build()")]
     MissingRule,
     /// [`crate::ddl::AlterSubscriptionBuilder::build`] was called with no
     /// terminal action (`.pause()` / `.resume()` / `.set_profile()`).
+    #[error("AlterSubscriptionBuilder::build() requires a terminal action — call .pause() / .resume() / .set_profile(_) before .build()")]
     MissingAction,
     /// [`crate::write::Doc::set`] could not convert the supplied
     /// [`FilterValue`](shamir_query_types::filter::FilterValue) into a
     /// `QueryValue` — nesting beyond `MAX_FILTER_DEPTH`, or a codec failure
     /// in the expression-marker msgpack round-trip fallback
     /// (RV-QUERY-BUILDER-20D9732A).
+    #[error("Doc::set() could not convert the field value to a QueryValue: {0}")]
     FieldValueCodec(String),
     /// An HMAC-gated builder's `build()` was called without `.hmac(tag)`
     /// (or the conditional gate — definer security, replace, secret grants —
     /// fired without one). The server rejects such ops with `hmac_required`;
     /// the builder now fails closed client-side (RV-QUERY-BUILDER-E6F53E38).
+    #[error("this op is HMAC-gated — call .hmac(tag) before .build()")]
     MissingHmac,
 }
-
-impl std::fmt::Display for BuilderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BuilderError::MissingWhereClause => write!(
-                f,
-                "Delete::build() requires a where clause — call .where_(filter) before .build()"
-            ),
-            BuilderError::MissingSetValue => write!(
-                f,
-                "Update::build() requires a set payload — call .set(doc) before .build()"
-            ),
-            BuilderError::MissingKey => {
-                write!(
-                    f,
-                    "Upsert::build() requires a key — call .key(doc) before .build()"
-                )
-            }
-            BuilderError::MissingValue => write!(
-                f,
-                "Upsert::build() requires a value — call .value(doc) before .build()"
-            ),
-            BuilderError::MissingRule => write!(
-                f,
-                "AddSchemaRuleBuilder::build() requires a rule — call .rule(r) before .build()"
-            ),
-            BuilderError::MissingAction => write!(
-                f,
-                "AlterSubscriptionBuilder::build() requires a terminal action — call .pause() / \
-                 .resume() / .set_profile(_) before .build()"
-            ),
-            BuilderError::FieldValueCodec(detail) => write!(
-                f,
-                "Doc::set() could not convert the field value to a QueryValue: {detail}"
-            ),
-            BuilderError::MissingHmac => {
-                write!(f, "this op is HMAC-gated — call .hmac(tag) before .build()")
-            }
-        }
-    }
-}
-
-impl std::error::Error for BuilderError {}

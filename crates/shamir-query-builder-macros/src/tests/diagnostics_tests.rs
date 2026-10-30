@@ -6,8 +6,48 @@
 
 use crate::filter_lower;
 use crate::query_parse::QMacro;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{TokenStream as TokenStream2, TokenTree};
 use syn::parse2;
+
+fn literal_source(tokens: TokenStream2, expected: &str) -> Option<String> {
+    for token in tokens {
+        match token {
+            TokenTree::Group(group) => {
+                if let Some(source) = literal_source(group.stream(), expected) {
+                    return Some(source);
+                }
+            }
+            TokenTree::Literal(lit) if lit.to_string() == format!("\"{expected}\"") => {
+                return lit.span().source_text();
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[test]
+fn rv_query_builder_macros_13a0d25a_field_and_alias_literal_spans() {
+    let expr: syn::Expr = parse2("r#type.city == 1".parse().unwrap()).unwrap();
+    let tokens = filter_lower::lower_expr(&expr, &quote::quote! { ::qb }).unwrap();
+    assert_eq!(
+        literal_source(tokens.clone(), "type").as_deref(),
+        Some("r#type")
+    );
+    assert_eq!(literal_source(tokens, "city").as_deref(), Some("city"));
+
+    let query = parse_q("from t group_by profile.city having profile.city == 1 select profile.city as r#label order_by profile.city asc").unwrap();
+    let tokens = query.to_tokens(&quote::quote! { ::qb }).unwrap();
+    assert_eq!(
+        literal_source(tokens.clone(), "profile").as_deref(),
+        Some("profile")
+    );
+    assert_eq!(
+        literal_source(tokens.clone(), "city").as_deref(),
+        Some("city")
+    );
+    assert_eq!(literal_source(tokens, "label").as_deref(), Some("r#label"));
+}
 
 fn parse_q(src: &str) -> syn::Result<QMacro> {
     let ts: TokenStream2 = src.parse().unwrap();
@@ -23,7 +63,7 @@ fn q_err(src: &str) -> String {
 
 fn lower_src(src: &str) -> syn::Result<TokenStream2> {
     let expr: syn::Expr = parse2(src.parse().unwrap()).unwrap();
-    filter_lower::lower_expr(&expr)
+    filter_lower::lower_expr(&expr, &quote::quote! { ::shamir_query_builder })
 }
 
 /// Preservation test: also passes on the pre-fix code.
