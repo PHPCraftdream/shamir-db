@@ -4,6 +4,7 @@
 //! one attempt, and response decoding are identical to production).
 
 use std::future::Future;
+use std::sync::Arc;
 
 use shamir_query_types::admin::ChangesSinceResponse;
 use shamir_query_types::batch::{BatchRequest, BatchResponse, VisibilityState, VisibilityWait};
@@ -14,7 +15,7 @@ use super::alias_receipt::AliasReceipt;
 use super::extract::extract_receipts;
 use crate::error::client_batch_error;
 use crate::interner_cache::InternerCacheRegistry;
-use crate::{Client, ClientError};
+use crate::{client::should_advertise_interner_epochs, Client, ClientError};
 
 const CHANGES_SINCE_ALIAS: &str = "changes_since";
 
@@ -30,9 +31,23 @@ impl Client {
         batch: BatchRequest,
         visibility_wait: Option<VisibilityWait>,
     ) -> Result<(BatchResponse, Vec<AliasReceipt>), ClientError> {
+        // L4-RV-CLIENT-1C219006: gate the interner registry exactly like
+        // `Client::execute` (api.rs) — a legacy peer (server_query_version
+        // < 2) never negotiates interner epochs, so it must not get
+        // pre-touched cache entries either. Passing `None` also disables the
+        // post-response merge, which is correct: a legacy peer never sends
+        // deltas.
+        let interner = if should_advertise_interner_epochs(
+            self.server_query_version(),
+            !batch.interner_epochs.is_empty(),
+        ) {
+            Some(self.interner_cache())
+        } else {
+            None
+        };
         execute_with_receipts_via(
             |req| async move { self.roundtrip(&req).await },
-            Some(self.interner_cache()),
+            interner.map(Arc::as_ref),
             db,
             batch,
             visibility_wait,
