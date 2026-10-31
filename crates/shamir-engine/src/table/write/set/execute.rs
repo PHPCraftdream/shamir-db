@@ -230,7 +230,12 @@ impl TableManager {
                         Some(&old_qv),
                         actor,
                         Some(tx),
-                        resolver,
+                        crate::validator::ValidatorFkCtx {
+                            resolver,
+                            // SET (upsert) handles one record per call — no
+                            // batch-scoped FK membership cache to share.
+                            fk_cache: None,
+                        },
                     )
                     .await
                     .map_err(validator_failure_to_db_error)?;
@@ -293,7 +298,12 @@ impl TableManager {
                 None,
                 actor,
                 Some(tx),
-                resolver,
+                crate::validator::ValidatorFkCtx {
+                    resolver,
+                    // SET (upsert) handles one record per call — no batch-scoped
+                    // FK membership cache to share.
+                    fk_cache: None,
+                },
             )
             .await
             .map_err(validator_failure_to_db_error)?;

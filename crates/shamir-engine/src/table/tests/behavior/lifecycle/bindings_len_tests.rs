@@ -161,7 +161,14 @@ async fn fast_skip_fires_on_empty_bindings() {
     assert_eq!(tm.validator_bindings.load().len(), 0);
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     assert!(result.is_ok(), "empty bindings must fast-skip to Ok(())");
 
@@ -192,7 +199,14 @@ async fn fast_skip_disabled_after_add() {
     // With a live binding, run_validators_qv goes past the fast-skip.
     // AcceptAll → Ok(()).
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     assert!(result.is_ok(), "accept validator should produce Ok(())");
 }

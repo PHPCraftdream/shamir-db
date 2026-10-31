@@ -12,17 +12,10 @@
 //! `$cond`'s answer to whichever record happened to populate it, and
 //! nothing would catch it, because nothing exercised the hit path at all.
 //!
-//! Group 13 Defect 2 fix: the cache key was originally the raw pointer
-//! address of `cond.condition` — sound only as long as the cache never
-//! outlives the exact allocation it was built from, an invariant nothing
-//! enforced. It is now derived from `condition`'s CONTENT (see
-//! `cond_cache.rs`'s doc comment), which closes the address-reuse hazard
-//! outright: a dropped-and-reallocated `Filter` tree can never cause a
-//! stale compiled predicate to leak into an unrelated query's evaluation.
+//! Plan-local cache slots avoid allocating a formatted AST key on hits.
 //!
 //! Part A (tests 1-4): direct unit tests for `prescan_cond_cache` /
-//! `cond_cache_get`'s structural/content-identity behaviour, including the
-//! Defect 2 regression proofs (tests 2 and 2b).
+//! `cond_cache_get` plan-slot behavior.
 //! Part B (tests 5-7): the decisive tests proving the cache-HIT path
 //! re-evaluates `node.matches(record, ctx)` per call rather than baking in
 //! a frozen answer at cache-population time.
@@ -82,7 +75,7 @@ fn prescan_populates_simple_cond() {
         cond: Box::new(cond),
     };
 
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
     prescan_cond_cache(&fv, &interner, &mut cache);
 
     // Destructure the SAME owned tree the cache was built from and look up
@@ -114,7 +107,7 @@ fn cond_cache_get_hits_structurally_identical_condition_from_a_different_allocat
         cond: Box::new(first),
     };
 
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
     prescan_cond_cache(&fv_first, &interner, &mut cache);
 
     // `second` was never itself prescanned, but its content is identical to
@@ -140,7 +133,7 @@ fn cond_cache_get_misses_a_genuinely_different_condition() {
         cond: Box::new(first),
     };
 
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
     prescan_cond_cache(&fv_first, &interner, &mut cache);
 
     let different = Cond::new(
@@ -171,7 +164,7 @@ fn cond_cache_get_misses_a_genuinely_different_condition() {
 #[test]
 fn cond_cache_never_collides_across_dropped_and_reallocated_trees() {
     let interner = Interner::new();
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
 
     {
         let first = make_score_cond(); // score > 50
@@ -223,7 +216,7 @@ fn prescan_recurses_into_all_documented_shapes() {
             cond: Box::new(make_score_cond()),
         };
         let fv = FilterValue::Array(vec![FilterValue::Int(1), nested_fv]);
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let FilterValue::Array(items) = &fv else {
             unreachable!()
@@ -242,7 +235,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::FnCall {
             call: FnCall::complex("strings/upper", vec![nested_fv]),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let FilterValue::FnCall { call } = &fv else {
             unreachable!()
@@ -261,7 +254,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::Expr {
             expr: FilterExpr::add(vec![FilterValue::Int(1), nested_fv]),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let FilterValue::Expr { expr } = &fv else {
             unreachable!()
@@ -288,7 +281,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::Cond {
             cond: Box::new(outer),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let outer_cond = as_cond(&fv);
         assert!(
@@ -312,7 +305,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::Cond {
             cond: Box::new(outer),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let outer_cond = as_cond(&fv);
         assert!(
@@ -339,7 +332,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::Cond {
             cond: Box::new(outer),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let outer_cond = as_cond(&fv);
         let Filter::Eq { value, .. } = outer_cond.condition.as_ref() else {
@@ -369,7 +362,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::Cond {
             cond: Box::new(outer),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let outer_cond = as_cond(&fv);
         let Filter::In { values, .. } = outer_cond.condition.as_ref() else {
@@ -400,7 +393,7 @@ fn prescan_recurses_into_all_documented_shapes() {
         let fv = FilterValue::Cond {
             cond: Box::new(outer),
         };
-        let mut cache: CondCache = new_map();
+        let mut cache = CondCache::new();
         prescan_cond_cache(&fv, &interner, &mut cache);
         let outer_cond = as_cond(&fv);
         let Filter::ValueCompare { left, .. } = outer_cond.condition.as_ref() else {
@@ -427,7 +420,7 @@ fn repeated_prescan_of_same_condition_is_idempotent() {
         cond: Box::new(cond),
     };
 
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
     prescan_cond_cache(&fv, &interner, &mut cache);
     let len_after_first = cache.len();
     assert_eq!(len_after_first, 1);
@@ -482,7 +475,7 @@ fn cached_cond_evaluates_correctly_per_record_not_stale() {
         cond: Box::new(cond),
     };
 
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
     prescan_cond_cache(&fv, &interner, &mut cache);
 
     let refs = empty_refs();
@@ -565,7 +558,7 @@ fn cache_populated_for_other_conditions_still_falls_back_correctly() {
     let other_fv = FilterValue::Cond {
         cond: Box::new(other_cond),
     };
-    let mut cache: CondCache = new_map();
+    let mut cache = CondCache::new();
     prescan_cond_cache(&other_fv, &interner, &mut cache);
     assert_eq!(cache.len(), 1, "sanity: cache holds only the OTHER Cond");
 
@@ -593,5 +586,120 @@ fn cache_populated_for_other_conditions_still_falls_back_correctly() {
         Some(QueryValue::Str("low".to_string())),
         "cache-miss-for-this-Cond must still fall back to compile_filter and \
          resolve correctly (score=20 => \"low\")"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Part C — L3-RV-ENGINE-62C6F2B1: prepared plan-local slots. The hit path
+// must perform NO content-key formatting, and distinct filters must not
+// collide (not even across a dropped-and-reallocated tree).
+// ---------------------------------------------------------------------
+
+/// Test 8 (62C6F2B1): after the prescan, repeated cache HITS must not
+/// compute a single additional content key. Before the plan-local slots,
+/// every `cond_cache_get` — hit included — ran `format!("{:?}", condition)`
+/// (the per-evaluation AST formatting the finding flags). The
+/// `content_key_computations` counter is incremented by exactly that code
+/// path, so an unchanged counter across N hits is the observable proof the
+/// formatting is gone from the hit path. On the old code the counter grew
+/// by 1 on EVERY call below.
+#[test]
+fn cond_cache_hit_path_performs_no_content_key_formatting() {
+    let interner = Interner::new();
+    let fv = FilterValue::Cond {
+        cond: Box::new(make_score_cond()),
+    };
+
+    let mut cache = CondCache::new();
+    prescan_cond_cache(&fv, &interner, &mut cache);
+
+    // One content key per distinct prescanned condition — insert-time only.
+    let after_prescan = cache.content_key_computations();
+    assert_eq!(after_prescan, 1);
+
+    let cond = as_cond(&fv);
+    let first = cond_cache_get(&cache, &cond.condition).expect("prescanned cond must hit");
+    for _ in 0..64 {
+        let _ = cond_cache_get(&cache, &cond.condition);
+    }
+    let second = cond_cache_get(&cache, &cond.condition).expect("prescanned cond must hit");
+
+    assert_eq!(
+        cache.content_key_computations(),
+        after_prescan,
+        "hit path must not compute any content key (no AST formatting) — \
+         only the prescan/insert path may"
+    );
+    // Same prepared slot: both hits resolve to the SAME compiled node.
+    assert!(
+        std::sync::Arc::ptr_eq(first, second),
+        "consecutive hits must reuse the SAME prepared FilterNode slot"
+    );
+}
+
+/// Test 9 (62C6F2B1): two DISTINCT conditions — one of them placed at a
+/// freed slot address — must not collide. The old content-KEY-ONLY design
+/// was already safe here; the new ADDRESS-KEYED slot layer must not
+/// regress it: a different condition that happens to hit the same (freed)
+/// slot address must be rejected by the slot's structural-hash guard and
+/// must MISS, and two coexisting distinct conditions must each resolve to
+/// their OWN compiled node (never each other's).
+#[test]
+fn cond_cache_distinct_filters_do_not_collide() {
+    let interner = Interner::new();
+    let mut cache = CondCache::new();
+
+    // Tree A: score > 50. Prescan, then DROP the tree (slot address freed).
+    {
+        let fv_a = FilterValue::Cond {
+            cond: Box::new(make_score_cond()),
+        };
+        prescan_cond_cache(&fv_a, &interner, &mut cache);
+        assert!(!cache.is_empty());
+    }
+
+    // Tree B: a genuinely DIFFERENT condition (age < 18), freshly
+    // allocated — plausibly reusing tree A's freed condition address.
+    let cond_b = Cond::new(
+        Filter::Lt {
+            field: vec!["age".to_string()],
+            value: FilterValue::Int(18),
+        },
+        FilterValue::String("minor".to_string()),
+        FilterValue::String("adult".to_string()),
+    );
+    let node_b = cond_cache_get(&cache, &cond_b.condition);
+    assert!(
+        node_b.is_none(),
+        "a distinct condition at a (possibly reused) freed slot address must \
+         MISS — the slot guard must not serve tree A's stale node"
+    );
+
+    // Both conditions coexisting in ONE tree: each slot must resolve to its
+    // OWN compiled node — no cross-condition reuse.
+    let _cond_a = make_score_cond();
+    let both = FilterValue::Cond {
+        cond: Box::new(Cond::new(
+            Filter::And { filters: vec![] },
+            FilterValue::Cond {
+                cond: Box::new(make_score_cond()),
+            },
+            FilterValue::Cond {
+                cond: Box::new(cond_b),
+            },
+        )),
+    };
+    prescan_cond_cache(&both, &interner, &mut cache);
+    let outer = as_cond(&both);
+    let then_fv = &outer.then;
+    let else_fv = &outer.or_else;
+    let node_a =
+        cond_cache_get(&cache, &as_cond(then_fv).condition).expect("cond A must be slotted");
+    let node_b2 =
+        cond_cache_get(&cache, &as_cond(else_fv).condition).expect("cond B must be slotted");
+    assert!(
+        !std::sync::Arc::ptr_eq(node_a, node_b2),
+        "two distinct prescanned conditions must resolve to DISTINCT compiled \
+         nodes — no slot collision"
     );
 }

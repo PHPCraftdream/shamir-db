@@ -168,7 +168,7 @@ pub(in crate::query::read) fn build_aggregate_object(
     }
 
     // Fresh per-call caches: never inherit a producer/ForEach snapshot.
-    let mut cond_cache = new_map_wc(0);
+    let mut cond_cache = crate::query::filter::CondCache::new();
     let mut field_path_cache = new_map_wc(0);
     let mut query_ref_cache = new_map_wc(0);
     for input in agg_slots
@@ -316,7 +316,7 @@ pub(in crate::query::read) fn build_aggregate_object(
     // Scalar functions in a group SELECT: evaluate against the group's first
     // record (mirrors the field-projection fallback above).
     if !func_slots.is_empty() {
-        let mut cond_cache = new_map_wc(0);
+        let mut cond_cache = crate::query::filter::CondCache::new();
         let mut field_path_cache = new_map_wc(0);
         let mut query_ref_cache = new_map_wc(0);
         for (_, fv) in &func_slots {

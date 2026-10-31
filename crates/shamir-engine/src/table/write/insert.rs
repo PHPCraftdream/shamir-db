@@ -310,10 +310,26 @@ impl TableManager {
         // de-intern is needed). Identity vs. the legacy
         // `run_validators_tx` path is proven by
         // `validator::tests::query_value_conv_tests`.
+        // L4-RV-ENGINE-3C71057D: one batch-scoped FK membership cache shared
+        // by every per-row validator invocation below — N children
+        // referencing the same parent row perform ONE committed-state parent
+        // probe instead of N. Transaction-staged parents stay visible (the
+        // cache never bypasses the tx's staged-overlay probe).
+        let fk_cache = crate::validator::BatchFkCache::new();
         for qv in &resolved_values {
-            self.run_validators_qv(WriteOp::Insert, Some(qv), None, actor, Some(tx), resolver)
-                .await
-                .map_err(validator_failure_to_db_error)?;
+            self.run_validators_qv(
+                WriteOp::Insert,
+                Some(qv),
+                None,
+                actor,
+                Some(tx),
+                crate::validator::ValidatorFkCtx {
+                    resolver,
+                    fk_cache: Some(&fk_cache),
+                },
+            )
+            .await
+            .map_err(validator_failure_to_db_error)?;
         }
 
         // W2d-cutover: lens-driven batched tx insert — the staged bytes
@@ -348,6 +364,9 @@ impl TableManager {
         let idmsgpack_ids: Vec<RecordId> = if op.records_idmsgpack.is_empty() {
             Vec::new()
         } else {
+            // Batch-scoped FK membership cache for the id-keyed rows
+            // (L4-RV-ENGINE-3C71057D — see the `values` branch above).
+            let idmsgpack_fk_cache = crate::validator::BatchFkCache::new();
             // Collect validated bytes — validate-before-collect so we never
             // stage any bytes whose keys don't resolve (security invariant).
             let mut idmsgpack_staged: Vec<Bytes> = Vec::with_capacity(op.records_idmsgpack.len());
@@ -400,7 +419,10 @@ impl TableManager {
                         None,
                         actor,
                         Some(tx),
-                        resolver,
+                        crate::validator::ValidatorFkCtx {
+                            resolver,
+                            fk_cache: Some(&idmsgpack_fk_cache),
+                        },
                     )
                     .await
                     .map_err(validator_failure_to_db_error)?;

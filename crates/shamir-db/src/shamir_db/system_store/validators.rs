@@ -192,6 +192,32 @@ impl SystemStore {
             .map(|r| r.as_value().into_owned()))
     }
 
+    /// Canonical-join the borrowed segments once and delegate to the keyed
+    /// `Eq`-filtered lookup — no full-catalogue scan on the authorization
+    /// ancestor path. (FunctionFolderPrefix callers use the borrowed
+    /// `&str` key of `load_function_folder` directly.)
+    ///
+    /// L3-RV-TYPES-A7B1FCEC (b) — known allocation: the single
+    /// `path.join("/")` per ancestor lookup cannot be borrowed away. The
+    /// folder record's stored identity IS the joined string: it is written
+    /// as the `path` field (`save_function_folder_meta` →
+    /// `qv_map1("path", path_key.to_string())`) and read back via
+    /// `Filter::Eq { field: ["path"], value: FilterValue::String(..) }` in
+    /// `load_function_folder` — the filter value is an owned `String`, and
+    /// the read path offers no borrowed-match API. The join here is
+    /// once-per-ancestor-lookup (one allocation per call, the call already
+    /// receives the whole ancestor slice), never per-segment: a deep chain
+    /// of S segments costs S-1 joins total across the authorization
+    /// traversal. Each join copies its whole prefix, so total copied bytes
+    /// grow quadratically with depth; folder depth is admin-bounded and the
+    /// allocation COUNT stays one per ancestor.
+    pub async fn load_function_folder_path(&self, path: &[String]) -> DbResult<Option<QueryValue>> {
+        #[cfg(test)]
+        self.count_folder_path_lookup();
+        let canonical = path.join("/");
+        self.load_function_folder(&canonical).await
+    }
+
     /// Persist a replacement function folder record (for `set_resource_meta`).
     pub async fn save_function_folder_meta(
         &self,

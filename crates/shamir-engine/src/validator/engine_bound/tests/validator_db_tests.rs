@@ -42,8 +42,8 @@ use crate::validator::{
 /// Resolver backed by a single `RepoInstance` — resolves any table in it.
 /// Injects the validator registry into every resolved table (mirrors
 /// `DbTableResolver` in production).
-struct TestResolver {
-    repo: RepoInstance,
+pub(crate) struct TestResolver {
+    pub(crate) repo: RepoInstance,
     validators: Arc<ValidatorRegistry>,
 }
 
@@ -159,7 +159,9 @@ async fn setup() -> (TestResolver, TableManager) {
     .await
 }
 
-async fn setup_with_validator(validator: Arc<dyn RecordValidator>) -> (TestResolver, TableManager) {
+pub(crate) async fn setup_with_validator(
+    validator: Arc<dyn RecordValidator>,
+) -> (TestResolver, TableManager) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
@@ -201,7 +203,7 @@ async fn setup_with_validator(validator: Arc<dyn RecordValidator>) -> (TestResol
     (resolver, child)
 }
 
-struct FinalStateFkValidator;
+pub(crate) struct FinalStateFkValidator;
 
 #[async_trait]
 impl RecordValidator for FinalStateFkValidator {
@@ -927,3 +929,6 @@ async fn fk_unindexed_field_scan_logs_warning() {
         log_sink.logs.lock().unwrap()
     );
 }
+
+// ── L4-RV-ENGINE-3C71057D — batch-scoped FK parent-membership cache tests ─
+// Moved to `fk_probe/fk_batch_cache_tests.rs` (layout ratchet).

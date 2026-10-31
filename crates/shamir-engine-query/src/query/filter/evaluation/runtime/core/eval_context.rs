@@ -61,13 +61,8 @@ pub struct FilterContext<'a> {
     /// Injected sub-batch parameters (`$param` bindings). Empty at the
     /// top level; populated by the recursive sub-batch executor (P3).
     pub params: &'a TMap<String, QueryValue>,
-    /// Optional pre-compiled `$cond` condition cache (#643). Defaults to
-    /// `None` — callers that never opt in (WHERE, `when`, `for_each`'s
-    /// `over`, write-value resolution) fall back to `local_cond_cache`
-    /// below (group 13 Defect 1), not to an unconditional recompile. Only
-    /// callers that build a [`CondCache`] once (e.g. `SelectProjection::new`)
-    /// and inject it via [`with_cond_cache`](Self::with_cond_cache) reuse an
-    /// eagerly compiled, address-independent condition cache.
+    /// Optional condition cache. Keys are content-derived to remain valid
+    /// across independently allocated equivalent filters and cache lifetimes.
     pub cond_cache: Option<&'a CondCache>,
     /// Optional pre-interned `FieldRef` path cache (F1). Defaults to `None`
     /// — every EXISTING caller (WHERE, `when`, `for_each`'s `over`,
