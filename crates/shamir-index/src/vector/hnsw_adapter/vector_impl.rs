@@ -5,6 +5,7 @@ use super::search::TEST_SEARCH_F32_GATE;
 use crate::vector::adapter::{SearchOpts, VectorAdapter, VectorError};
 use async_trait::async_trait;
 use hnsw_rs::anndists::dist::distances::Distance;
+use scc::hash_map::Entry::{Occupied, Vacant};
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::Ordering;
 
@@ -53,7 +54,6 @@ impl VectorAdapter for HnswAdapter {
         let internal = self.state.next_id.fetch_add(1, Ordering::Relaxed);
         let mut replaced: Option<usize> = None;
         {
-            use scc::hash_map::Entry::{Occupied, Vacant};
             match self.state.rid_to_internal.entry_sync(rid) {
                 Occupied(mut occ) => {
                     let old_internal = *occ.get();
@@ -250,7 +250,6 @@ impl VectorAdapter for HnswAdapter {
         for (rid, vec) in items {
             let internal = self.state.next_id.fetch_add(1, Ordering::Relaxed);
             {
-                use scc::hash_map::Entry::{Occupied, Vacant};
                 // DEADLOCK FIX (#589 class, commit `7a4abf62`, H1+H2 commit
                 // `621776bd`): `entry_sync`, NOT `entry_async` — same
                 // rationale as single `upsert` (amplifier: this guard is
