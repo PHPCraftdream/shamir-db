@@ -5,7 +5,6 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::TableResolver;
 use crate::repo::RepoWritePermit;
 use crate::validator::{
     record_fields::{OwnedFields, ViewFields},
@@ -161,7 +160,7 @@ impl TableManager {
         old_record: Option<&shamir_types::types::value::QueryValue>,
         actor: &shamir_types::access::Actor,
         tx: Option<&shamir_tx::TxContext>,
-        resolver: Option<&dyn TableResolver>,
+        fk_ctx: crate::validator::ValidatorFkCtx<'_>,
     ) -> Result<(), crate::validator::ValidatorFailure> {
         // 1. No registry → validators disabled (system tables / tests).
         let reg = match &self.validator_registry {
@@ -221,7 +220,10 @@ impl TableManager {
         // (fail-open, matching the scalar-bridge precedent).
         let scalar_res = self.scalar_resolver.load_full();
         if let Some(tx) = tx {
-            let vdb = ValidatorDb::new(tx, self, resolver);
+            let vdb = match fk_ctx.fk_cache {
+                Some(cache) => ValidatorDb::new_with_fk_cache(tx, self, fk_ctx.resolver, cache),
+                None => ValidatorDb::new(tx, self, fk_ctx.resolver),
+            };
             let ctx = ValidatorCtx::with_db(actor, interner, scalar_res.as_ref(), &vdb);
             self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)
                 .await
@@ -257,7 +259,7 @@ impl TableManager {
         old_view: Option<&RecordView<'_>>,
         actor: &shamir_types::access::Actor,
         tx: &shamir_tx::TxContext,
-        resolver: Option<&dyn TableResolver>,
+        fk_ctx: crate::validator::ValidatorFkCtx<'_>,
     ) -> Result<(), crate::validator::ValidatorFailure> {
         // 1. No registry → validators disabled.
         let reg = match &self.validator_registry {
@@ -309,7 +311,10 @@ impl TableManager {
         // Phase C1 — attach a [`ValidatorDb`] from `tx` for relational
         // validators (DELETE may have FK-referenced records, etc.).
         let scalar_res = self.scalar_resolver.load_full();
-        let vdb = ValidatorDb::new(tx, self, resolver);
+        let vdb = match fk_ctx.fk_cache {
+            Some(cache) => ValidatorDb::new_with_fk_cache(tx, self, fk_ctx.resolver, cache),
+            None => ValidatorDb::new(tx, self, fk_ctx.resolver),
+        };
         let ctx = ValidatorCtx::with_db(actor, interner, scalar_res.as_ref(), &vdb);
 
         self.run_validators_loop(&applicable, reg, &ctx, new_dyn, old_dyn)

@@ -46,6 +46,7 @@ shamir-collections = { path = "../shamir-collections" }
 shamir-storage     = { path = "../shamir-storage", default-features = false }
 shamir-engine      = { path = "../shamir-engine",  default-features = false }
 shamir-funclib     = { path = "../shamir-funclib" }
+shamir-query-builder = { path = "../shamir-query-builder" }
 # T4-purge: the execute arm resolves the per-table MvccStore directly
 # (per_table_mvcc) to call purge_below_ts / read its clock. Already a
 # transitive build dep via shamir-engine; declared explicitly so the
@@ -95,11 +96,12 @@ shamir-engine = { path = "../shamir-engine", default-features = false, features 
 # tests. Dev-only; no production code in this crate depends on shamir-index.
 shamir-index = { path = "../shamir-index" }
 bench-scale-tool = { workspace = true, features = ["async"] }
-wat         = "1.226"
-shamir-query-builder = { path = "../shamir-query-builder" }
 # CAS sequenced-write e2e: canonical record hash shared by the validator and
 # the test (so both sides compute the prev-hash identically).
 shamir-funclib = { path = "../shamir-funclib" }
+# WASM test modules: many unit/integration test files compile inline
+# `wat` text to wasm binaries for function-management tests.
+wat = "1.226"
 
 [[bench]]
 name = "engine_perf"

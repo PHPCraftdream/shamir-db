@@ -359,9 +359,9 @@ impl ShamirDb {
 
     /// Resolve a [`GroupRef`] to a numeric group id.
     ///
-    /// `GroupRef::Id` returns the id directly. `GroupRef::Name` scans
-    /// the groups table for a matching name. Returns `Err` if the name
-    /// does not resolve to any group.
+    /// `GroupRef::Id` returns the id directly. `GroupRef::Name` consults the
+    /// generation-safe group-name snapshot, including authoritative misses.
+    /// Returns `Err` if the name does not resolve to any group.
     pub async fn resolve_group_id(
         &self,
         group_ref: &crate::query::admin::GroupRef,
@@ -386,9 +386,9 @@ impl ShamirDb {
     }
 
     pub(super) async fn resolve_group_name(&self, name: &str) -> DbResult<u64> {
-        // A miss in the snapshot must fall through to the live catalogue.
-        if let Some(Some(id)) = self.system_store.group_id_by_name(name) {
-            return Ok(id);
+        // A published snapshot, including a missing name, is authoritative.
+        if let Some(id) = self.system_store.group_id_by_name(name) {
+            return id.ok_or_else(|| DbError::NotFound(format!("group '{}' not found", name)));
         }
         let groups = self.system_store.load_groups().await?;
         groups

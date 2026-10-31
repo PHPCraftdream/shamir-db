@@ -234,3 +234,87 @@ fn compile_cond_cached_returns_the_same_arc_on_repeated_calls() {
          third call too"
     );
 }
+
+// L3-RV-ENGINE-62C6F2B1 — the cache is now ADDRESS-keyed (usize) with a
+// structural-hash pre-filter plus full `PartialEq` content re-check on hits;
+// no `format!("{:?}")` on any path. The tests below pin the guard: a stale
+// entry left at a reused address (freed condition, later reallocated to a
+// different one) must NEVER be served, and each distinct condition must
+// resolve to its own compiled node.
+
+/// A distinct filter used for collision/reuse fixtures.
+fn make_age_cond() -> Box<Cond> {
+    Box::new(Cond::new(
+        Filter::Lt {
+            field: vec!["age".to_string()],
+            value: FilterValue::Int(18),
+        },
+        FilterValue::String("minor".to_string()),
+        FilterValue::String("adult".to_string()),
+    ))
+}
+
+/// Deterministic stale-address proof: a bogus entry is injected directly at
+/// condition B's address key with a DIFFERENT filter's content (the exact
+/// state a dropped condition + allocator reuse produces). `compile_cond_cached`
+/// must detect the content mismatch, evict the stale entry, and return a
+/// freshly compiled node for B — never the stale one. (This is deterministic
+/// where real allocator address reuse is not.)
+#[test]
+fn compile_cond_cached_rejects_stale_entry_at_reused_address() {
+    let interner = Interner::new();
+    interner.touch_ind("score").unwrap();
+    interner.touch_ind("age").unwrap();
+
+    let cond_b = make_age_cond();
+    let cache = new_local_cond_cache();
+
+    // Inject the stale entry exactly as the old bug would leave it: keyed by
+    // B's address, but holding a DIFFERENT filter (score > 50) and node.
+    let stale_cond = make_score_cond();
+    let stale_node = compile_cond_cached(&cache, &stale_cond.condition, &interner).unwrap();
+    let addr_b = &*cond_b.condition as *const Filter as usize;
+    let stale_addr = &*stale_cond.condition as *const Filter as usize;
+    assert_ne!(addr_b, stale_addr);
+    let stale_entry = (
+        crate::query::filter::cond_cache::structural_hash_for_tests(&stale_cond.condition),
+        (*stale_cond.condition).clone(),
+        std::sync::Arc::clone(&stale_node),
+    );
+    if cache.insert_sync(addr_b, stale_entry).is_err() {
+        panic!("no concurrent writer in the test");
+    }
+
+    let fresh = compile_cond_cached(&cache, &cond_b.condition, &interner).expect("compile ok");
+    assert!(
+        !std::sync::Arc::ptr_eq(&fresh, &stale_node),
+        "a different condition parked at a reused address must NEVER be \
+         served the stale entry's compiled node"
+    );
+    // The stale entry was evicted and replaced by B's own entry; a repeat
+    // call now hits B's genuine entry (same Arc again).
+    let again = compile_cond_cached(&cache, &cond_b.condition, &interner).expect("compile ok");
+    assert!(std::sync::Arc::ptr_eq(&fresh, &again));
+}
+
+/// Two distinct conditions at distinct addresses: each gets and keeps its
+/// OWN compiled node — no cross-serve even though both live in one cache.
+#[test]
+fn compile_cond_cached_distinct_conditions_get_distinct_nodes() {
+    let interner = Interner::new();
+    interner.touch_ind("score").unwrap();
+    interner.touch_ind("age").unwrap();
+
+    let cond_a = make_score_cond();
+    let cond_b = make_age_cond();
+    let cache = new_local_cond_cache();
+
+    let node_a = compile_cond_cached(&cache, &cond_a.condition, &interner).unwrap();
+    let node_b = compile_cond_cached(&cache, &cond_b.condition, &interner).unwrap();
+    assert!(!std::sync::Arc::ptr_eq(&node_a, &node_b));
+    // Repeated lookups stay on their own entries.
+    let node_a2 = compile_cond_cached(&cache, &cond_a.condition, &interner).unwrap();
+    let node_b2 = compile_cond_cached(&cache, &cond_b.condition, &interner).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&node_a, &node_a2));
+    assert!(std::sync::Arc::ptr_eq(&node_b, &node_b2));
+}

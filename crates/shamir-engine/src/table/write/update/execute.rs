@@ -259,6 +259,12 @@ impl TableManager {
             let bindings = self.validator_bindings();
             bindings.iter().any(|b| b.ops.contains(&WriteOp::Update))
         };
+        // L4-RV-ENGINE-3C71057D: one batch-scoped FK membership cache shared
+        // by every per-row validator invocation below — N updated children
+        // referencing the same parent row perform ONE committed-state parent
+        // probe instead of N. Staged parents stay visible (the cache never
+        // bypasses the tx's staged-overlay probe).
+        let update_fk_cache = crate::validator::BatchFkCache::new();
 
         for (id, old_bytes) in &matched {
             // Read-this-tx-staging-FIRST: a prior op in the SAME batch/tx
@@ -359,7 +365,10 @@ impl TableManager {
                         Some(&old_qv),
                         actor,
                         Some(tx),
-                        resolver,
+                        crate::validator::ValidatorFkCtx {
+                            resolver,
+                            fk_cache: Some(&update_fk_cache),
+                        },
                     )
                     .await
                     .map_err(validator_failure_to_db_error)?;

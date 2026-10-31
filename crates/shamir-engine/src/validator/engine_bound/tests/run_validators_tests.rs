@@ -126,7 +126,14 @@ async fn no_bindings_returns_ok() {
     let tm = build_table_with_validators(vec![], reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     assert!(result.is_ok());
 }
@@ -151,7 +158,14 @@ async fn no_matching_op_returns_ok() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     assert!(result.is_ok());
 }
@@ -176,7 +190,14 @@ async fn accept_validator_returns_ok() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     assert!(result.is_ok());
 }
@@ -203,7 +224,14 @@ async fn reject_validator_returns_failed() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     match result {
         Err(ValidatorFailure::Failed(errors)) => {
@@ -256,7 +284,14 @@ async fn priority_order_and_collect_all() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     match result {
         Err(ValidatorFailure::Failed(errors)) => {
@@ -310,7 +345,14 @@ async fn stop_halts_remaining_validators() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     match result {
         Err(ValidatorFailure::Failed(errors)) => {
@@ -336,7 +378,14 @@ async fn missing_validator_fails_closed() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     match result {
         Err(ValidatorFailure::Missing { id }) => {
@@ -366,7 +415,14 @@ async fn trap_validator_fails_closed() {
     let tm = build_table_with_validators(bindings, reg).await;
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     match result {
         Err(ValidatorFailure::Invocation { id: err_id, .. }) => {
@@ -401,7 +457,14 @@ async fn no_registry_returns_ok() {
         .unwrap();
 
     let result = tm
-        .run_validators_qv(WriteOp::Insert, None, None, &Actor::System, None, None)
+        .run_validators_qv(
+            WriteOp::Insert,
+            None,
+            None,
+            &Actor::System,
+            None,
+            crate::validator::ValidatorFkCtx::default(),
+        )
         .await;
     assert!(result.is_ok(), "no registry = validators disabled");
 }

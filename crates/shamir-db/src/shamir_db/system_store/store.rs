@@ -80,6 +80,8 @@ pub struct SystemStore {
     catalogue_accesses: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     full_catalogue_loads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    #[cfg(test)]
+    group_name_cache_lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub(super) group_names: Arc<ArcSwapOption<super::group_names::GroupNames>>,
     // DDL-only rebuild lock; group-catalogue writes are rare.
     pub(super) group_names_rebuild: Arc<tokio::sync::Mutex<()>>,
@@ -92,6 +94,10 @@ pub struct SystemStore {
     /// Test-only count of validator-catalogue reads.
     #[cfg(test)]
     validator_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only count of `load_function_folder_path` ancestor lookups
+    /// (A7B1FCEC deep-chain allocation oracle).
+    #[cfg(test)]
+    folder_path_lookups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Build a `QueryValue::Map` with a single string-keyed entry (for simple
@@ -163,6 +169,8 @@ impl SystemStore {
             #[cfg(test)]
             full_catalogue_loads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
+            group_name_cache_lookups: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
             function_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             group_names: Arc::new(ArcSwapOption::empty()),
             group_names_rebuild: Arc::new(tokio::sync::Mutex::new(())),
@@ -170,6 +178,8 @@ impl SystemStore {
             invocation_settings_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             validator_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            #[cfg(test)]
+            folder_path_lookups: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         store.rebuild_group_names().await;
         Ok(store)
@@ -256,6 +266,18 @@ impl SystemStore {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 
+    #[cfg(test)]
+    pub(crate) fn folder_path_lookup_count(&self) -> usize {
+        self.folder_path_lookups
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count_folder_path_lookup(&self) {
+        self.folder_path_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Consulted by every catalogue write below; the armed countdown reaches
     /// 1 on the armed write and fails it (arm(n) ⇒ the n-th write fails).
     pub(crate) fn catalogue_write_fault_gate(&self) -> DbResult<()> {
@@ -289,6 +311,12 @@ impl SystemStore {
     }
 
     #[cfg(test)]
+    pub(crate) fn count_full_catalogue_load(&self) {
+        self.full_catalogue_loads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
     pub(crate) fn catalogue_access_count(&self) -> usize {
         self.catalogue_accesses
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -301,9 +329,9 @@ impl SystemStore {
     }
 
     #[cfg(test)]
-    pub(crate) fn count_full_catalogue_load(&self) {
-        self.full_catalogue_loads
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    pub(crate) fn group_name_cache_lookup_count(&self) -> usize {
+        self.group_name_cache_lookups
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -311,6 +339,10 @@ impl SystemStore {
         self.catalogue_accesses
             .store(0, std::sync::atomic::Ordering::SeqCst);
         self.full_catalogue_loads
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.group_name_cache_lookups
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        self.folder_path_lookups
             .store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
@@ -344,6 +376,9 @@ impl SystemStore {
     }
 
     pub(crate) fn group_id_by_name(&self, name: &str) -> Option<Option<u64>> {
+        #[cfg(test)]
+        self.group_name_cache_lookups
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.group_names
             .load_full()
             .map(|snapshot| snapshot.by_name.get(name).copied())
