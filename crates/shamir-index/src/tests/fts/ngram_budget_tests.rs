@@ -1,7 +1,8 @@
-use crate::backends::backend::IndexError;
+use crate::backend::IndexError;
 use crate::fts::ngram_budget::{MAX_NGRAM_BYTES_PER_VALUE, MAX_NGRAM_TOKENS_PER_VALUE};
 use crate::kind::{StemLanguage, TokenizerKind};
-use crate::tokenizer::build_tokenizer;
+use crate::tokenizer::{build_tokenizer, token_hash};
+use shamir_collections::TFxMap;
 
 fn assert_budget(error: IndexError, kind: &str, limit: u64, observed: u64) {
     assert!(matches!(error, IndexError::TokenBudgetExceeded {
@@ -90,6 +91,71 @@ fn budget_error_converts_to_database_error() {
         matches!(converted, shamir_storage::error::DbError::Internal(message)
         if message.contains("bytes") && message.contains("11"))
     );
+}
+
+#[test]
+fn rv_index_0695aada_streamed_tokens_match_materialized_output() {
+    let over_budget = "A1b2C3d4".repeat(9_000);
+    // The budget applies to the EMITTED n-gram bytes, not the raw value:
+    // emitted total = (chars - n + 1) * n. For one 72_000-char word with
+    // n = 255 that is ~18.3 MB, above MAX_NGRAM_BYTES_PER_VALUE (16 MiB).
+    let n = 255_usize;
+    let emitted_bytes = (over_budget.len() - n + 1) * n;
+    assert!(emitted_bytes as u64 > MAX_NGRAM_BYTES_PER_VALUE);
+    let tokenizer = build_tokenizer(&TokenizerKind::Ngram { n: 255 });
+    assert!(tokenizer.try_tokenize(&over_budget).is_err());
+    let materialized = tokenizer.tokenize(&over_budget);
+    let mut expected = TFxMap::default();
+    for token in &materialized {
+        *expected.entry(token_hash(token)).or_insert(0_u32) += 1;
+    }
+    let mut streamed = TFxMap::default();
+    let mut streamed_len = 0_u32;
+    tokenizer.for_each_token_hash(&over_budget, |hash| {
+        streamed_len = streamed_len.wrapping_add(1);
+        *streamed.entry(hash).or_insert(0_u32) += 1;
+    });
+    assert_eq!(streamed, expected);
+    assert_eq!(streamed_len as usize, materialized.len());
+    let cases = ["A é!中 İX", "short", "soup 0123!xyz", over_budget.as_str()];
+    for n in [1, 2, 5, 255] {
+        let tokenizer = build_tokenizer(&TokenizerKind::Ngram { n });
+        for text in cases {
+            let expected: Vec<_> = tokenizer
+                .tokenize(text)
+                .iter()
+                .map(|token| token_hash(token))
+                .collect();
+            let mut actual = Vec::new();
+            tokenizer.for_each_token_hash(text, |hash| actual.push(hash));
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
+fn rv_index_0695aada_streamed_hash_frequency_and_length_parity() {
+    for (n, text) in [
+        (1, "İa é!中"),
+        (2, "ab ab x"),
+        (4, "cat ox"),
+        (255, "A1b2C3d4"),
+    ] {
+        let tokenizer = build_tokenizer(&TokenizerKind::Ngram { n });
+        let tokens = tokenizer.tokenize(text);
+        let mut expected = TFxMap::default();
+        for token in &tokens {
+            *expected.entry(token_hash(token)).or_insert(0_u32) += 1;
+        }
+        let mut actual = TFxMap::default();
+        let mut len = 0_u32;
+        tokenizer.for_each_token_hash(text, |hash| {
+            len = len.wrapping_add(1);
+            *actual.entry(hash).or_insert(0_u32) += 1;
+        });
+        assert_eq!(actual, expected);
+        assert_eq!(len as usize, tokens.len());
+    }
 }
 
 #[test]
