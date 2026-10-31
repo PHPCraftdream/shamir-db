@@ -176,7 +176,7 @@ fn rv_query_builder_macros_36328515_call_uses_builder_paths() {
 fn rv_query_builder_macros_2c459e8e_call_uses_new_constructor() {
     let rendered = render_q("call daily()");
     assert!(rendered.contains("CallOp :: new"), "expansion: {rendered}");
-    assert!(rendered.contains("Vec < shamir_query_builder :: FilterValue >"));
+    assert!(rendered.contains("Vec :: < shamir_query_builder :: FilterValue > :: from"));
 
     let rendered = render_q("call daily(1, \"x\")");
     assert!(rendered.contains("CallOp :: new"), "expansion: {rendered}");

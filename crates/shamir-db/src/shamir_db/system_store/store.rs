@@ -328,6 +328,14 @@ impl SystemStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test-only: unpublish the group-name snapshot, the state a failed group
+    /// write or rebuild leaves behind, so name resolution reads the live
+    /// catalogue (and therefore sees a storage fault).
+    #[cfg(test)]
+    pub(crate) fn unpublish_group_names_for_test(&self) {
+        self.group_names.store(None);
+    }
+
     #[cfg(test)]
     pub(crate) fn group_name_cache_lookup_count(&self) -> usize {
         self.group_name_cache_lookups

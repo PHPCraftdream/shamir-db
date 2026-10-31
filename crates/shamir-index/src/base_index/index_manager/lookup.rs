@@ -16,7 +16,6 @@ use crate::base_index::index_keys::{
 use crate::base_index::index_record_key::{
     is_legacy_base_posting_key, posting_index_prefix, IndexRecordKey,
 };
-use crate::model::identity::identity_bytes::posting_tail_matches;
 use crate::model::identity::markers::DIGEST_MARKER;
 use crate::write_ops::IndexWriteOp;
 use crate::IndexState;
@@ -527,13 +526,15 @@ impl IndexManager {
             for (k, v) in batch? {
                 let kb: &[u8] = k.as_ref();
                 if kb.len() == index_key.len() + 16 {
-                    // Digest form: drop postings whose canonical tail
+                    // Digest form: drop postings whose canonical value
                     // differs from the probe's `C` (a BLAKE3 collision of
-                    // two distinct values must never surface as a hit).
+                    // two distinct values must never surface as a hit). A
+                    // regular posting value is `C` itself; the record id
+                    // is the key suffix, unlike a unique posting value.
                     if probe_is_digest {
                         let matches = probe_canonical
                             .as_deref()
-                            .is_some_and(|probe_c| posting_tail_matches(v.as_ref(), probe_c));
+                            .is_some_and(|probe_c| v.as_ref() == probe_c);
                         if !matches {
                             continue;
                         }

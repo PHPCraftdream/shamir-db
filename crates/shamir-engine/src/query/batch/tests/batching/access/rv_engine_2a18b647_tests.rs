@@ -193,7 +193,7 @@ async fn rv_engine_2a18b647_over_cap_pattern_in_subscribe_filter_rejected() {
 }
 
 #[tokio::test]
-async fn rv_engine_2a18b647_valid_pattern_in_subscribe_filter_passes() {
+async fn rv_engine_2a18b647_valid_pattern_in_subscribe_filter_passes_pattern_guard() {
     let resolver = setup().await;
     let op = BatchOp::Subscribe(SubscribeOp {
         subscribe: vec![SubscriptionSource {
@@ -208,9 +208,23 @@ async fn rv_engine_2a18b647_valid_pattern_in_subscribe_filter_passes() {
         initial: false,
         from_version: None,
     });
-    execute_batch(&request(op), &resolver, None, None, Actor::System, "test")
+    // The pattern guard accepts the valid pattern; the runner then rejects the
+    // Regex operator itself for subscription filters. The distinct error code
+    // proves execution got past the guard (the guard's message is different).
+    let err = execute_batch(&request(op), &resolver, None, None, Actor::System, "test")
         .await
-        .expect("a valid pattern in a Subscribe filter must pass validation");
+        .unwrap_err();
+    match &err {
+        BatchError::QueryError { alias, code, .. } => {
+            assert_eq!(alias, "surface");
+            assert_eq!(
+                code.as_deref(),
+                Some("subscription_filter_unsupported_operator"),
+                "a valid pattern must pass the guard and reach the runner: {err:?}"
+            );
+        }
+        other => panic!("expected QueryError, got {other:?}"),
+    }
 }
 
 fn cond_default(pattern: &str) -> ConstraintsDto {
