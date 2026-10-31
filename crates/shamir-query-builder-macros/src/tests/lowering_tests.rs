@@ -74,6 +74,13 @@ fn rv_query_builder_macros_ec1b86b3_filter_parser_does_not_reparse_prefixes() {
 }
 
 #[test]
+fn rv_query_builder_macros_002c0148_raw_select_function_matches_plain_count() {
+    let plain = render_q("from t select count(*) as n");
+    let raw = render_q("from t select r#count(*) as n");
+    assert_eq!(raw, plain, "raw and plain builtin select lowering differ");
+}
+
+#[test]
 fn rv_query_builder_macros_002c0148_raw_filter_identifier_normalizes() {
     let ts: TokenStream2 = "r#type == 1".parse().unwrap();
     let expr: syn::Expr = parse2(ts).unwrap();
@@ -166,35 +173,33 @@ fn rv_query_builder_macros_36328515_call_uses_builder_paths() {
 }
 
 #[test]
-fn rv_query_builder_macros_2c459e8e_repo_qualified_call_lowers_repo() {
-    let rendered = render_q("call my_repo.daily(1)");
-    // Flatten by removing whitespace; proc_macro2 renders `::` Joint but single
-    // `:` spaced, so `:` + `::` join to `:::` in the flattened string.
-    let flat: String = rendered.split_whitespace().collect();
-    assert!(
-        flat.contains("call:::std::string::String::from(\"daily\")"),
-        "name field wrong in expansion: {rendered}"
-    );
-    assert!(
-        flat.contains("repo:::std::string::String::from(\"my_repo\")"),
-        "repo field wrong in expansion: {rendered}"
-    );
+fn rv_query_builder_macros_2c459e8e_call_uses_new_constructor() {
+    let rendered = render_q("call daily()");
+    assert!(rendered.contains("CallOp :: new"), "expansion: {rendered}");
+    assert!(rendered.contains("Vec < shamir_query_builder :: FilterValue >"));
+
+    let rendered = render_q("call daily(1, \"x\")");
+    assert!(rendered.contains("CallOp :: new"), "expansion: {rendered}");
+    assert!(rendered.contains("Into :: < shamir_query_builder :: FilterValue > :: into"));
 }
 
-/// Preservation test: also passes on the pre-fix code.
 #[test]
-fn rv_query_builder_macros_2c459e8e_unqualified_call_defaults_to_main() {
+fn rv_query_builder_macros_2c459e8e_repo_qualified_call_uses_in_repo_constructor() {
+    let rendered = render_q("call my_repo.daily(1)");
+    assert!(
+        rendered.contains("CallOp :: in_repo"),
+        "expansion: {rendered}"
+    );
+    assert!(rendered.contains("\"daily\""), "expansion: {rendered}");
+    assert!(rendered.contains("\"my_repo\""), "expansion: {rendered}");
+}
+
+#[test]
+fn rv_query_builder_macros_2c459e8e_unqualified_call_uses_new_constructor() {
     let rendered = render_q("call daily(1)");
-    // Whitespace removed; `:` + `::` join to `:::` in the flattened string.
-    let flat: String = rendered.split_whitespace().collect();
-    assert!(
-        flat.contains("repo:::std::string::String::from(\"main\")"),
-        "expansion: {rendered}"
-    );
-    assert!(
-        flat.contains("call:::std::string::String::from(\"daily\")"),
-        "expansion: {rendered}"
-    );
+    assert!(rendered.contains("CallOp :: new"), "expansion: {rendered}");
+    assert!(rendered.contains("\"daily\""), "expansion: {rendered}");
+    assert!(!rendered.contains("in_repo"), "expansion: {rendered}");
 }
 
 #[test]

@@ -32,6 +32,10 @@
 //!   `batch::executor` still lives in the engine since it drives a
 //!   `TableManager`.
 
+#[cfg(test)]
+#[path = "read/tests/allocation_counter.rs"]
+mod testing_alloc;
+
 pub mod admin;
 pub mod durability;
 pub mod read;
