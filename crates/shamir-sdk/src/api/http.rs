@@ -238,6 +238,15 @@ impl HttpResponse {
             _ => return Err(Error::codec("http_fetch: response is not a Map")),
         };
 
+        let count = |name: &str| map.iter().filter(|(key, _)| key == name).count();
+        for field in ["status", "headers", "body"] {
+            if count(field) > 1 {
+                return Err(Error::codec(format!(
+                    "http_fetch: duplicate response {field} field"
+                )));
+            }
+        }
+
         let status = map
             .iter()
             .find(|(k, _)| k == "status")

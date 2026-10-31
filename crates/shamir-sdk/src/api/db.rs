@@ -97,7 +97,7 @@ impl Table {
     pub fn insert(&self, doc: Value) -> Result<Value> {
         let stored = host_imports::db_insert(&self.name, &doc)?;
         match stored {
-            Value::Null => Err(Error::user("db_insert returned null")),
+            Value::Null => Err(Error::codec("db_insert returned null")),
             other => Ok(other),
         }
     }
@@ -117,8 +117,8 @@ impl Table {
         };
         match result {
             Value::List(items) => Ok(items),
-            _other => Err(Error::user(
-                "db_query expected list, got unexpected value".to_string(),
+            _other => Err(Error::codec(
+                "db_query returned an unexpected response shape",
             )),
         }
     }
@@ -221,13 +221,13 @@ fn execute_encoding_result<T: serde::Serialize>(
 fn map_execute_encoding(
     result: std::result::Result<Vec<u8>, rmp_serde::encode::Error>,
 ) -> crate::Result<Vec<u8>> {
-    result.map_err(|e| crate::Error::codec(format!("execute: encode batch: {e}")))
+    result.map_err(|e| crate::Error::codec_with_source(format!("execute: encode batch: {e}"), e))
 }
 
 #[cfg(feature = "query-builder")]
 fn decode_execute_response(bytes: &[u8]) -> crate::Result<shamir_query_builder::BatchResponse> {
     rmp_serde::from_slice(bytes)
-        .map_err(|e| crate::Error::codec(format!("execute: decode response: {e}")))
+        .map_err(|e| crate::Error::codec_with_source(format!("execute: decode response: {e}"), e))
 }
 
 /// [`BuildError`] into the SDK's [`Error`] — the testable seam of
