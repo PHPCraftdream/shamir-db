@@ -265,7 +265,9 @@ async fn seed_corrupt_unique_posting(
     lookup_values: &[InnerValue],
     corrupt_value: Bytes,
 ) {
-    let index_key = build_index_key(true, name_interned, lookup_values).to_bytes();
+    let index_key = build_index_key(true, name_interned, lookup_values)
+        .expect("probe has identity")
+        .to_bytes();
     info_store
         .set(index_key.into(), corrupt_value)
         .await

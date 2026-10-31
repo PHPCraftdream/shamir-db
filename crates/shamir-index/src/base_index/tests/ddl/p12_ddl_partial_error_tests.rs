@@ -380,6 +380,7 @@ async fn p12_drop_index_sweep_failure_enriched() {
         &[IndexInfoItem::new(vec![field_key])],
     )
     .unwrap();
+    let (irk, _canonical) = irk;
     let index_key = irk.to_bytes();
     let record_id = RecordId::new();
     let posting_key = build_posting_key(&index_key, &record_id);
