@@ -84,3 +84,54 @@ fn rv_transport_tcp_0a23323d_explicit_provider_ignores_ambient_install() {
         "explicit provider selection must not touch the process default"
     );
 }
+
+/// RV-TRANSPORT-TCP-A38C5274: a REAL rustls connection whose TLS 1.3
+/// handshake never completes must fail exporter extraction with the
+/// SPECIFIC rustls cause, not a catch-all. rustls reports any pre-completion
+/// handshake state via `Error::HandshakeNotComplete` (the default
+/// `common_state::State::export_keying_material`, rustls 0.23.46).
+///
+/// Note: tokio-rustls 0.26 only hands out a `client::TlsStream` AFTER a
+/// completed handshake (its `MidHandshake` future polls
+/// `while session.is_handshaking()`), so an uncompleted tokio-rustls stream
+/// is unreachable from user code. The uncompleted connection here is built
+/// from the crate's REAL client config (`make_client_config_app_authenticated`)
+/// and exercised through the crate's own `ConnectionExporter` seam.
+struct UncompletedClientExporter(rustls::ClientConnection);
+
+impl crate::tls::ConnectionExporter for UncompletedClientExporter {
+    fn export_keying_material(
+        &self,
+        out: &mut [u8],
+        label: &[u8],
+        context: Option<&[u8]>,
+    ) -> Result<(), rustls::Error> {
+        self.0
+            .export_keying_material(out, label, context)
+            .map(|_| ())
+    }
+}
+
+#[test]
+fn rv_transport_tcp_a38c5274_uncompleted_handshake_exporter_fails_with_specific_cause() {
+    let config =
+        make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound()).unwrap();
+    let server_name = rustls::pki_types::ServerName::try_from("localhost".to_string()).unwrap();
+    let mut conn = rustls::ClientConnection::new(config, server_name).unwrap();
+
+    // Drive the handshake one step for real: emit the ClientHello onto the
+    // wire (a plain in-memory sink; rustls write_tls needs a std Write).
+    let mut wire = Vec::new();
+    let written = conn.write_tls(&mut wire).unwrap();
+    assert!(written > 0, "ClientHello must be written");
+    assert!(
+        conn.is_handshaking(),
+        "no server response: still handshaking"
+    );
+
+    let err = crate::tls::extract_tls_exporter(&UncompletedClientExporter(conn)).unwrap_err();
+    match err {
+        rustls::Error::HandshakeNotComplete => {}
+        other => panic!("expected HandshakeNotComplete, got {other:?}"),
+    }
+}

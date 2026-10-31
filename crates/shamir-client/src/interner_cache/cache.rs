@@ -228,6 +228,14 @@ impl InternerCacheRegistry {
             }
         }
     }
+
+    /// Test-only observation (L4-RV-CLIENT-1C219006): look up `(db, repo)`
+    /// WITHOUT creating an entry — `None` proves no pre-touch happened.
+    #[cfg(test)]
+    pub(crate) fn peek_for_test(&self, db: &str, repo: &str) -> Option<Arc<FieldMap>> {
+        let key = (db.to_string(), repo.to_string());
+        self.maps.read_sync(&key, |_, v| Arc::clone(v))
+    }
 }
 
 impl Default for InternerCacheRegistry {

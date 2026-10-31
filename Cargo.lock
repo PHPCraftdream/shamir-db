@@ -3356,6 +3356,7 @@ version = "0.1.0-alpha.1"
 name = "shamir-client"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "bench-scale-tool",
  "futures",
  "rand 0.9.4",
  "rmp-serde",

@@ -341,6 +341,29 @@ async fn rv_transport_tcp_ac0beb92_prereserved_writer_rejects_over_limit() {
     );
 }
 
+/// RV-TRANSPORT-TCP-884DDBF5: a well-formed buffer (prefix == body length)
+/// whose declared length exceeds the cap is TooLarge, not MalformedBuffer.
+#[tokio::test]
+async fn rv_transport_tcp_884ddbf5_wellformed_oversized_is_too_large() {
+    let mut frame = Vec::with_capacity(MAX_FRAME_SIZE_DEFAULT + 5);
+    frame.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT as u32) + 1).to_be_bytes());
+    frame.resize(MAX_FRAME_SIZE_DEFAULT + 5, 0);
+    let (mut tx, _rx) = duplex(8);
+    let err = write_frame_prereserved(&mut tx, &frame).await.unwrap_err();
+    assert!(
+        matches!(err, FrameError::TooLarge { actual, max } if actual == MAX_FRAME_SIZE_DEFAULT + 1 && max == MAX_FRAME_SIZE_DEFAULT)
+    );
+
+    // Same expectation through the explicit-cap variant.
+    let (mut tx, _rx) = duplex(8);
+    let err = shamir_transport_tcp::framing::write_frame_prereserved_with_cap(&mut tx, &frame, 16)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, FrameError::TooLarge { actual, max } if actual == MAX_FRAME_SIZE_DEFAULT + 1 && max == 16)
+    );
+}
+
 /// Optim #1: oversized declaration is rejected before the buffer is resized.
 #[tokio::test]
 async fn read_frame_into_rejects_oversized() {
@@ -524,4 +547,22 @@ async fn write_frame_prereserved_rejects_malformed_buffers() {
     oversized.resize(4 + MAX_FRAME_SIZE_DEFAULT + 1, 0);
     let result = write_frame_prereserved(&mut a3, &oversized).await;
     assert!(matches!(result, Err(FrameError::TooLarge { .. })));
+}
+
+/// RV-TRANSPORT-TCP-884DDBF5: a buffer whose prefix declares a length that is
+/// BOTH oversized (> cap) AND mismatched with the actual payload is reported
+/// as `MalformedBuffer`, not `TooLarge` — the malformed-buffer contract takes
+/// priority over the size cap. On the old code the cap check ran first and
+/// returned `TooLarge`.
+#[tokio::test]
+async fn write_frame_prereserved_oversized_mismatch_is_malformed_not_too_large() {
+    let mut buf = Vec::with_capacity(4 + 10);
+    buf.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT + 2) as u32).to_be_bytes());
+    buf.resize(4 + 10, 0);
+    let (mut a, _b) = duplex(1024);
+    let result = write_frame_prereserved(&mut a, &buf).await;
+    assert!(
+        matches!(result, Err(FrameError::MalformedBuffer(_))),
+        "got: {result:?}"
+    );
 }

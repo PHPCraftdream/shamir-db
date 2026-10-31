@@ -20,7 +20,15 @@ In a separate run with identical payloads and configuration, use Linux `strace
 counts per frame separately for sender and receiver and retain the trace summary.
 Tracing perturbs latency: never use the traced run for latency figures.
 
-This is a recipe, not an implemented runner or measured result. CI must supply
-the sender/receiver harness and artifact collection. Latency is a trend, not a
-deterministic pass/fail threshold; do not claim a performance improvement from
-this recipe alone.
+The sender/receiver harness IS implemented as the fixed-iteration bench
+`plain_tcp/framing_round_trip/<size>` (file
+`crates/shamir-transport-tcp/benches/measurement.rs`, `bench_scale_tool`
+harness with the `async` feature). CI invokes it on the isolated runner
+described above with
+`cargo bench -p shamir-transport-tcp --bench measurement` (using the
+isolated bench target directory convention from CLAUDE.md), and captures
+the deterministic per-size result lines printed to stdout as the CI
+artifact; percentile computation, if wanted, happens on that recorded
+output, not inside the bench. **No numeric results are recorded yet — CI
+supplies them.** Latency is a trend, not a deterministic pass/fail
+threshold; do not claim a performance improvement from this recipe alone.

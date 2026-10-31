@@ -329,3 +329,67 @@ async fn explicit_writer_caps_validate_before_writing() {
     write_frame_prereserved(&mut output, &framed).await.unwrap();
     assert_eq!(output, framed);
 }
+
+/// RV-TRANSPORT-TCP-884DDBF5: when the declared length is BOTH oversized AND
+/// mismatched with the actual payload length, the documented contract says the
+/// caller bug is reported as `MalformedBuffer`, not `TooLarge` (the cap error
+/// is reserved for a VALID declared payload that exceeds the cap). On the old
+/// code the cap check ran first and returned `TooLarge` here, so this test
+/// failed.
+#[tokio::test]
+async fn rv_transport_tcp_884ddbf5_oversized_mismatch_is_malformed_not_too_large() {
+    // Prefix declares MAX_FRAME_SIZE_DEFAULT + 2, buffer holds only 10 bytes.
+    let mut buf = Vec::with_capacity(4 + 10);
+    buf.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT + 2) as u32).to_be_bytes());
+    buf.resize(4 + 10, 0);
+    let (mut writer, _reader) = tokio::io::duplex(1024);
+    let result = write_frame_prereserved(&mut writer, &buf).await;
+    match result {
+        Err(FrameError::MalformedBuffer(_)) => {}
+        Err(FrameError::TooLarge { actual, max }) => panic!(
+            "oversized mismatched prefix must be MalformedBuffer, got TooLarge {{ actual: {actual}, max: {max} }}"
+        ),
+        other => panic!("unexpected result: {other:?}"),
+    }
+
+    // Same expectation through the explicit-cap variant.
+    let (mut writer, _reader) = tokio::io::duplex(1024);
+    let result = crate::framing::write_frame_prereserved_with_cap(&mut writer, &buf, 16).await;
+    assert!(
+        matches!(result, Err(FrameError::MalformedBuffer(_))),
+        "got: {result:?}"
+    );
+}
+
+/// RV-TRANSPORT-TCP-884DDBF5: a well-formed buffer (prefix == body length)
+/// whose declared length exceeds the cap is TooLarge, not MalformedBuffer.
+#[tokio::test]
+async fn rv_transport_tcp_884ddbf5_wellformed_oversized_is_too_large() {
+    // Prefix declares MAX_FRAME_SIZE_DEFAULT + 1 and the body matches exactly.
+    let mut buf = Vec::with_capacity(MAX_FRAME_SIZE_DEFAULT + 5);
+    buf.extend_from_slice(&((MAX_FRAME_SIZE_DEFAULT as u32) + 1).to_be_bytes());
+    buf.resize(MAX_FRAME_SIZE_DEFAULT + 5, 0);
+    let (mut writer, _reader) = tokio::io::duplex(1024);
+    let result = write_frame_prereserved(&mut writer, &buf).await;
+    assert!(
+        matches!(
+            result,
+            Err(FrameError::TooLarge { actual, max })
+                if actual == MAX_FRAME_SIZE_DEFAULT + 1
+                    && max == MAX_FRAME_SIZE_DEFAULT
+        ),
+        "got: {result:?}"
+    );
+
+    // Same expectation through the explicit-cap variant.
+    let (mut writer, _reader) = tokio::io::duplex(1024);
+    let result = crate::framing::write_frame_prereserved_with_cap(&mut writer, &buf, 16).await;
+    assert!(
+        matches!(
+            result,
+            Err(FrameError::TooLarge { actual, max })
+                if actual == MAX_FRAME_SIZE_DEFAULT + 1 && max == 16
+        ),
+        "got: {result:?}"
+    );
+}
