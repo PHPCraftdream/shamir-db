@@ -1,5 +1,7 @@
 use std::borrow::Cow;
 
+use shamir_collections::{TFxMap, TFxSet};
+
 use crate::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry, TableResolver};
 use shamir_query_types::batch::VisibilityWait;
 
@@ -24,6 +26,9 @@ pub(in crate::query::batch) async fn validate(
         return Ok(());
     }
     let mut bodies = vec![(request, None)];
+    // Built on first need, in one walk of the tree: only a body holding an
+    // independently committed write and no explicit wait reads repository sets.
+    let mut body_metadata: Option<TFxMap<usize, BodyMetadata>> = None;
     while let Some((body, inherited)) = bodies.pop() {
         let wait = body.visibility_wait.or(inherited);
         let mut bounded = matches!(wait, Some(VisibilityWait::Bounded { .. }));
@@ -44,16 +49,27 @@ pub(in crate::query::batch) async fn validate(
             .unwrap_or_else(|| entry.op.is_write())
         });
         if wait.is_none() && unsupported {
-            let repos = if std::ptr::eq(body, request) {
-                root_metadata.map(|metadata| metadata.repos.clone())
-            } else {
-                None
-            }
-            .unwrap_or_else(|| shamir_query_types::batch::distinct_repos(&body.queries));
+            let repos = match root_metadata.filter(|_| std::ptr::eq(body, request)) {
+                Some(metadata) => &metadata.repos,
+                None => {
+                    let summaries =
+                        body_metadata.get_or_insert_with(|| collect_body_metadata(request).0);
+                    &summaries
+                        .get(&(body as *const BatchRequest as usize))
+                        .ok_or_else(|| {
+                            BatchError::query_coded(
+                                "",
+                                "internal",
+                                "missing static receipt metadata",
+                            )
+                        })?
+                        .repos
+                }
+            };
             for repo_name in repos {
                 // An unresolvable repository has no commit policy to inherit:
                 // execution reports the real error where it always did.
-                if let Ok(repo) = resolver.resolve_repo(&repo_name).await {
+                if let Ok(repo) = resolver.resolve_repo(repo_name).await {
                     bounded |= matches!(
                         repo.commit_visibility_wait(),
                         VisibilityWait::Bounded { .. }
@@ -108,6 +124,74 @@ pub(in crate::query::batch) async fn validate(
         }
     }
     Ok(())
+}
+
+/// Metadata stays local to this immutable request borrow; its address keys are
+/// never retained in RequestMetadata or an execution scope.
+#[derive(Default)]
+struct BodyMetadata {
+    repos: TFxSet<String>,
+}
+
+// Returns the repository set of every body (nested ones included) and the
+// number of entries enumerated to build them: each entry is visited once to
+// find the bodies and once to summarise its body.
+fn collect_body_metadata(request: &BatchRequest) -> (TFxMap<usize, BodyMetadata>, usize) {
+    let mut ordered = Vec::new();
+    let mut pending = vec![request];
+    let mut visits = 0;
+    while let Some(body) = pending.pop() {
+        ordered.push(body);
+        for entry in body.queries.values() {
+            visits += 1;
+            match &entry.op {
+                BatchOp::Batch(sub) => pending.push(&sub.batch),
+                BatchOp::ForEach(fe) => pending.push(&fe.batch),
+                _ => {}
+            }
+        }
+    }
+    let mut metadata: TFxMap<usize, BodyMetadata> = TFxMap::default();
+    for body in ordered.into_iter().rev() {
+        let mut summary = BodyMetadata::default();
+        for entry in body.queries.values() {
+            visits += 1;
+            if let Some(table) = entry.op.table_ref() {
+                summary.repos.insert(table.repo.clone());
+            }
+            match &entry.op {
+                BatchOp::Batch(sub) => {
+                    let nested = &sub.batch;
+                    if let Some(child) = metadata.get(&(nested as *const BatchRequest as usize)) {
+                        summary.repos.extend(child.repos.iter().cloned());
+                    }
+                }
+                BatchOp::ForEach(fe) => {
+                    let nested = &fe.batch;
+                    if let Some(child) = metadata.get(&(nested as *const BatchRequest as usize)) {
+                        summary.repos.extend(child.repos.iter().cloned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        metadata.insert(body as *const BatchRequest as usize, summary);
+    }
+    (metadata, visits)
+}
+
+#[cfg(test)]
+pub(super) fn body_metadata_test_probe(
+    request: &BatchRequest,
+) -> (usize, TFxMap<usize, TFxSet<String>>) {
+    let (metadata, visits) = collect_body_metadata(request);
+    (
+        visits,
+        metadata
+            .into_iter()
+            .map(|(key, summary)| (key, summary.repos))
+            .collect(),
+    )
 }
 
 /// Clone only a container requiring policy inheritance, never a leaf hot path.

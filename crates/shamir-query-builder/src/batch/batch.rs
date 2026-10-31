@@ -287,12 +287,9 @@ impl Batch {
 
     // ── fallible write-op insertion ───────────────────────────────
     //
-    // Mirrors of the `update`/`upsert`/`delete` entry methods above that
-    // surface a missing-required-field as a typed `BuilderError` instead of
-    // panicking inside `IntoBatchOp`. Each calls the builder's own fallible
-    // `build()` and delegates to the same internal `add_entry`/`add_entry_after`
-    // its non-try sibling uses, so a well-formed op produces the identical wire
-    // shape (see `try_into_batch_op_tests`).
+    // Mirrors of the update/upsert/delete entry methods, using each builder's
+    // fallible build path and returning typed BuilderError values for missing
+    // required fields. Successful operations retain the same wire shape.
 
     /// Fallible mirror of [`Batch::update`]: build `op` and add it, returning a
     /// typed error if [`crate::write::Update`] is missing its `.set()` payload.
@@ -774,11 +771,7 @@ impl Batch {
         name: impl Into<String>,
         params: impl IntoIterator<Item = impl Into<FilterValue>>,
     ) -> Handle {
-        let op = CallOp {
-            call: name.into(),
-            params: params.into_iter().map(Into::into).collect(),
-            repo: "main".to_string(),
-        };
+        let op = CallOp::new(name, params);
         self.add_entry(alias, BatchOp::Call(op), true)
     }
 
@@ -790,11 +783,7 @@ impl Batch {
         repo: impl Into<String>,
         params: impl IntoIterator<Item = impl Into<FilterValue>>,
     ) -> Handle {
-        let op = CallOp {
-            call: name.into(),
-            params: params.into_iter().map(Into::into).collect(),
-            repo: repo.into(),
-        };
+        let op = CallOp::in_repo(name, repo, params);
         self.add_entry(alias, BatchOp::Call(op), true)
     }
 

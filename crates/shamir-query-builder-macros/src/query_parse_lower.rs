@@ -236,23 +236,19 @@ impl CallMacro {
         };
 
         let args = &self.args;
-        let repo_expr = match &self.repo {
-            Some(id) => {
-                let r = unraw(id);
-                quote! { #r }
-            }
-            None => quote! { "main" },
+        let params = quote! {
+            ::std::vec::Vec::<#root::FilterValue>::from([#(
+                ::std::convert::Into::<#root::FilterValue>::into(#args)
+            ),*])
         };
 
         // The builder facade re-exports the query types used here.
-        Ok(quote! {
-            #root::CallOp {
-                call: ::std::string::String::from(#name_expr),
-                params: ::std::vec![#(
-                    ::std::convert::Into::<#root::FilterValue>::into(#args)
-                ),*],
-                repo: ::std::string::String::from(#repo_expr),
+        Ok(match &self.repo {
+            Some(repo) => {
+                let repo = unraw(repo);
+                quote! { #root::CallOp::in_repo(#name_expr, #repo, #params) }
             }
+            None => quote! { #root::CallOp::new(#name_expr, #params) },
         })
     }
 }
