@@ -17,6 +17,7 @@
 //! caps `auth_init` arrival rate) so the queue depth in front of the
 //! Argon2 semaphore stays bounded.
 
+use crate::common::error::EnvironmentError;
 use crate::common::time::{ns, UnixNanos};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Condvar;
@@ -80,10 +81,23 @@ impl Argon2Semaphore {
     }
 
     /// Block until a permit becomes available OR the deadline expires.
-    /// Returns `Some(Permit)` on success, `None` on timeout.
+    /// Returns `Some(Permit)` on success, `None` on timeout — and also `None`
+    /// if the system clock cannot be read (fail closed: a clock failure is
+    /// indistinguishable from a timeout, so the caller reports `server_busy`;
+    /// RV-CONNECT-387EAA05, P2-10: never fabricate a timestamp).
     ///
     /// Use `deadline_ns = u64::MAX` for indefinite wait.
     pub fn acquire_until(&self, deadline_ns: u64) -> Option<Argon2Permit<'_>> {
+        self.acquire_until_with_clock(deadline_ns, UnixNanos::try_now)
+    }
+
+    /// Clock-injected core of [`Self::acquire_until`] (private; tests inject
+    /// a failing clock to prove the fail-closed path).
+    pub(crate) fn acquire_until_with_clock(
+        &self,
+        deadline_ns: u64,
+        now: impl Fn() -> Result<UnixNanos, EnvironmentError>,
+    ) -> Option<Argon2Permit<'_>> {
         if let Some(p) = self.try_acquire() {
             return Some(p);
         }
@@ -94,7 +108,7 @@ impl Argon2Semaphore {
             if let Some(p) = self.try_acquire() {
                 return Some(p);
             }
-            let now_ns = UnixNanos::now().as_u64();
+            let now_ns = now().ok()?.as_u64();
             if now_ns >= deadline_ns {
                 return None;
             }

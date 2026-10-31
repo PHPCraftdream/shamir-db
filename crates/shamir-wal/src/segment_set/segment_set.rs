@@ -720,6 +720,13 @@ impl SegmentSet {
 
     /// Highest `commit_version` across all segments (sealed + active) — for
     /// parity with [`WalSegment::max_committed`].
+    ///
+    /// Unlike a bare [`WalSegment::open`] handle (which starts at 0 on an
+    /// existing non-empty segment, with the retention pin clear — see
+    /// RV-WAL-48749F97), this value includes retained active frames restored
+    /// at `open` time. Truncation eligibility is decided only by `SegmentSet`;
+    /// never treat a handle-local `WalSegment::max_committed` as a durable
+    /// cross-segment watermark.
     pub fn max_committed(&self) -> u64 {
         let g = self.inner.lock().expect("SegmentSet inner mutex poisoned");
         let sealed_max = g.sealed.iter().map(|m| m.max_version).max().unwrap_or(0);

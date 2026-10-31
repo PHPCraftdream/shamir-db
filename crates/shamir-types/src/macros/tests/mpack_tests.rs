@@ -1,5 +1,5 @@
 use crate::mpack;
-use crate::types::common::new_map;
+use crate::types::common::{new_map, new_set};
 use crate::types::value::QueryValue;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
@@ -329,7 +329,6 @@ fn mpack_list_of_maps() {
 
 #[test]
 fn mpack_escape_set() {
-    use crate::types::common::new_set;
     let mut s = new_set();
     s.insert(QueryValue::Int(1));
     s.insert(QueryValue::Int(2));

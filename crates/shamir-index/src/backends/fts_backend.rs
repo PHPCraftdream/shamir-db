@@ -70,12 +70,13 @@ impl FtsBackend {
     fn tokenize_record(&self, rec: &dyn RecordRef) -> TFxSet<u64> {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
-            Some(text) => self
-                .tokenizer
-                .tokenize(text)
-                .into_iter()
-                .map(|t| token_hash(&t))
-                .collect(),
+            Some(text) => {
+                let mut hashes = TFxSet::default();
+                self.tokenizer.for_each_token_hash(text, |hash| {
+                    hashes.insert(hash);
+                });
+                hashes
+            }
             None => TFxSet::default(),
         }
     }

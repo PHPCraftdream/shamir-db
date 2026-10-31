@@ -1,8 +1,10 @@
 use crate::access::{
-    action_perm, class_of, permits, principal64, trace_access, AccessError, Action, Actor, Mode,
-    Perm, PermClass, ResourceMeta, ResourcePath, OWNER_SYSTEM,
+    action_perm, class_of, permits, principal64, principal64_from_username, trace_access,
+    AccessError, Action, Actor, Mode, Perm, PermClass, ResourceMeta, ResourcePath, OWNER_SYSTEM,
 };
 use crate::mpack;
+use crate::types::common::new_map;
+use crate::types::value::QueryValue;
 
 #[test]
 fn rv_types_65dde5b8_principal64_projects_first_eight_bytes_and_masks_sign_bit() {
@@ -306,8 +308,6 @@ fn from_record_backward_compat_returns_open() {
 
 #[test]
 fn from_record_null_group_is_none() {
-    use crate::types::common::new_map;
-    use crate::types::value::QueryValue;
     let mut m = new_map();
     m.insert("name".to_string(), QueryValue::Str("test".to_string()));
     m.insert("owner".to_string(), QueryValue::Int(42));
@@ -318,6 +318,52 @@ fn from_record_null_group_is_none() {
     assert_eq!(loaded.owner, Actor::User(42));
     assert!(loaded.group.is_none());
     assert_eq!(loaded.mode, 0o644);
+}
+
+// L3-RV-TYPES-65DDE5B8: direct coverage of the interim username bridge.
+// No collision-resistance claim is made — `principal64_from_username` is a
+// deterministic Fx hash of a *name* (see its doc comment), so only
+// determinism and the documented i64-range contract are asserted here.
+
+#[test]
+fn principal64_from_username_is_deterministic() {
+    // Same username → same u64, across repeated calls (the documented
+    // bridging behaviour: legacy call sites must resolve to a stable id).
+    for username in ["", "alice", "bob", "пароль-🔐-user", "x"] {
+        let first = principal64_from_username(username);
+        for _ in 0..3 {
+            assert_eq!(
+                principal64_from_username(username),
+                first,
+                "username bridge must be deterministic for {username:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn principal64_from_username_always_fits_i64() {
+    // The catalogue stores ids as i64; the bridge projects through the
+    // same `& i64::MAX` mask as `principal64`, so every output is <= i64::MAX
+    // and its i64 cast is non-negative (survives the msgpack round-trip).
+    for username in [
+        "",
+        "alice",
+        "bob",
+        "пароль-🔐-user",
+        "a-very-long-directory-name-that-spans-many-bytes-0123456789",
+    ] {
+        let id = principal64_from_username(username);
+        assert!(
+            id <= i64::MAX as u64,
+            "principal64_from_username({username:?}) = {id} overflowed i64"
+        );
+        let signed = id as i64;
+        assert!(
+            signed >= 0,
+            "principal64_from_username({username:?}) cast to i64 went negative"
+        );
+    }
 }
 
 // ========================================================================
@@ -536,4 +582,39 @@ fn function_folder_constructor() {
 fn empty_function_folder_parent_is_namespace() {
     let folder = ResourcePath::function_folder(vec![]);
     assert_eq!(folder.parent().unwrap(), ResourcePath::FunctionNamespace);
+}
+
+// ========================================================================
+// RV-TYPES-71AFA12F: log-forging escaping + allocation oracle
+// ========================================================================
+
+#[test]
+fn rv_types_71afa12f_escape_resource_diagnostic_allocations_are_bounded() {
+    // History confirms the pre-fix trace rendered `ResourcePath` via its raw
+    // Display implementation (e.g. `write!(f, "fn://{name}")`), so controls
+    // could reach the log line. The old implementation is not shown to have
+    // per-character formatting allocations; do not claim such historical
+    // counts. This test checks the current escaping contract and uses a
+    // deterministic legacy raw-render negative control to prove controls
+    // were previously retained. The allocation budget is only a bounded-cost
+    // guard, not a claim about a measured historical count.
+    let name: String = "\u{1}".repeat(64);
+    let legacy_render = format!("fn://{name}");
+    assert!(
+        legacy_render.contains('\u{1}'),
+        "legacy raw rendering retains controls"
+    );
+
+    let (allocs, escaped) = crate::testing_alloc::count_allocations(|| {
+        crate::access::escape_resource_diagnostic(&name)
+    });
+    assert!(!escaped.contains('\u{1}'), "control chars must be escaped");
+    assert!(
+        escaped.chars().all(|c| c.is_ascii() || !c.is_control()),
+        "escaped output must contain no raw control characters: {escaped:?}"
+    );
+    assert!(
+        allocs <= 10,
+        "escaping allocation budget exceeded: {allocs}"
+    );
 }

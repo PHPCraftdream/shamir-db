@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::{error::ErrorKind, Parser};
 use zeroize::Zeroizing;
 
-use super::{bootstrap_mode, bootstrap_stdin, BootstrapMode, Cli};
+use super::{bootstrap_argv_warning_needed, bootstrap_mode, bootstrap_stdin, BootstrapMode, Cli};
 
 fn read(bytes: &[u8]) -> anyhow::Result<Zeroizing<Vec<u8>>> {
     bootstrap_stdin::read_password(BufReader::with_capacity(2, Cursor::new(bytes)))
@@ -75,6 +75,8 @@ fn rv_server_97c240d7_clap_conflicts_and_help() {
 
 #[test]
 fn rv_server_97c240d7_existing_modes_and_stdin_selection() {
+    assert!(bootstrap_argv_warning_needed(&Some("sensitive".into())));
+    assert!(!bootstrap_argv_warning_needed(&None));
     let cli = Cli::try_parse_from(["server", "--config", "cfg"]).unwrap();
     assert!(!cli.bootstrap_password_stdin);
     assert!(matches!(

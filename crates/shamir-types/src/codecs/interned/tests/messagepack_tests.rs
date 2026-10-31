@@ -1,4 +1,5 @@
 use crate::codecs::interned::common::intern_string_key;
+use crate::codecs::interned::messagepack::msgpack_to_inner_legacy;
 use crate::codecs::interned::{inner_to_msgpack, msgpack_to_inner};
 use crate::core::interner::Interner;
 use crate::types::common::{new_map, new_set};
@@ -684,8 +685,6 @@ fn test_normal_nesting_roundtrip_still_works() {
 /// Property test: zerocopy decoder produces identical results to legacy rmpv-based decoder.
 #[test]
 fn test_zerocopy_vs_legacy_equivalence() {
-    use crate::codecs::interned::messagepack::msgpack_to_inner_legacy;
-
     let interner = Interner::new();
 
     // Collection of representative values to encode then decode both ways
@@ -914,4 +913,32 @@ fn maximum_bin32_length_returns_error() {
         &bytes
     )
     .is_err());
+}
+
+// -------------------------------------------------------------------------
+// RV-TYPES-F070E432 — read_bin must use checked range arithmetic.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_types_f070e432_malformed_max_length_bin32_is_an_error_not_a_panic() {
+    // A Bin32 header declaring u32::MAX payload bytes with no body must
+    // surface as a decode error. `read_bin` computes `pos + len` with
+    // `checked_add` and slices with `data.get(..)`, so no unchecked
+    // `cursor + length` arithmetic is reachable.
+    //
+    // NOTE on the overflow oracle: `pos.checked_add(len)` can only
+    // *overflow* on 32-bit targets (`usize` = u32), where a Bin32 length
+    // near u32::MAX added to a high cursor position wraps; on 64-bit the
+    // same input simply fails the `get(pos..end)` bounds check below. The
+    // overflow branch is therefore exercised only on
+    // `target_pointer_width = "32"` CI runners — this test documents and
+    // covers the shared checked path on every target without allocating
+    // anything.
+    let interner = Interner::new();
+    let bytes: [u8; 5] = [0xc6, 0xff, 0xff, 0xff, 0xff]; // Bin32, len = u32::MAX, no payload
+    let result = msgpack_to_inner(&interner, &bytes);
+    assert!(
+        matches!(result, Err(ref e) if matches!(e, crate::codecs::CodecError::Decode(_))),
+        "truncated max-length Bin32 must be a decode error, got {result:?}"
+    );
 }

@@ -79,9 +79,9 @@ fn load_local_indexes_by_current_node() {
 }
 
 #[test]
-fn load_local_clamps_when_current_node_out_of_range() {
-    // current_node is clamped by the mock, but guard the replica index too:
-    // even a hostile topology reporting an OOB node must not panic.
+fn current_node_mock_clamps_out_of_range_override() {
+    // This pins MockTopology's current_node() behavior only; explicit replica
+    // APIs have their own out-of-range coverage below.
     let topo: Arc<dyn Topology> = Arc::new(MockTopology::with_nodes(2, 2));
     let r = NodeReplicated::new(topo, 7u64);
     std::thread::spawn(move || {
@@ -90,6 +90,26 @@ fn load_local_clamps_when_current_node_out_of_range() {
     })
     .join()
     .unwrap();
+}
+
+#[test]
+fn explicit_node_access_out_of_range_falls_back_to_node_zero_rv_numa_553cb81d() {
+    let topo: Arc<dyn Topology> = Arc::new(MockTopology::with_nodes(2, 2));
+    let r = NodeReplicated::new(topo, 7u64);
+    r.store_node(NodeId(0), 10);
+    r.store_node(NodeId(1), 20);
+
+    for node in [NodeId(2), NodeId(usize::MAX)] {
+        assert_eq!(
+            **r.load_node(node),
+            10,
+            "out-of-range load must select node 0"
+        );
+        r.store_node(node, 30);
+        assert_eq!(**r.load_node(NodeId(0)), 30);
+        assert_eq!(**r.load_node(NodeId(1)), 20);
+        r.store_node(NodeId(0), 10);
+    }
 }
 
 #[test]

@@ -55,8 +55,45 @@ where
         }
     }
 
+    /// Like [`MetaEnvelope::new`] but with an explicit envelope version
+    /// (identity v2 writes `_m.idx` with version 2; design P34-12 section
+    /// (b), item 3).
+    pub fn new_with_version(version: u16, payload: T) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        Self {
+            magic: ENVELOPE_MAGIC,
+            version,
+            written_at_nanos: nanos,
+            payload,
+        }
+    }
+
     pub fn encode(&self) -> Result<Vec<u8>, MetaError> {
         bincode::serialize(self).map_err(|e| MetaError::Encode(e.to_string()))
+    }
+
+    /// Header-first open that ACCEPTS an explicit set of envelope versions
+    /// and returns the version with the payload (identity v2 reads
+    /// `_m.idx` written with version 1 or 2). Strict [`MetaEnvelope::open`]
+    /// is unchanged.
+    pub fn open_accepting(bytes: &[u8], versions: &[u16]) -> Result<(u16, T), MetaError> {
+        let header: MetaEnvelopeHeader =
+            bincode::deserialize(bytes).map_err(|e| MetaError::Decode(e.to_string()))?;
+        if header.magic != ENVELOPE_MAGIC {
+            return Err(MetaError::BadMagic {
+                expected: ENVELOPE_MAGIC,
+                got: header.magic,
+            });
+        }
+        if !versions.contains(&header.version) {
+            return Err(MetaError::UnsupportedVersion(header.version));
+        }
+        let env: MetaEnvelope<T> =
+            bincode::deserialize(bytes).map_err(|e| MetaError::Decode(e.to_string()))?;
+        Ok((header.version, env.payload))
     }
 
     pub fn open(bytes: &[u8]) -> Result<T, MetaError> {

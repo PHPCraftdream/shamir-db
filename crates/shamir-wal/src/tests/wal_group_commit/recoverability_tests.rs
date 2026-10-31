@@ -3,7 +3,9 @@ use super::*;
 use crate::segment_set::sync_test_seam::InjectedSealedError;
 use crate::wal_group_commit::WalCoverage;
 use crate::wal_ticket::WalAppendError;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::task::Poll;
 
 /// Bounded test-only bitmap oracle (versions 1..=63). Production coverage
 /// lives in engine's scc observer; this fixture never represents unbounded IDs.
@@ -415,8 +417,6 @@ async fn postcapture_write_remains_dirty_until_next_sync() {
 /// Snapshot capture holds the gate through read/fsync; history unlink waits.
 #[tokio::test]
 async fn snapshot_capture_serializes_history_truncate_and_retry_succeeds() {
-    use std::future::Future;
-    use std::sync::atomic::Ordering;
     let dir = TempDir::new().unwrap();
     let sink = Arc::new(WalSink::File(
         SegmentSet::open(dir.path().to_path_buf(), 1).await.unwrap(),
@@ -460,9 +460,6 @@ async fn snapshot_capture_serializes_history_truncate_and_retry_succeeds() {
 /// Count actual active sync calls, including rotation, not worker rounds.
 #[tokio::test]
 async fn rotation_and_shared_sync_have_at_most_one_actual_in_flight_call() {
-    use std::future::Future;
-    use std::sync::atomic::Ordering;
-    use std::task::Poll;
     let dir = TempDir::new().unwrap();
     let payload = entry(1, 1).encode().unwrap();
     let threshold = (payload.len() as u64 + 8) * 3;
@@ -515,8 +512,6 @@ async fn rotation_and_shared_sync_have_at_most_one_actual_in_flight_call() {
 /// Rotation must use the same sync-only gate as the detached worker.
 #[tokio::test]
 async fn rotation_waits_for_existing_sync_without_blocking_ordinary_append() {
-    use std::future::Future;
-    use std::task::Poll;
     let dir = TempDir::new().unwrap();
     let segments = SegmentSet::open(dir.path().to_path_buf(), 1).await.unwrap();
     let gate = Arc::clone(&segments.sync_gate);

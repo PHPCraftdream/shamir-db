@@ -3,8 +3,9 @@ use crate::descriptor::IndexDescriptor;
 use crate::fts_backend::FtsBackend;
 use crate::kind::{IndexKind, TokenizerKind};
 use crate::tests::backends::remove_fail_store::RemoveFailStore;
-use crate::tokenizer::token_hash;
+use crate::tokenizer::{build_tokenizer, token_hash};
 use crate::write_ops::IndexWriteOp;
+use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -295,6 +296,77 @@ async fn plan_update_returns_diff_ops() {
         .collect();
     assert_eq!(removes.len(), 1); // "world"
     assert_eq!(sets.len(), 1); // "rust"
+}
+
+#[tokio::test]
+async fn rv_index_0695aada_delete_streams_all_distinct_legacy_grams() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let text = "A1b2C3d4".repeat(9_000);
+    // Prove the over-budget premise: for one 72_000-char word with n = 255 the
+    // emitted n-gram byte total is (chars - n + 1) * n ≈ 18.3 MB, above
+    // MAX_NGRAM_BYTES_PER_VALUE (16 MiB). The materialized path would need
+    // ~71_746 distinct 255-byte gram strings (>18 MB) just for the grams.
+    let n = 255_usize;
+    let emitted_bytes = (text.len() - n + 1) * n;
+    assert!(emitted_bytes as u64 > crate::fts::ngram_budget::MAX_NGRAM_BYTES_PER_VALUE);
+    let desc = IndexDescriptor::new(
+        11,
+        "legacy_ngram",
+        intern(&interner, "legacy_ngram"),
+        SmallVec::new(),
+        IndexKind::Fts {
+            tokenizer: TokenizerKind::Ngram { n: 255 },
+            language: None,
+        },
+    );
+    let backend = FtsBackend::new(desc, vec![intern(&interner, "body")], store);
+    let rec = make_rec(&interner, &text);
+    let rid = RecordId::new();
+    // Memory oracle: count allocated bytes while streaming plan_delete over
+    // the over-budget record; the materialized path would need >18 MB of
+    // gram strings alone.
+    let window = crate::tests::support::allocation_counter::Window::start();
+    let ops = backend.plan_delete(rid, &rec).await.unwrap();
+    let allocated_bytes = window.finish();
+    assert!(
+        allocated_bytes < 8 * 1024 * 1024,
+        "plan_delete allocated {allocated_bytes} bytes; materializing the grams would need >18 MB"
+    );
+    let removed: std::collections::BTreeSet<_> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IndexWriteOp::RemovePosting { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    let expected_hashes: std::collections::BTreeSet<_> =
+        build_tokenizer(&TokenizerKind::Ngram { n: 255 })
+            .tokenize(&text)
+            .iter()
+            .map(|token| token_hash(token))
+            .collect();
+    let expected: std::collections::BTreeSet<Bytes> = expected_hashes
+        .iter()
+        .map(|hash| {
+            Bytes::from(crate::posting_layout::build_posting_key(
+                11,
+                crate::posting_layout::type_tag::FTS,
+                &hash.to_le_bytes(),
+                &rid,
+            ))
+        })
+        .collect();
+    assert_eq!(removed, expected);
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, IndexWriteOp::RemovePosting { .. }))
+            .count(),
+        expected.len()
+    );
+    assert!(ops
+        .iter()
+        .all(|op| matches!(op, IndexWriteOp::RemovePosting { .. })));
 }
 
 #[tokio::test]

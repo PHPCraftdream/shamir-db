@@ -18,6 +18,22 @@ fn windows(word: &str, n: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
     starts.zip(ends)
 }
 
+pub(crate) fn visit(text: &str, n: usize, mut visitor: impl FnMut(&str)) {
+    for word in text
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+    {
+        let lowered = word.to_lowercase();
+        if lowered.chars().count() <= n {
+            visitor(&lowered);
+        } else {
+            for (start, end) in windows(&lowered, n) {
+                visitor(&lowered[start..end]);
+            }
+        }
+    }
+}
+
 pub(crate) fn emit<'a>(word: &str, n: usize, out: &mut Vec<Cow<'a, str>>) {
     let lowered = word.to_lowercase();
     emit_lowered(lowered, n, out);

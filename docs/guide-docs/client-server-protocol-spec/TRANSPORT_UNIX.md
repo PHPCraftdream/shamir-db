@@ -169,7 +169,7 @@ runtime "first client to connect over this channel becomes admin" flow.
 
 This is not a gap in practice: the server's existing OUT-OF-BAND
 provisioning path — `BootstrapMode::Password` / `BootstrapMode::RandomToken`
-(`--bootstrap-password` / default random-token-to-file CLI flags) — runs
+(`--bootstrap-password-stdin` / default random-token-to-file first; argv `--bootstrap-password` remains supported for compatibility) — runs
 during `ServerLauncher::launch()` **before any listener's accept loop
 starts**, entirely independent of transport or `binding_mode`. It writes
 the admin account directly into the user directory, not through the wire

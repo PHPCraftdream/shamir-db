@@ -132,10 +132,12 @@ impl PinPolicy {
 /// A [`ReplSource`] that connects to its upstream on first use and caches the
 /// connected [`WireReplSource`] for subsequent calls.
 ///
-/// Connection state lives behind a `tokio::sync::Mutex` (sanctioned async
-/// guard — held only across the connect `.await`, uncontended in the
-/// single-tasked loop). Once connected, every op delegates to the inner
-/// [`WireReplSource`].
+/// One source (and one client connection) serves every pull target of its
+/// subscription. Connection state lives behind a `tokio::sync::Mutex`
+/// (sanctioned async guard — held only across the connect `.await`, so
+/// targets contend on it only while the first connect is in flight). Once
+/// connected, every op delegates to the inner [`WireReplSource`], which holds
+/// no lock across a long poll, so the targets' polls overlap.
 struct LazyWireSource {
     upstream: String,
     creds: ReplicatorCreds,

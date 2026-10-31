@@ -181,6 +181,15 @@ impl WalGroupCommit {
     /// entry has reached the requested durability level. `commit_version`
     /// is the MVCC version stamped on the entry — the leader folds the
     /// window's max into the sink's `max_committed` watermark (F6).
+    ///
+    /// Error fidelity (RV-WAL-C55C2D47): this legacy entry point converts
+    /// every failure into [`DbError::Storage`] with a fixed, path-free
+    /// outcome text, deliberately discarding the underlying sink cause.
+    /// This preserves the legacy classification/match shape and keeps WAL
+    /// file paths out of client-visible errors. Callers that need the
+    /// underlying sink cause use [`Self::append_ticketed`] and
+    /// [`WalTicket::failure_cause`](crate::WalTicket::failure_cause()),
+    /// which retains the original `Arc<DbError>`.
     pub async fn append(
         &self,
         payload: Vec<u8>,
@@ -288,6 +297,14 @@ impl WalGroupCommit {
     /// Only a successful rollback proves no frame survives. The File sink
     /// does not expose that distinction, so an append error is UNKNOWN;
     /// recovery may still observe frames from that indeterminate batch.
+    ///
+    /// Error fidelity (RV-WAL-C55C2D47): like [`Self::append`], this legacy
+    /// entry point returns [`DbError::Storage`] with a fixed, path-free
+    /// outcome text and discards the underlying sink cause — deliberate,
+    /// to preserve classification and keep WAL file paths out of
+    /// client-visible errors. Use [`Self::append_ticketed`] plus
+    /// [`WalTicket::failure_cause`](crate::WalTicket::failure_cause())
+    /// for the preserved `Arc<DbError>` cause.
     pub async fn append_many(
         &self,
         entries: Vec<(Vec<u8>, u64)>,

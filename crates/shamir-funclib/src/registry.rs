@@ -42,6 +42,8 @@ pub const SCALAR_ERROR_CODES: &[&str] = &[
     "bad_unit",
     "compute",
     "parse",
+    "scalar_task_failed",
+    "not_indexable",
 ];
 
 /// Machine-readable scalar-error. Carries a stable `code`; the frontend maps the

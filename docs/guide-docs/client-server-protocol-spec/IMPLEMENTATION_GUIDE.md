@@ -262,7 +262,7 @@ wired into any live dispatch path**: zero references to
 `shamir-query-types`'s wire-message enum, and no client connection path
 ever calls the client-side helpers. The operationally-reachable bootstrap
 flow today is entirely CLI-flag + local-file-based
-(`--bootstrap-password` / `--bootstrap-token-path`, described above) —
+(`--bootstrap-password-stdin` / default random-token file first; argv `--bootstrap-password` remains supported for compatibility, described above) —
 **not** the wire protocol this subsection and the AUTH spec describe.
 Wiring the wire protocol up (new pre-auth wire message types, a new
 server dispatch branch, client-side integration in both the Rust and

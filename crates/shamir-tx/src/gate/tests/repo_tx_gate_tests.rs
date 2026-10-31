@@ -47,6 +47,14 @@ fn assign_next_version_monotonic() {
 }
 
 #[test]
+fn rv_tx_58e47f9e_publish_committed_never_regresses_floor() {
+    let gate = RepoTxGate::fresh();
+    gate.publish_committed(12);
+    gate.publish_committed(5);
+    assert_eq!(gate.last_committed(), 12);
+}
+
+#[test]
 fn publish_updates_last_committed() {
     let gate = RepoTxGate::fresh();
     assert_eq!(gate.last_committed(), 0);

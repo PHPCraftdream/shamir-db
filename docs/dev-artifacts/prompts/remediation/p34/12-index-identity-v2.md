@@ -12,6 +12,10 @@ Design, then implement, a persisted hash identity ("index identity v2") that rem
 2. **Owner decision.** Any incompatible persisted-format change, new dependency or rebuild policy the design contains goes to the owner as a numbered question before code.
 3. **Implementation** as a normal stage (executor, reviewer, CI) from the approved design; this brief is extended with the decisions before the executor is launched.
 
+## Status (2026-10-30)
+
+Phase 1 (design) and phase 2 (decisions) are done: `docs/dev-artifacts/audits/2026-08-14-cross-crate-rush-review/P34-12-index-identity-v2-design.md`, section "Owner decisions". Phase 3 runs as four sequential executor stages S1-S4 of the design (codec and envelope, base indexes, FTS and functional indexes, documentation), each with its own brief derived from design sections (a)-(e), after P34-07 has landed.
+
 ## Acceptance
 
 - A written design (read-only reviewer) covering: the identity scheme, versioning of persisted hashes, the migration or rebuild path, the behaviour of old binaries, and the test plan, before any code.

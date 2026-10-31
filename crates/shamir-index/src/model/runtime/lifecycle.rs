@@ -9,8 +9,8 @@
 //! sorted-index RENAME" from this doc alone, without spelunking four files.
 //!
 //! The persisted enum that backs the in-memory lifecycle is
-//! [`crate::state::IndexState`] (`Building` / `Ready`). This doc extends that
-//! two-variant enum into the full CONCEPTUAL lifecycle F-72 (#899) and F-76
+//! [`crate::state::IndexState`] (`Building` / `Ready` / `Failed`). This doc extends that
+//! enum into the full CONCEPTUAL lifecycle F-72 (#899) and F-76
 //! (#903) implement:
 //!
 //! ```text

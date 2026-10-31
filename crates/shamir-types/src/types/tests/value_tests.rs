@@ -11,7 +11,6 @@ mod tests {
     use std::hash::Hash;
     use std::hash::Hasher;
     use std::str::FromStr;
-
     fn calculate_hash<T: Hash>(t: &T) -> u64 {
         let mut hasher = FxHasher::default();
         t.hash(&mut hasher);
