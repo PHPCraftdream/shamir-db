@@ -2,3 +2,4 @@
 
 pub mod pull_bounds_tests;
 pub mod pull_cap_tests;
+pub mod wire_source_tests;

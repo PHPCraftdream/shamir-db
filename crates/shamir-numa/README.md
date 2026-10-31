@@ -44,8 +44,11 @@ defs.rcu(|cur| { let mut v = cur.clone(); /* mutate */ v });  // COW, all nodes
 
 ## Testing strategy (three tiers)
 
-1. **Tier 1 — DI-mock unit tests** run across the CI OS matrix.
+1. **Tier 1 — DI-mock unit tests** run across the CI OS matrix. They cover
+   portable topology behavior, including explicit replica-index fallback to
+   node 0 for out-of-range access.
 2. **Tier 2 — Linux integration** exercises `LinuxTopology` against real `/sys`.
+   Injected unit tests also cover Linux probe parser/error behavior.
 3. **Tier 3 — QEMU NUMA smoke** checks guest topology announcements, not Rust
    integration. Opt-in via `[numa-qemu]` in the commit message; implemented in
    `scripts/runners/ci-qemu-numa-test.sh`.

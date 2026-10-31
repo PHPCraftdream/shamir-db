@@ -101,7 +101,7 @@ pub(super) async fn history_of_many(
             Err(error) => {
                 log::warn!("batch timestamp lookup failed: {error}; retrying individually");
                 for &version in chunk {
-                    stamps.insert(version, mvcc.lookup_ts(version).await);
+                    stamps.insert(version, mvcc.try_lookup_ts(version).await?);
                 }
             }
         }

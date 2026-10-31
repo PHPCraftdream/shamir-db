@@ -66,7 +66,10 @@ impl core::fmt::Debug for BootstrapRequest {
     }
 }
 
-/// Server-side compatibility wrapper. Panics if the system clock is invalid.
+/// Server-side compatibility wrapper; prefer [`try_make_bootstrap_challenge`].
+///
+/// # Panics
+/// Panics if the system clock is invalid.
 pub fn make_bootstrap_challenge(
     server_keypair: &Ed25519Keypair,
     transport_kind: TransportKind,

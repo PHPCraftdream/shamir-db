@@ -1,10 +1,4 @@
-//! Transactional WAL entry format (V2).
-//!
-//! Coexists with the V1 [`super::wal_entry::WalEntry`] used by the
-//! non-transactional write path. V1 records only `record_id` and
-//! relies on the data_store as the source of truth for the actual
-//! bytes; that works only if data_store was successfully updated
-//! before the crash.
+//! Transactional WAL entry format (V2) — the only live WAL entry format.
 //!
 //! V2 carries **inline body** for every mutating op so MVCC recovery
 //! can replay uncommitted transactions after a crash where the

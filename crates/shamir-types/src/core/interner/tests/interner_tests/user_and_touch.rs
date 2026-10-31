@@ -2,6 +2,7 @@
 
 use super::basic::arc_str;
 use crate::core::interner::{Interner, InternerError, InternerKey, UserKey};
+use std::borrow::Borrow;
 
 #[test]
 fn test_user_key_from_str_and_display() {
@@ -25,7 +26,6 @@ fn test_user_key_as_ref() {
 
 #[test]
 fn test_user_key_borrow_str() {
-    use std::borrow::Borrow;
     let key = UserKey::from_str("borrowed");
     let b: &str = key.borrow();
     assert_eq!(b, "borrowed");

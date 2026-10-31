@@ -4,7 +4,7 @@
 
 use super::manifest::{integrity_bytes, integrity_key};
 use crate::kind::VectorMetric;
-use crate::meta_envelope::MetaEnvelope;
+use crate::meta_envelope::{MetaEnvelope, MetaError};
 use crate::vector::hnsw_adapter::HnswAdapter;
 use bytes::Bytes;
 use hnsw_rs::api::AnnT;
@@ -643,7 +643,6 @@ fn slice_into_chunk_ops(
 /// decode failure means the manifest/sidecar bytes themselves are corrupt
 /// (they carry no crc of their own, unlike the chunk bodies).
 pub(super) fn map_meta_err(e: crate::meta_envelope::MetaError) -> SnapshotError {
-    use crate::meta_envelope::MetaError;
     match e {
         MetaError::UnsupportedVersion(v) => {
             SnapshotError::VersionMismatch(format!("envelope version {v} unsupported"))

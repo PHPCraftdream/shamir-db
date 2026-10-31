@@ -34,6 +34,9 @@ pub(in crate::mvcc_store::tests) mod failing_store {
         pub fail_scan: AtomicBool,
         pub get_many_calls: AtomicUsize,
         pub fail_many: AtomicBool,
+        /// Keep failing timestamp reads armed until the caller clears this flag.
+        pub fail_timestamp_get: AtomicBool,
+        pub timestamp_get_calls: AtomicUsize,
         pub pause_scans: AtomicBool,
         pub scan_polls: Arc<AtomicUsize>,
     }
@@ -48,6 +51,8 @@ pub(in crate::mvcc_store::tests) mod failing_store {
                 fail_scan: AtomicBool::new(false),
                 get_many_calls: AtomicUsize::new(0),
                 fail_many: AtomicBool::new(false),
+                fail_timestamp_get: AtomicBool::new(false),
+                timestamp_get_calls: AtomicUsize::new(0),
                 pause_scans: AtomicBool::new(false),
                 scan_polls: Arc::new(AtomicUsize::new(0)),
             }
@@ -72,6 +77,13 @@ pub(in crate::mvcc_store::tests) mod failing_store {
         }
 
         async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+            if key.as_ref().first() == Some(&0x00)
+                && key.as_ref().len() == 9
+                && self.fail_timestamp_get.load(Ordering::Relaxed)
+            {
+                self.timestamp_get_calls.fetch_add(1, Ordering::Relaxed);
+                return Err(Self::injected_error());
+            }
             if self.fail_get.load(Ordering::Relaxed) {
                 return Err(Self::injected_error());
             }
@@ -85,6 +97,13 @@ pub(in crate::mvcc_store::tests) mod failing_store {
             }
             let mut values = Vec::with_capacity(keys.len());
             for key in keys {
+                if key.as_ref().first() == Some(&0x00)
+                    && key.as_ref().len() == 9
+                    && self.fail_timestamp_get.load(Ordering::Relaxed)
+                {
+                    self.timestamp_get_calls.fetch_add(1, Ordering::Relaxed);
+                    return Err(Self::injected_error());
+                }
                 match self.get(key).await {
                     Ok(value) => values.push(Some(value)),
                     Err(DbError::NotFound(_)) => values.push(None),

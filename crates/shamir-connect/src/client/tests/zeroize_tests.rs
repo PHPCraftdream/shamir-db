@@ -3,9 +3,45 @@
 
 use crate::client::bootstrap::build_request as build_bootstrap_request;
 use crate::client::changepw::build_request as build_changepw_request;
-use crate::common::kdf_params::KdfParams;
 use crate::common::types::{BindingMode, TransportKind};
 use crate::common::username::NormalizedUsername;
+use crate::common::KdfParams;
+
+#[test]
+fn rv_connect_f43eb41e_old_password_wiped_when_derivation_fails() {
+    let mut old_password = b"correct old password".to_vec();
+    let mut new_password = b"correct new password".to_vec();
+    let invalid_old_params = KdfParams {
+        memory_kb: 8,
+        time: 0,
+        parallelism: 1,
+        argon2_version: 0x13,
+    };
+    let result = build_changepw_request(
+        &NormalizedUsername::from_normalized_unchecked("alice".into()),
+        &[0x22; 32],
+        &[0x33; 32],
+        &[0x44; 32],
+        &[0x55; 16],
+        invalid_old_params,
+        TransportKind::Tcp,
+        BindingMode::None,
+        &[0x66; 32],
+        &mut old_password,
+        &mut new_password,
+        KdfParams::DEFAULT,
+    );
+    // The OLD params only reach Argon2id (the new-params recommendation is
+    // the one validated against client limits), which rejects time = 0.
+    assert!(matches!(
+        result,
+        Err(crate::common::error::Error::Crypto(
+            "argon2id: invalid params"
+        ))
+    ));
+    assert_wiped(&old_password, "old password after derivation error");
+    assert_wiped(&new_password, "new password after derivation error");
+}
 
 fn assert_wiped(buf: &[u8], what: &str) {
     assert!(

@@ -1,3 +1,4 @@
+use crate::common::error::EnvironmentError;
 use crate::common::time::UnixNanos;
 use crate::server::argon2_semaphore::Argon2Semaphore;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -102,4 +103,18 @@ fn many_concurrent_threads_respect_cap() {
         "at most `capacity` permits may be held at once; observed {}",
         max_observed.load(Ordering::Acquire)
     );
+}
+
+/// RV-CONNECT-387EAA05 (P2-10 second tranche): a failing clock must make
+/// `acquire_until` return `None` without panicking — fail closed, exactly
+/// like a timeout, so callers report `server_busy` instead of crashing.
+/// The pre-fix code called `UnixNanos::now()` (panicking wrapper) and the
+/// test panicked.
+#[test]
+fn rv_connect_387eaa05_acquire_until_failing_clock_returns_none_without_panic() {
+    let s = Argon2Semaphore::with_capacity(0);
+    let result = s.acquire_until_with_clock(u64::MAX, || Err(EnvironmentError::ClockBeforeEpoch));
+    assert!(result.is_none(), "failing clock must fail closed to None");
+    // The permit accounting must be untouched by the failed acquisition.
+    assert_eq!(s.available(), 0);
 }

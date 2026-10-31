@@ -507,3 +507,55 @@ fn rv_types_bb78489c_merge_prealloc_capped_by_remaining() {
     let set_map = new_map();
     assert!(merge_storage_bytes(&old, &set_map).is_err());
 }
+
+// -------------------------------------------------------------------------
+// RV-TYPES-E82C6BE1 — allocation oracle: replacement/new-entry payloads must
+// be serialized directly into the output buffer, not through intermediate
+// Vecs.
+// -------------------------------------------------------------------------
+
+#[test]
+fn rv_types_e82c6be1_merge_with_new_entries_has_bounded_allocations() {
+    // The measured path has an empty old map (so entries/old_ids need no
+    // backing storage). The iterator chain `iter().filter().collect()` does
+    // not expose an exact-size iterator, so Vec collection can grow; its
+    // source-derived geometric growth for 16 pairs needs at most 5 backing
+    // allocations. The output buffer reserves once, and `Bytes::from(Vec)`
+    // transfers that buffer. Budget <=7 allows those collection/output
+    // allocations while distinguishing the legacy per-entry payload
+    // temporaries (key and value Vecs for each NEW entry). This is a derived
+    // structural bound, not an empirically observed count.
+    let old = make_map(&[]);
+    let old_bytes = old.to_bytes().unwrap();
+    let make_set = |count: u64| {
+        let mut set_map: TMap<InternerKey, InnerValue> = new_map();
+        for id in 1..=count {
+            set_map.insert(InternerKey::new(id), InnerValue::Str(format!("value-{id}")));
+        }
+        set_map
+    };
+    let few = make_set(8);
+    let many = make_set(16);
+
+    let (few_allocs, few_merged) =
+        crate::testing_alloc::count_allocations(|| merge_storage_bytes(&old_bytes, &few));
+    let few_merged = few_merged.unwrap();
+    let (many_allocs, many_merged) =
+        crate::testing_alloc::count_allocations(|| merge_storage_bytes(&old_bytes, &many));
+    let many_merged = many_merged.unwrap();
+
+    // Byte parity is preserved for both measured batch sizes.
+    let few_want = merge_inner_maps_ref(&old, &few).to_bytes().unwrap();
+    assert_eq!(few_merged.as_ref(), few_want.as_ref());
+    let want = merge_inner_maps_ref(&old, &many).to_bytes().unwrap();
+    assert_eq!(many_merged.as_ref(), want.as_ref());
+    assert!(
+        many_allocs <= 7,
+        "16-entry merge exceeded source-derived allocation budget: {many_allocs}"
+    );
+    assert!(
+        many_allocs <= few_allocs + 2,
+        "allocations grew by {} from 8 to 16 new entries; direct serialization should add only bounded Vec growth",
+        many_allocs.saturating_sub(few_allocs)
+    );
+}

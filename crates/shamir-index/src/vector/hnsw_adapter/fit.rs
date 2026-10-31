@@ -5,6 +5,7 @@ use crate::vector::adapter::VectorError;
 use crate::vector::quantized_dist::ShamirDistU8;
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
+use scc::hash_map::Entry::{Occupied, Vacant};
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -89,7 +90,6 @@ impl HnswAdapter {
                 }
             }
             // Atomic check: only insert if absent
-            use scc::hash_map::Entry::{Occupied, Vacant};
             // DEADLOCK FIX (same class as #589 / `cells` map, commit
             // `7a4abf62`, and the H1+H2 fix commit `621776bd`):
             // `entry_sync`, NOT `entry_async`. The `rid_to_internal` map

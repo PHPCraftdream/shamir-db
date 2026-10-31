@@ -67,7 +67,9 @@ mod segment;
 pub mod segment_set;
 pub mod wal_group_commit;
 
-pub use entry::segment_meta;
+// Crate-internal namespace (RV-WAL-0843B96B): every item in the sidecar
+// metadata module is `pub(crate)`; it is not public API.
+pub(crate) use entry::segment_meta;
 pub use entry::wal_entry_v2;
 pub use segment::wal_segment;
 pub use segment::wal_sink;

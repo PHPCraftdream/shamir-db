@@ -13,7 +13,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct UnixNanos(pub u64);
 
 impl UnixNanos {
-    /// Legacy wrapper; panics when the clock is invalid or out of range.
+    /// Legacy wrapper; prefer [`UnixNanos::try_now`].
+    ///
+    /// # Panics
+    /// Panics when the clock is invalid or out of range.
     pub fn now() -> Self {
         Self::try_now().expect("system clock unavailable")
     }

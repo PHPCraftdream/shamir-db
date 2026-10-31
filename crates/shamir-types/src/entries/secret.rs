@@ -65,9 +65,29 @@ impl<'de> Deserialize<'de> for SecretString {
     }
 }
 
+#[cfg(all(test, feature = "crypto"))]
+thread_local! {
+    static WIPE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LAST_WIPED_LEN: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 #[cfg(feature = "crypto")]
 fn wipe(inner: &mut String) {
+    #[cfg(all(test, feature = "crypto"))]
+    WIPE_CALLS.with(|calls| calls.set(calls.get() + 1));
+    #[cfg(all(test, feature = "crypto"))]
+    LAST_WIPED_LEN.with(|len| len.set(Some(inner.len())));
     inner.zeroize();
+}
+
+#[cfg(all(test, feature = "crypto"))]
+pub(crate) fn wipe_calls() -> usize {
+    WIPE_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(all(test, feature = "crypto"))]
+pub(crate) fn last_wiped_len() -> Option<usize> {
+    LAST_WIPED_LEN.with(std::cell::Cell::get)
 }
 
 #[cfg(all(test, feature = "crypto"))]

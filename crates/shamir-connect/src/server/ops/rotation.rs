@@ -4,27 +4,19 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::common::crypto::Ed25519Keypair;
+use crate::common::crypto::{try_random_bytes, Ed25519Keypair};
 use crate::common::error::{Error, Result};
 use crate::common::rotation::{build_rotate_event_input, build_rotation_proof_input};
 use crate::common::time::ns;
+use zeroize::Zeroizing;
 
 /// Rotation overlap window — fixed 7 days per spec §12.2.
 pub const ROTATION_OVERLAP_NS: u64 = 7 * ns::DAY;
 
 /// Server identity state — current keypair plus optional previous
 /// (during the 7-day overlap).
-///
-/// **Optim #5:** `current_version` is mirrored to a `std::sync::atomic::AtomicU64`
-/// so `is_ticket_version_acceptable` (called per-resume) can read it
-/// lock-free with `Relaxed` ordering instead of acquiring the RwLock. Saves
-/// ~3 ns per resume.
 pub struct ServerIdentityState {
     inner: ArcSwap<ServerIdentityInner>,
-    /// Lock-free mirror of `inner.current_version`. Updated in [`Self::rotate`]
-    /// (under the same logical write as the ArcSwap store) so they stay
-    /// coherent for resume-path reads.
-    current_version_atomic: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone)]
@@ -42,6 +34,12 @@ struct ServerIdentityInner {
 
 impl ServerIdentityState {
     /// Construct from a freshly-generated keypair (`current_version = 0`).
+    ///
+    /// Legacy wrapper; prefer drawing the seed via [`Ed25519Keypair::try_generate`]
+    /// and [`Self::from_material`].
+    ///
+    /// # Panics
+    /// Panics on OS entropy failure.
     pub fn fresh() -> Self {
         Self {
             inner: ArcSwap::from_pointee(ServerIdentityInner {
@@ -50,7 +48,6 @@ impl ServerIdentityState {
                 rotation_until_ns: None,
                 current_version: 0,
             }),
-            current_version_atomic: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -71,16 +68,13 @@ impl ServerIdentityState {
                 rotation_until_ns,
                 current_version,
             }),
-            current_version_atomic: std::sync::atomic::AtomicU64::new(current_version),
         }
     }
 
     /// Current identity-key version.
     ///
-    /// Optim #5: lock-free atomic read.
     pub fn current_version(&self) -> u64 {
-        self.current_version_atomic
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.inner.load().current_version
     }
 
     /// Whether a ticket carrying `ticket_identity_key_version` is acceptable
@@ -95,13 +89,9 @@ impl ServerIdentityState {
     ///   so orphan clients are forced into full re-auth and thus pick up the
     ///   `rotation_in_progress` payload (spec §6.5 / diagram 05 Part B).
     ///
-    /// Optim #5: lock-free atomic read on the resume hot path.
     #[inline]
     pub fn is_ticket_version_acceptable(&self, ticket_version: u64) -> bool {
-        ticket_version
-            == self
-                .current_version_atomic
-                .load(std::sync::atomic::Ordering::Relaxed)
+        ticket_version == self.inner.load().current_version
     }
 
     /// Current public key.
@@ -153,16 +143,29 @@ impl ServerIdentityState {
     ///   the freshest snapshot whenever another writer wins. Whether the
     ///   call was rejected is derived from the outcome after `rcu`, so no
     ///   per-attempt out-flag can leak a stale `rejected` state into a
-    ///   retried winning attempt. The version mirror is published only after
-    ///   a transition that actually won, via [`Self::publish_version`],
-    ///   which updates it monotonically (`fetch_max`): an older rotation
-    ///   finishing last can never regress the mirror below the newest
-    ///   published version.
+    ///   retried winning attempt. Ticket acceptance reads the committed snapshot
+    ///   directly, so the key and version publish as one authoritative state.
+    ///
+    /// Entropy (P2-10 second tranche, RV-CONNECT-387EAA05): the candidate
+    /// seed is drawn ONCE, before the `rcu`, through the fallible
+    /// [`try_random_bytes`] path into a zeroizing buffer; on failure the call returns
+    /// [`Error::Environment`] with keys, `rotation_until_ns` and the version
+    /// counter unchanged — no partial publication.
+    ///
+    /// Known remaining panicking-clock/entropy call sites (documented,
+    /// compat-additive limitation): `persist_snapshot` paths run inside the
+    /// scheduler's `safe_run` wrapper, and `default_node_id` is a boot-time
+    /// fail-fast; both are outside this fallible path.
     pub fn rotate(&self, now_ns: u64) -> Result<RotationOutcome> {
         // No per-attempt out-flag: whether the call was rejected is derived
         // from `outcome` after `rcu`, so a retry that wins can never be
         // mistaken for a rejection (the old `rejected` flag was never reset
         // on a successful retry).
+        // RV-CONNECT-387EAA05: draw the candidate seed ONCE, before the rcu,
+        // through the fallible path. On entropy failure we return before any
+        // state mutation — keys, rotation_until_ns and version all stay put.
+        let mut candidate_seed = Zeroizing::new([0u8; 32]);
+        try_random_bytes(candidate_seed.as_mut())?;
         let mut outcome: Option<RotationOutcome> = None;
         self.inner.rcu(|current: &Arc<ServerIdentityInner>| {
             // Per-attempt state: a retry that ends in rejection must not keep
@@ -174,7 +177,7 @@ impl ServerIdentityState {
                 }
             }
             let old_pub = current.current.public_bytes();
-            let new_keypair = Ed25519Keypair::generate();
+            let new_keypair = Ed25519Keypair::from_seed(&candidate_seed);
             let new_pub = new_keypair.public_bytes();
             let transition_until_ns = now_ns.saturating_add(ROTATION_OVERLAP_NS);
             let new_version = current.current_version.saturating_add(1);
@@ -194,23 +197,7 @@ impl ServerIdentityState {
         if outcome.is_none() {
             return Err(Error::InvalidInput("rotation_in_progress_already"));
         }
-        // Keep atomic mirror in sync so `is_ticket_version_acceptable` sees
-        // the updated version without loading the Arc. Published after the
-        // rcu swap via `publish_version`, which updates the mirror
-        // monotonically: an older rotation finishing last cannot regress it.
-        let outcome = outcome.expect("rcu runs the closure at least once");
-        self.publish_version(outcome.new_version);
-        Ok(outcome)
-    }
-
-    /// Publish `v` to the lock-free version mirror (RV-CONNECT-F8A5E821).
-    ///
-    /// Monotonic by construction: `fetch_max(Release)` guarantees the mirror
-    /// never regresses even when an older rotation's publication lands after
-    /// a newer one (versions only grow).
-    pub(crate) fn publish_version(&self, v: u64) {
-        self.current_version_atomic
-            .fetch_max(v, std::sync::atomic::Ordering::Release);
+        Ok(outcome.expect("checked above"))
     }
 
     /// Background task: when `now_ns >= rotation_until_ns`, zeroize previous

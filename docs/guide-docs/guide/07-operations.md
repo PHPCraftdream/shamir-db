@@ -39,7 +39,8 @@ SCM Stop (Windows), `systemctl stop` (systemd). Drain-логика одинак�
 ### Foreground
 
 ```bash
-shamir-server --config /etc/shamir/server.ktav --bootstrap-password "admin-pass"
+PW='admin-pass'
+printf '%s\n' "$PW" | shamir-server --config /etc/shamir/server.ktav --bootstrap-password-stdin
 ```
 
 Остановка: `Ctrl+C` (везде) или `SIGTERM` (unix). Процесс доливает все

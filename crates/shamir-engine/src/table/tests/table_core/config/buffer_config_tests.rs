@@ -350,3 +350,149 @@ async fn load_fails_closed_on_pre_envelope_raw_bincode_blob() {
         "expected a coded Codec error on a pre-envelope raw blob, got {err:?}"
     );
 }
+
+// ---- Golden pins: MetaEnvelope v1 bytes of MemBufferConfig (CCF2090E) ----
+
+const GOLDEN_WRITTEN_AT_NANOS: u64 = 1_700_000_000_000_000_000;
+
+fn golden_cfg_ttl_some() -> MemBufferConfig {
+    MemBufferConfig {
+        max_bytes: 2 * 1024 * 1024,
+        max_entries: 250,
+        ttl_ms: Some(7_000),
+        flush_interval_ms: 333,
+        flush_batch_size: 48,
+    }
+}
+
+fn golden_cfg_ttl_none() -> MemBufferConfig {
+    MemBufferConfig {
+        max_bytes: 2 * 1024 * 1024,
+        max_entries: 250,
+        ttl_ms: None,
+        flush_interval_ms: 333,
+        flush_batch_size: 48,
+    }
+}
+
+/// Hand-written golden bytes for `MetaEnvelope` v1 with
+/// `golden_cfg_ttl_some()`, derived by hand from the bincode 1.3.3
+/// legacy layout (fixint little-endian, `usize` as `u64`, Option as
+/// a one-byte tag: 1 = Some + `u64` value, 0 = None) — NOT from
+/// encoder output.
+///
+/// Layout: magic `"SDB2"` (4) | version `u16` LE = 1 |
+/// `written_at_nanos` `u64` LE | payload:
+/// `max_bytes` `u64` LE | `max_entries` `u64` LE |
+/// `ttl_ms` Option tag `u8` (1 = Some + `u64` value, 0 = None) |
+/// `flush_interval_ms` `u64` LE | `flush_batch_size` `u64` LE.
+///
+/// Schema-change policy: the payload is positional bincode inside
+/// `MetaEnvelope` v1. Adding, removing, reordering or retyping a field
+/// is a format break that must ship with either a versioned decode
+/// path or explicit fail-closed rejection; this golden literal changes
+/// only together with that decision.
+const GOLDEN_V1_TTL_SOME: [u8; 55] = [
+    0x53, 0x44, 0x42, 0x32, 0x01, 0x00, 0x00, 0x00, 0x2A, 0x36, 0xFE, 0x9C, 0x97, 0x17, 0x00, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x58,
+    0x1B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4D, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// Hand-written golden bytes for `MetaEnvelope` v1 with
+/// `golden_cfg_ttl_none()`, derived by hand from the bincode 1.3.3
+/// legacy layout (fixint little-endian, `usize` as `u64`, Option as
+/// a one-byte tag: 1 = Some + `u64` value, 0 = None) — NOT from
+/// encoder output.
+///
+/// Layout: magic `"SDB2"` (4) | version `u16` LE = 1 |
+/// `written_at_nanos` `u64` LE | payload:
+/// `max_bytes` `u64` LE | `max_entries` `u64` LE |
+/// `ttl_ms` Option tag `u8` (1 = Some + `u64` value, 0 = None) |
+/// `flush_interval_ms` `u64` LE | `flush_batch_size` `u64` LE.
+///
+/// Schema-change policy: the payload is positional bincode inside
+/// `MetaEnvelope` v1. Adding, removing, reordering or retyping a field
+/// is a format break that must ship with either a versioned decode
+/// path or explicit fail-closed rejection; this golden literal changes
+/// only together with that decision.
+const GOLDEN_V1_TTL_NONE: [u8; 47] = [
+    0x53, 0x44, 0x42, 0x32, 0x01, 0x00, 0x00, 0x00, 0x2A, 0x36, 0xFE, 0x9C, 0x97, 0x17, 0x00, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFA, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x4D,
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[test]
+fn golden_envelope_v1_encode_ttl_some() {
+    let env = crate::meta::MetaEnvelope {
+        magic: crate::meta::ENVELOPE_MAGIC,
+        version: 1,
+        written_at_nanos: GOLDEN_WRITTEN_AT_NANOS,
+        payload: golden_cfg_ttl_some(),
+    };
+    assert_eq!(
+        env.encode().unwrap().as_slice(),
+        &GOLDEN_V1_TTL_SOME[..],
+        "encoded MetaEnvelope v1 bytes drifted from the pinned golden literal"
+    );
+}
+
+#[test]
+fn golden_envelope_v1_encode_ttl_none() {
+    let env = crate::meta::MetaEnvelope {
+        magic: crate::meta::ENVELOPE_MAGIC,
+        version: 1,
+        written_at_nanos: GOLDEN_WRITTEN_AT_NANOS,
+        payload: golden_cfg_ttl_none(),
+    };
+    assert_eq!(
+        env.encode().unwrap().as_slice(),
+        &GOLDEN_V1_TTL_NONE[..],
+        "encoded MetaEnvelope v1 bytes drifted from the pinned golden literal"
+    );
+}
+
+#[test]
+fn golden_envelope_v1_open_decodes_golden_bytes() {
+    let some = crate::meta::MetaEnvelope::<MemBufferConfig>::open(&GOLDEN_V1_TTL_SOME).unwrap();
+    let want_some = golden_cfg_ttl_some();
+    assert_eq!(some.max_bytes, want_some.max_bytes);
+    assert_eq!(some.max_entries, want_some.max_entries);
+    assert_eq!(some.ttl_ms, want_some.ttl_ms);
+    assert_eq!(some.flush_interval_ms, want_some.flush_interval_ms);
+    assert_eq!(some.flush_batch_size, want_some.flush_batch_size);
+
+    let none = crate::meta::MetaEnvelope::<MemBufferConfig>::open(&GOLDEN_V1_TTL_NONE).unwrap();
+    let want_none = golden_cfg_ttl_none();
+    assert_eq!(none.max_bytes, want_none.max_bytes);
+    assert_eq!(none.max_entries, want_none.max_entries);
+    assert_eq!(none.ttl_ms, want_none.ttl_ms);
+    assert_eq!(none.flush_interval_ms, want_none.flush_interval_ms);
+    assert_eq!(none.flush_batch_size, want_none.flush_batch_size);
+}
+
+#[tokio::test]
+async fn golden_v1_bytes_load_through_buffer_config() {
+    let cases: &[(&[u8], MemBufferConfig)] = &[
+        (&GOLDEN_V1_TTL_SOME, golden_cfg_ttl_some()),
+        (&GOLDEN_V1_TTL_NONE, golden_cfg_ttl_none()),
+    ];
+    for (literal, expected) in cases {
+        let repo = InMemoryRepo::new();
+        let info_store: Arc<dyn Store> = repo.store_get("info").await.unwrap();
+        info_store
+            .set(
+                raw_buffer_config_key(),
+                bytes::Bytes::from(literal.to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let loaded = load(&info_store).await.unwrap().unwrap();
+        assert_eq!(loaded.max_bytes, expected.max_bytes);
+        assert_eq!(loaded.max_entries, expected.max_entries);
+        assert_eq!(loaded.ttl_ms, expected.ttl_ms);
+        assert_eq!(loaded.flush_interval_ms, expected.flush_interval_ms);
+        assert_eq!(loaded.flush_batch_size, expected.flush_batch_size);
+    }
+}

@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use shamir_connect::common::error::EnvironmentError;
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::admin::UserDirectory as _;
@@ -15,6 +16,18 @@ use shamir_db::{PortError, PrincipalInfo, PrincipalResolver, UserAdminPort};
 
 use crate::db_handler::derive_scram_record;
 use crate::user_directory::FjallUserDirectory;
+
+/// Clock read for the user-admin port (RV-CONNECT-387EAA05): a clock
+/// failure maps to `PortError::other` — the timestamp is never fabricated.
+pub(crate) fn now_ns_for_port() -> Result<u64, PortError> {
+    map_clock_to_port(UnixNanos::try_now().map(UnixNanos::as_u64))
+}
+
+/// Clock-injected core (private to tests via `pub(crate)`): maps a clock
+/// result to the port error domain.
+pub(crate) fn map_clock_to_port(clock: Result<u64, EnvironmentError>) -> Result<u64, PortError> {
+    clock.map_err(|error| PortError::other(error.to_string()))
+}
 
 /// Thin adapter wrapping a shared [`FjallUserDirectory`] handle. Carries the
 /// KDF params used for new-user Argon2id derivation (mirrors `AdminGlue`'s
@@ -119,7 +132,7 @@ impl UserAdminPort for DirectoryPorts {
     }
 
     async fn grant_role(&self, user: &str, role: &str) -> Result<(), PortError> {
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = now_ns_for_port()?;
         self.dir
             .grant_role(user, role, now_ns)
             .map(|_| ())
@@ -132,7 +145,7 @@ impl UserAdminPort for DirectoryPorts {
     }
 
     async fn revoke_role(&self, user: &str, role: &str) -> Result<(), PortError> {
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = now_ns_for_port()?;
         self.dir
             .revoke_role(user, role, now_ns)
             .map(|_| ())
@@ -145,7 +158,7 @@ impl UserAdminPort for DirectoryPorts {
     }
 
     async fn set_superuser(&self, user: &str, on: bool) -> Result<(), PortError> {
-        let now_ns = UnixNanos::now().as_u64();
+        let now_ns = now_ns_for_port()?;
         self.dir
             .set_superuser(user, on, now_ns)
             .map(|_| ())

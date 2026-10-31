@@ -4,6 +4,7 @@ use crate::descriptor::IndexDescriptor;
 use crate::fts_backend::FtsBackend;
 use crate::fts_ranked_backend::{ranked_top_k, FtsRankedBackend};
 use crate::kind::{IndexKind, TokenizerKind};
+use crate::tests::support::log_sink::capture_session;
 use crate::tokenizer::token_hash;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
@@ -95,6 +96,8 @@ async fn rv_index_605eec5d_golden_fts_posting() {
 
 #[tokio::test]
 async fn rv_index_9733f1f3_corrupt_posting_rejected_empty_legacy_accepted() {
+    let (_guard, logs) = capture_session().await;
+    logs.clear();
     let i = Interner::new();
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let backend = make_backend(&i, Arc::clone(&store));
@@ -120,7 +123,10 @@ async fn rv_index_9733f1f3_corrupt_posting_rejected_empty_legacy_accepted() {
         .await
         .unwrap();
     assert!(backend.lookup(query()).await.is_err());
+    assert!(logs.contains("corrupt FTS posting for index 20"));
     store.set(key.into(), Bytes::new()).await.unwrap();
+    backend.lookup(query()).await.unwrap();
+    assert!(logs.contains("empty legacy FTS posting for index 20"));
     assert!(
         matches!(backend.lookup(query()).await.unwrap(), IndexResult::Ranked(rows) if rows.len() == 1)
     );
@@ -311,6 +317,8 @@ async fn longer_doc_gets_lower_score() {
 #[tokio::test]
 async fn rebuild_restores_stats_from_data_store() {
     let i = Interner::new();
+    let (_guard, logs) = capture_session().await;
+    logs.clear();
     // Separate stores: data_store holds records, info_store holds postings.
     let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let info_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -348,9 +356,22 @@ async fn rebuild_restores_stats_from_data_store() {
 
     assert_eq!(fts.stats.doc_count(), 0);
 
+    let malformed_rid = RecordId::new();
+    // 0xc1 is the MessagePack "never used" byte; prove the row genuinely
+    // fails storage decode before inserting it (a positive-fixint-looking
+    // payload like b"malformed row" would decode as the integer 0x6d).
+    assert!(InnerValue::from_bytes([0xc1_u8]).is_err());
+    data_store
+        .set(
+            malformed_rid.to_bytes().into(),
+            Bytes::from_static(&[0xc1_u8]),
+        )
+        .await
+        .unwrap();
+
     // Rebuild from data_store.
     fts.rebuild(Arc::clone(&data_store)).await.unwrap();
-
+    assert!(logs.contains("skipping malformed FTS rebuild row for index 20"));
     // Stats must be restored.
     assert_eq!(
         fts.stats.snapshot(),

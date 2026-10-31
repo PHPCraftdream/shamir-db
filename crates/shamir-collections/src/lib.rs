@@ -10,6 +10,11 @@
 //! `shift_remove` preserves order but is O(N)); serde duplicate keys keep the
 //! first position with the last value winning (see `TMap` docs).
 
+// Sanctioned (L4-RV-COLLECTIONS-201D84D3-FACET): this crate IS the
+// workspace's collection facade — it deliberately defines the `TMap`/`TSet`
+// aliases over `IndexMap`/`IndexSet` and exposes std-compatible shims, so
+// the `disallowed_types` lint is disabled here at the definition site.
+// Every consumer crate keeps the lint and is routed through these aliases.
 #![allow(clippy::disallowed_types)]
 
 use indexmap::{IndexMap, IndexSet};

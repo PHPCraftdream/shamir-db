@@ -72,6 +72,15 @@ impl RepoAdminObserver for RepoAuditObserver {
         details.insert("repo".into(), QueryValue::Str(repo.to_owned()));
         details.insert("durability".into(), QueryValue::Map(policy));
         if let Ok(bytes) = rmp_serde::to_vec_named(&QueryValue::Map(details)) {
+            // RV-CONNECT-387EAA05: never fabricate a timestamp; on clock
+            // failure log an error and skip this append (fail closed).
+            let now_ns = match UnixNanos::try_now() {
+                Ok(now) => now.as_u64(),
+                Err(error) => {
+                    tracing::error!(%error, "audit append skipped: clock unavailable");
+                    return;
+                }
+            };
             if let Err(error) = self.audit.append(
                 "alter_repo",
                 self.transport,
@@ -80,7 +89,7 @@ impl RepoAdminObserver for RepoAuditObserver {
                 self.session_prefix,
                 "ok",
                 bytes,
-                UnixNanos::now().as_u64(),
+                now_ns,
             ) {
                 tracing::error!(%error, "audit append rejected repository event");
             }

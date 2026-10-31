@@ -76,7 +76,7 @@ Only what the design decider could not decide on technical merit. Until an answe
 2. **RV-CLIENT-B80C0D09** (P34-05). std::sync::Mutex on the client push-routing state fits none of the three sanctioned exceptions of CLAUDE.md. (A) add a fourth exception "per-connection client demux state" (recommended); (B) rewrite on scc (medium, risks the close-vs-subscribe invariants). Until answered: no change.
 3. **RV-INDEX-CF86432E** (P34-07). Legacy inline External vector API keys are rewritten in cleartext on every index-metadata save and nothing consumes them. (A) scrub on load/save with a warning, irreversible (recommended); (B) keep until secret references exist; (C) build secret references now (no consumer). Until answered: keep (B).
 
-Also open for the owner, found by P34-12 design: any incompatible persisted-format change of index identity v2.
+Found by the P34-12 design and decided by the design decider on its recommendations (not owner questions any more): accept the S3 refusal of FTS/functional tables by older binaries, `blake3` (pure) as a direct dependency of shamir-index, automatic blocking open-time rebuild. See `P34-12-index-identity-v2-design.md`, section "Owner decisions".
 
 ## Decisions made by the design decider (2026-10-30)
 

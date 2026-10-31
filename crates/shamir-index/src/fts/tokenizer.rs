@@ -19,6 +19,8 @@ use crate::fts::ngram_budget;
 use crate::kind::StemLanguage;
 
 pub trait Tokenizer: Send + Sync {
+    /// The output may be unbounded: use only to clean up already-admitted values.
+    /// New values and queries must use `try_tokenize`.
     fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>>;
 }
 
@@ -46,6 +48,21 @@ impl TokenizerEnum {
         }
     }
 
+    pub(crate) fn for_each_token_hash(&self, text: &str, mut visitor: impl FnMut(u64)) {
+        match self {
+            Self::Ngram(tokenizer) => {
+                ngram_budget::visit(text, tokenizer.n, |token| visitor(token_hash(token)));
+            }
+            _ => {
+                for token in self.tokenize(text) {
+                    visitor(token_hash(&token));
+                }
+            }
+        }
+    }
+
+    /// The output may be unbounded: use only to clean up already-admitted values.
+    /// New values and queries must use `try_tokenize`.
     #[inline]
     pub fn tokenize<'a>(&self, text: &'a str) -> Vec<Cow<'a, str>> {
         match self {

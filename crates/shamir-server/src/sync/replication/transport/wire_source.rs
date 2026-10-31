@@ -10,23 +10,21 @@
 //! backoff machinery handles retries. A regressed epoch is detected by the
 //! loop (not here) via the `leader_epoch` carried on every reply variant.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use shamir_client::Client;
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse, REPL_CAP_IDENTITY_FENCE};
-use tokio::sync::Mutex;
 
 use super::source::{hello_request, ReplSource};
 use crate::replication::error::ReplError;
 
-/// Wire-side [`ReplSource`]: wraps a connected [`shamir_client::Client`].
-///
-/// The client is wrapped in a `Mutex` because `shamir_client::Client::repl`
-/// takes `&self` but the underlying write path serialises requests internally
-/// — we keep the mutex so the loop's backoff-sleep cannot interleave with a
-/// racing re-sender in a future variant. Today the loop is single-tasked, so
-/// the mutex is uncontended (lock-free fast path).
+/// [`ReplSource`] backed by one authenticated `Client`. The client internally
+/// serializes individual writes; no source-level lock is held during a long
+/// poll, so the pull targets of one subscription share this source and their
+/// long polls overlap.
 pub struct WireReplSource {
-    client: Mutex<Client>,
+    client: Arc<Client>,
 }
 
 impl WireReplSource {
@@ -34,7 +32,7 @@ impl WireReplSource {
     /// `replicator`-role user or superuser).
     pub fn new(client: Client) -> Self {
         Self {
-            client: Mutex::new(client),
+            client: Arc::new(client),
         }
     }
 }
@@ -42,8 +40,7 @@ impl WireReplSource {
 #[async_trait]
 impl ReplSource for WireReplSource {
     async fn hello(&self, node_id: &str) -> Result<ReplResponse, ReplError> {
-        let client = self.client.lock().await;
-        client
+        self.client
             .repl(hello_request(node_id))
             .await
             .map_err(|e| ReplError::Transport(e.to_string()))
@@ -68,8 +65,7 @@ impl ReplSource for WireReplSource {
             // (a `completed_reseed` leader re-checks it on every pull).
             capabilities: Some(vec![REPL_CAP_IDENTITY_FENCE.to_string()]),
         };
-        let client = self.client.lock().await;
-        client
+        self.client
             .repl(req)
             .await
             .map_err(|e| ReplError::Transport(e.to_string()))

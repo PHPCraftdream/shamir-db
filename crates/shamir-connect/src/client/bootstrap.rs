@@ -24,7 +24,10 @@ use zeroize::Zeroizing;
 /// Per spec §11.3.4 (d).
 pub const BOOTSTRAP_CLOCK_SKEW_NS: u64 = 60 * ns::SECOND;
 
-/// Legacy wrapper; panics on OS entropy failure.
+/// Legacy wrapper; prefer [`try_build_hello`].
+///
+/// # Panics
+/// Panics on OS entropy failure.
 pub fn build_hello() -> BootstrapHello {
     try_build_hello().expect("OS RNG failure")
 }

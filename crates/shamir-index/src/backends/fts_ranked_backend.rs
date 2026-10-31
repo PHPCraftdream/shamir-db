@@ -137,12 +137,12 @@ impl FtsRankedBackend {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
             Some(text) => {
-                let tokens = self.tokenizer.tokenize(text);
-                let doc_len = tokens.len() as u32;
                 let mut freq: TFxMap<u64, u32> = TFxMap::default();
-                for t in tokens {
-                    *freq.entry(token_hash(&t)).or_insert(0) += 1;
-                }
+                let mut doc_len = 0_u32;
+                self.tokenizer.for_each_token_hash(text, |hash| {
+                    doc_len = doc_len.wrapping_add(1);
+                    *freq.entry(hash).or_insert(0) += 1;
+                });
                 (freq, doc_len)
             }
             None => (TFxMap::default(), 0),

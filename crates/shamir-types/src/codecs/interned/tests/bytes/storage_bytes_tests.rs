@@ -19,7 +19,7 @@ use crate::codecs::interned::messagepack::{
 use crate::codecs::interned::query_value_to_inner_with;
 use crate::core::interner::InternerKey;
 use crate::types::common::{new_map, new_set};
-use crate::types::value::{QueryValue, Value};
+use crate::types::value::{InnerValue, QueryValue, Value};
 use bytes::Bytes;
 use num_bigint::BigInt;
 use rust_decimal::Decimal;
@@ -435,8 +435,6 @@ fn scratch_buffer_byte_identical_100_rows() {
 
 #[test]
 fn scratch_buffer_roundtrip_diverse_types() {
-    use crate::types::value::InnerValue;
-
     let intern_fn = make_first_seen_interner();
 
     // A batch of diverse-type values.

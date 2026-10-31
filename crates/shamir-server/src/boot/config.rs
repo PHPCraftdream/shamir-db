@@ -62,7 +62,7 @@
 // Wave-1 deliverable. Consumed by `connection.rs` (listener spawn) and
 // `main.rs` (boot path).
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -886,7 +886,9 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
     }
 
     // 4. Plain profile: loopback only.
-    if l.profile == ProfileKind::Plain && !is_loopback_ip(addr.ip()) {
+    if l.profile == ProfileKind::Plain
+        && !shamir_transport_tcp::listener::ListenerProfile::Plain.allows(&addr)
+    {
         return Err(ConfigError::Validation(format!(
             "listeners[{idx}] profile=plain requires a loopback address (127.0.0.0/8, ::1, or IPv4-mapped 127.0.0.0/8); got {}",
             addr
@@ -939,13 +941,4 @@ fn validate_kdf(kdf: &KdfConfig) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Loopback predicate.
-fn is_loopback_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => v4.is_loopback(),
-        IpAddr::V6(v6) if let Some(v4) = v6.to_ipv4_mapped() => v4.is_loopback(),
-        IpAddr::V6(v6) => v6.is_loopback(),
-    }
 }

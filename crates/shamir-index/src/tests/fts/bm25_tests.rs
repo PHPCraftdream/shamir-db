@@ -1,4 +1,5 @@
 use crate::bm25::{idf, term_score, Bm25Params, FtsPostingValue, FtsStats, FtsStatsSnapshot};
+use crate::tests::support::log_sink::capture_session_blocking;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -68,9 +69,12 @@ fn stats_empty_returns_1() {
 }
 
 #[test]
-fn rv_index_cf7d545b_delete_from_zero_does_not_underflow() {
+fn rv_index_cf7d545b_delete_from_zero_logs_rejection() {
+    let (_guard, sink) = capture_session_blocking();
+    sink.clear();
     let stats = FtsStats::new();
     stats.on_delete(5);
+    assert!(sink.contains("rejected FTS statistics update"));
     assert_eq!(stats.snapshot(), FtsStatsSnapshot::default());
 }
 

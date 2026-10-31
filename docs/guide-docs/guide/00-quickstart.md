@@ -12,7 +12,8 @@
 
 ```bash
 cargo build --release -p shamir-server
-./target/release/shamir-server --config db.ktav --bootstrap-password "change-me-admin"
+PW='change-me-admin'
+printf '%s\n' "$PW" | ./target/release/shamir-server --config db.ktav --bootstrap-password-stdin
 ```
 
 * Сервер сам создаёт при первом старте: data-каталог, self-signed TLS-серт,

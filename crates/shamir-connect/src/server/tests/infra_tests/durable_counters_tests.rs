@@ -3,6 +3,7 @@ mod inner {
     use crate::common::time::{ns, UnixNanos};
     use crate::server::durable_counters::{FaultPoint, FjallConsumedCounters};
     use crate::server::resume::{AdvanceOutcome, ConsumedCounterStore};
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn fresh_store() -> (TempDir, FjallConsumedCounters) {
@@ -12,6 +13,37 @@ mod inner {
         (dir, store)
     }
 
+    #[test]
+    fn rv_connect_f43eb41e_counter_replay_rejected_after_abrupt_child_exit() {
+        if let Some(path) = std::env::var_os("RV_COUNTER_CHILD_DB") {
+            let store = FjallConsumedCounters::open(path).unwrap();
+            assert_eq!(
+                store.try_advance(&[0xA1; 16], &[0xB2; 16], 7),
+                AdvanceOutcome::Accepted
+            );
+            std::process::abort();
+        }
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("abrupt-counters");
+        let status = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("server::tests::infra_tests::durable_counters_tests::inner::rv_connect_f43eb41e_counter_replay_rejected_after_abrupt_child_exit")
+            .arg("--nocapture")
+            .env("RV_COUNTER_CHILD_DB", &path)
+            .status()
+            .expect("spawn abrupt-exit oracle child");
+        assert!(
+            !status.success(),
+            "child must terminate abruptly after durable acceptance"
+        );
+        let reopened = FjallConsumedCounters::open(&path).unwrap();
+        assert_eq!(reopened.peek(&[0xA1; 16], &[0xB2; 16]), Some(7));
+        assert_eq!(
+            reopened.try_advance(&[0xA1; 16], &[0xB2; 16], 7),
+            AdvanceOutcome::Replayed
+        );
+    }
     #[test]
     fn first_advance_accepts() {
         let (_dir, s) = fresh_store();

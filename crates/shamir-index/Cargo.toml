@@ -7,6 +7,8 @@ description = "ShamirDB index system — FTS / Functional / Vector backends."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+# P34-12 (OQ-2): BLAKE3 posting digest for identity v2 (same version as shamir-funclib).
+blake3 = { version = "1.5", features = ["pure"] }
 # F-1103 (#1103): concurrency model checker for the `ReaderDrainGate` primitive.
 # A regular dependency that ONLY the `loom` feature turns on, so normal builds
 # and tests do not compile loom (nor its `generator` helper, which builds

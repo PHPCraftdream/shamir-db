@@ -22,12 +22,12 @@ use crate::core::topology::Topology;
 /// The write path is **copy-on-write across every replica**. [`rcu`](Self::rcu)
 /// linearises the update on the node-0 cell with a CAS retry loop — the exact
 /// lost-update-safe shape proven in the #292 / #304 `ArcSwap` migrations — then
-/// mirrors the winning value to the remaining nodes. Between the node-0 commit
-/// and the last mirror store (a few nanoseconds) different nodes may observe
-/// old-vs-new: **eventual consistency**. Each mirror store re-reads node 0
-/// and only completes while node 0 still holds the stored value, so a
-/// publisher whose node-0 commit was superseded cannot leave an older value
-/// behind. This is sound for read-mostly
+/// mirrors the winning value to the remaining nodes. During the mirror
+/// sequence, different nodes may observe old-vs-new for a scheduling- and
+/// contention-dependent interval with no fixed time bound: **eventual
+/// consistency**. Each mirror store re-reads node 0 and only completes while
+/// node 0 still holds the stored value, so a publisher whose node-0 commit was
+/// superseded cannot leave an older value behind. This is sound for read-mostly
 /// registries (index definitions, validator bindings, interner snapshots);
 /// data needing strong cross-node consistency must coordinate separately and is
 /// out of scope here.

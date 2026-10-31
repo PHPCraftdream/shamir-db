@@ -16,6 +16,9 @@ pub mod core;
 mod entries;
 pub mod macros;
 pub mod record_view;
+#[cfg(test)]
+#[path = "types/tests/allocation_counter.rs"]
+mod testing_alloc;
 pub mod types;
 
 pub use entries::{access, secret, time};

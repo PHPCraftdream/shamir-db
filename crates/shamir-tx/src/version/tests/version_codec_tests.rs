@@ -50,25 +50,16 @@ fn missing_separator_decodes_to_none() {
     assert!(decode_version_key(&bad).is_none());
 }
 
-// Property tests for the MVCC version codec.
-//
-// Generated keys exclude the separator byte `0xFF` so that the
-// invariant documented at the top of this module (key must not
-// end in `0xFF` + 8 bytes that look like a version) is upheld
-// by construction. Real callers either use random 16-byte
-// `RecordId`s or typed `SysKey` encodings — neither produces
-// a `0xFF` byte in the trailing position by accident.
+// Property tests cover every byte value: VERSION_SEP is a delimiter at the
+// grammar boundary, not a forbidden byte within the arbitrary key prefix.
 
-/// Arbitrary key that respects the codec invariant: no `0xFF`
-/// anywhere. Length 0..=32 covers the empty-key edge case the
-/// existing unit tests already pin.
+/// Arbitrary key bytes, including the separator byte; lengths include empty.
 fn key_strategy() -> impl Strategy<Value = Vec<u8>> {
-    prop::collection::vec(0u8..=0xFEu8, 0..=32)
+    prop::collection::vec(any::<u8>(), 0..=32)
 }
 
 proptest! {
-    /// `decode . encode == identity` for any (key, version) where
-    /// `key` upholds the codec invariant.
+    /// `decode . encode == identity` for any key byte sequence, including 0xFF.
     #[test]
     fn prop_round_trip(key in key_strategy(), version in any::<u64>()) {
         let enc = encode_version_key(&key, version);
@@ -107,19 +98,12 @@ proptest! {
         prop_assert!(e1 < e2);
     }
 
-    /// Key prefix dominates the version suffix: any two distinct
-    /// keys of the same length never interleave in the encoded
-    /// space, regardless of version.  The same-length constraint
-    /// reflects reality — MVCC keys are fixed-size `RecordId`s
-    /// (16 bytes) or typed `SysKey` encodings.  Different-length
-    /// keys can violate lex order when the `0xFF` separator in
-    /// the shorter key sorts above the next byte of the longer
-    /// key (e.g. `encode([], u64::MAX)` > `encode([0x00], 0)`).
+    /// Prefix-order property for distinct equal-length arbitrary keys.
     #[test]
     fn prop_key_prefix_dominates_version(
         len in 1usize..=32,
-        k1_bytes in prop::collection::vec(0u8..=0xFEu8, 32),
-        k2_bytes in prop::collection::vec(0u8..=0xFEu8, 32),
+        k1_bytes in prop::collection::vec(any::<u8>(), 32),
+        k2_bytes in prop::collection::vec(any::<u8>(), 32),
     ) {
         let k1 = &k1_bytes[..len];
         let k2 = &k2_bytes[..len];

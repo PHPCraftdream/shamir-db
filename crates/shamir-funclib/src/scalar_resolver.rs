@@ -79,8 +79,9 @@ impl Default for UserScalarLayer {
 /// 2-layer scalar resolver: user layer (per-DB) checked first, built-in
 /// fallback second.
 ///
-/// Designed for the hot filter path: the user layer is an `Arc` to a lock-free
-/// `scc::HashMap`; the builtin layer is a `&'static ScalarRegistry`. When the
+/// Designed for the hot filter path: the user layer is an `Arc` to a
+/// `scc::HashMap`; lookups acquire a short shared bucket read lock. The builtin
+/// layer is a `&'static ScalarRegistry`. When the
 /// user layer is empty (the common case for built-in-only databases), the
 /// extra cost is exactly one hash-miss on the empty `scc::HashMap` before
 /// falling through to the static builtin lookup.
@@ -152,7 +153,7 @@ impl ScalarResolver {
                 tokio::task::block_in_place(|| {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call(name, args)))
                 })
-                .map_err(|_| ScalarError::new("scalar_task_failed"))?
+                .map_err(|_| ScalarError::builtin("scalar_task_failed"))?
             }
             Ok(_) => {
                 ARGON2_INLINE_ON_RUNTIME.fetch_add(1, Ordering::Relaxed);
@@ -171,9 +172,9 @@ impl ScalarResolver {
     pub fn call_indexable(&self, name: &str, args: &[QueryValue]) -> ScalarResult {
         let entry = self
             .get(name)
-            .ok_or_else(|| ScalarError::new("unknown_function"))?;
+            .ok_or_else(|| ScalarError::builtin("unknown_function"))?;
         if !entry.is_indexable() {
-            return Err(ScalarError::new("not_indexable"));
+            return Err(ScalarError::builtin("not_indexable"));
         }
         dispatch_entry(&entry, args)
     }

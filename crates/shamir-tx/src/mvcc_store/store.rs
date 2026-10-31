@@ -83,15 +83,10 @@ pub(crate) struct RecordCell {
     /// "just missed" registering in `active_snapshots` before vacuum ran
     /// will still find its version in the log.
     pub(crate) vacuum_anchor: u64,
-    /// SSI fix S1 — cell-reservation marker. `0` = free; otherwise the
-    /// `txn_id` of the committer that has CLAIMED this cell as the explicit
-    /// serialization point for a write-write conflict (`try_reserve`). The
-    /// claim blocks competing writers (their `try_reserve` returns `false`)
-    /// but is INVISIBLE to readers — every read path consults `version`
-    /// only, never this field. In S1 this is purely additive: no live path
-    /// ever sets it non-zero (every `RecordCell` constructor initialises it
-    /// to `0`), so behaviour is byte-identical. S2 wires `try_reserve` into
-    /// `pre_commit` and `finalize_reservation` into the publish path.
+    /// Its `txn_id` identifies a writer that has claimed this cell as the
+    /// serialization point for a write-write conflict. Competing reservations
+    /// fail, while reads continue to use `version` only; this marker is not a
+    /// visibility boundary.
     pub(crate) reserved_by: u64,
 }
 
@@ -127,12 +122,8 @@ pub struct MvccStore {
     /// Retention is calendar time (wall clock), so `SystemTime` is correct
     /// here — NOT a monotonic clock (we need to reason about "60 seconds ago").
     pub(crate) test_now_millis: AtomicU64,
-    /// P1b: per-table in-memory versioned overlay. Holds `(key, version) →
-    /// value` for the `(durable_watermark, visibility_watermark]` window. The
-    /// three read seams (`resolve_read`, `get_current`, `current_stream`)
-    /// probe it BEFORE the durable `history` log. In P1b it is never populated
-    /// on the production path (filled in P1c), so it stays empty and every
-    /// probe returns `None` → behaviour is byte-identical to history-only.
+    /// The production overlay contains visible writes not yet drained to the
+    /// durable history log. Read paths consult it before the history store.
     pub(crate) overlay: VersionedOverlay,
     /// D2 P1d-2b: per-version COMMIT-TIME timestamp, stamped on the ack-path
     /// (`apply_committed_visible`) and READ (non-destructively) by the drainer
@@ -246,13 +237,8 @@ impl MvccStore {
         self.gate.last_committed()
     }
 
-    /// P1b: borrow the per-table versioned overlay. P1c will use this to
-    /// populate the overlay on the ack-path; tests use it to drive the merge
-    /// logic with hand-placed entries. The read seams consult it internally.
-    ///
-    /// `#[allow(dead_code)]`: in P1b the production write path never calls this
-    /// (the overlay is filled in P1c); only the unit tests exercise it. The lib
-    /// build therefore sees it as unused until P1c wires the populate site.
+    /// Access the per-table versioned overlay. Production write paths populate
+    /// it as commits become visible; tests also use it for focused merge cases.
     #[allow(dead_code)]
     pub(crate) fn overlay(&self) -> &VersionedOverlay {
         &self.overlay
@@ -424,8 +410,8 @@ impl MvccStore {
     /// Resolve a versioned read of `key` visible at `snapshot_version`, given
     /// its current cached version `cur_v`. Direct path (`cur_v > 0 && cur_v <= snapshot`):
     /// read the log at `encode_version_key(key, cur_v)`. Fallback: range-scan
-    /// the log for the newest version `<= snapshot`. Reads exclusively from
-    /// the single `history` log in both cases.
+    /// the log for the newest version `<= snapshot`. The lookup checks the
+    /// visible overlay first, then falls back to durable history.
     pub(crate) async fn resolve_read(
         &self,
         key: &[u8],
@@ -436,8 +422,7 @@ impl MvccStore {
             // P1b: overlay-probe BEFORE the durable log. The overlay holds the
             // visible-but-not-yet-drained value for `(key, cur_v)`. A hit
             // (empty = tombstone → None, non-empty → Some) short-circuits; a
-            // miss falls through to history (the overlay is empty in P1b, so
-            // this always falls through under production load).
+            // miss falls through to history.
             if let Some(val) = self.overlay.get(key, cur_v) {
                 return Ok(if val.is_empty() { None } else { Some(val) });
             }
