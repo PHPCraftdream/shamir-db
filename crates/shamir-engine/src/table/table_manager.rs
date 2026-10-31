@@ -22,6 +22,8 @@ use shamir_storage::types::Store;
 // resolution (`table_manager/<name>.rs`) would look for them.
 #[path = "table_manager/admission/domain/barrier/admitted_ops.rs"]
 mod admitted_ops;
+#[path = "table_manager/admission/domain/barrier/identity_migration.rs"]
+mod identity_migration;
 #[path = "table_manager/admission/views/read_only_views.rs"]
 mod read_only_views;
 #[path = "table_manager/admission/domain/barrier/write_domain_barrier.rs"]
@@ -453,6 +455,14 @@ pub struct TableManager {
     /// stranded `true` by a prior panicking verify).
     #[cfg(test)]
     pub(super) verify_call_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Identity-migration marker (design P34-12 (c)): set when THIS open
+    /// ran the blocking base identity migration for this table. The
+    /// post-replay re-run (`tx/recovery/v2.rs`) consults it: a table that
+    /// migrated this open AND received a replayed pre-upgrade `IndexPut`/
+    /// `IndexDel` gets its migration re-run after the replay loop, so v1/v3
+    /// postings written by a crashed OLD binary are not silently missing
+    /// from the v2 index.
+    pub(in crate::table) identity_migrated_this_open: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Bundle wiring the non-tx write path to the SSI commit-write log.
@@ -558,6 +568,7 @@ impl Clone for TableManager {
             verify_panic_hook: Arc::clone(&self.verify_panic_hook),
             #[cfg(test)]
             verify_call_count: Arc::clone(&self.verify_call_count),
+            identity_migrated_this_open: Arc::clone(&self.identity_migrated_this_open),
         }
     }
 }
@@ -727,6 +738,7 @@ impl TableManager {
             verify_panic_hook: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             verify_call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            identity_migrated_this_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

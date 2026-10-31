@@ -246,6 +246,7 @@ impl TableManager {
             verify_panic_hook: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             verify_call_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            identity_migrated_this_open: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         // Resolve covering-index included_fields string paths to interned ids.
@@ -508,30 +509,14 @@ impl TableManager {
         // removed in F5d: after the non-tx write cutover (F4b/F5a) the
         // per-table WAL is no longer written, so this scan was a no-op.
 
-        // S9b (#81): legacy-index format-v2 rebuild-on-open. If the stored
-        // posting format version is older than current (or absent = pre-S9
-        // data), the on-disk hash scheme is V1 and would yield silent lookup
-        // misses against the V2 hasher. Rebuild every legacy posting
-        // (hash/unique/sorted) from the data store, then stamp the version so
-        // subsequent opens are a single cheap version read. The full O(N)
-        // scan is skipped when the table has no legacy indexes — only the
-        // marker is written.
-        if crate::index2::persistence::legacy_indexes_need_rebuild(&mgr.info_store).await? {
-            let has_legacy = mgr.index_manager_ref().iter_indexes().next().is_some()
-                || mgr
-                    .index_manager_ref()
-                    .iter_unique_indexes()
-                    .next()
-                    .is_some()
-                || !mgr.sorted_indexes().iter_indexes().is_empty();
-            if has_legacy {
-                // S5c-X: the open path already holds `open_permit` — use the
-                // admitted twin (public `repair()` would re-admit and
-                // self-deadlock on the non-reentrant domain mutex).
-                mgr.repair_admitted(open_permit).await?;
-            }
-            crate::index2::persistence::save_legacy_index_version(&mgr.info_store).await?;
-        }
+        // Identity v2 (P34-12 S2): blocking open-time base-family
+        // migration. Replaces the S9b `_m.idx.lfv` gate: need =
+        // !(idv == 2 && lfv absent); the three-step protocol lives in
+        // `identity_migration.rs` (remove both markers -> in-place rebuild -> set idv = 2)
+        // Backfill streams regular definitions and materializes the shared unique snapshot.
+        // `idv > 2` is a typed, fail-closed open error; tables without base
+        // indexes only move markers.
+        mgr.ensure_base_identity_current(open_permit).await?;
 
         // #1068: catch up the DDL op-log FIFO retention sweep at open time.
         // The throttled trigger in `ddl_op_log::write_op_status` lives behind

@@ -10,9 +10,14 @@ use shamir_types::types::value::InnerValue;
 
 use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_keys::{
-    build_index_key, build_index_key_from_record, build_posting_key,
+    build_index_key, build_index_key_from_record, build_posting_key, canonical_from_values,
+    is_digest_form,
 };
-use crate::base_index::index_record_key::IndexRecordKey;
+use crate::base_index::index_record_key::{
+    is_legacy_base_posting_key, posting_index_prefix, IndexRecordKey,
+};
+use crate::model::identity::identity_bytes::posting_tail_matches;
+use crate::model::identity::markers::DIGEST_MARKER;
 use crate::write_ops::IndexWriteOp;
 use crate::IndexState;
 
@@ -56,7 +61,7 @@ impl IndexManager {
             let in_flight =
                 def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
 
-            if let Some(irk) =
+            if let Some((irk, canonical)) =
                 build_index_key_from_record(false, def.name_interned, value, &def.paths)
             {
                 if in_flight {
@@ -69,12 +74,18 @@ impl IndexManager {
                     // Normal path: produce SetPosting for Ready defs (or Building
                     // defs not yet in-flight-registered — those still need direct
                     // writes for the "delta catch-up for free" mechanism before
-                    // Phase B starts).
+                    // Phase B starts). Value: empty for the inline form, the
+                    // canonical bytes `C` for the digest form (design (a)).
                     let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, record_id);
+                    let value = if is_digest_form(&canonical) {
+                        Bytes::from(canonical)
+                    } else {
+                        Bytes::new()
+                    };
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
-                        value: Bytes::new(),
+                        value,
                         provenance: regular_provenance(def),
                     });
                 }
@@ -124,7 +135,7 @@ impl IndexManager {
             let in_flight =
                 def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
             for (rid, value) in items.clone() {
-                if let Some(irk) =
+                if let Some((irk, canonical)) =
                     build_index_key_from_record(false, def.name_interned, value, &def.paths)
                 {
                     if in_flight {
@@ -135,9 +146,14 @@ impl IndexManager {
                     }
                     let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, rid);
+                    let value = if is_digest_form(&canonical) {
+                        Bytes::from(canonical)
+                    } else {
+                        Bytes::new()
+                    };
                     ops.push(IndexWriteOp::SetPosting {
                         key: posting_key,
-                        value: Bytes::new(),
+                        value,
                         provenance,
                     });
                 }
@@ -212,16 +228,21 @@ impl IndexManager {
                 // Normal path: produce RemovePosting/SetPosting as usual.
                 match (old_key, new_key) {
                     (None, None) => {}
-                    (None, Some(nk)) => {
+                    (None, Some((nk, nc))) => {
                         let index_key = nk.to_bytes();
                         let posting_key = build_posting_key(&index_key, record_id);
+                        let value = if is_digest_form(&nc) {
+                            Bytes::from(nc)
+                        } else {
+                            Bytes::new()
+                        };
                         ops.push(IndexWriteOp::SetPosting {
                             key: posting_key,
-                            value: Bytes::new(),
+                            value,
                             provenance,
                         });
                     }
-                    (Some(ok), None) => {
+                    (Some((ok, _oc)), None) => {
                         let index_key = ok.to_bytes();
                         let posting_key = build_posting_key(&index_key, record_id);
                         ops.push(IndexWriteOp::RemovePosting {
@@ -230,10 +251,10 @@ impl IndexManager {
                             owner: None,
                         });
                     }
-                    (Some(ok), Some(nk)) => {
+                    (Some((ok, oc)), Some((nk, nc))) => {
                         let old_bytes = ok.to_bytes();
                         let new_bytes = nk.to_bytes();
-                        if old_bytes != new_bytes {
+                        if old_bytes != new_bytes || oc.as_slice() != nc.as_slice() {
                             let old_posting_key = build_posting_key(&old_bytes, record_id);
                             ops.push(IndexWriteOp::RemovePosting {
                                 key: old_posting_key,
@@ -242,9 +263,14 @@ impl IndexManager {
                             });
 
                             let new_posting_key = build_posting_key(&new_bytes, record_id);
+                            let value = if is_digest_form(&nc) {
+                                Bytes::from(nc)
+                            } else {
+                                Bytes::new()
+                            };
                             ops.push(IndexWriteOp::SetPosting {
                                 key: new_posting_key,
-                                value: Bytes::new(),
+                                value,
                                 provenance,
                             });
                         }
@@ -293,7 +319,7 @@ impl IndexManager {
             let in_flight =
                 def.state == IndexState::Building && self.is_build_in_flight(def.name_interned);
 
-            if let Some(irk) =
+            if let Some((irk, _canonical)) =
                 build_index_key_from_record(false, def.name_interned, old_value, &def.paths)
             {
                 if in_flight {
@@ -419,7 +445,23 @@ impl IndexManager {
             return Ok(None);
         };
 
-        let index_key = build_index_key(false, name_interned, values).to_bytes();
+        // A probe with no identity (NaN) matches nothing: no posting can
+        // exist for it (NaN never produces canonical bytes, inline or
+        // digested), so return the empty result directly.
+        let Some(index_key) = build_index_key(false, name_interned, values) else {
+            return Ok(Some(Arc::from(Vec::new())));
+        };
+        let index_key = index_key.to_bytes();
+        // Digest-form probes verify each posting's canonical tail (design
+        // (a)): the key is only a locator, two distinct long values sharing
+        // a BLAKE3 digest each keep their own postings distinguished by the
+        // trailing rid.
+        let probe_canonical = canonical_from_values(values);
+        let probe_is_digest = index_key.get(9) == Some(&DIGEST_MARKER);
+        // A digest-form key is only a LOCATOR: two distinct long values that
+        // collide on the BLAKE3 digest share the same cache slot but have
+        // different true result sets, so digest-form lookups bypass the
+        // posting cache entirely (correctness over the tiny hit-rate cost).
 
         // Opt G: try the in-memory posting cache first. DashMap's
         // sharded RwLock lets unrelated concurrent lookups proceed
@@ -438,7 +480,11 @@ impl IndexManager {
         let generation = self
             .posting_cache_generation
             .load(std::sync::atomic::Ordering::Acquire);
-        if let Some(cached) = self.posting_cache.get(&index_key) {
+        if let Some(cached) = if probe_is_digest {
+            None
+        } else {
+            self.posting_cache.get(&index_key)
+        } {
             let (cached_generation, values) = cached;
             if cached_generation == generation
                 && self
@@ -465,20 +511,33 @@ impl IndexManager {
             .posting_cache_generation
             .load(std::sync::atomic::Ordering::Acquire);
 
-        // Scan the 25-byte index prefix; every match is a posting
+        // Scan the `9 + |I|`-byte index prefix; every match is a posting
         // entry whose final 16 bytes are the record_id. The scan visits
         // postings in ascending order of the trailing record_id bytes,
         // which is exactly `RecordId::Ord` (byte-lexicographic over
         // `[u8; 16]`), and there is at most one posting per record_id —
         // so `record_ids` is built already-sorted and duplicate-free by
         // plain `push`, no `BTreeSet` insert/rebalance needed (audit 3.2).
+        // The key length is checked EXACTLY (`== prefix + 16`): a longer or
+        // shorter key under the prefix is not a posting of this identity.
         // tunables: one-off prefix-scan batch (512); fold into a named knob under /opti.
         let mut record_ids: Vec<RecordId> = Vec::new();
         let mut stream = self.info_store.scan_prefix_stream(index_key.clone(), 512);
         while let Some(batch) = stream.next().await {
-            for (k, _) in batch? {
+            for (k, v) in batch? {
                 let kb: &[u8] = k.as_ref();
-                if kb.len() >= index_key.len() + 16 {
+                if kb.len() == index_key.len() + 16 {
+                    // Digest form: drop postings whose canonical tail
+                    // differs from the probe's `C` (a BLAKE3 collision of
+                    // two distinct values must never surface as a hit).
+                    if probe_is_digest {
+                        let matches = probe_canonical
+                            .as_deref()
+                            .is_some_and(|probe_c| posting_tail_matches(v.as_ref(), probe_c));
+                        if !matches {
+                            continue;
+                        }
+                    }
                     let mut id_bytes = [0u8; 16];
                     id_bytes.copy_from_slice(&kb[index_key.len()..index_key.len() + 16]);
                     record_ids.push(RecordId(id_bytes));
@@ -504,7 +563,7 @@ impl IndexManager {
                 std::sync::atomic::Ordering::Acquire,
             )
             .is_ok();
-        if publish_allowed {
+        if publish_allowed && !probe_is_digest {
             self.posting_cache
                 .insert(index_key, scan_generation, Arc::clone(&record_ids_arc));
         }
@@ -515,7 +574,11 @@ impl IndexManager {
     /// Invalidate posting cache entries for every `SetPosting` /
     /// `RemovePosting` in `ops`. Called by the tx-commit pipeline
     /// (`apply_index_batch`) after durably writing the ops, so the
-    /// next `lookup_by_index` re-fetches from the store.
+    /// next `lookup_by_index` re-fetches from the store. The index-key
+    /// prefix is derived from the posting's namespace byte (identity v2:
+    /// regular = key minus the 16-byte rid tail, unique = whole key;
+    /// legacy v1 = the fixed 25-byte prefix) — see
+    /// `posting_index_prefix`.
     pub fn invalidate_posting_cache_for_ops(&self, ops: &[IndexWriteOp]) {
         let mut touched = false;
         for op in ops {
@@ -525,8 +588,10 @@ impl IndexManager {
                 }
                 _ => continue,
             };
-            if key.len() >= 25 {
-                let index_key = key.slice(..25);
+            let index_key = posting_index_prefix(key.as_ref())
+                .map(Bytes::copy_from_slice)
+                .or_else(|| is_legacy_base_posting_key(key.as_ref()).then(|| key.slice(..25)));
+            if let Some(index_key) = index_key {
                 self.posting_cache.remove(&index_key);
                 touched = true;
             }
@@ -541,12 +606,17 @@ impl IndexManager {
     /// straight onto `info_store` (the drainer's WAL index replay), which
     /// bypasses [`apply_ops`](Self::apply_ops) and its invalidation. Call it
     /// AFTER the write lands so no reader can re-cache the old state between
-    /// the two. Keys shorter than the 25-byte index prefix are ignored.
+    /// the two. Keys shorter than the index prefix are ignored.
     pub fn invalidate_posting_cache_for_keys<'a>(&self, keys: impl IntoIterator<Item = &'a [u8]>) {
         let mut touched = false;
         for key in keys {
-            if key.len() >= 25 {
-                self.posting_cache.remove(&key[..25]);
+            let index_key = posting_index_prefix(key)
+                .map(Bytes::copy_from_slice)
+                .or_else(|| {
+                    is_legacy_base_posting_key(key).then(|| Bytes::copy_from_slice(&key[..25]))
+                });
+            if let Some(index_key) = index_key {
+                self.posting_cache.remove(&index_key);
                 touched = true;
             }
         }

@@ -363,14 +363,17 @@ impl TableManager {
                 // Now record this row's unique-index claims so the
                 // next iteration sees them.
                 for def in &unique_defs {
-                    if let Some(irk) = crate::index::index_keys::build_index_key_from_record(
-                        true,
-                        def.name_interned,
-                        v,
-                        &def.paths,
-                    ) {
-                        let key = irk.to_bytes().to_vec();
-                        if !batch_seen.insert((def.name_interned, key)) {
+                    // Batch-local duplicate key: (name_interned, canonical
+                    // bytes C) — NOT the physical posting key (design
+                    // P34-12 (a)): the digest-form posting key is only a
+                    // locator, so two distinct long values sharing a BLAKE3
+                    // digest must NOT be flagged as duplicates here. NaN
+                    // rows yield None and are skipped (NaN is not a
+                    // conflict).
+                    if let Some(canonical) =
+                        crate::index::index_keys::canonical_from_record(v, &def.paths)
+                    {
+                        if !batch_seen.insert((def.name_interned, canonical)) {
                             return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                                 "Unique index '{}' violated within batch (row {} duplicates an earlier row)",
                                 def.name_interned, i
