@@ -84,7 +84,7 @@ fn rv_sdk_6d2497ca_host_imports_classify_null_insert_and_non_list_query() {
                 .table("items")
                 .insert(Value::Map(vec![]))
                 .unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::User);
+            assert_eq!(error.kind(), ErrorKind::Codec);
             assert_eq!(error.message(), "db_insert returned null");
         },
     );
@@ -95,10 +95,10 @@ fn rv_sdk_6d2497ca_host_imports_classify_null_insert_and_non_list_query() {
         },
         || {
             let error = Db::new().table("items").query(None).unwrap_err();
-            assert_eq!(error.kind(), ErrorKind::User);
+            assert_eq!(error.kind(), ErrorKind::Codec);
             assert_eq!(
                 error.message(),
-                "db_query expected list, got unexpected value"
+                "db_query returned an unexpected response shape"
             );
         },
     );

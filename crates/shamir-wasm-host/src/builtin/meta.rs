@@ -111,7 +111,10 @@ impl FunctionMeta {
 
     /// Construct metadata from a persisted `QueryValue` catalogue record.
     ///
-    /// Missing fields fall back to defaults (Private / Invoker / empty).
+    /// Lossy legacy compatibility decoder: malformed or non-string values silently fall back to
+    /// defaults (Private visibility, Invoker security, and empty grant lists).
+    /// Use [`FunctionMeta::try_from_record`] for checked persisted-data decoding.
+    #[deprecated(note = "lossy legacy decoder; use FunctionMeta::try_from_record")]
     pub fn from_record(rec: &shamir_types::types::value::QueryValue) -> Self {
         let visibility = rec
             .get("visibility")

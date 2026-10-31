@@ -116,17 +116,6 @@ async fn wasm_function_http_fetch_allowed() {
     let result = db.invoke_function("fetcher", params).await.unwrap();
 
     match result {
-        QueryValue::Str(s) if s.starts_with("err:") => {
-            // If the function returned an error string, it's likely
-            // because the mock server was too fast / slow. Log it but
-            // don't fail — this is a timing-sensitive integration test.
-            eprintln!("NOTE: fetcher returned error (may be timing): {s}");
-            // Still check the error is about egress, not allowlist.
-            assert!(
-                !s.contains("not allowed"),
-                "allowlist should have permitted 127.0.0.1, got: {s}"
-            );
-        }
         QueryValue::Str(body) => {
             assert_eq!(
                 body, "hello from mock server 8c",
