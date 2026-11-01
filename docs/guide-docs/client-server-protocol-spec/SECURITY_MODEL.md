@@ -67,7 +67,7 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | Повышение прав через токен (superuser/replicator-владелец) | A13 | Права токена строятся `SessionPermissions::new(false, false, roles)`, deny-by-default allowlist, admin-листья запрещены (TOKEN_API §6, §7) |
 | Подмена сессии между токен- и SCRAM-listener-ами | A13, A2 | Отдельное `TokenSessionStore`, соединение принимает только свой случайный `sid`, close `4010` (TOKEN_API §10) |
 | Живой сокет или подписка переживают отзыв токена | A13 | Публикация отзыва, затем отмена сессий; перепроверка перед каждым запросом; close `4011` (TOKEN_API §10) |
-| Воскрешение отозванных токенов из резервной копии | A6 | Restore повышает `tokens_invalid_before_ns` для всех пользователей; `shamir-server restore` и `--revoke-all-tickets-on-start` повышают глобальный порог, runbook `token revoke-all` (IMPLEMENTATION_GUIDE §5.7, §5.8) |
+| Воскрешение отозванных токенов из резервной копии | A6 | `restore` вызывает `invalidate_all_tickets`, общий порог `tickets_invalid_before_ns` убивает все токены, созданные до восстановления; runbook `token revoke-all` (IMPLEMENTATION_GUIDE §5.7, §5.8) |
 | Утечка токена в логи, метрики, аудит | A13 | Редактирование `Authorization` в самой ранней точке, тест редактирования логов (TOKEN_API §13) |
 
 ---

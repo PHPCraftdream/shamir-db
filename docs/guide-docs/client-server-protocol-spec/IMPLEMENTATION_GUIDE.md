@@ -588,7 +588,7 @@ Trade-off: атакующий получает clean slate (50 attempts зано
 
 Аналогично — при disk corruption suspected, replication failover, OS reinstall с restored data dir.
 
-**API-токены при restore.** Команда `shamir-server restore` и флаг `--revoke-all-tickets-on-start` повышают **глобальный** порог `tokens_invalid_before_ns` в хранилище токенов (TOKEN_API.md §5): токены, созданные до восстановленного состояния, перестают действовать, отозванные токены не воскресают. При restore из недоверенной копии дополнительно выполняется `shamir-server token revoke-all` (§5.8).
+**API-токены при restore.** `shamir-server restore` вызывает `invalidate_all_tickets` (`sync/durability/restore.rs`): `tickets_invalid_before_ns` каждого пользователя повышается до `now`. Проверка токенов использует тот же порог (TOKEN_API.md §5), поэтому токены, созданные до восстановления, перестают действовать, отозванные токены не воскресают. При restore из недоверенной копии дополнительно выполняется `shamir-server token revoke-all` (§5.8).
 
 ### 5.8. `token_key` или резервная копия `server_meta` утекла
 
