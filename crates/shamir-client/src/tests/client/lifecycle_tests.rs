@@ -749,38 +749,10 @@ fn rv_client_e16a04e5_roundtrip_serialize_uses_borrowed_request_bytes() {
     assert!(!serializer.contains("to_msgpack"));
 }
 
-/// Structural synchronization guard: scopes contain lock acquisition through
-/// route/install operations; this is a source-shape guard, not a forced-interleaving proof.
-#[test]
-fn rv_client_b80c0d09_subscription_routing_install_share_mutex_structural_guard() {
-    let transport = include_str!("../../client/transport.rs");
-    let start = transport
-        .find("let mut subs = state.subs.lock()")
-        .expect("routing lock");
-    let end = transport[start..]
-        .find("if let PushAction::Live(res) = action")
-        .expect("route")
-        + start;
-    let route = &transport[start..end];
-    assert!(route.contains("subs.live.get(&envelope.sub)"));
-    assert!(route.contains("subs.early.entry(envelope.sub)"));
-    assert!(!route.contains("drop(subs)"));
-    assert!(!route.contains("drop(guard)"));
-    assert!(!route.contains("drop(_guard)"));
-    let api = include_str!("../../client/api.rs");
-    let start = api
-        .find("let mut subs = self.state.subs.lock()")
-        .expect("install lock");
-    let end = api[start..].find("SubscriptionHandle::new").expect("flush") + start;
-    let install = &api[start..end];
-    assert!(install.contains("subs.live.insert(sub_id, tx.clone())"));
-    assert!(install.contains("subs.early.remove(&sub_id)"));
-    assert!(install.contains("subs.early_total -= buffered.len()"));
-    assert!(install.contains("tx.try_send(envelope)"));
-    assert!(!install.contains("drop(subs)"));
-    assert!(!install.contains("drop(guard)"));
-    assert!(!install.contains("drop(_guard)"));
-}
+// The former source-text checks were removed because they asserted mutex
+// spelling, not route/install atomicity. Behavioral coverage is in
+// `subscription_tests.rs` and `demux_tests.rs` (per-key FIFO, close races,
+// budget conservation, stale-drop preservation).
 
 /// Real wire flow uses response markers to order early and live pushes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -805,14 +777,10 @@ async fn rv_client_b80c0d09_real_subscription_fifo_flush_count_and_shutdown() {
     ping_result.expect("early marker response");
     let mut handle = client.subscribe_push(17);
     assert_eq!(
-        client
-            .lifecycle_for_test()
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early_total,
-        0
+        client.lifecycle_for_test().subs.debug_early_total(),
+        client.lifecycle_for_test().subs.early_total()
     );
+    assert_eq!(client.lifecycle_for_test().subs.early_total(), 0);
 
     write_push(&mut ends.server_out, &push(17, 2)).await;
     let live_marker = async {
@@ -837,14 +805,10 @@ async fn rv_client_b80c0d09_real_subscription_fifo_flush_count_and_shutdown() {
     assert!(handle.next().await.is_none());
     assert_eq!(handle.termination(), Some(CloseCause::PeerEof));
     assert_eq!(
-        client
-            .lifecycle_for_test()
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early_total,
-        0
+        client.lifecycle_for_test().subs.debug_early_total(),
+        client.lifecycle_for_test().subs.early_total()
     );
+    assert_eq!(client.lifecycle_for_test().subs.early_total(), 0);
 }
 
 /// Fill the aggregate early budget through the real client, then prove that
@@ -872,26 +836,10 @@ async fn rv_client_b80c0d09_real_early_budget_reuse_and_shutdown_count() {
     };
     let (ping_result, ()) = tokio::join!(client.ping(), first_marker);
     ping_result.expect("initial budget marker response");
-    assert_eq!(
-        client
-            .lifecycle_for_test()
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early_total,
-        cap
-    );
+    assert_eq!(client.lifecycle_for_test().subs.early_total(), cap);
 
     let mut handle = client.subscribe_push(17);
-    assert_eq!(
-        client
-            .lifecycle_for_test()
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early_total,
-        cap - 1
-    );
+    assert_eq!(client.lifecycle_for_test().subs.early_total(), cap - 1);
     write_push(&mut ends.server_out, &push(cap as u64 + 7, 1)).await;
     let second_marker = async {
         let frame = read_frame(&mut ends.server_in, MAX_FRAME_SIZE_DEFAULT)
@@ -908,15 +856,7 @@ async fn rv_client_b80c0d09_real_early_budget_reuse_and_shutdown_count() {
     };
     let (ping_result, ()) = tokio::join!(client.ping(), second_marker);
     ping_result.expect("budget reuse marker response");
-    assert_eq!(
-        client
-            .lifecycle_for_test()
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early_total,
-        cap
-    );
+    assert_eq!(client.lifecycle_for_test().subs.early_total(), cap);
 
     drop(ends.server_out);
     reader.await.expect("reader task");
@@ -924,14 +864,10 @@ async fn rv_client_b80c0d09_real_early_budget_reuse_and_shutdown_count() {
     assert!(handle.next().await.is_none());
     assert_eq!(handle.termination(), Some(CloseCause::PeerEof));
     assert_eq!(
-        client
-            .lifecycle_for_test()
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early_total,
-        0
+        client.lifecycle_for_test().subs.debug_early_total(),
+        client.lifecycle_for_test().subs.early_total()
     );
+    assert_eq!(client.lifecycle_for_test().subs.early_total(), 0);
 }
 
 /// Real roundtrip paused after fast check; shutdown completes before its
