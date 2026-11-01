@@ -33,6 +33,10 @@ Operational details для имплементаторов сервера и кл
   ticket_key: bytes(32),
   ticket_key_previous: Option<bytes(32)>,
   ticket_key_rotated_at_ns: u64,
+
+  // API tokens (TOKEN_API.md §3)
+  token_key: bytes(32),                           // HMAC key MAC-ов API-токенов; НЕ ротируется в v1 (§5.8)
+  token_key_id: u8,                               // 1 в v1; входит в MAC-вход токена
   
   // Audit log integrity
   audit_chain_key: bytes(32),                     // HMAC key для chained log (см. §3.3)
@@ -294,6 +298,44 @@ Operational note: pure-plain embedded deployments — это explicit limitation
 
 Если `[admin_ui].enabled = true` AND нет ни одного `[[listener]]` с `profile = "tls"` (native) — server warning при старте: "browser endpoint без native peer — admin клиенты forced на binding_mode=0x02 (ослабленный режим)". Не блокер, но привлекает внимание.
 
+### 2.4. Token listeners (`kind: http`) [NORMATIVE]
+
+Один listener обслуживает токен-REST и токен-WebSocket (TOKEN_API.md §1). Он **не** имеет `profile`/`binding_mode` (SCRAM на нём нет): `profile` обязателен для `tcp|ws|unix` и отсутствует для `http`; `tls` обязателен для `http` и отвергается для остальных видов. Каналы — произведение `tls` и `endpoints`:
+
+```
+listeners: [
+    {
+        kind: http
+        addr: 127.0.0.1:7340
+        tls: false                        # каналы 1 и 2, только loopback
+        endpoints: [rest, ws]             # по умолчанию оба
+    }
+    {
+        kind: http
+        addr: 0.0.0.0:7341
+        tls: true                         # каналы 3 и 4; верхнеуровневый tls: { cert_path, key_path }
+        endpoints: [rest, ws]
+        max_request_body_bytes: 16777216
+        browser_origin_allowlist: []      # существующее поле: проверка Origin при WS upgrade
+        allow_self_signed: false          # не-loopback TLS без CA-сертификата: только true, SPKI-pin печатается при старте
+        allow_plaintext_remote: false     # только tls: false
+        allow_plaintext_write: false      # только tls: false
+        trusted_proxies: []               # CIDR прокси, чей X-Forwarded-For учитывается
+    }
+]
+tokens: {
+    max_ttl_days: 365
+    default_ttl_days: 30
+    max_per_user: 20
+    allow_self_service: true              # false: токены выдают только superuser
+    max_sockets_per_token: 8
+    max_sockets_per_owner: 32
+    session_max_age_hours: 24
+}
+```
+
+Server при старте **проверяет** и fails если: `tls: false` AND `addr` не loopback AND `allow_plaintext_remote != true`; `allow_plaintext_*` при `tls: true`; `tls: true` AND `addr` не loopback AND сертификат автосгенерирован AND `allow_self_signed != true`; `0.0.0.0`/`::` с `tls: false` без `allow_plaintext_remote`. Точные имена ключей уточняются в задаче TOKEN-T6 вместе с `deploy/server.example.ktav`; семантика фиксируется здесь и в TOKEN_API.md §11.
+
 ---
 
 ## 3. Audit Log [NORMATIVE]
@@ -339,6 +381,8 @@ Audit-line (одна запись на строку, no inner whitespace в prod
 **Audit integrity:** `audit_chain_verify_failed` (startup truncation/tamper detection).
 
 **Revocation:** `revoke_user_tickets`, `revoke_all_tickets`.
+
+**API tokens (TOKEN_API.md §13):** `api_token_created`, `api_token_revoked`, `api_token_user_revoked`, `api_token_auth_failed`, `api_token_exposed`. Запись содержит `id` токена (если известен), владельца (только после успешной проверки MAC), канал и подсеть, **никогда** секрет или MAC; пишется вне пути ответа. Добавляется `api_token_exposed` (`read_write` токен отвергнут на удалённом plaintext listener-е). `api_token_auth_failed` для malformed и unknown-id **агрегируется по подсети и сэмплируется** (запись без аутентификации иначе усиливает запись на диск); неудачи с известным `id` пишутся по правилам rate limit.
 
 ### 3.3. HMAC chaining + truncation defence (NORMATIVE v1)
 
@@ -442,6 +486,8 @@ Out-of-band binary `shamir-audit-verify` читает `__system__/server_meta` (
 - `client_nonce`, `server_nonce`
 - `bootstrap_token`
 - `ticket` plain или wire format
+- API-токен целиком (`shk1.<id>.<secret>`), его `secret`, `mac` и значение заголовка `Authorization` (допустим только `id`)
+- `token_key`
 
 ### 4.2. Allow-list
 
@@ -542,11 +588,30 @@ Trade-off: атакующий получает clean slate (50 attempts зано
 
 Аналогично — при disk corruption suspected, replication failover, OS reinstall с restored data dir.
 
+**API-токены при restore.** Команда `shamir-server restore` и флаг `--revoke-all-tickets-on-start` повышают **глобальный** порог `tokens_invalid_before_ns` в хранилище токенов (TOKEN_API.md §5): токены, созданные до восстановленного состояния, перестают действовать, отозванные токены не воскресают. При restore из недоверенной копии дополнительно выполняется `shamir-server token revoke-all` (§5.8).
+
+### 5.8. `token_key` или резервная копия `server_meta` утекла
+
+`token_key` в v1 **не ротируется** (ротация потребовала бы схемы нескольких ключей; `key_id` и `format_version` уже входят в MAC-вход, поэтому такая схема добавится без смены формата токена).
+
+1. Остановить сервер, выполнить `shamir-server token revoke-all`: команда отзывает все токены (аудит `api_token_user_revoked` на каждого владельца) и **генерирует новый `token_key`** (единственный способ смены ключа; старые токены всё равно отозваны).
+2. Запустить сервер, владельцы выпускают токены заново (`CreateApiToken`).
+3. Если утёк весь `server_meta`, применяется §5.5.
+
+Для подделки токена одного `token_key` недостаточно: нужна ещё запись в хранилище токенов, потому что проверка ищет `id` в хранилище.
+
+### 5.9. Утёк один токен
+
+1. Владелец (или superuser) вызывает `RevokeApiToken`; без доступа к серверу — офлайн `shamir-server token revoke <id>`.
+2. Отзыв эффективен для следующего запроса, закрывает живые WebSocket-сокеты токена (close `4011`) и снимает подписки (TOKEN_API.md §10).
+3. Если утечка вероятно коснулась нескольких токенов пользователя: `RevokeUserTokens` или `token revoke-user`.
+4. Смена пароля владельца также отзывает все его токены.
+
 ---
 
 ## 6. Observability — Metrics
 
-Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin_session>`.
+Prometheus-style. Фактически отдаётся observability-listener-ом (`observability.addr`, по умолчанию `127.0.0.1:9090`, маршрут `/metrics`; не-loopback требует `allow_public_metrics`). Маршрут `/admin/metrics` с `Bearer <admin_session>` относится к нереализованному admin-эскизу (ADMIN_UI_HOSTING). Токен-listener метрик не отдаёт.
 
 ### 6.1. Counters
 
@@ -562,6 +627,7 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 - `shamir_frame_oversized_total{transport}`
 - `shamir_admin_command_total{command, result}`
 - `shamir_audit_chain_verify_failures_total`
+- `shamir_token_auth_total{channel, result}` (`channel`: `rest`|`ws`; `result`: ok|invalid|expired|revoked|owner_invalid|channel_denied|plaintext_denied|rate_limited; `invalid` объединяет malformed, unknown id и неверный MAC). Меток с токеном или владельцем нет.
 
 ### 6.2. Histograms
 
@@ -570,6 +636,7 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 - `shamir_handshake_state_lifetime_seconds`
 - `shamir_resumption_fsync_latency_seconds` — alert если p99 > 100ms (recommend NVMe или WAL group-commit)
 - `shamir_audit_log_append_latency_seconds`
+- `shamir_token_request_duration_seconds{endpoint}` (`endpoint`: `rest`|`ws`)
 
 ### 6.3. Gauges
 
@@ -577,6 +644,8 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 - `shamir_inflight_handshakes`
 - `shamir_argon2id_semaphore_available`
 - `shamir_auth_failures_tracked_keys`
+- `shamir_token_active_ws` — активные токен-сокеты
+- `shamir_token_listener_plaintext_remote` — 1, если есть токен-listener с `allow_plaintext_remote`
 
 ### 6.4. Suggested Alerts
 
@@ -671,6 +740,8 @@ Client side: `--accept-new-host` flag всегда печатает loud stderr 
 `auth_init.version` отражает только AUTH_PROTOCOL.md major.
 
 **Enum extension rule** (NORMATIVE): `binding_mode`, `transport_kind`, `version` — owned by AUTH. SESSION_RESUMPTION и TRANSPORT_*.md MUST treat unknown enum values as fail-closed. Adding new enum value = AUTH minor bump.
+
+TOKEN_API.md версионируется независимо (v1, `format_version = 1`) и **не расширяет** эти enum: токен-сессии различаются серверным полем `origin`, которое не попадает в `auth_message` и на wire; аудит и метрики сами отображают `origin` в строки.
 
 ---
 
@@ -880,5 +951,6 @@ Schemas очевидны из имени; semantic см. в AUTH_PROTOCOL §12, 
 - **SESSION_RESUMPTION.md** — ticket protocol
 - **TRANSPORT_TCP.md / TRANSPORT_WS.md** — transport bindings
 - **ADMIN_UI_HOSTING.md** — admin UI delivery
+- **TOKEN_API.md** — REST и WebSocket по API-токену
 - **CLIENT_BROWSER.md** — browser SDK
 - **../roadmap/ROADMAP.md** — future hardening
