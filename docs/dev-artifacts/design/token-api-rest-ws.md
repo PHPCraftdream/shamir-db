@@ -1,6 +1,6 @@
 # Token API: REST and WebSocket access by bearer token
 
-Status: DESIGN, revision 2 (2026-11-01). Requested by the owner on 2026-11-01. Nothing in this document is implemented. Revision 2 folds in the independent review (24 findings, three of them HIGH; each is spot-checked against the code and marked "review Fn" where it changed the text). The work is split into tasks listed in section 16.
+Status: DESIGN, revision 3 (2026-11-01). Requested by the owner on 2026-11-01. Nothing in this document is implemented. Revision 3 adds the owner follow-up of 2026-11-01 (users must be able to be issued tokens for HTTP and WebSocket: per-channel tokens and self-service issuance, sections 6.2, 7). Revision 2 folded in the independent review (24 findings, three of them HIGH; each is spot-checked against the code and marked "review Fn" where it changed the text). The work is split into tasks listed in section 16.
 
 ## 0. Request and interpretation
 
@@ -106,6 +106,7 @@ mac: [u8;32]                    // HMAC-SHA256(token_key, "shamir-api-token" || 
 key_id: u8                      // 1 in v1
 created_at_ns, expires_at_ns    // expiry mandatory, capped by tokens.max_ttl_days
 mode: ReadOnly | ReadWrite
+channels: Rest | Ws | Both       // which endpoint the token may be used on; default Both
 databases: Option<Vec<String>>  // allowlist; None = every database the owner may access
 revoked_at_ns: Option<u64>
 format_version: u8
@@ -122,7 +123,8 @@ An in-memory `scc::HashMap<[u8;16], Arc<TokenState>, THasher>` mirrors the persi
 3. Look up `id`. When it is unknown, still compute an HMAC against a dummy so unknown-id and wrong-secret take comparable time.
 4. Constant-time compare (`subtle`).
 5. Validity: not revoked; not expired; the owner is present in `OwnerState` with the same `user_id`; `token.created_at_ns >= owner.tokens_invalid_before_ns` (kicking a user, changing roles and **backup restore** bump it for every user, so a restored backup cannot resurrect revoked tokens, review F11).
-6. Build the token session (section 6.4).
+6. The token's `channels` must include the endpoint it is presented on (`rest` or `ws`); otherwise `403` with `token_channel_denied` (REST), or `403` before `101` (WebSocket upgrade). A `Rest`-only token cannot open a socket and a `Ws`-only token cannot call the REST endpoint.
+7. Build the token session (section 6.4).
 
 Failures feed a **separate per-subnet token-failure limiter** (an instance of the `RateLimiter` trait, never the SCRAM `LockoutStore`): feeding the owner's username into the SCRAM lockout would let anyone who learns a token id lock the owner out of SCRAM login (review F12). Success never resets another subnet's counters. The ordering of publish-then-close for revocation follows the lifecycle pattern already used in `shamir-client` (`ClosedState`): publish the revocation first, then cancel sessions.
 
@@ -131,14 +133,20 @@ Failures feed a **separate per-subnet token-failure limiter** (an instance of th
 - A token acts as its owner: `Actor::User(principal64(owner))`, `SessionPermissions::new(false, false, roles)` (rule 4 above). Everything gated on `session.permissions` (create user, set superuser/replicator, replication, admin leaves, the destructive-operation HMAC check whose key derives from the session id) is therefore unreachable; the session id is never exposed in a way that lets a client "fix" that. `ChangePasswordChallenge/Verify` are not superuser-gated in the handler and are therefore **explicitly denied** by `ScopedHandler`.
 - `ScopedHandler` is an allowlist on both channels. Allowed `DbRequest` variants: `Ping`, `Execute`, `WaitForVisibility`, `GetDdlOpStatus`, and on WebSocket additionally `TxBegin`, `TxExecute`, `TxCommit`, `TxRollback`, `CreateCursor`, `FetchNext`, `CancelCursor`. Denied: `CreateScramUser`, `SetSuperuser`, `SetReplicator`, `ChangePassword*`, `Repl`, and any variant added later until it is classified. Inside `Execute`/`TxExecute` the batch is scanned with `BatchTreeVisitor` (all leaves, including static `ForEach` bodies): admin leaves are denied; `Subscribe`/`Unsubscribe` leaves are denied on REST (no push channel; they would silently do nothing, review F17); `List::{Databases, Users}` and `AccessTree` are denied for tokens with a `databases` allowlist unless their `db` is inside it (review F4).
 - Mode `ReadOnly` rejects any batch containing a write (`BatchOp::is_write()`, which classifies `Call` as a write, documented), rejects `TxExecute` write batches and `TxCommit` (review F18). The `databases` allowlist is checked against the `db` of every request and of every `TxBegin`.
-- `ScopedHandler` first runs `validate_request_alias_caps` and decodes the request once, as `ShamirDbHandler::handle` does, and returns a typed outcome (`Allowed(response_bytes) | Denied(code) | NotSupported(code)`) so the REST layer maps `403`/`400` without decoding the response again (review F17, F21). Scope errors use the existing `DbResponse::Error` shape with codes `token_read_only`, `token_database_denied`, `token_request_denied`, `not_supported_over_rest`.
+- `ScopedHandler` first runs `validate_request_alias_caps` and decodes the request once, as `ShamirDbHandler::handle` does, and returns a typed outcome (`Allowed(response_bytes) | Denied(code) | NotSupported(code)`) so the REST layer maps `403`/`400` without decoding the response again (review F17, F21). Scope errors use the existing `DbResponse::Error` shape with codes `token_read_only`, `token_database_denied`, `token_request_denied`, `token_channel_denied`, `not_supported_over_rest`.
 - The effective rights are the intersection of the owner's live rights (evaluated by the engine on every request) and the token scope.
 
 ## 7. Token administration
 
 1. Offline CLI on the stopped data directory (the `shamir-server access-tree` pattern): `shamir-server token create --user U --label L --ttl 30d [--read-only] [--db NAME]...`, `token list [--user U]`, `token revoke <id>`, `token revoke-user U`, `token revoke-all`. `create` prints the secret once to a TTY, or to `--out-file` with mode 0600; never to a log.
-2. Online wire operations over an authenticated SCRAM session: `CreateApiToken`, `ListApiTokens`, `RevokeApiToken`, `RevokeUserTokens`, new `DbRequest` variants gated like `create_scram_user` (superuser plus the destructive-operation HMAC; a user may list and revoke only their own tokens). **The online operations are required before the listeners are considered usable** (a leaked token must be revocable without stopping the server): T6/T7 may land earlier, but the end-to-end task depends on T5 and the feature is not documented as production-ready before T5.
-3. The token store is node-local; online create/revoke run on a `ReadWrite` node, a read-only replica serves existing tokens from its own copy and manages them offline.
+2. Online wire operations over an authenticated SCRAM session (never over a token session: the token allowlist contains none of them, so a token cannot mint or manage tokens): `CreateApiToken`, `ListApiTokens`, `RevokeApiToken`, `RevokeUserTokens`, new `DbRequest` variants. **The online operations are required before the listeners are considered usable** (a leaked token must be revocable without stopping the server): T3/T6 may land earlier, but the end-to-end task depends on T5 and the feature is not documented as production-ready before T5.
+3. **Who may issue tokens to whom (owner follow-up, revision 3).** Users get tokens for HTTP and WebSocket in two ways, both through the same operation:
+   - **Self-service**: any authenticated user creates, lists and revokes their own tokens (`CreateApiToken { label, ttl, mode, channels, databases }` without `for_user`). No HMAC confirmation is needed (it only grants the user a subset of what they already have). Limits: `tokens.max_per_user` active tokens (default 20), `tokens.max_ttl_days`, label unique per owner; `mode`, `channels` and `databases` can only narrow, because the effective rights are always the intersection with the owner's live rights.
+   - **Issued by an administrator**: a superuser creates a token for any user (`for_user: Some(name)`), lists any user's tokens, revokes any token, and runs `RevokeUserTokens`. These superuser operations carry the destructive-operation HMAC confirmation, like `create_scram_user`. This also covers service accounts: create a user, then issue them tokens, no human password needed beyond the account's own SCRAM record.
+   - A user never sees another user's tokens; a listing never contains secrets, MACs or hashes (id, label, owner, mode, channels, databases, created, expires, revoked, last-presented time is not tracked in v1).
+   - The secret is returned exactly once in the `CreateApiToken` response over the authenticated, TLS-protected (or loopback) SCRAM channel; it is never stored in clear and cannot be shown again.
+   - Password change, role change, kick and restore bump `tokens_invalid_before_ns` for the user, so a password change revokes all of that user's tokens (they are re-issued afterwards); this is a security default (a changed password usually means a suspected compromise), see section 17.
+4. The token store is node-local; online create/revoke run on a `ReadWrite` node, a read-only replica serves existing tokens from its own copy and manages them offline.
 
 Every create, revoke and failed verification is an audit event on the HMAC chain with the token id (never the secret). Malformed-input and unknown-id failures are aggregated per subnet and sampled, not written one-for-one (review F20: pre-auth write amplification). Metrics carry only `result` and `channel` labels.
 
@@ -161,7 +169,7 @@ Status mapping (HTTP status only for gateway-level outcomes; application errors 
 |---|---|---|
 | ok, including `DbResponse::Error` | 200 | msgpack `DbResponse` |
 | missing/malformed/wrong/expired/revoked token | 401 | fixed msgpack `{"error":"unauthorized"}`, `WWW-Authenticate: Bearer` |
-| scope violation (`token_read_only`, `token_database_denied`, `token_request_denied`) | 403 | `DbResponse::Error` |
+| scope violation (`token_read_only`, `token_database_denied`, `token_request_denied`, `token_channel_denied`) | 403 | `DbResponse::Error` |
 | `not_supported_over_rest` | 400 | `DbResponse::Error` |
 | unsupported method or path | 405 / 404 | fixed |
 | body above the limit | 413 | fixed, connection closed |
@@ -237,6 +245,8 @@ listeners: [
 tokens: {
     max_ttl_days: 365
     default_ttl_days: 30
+    max_per_user: 20
+    allow_self_service: true         # false = only superusers issue tokens
     max_sockets_per_token: 8
     session_max_age_hours: 24
 }
@@ -267,6 +277,8 @@ Integration (server crate, real sockets, loopback, OS ephemeral ports):
 - **race**: revoke while requests are in flight; no request authorized after the revoke call returned (T5 provides the online revoke);
 - **accounting**: 16 active token sockets of one owner do not block that owner's SCRAM login;
 - **budget**: pre-auth body flood does not exceed the global body budget; response-byte guard held until the body is written;
+- **issuance**: a user creates/lists/revokes only their own tokens; `for_user` by a non-superuser is rejected; a superuser issues for another user with the HMAC confirmation and not without it; `max_per_user` and TTL caps; `allow_self_service: false` rejects non-superuser creation; a token session cannot call any token operation; a password change revokes the user's tokens; the secret appears exactly once and never in a listing;
+- **channels**: a `Rest`-only token is refused at the WebSocket upgrade (403, no `101`), a `Ws`-only token is refused on REST (`token_channel_denied`), `Both` works on both;
 - log-redaction test; restore bumps tokens; WebSocket subscription push and cursors through a token session; REST `not_supported_over_rest`.
 Windows and Linux in CI; no sleeps (lifecycle seams).
 
@@ -281,10 +293,10 @@ Each task becomes a committed brief under `docs/dev-artifacts/prompts/remediatio
 | T0 | Independent review of this document, folded into revision 2 (done) [#1734] | docs | - |
 | T0b | Make room: split the folders and files named in section 5 so the later tasks do not violate the layout limits | shamir-server, shamir-connect | - |
 | T1 | Normative spec first: `TOKEN_API.md` (statuses, close codes, error codes, envelopes, token format), explicit amendments to `TRANSPORT_WS.md`, `ADMIN_UI_HOSTING.md`, `SECURITY_MODEL.md`, `IMPLEMENTATION_GUIDE.md` | docs | T0 |
-| T2 | Token model, `ApiTokenStore`, HMAC verification, in-memory mirror and owner state, `TokenSessionStore`, `SessionOrigin`, fjall store, `token_key` [#1735] | shamir-connect, shamir-server | T0b, T1 |
+| T2 | Token model (including `channels`), `ApiTokenStore`, HMAC verification, in-memory mirror and owner state, `TokenSessionStore`, `SessionOrigin`, fjall store, `token_key` [#1735] | shamir-connect, shamir-server | T0b, T1 |
 | T3 | `shamir-transport-http` crate and REST channel (HTTP and HTTPS): listener kind, plaintext rails, framing rules, auth-before-body, `ScopedHandler`, status mapping, budgets, redaction [#1737] | shamir-transport-http, shamir-server, shamir-connect | T2 |
 | T4 | Offline CLI `shamir-server token ...`, audit events, `access-tree` section [#1736] | shamir-server | T2 |
-| T5 | Online administration: `DbRequest` variants, handler with HMAC gate, builders (Rust, TS), client methods, spec tables [#1739] | shamir-query-types, shamir-query-builder, shamir-server, shamir-client, shamir-client-ts | T2, T4 |
+| T5 | Online administration and issuance: `CreateApiToken` (self-service and `for_user` by a superuser), list, revoke, revoke-user as `DbRequest` variants, handler with the HMAC gate for superuser operations, per-user limits, password-change bump, builders (Rust, TS), client methods, spec tables [#1739] | shamir-query-types, shamir-query-builder, shamir-server, shamir-client, shamir-client-ts | T2, T4 |
 | T6 | WebSocket token channel (WS and WSS): upgrade via `hyper::upgrade`, session binding frame, token request loop with cancel arm, close codes, subscription teardown [#1738] | shamir-transport-http, shamir-server | T2, T3 |
 | T7 | End-to-end matrix, redaction test, revoke race, privilege/replay/accounting tests, Windows+Linux in the fork CI [#1740] | shamir-server | T3, T5, T6 |
 | T8 | Final documentation: operator guide, `deploy/*.ktav` examples, `KNOWN_LIMITATIONS.md`, `CLAUDE.md` crate list (the only place it changes) [#1741] | docs | T3, T5, T6, T7 |
@@ -300,6 +312,9 @@ T3 and T6 are the large stages; each starts with its own design note (module spl
 4. **Token and superuser.** Default here: a token never carries admin rights. Alternative: an explicit `admin` scope for superuser-owned tokens.
 5. **Expiry.** Default here: mandatory (max `tokens.max_ttl_days`). Alternative: non-expiring tokens.
 6. **`token_key` rotation.** Default here: none in v1 (re-issue after a leak). Alternative: multi-key scheme with `key_id` lookup.
+7. **Who issues.** Default here: self-service for every user plus issuance by superusers (`tokens.allow_self_service: true`). Alternative: only superusers issue tokens.
+8. **Channel scope.** Default here: every token has a `channels` field (`rest`, `ws`, `both`; default `both`) and is refused on the other endpoint. Alternative: no per-channel scope.
+9. **Password change.** Default here: a password change revokes all of the user's tokens. Alternative: tokens survive a password change.
 
 ## 18. Risks
 
