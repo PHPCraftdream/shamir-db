@@ -3413,6 +3413,7 @@ dependencies = [
  "aes-gcm",
  "arc-swap",
  "argon2",
+ "base64",
  "bench-scale-tool",
  "dashmap",
  "ed25519-dalek",
