@@ -10,10 +10,9 @@ use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
 
 use crate::framer::Framer;
 
-use super::super::handshake::{audit_emit, checked_query_version, prefix_8, HandshakeError};
-use super::super::user_state_lookup::RedbUserStateLookup;
-use super::wire;
-use super::ConnectionContext;
+use crate::connection::handshake::{audit_emit, checked_query_version, prefix_8, HandshakeError};
+use crate::connection::user_state_lookup::RedbUserStateLookup;
+use crate::connection::{wire, ConnectionContext};
 
 /// Session-resume fast-path (SESSION_RESUMPTION §5).
 ///
