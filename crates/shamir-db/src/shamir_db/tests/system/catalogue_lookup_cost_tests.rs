@@ -162,7 +162,7 @@ async fn invocation_reads_one_function_and_one_settings_snapshot() {
 async fn rv_db_3eb43ac7_boot_groups_tables_before_repository_iteration() {
     let source = include_str!("../../shamir_db/core.rs");
     let grouping = source
-        .find("table_catalogue_grouping::group_tables_by_repo")
+        .find("catalog::group_tables_by_repo")
         .expect("boot grouping helper call");
     let repo_loop = source[grouping..]
         .find("for rec in &repo_records")
