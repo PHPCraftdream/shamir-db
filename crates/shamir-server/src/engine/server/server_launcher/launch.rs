@@ -1,11 +1,9 @@
 //! [`ServerLauncher`]: builds the server runtime from a
 //! [`Config`](crate::config::Config) + bootstrap policy in `launch()`.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
 use shamir_connect::server::dispatch::RequestHandler;
@@ -21,24 +19,12 @@ use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 
-use shamir_transport_ipc::IpcListener;
-use shamir_transport_tcp::listener::{
-    bind_validated as bind_tcp, ListenerProfile as TcpListenerProfile,
-};
-use shamir_transport_ws::listener::{bind_validated as bind_ws, WsListenerProfile};
-use shamir_transport_ws::server::{BROWSER_WS_PATH, NATIVE_WS_PATH};
-use shamir_transport_ws::BrowserOriginPolicy;
-
-use tokio::task::JoinHandle;
-use tokio_rustls::TlsAcceptor;
-
 use crate::audit_appender::FjallAuditAppender;
 use crate::bootstrap::{
     ensure_superuser, BootstrapOutcome, BootstrapPolicy, DEFAULT_BOOTSTRAP_NAME,
 };
 use crate::byte_budget::ByteBudget;
-use crate::config::{Config, ListenerKind, ProfileKind};
-use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
+use crate::config::Config;
 use crate::connection::ConnTasks;
 use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
@@ -51,17 +37,12 @@ use crate::server::meta_sinks::{spawn_meta_snapshot_task, MetaLockoutSink, MetaR
 use crate::server::server_handle::ServerHandle;
 use crate::server_meta::ServerMetaStore;
 use crate::tables_registry::TablesRegistry;
-use crate::tls::{load_or_generate, subject_alts_from_addrs, LoadedTls};
 use crate::user_directory::FjallUserDirectory;
 
-use super::accept_loops::{
-    accept_loop_ipc, accept_loop_plain, accept_loop_tcp, accept_loop_ws_browser,
-    accept_loop_ws_native, WsAcceptParams,
-};
 use super::helpers::{
-    boot_now_ns, browser_origin_policy_from, default_node_id, kdf_from_config,
-    log_bootstrap_outcome, AcceptPath, REPL_RECONCILE_INTERVAL,
+    boot_now_ns, default_node_id, kdf_from_config, log_bootstrap_outcome, REPL_RECONCILE_INTERVAL,
 };
+use super::listeners::{spawn_listeners, ListenerEnv, SpawnedListeners};
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
 pub struct ServerLauncher {
@@ -563,326 +544,35 @@ impl ServerLauncher {
             SchedulerConfig::default_for_production(),
         );
 
-        // 9. TLS material — load or generate before binding any TCP+TLS
-        //    listener so we can fail fast on missing PEMs.
-        //
-        // We generate SAN entries lazily for now — the cert covers
-        // `localhost` and every literal IP in the configured listeners.
-        // Self-signed cert chain is informational only (Ed25519 pin in
-        // `auth_ok` is the real identity check).
-        let parsed_addrs: Vec<SocketAddr> = config
-            .listeners
-            .iter()
-            .filter_map(|l| l.addr.parse::<SocketAddr>().ok())
-            .collect();
-        let LoadedTls {
-            server_config: tls_server,
-            generated,
-        } = load_or_generate(
-            &config.tls.cert_path,
-            &config.tls.key_path,
-            subject_alts_from_addrs(&parsed_addrs),
-        )?;
-        if generated {
-            tracing::warn!(
-                cert_path = ?config.tls.cert_path,
-                "tls: self-signed cert generated — clients pin the Ed25519 \
-                 identity, the X.509 chain is informational only",
-            );
-        }
-        let tls_acceptor = TlsAcceptor::from(tls_server);
-
-        // 10. Spawn accept loops. They share the root `shutdown_token`
-        //     created at the top of `launch()` — `shutdown()` cancels it
-        //     once and every accept loop observes the cancel on its next
-        //     `select!` poll.
-        let mut bound_addrs: Vec<Option<SocketAddr>> = Vec::with_capacity(config.listeners.len());
-        // Companion to `bound_addrs`, same length/order — `kind: unix`
-        // listeners have no `SocketAddr` to report (see the early-return
-        // branch below), so they get `None` in `bound_addrs` and `Some(path)`
-        // here instead. Every other listener kind pushes `None` here.
-        let mut bound_ipc_paths: Vec<Option<String>> = Vec::with_capacity(config.listeners.len());
-        let mut listener_tasks: Vec<JoinHandle<()>> = Vec::new();
-
-        // Connection-level security knobs from config (slow-loris timeout, etc.)
-        let auth_init_timeout =
-            Duration::from_millis(config.security.connection.auth_init_timeout_ms);
-        // Global cap on simultaneously-active connections — shared across
-        // every listener.
-        let conn_limiter = ConnLimiter::new(config.security.connection.max_active_connections);
-        // Per-source-IP cap — bounds a single attacker host to a small
-        // fraction of the global cap (audit §2a / top-5 #4). `0` = off.
-        let per_ip_limiter =
-            PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
-
-        for l in &config.listeners {
-            // Local IPC (`kind: unix`) addresses a filesystem path / pipe
-            // name, not a `SocketAddr` — handled entirely on its own path,
-            // separate from the TCP/WS SocketAddr-based dispatch below
-            // (`Config::validate` already rejected any other `l.kind` +
-            // `l.addr` combination that wouldn't make sense here).
-            if l.kind == ListenerKind::Unix {
-                let listener = IpcListener::bind(&l.addr)
-                    .await
-                    .map_err(|e| BootError::Bind(format!("unix {}: {e}", l.addr)))?;
-                tracing::info!(path = %l.addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                let ctx = super::helpers::build_ctx(
-                    &identity,
-                    identity_seed,
-                    &secrets,
-                    kdf_for_bootstrap,
-                    &session_store,
-                    &user_dir,
-                    lockout.clone(),
-                    rate_limit.clone(),
-                    &argon2_sem,
-                    &audit_writer,
-                    &resume_config,
-                    &handler,
-                    BindingMode::None,
-                    TransportKind::Unix,
-                    l.kdf_override.as_ref().map(kdf_from_config),
-                    auth_init_timeout,
-                    &meta,
-                    conn_tasks.clone(),
-                );
-                let token = shutdown_token.clone();
-                let limiter = conn_limiter.clone();
-                let per_ip = per_ip_limiter.clone();
-                listener_tasks.push(tokio::spawn(accept_loop_ipc(
-                    listener, ctx, token, limiter, per_ip,
-                )));
-                bound_addrs.push(None);
-                bound_ipc_paths.push(Some(l.addr.clone()));
-                continue;
-            }
-            bound_ipc_paths.push(None);
-
-            let addr: SocketAddr = match l.addr.parse() {
-                Ok(a) => a,
-                Err(e) => {
-                    return Err(BootError::Bind(format!(
-                        "addr {} is not a SocketAddr: {e}",
-                        l.addr
-                    )));
-                }
-            };
-
-            // Resolve the right (transport, binding_mode) tuple for this
-            // listener.
-            let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
-                (ListenerKind::Tcp, ProfileKind::TlsExporter) => (
-                    TransportKind::Tcp,
-                    BindingMode::TlsExporter,
-                    AcceptPath::TcpTlsExporter,
-                ),
-                (ListenerKind::Tcp, ProfileKind::Plain) => {
-                    (TransportKind::Tcp, BindingMode::None, AcceptPath::TcpPlain)
-                }
-                (ListenerKind::Ws, ProfileKind::TlsExporter) => (
-                    TransportKind::WebSocket,
-                    BindingMode::TlsExporter,
-                    AcceptPath::WsNative,
-                ),
-                (ListenerKind::Ws, ProfileKind::TlsNoExport) => {
-                    let policy = browser_origin_policy_from(&l.browser_origin_allowlist)?;
-                    (
-                        TransportKind::WebSocket,
-                        BindingMode::TlsNoExport,
-                        AcceptPath::WsBrowser(policy),
-                    )
-                }
-                (kind, profile) => {
-                    tracing::warn!(
-                        addr = %addr,
-                        ?kind,
-                        ?profile,
-                        "listener skipped (unsupported MVP combination)",
-                    );
-                    bound_addrs.push(None);
-                    continue;
-                }
-            };
-
-            let local_addr = match accept_path {
-                AcceptPath::TcpTlsExporter => {
-                    let listener = bind_tcp(addr, TcpListenerProfile::TlsExporter)
-                        .await
-                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
-                    let local_addr = listener
-                        .local_addr()
-                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                    let ctx = super::helpers::build_ctx(
-                        &identity,
-                        identity_seed,
-                        &secrets,
-                        kdf_for_bootstrap,
-                        &session_store,
-                        &user_dir,
-                        lockout.clone(),
-                        rate_limit.clone(),
-                        &argon2_sem,
-                        &audit_writer,
-                        &resume_config,
-                        &handler,
-                        binding_mode,
-                        transport_kind,
-                        l.kdf_override.as_ref().map(kdf_from_config),
-                        auth_init_timeout,
-                        &meta,
-                        conn_tasks.clone(),
-                    );
-                    let acceptor = tls_acceptor.clone();
-                    let token = shutdown_token.clone();
-
-                    let limiter = conn_limiter.clone();
-                    let per_ip = per_ip_limiter.clone();
-                    listener_tasks.push(tokio::spawn(accept_loop_tcp(
-                        listener, acceptor, ctx, token, limiter, per_ip,
-                    )));
-                    local_addr
-                }
-                AcceptPath::TcpPlain => {
-                    let listener = bind_tcp(addr, TcpListenerProfile::Plain)
-                        .await
-                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
-                    let local_addr = listener
-                        .local_addr()
-                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                    let ctx = super::helpers::build_ctx(
-                        &identity,
-                        identity_seed,
-                        &secrets,
-                        kdf_for_bootstrap,
-                        &session_store,
-                        &user_dir,
-                        lockout.clone(),
-                        rate_limit.clone(),
-                        &argon2_sem,
-                        &audit_writer,
-                        &resume_config,
-                        &handler,
-                        binding_mode,
-                        transport_kind,
-                        l.kdf_override.as_ref().map(kdf_from_config),
-                        auth_init_timeout,
-                        &meta,
-                        conn_tasks.clone(),
-                    );
-                    let token = shutdown_token.clone();
-
-                    let limiter = conn_limiter.clone();
-                    let per_ip = per_ip_limiter.clone();
-                    listener_tasks.push(tokio::spawn(accept_loop_plain(
-                        listener, ctx, token, limiter, per_ip,
-                    )));
-                    local_addr
-                }
-                AcceptPath::WsNative => {
-                    let listener = bind_ws(addr, WsListenerProfile::Wss)
-                        .await
-                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
-                    let local_addr = listener
-                        .local_addr()
-                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                    let ctx = super::helpers::build_ctx(
-                        &identity,
-                        identity_seed,
-                        &secrets,
-                        kdf_for_bootstrap,
-                        &session_store,
-                        &user_dir,
-                        lockout.clone(),
-                        rate_limit.clone(),
-                        &argon2_sem,
-                        &audit_writer,
-                        &resume_config,
-                        &handler,
-                        binding_mode,
-                        transport_kind,
-                        l.kdf_override.as_ref().map(kdf_from_config),
-                        auth_init_timeout,
-                        &meta,
-                        conn_tasks.clone(),
-                    );
-                    let acceptor = tls_acceptor.clone();
-                    let token = shutdown_token.clone();
-
-                    let limiter = conn_limiter.clone();
-                    let per_ip = per_ip_limiter.clone();
-                    let path = l.path.clone().unwrap_or_else(|| NATIVE_WS_PATH.to_string());
-                    let policy = Arc::new(
-                        BrowserOriginPolicy::try_allow(l.browser_origin_allowlist.iter().cloned())
-                            .map_err(BootError::Bind)?,
-                    );
-                    listener_tasks.push(tokio::spawn(accept_loop_ws_native(
-                        listener,
-                        acceptor,
-                        ctx,
-                        token,
-                        limiter,
-                        per_ip,
-                        WsAcceptParams { path, policy },
-                    )));
-                    local_addr
-                }
-                AcceptPath::WsBrowser(policy) => {
-                    let listener = bind_ws(addr, WsListenerProfile::WssBrowser)
-                        .await
-                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
-                    let local_addr = listener
-                        .local_addr()
-                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                    let ctx = super::helpers::build_ctx(
-                        &identity,
-                        identity_seed,
-                        &secrets,
-                        kdf_for_bootstrap,
-                        &session_store,
-                        &user_dir,
-                        lockout.clone(),
-                        rate_limit.clone(),
-                        &argon2_sem,
-                        &audit_writer,
-                        &resume_config,
-                        &handler,
-                        binding_mode,
-                        transport_kind,
-                        l.kdf_override.as_ref().map(kdf_from_config),
-                        auth_init_timeout,
-                        &meta,
-                        conn_tasks.clone(),
-                    );
-                    let acceptor = tls_acceptor.clone();
-                    let token = shutdown_token.clone();
-
-                    let limiter = conn_limiter.clone();
-                    let per_ip = per_ip_limiter.clone();
-                    let path = l
-                        .path
-                        .clone()
-                        .unwrap_or_else(|| BROWSER_WS_PATH.to_string());
-                    listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
-                        listener,
-                        acceptor,
-                        ctx,
-                        token,
-                        limiter,
-                        per_ip,
-                        WsAcceptParams {
-                            path,
-                            policy: Arc::new(policy),
-                        },
-                    )));
-                    local_addr
-                }
-            };
-            bound_addrs.push(Some(local_addr));
-        }
+        // 9-10. TLS material, then bind every listener and spawn its accept
+        //       loop. They share the root `shutdown_token` created at the top
+        //       of `launch()` — `shutdown()` cancels it once and every accept
+        //       loop observes the cancel on its next `select!` poll.
+        let SpawnedListeners {
+            bound_addrs,
+            bound_ipc_paths,
+            listener_tasks,
+        } = spawn_listeners(
+            &ListenerEnv {
+                config: &config,
+                identity: &identity,
+                identity_seed,
+                secrets: &secrets,
+                kdf: kdf_for_bootstrap,
+                session_store: &session_store,
+                user_dir: &user_dir,
+                lockout: &lockout,
+                rate_limit: &rate_limit,
+                argon2_sem: &argon2_sem,
+                audit_writer: &audit_writer,
+                resume_config: &resume_config,
+                handler: &handler,
+                meta: &meta,
+                conn_tasks: &conn_tasks,
+            },
+            &shutdown_token,
+        )
+        .await?;
 
         // 11. Optional observability HTTP server. Spawned LAST so its
         //     `/readyz` flips to 200 only after every listener is bound.

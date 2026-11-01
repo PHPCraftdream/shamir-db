@@ -2,6 +2,8 @@
 
 Только `wss://`. Plain WS удалён в v1 (browser требует TLS, native может использовать TCP plain).
 
+**Область действия (поправка Token API).** Это правило относится к SCRAM-listener-ам (`kind: ws`, endpoints `/shamir/v1` и `/shamir/v1/browser`): они остаются только `wss://`. Отдельный listener `kind: http` обслуживает WebSocket по bearer-токену на endpoint `/shamir/v1/ws` и допускает plain `ws://` на loopback или по явному opt-in (`allow_plaintext_remote`), см. TOKEN_API.md §10, §11. Токен-endpoint не принимает SCRAM, SCRAM-endpoints не принимают токен.
+
 ## 1. Профили
 
 | Профиль | URI | binding_mode | Endpoint |
@@ -72,6 +74,11 @@ WS close 1000 ИЛИ logout
 | 4001 | `unsupported_version` |
 | 4002 | `server_busy` |
 | 4003 | `heartbeat_timeout` |
+| 4010 | `token_sid_mismatch` (только токен-соединения, TOKEN_API.md §10) |
+| 4011 | `token_revoked` (только токен-соединения) |
+| 4012 | `token_expired` (только токен-соединения) |
+
+Коды 4010-4012 выдаёт только listener `kind: http`; `4003` остаётся `heartbeat_timeout` на обоих видах соединений.
 
 ## 7. Heartbeat
 

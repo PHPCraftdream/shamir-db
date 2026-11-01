@@ -1,7 +1,7 @@
 use shamir_connect::server::conn_services::{PushRejected, PushSink};
 use tokio::sync::mpsc;
 
-use super::request_loop::{prereserve_frame, WriterMsg};
+use crate::connection::request_loop::{prereserve_frame, WriterMsg};
 
 /// Adapts the writer's mpsc channel into a [`PushSink`] for subscription bridges.
 pub(crate) struct MpscPushSink {

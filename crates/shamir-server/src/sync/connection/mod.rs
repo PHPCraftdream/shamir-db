@@ -11,12 +11,12 @@
 pub mod conn_limiter;
 
 mod handshake;
-mod push_sink;
 mod request_loop;
 mod session;
+mod support;
 // `pub(crate)` so the in-crate adapter test (`src/tests/user_state_lookup_tests`)
 // can name `RedbUserStateLookup`; production use stays internal to this module.
-pub(crate) mod user_state_lookup;
+pub(crate) use support::user_state_lookup;
 
 #[cfg(test)]
 pub(crate) use handshake::checked_query_version;

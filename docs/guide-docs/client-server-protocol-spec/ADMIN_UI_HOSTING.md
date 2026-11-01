@@ -4,6 +4,8 @@ HTTP-сервер для **раздачи статической admin SPA** + R
 
 (Этот документ заменяет removed `TRANSPORT_HTTP.md`.)
 
+> **Поправка Token API.** REST-набросок ниже (`POST /shamir/v1/query` и `/shamir/v1/admin/<command>` с `session_id` как Bearer) **заменён** для REST-доступа документом **TOKEN_API.md**: REST-клиенты используют API-токены (`POST /shamir/v1/request`), токен никогда не бывает администраторским. `session_id` как Bearer **не принимается** ни одним listener-ом. Административные REST-команды `/shamir/v1/admin/<command>` остаются **нереализованной спецификацией** и этой фичей не обслуживаются. Статическая раздача admin SPA (§4, §5) не меняется. Токен-listener (`kind: http`) не отдаёт `/admin/*`, `/shamir/v1/health`, `/shamir/v1/version` и метрики.
+
 ---
 
 ## 1. Endpoints
@@ -13,16 +15,18 @@ GET  /admin/                        — admin SPA index.html
 GET  /admin/static/*                — bundle (JS/CSS/WASM)
 GET  /shamir/v1/health              — liveness probe (no auth)
 GET  /shamir/v1/version             — version, supported protocol versions (no auth)
-GET  /admin/metrics                 — Prometheus metrics (Bearer admin session)
-POST /shamir/v1/query               — REST query (Bearer session_id)
-POST /shamir/v1/admin/<command>     — admin commands (Bearer admin session_id)
+GET  /admin/metrics                 — Prometheus metrics (Bearer admin session) — НЕ РЕАЛИЗОВАН: метрики отдаёт observability-listener (`observability.addr`, `/metrics`)
+POST /shamir/v1/query               — REST query (Bearer session_id) — ЗАМЕНЁН: TOKEN_API.md §9
+POST /shamir/v1/admin/<command>     — admin commands (Bearer admin session_id) — НЕ РЕАЛИЗОВАН
 ```
 
-WS upgrade endpoints `/shamir/v1` и `/shamir/v1/browser` — обслуживаются на том же HTTP listener (см. TRANSPORT_WS.md).
+WS upgrade endpoints `/shamir/v1` и `/shamir/v1/browser` обслуживаются SCRAM-listener-ами `kind: ws` (см. TRANSPORT_WS.md), токен-listener `kind: http` их не обслуживает.
 
 ---
 
 ## 2. Auth Flow
+
+> **Заменено для REST (TOKEN_API.md).** Описанный ниже поток «session_id как Bearer» не реализуется и не принимается. Остаётся как историческое описание admin-UI эскиза.
 
 **HTTP не делает primary auth.** Клиент:
 1. Получает session_id через WS-handshake (либо native либо browser endpoint).
@@ -33,6 +37,8 @@ WS upgrade endpoints `/shamir/v1` и `/shamir/v1/browser` — обслужива
 ---
 
 ## 3. REST Request Format
+
+> **Заменено (TOKEN_API.md §9).** Фактический REST-формат: `POST /shamir/v1/request`, `Authorization: Bearer shk1.<id>.<secret>`, статусы 401/403/400/413/415/429/503. Блок ниже не реализуется.
 
 ```
 POST /shamir/v1/query
@@ -112,7 +118,7 @@ Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
 6.1. Admin UI fetches только same-origin → CORS не нужен.
 
-6.2. REST `/shamir/v1/*`:
+6.2. REST `/shamir/v1/*` (admin-эскиз; токен-listener `kind: http` не выдаёт **никаких** CORS-заголовков, TOKEN_API.md §9):
 - Default: same-origin only (нет CORS headers)
 - Server config может разрешить ограниченные origins (см. §4.2)
 - При configured origins — preflight для них только
@@ -122,7 +128,7 @@ Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
 ## 7. TLS
 
-7.1. **HTTPS only** для production. Plain HTTP — только loopback.
+7.1. **HTTPS only** для production. Plain HTTP — только loopback. **Исключение:** токен-listener `kind: http` с `tls: false` может по явному opt-in `allow_plaintext_remote` слушать не-loopback адрес; на нём принимаются только `read_only` токены, пока не задан `allow_plaintext_write` (TOKEN_API.md §11). Admin UI (`/admin/*`) этим исключением не пользуется.
 
 7.2. TLS config — идентичен TRANSPORT_TCP §3 (TLS 1.3, no 0-RTT).
 
@@ -136,8 +142,8 @@ Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
 - `/shamir/v1/health`, `/shamir/v1/version`: 100/sec per IP
 - `/admin/*`: 100/sec per IP (static delivery, не security-критично)
-- `/shamir/v1/query`: per-session rate limit (server config)
-- `/shamir/v1/admin/*`: 10/sec per session
+- `/shamir/v1/query`: per-session rate limit (server config) — заменено токен-REST, лимиты в TOKEN_API.md §5, §9
+- `/shamir/v1/admin/*`: 10/sec per session — не реализован
 
 ---
 
@@ -145,9 +151,9 @@ Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
 - GET /admin/ → CSP, HSTS headers presence
 - GET /admin/static/argon2.wasm → Content-Type: application/wasm
-- POST /shamir/v1/query без Bearer → 401
-- POST /shamir/v1/query с invalid Bearer → 401
-- POST /shamir/v1/query с expired session_id → 401, `session_expired`
+- (заменено токен-REST, TOKEN_API.md §15) POST /shamir/v1/query без Bearer → 401
+- (заменено) POST /shamir/v1/query с invalid Bearer → 401
+- (заменено) POST /shamir/v1/query с expired session_id → 401, `session_expired`
 - CSP violations при попытке inline script — browser blocks
 - CORS preflight для allowed origin → headers present; для disallowed → no CORS headers
 - WASM load via instantiateStreaming работает без `wasm-unsafe-eval`

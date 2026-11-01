@@ -3,8 +3,9 @@
 //! management.
 
 pub mod access_tree;
-pub mod byte_budget;
 pub mod observability;
+mod perimeter;
 pub mod service;
-pub mod tls;
 pub mod user_directory;
+
+pub use perimeter::{byte_budget, tls};
