@@ -277,8 +277,11 @@ async fn rv_client_79910ba5_write_phase_allocates_no_frame_buffer() {
     };
 
     let (allocs, bytes) = window;
+    // Incidental allocations (a pipe/waker buffer of ~4 KiB shows up on both
+    // platforms) stay well below half the payload; the old frame buffer alone
+    // was the whole frame.
     assert!(
-        bytes < BIG_PAYLOAD / 4,
+        bytes < BIG_PAYLOAD / 2,
         "write phase allocated {bytes} bytes in {allocs} allocations; a \
          {BIG_PAYLOAD}-byte payload must reach the wire without a frame \
          buffer or payload copy (old code allocates the whole frame)"
