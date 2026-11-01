@@ -112,31 +112,6 @@ pub async fn save_index2_metadata_with_pending(
             descriptors.push(d);
         }
     }
-    // The registry may have renamed or advanced lifecycle state, but an inline
-    // credential is grandfathered only for the identical persisted descriptor.
-    // This fallback intentionally rewrites existing cleartext bytes; references
-    // are not implemented.
-    let existing = match info_store.get(meta_key_indexes().to_bytes().into()).await {
-        Ok(bytes) => Some(decode_persisted_indexes(&bytes)?),
-        Err(shamir_storage::error::DbError::NotFound(_)) => None,
-        Err(error) => return Err(error),
-    };
-    for descriptor in &descriptors {
-        if has_inline_credential(descriptor)
-            && !existing.as_ref().is_some_and(|persisted| {
-                persisted.descriptors.iter().any(|old| {
-                    old.id == descriptor.id
-                        && old.created_at_nanos == descriptor.created_at_nanos
-                        && descriptor_matches_ignoring_credential(old, descriptor)
-                        && credential_matches(old, descriptor)
-                })
-            })
-        {
-            return Err(shamir_storage::error::DbError::Internal(
-                "cannot persist new or changed external vector credential; secret references are not supported".into(),
-            ));
-        }
-    }
     for descriptor in &mut descriptors {
         if let crate::kind::IndexKind::Vector(config) = &descriptor.kind {
             super::index_options::write(&mut descriptor.options, config.quantization)?;
@@ -180,58 +155,6 @@ fn descriptors_have_identity_v2(descriptors: &[IndexDescriptor]) -> bool {
     })
 }
 
-fn has_inline_credential(descriptor: &IndexDescriptor) -> bool {
-    matches!(
-        &descriptor.kind,
-        crate::kind::IndexKind::Vector(config)
-            if matches!(
-                &config.backend,
-                crate::kind::VectorBackendRef::External { api_key_secret, .. }
-                    if !api_key_secret.reveal().is_empty()
-            )
-    )
-}
-
-fn credential_matches(old: &IndexDescriptor, new: &IndexDescriptor) -> bool {
-    match (&old.kind, &new.kind) {
-        (crate::kind::IndexKind::Vector(old), crate::kind::IndexKind::Vector(new)) => {
-            match (&old.backend, &new.backend) {
-                (
-                    crate::kind::VectorBackendRef::External {
-                        api_key_secret: old,
-                        ..
-                    },
-                    crate::kind::VectorBackendRef::External {
-                        api_key_secret: new,
-                        ..
-                    },
-                ) => old == new,
-                _ => false,
-            }
-        }
-        _ => false,
-    }
-}
-
-fn descriptor_matches_ignoring_credential(old: &IndexDescriptor, new: &IndexDescriptor) -> bool {
-    fn normalized(descriptor: &IndexDescriptor) -> Option<Vec<u8>> {
-        let mut copy = descriptor.clone();
-        copy.state = crate::state::IndexState::default();
-        copy.options.clear();
-        if let crate::kind::IndexKind::Vector(config) = &mut copy.kind {
-            if let crate::kind::VectorBackendRef::External { api_key_secret, .. } =
-                &mut config.backend
-            {
-                *api_key_secret = shamir_types::secret::SecretString::new(String::new());
-            }
-        }
-        bincode::serialize(&copy).ok()
-    }
-    normalized(old)
-        .zip(normalized(new))
-        .is_some_and(|(old, new)| old == new)
-}
-
 pub async fn load_index2_metadata(
     info_store: &Arc<dyn Store>,
 ) -> Result<Option<(u16, PersistedIndexes)>, shamir_storage::error::DbError> {
@@ -259,6 +182,7 @@ pub async fn load_index2_metadata(
 /// never have been persisted before the `state` field existed). Any other
 /// failure (bad magic, unsupported envelope version, or a blob that
 /// decodes as NEITHER shape — genuine corruption) is surfaced as an error.
+#[cfg(test)]
 pub(crate) fn decode_persisted_indexes(
     bytes: &[u8],
 ) -> Result<PersistedIndexes, shamir_storage::error::DbError> {
