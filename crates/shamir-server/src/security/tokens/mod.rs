@@ -1,4 +1,5 @@
 //! Durable API token persistence and token-service operations.
+pub mod cli;
 mod model;
 mod owners;
 mod service;
