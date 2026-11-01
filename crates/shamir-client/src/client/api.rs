@@ -331,25 +331,7 @@ impl Client {
     pub fn subscribe_push(&self, sub_id: u64) -> SubscriptionHandle {
         let (tx, rx) = tokio::sync::mpsc::channel(CLIENT_SUB_CHANNEL_CAP);
         let (term_tx, term_rx) = tokio::sync::oneshot::channel();
-        {
-            let mut subs = self.state.subs.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(cause) = subs.closed.clone() {
-                let _ = term_tx.send(cause);
-            } else {
-                subs.live.insert(sub_id, tx.clone());
-                subs.terminal.insert(sub_id, term_tx);
-                if let Some(buffered) = subs.early.remove(&sub_id) {
-                    subs.early_total -= buffered.len();
-                    for envelope in buffered {
-                        let _ = tx.try_send(envelope);
-                    }
-                }
-                debug_assert_eq!(
-                    subs.early_total,
-                    subs.early.values().map(Vec::len).sum::<usize>()
-                );
-            }
-        }
+        let _ = self.state.subs.register(sub_id, tx.clone(), term_tx);
         SubscriptionHandle::new(sub_id, rx, tx.downgrade(), self.state.subs.clone(), term_rx)
     }
 
