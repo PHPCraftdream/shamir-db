@@ -26,9 +26,9 @@ Added `revoke_user_skips_expired_and_already_revoked_records`, `retained_non_liv
 
 `launcher_shutdown_stops_token_gc_task` starts a real `ServerLauncher`, observes GC termination during `ServerHandle::shutdown`, drops its additional service `Arc` after GC termination, and bounds shutdown. `read_only_node_rejects_create_and_revoke_mutations` creates a durable bearer on a writable service, reopens the same store read-only, verifies the existing bearer and checks create/revoke/revoke_user rejection. Tests are unexecuted pending CI.
 
-### Item 5 — exact future source split (not performed)
+### Item 5 — source split (performed by the orchestrator after revision 2)
 
-No moves or deletions were made. Keep `tokens/` at six top-level entries: `mod.rs`, `owners.rs`, `store.rs`, `tests/`, and future `model/` and `service/` directories.
+The executor made no moves; the orchestrator then performed the split below with `git mv` plus extraction. `tokens/` keeps six top-level entries: `mod.rs`, `owners.rs`, `store.rs`, `tests/`, and the `model/` and `service/` directories.
 
 Orchestrator extracts the model items (each subdirectory's `mod.rs` is a manifest only):
 - `model/token_view.rs`: `TokenView` and `From<&TokenRecord>`.
@@ -50,7 +50,7 @@ Update imports/re-exports during extraction; moving the current files as-is is i
 ### Item 6 — lint-aware read-through
 
 Read end-to-end after edits:
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/service.rs`
+- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/service/token_service.rs`
 - `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/store.rs`
 - `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/tests/service_tests.rs`
 - `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/tests/store_tests.rs`
@@ -65,6 +65,6 @@ Revision 2 items 1–6 status:
 - Item 2 DONE — typed failure seam covers record writes/deletes, revoke_user and GC batches.
 - Item 3 PARTIAL — functional regressions added; retained-row owner-gate acquisition remains unverified.
 - Item 4 PARTIAL — launcher GC shutdown and read-only reopen/verify/rejection regressions added; behavior awaits CI.
-- Item 5 DONE — exact split targets above; no moves/deletions.
+- Item 5 — split targets above; the moves and extraction were done by the orchestrator, not the executor.
 - Item 6 DONE — six changed files read end-to-end and source classes reviewed above.
 - Scoped `cargo fmt -p shamir-server`, `cargo fmt -p shamir-server -- --check`, `python -I scripts/ci/check_layout.py`, and `git diff --check` passed. Tests, compilation and Clippy were not run; CI verification remains required.
