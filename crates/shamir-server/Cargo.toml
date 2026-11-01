@@ -38,6 +38,7 @@ shamir-tunables = { path = "../shamir-tunables" }
 shamir-transport-tcp = { path = "../shamir-transport-tcp" }
 shamir-transport-ws = { path = "../shamir-transport-ws" }
 shamir-transport-ipc = { path = "../shamir-transport-ipc" }
+shamir-transport-http = { path = "../shamir-transport-http" }
 shamir-collections = { path = "../shamir-collections" }
 shamir-db = { path = "../shamir-db" }
 shamir-query-types = { path = "../shamir-query-types" }
@@ -73,6 +74,7 @@ fjall = "3.0.1"
 ktav = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_bytes = "0.11"
+bytes = "1.11.0"
 
 # Encoding
 rmp-serde = "1.3"
