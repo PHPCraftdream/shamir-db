@@ -167,7 +167,7 @@ shk1.<id>.<secret>
 
 Любой ответ, отправленный до чтения тела (`401`, `403`, `415`, `429` и т.п.), несёт `Connection: close`, и соединение закрывается (на keep-alive остался бы непрочитанный хвост тела). `Expect: 100-continue` не отвергается: `100 Continue` отправляется только после успешной проверки токена, т.е. когда читающий тело код впервые запрашивает тело; при неудаче клиент получает финальный ответ без `100`.
 
-**Framing** (только HTTP/1.1, без pipelining): запрос с одновременными `Content-Length` и `Transfer-Encoding`, повторным или нечисловым `Content-Length`, obsolete line folding, голым LF, `Transfer-Encoding` кроме `chunked` отвергается `400` с закрытием соединения; любая аномалия framing закрывает соединение. Ответы несут `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, на TLS ещё `Strict-Transport-Security`. **Заголовков CORS нет никогда**; браузерный кросс-доменный клиент вне scope v1.
+**Framing** (только HTTP/1.1; запросы одного соединения, включая pipelined, обслуживаются строго последовательно, каждая голова запроса проходит строгий сканер): запрос с одновременными `Content-Length` и `Transfer-Encoding`, повторным или нечисловым `Content-Length`, obsolete line folding, голым LF, `Transfer-Encoding` кроме `chunked` отвергается `400` с закрытием соединения; любая аномалия framing закрывает соединение. Ответы несут `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, на TLS ещё `Strict-Transport-Security`. **Заголовков CORS нет никогда**; браузерный кросс-доменный клиент вне scope v1.
 
 ## 10. WebSocket (каналы 2 и 4)
 
