@@ -356,7 +356,8 @@ async fn rv_index_2f3cbca3_reopen_reseed_respects_absorption_watermark() {
         .await
         .unwrap();
     }
-    snapshot::dump_snapshot_with_gen(&adapter, &info_store, &keyspace, 1)
+    assert_eq!(m0.gen, 0);
+    snapshot::dump_snapshot_with_gen(&adapter, &info_store, &keyspace, m0.gen + 1)
         .await
         .unwrap();
     let m1 = snapshot::read_manifest(&info_store, &keyspace)
@@ -506,7 +507,7 @@ async fn seed_pruned_boundary_3(info_store: &Arc<dyn Store>, keyspace: &str) -> 
         .await
         .unwrap();
     }
-    snapshot::dump_snapshot_with_gen(&adapter, info_store, keyspace, 1)
+    snapshot::dump_snapshot_with_gen(&adapter, info_store, keyspace, m0.gen + 1)
         .await
         .unwrap();
     let m1 = snapshot::read_manifest(info_store, keyspace).await.unwrap();
