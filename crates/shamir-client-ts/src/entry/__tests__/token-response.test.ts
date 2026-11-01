@@ -22,6 +22,30 @@ function expectProtocolError(value: Record<string, unknown>): void {
 }
 
 describe('validateTokenBatchResponse', () => {
+  it('normalizes Rust externally tagged DDL states in batch results', () => {
+    const cases: Array<[unknown, unknown]> = [
+      ['in_progress', { kind: 'in_progress' }],
+      ['unknown', { kind: 'unknown' }],
+      [{ succeeded: { completed_at: 7n } }, { kind: 'succeeded', completed_at: 7 }],
+      [{ succeeded_via_crash_recovery: { completed_at_restart: 8 } }, { kind: 'succeeded_via_crash_recovery', completed_at_restart: 8 }],
+      [{ failed: { detail: 'failure' } }, { kind: 'failed', detail: 'failure' }],
+      [{ kind: 'succeeded', completed_at: 9 }, { kind: 'succeeded', completed_at: 9 }],
+    ];
+    for (const [state, normalized] of cases) {
+      const fixture = response({ ddl_status: state });
+      expect(validateTokenBatchResponse(fixture).results.read?.ddl_status).toEqual(normalized);
+    }
+  });
+
+  it('rejects malformed externally tagged DDL variants', () => {
+    for (const state of [
+      'missing', { succeeded: {} }, { succeeded: { completed_at: -1 } },
+      { succeeded: { completed_at: 1, extra: true } }, { failed: {} },
+      { succeeded: { completed_at: 1 }, failed: { detail: 'x' } },
+      [], Object.create({ succeeded: { completed_at: 1 } }),
+    ]) expectProtocolError(response({ ddl_status: state }));
+  });
+
   it('accepts full query stats, pagination, explain, versions, corrupt records, and receipt metadata', () => {
     const fixture = response({
       records: [{ id: 3 }],
@@ -63,6 +87,41 @@ describe('validateTokenBatchResponse', () => {
   it('rejects non-wire row values and binary row records', () => {
     expectProtocolError(response({ records: [{ id: Symbol('hidden') }] }));
     expectProtocolError(response({ records: [new Uint8Array([1, 2])] }));
+  });
+
+  it('rejects non-string transaction reason and error fields on transactions and receipts', () => {
+    const malformed = [1, null, {}, new Uint8Array([1])];
+    for (const field of ['reason', 'error']) {
+      for (const invalid of malformed) {
+        expectProtocolError({ ...response(), transaction: { tx_id: 1, status: 'aborted', materialized: false, [field]: invalid } });
+        expectProtocolError(response({ receipt: { tx_id: 1, status: 'aborted', materialized: false, [field]: invalid } }));
+      }
+    }
+  });
+
+  it('preserves valid transaction reason and error strings and legacy nested wire values', () => {
+    const bytes = new Uint8Array([1, 2]);
+    const large = 9007199254740992n;
+    const fixture = {
+      ...response({ records: [{ id: 'record', nested: { bytes, large } }], value: { bytes, large } }),
+      transaction: { tx_id: 9n, status: 'aborted', materialized: false, reason: 'cancelled' },
+    };
+    const result = validateTokenBatchResponse(fixture);
+    expect(result).toBe(fixture);
+    const data = result as unknown as {
+      transaction: { reason: string };
+      results: { read: { records: Array<{ nested: { bytes: Uint8Array; large: bigint } }>; value: { bytes: Uint8Array; large: bigint } } };
+    };
+    expect(data.transaction.reason).toBe('cancelled');
+    expect(data.results.read.records[0].nested.bytes).toBe(bytes);
+    expect(data.results.read.records[0].nested.large).toBe(large);
+    expect(data.results.read.value.bytes).toBe(bytes);
+    expect(data.results.read.value.large).toBe(large);
+
+    const receiptFixture = response({ receipt: { tx_id: 10, status: 'committed', materialized: true, visibility: { state: 'visible' }, error: 'retained' } });
+    const receiptResult = validateTokenBatchResponse(receiptFixture);
+    expect(receiptResult).toBe(receiptFixture);
+    expect(receiptResult.results.read).toMatchObject({ receipt: { error: 'retained' } });
   });
 
   it('rejects malformed transaction visibility metadata as a protocol error', () => {

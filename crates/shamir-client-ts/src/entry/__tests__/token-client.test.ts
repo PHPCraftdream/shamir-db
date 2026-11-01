@@ -6,6 +6,7 @@ import { ApiToken } from '../api-token.js';
 import { createTokenHttpClient } from '../token-client.js';
 import type { TokenPlatform, TokenHttpResponse } from '../../platform/token/types.js';
 import type { BatchOpInput } from '../../core/types/write/batch.js';
+import { VisibilityError } from '../../core/visibility/errors.js';
 
 const token = ApiToken.from(`shk1.${'A'.repeat(21)}A.${'A'.repeat(42)}A`);
 const batchResponse = (id: unknown = 1) => ({ kind: 'batch', response: { id, results: { _: { records: [] }, read: { records: [] } }, execution_plan: [], execution_time_us: 2 } });
@@ -42,10 +43,51 @@ const request = () => Batch.create().add('read', Query.from('items')).build();
   });
   it('places normalized visibility waits on execute requests and supports bounded bigint versions', async () => {
     const { client, requests } = harness([batchResponse(), { kind: 'visibility_observed', version: 9007199254740991n, visibility: { state: 'visible' } }]);
-    await client.execute('db', request(), { mode: 'bounded', timeout_ms: 10 });
-    expect((requests[0]?.body as Record<string, { visibility_wait?: unknown }>).batch.visibility_wait).toBeDefined();
+    const originalBatch = request();
+    await client.execute('db', originalBatch, { mode: 'bounded', timeout_ms: 10 });
+    const executeWire = requests[0]?.body as Record<string, { visibility_wait?: unknown }>;
+    expect(executeWire.batch.visibility_wait).toEqual({ mode: 'bounded', timeout_ms: 10n });
+    expect(originalBatch).not.toHaveProperty('visibility_wait');
     await expect(client.waitForVisibility('db', 'repo', 9007199254740991n, { mode: 'bounded', timeout_ms: 10 })).resolves.toEqual({ state: 'visible' });
     expect((requests[1]?.body as Record<string, unknown>).version).toBe(9007199254740991n);
+    expect((requests[1]?.body as Record<string, unknown>).visibility_wait).toEqual({ mode: 'bounded', timeout_ms: 10n });
+  });
+  it('preserves structured visibility errors through execute and visibility waits', async () => {
+    const structuredTimeout = {
+      kind: 'as_of_visibility_timeout',
+      code: 'as_of_visibility_timeout',
+      message: 'peer secret',
+      requested: 12n,
+      visible_through: 9n,
+      blocking_version: 10n,
+    };
+    const { client } = harness([structuredTimeout, structuredTimeout]);
+    const assertVisibilityTimeout = (error: unknown) => {
+      expect(error).toBeInstanceOf(VisibilityError);
+      expect(error).toMatchObject({
+        code: 'as_of_visibility_timeout',
+        requested: 12n,
+        visible_through: 9n,
+        blocking_version: 10n,
+        detail: 'Visibility wait timed out',
+      });
+      expect(String(error)).not.toContain('peer secret');
+    };
+
+    const executeRejection = client.execute('db', request(), { mode: 'bounded', timeout_ms: 10 });
+    await expect(executeRejection).rejects.toBeInstanceOf(VisibilityError);
+    try {
+      await executeRejection;
+    } catch (error: unknown) {
+      assertVisibilityTimeout(error);
+    }
+    const visibilityRejection = client.waitForVisibility('db', 'repo', 12n, { mode: 'bounded', timeout_ms: 10 });
+    await expect(visibilityRejection).rejects.toBeInstanceOf(VisibilityError);
+    try {
+      await visibilityRejection;
+    } catch (error: unknown) {
+      assertVisibilityTimeout(error);
+    }
   });
   it('allows builder transactions and forwards db helpers through bound executions', async () => {
     const { client, requests } = harness();

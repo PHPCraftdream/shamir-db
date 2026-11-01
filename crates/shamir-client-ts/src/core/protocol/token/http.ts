@@ -3,6 +3,8 @@ import type { ApiToken } from '../../../entry/api-token.js';
 import { authorizationHeader } from './auth.js';
 import { TokenTransportError, isTokenTransportErrorCode, type TokenTransportErrorCode } from './errors.js';
 import { ShamirDbError, isRetryableCode } from '../../support/errors.js';
+import { VisibilityError } from '../../visibility/errors.js';
+import { position } from '../../visibility/positions.js';
 import type { TokenPlatform } from '../../../platform/token/types.js';
 import type { TokenHttpRequest, TokenRequestOptions } from './options.js';
 import type { TokenResponseMap } from './transport.js';
@@ -13,6 +15,17 @@ const SAFE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Uint8Array); }
 function fail(code: TokenTransportErrorCode, status?: number): TokenTransportError { return new TokenTransportError(code, 'Token HTTP request failed', { ...(status === undefined ? {} : { status }) }); }
 function appError(value: unknown, status: number): Error | undefined {
+  if (object(value) && value.kind === 'as_of_visibility_timeout') {
+    if (value.code !== 'as_of_visibility_timeout' || typeof value.message !== 'string') throw fail('protocol_error', status);
+    try {
+      const requested = position(value.requested);
+      const visible_through = position(value.visible_through);
+      const blocking_version = position(value.blocking_version);
+      return new VisibilityError({ kind: 'as_of_visibility_timeout', code: 'as_of_visibility_timeout', message: 'Visibility wait timed out', requested, visible_through, blocking_version });
+    } catch {
+      throw fail('protocol_error', status);
+    }
+  }
   if (!object(value) || value.kind !== 'error' || typeof value.code !== 'string' || typeof value.message !== 'string') return undefined;
   if (!SAFE_CODE.test(value.code)) return fail(status === 403 ? 'protocol_error' : 'http_bad_request', status);
   if (value.code === 'timeout' || value.code === 'lock_timeout' || value.code === 'tx_conflict' || value.code === 'read_only_replica' || value.code === 'wal_retention_exceeded') return new ShamirDbError(value.code, 'Remote application error');
@@ -22,6 +35,10 @@ function appError(value: unknown, status: number): Error | undefined {
 function validateResponse(value: unknown): TokenResponseMap {
   if (!object(value)) throw fail('protocol_error');
   if (value.kind === 'pong') return value;
+  if (value.kind === 'as_of_visibility_timeout') {
+    const error = appError(value, 200);
+    if (error) throw error;
+  }
   if (value.kind === 'error') {
     const error = appError(value, 200);
     if (error) throw error;

@@ -1,72 +1,54 @@
-# JS1 token HTTP transport audit — 2026-11-01
+# TOKEN-JS1 token HTTP transport audit — 2026-11-01
 
-## Historical progress (superseded)
+## Scope and decisions
 
-The progress notes below preserve the earlier chunk record; statements about denied visibility, deferred integration, missing tests/adapters, and validation are superseded by the final audit at the end of this file. The final audit is authoritative.
+This revision covers the HTTP-only token transport and its Node/browser adapters. WebSocket, login, end-to-end work, dependency changes, and public connect/package-export changes are out of scope; public connect overloads and package exports remain unchanged for JS3.
 
-- Browser adapter completed: `src/platform/token/http-browser.ts` exports the fetch/reader/response structures and `createBrowserTokenPlatform`; bounded streaming, same-origin HTTP(S), authorization-only auth, omitted credentials, redirect refusal, abort/deadline lifecycle, and close are implemented. Tests/builds intentionally not run; adapter/type integration remains for CI.
-- Foundation contracts: added a module-private WeakMap ApiToken with canonical base64url tail-bit checks and redacting coercions; transport accessor is a named module export only and is not wired through package entries. Node inspect hook deferred because this code must stay browser-safe without importing Node.
-- Scope contracts: introduced HTTP-specific connection option types, token protocol request/error/transport types, and a structural platform HTTP seam; public connect overloads, adapters, clients/DB facade, auth credential exclusion from encoded request, recursive batch allowlisting, and richer response-shape validation remain for later JS1/JS3 work.
-- HTTP contract uses existing framing scalar codec helpers, a 16 MiB response cap, static endpoints, no automatic replay, uniform 401, and advisory Retry-After. Deviation: currently broad success shape checks require follow-up against concrete response variants before integration.
-- Tests authored: none in this partial foundation pass. CI typecheck/lint and behavioral tests are unrun by instruction; layout gate unrun.
-- ApiToken tests added at `crates/shamir-client-ts/src/entry/__tests__/api-token.test.ts`: canonical shape/trailing-bit validation, coercion/inspection/property redaction, safe invalid-input errors, and internal accessor/forged-handle behavior. Tests remain unrun per policy; strict TypeScript compile-read-through completed for the test and source.
-- HTTP transport replaced with operation denial, bounded msgpack decoding, typed/sanitized errors, status mapping and terminal close; token options now validate opaque handles, URL origin-root syntax and bounded safe timeouts.
-- Added focused `token/__tests__/http.test.ts` protocol and option validation cases. CI must verify strict TS types and framing/error semantics; tests intentionally not run.
+`normalizeTokenDdlState` is the sole new export in this revision. The shared normalizer accepts Rust externally tagged unit strings and one-key maps, along with compatible legacy `kind` objects. It returns the existing `DdlOpState` tagged shape. Timestamp validation accepts nonnegative safe integers (including bigint only when exactly representable); malformed states and unsafe timestamps become sanitized protocol errors. Both batch DDL states and `getDdlOpStatus` use this normalization.
 
-The earlier “Final report” section and its duplicated later progress statements were superseded: they incorrectly asserted REST visibility denial and deferred client/adapters. The implementation admits REST visibility requests; see `src/core/protocol/token/http.ts:58` and client handling in `src/entry/token-client.ts:103-107`.
+Structured visibility timeouts retain the existing `VisibilityError`, with sanitized static detail, preserved code, and bigint positions. Malformed visibility metadata is handled as a protocol error. Transaction and receipt optional `reason` and `error` fields are validated as strings when present. The legacy binary/bigint wire-value cast remains for compatibility and has an explicit short comment; there is no `LegacyBatchResponse` type alias.
+
+Item 4 assertions cover absent Retry-After as `undefined`, nested wire-batch interner-field exclusion and builder comparison, and an exact normalized `10n` wait. Visibility wait input is not mutated. These assertions are in `crates/shamir-client-ts/src/core/protocol/token/__tests__/http.test.ts:117`, `crates/shamir-client-ts/src/platform/token/__tests__/http-node.test.ts:69`, and `crates/shamir-client-ts/src/entry/__tests__/token-client.test.ts:44`.
+
+A JS0 deviation is documented: peer-provided error text is sanitized, arbitrary error codes use the existing identifier guard, legacy typed DDL timestamps are normalized safely, and the browser connection budget measures fetch headers rather than TCP connection establishment.
+
+## Revision 1 status
+
+Items 1–4 are DONE based on source inspection and authored tests; no test execution is claimed. Item 5 is DONE. Item 6 is DONE based on lint-aware source read-through of all 20 token source/test files and both modified type files (22 files total). This is source inspection, not compiler or runtime verification. The deadline is a bound only; no claim is made that the last 15 minutes elapsed.
+
+The token source/test read-through covered these files:
+
+- `crates/shamir-client-ts/src/core/protocol/token/auth.ts`
+- `crates/shamir-client-ts/src/core/protocol/token/errors.ts`
+- `crates/shamir-client-ts/src/core/protocol/token/http.ts`
+- `crates/shamir-client-ts/src/core/protocol/token/options.ts`
+- `crates/shamir-client-ts/src/core/protocol/token/transport.ts`
+- `crates/shamir-client-ts/src/core/protocol/token/__tests__/http.test.ts`
+- `crates/shamir-client-ts/src/entry/api-token.ts`
+- `crates/shamir-client-ts/src/entry/token-client.ts`
+- `crates/shamir-client-ts/src/entry/token-db.ts`
+- `crates/shamir-client-ts/src/entry/token-ddl-state.ts`
+- `crates/shamir-client-ts/src/entry/token-response.ts`
+- `crates/shamir-client-ts/src/entry/__tests__/api-token.test.ts`
+- `crates/shamir-client-ts/src/entry/__tests__/token-client.test.ts`
+- `crates/shamir-client-ts/src/entry/__tests__/token-response.test.ts`
+- `crates/shamir-client-ts/src/platform/token/types.ts`
+- `crates/shamir-client-ts/src/platform/token/http-browser.ts`
+- `crates/shamir-client-ts/src/platform/token/http-node.ts`
+- `crates/shamir-client-ts/src/platform/token/__tests__/http-browser.test.ts`
+- `crates/shamir-client-ts/src/platform/token/__tests__/http-node.test.ts`
+- `crates/shamir-client-ts/src/platform/token/__tests__/http-node-tls.test.ts`
+
+The modified type files read through were `crates/shamir-client-ts/src/core/types/connection.ts` and `crates/shamir-client-ts/src/core/types/write/batch.ts`. No local builds, typechecks, or tests were run. CI verification is pending: strict TypeScript typecheck and Vitest across all seven test files are required. Both permitted layout-check runs returned OK; the checker ignores the untracked helper: `python -I scripts/ci/check_layout.py`. Inspected folder/file budgets were protocol 6, entry 6, platform 4, and test directories 1/3/3; all are within the limit of 7.
 
 ## Final report
 
-Status: **PARTIAL**. The HTTP token transport, platform adapters, token client/DB facade, and seven focused test files exist. Integration/build/test confidence is incomplete because no local builds, tests, or typecheck were run; CI remains required. Package-level `connect()` and client entrypoints remain unchanged, pending JS3.
-
-### Per-item status and evidence
-
-| Item | Status | Evidence / audit finding |
-|---|---|---|
-| Opaque API token, canonical validation and redaction | DONE | `/crates/shamir-client-ts/src/entry/api-token.ts:1-44`; WeakMap storage, canonical base64url tail bits, coercion redaction, Node inspect symbol, and accessor validation. `ApiToken` does not import Node; inspect is symbol-based. |
-| HTTP option and request contracts | DONE | `/crates/shamir-client-ts/src/core/types/connection.ts:1-27`; `/crates/shamir-client-ts/src/core/protocol/token/options.ts:6-65`. Options validate token handle, origin-root HTTP(S) URL, bounded safe timeouts, signal and TLS fields. |
-| HTTP request protocol, status mapping and bounded framing | DONE | `/crates/shamir-client-ts/src/core/protocol/token/http.ts:11-20,47-141`; msgpack framing via existing codec, 16 MiB bound, fixed endpoints, authorization header, no replay, uniform 401 and advisory Retry-After capped at 2^31-1 ms. |
-| Operation allowlisting and request credential exclusion | DONE | `/crates/shamir-client-ts/src/entry/token-client.ts:26-78,94-100`; recursive batch allowlist and prohibited operation handling; only request payload is encoded and authorization is placed in headers by protocol transport. |
-| Client/DB facade and response checks | PARTIAL | `/crates/shamir-client-ts/src/entry/token-client.ts:85-154`; `/crates/shamir-client-ts/src/entry/token-db.ts:10-29`; `/crates/shamir-client-ts/src/entry/token-response.ts:37-78`. Facade exists, and response values receive structural validation, but this is not equivalent to exhaustive validation against every concrete serde response type. |
-| Visibility behavior | PARTIAL | `/crates/shamir-client-ts/src/core/protocol/token/http.ts:58,31`; `/crates/shamir-client-ts/src/entry/token-client.ts:103-107`. REST visibility is allowed; `as_of_visibility_timeout` is not specially preserved and is surfaced as `protocol_error`. |
-| Error normalization and sanitization | DONE | `/crates/shamir-client-ts/src/core/protocol/token/errors.ts:16-53`; `/crates/shamir-client-ts/src/core/protocol/token/http.ts:12-20,101-118`. Peer messages are replaced with static text. `ShamirDbError` safe unknown application codes require the restricted lowercase identifier regex; unsafe strings are dropped for security. |
-| Node HTTP adapter | DONE | `/crates/shamir-client-ts/src/platform/token/http-node.ts:21-139`; bounded response buffering, abort/deadline handling, safe TLS configuration and close. Runtime TLS handshake was not exercised. |
-| Browser HTTP adapter | DONE | `/crates/shamir-client-ts/src/platform/token/http-browser.ts:9-117`; fetch/reader contracts, response cap, cancellation, same-origin fixed endpoint and omitted credentials. `connectTimeout` bounds fetch through response headers because browser fetch exposes no TCP-connect phase; it cannot separately bound TCP connection. |
-| DDL status types / normalization | DONE | `/crates/shamir-client-ts/src/entry/token-client.ts:109-149`; public DDL operation union additions in `/crates/shamir-client-ts/src/core/types/write/batch.ts` (amended declaration); supported Rust enum values are normalized to public tagged `kind`, including `drop_sorted_index`, `rename_sorted_index`, and `rename_index2`. |
-| Tests | DONE (authored; execution unverified) | Seven focused test files: entry tests `api-token.test.ts`, `token-client.test.ts`, `token-response.test.ts`; protocol `http.test.ts`; platform `http-browser.test.ts`, `http-node.test.ts`, `http-node-tls.test.ts`, all under `/crates/shamir-client-ts/src/{entry,core/protocol/token,platform/token}/__tests__/`. Primary named coverage includes token redaction, client operation allowlisting, response validation, HTTP status mapping, browser abort, Node HTTP behavior, and TLS configuration. No test execution is claimed. |
-| Public package connection exports | PARTIAL / JS3 | `/crates/shamir-client-ts/src/core/types/connection.ts:3-4` identifies package overloads as deferred. `src/core/client/client.ts`, package entries, and `connect()` were not changed. |
-| Name-key wire value compatibility | PARTIAL | `/crates/shamir-client-ts/src/entry/token-response.ts:12-18,37` preserves runtime binary and bigint values, while the legacy `WireValue` type model does not include binary/bigint variants. |
-
-### New module exports
-
-- `src/entry/api-token.ts`: `ApiToken`, `tokenValueForTransport` (module export for internal transport use; not package-entry wired).
-- `src/entry/token-client.ts`: `TokenHttpClient`, `TokenPlatformFactory`, `createTokenHttpClient`.
-- `src/entry/token-db.ts`: `TokenHttpDb`.
-- `src/entry/token-response.ts`: `validateTokenBatchResponse`.
-- `src/core/protocol/token/auth.ts`: `authorizationHeader`.
-- `src/core/protocol/token/errors.ts`: `TokenTransportErrorCode`, `isTokenTransportErrorCode`, `TokenTransportErrorOptions`, `TokenTransportError`.
-- `src/core/protocol/token/http.ts`: `MAX_TOKEN_RESPONSE_BYTES`, `TokenHttpTransport`, and re-export `TokenResponseMap`.
-- `src/core/protocol/token/options.ts`: `DEFAULT_TOKEN_REQUEST_TIMEOUT_MS`, `DEFAULT_TOKEN_CONNECT_TIMEOUT_MS`, `NormalizedTokenHttpOptions`, `normalizeTokenHttpOptions`, `TokenRequestOptions`, `TokenHttpRequest`.
-- `src/core/protocol/token/transport.ts`: `TokenResponseMap`, `TokenRequestTransport`, `TokenFailure`.
-- `src/platform/token/types.ts`: `TokenHttpRequestInit`, `TokenHttpResponse`, `TokenPlatform`, `DEFAULT_TOKEN_RESPONSE_BYTES`.
-- `src/platform/token/http-node.ts`: `createNodeTokenPlatform`.
-- `src/platform/token/http-browser.ts`: `BrowserTokenHttpReader`, `BrowserTokenHttpResponse`, `BrowserTokenHttpInit`, `TokenFetch`, `createBrowserTokenPlatform`.
-- Modified type declarations add `TokenHttpConnectOptions`, `TokenTlsOptions`, `NodeTokenHttpConnectOptions`, `BrowserTokenHttpConnectOptions` in `src/core/types/connection.ts`; DDL union includes the task-relevant Rust variants in `src/core/types/write/batch.ts`.
-
-### Read-through and validation
-
-Read-through covered all authored implementation files listed above, the seven focused test files listed above, and the relevant existing framing codec, visibility types/normalizer, and package entry/client files to verify their status. This records source review only, not compilation or runtime validation.
-
-The observed layout gate returned OK on all three runs; it ignores untracked files. A manual directory/file-budget review found at most 7 direct entries per token module directory, each source file under 1,000 lines, and test child directories with 1/3/3 files (all within the stated limits). No builds, tests, or typecheck were run by the orchestrator. No pass claim is made for them.
-
-### Deviations, remaining work, and ownership
-
-- Public `connect()` and package entry wiring remain for JS3. `src/core/client/client.ts` and package entry files are unchanged; dependencies are unchanged.
-- No retry logic, WebSocket transport, token login flow, E2E coverage, or JS3/JS2/deferred docs work was implemented.
-- Client response checks remain structural rather than exhaustive serde-equivalent validation; optional further structural validation/test coverage is not claimed exhaustive.
-- `as_of_visibility_timeout` has no specialized variant and becomes `protocol_error`; name-key runtime values can include binary/bigint although the existing type model is legacy-limited.
-- Node TLS handshake behavior has not been exercised. Browser connect timeout cannot isolate TCP connection establishment.
-- The untracked root `PROGRESS.md` was accidentally created by the worker during this run. It was left unchanged after discovery because deletion was forbidden; owner must delete it before commit.
-- No source, test, `PROGRESS.md`, git state, commit, or push was modified by this audit operation, apart from the accidental `PROGRESS.md` creation noted above.
-
-|
+Revision 1 items 1–6 are DONE by source inspection; CI verification remains pending.
+1. DONE — structured visibility timeouts preserve sanitized `VisibilityError` code and bigint positions (`crates/shamir-client-ts/src/core/protocol/token/http.ts:17`).
+2. DONE — batch DDL states and `getDdlOpStatus` share `normalizeTokenDdlState` (`crates/shamir-client-ts/src/entry/token-ddl-state.ts:18`).
+3. DONE — transaction/receipt text fields are validated; the legacy binary/bigint cast is explicitly documented (`crates/shamir-client-ts/src/entry/token-response.ts:21`).
+4. DONE — Retry-After absence, nested interner-field exclusion, and exact normalized waits are asserted in the protocol, Node, and client tests.
+5. DONE — this audit note is consistent and contains this final report.
+6. DONE — all 20 token source/test files and both modified type files received a lint-aware read-through; folder/file budgets were inspected.
+Added tests: “surfaces sanitized typed visibility timeouts from execute and REST visibility waits losslessly”; “rejects malformed visibility timeout metadata as a protocol error”; “normalizes Rust externally tagged DDL states in batch results”; “rejects malformed externally tagged DDL variants”; “rejects non-string transaction reason and error fields on transactions and receipts”; “preserves valid transaction reason and error strings and legacy nested wire values”; “preserves structured visibility errors through execute and visibility waits”.
+Validation: `python -I scripts/ci/check_layout.py` passed. No local builds, typechecks, or tests were run. CI must typecheck and run Vitest; public connect/package exports remain for JS3.

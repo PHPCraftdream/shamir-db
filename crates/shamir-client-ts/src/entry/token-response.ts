@@ -1,6 +1,7 @@
 import type { BatchResponse, TransactionInfo } from '../core/types/write/batch.js';
 import { validateTransactionVisibility } from '../core/visibility/positions.js';
 import { TokenTransportError } from '../core/protocol/token/errors.js';
+import { normalizeTokenDdlState } from './token-ddl-state.js';
 
 function bad(): never { throw new TokenTransportError('protocol_error', 'Malformed batch response'); }
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Uint8Array); }
@@ -19,22 +20,13 @@ function wire(value: unknown, depth = 0): boolean {
 function u64(value: unknown): boolean { try { return typeof value === 'number' ? Number.isSafeInteger(value) && value >= 0 : typeof value === 'bigint' && value >= 0n && value <= 0xffff_ffff_ffff_ffffn; } catch { return false; } }
 function validateTransaction(tx: unknown): tx is Record<string, unknown> {
   if (!record(tx) || !u64(tx.tx_id) || !['committed','aborted','indeterminate'].includes(String(tx.status)) || typeof tx.materialized !== 'boolean') return false;
+  if (tx.reason !== undefined && typeof tx.reason !== 'string' || tx.error !== undefined && typeof tx.error !== 'string') return false;
   tx.tx_id = safeNumber(tx.tx_id);
   validateTransactionVisibility(tx as unknown as TransactionInfo);
   return true;
 }
-function validateDdlState(state: unknown): boolean {
-  if (!record(state)) return false;
-  switch (state.kind) {
-    case 'in_progress': case 'unknown': return true;
-    case 'succeeded': return state.completed_at !== undefined && (state.completed_at = safeNumber(state.completed_at)) >= 0;
-    case 'succeeded_via_crash_recovery': return state.completed_at_restart !== undefined && (state.completed_at_restart = safeNumber(state.completed_at_restart)) >= 0;
-    case 'failed': return typeof state.detail === 'string';
-    default: return false;
-  }
-}
 
-/** Validates an untrusted token batch response; binary and bigint WireValue legacy variants are preserved. */
+/** Validates token results without narrowing MessagePack binary or bigint values. */
 export function validateTokenBatchResponse(value: Record<string, unknown>): BatchResponse {
   try {
     if (!record(value) || !Object.prototype.hasOwnProperty.call(value, 'id') || !wire(value.id) || !record(value.results) || !Array.isArray(value.execution_plan) || !value.execution_plan.every((row) => Array.isArray(row) && row.every((item) => typeof item === 'string'))) return bad();
@@ -58,7 +50,7 @@ export function validateTokenBatchResponse(value: Record<string, unknown>): Batc
       if (query.versions !== undefined && (!Array.isArray(query.versions) || !query.versions.every(u64))) return bad();
       if (query.skipped !== undefined && typeof query.skipped !== 'boolean') return bad();
       if (query.op_id !== undefined && typeof query.op_id !== 'string') return bad();
-      if (query.ddl_status !== undefined && !validateDdlState(query.ddl_status)) return bad();
+      if (query.ddl_status !== undefined) query.ddl_status = normalizeTokenDdlState(query.ddl_status);
       if (query.receipt !== undefined && !validateTransaction(query.receipt)) return bad();
       if (query.corrupt_records !== undefined && (!Array.isArray(query.corrupt_records) || !query.corrupt_records.every((r) => record(r) && typeof r.table === 'string' && typeof r.id === 'string'))) return bad();
       if (query.explain !== undefined) {
@@ -73,6 +65,7 @@ export function validateTokenBatchResponse(value: Record<string, unknown>): Batc
       for (const deps of Object.values(value.edge_provenance)) if (!record(deps) || Object.values(deps).some((kind) => !['explicit','data_flow','both'].includes(String(kind)))) return bad();
     }
     if (value.transaction !== undefined && !validateTransaction(value.transaction)) return bad();
+    // Keep legacy BatchResponse typings; MessagePack binary and bigint values remain lossless.
     return value as unknown as BatchResponse;
   } catch { return bad(); }
 }

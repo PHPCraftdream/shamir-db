@@ -9,6 +9,7 @@ import type { TokenResponseMap } from '../core/protocol/token/transport.js';
 import { TokenTransportError } from '../core/protocol/token/errors.js';
 import type { TokenPlatform } from '../platform/token/types.js';
 import { TokenHttpDb } from './token-db.js';
+import { normalizeTokenDdlState } from './token-ddl-state.js';
 
 export interface TokenHttpClient {
   readonly channel: 'http'; readonly sid: undefined; readonly expiresAtNs: undefined;
@@ -112,7 +113,7 @@ class TokenHttpClientImpl implements TokenHttpClient {
     const status = result.status;
     if (status === null) return null;
     if (!isRecord(status) || typeof status.op_id !== 'string') throw new TokenTransportError('protocol_error', 'Malformed DDL status');
-    return { op_id: status.op_id, kind: normalizeKind(status.kind) as DdlOpStatus['kind'], state: normalizeState(status.state) };
+    return { op_id: status.op_id, kind: normalizeKind(status.kind) as DdlOpStatus['kind'], state: normalizeTokenDdlState(status.state) };
   }
   db(name: string): TokenHttpDb { return new TokenHttpDb(this, name); }
   async close(): Promise<void> { if (!this.closed) { this.closed = true; await this.transport.close(); } }
@@ -138,14 +139,6 @@ function normalizeKind(value: unknown): DdlOpStatus['kind'] {
   const required: Record<string, string[]> = { create_hash_index: ['index_name','table_name'], create_unique_hash_index: ['index_name','table_name'], drop_hash_index: ['index_name'], drop_unique_hash_index: ['index_name'], rename_hash_index: ['old_name','new_name'], rename_unique_hash_index: ['old_name','new_name'], drop_index2: ['index_name'], drop_sorted_index: ['index_name'], rename_sorted_index: ['old_name','new_name'], rename_index2: ['old_name','new_name'], other: ['description'] };
   for (const field of required[String(kind.kind)] ?? []) if (typeof kind[field] !== 'string') throw new TokenTransportError('protocol_error', 'Malformed DDL status');
   return kind as unknown as DdlOpStatus['kind'];
-}
-function normalizeState(value: unknown): DdlOpStatus['state'] {
-  const state = tagged(value, ['in_progress','succeeded','succeeded_via_crash_recovery','failed','unknown']);
-  if (state.kind === 'in_progress' || state.kind === 'unknown') return { kind: state.kind };
-  if (state.kind === 'succeeded' && (typeof state.completed_at === 'number' || typeof state.completed_at === 'bigint') && Number.isSafeInteger(Number(state.completed_at)) && Number(state.completed_at) >= 0) return { kind: 'succeeded', completed_at: Number(state.completed_at) };
-  if (state.kind === 'succeeded_via_crash_recovery' && (typeof state.completed_at_restart === 'number' || typeof state.completed_at_restart === 'bigint') && Number.isSafeInteger(Number(state.completed_at_restart)) && Number(state.completed_at_restart) >= 0) return { kind: 'succeeded_via_crash_recovery', completed_at_restart: Number(state.completed_at_restart) };
-  if (state.kind === 'failed' && typeof state.detail === 'string') return { kind: 'failed', detail: state.detail };
-  throw new TokenTransportError('protocol_error', 'Malformed DDL state');
 }
 export function createTokenHttpClient<T extends TokenHttpConnectOptions>(options: T, platformFactory: TokenPlatformFactory<T>): TokenHttpClient {
   const normalized = normalizeTokenHttpOptions(options);

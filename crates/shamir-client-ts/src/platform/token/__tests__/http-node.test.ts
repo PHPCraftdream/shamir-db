@@ -90,7 +90,19 @@ describe('Node token HTTP adapter', () => {
       const wire = decode(fixture.seen[1].body) as Record<string, unknown>;
       expect(wire).toMatchObject({ op: 'execute', db: 'app', query_version: 4 });
       expect(wire).not.toHaveProperty('interner_epochs');
-      expect(wire).not.toHaveProperty('records_idmsgpack');
+      expect(wire).not.toHaveProperty('result_encoding');
+      const wireBatch = wire.batch as { queries: Record<string, Record<string, unknown>> };
+      expect(Object.keys(wireBatch.queries)).toContain('read');
+      expect(wireBatch).not.toHaveProperty('interner_epochs');
+      expect(wireBatch).not.toHaveProperty('records_idmsgpack');
+      expect(wireBatch).not.toHaveProperty('result_encoding', 'id');
+      for (const operation of Object.values(wireBatch.queries)) {
+        expect(operation).not.toHaveProperty('records_idmsgpack');
+        expect(operation).not.toHaveProperty('interner_epochs');
+        expect(operation).not.toHaveProperty('result_encoding');
+      }
+      expect(wireBatch.queries.read).toEqual(batch.queries.read);
+      expect(wireBatch.queries.read).toMatchObject({ from: 'items' });
     } finally { await shutdown(fixture.server, [transport]); }
   });
 
