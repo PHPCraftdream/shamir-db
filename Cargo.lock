@@ -3824,6 +3824,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-transport-http"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "shamir-transport-tcp",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "shamir-transport-ipc"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -4350,6 +4368,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
