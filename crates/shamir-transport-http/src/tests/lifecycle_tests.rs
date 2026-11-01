@@ -24,13 +24,13 @@ struct LifecycleGate;
 impl TokenGate for LifecycleGate {
     type Grant = ();
 
-    fn authenticate<'a>(
-        &'a self,
-        _: AuthHeader<'a>,
+    async fn authenticate(
+        &self,
+        _: AuthHeader<'_>,
         _: Endpoint,
         _: PeerInfo,
-    ) -> impl Future<Output = GateDecision<Self::Grant>> + Send + 'a {
-        async { GateDecision::Allow(()) }
+    ) -> GateDecision<Self::Grant> {
+        GateDecision::Allow(())
     }
 
     fn still_valid(&self, _: &Self::Grant) -> bool {
@@ -43,17 +43,15 @@ struct BlockingExecutor {
     release: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
 }
 impl RestExecutor<()> for BlockingExecutor {
-    fn execute<'a>(&'a self, _: &'a (), _: Bytes) -> impl Future<Output = ExecOutcome> + Send + 'a {
-        async move {
-            self.entered.notify_one();
-            if let Some(release) = self.release.lock().await.take() {
-                let _ = release.await;
-            }
-            ExecOutcome {
-                status: ExecStatus::Ok,
-                body: Bytes::new(),
-                hold: None,
-            }
+    async fn execute(&self, _: &(), _: Bytes) -> ExecOutcome {
+        self.entered.notify_one();
+        if let Some(release) = self.release.lock().await.take() {
+            let _ = release.await;
+        }
+        ExecOutcome {
+            status: ExecStatus::Ok,
+            body: Bytes::new(),
+            hold: None,
         }
     }
 }
