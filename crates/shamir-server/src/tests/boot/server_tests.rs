@@ -8,7 +8,7 @@ use crate::config::{
 };
 use crate::server::{BootstrapMode, ServerLauncher};
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launcher_shutdown_stops_token_gc_task() {
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
@@ -84,12 +84,10 @@ async fn launcher_shutdown_stops_token_gc_task() {
 /// 3. After dropping the first lock, a third `try_lock_exclusive` succeeds
 ///    (release-on-drop).
 ///
-/// This tests the lock primitive directly on a tempfile — it does NOT
-/// boot a full `ServerLauncher`. The wiring from `launch()` into
-/// `ServerHandle._data_dir_lock` is verified by compilation (the field
-/// is populated in the `Ok(ServerHandle { ... })` constructor; removing
-/// it is a compile error). A full-launcher test would require TLS certs,
-/// ports, bootstrap, etc. and is covered by `mvp_e2e`.
+/// This tests the lock primitive directly on a tempfile. The wiring from
+/// `launch()` into `ServerHandle._data_dir_lock` is verified by compilation
+/// (the field is populated in the `Ok(ServerHandle { ... })` constructor;
+/// removing it is a compile error).
 #[test]
 fn data_dir_lock_blocks_second_instance() {
     let dir = tempfile::tempdir().expect("tempdir");
