@@ -1,4 +1,4 @@
-use super::{args::CreateArgs, secret_output, TokenAction};
+use super::{args::CreateArgs, secret_output};
 use crate::{
     audit_appender::FjallAuditAppender,
     config::Config,
@@ -25,10 +25,21 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
         anyhow::bail!("create requires terminal or --out-file; no token was created");
     }
     let output = secret_output::prepare(a.out_file.as_deref(), io.is_terminal)?;
-    let (g, m, d, w, app) = open(c)?;
-    let owner = resolve(&d, &a.user)?;
-    let channel = parse_channels(&a.channels)?;
-    let svc = service(c, &m, d.clone(), w.clone()).await?;
+    let setup = async {
+        let (g, m, d, w, app) = open(c)?;
+        let owner = resolve(&d, &a.user)?;
+        let channel = parse_channels(&a.channels)?;
+        let svc = service(c, &m, d.clone(), w.clone()).await?;
+        anyhow::Ok((g, m, d, w, app, owner, channel, svc))
+    }
+    .await;
+    let (g, m, d, w, app, owner, channel, svc) = match setup {
+        Ok(v) => v,
+        Err(e) => {
+            remove_out_file(a.out_file.as_deref());
+            return Err(e);
+        }
+    };
     let result = svc
         .create(NewToken {
             owner_user_id: owner.user_id,
@@ -71,23 +82,27 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
     drop(g);
     let (secret, text, token_id) = match (prepared, cp) {
         (Ok(v), Ok(())) => v,
-        (Err(_), Err(_)) => {
+        (Ok((_, _, id)), Err(_)) => {
             return Err(anyhow::anyhow!(
-                "mutation may have happened; audit checkpoint failed"
+                "token {id} was created but the audit checkpoint failed; revoke it with `token revoke {id}`"
             ))
         }
-        (Err(_), _) => return Err(anyhow::anyhow!("token mutation failed")),
-        (_, Err(_)) => {
-            return Err(anyhow::anyhow!(
-                "mutation may have happened; audit checkpoint failed"
-            ))
+        (Err(e), Ok(())) => {
+            remove_out_file(a.out_file.as_deref());
+            return Err(e);
         }
+        (Err(e), Err(_)) => return Err(e.context("the audit checkpoint also failed")),
     };
     secret_output::deliver(output, &secret, io.stdout, io.stderr)
         .map_err(|_| anyhow::anyhow!("token {token_id} was created but secret delivery failed"))?;
     std::io::Write::write_all(io.stdout, text.as_bytes())
         .map_err(|_| anyhow::anyhow!("token {token_id} was created; metadata output failed"))?;
     Ok(())
+}
+fn remove_out_file(path: Option<&std::path::Path>) {
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
 }
 pub(super) fn parse_channels(s: &str) -> anyhow::Result<TokenChannels> {
     match s {
@@ -140,26 +155,31 @@ fn channel_text(v: TokenChannels) -> &'static str {
         TokenChannels::Both => "both",
     }
 }
-pub(super) fn open(
-    c: &Config,
-) -> anyhow::Result<(
+/// Exclusive lock, server meta, user directory, shared audit writer and its appender.
+pub(super) type Opened = (
     std::fs::File,
     ServerMetaStore,
     Arc<FjallUserDirectory>,
     Arc<AuditChainWriter>,
     Arc<FjallAuditAppender>,
-)> {
+);
+pub(super) fn open(c: &Config) -> anyhow::Result<Opened> {
     std::fs::create_dir_all(&c.data_dir)?;
     let g = crate::maintenance_lock::acquire(&c.data_dir)
         .map_err(|_| anyhow::anyhow!("offline token command requires a stopped server"))?;
     let m = ServerMetaStore::open_or_init(c.data_dir.join("server_meta"))?;
     let key = m.audit_chain_key()?;
     let log = FjallAuditAppender::read_log_for_verify(&c.data_dir)?;
-    AuditChain::verify_chain(&key, &log)?;
-    let ac = FjallAuditAppender::load_checkpoint(&c.data_dir)?;
-    let mc = m.audit_checkpoint();
-    for cp in [ac, mc].into_iter().flatten() {
-        AuditChain::verify_against_checkpoint(&log, cp.0, &cp.1)?;
+    // Rotation, retention and online restarts can leave a log that does not verify from
+    // genesis; the operator command then resumes from the log tail instead of refusing.
+    if AuditChain::verify_chain(&key, &log).is_ok() {
+        let ac = FjallAuditAppender::load_checkpoint(&c.data_dir)?;
+        let mc = m.audit_checkpoint();
+        for cp in [ac, mc].into_iter().flatten() {
+            AuditChain::verify_against_checkpoint(&log, cp.0, &cp.1)?;
+        }
+    } else {
+        tracing::warn!("audit log does not verify from genesis; resuming from its tail");
     }
     let tail = log
         .last()

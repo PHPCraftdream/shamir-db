@@ -28,12 +28,13 @@ pub(super) async fn run_list(c: &Config, a: ListArgs, io: &mut CliIo<'_>) -> any
     drop(g);
     let text = match (output, cp) {
         (Ok(s), Ok(())) => s,
-        (Err(_), Err(_)) => return Err(anyhow::anyhow!("audit checkpoint failed")),
-        (Err(_), _) => return Err(anyhow::anyhow!("token listing failed")),
+        (Err(e), Err(_)) => {
+            return Err(anyhow::Error::from(e).context("the audit checkpoint also failed"))
+        }
+        (Err(e), _) => return Err(anyhow::Error::from(e)),
         (_, Err(_)) => return Err(anyhow::anyhow!("audit checkpoint failed")),
     };
-    let mut stdout = io.stdout;
-    std::io::Write::write_all(&mut stdout, text.as_bytes())?;
+    std::io::Write::write_all(io.stdout, text.as_bytes())?;
     Ok(())
 }
 pub fn render_list(

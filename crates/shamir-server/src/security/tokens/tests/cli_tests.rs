@@ -8,14 +8,15 @@ use crate::security::tokens::cli::{
 use crate::security::tokens::cli::{
     create::{escape, id_text, parse_ttl},
     list::render_list,
-    revoke::validate_id,
+    revoke::parse_id,
     secret_output,
 };
 use crate::security::tokens::TokenView;
 use crate::security::user_directory::FjallUserDirectory;
 use clap::Parser;
 use shamir_connect::common::{crypto::StoredKey, kdf_params::KdfParams};
-use shamir_connect::server::token::{parse_token, TokenChannels, TokenMode};
+use shamir_connect::server::admin::UserDirectory;
+use shamir_connect::server::token::parse_token;
 use shamir_connect::server::{audit_chain::AuditChain, user_record::UserRecord};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -71,8 +72,8 @@ fn parser_rejects_missing_label_bad_ttl_bad_channel_and_revoke_without_yes() {
     assert!(TestCli::try_parse_from(["s", "revoke-all", "--yes"]).is_ok());
     assert_eq!(parse_ttl("30d").expect("ttl"), 2592000);
     assert!(parse_ttl("0s").is_err());
-    assert!(validate_id("AAAAAAAAAAAAAAAAAAAAA!").is_err());
-    assert!(validate_id("AAAAAAAAAAAAAAAAAAAAAA").is_ok());
+    assert!(parse_id("AAAAAAAAAAAAAAAAAAAAA!").is_err());
+    assert!(parse_id("AAAAAAAAAAAAAAAAAAAAAA").is_ok());
 }
 #[test]
 fn stable_list_render_escapes_label_owner_and_database_controls() {

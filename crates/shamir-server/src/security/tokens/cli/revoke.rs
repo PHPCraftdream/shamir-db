@@ -24,7 +24,8 @@ pub fn parse_id(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 fn id(s: &str) -> anyhow::Result<TokenId> {
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parse_id(s)?)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(parse_id(s).map_err(anyhow::Error::msg)?)?;
     Ok(TokenId(
         raw.try_into()
             .map_err(|_| anyhow::anyhow!("invalid token id"))?,
@@ -82,19 +83,14 @@ pub async fn run_revoke(c: &Config, a: Action, io: &mut CliIo<'_>) -> anyhow::Re
     drop(g);
     let out = match (result, cp) {
         (Ok(s), Ok(())) => s,
-        (Err(_), Err(_)) => {
-            return Err(anyhow::anyhow!(
-                "mutation may have happened; audit checkpoint failed"
-            ))
-        }
-        (Err(_), _) => return Err(anyhow::anyhow!("token mutation failed")),
+        (Err(e), Err(_)) => return Err(e.context("the audit checkpoint also failed")),
+        (Err(e), _) => return Err(e),
         (_, Err(_)) => {
             return Err(anyhow::anyhow!(
                 "mutation may have happened; audit checkpoint failed"
             ))
         }
     };
-    let mut stdout = io.stdout;
-    std::io::Write::write_all(&mut stdout, out.as_bytes())?;
+    std::io::Write::write_all(io.stdout, out.as_bytes())?;
     Ok(())
 }

@@ -25,7 +25,7 @@ pub struct ListArgs {
     #[arg(long)]
     pub user: Option<String>,
 }
-#[derive(Debug, Subcommand)]
+#[derive(Debug, clap::Subcommand)]
 /// Token administration actions.
 pub enum TokenAction {
     Create(CreateArgs),
