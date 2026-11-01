@@ -355,6 +355,9 @@ export type DdlOpKind =
   | { kind: 'rename_hash_index'; old_name: string; new_name: string }
   | { kind: 'rename_unique_hash_index'; old_name: string; new_name: string }
   | { kind: 'drop_index2'; index_name: string }
+  | { kind: 'drop_sorted_index'; index_name: string }
+  | { kind: 'rename_sorted_index'; old_name: string; new_name: string }
+  | { kind: 'rename_index2'; old_name: string; new_name: string }
   | { kind: 'other'; description: string };
 
 /**
