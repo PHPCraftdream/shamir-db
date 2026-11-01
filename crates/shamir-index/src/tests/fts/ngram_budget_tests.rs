@@ -113,7 +113,7 @@ fn rv_index_0695aada_streamed_tokens_match_materialized_output() {
     let mut streamed_len = 0_u32;
     tokenizer.for_each_token_identity(&over_budget, |hash| {
         streamed_len = streamed_len.wrapping_add(1);
-        *streamed.entry(hash).or_insert(0_u32) += 1;
+        *streamed.entry(hash.to_vec()).or_insert(0_u32) += 1;
     });
     assert_eq!(streamed, expected);
     assert_eq!(streamed_len as usize, materialized.len());
@@ -127,7 +127,7 @@ fn rv_index_0695aada_streamed_tokens_match_materialized_output() {
                 .map(|token| token_identity(token))
                 .collect();
             let mut actual = Vec::new();
-            tokenizer.for_each_token_identity(text, |hash| actual.push(hash));
+            tokenizer.for_each_token_identity(text, |hash| actual.push(hash.to_vec()));
             assert_eq!(actual, expected);
         }
     }
@@ -151,7 +151,7 @@ fn rv_index_0695aada_streamed_hash_frequency_and_length_parity() {
         let mut len = 0_u32;
         tokenizer.for_each_token_identity(text, |hash| {
             len = len.wrapping_add(1);
-            *actual.entry(hash).or_insert(0_u32) += 1;
+            *actual.entry(hash.to_vec()).or_insert(0_u32) += 1;
         });
         assert_eq!(actual, expected);
         assert_eq!(len as usize, tokens.len());

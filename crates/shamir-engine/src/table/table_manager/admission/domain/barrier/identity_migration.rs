@@ -30,13 +30,92 @@
 
 use std::sync::atomic::Ordering;
 
+use bytes::Bytes;
 use futures::StreamExt;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
 
 use super::TableManager;
 use crate::repo::RepoWritePermit;
 
 impl TableManager {
+    const INDEX2_IDENTITY_FAILURE_KEY: &'static str = "_m.idx.err";
+
+    fn index2_identity_failure_key() -> RecordKey {
+        RecordKey::from_slice(
+            shamir_types::types::record_id::RecordId::system(Self::INDEX2_IDENTITY_FAILURE_KEY)
+                .as_bytes(),
+        )
+    }
+
+    async fn load_index2_identity_failures(&self) -> DbResult<Vec<(u32, String)>> {
+        match self
+            .info_store
+            .get(Self::index2_identity_failure_key())
+            .await
+        {
+            Ok(bytes) => crate::meta::MetaEnvelope::open(&bytes)
+                .map_err(|e| DbError::Codec(format!("index2 identity failures: {e}"))),
+            Err(DbError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn write_index2_identity_failures(&self, failures: Vec<(u32, String)>) -> DbResult<()> {
+        let bytes = crate::meta::MetaEnvelope::new(failures)
+            .encode()
+            .map_err(|e| DbError::Codec(format!("index2 identity failures: {e}")))?;
+        self.info_store
+            .set(Self::index2_identity_failure_key(), Bytes::from(bytes))
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn save_index2_identity_failure(
+        &self,
+        id: u32,
+        reason: String,
+    ) -> DbResult<()> {
+        let mut failures = self.load_index2_identity_failures().await?;
+        if let Some((_, existing)) = failures.iter_mut().find(|(saved_id, _)| *saved_id == id) {
+            *existing = reason;
+        } else {
+            failures.push((id, reason));
+        }
+        self.write_index2_identity_failures(failures).await
+    }
+
+    pub(super) async fn clear_index2_identity_failure(&self, id: u32) -> DbResult<()> {
+        let mut failures = self.load_index2_identity_failures().await?;
+        if !failures.iter().any(|(saved_id, _)| *saved_id == id) {
+            return Ok(());
+        }
+        failures.retain(|(saved_id, _)| *saved_id != id);
+        if failures.is_empty() {
+            match self
+                .info_store
+                .remove(Self::index2_identity_failure_key())
+                .await
+            {
+                Ok(_) | Err(DbError::NotFound(_)) => Ok(()),
+                Err(error) => Err(error),
+            }
+        } else {
+            self.write_index2_identity_failures(failures).await
+        }
+    }
+
+    pub(super) async fn restore_index2_identity_failures(&self) -> DbResult<()> {
+        for (id, reason) in self.load_index2_identity_failures().await? {
+            if self.index2_registry.state_of(id).await
+                == Some(crate::index2::state::IndexState::Failed)
+            {
+                self.index2_registry.set_failed(id, reason).await;
+            }
+        }
+        Ok(())
+    }
+
     /// Ensure the base index family is on identity v2 for THIS table.
     /// Returns `true` when the migration ran (either because the stored
     /// markers said `need`, or because `force` is set by the post-replay
@@ -116,6 +195,8 @@ impl TableManager {
                         return Err(error.into());
                     }
                     let reason = format!("identity migration for index '{}' (id={id}) could not backfill: {error}; register its scalar with set_scalar_resolver(), then call TableManager::repair()", backend.descriptor().name);
+                    self.save_index2_identity_failure(id, reason.clone())
+                        .await?;
                     self.index2_registry.set_failed(id, reason).await;
                     crate::index2::persistence::save_index2_metadata(
                         &self.index2_registry,
@@ -127,6 +208,7 @@ impl TableManager {
                 self.index2_registry
                     .set_state(id, crate::index2::state::IndexState::Ready)
                     .await;
+                self.clear_index2_identity_failure(id).await?;
                 crate::index2::persistence::save_index2_metadata(
                     &self.index2_registry,
                     &self.info_store,

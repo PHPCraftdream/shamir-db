@@ -4,6 +4,7 @@ use crate::tokenizer::{
     WhitespaceTokenizer,
 };
 use std::borrow::Cow;
+use std::cell::Cell;
 
 #[test]
 fn whitespace_basic() {
@@ -65,6 +66,63 @@ fn rv_index_605eec5d_golden_token_hash() {
 fn token_identity_deterministic() {
     assert_eq!(token_identity("hello"), token_identity("hello"));
     assert_ne!(token_identity("hello"), token_identity("world"));
+}
+
+#[test]
+fn token_identity_is_encoded_once_per_distinct_token() {
+    let tokenizer = build_tokenizer(&TokenizerKind::Whitespace);
+    let calls = Cell::new(0);
+    let repeated = "alpha ".repeat(1000);
+    tokenizer.for_each_token_identity_with(
+        &repeated,
+        |token| {
+            calls.set(calls.get() + 1);
+            token_identity(token)
+        },
+        |_| {},
+    );
+    assert_eq!(calls.get(), 1);
+    calls.set(0);
+    let (freq, doc_len) = tokenizer
+        .try_token_frequencies_with(&repeated, |token| {
+            calls.set(calls.get() + 1);
+            token_identity(token)
+        })
+        .expect("token frequencies");
+    assert_eq!(calls.get(), 1);
+    assert_eq!(doc_len, 1000);
+    assert_eq!(freq.len(), 1);
+    assert_eq!(freq.get(&token_identity("alpha")), Some(&1000));
+    calls.set(0);
+    let (distinct_freq, distinct_doc_len) = tokenizer
+        .try_token_frequencies_with("alpha alpha beta alpha", |token| {
+            calls.set(calls.get() + 1);
+            token_identity(token)
+        })
+        .expect("token frequencies");
+    assert_eq!(calls.get(), 2);
+    assert_eq!(distinct_doc_len, 4);
+    assert_eq!(distinct_freq.len(), 2);
+    assert_eq!(distinct_freq.get(&token_identity("alpha")), Some(&3));
+    assert_eq!(distinct_freq.get(&token_identity("beta")), Some(&1));
+    calls.set(0);
+    let mut actual = Vec::new();
+    tokenizer.for_each_token_identity_with(
+        "alpha alpha beta alpha",
+        |token| {
+            calls.set(calls.get() + 1);
+            token_identity(token)
+        },
+        |identity| actual.push(identity.to_vec()),
+    );
+    assert_eq!(calls.get(), 2);
+    assert_eq!(
+        actual,
+        ["alpha", "alpha", "beta", "alpha"]
+            .into_iter()
+            .map(token_identity)
+            .collect::<Vec<_>>()
+    );
 }
 
 // ----- Full tokenizer: stemming -----

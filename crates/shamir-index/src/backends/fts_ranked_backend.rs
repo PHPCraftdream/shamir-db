@@ -141,7 +141,11 @@ impl FtsRankedBackend {
                 let mut doc_len = 0_u32;
                 self.tokenizer.for_each_token_identity(text, |identity| {
                     doc_len = doc_len.wrapping_add(1);
-                    *freq.entry(identity).or_insert(0) += 1;
+                    if let Some(count) = freq.get_mut(identity) {
+                        *count += 1;
+                    } else {
+                        freq.insert(identity.to_vec(), 1);
+                    }
                 });
                 (freq, doc_len)
             }
@@ -157,13 +161,8 @@ impl FtsRankedBackend {
         let Some(text) = rec.str_at(&ipath) else {
             return Ok((TFxMap::default(), 0));
         };
-        let tokens = self.tokenizer.try_tokenize(text)?;
-        let doc_len = tokens.len() as u32;
-        let mut freq = TFxMap::default();
-        for token in tokens {
-            *freq.entry(token_identity(&token)).or_insert(0) += 1;
-        }
-        Ok((freq, doc_len))
+        self.tokenizer
+            .try_token_frequencies_with(text, token_identity)
     }
 
     fn posting_key_for_token(&self, canonical: &[u8], rid: &RecordId) -> Vec<u8> {

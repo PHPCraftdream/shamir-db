@@ -73,7 +73,9 @@ impl FtsBackend {
             Some(text) => {
                 let mut identities = TFxSet::default();
                 self.tokenizer.for_each_token_identity(text, |identity| {
-                    identities.insert(identity);
+                    if !identities.contains(identity) {
+                        identities.insert(identity.to_vec());
+                    }
                 });
                 identities
             }
@@ -84,12 +86,12 @@ impl FtsBackend {
     fn try_tokenize_record(&self, rec: &dyn RecordRef) -> Result<TFxSet<Vec<u8>>, IndexError> {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
-            Some(text) => Ok(self
-                .tokenizer
-                .try_tokenize(text)?
-                .iter()
-                .map(|t| token_identity(t))
-                .collect()),
+            Some(text) => {
+                let (frequencies, _) = self
+                    .tokenizer
+                    .try_token_frequencies_with(text, token_identity)?;
+                Ok(frequencies.into_keys().collect())
+            }
             None => Ok(TFxSet::default()),
         }
     }

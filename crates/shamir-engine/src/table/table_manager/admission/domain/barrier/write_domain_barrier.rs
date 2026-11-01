@@ -425,6 +425,10 @@ impl TableManager {
                                 &e,
                             )
                         })?;
+                        if was_identity_migration {
+                            mgr.save_index2_identity_failure(recovered_id, reason.clone())
+                                .await?;
+                        }
                         mgr.index2_registry.set_failed(recovered_id, reason).await;
                         failed_recovery_ids.push(recovered_id);
                         continue;
@@ -476,6 +480,8 @@ impl TableManager {
                                     &e,
                                 )
                             })?;
+                            mgr.save_index2_identity_failure(recovered_id, reason.clone())
+                                .await?;
                             mgr.index2_registry.set_failed(recovered_id, reason).await;
                             failed_recovery_ids.push(recovered_id);
                             continue;
@@ -491,6 +497,7 @@ impl TableManager {
                     mgr.index2_registry
                         .set_state(recovered_id, crate::index2::state::IndexState::Ready)
                         .await;
+                    mgr.clear_index2_identity_failure(recovered_id).await?;
                     recovered_building_ids.push(recovered_id);
                     continue;
                 }
@@ -566,6 +573,7 @@ impl TableManager {
         // crash-state matrix.
         mgr.recover_hash_renames_admitted(open_permit).await?;
 
+        mgr.restore_index2_identity_failures().await?;
         // Restore in-memory state from persisted data.
         //
         // Each backend restores itself via `restore_on_open`: most
@@ -609,6 +617,9 @@ impl TableManager {
                         b.descriptor().name
                     );
                     log::error!("{reason}");
+                    if mgr.identity_migrated_this_open() {
+                        mgr.save_index2_identity_failure(id, reason.clone()).await?;
+                    }
                     mgr.index2_registry.set_failed(id, reason).await;
                 }
             }
@@ -626,6 +637,7 @@ impl TableManager {
         // `identity_migration.rs` (remove both markers -> in-place rebuild -> set idv = 2)
         // `idv > 2` is a typed, fail-closed open error; tables without base
         // indexes only move markers.
+        // Backfill streams regular definitions and materializes the shared unique snapshot.
         mgr.ensure_base_identity_current(open_permit).await?;
 
         // #1068: catch up the DDL op-log FIFO retention sweep at open time.
