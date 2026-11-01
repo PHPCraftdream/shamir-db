@@ -19,8 +19,10 @@ trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 type BoxedIo = Box<dyn IoStream>;
 
-/// Inbound bytes discarded after a rejection before the socket is closed.
+/// Inbound bytes discarded after a connection ends before the socket is closed.
 const LINGER_DISCARD_LIMIT: usize = 64 * 1024;
+/// Longest time a finished connection lingers waiting for the peer to close.
+const LINGER_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Failure to initialize or serve the HTTP listener.
 #[derive(Debug, Error)]
@@ -148,11 +150,11 @@ where
                         }
                         result = &mut connection => Some(result),
                     };
-                    if let Some(Err(_error)) = result {
+                    if let Some(outcome) = result {
                         let connection = *std::pin::Pin::into_inner(connection);
                         let mut guarded = connection.into_parts().io.into_inner();
-                        if !token.is_cancelled() {
-                            let timed_out = _error.is_timeout();
+                        if let (Err(failure), false) = (&outcome, token.is_cancelled()) {
+                            let timed_out = failure.is_timeout();
                             let drain = tokio::time::timeout(
                                 cfg.limits.write_timeout,
                                 guarded.finish_rejection(timed_out),
@@ -177,7 +179,7 @@ where
                         tokio::select! {
                             _ = token.cancelled() => {}
                             _ = tokio::time::timeout(
-                                cfg.limits.write_timeout,
+                                LINGER_DEADLINE,
                                 guarded.discard_inbound(LINGER_DISCARD_LIMIT),
                             ) => {}
                         }

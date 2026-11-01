@@ -191,7 +191,13 @@ async fn setup_with_validity_and_budget(
 async fn read_response(stream: &mut TcpStream) -> (String, Vec<u8>) {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
-        let byte = stream.read_u8().await.expect("read response head byte");
+        let byte = stream.read_u8().await.unwrap_or_else(|error| {
+            panic!(
+                "read response head byte after {} bytes {:?}: {error}",
+                head.len(),
+                String::from_utf8_lossy(&head)
+            )
+        });
         head.push(byte);
     }
     let head = String::from_utf8(head).expect("HTTP headers");

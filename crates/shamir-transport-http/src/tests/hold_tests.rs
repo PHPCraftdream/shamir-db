@@ -207,10 +207,11 @@ async fn empty_response_releases_hold_after_flush() {
         .expect("HTTP connection");
 }
 
-// This wrapper is test-only: it observes the real TCP writer's backpressure
-// without changing the production GuardedIo or transport API.
+// This wrapper is test-only: it observes the writer's backpressure on a bounded in-memory
+// pipe (deterministic on every OS, unlike kernel socket buffers) without changing the
+// production GuardedIo or transport API.
 struct ObservedTcp {
-    stream: tokio::net::TcpStream,
+    stream: tokio::io::DuplexStream,
     successful_bytes: Arc<AtomicUsize>,
     write_blocked: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -259,7 +260,7 @@ impl tokio::io::AsyncWrite for ObservedTcp {
 type HttpConnection = Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>>;
 
 struct TcpHarness {
-    client: tokio::net::TcpStream,
+    client: tokio::io::DuplexStream,
     connection: HttpConnection,
     count: Arc<AtomicUsize>,
     successful_bytes: Arc<AtomicUsize>,
@@ -267,26 +268,7 @@ struct TcpHarness {
 }
 
 async fn start_tcp(body: Bytes, write_timeout: Option<Duration>) -> TcpHarness {
-    // Small buffers keep the 16 MiB response blocked on Windows loopback too; the accepted
-    // socket inherits the listener's send buffer size.
-    let listener_socket = tokio::net::TcpSocket::new_v4().expect("listener socket");
-    listener_socket
-        .set_send_buffer_size(4096)
-        .expect("small send buffer");
-    listener_socket
-        .bind("127.0.0.1:0".parse().expect("loopback address"))
-        .expect("bind loopback");
-    let listener = listener_socket.listen(1).expect("listen loopback");
-    let address = listener.local_addr().expect("listener address");
-    let client_socket = tokio::net::TcpSocket::new_v4().expect("client socket");
-    client_socket
-        .set_recv_buffer_size(4096)
-        .expect("small receive buffer");
-    let client = client_socket
-        .connect(address)
-        .await
-        .expect("connect loopback");
-    let (stream, _) = listener.accept().await.expect("accept loopback");
+    let (client, stream) = tokio::io::duplex(16 * 1024);
     let (hold_tx, hold_rx) = tokio::sync::mpsc::channel(1);
     let count = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(Notify::new());
@@ -358,7 +340,7 @@ async fn wait_for_tcp_write_backpressure(harness: &mut TcpHarness, head_size: us
     .expect("server TCP poll_write reached Pending after body bytes");
 }
 
-async fn tcp_request(client: &mut tokio::net::TcpStream) {
+async fn tcp_request(client: &mut tokio::io::DuplexStream) {
     client
         .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
         .await
