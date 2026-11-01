@@ -7,15 +7,22 @@ use super::{
 use std::sync::Arc;
 /// The server supplies its synchronous cached owner floor. `None` denotes an unknown owner.
 pub trait OwnerFloors {
+    /// Returns the cached invalidation floor, or `None` for an unknown owner.
     fn floor_if_present(&self, user_id: &[u8; 16]) -> Option<u64>;
 }
 /// Secret verification key is always redacted in Debug.
 pub struct VerifyCtx<'a> {
+    /// In-memory token state index.
     pub mirror: &'a TokenMirror,
+    /// MAC key bytes, never exposed by Debug.
     pub key: &'a [u8; 32],
+    /// Identifier of the active MAC key.
     pub key_id: u8,
+    /// Cached owner-floor lookup.
     pub owners: &'a dyn OwnerFloors,
+    /// Current time in Unix nanoseconds.
     pub now_ns: u64,
+    /// Endpoint being authorized.
     pub endpoint: Endpoint,
 }
 impl std::fmt::Debug for VerifyCtx<'_> {
@@ -28,20 +35,28 @@ impl std::fmt::Debug for VerifyCtx<'_> {
             .finish_non_exhaustive()
     }
 }
+/// Reason a token was rejected by verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum VerifyFailure {
     #[error("invalid token")]
+    /// Malformed token, unknown identifier, bad MAC, or incompatible key/version.
     Invalid,
     #[error("token revoked")]
+    /// Token has been revoked.
     Revoked,
     #[error("token expired")]
+    /// Token has expired.
     Expired,
     #[error("token owner invalid")]
+    /// Owner is unknown or token predates its invalidation floor.
     OwnerInvalid,
     #[error("token channel denied")]
+    /// Token is not permitted on the requested endpoint.
     ChannelDenied,
 }
+/// Successfully verified token state.
 pub struct Verified {
+    /// Shared immutable token state with revocation status.
     pub state: Arc<TokenState>,
 }
 impl std::fmt::Debug for Verified {
@@ -57,10 +72,12 @@ thread_local! {
     static MAC_COMPUTATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(test)]
+/// Resets this test thread's MAC computation counter.
 pub fn reset_mac_count() {
     MAC_COMPUTATIONS.with(|count| count.set(0));
 }
 #[cfg(test)]
+/// Returns this test thread's MAC computation count.
 pub fn mac_count() -> usize {
     MAC_COMPUTATIONS.with(std::cell::Cell::get)
 }

@@ -1,3 +1,5 @@
+//! Admission and counter accounting for token-authenticated sessions.
+
 use crate::server::auth::token::TokenId;
 use crate::server::state::origin::SessionOrigin;
 use crate::server::state::session::Session;
@@ -7,19 +9,27 @@ use std::hash::{BuildHasherDefault, Hash};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 type FxBuild = BuildHasherDefault<FxHasher>;
+/// Maximum simultaneous token sessions enforced by admission.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenSocketCaps {
+    /// Maximum token sessions across all owners for one token.
     pub per_token: usize,
+    /// Maximum token sessions across all tokens for one owner.
     pub per_owner: usize,
 }
+/// Reason token-session admission was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TokenAdmitReject {
+    /// The token's simultaneous-session limit was reached.
     #[error("per-token cap reached")]
     PerTokenCap,
+    /// The owner's simultaneous-session limit was reached.
     #[error("per-owner cap reached")]
     PerOwnerCap,
+    /// The session identifier is already stored.
     #[error("duplicate session id")]
     DuplicateSid,
+    /// The supplied session did not originate from a token.
     #[error("not a token session")]
     NotTokenSession,
 }
@@ -67,6 +77,7 @@ impl<K: Eq + Hash + Clone> Drop for CounterLease<'_, K> {
         }
     }
 }
+/// Stores token-authenticated sessions and enforces per-token and per-owner caps.
 pub struct TokenSessionStore {
     sessions: DashMap<[u8; 32], Arc<Session>, FxBuild>,
     token_counts: DashMap<TokenId, Arc<CounterCell>, FxBuild>,
@@ -79,6 +90,7 @@ impl Default for TokenSessionStore {
     }
 }
 impl TokenSessionStore {
+    /// Creates an empty token-session store.
     pub fn new() -> Self {
         Self {
             sessions: DashMap::with_hasher(FxBuild::default()),
@@ -102,6 +114,7 @@ impl TokenSessionStore {
             }
         }
     }
+    /// Admits a token session under `sid` if both caps and the identifier permit it.
     pub fn admit(
         &self,
         sid: [u8; 32],
@@ -136,6 +149,7 @@ impl TokenSessionStore {
         }
         insertion
     }
+    /// Removes the session identified by `sid`, releasing its token and owner counts.
     pub fn remove(&self, sid: &[u8; 32]) -> bool {
         let Some((_, session)) = self.sessions.remove(sid) else {
             return false;
@@ -150,11 +164,13 @@ impl TokenSessionStore {
         owner.cell.count.fetch_sub(1, Ordering::AcqRel);
         true
     }
+    /// Returns a stored session for `sid`, if present.
     pub fn get(&self, sid: &[u8; 32]) -> Option<Arc<Session>> {
         self.sessions
             .get(sid)
             .map(|entry| Arc::clone(entry.value()))
     }
+    /// Returns all stored sessions originating from token `id`.
     pub fn sessions_of_token(&self, id: &TokenId) -> Vec<Arc<Session>> {
         self.sessions
             .iter()
@@ -166,16 +182,19 @@ impl TokenSessionStore {
             })
             .collect()
     }
+    /// Returns the number of allocated token and owner counter cells for tests.
     #[cfg(test)]
     pub(crate) fn counter_cells_hint(&self) -> (usize, usize) {
         (self.token_counts.len(), self.owner_counts.len())
     }
+    /// Returns the current number of sessions for token `id`.
     pub fn count_for_token(&self, id: &TokenId) -> usize {
         self.token_counts
             .get(id)
             .map(|entry| entry.count.load(Ordering::Acquire))
             .unwrap_or(0)
     }
+    /// Returns the current number of sessions owned by `id`.
     pub fn count_for_owner(&self, id: &[u8; 16]) -> usize {
         self.owner_counts
             .get(id)

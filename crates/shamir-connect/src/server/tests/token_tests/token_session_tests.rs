@@ -2,7 +2,7 @@ use crate::common::types::{BindingMode, TransportKind};
 use crate::server::auth::token::TokenId;
 use crate::server::auth::token::Verified;
 use crate::server::state::origin::SessionOrigin;
-use crate::server::state::session::{Session, SessionPermissions};
+use crate::server::state::session::{Session, SessionPermissions, SessionStore};
 use crate::server::state::token_session::{TokenAdmitReject, TokenSocketCaps};
 use crate::server::token::{TokenChannels, TokenMode, TokenState};
 use crate::server::TokenSessionStore;
@@ -306,7 +306,7 @@ fn barrier_owner_cap_spans_distinct_token_ids() {
 #[test]
 fn token_admission_does_not_consume_scram_session_store() {
     let token_store = TokenSessionStore::new();
-    let scram_store = crate::server::state::session::SessionStore::new();
+    let scram_store = SessionStore::new();
     let admitted = token_store
         .admit(
             [6; 32],
@@ -390,6 +390,63 @@ fn counter_cells_are_reclaimed_after_rejection_removal_and_churn() {
         assert_eq!(store.counter_cells_hint(), (0, 0));
         assert_eq!(store.count_for_token(&TokenId([rejected_owner[0]; 16])), 0);
         assert_eq!(store.count_for_owner(&rejected_owner), 0);
+        assert_eq!(store.counter_cells_hint(), (0, 0));
+    }
+}
+
+#[test]
+fn concurrent_last_removal_and_admission_reuse_pruned_counter_identity() {
+    let store = Arc::new(TokenSessionStore::new());
+    let token_id = TokenId([31; 16]);
+    let owner_id = [32; 16];
+    let old_sid = [41; 32];
+    let fresh_sid = [42; 32];
+    let caps = TokenSocketCaps {
+        per_token: 2,
+        per_owner: 2,
+    };
+    for _ in 0..200 {
+        assert!(store.admit(old_sid, session(31, owner_id), caps).is_ok());
+        let barrier = Arc::new(Barrier::new(3));
+        let (removed, admitted) = std::thread::scope(|scope| {
+            let removal_store = Arc::clone(&store);
+            let removal_barrier = Arc::clone(&barrier);
+            let removal = scope.spawn(move || {
+                removal_barrier.wait();
+                removal_store.remove(&old_sid)
+            });
+            let admission_store = Arc::clone(&store);
+            let admission_barrier = Arc::clone(&barrier);
+            let admission = scope.spawn(move || {
+                admission_barrier.wait();
+                admission_store.admit(fresh_sid, session(31, owner_id), caps)
+            });
+            barrier.wait();
+            (
+                removal.join().expect("removal worker joins"),
+                admission.join().expect("admission worker joins"),
+            )
+        });
+        assert!(removed, "old session must be removed");
+        assert!(
+            admitted.is_ok(),
+            "fresh session admission must succeed: {admitted:?}"
+        );
+        assert!(store.get(&fresh_sid).is_some());
+        assert!(store.get(&old_sid).is_none());
+        assert_eq!(store.count_for_token(&token_id), 1);
+        assert_eq!(store.count_for_owner(&owner_id), 1);
+        assert_eq!(
+            store.count_for_token(&token_id),
+            store.sessions_of_token(&token_id).len()
+        );
+        assert_eq!(
+            store.count_for_owner(&owner_id),
+            usize::from(store.get(&fresh_sid).is_some())
+        );
+        assert!(store.remove(&fresh_sid));
+        assert_eq!(store.count_for_token(&token_id), 0);
+        assert_eq!(store.count_for_owner(&owner_id), 0);
         assert_eq!(store.counter_cells_hint(), (0, 0));
     }
 }

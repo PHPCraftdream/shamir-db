@@ -1,8 +1,13 @@
 //! Public token-core API; transport and persistence are deliberately absent.
+/// Canonical token encoding and parsing types.
 pub mod format;
+/// Token authentication MAC operations.
 pub mod mac;
+/// In-memory token state mirror.
 pub mod mirror;
+/// Token records and authorization scope types.
 pub mod record;
+/// Token verification and owner-floor contracts.
 pub mod verify;
 
 pub use format::{

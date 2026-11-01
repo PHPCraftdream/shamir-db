@@ -3,6 +3,7 @@ use crate::server::token::{
 };
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 fn record(id: u8, owner: u8) -> TokenRecord {
     TokenRecord {
@@ -68,6 +69,77 @@ fn revocation_is_idempotent_and_post_return_reader_observes_it() {
     reader.join().unwrap();
     assert_eq!(held_state.revoked_at_ns(), Some(10));
 }
+#[test]
+fn concurrent_revocation_readers_never_observe_live_after_first_true() {
+    let mirror = Arc::new(TokenMirror::new());
+    assert!(mirror.insert(record(1, 2)));
+    let held_state = mirror.get(&TokenId([1; 16])).expect("inserted token");
+    let start = Arc::new(AtomicBool::new(false));
+    let observation_barrier = Arc::new(Barrier::new(5));
+    let post_publish = Arc::new(Barrier::new(5));
+
+    std::thread::scope(|scope| {
+        let mut readers = Vec::new();
+        for _ in 0..4 {
+            let held_state = Arc::clone(&held_state);
+            let start = Arc::clone(&start);
+            let observation_barrier = Arc::clone(&observation_barrier);
+            let post_publish = Arc::clone(&post_publish);
+            let mirror = Arc::clone(&mirror);
+            readers.push(scope.spawn(move || {
+                observation_barrier.wait();
+                while !start.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                }
+                let mut first_revoked_read = None;
+                let mut last_state_revoked = false;
+                let mut last_indexed_revoked = false;
+                let mut monotonic = true;
+                for iteration in 0..10_000 {
+                    let state_revoked = held_state.is_revoked();
+                    let indexed_revoked = mirror
+                        .get(&TokenId([1; 16]))
+                        .expect("token remains indexed")
+                        .is_revoked();
+                    monotonic &= !last_state_revoked || state_revoked;
+                    monotonic &= !last_indexed_revoked || indexed_revoked;
+                    if (state_revoked || indexed_revoked) && first_revoked_read.is_none() {
+                        first_revoked_read = Some(iteration);
+                    }
+                    last_state_revoked = state_revoked;
+                    last_indexed_revoked = indexed_revoked;
+                }
+                post_publish.wait();
+                assert!(monotonic);
+                assert!(held_state.is_revoked());
+                assert!(mirror
+                    .get(&TokenId([1; 16]))
+                    .expect("token remains indexed")
+                    .is_revoked());
+                *first_revoked_read.get_or_insert(10_000)
+            }));
+        }
+        observation_barrier.wait();
+        start.store(true, Ordering::Release);
+        assert!(mirror.revoke(&TokenId([1; 16]), 42));
+        post_publish.wait();
+        for reader in readers {
+            assert!(reader.join().unwrap() <= 10_000);
+        }
+
+        // These readers are created only after revoke returns.
+        for _ in 0..2 {
+            let mirror = Arc::clone(&mirror);
+            scope.spawn(move || {
+                let state = mirror
+                    .get(&TokenId([1; 16]))
+                    .expect("token remains indexed");
+                assert!(state.is_revoked());
+            });
+        }
+    });
+}
+
 #[test]
 fn preexisting_zero_revocation_timestamp_is_still_revoked() {
     let mut r = record(1, 2);
@@ -201,7 +273,20 @@ fn deterministic_colliding_stripes_serialize_remove_and_insert() {
     assert!(mirror.get(&first).is_none());
     assert_eq!(mirror.ids_of_owner(&owner), vec![second]);
     assert_eq!(mirror.len_hint(), 1);
+    assert_eq!(mirror.retained_gate_cells_hint(), 64);
     assert!(mirror.remove(&second));
+    for iteration in 0u16..512 {
+        let mut raw_id = [0u8; 16];
+        raw_id[..2].copy_from_slice(&iteration.to_le_bytes());
+        let id = TokenId(raw_id);
+        let churn_record = TokenRecord {
+            id: raw_id,
+            ..record(raw_id[0], owner[0])
+        };
+        assert!(mirror.insert(churn_record));
+        assert!(mirror.remove(&id));
+    }
+    assert_eq!(mirror.retained_gate_cells_hint(), 64);
 }
 #[test]
 fn same_id_insert_remove_race_has_no_stale_index() {

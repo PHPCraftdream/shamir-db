@@ -44,3 +44,11 @@ Session counter leases are acquired through the map's exclusive entry and increm
 No current-session local compilation was done; any inherited statement that a check is “in progress” is historical only. Per operator, all check/clippy/tests are **NOT RUN** in this task and are for CI. Do not infer passing tests or full implementation completion; orchestrator review remains outstanding.
 
 Corrected test-review notes: format/verify test descriptions and expectations must not contradict the actual brief or implementation; treat prior coverage wording as review guidance, not evidence of execution. Retain deterministic concurrency controls (barriers/channels and explicit synchronization for post-return revocation observations), and include additional record coverage where required by the brief. No test results are asserted here.
+
+## Follow-up (2026-11-01)
+
+User CI feedback reports the library typechecked, but Clippy rejected 103 diagnostics, including `missing_docs` and disallowed `HashSet`. This is feedback only; no post-fix CI or test result is claimed. No local compilation was performed.
+
+The owner index is now `Vec<TokenId>` (no `shamir-collections` dependency in Cargo); insertion maintains raw-ID sort order using `binary_search_by_key`. The owner-index guard is explicitly dropped before acquiring the primary-map guard. This retains stripe serialization and avoids holding two DashMap guards simultaneously.
+
+Additional requested regression tests are named `concurrent_revocation_readers_never_observe_live_after_first_true` and `concurrent_last_removal_and_admission_reuse_pruned_counter_identity`. Stripe churn now exercises 512 distinct TokenIds and checks the actual retained-gate hint remains 64; these are source/test changes, not evidence of execution or passing CI.
