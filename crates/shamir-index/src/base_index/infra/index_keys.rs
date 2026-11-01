@@ -27,9 +27,18 @@
 //! This is identity VERSION 2 of the base family (marker `_m.idx.idv`,
 //! replacing the legacy `_m.idx.lfv`). The engine wires the blocking
 //! open-time base migration (`identity_migration.rs`): `need = !(idv == 2
-//! && lfv absent)`; the migration drops and rebuilds every base posting
-//! from the data store via the S9b `repair_admitted` machinery, sweeping
-//! BOTH the legacy `[0|1][name]` and the v2 `[2|3][name]` namespaces.
+//! && lfv absent)`. It clears both markers in one transaction, then for
+//! every regular and unique definition sweeps BOTH the legacy `[0|1][name]`
+//! and the v2 `[2|3][name]` namespaces and re-backfills the postings from
+//! the data store through the creation path, leaving the persisted
+//! definition untouched, and finally sets `idv = 2` (the commit point). A
+//! crash before it repeats the rebuild on the next open. The rebuild reads
+//! the records through the table's MVCC view (the raw `__data__` store is
+//! inert under MVCC).
+//!
+//! History: v1/v3 keys were `[0|1][name][h1][h2]` with two 64-bit FxHash
+//! words (collision-prone, insertion-order dependent for maps); v2 keys are
+//! `[2|3][name][I]` with the canonical identity above.
 
 use bytes::Bytes;
 use shamir_types::core::interner::InternerKey;

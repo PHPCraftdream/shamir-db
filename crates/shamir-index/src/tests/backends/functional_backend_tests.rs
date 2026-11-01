@@ -388,7 +388,6 @@ async fn rv_index_56a505f0_dec_big_bin_hash_distinctly() {
     }
 }
 
-#[cfg(target_pointer_width = "64")]
 #[tokio::test]
 async fn rv_index_605eec5d_golden_functional_postings() {
     let interner = Interner::new();
@@ -399,73 +398,36 @@ async fn rv_index_605eec5d_golden_functional_postings() {
     let mut set = new_set_wc(2);
     set.insert(InnerValue::Int(1));
     set.insert(InnerValue::Int(2));
-    // RV-INDEX-FBB72544: Map hashing depends on insertion order; its fix is deferred.
     let mut map = new_map_wc(2);
     map.insert(InternerKey::new(1), InnerValue::Int(1));
     map.insert(InternerKey::new(258), InnerValue::Int(2));
 
-    // Independently calculated from rustc-hash 2.1.2 arithmetic on a 64-bit target.
-    // Map key bytes are [01] and [02, 01], respectively (minimal LE widths).
-    let int_hash = [
-        0xc5, 0x13, 0x66, 0xdc, 0x33, 0xd8, 0x74, 0x12, 0x4e, 0xcd, 0xa0, 0xbd, 0xe4, 0x98, 0xf4,
-        0x9c,
-    ];
-    let cases = [
+    let cases: [(InnerValue, &[u8]); 9] = [
+        (InnerValue::Null, &[0x00]),
+        (InnerValue::Bool(true), &[0x01, 0x01]),
+        (InnerValue::Int(1), &[0x02, 0, 0, 0, 0, 0, 0, 0, 1]),
+        (InnerValue::F64(1.0), &[0x02, 0, 0, 0, 0, 0, 0, 0, 1]),
         (
-            InnerValue::Null,
-            [
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc8, 0x4d, 0x4e, 0x9c, 0x9d, 0x1f,
-                0xc9, 0x28,
-            ],
+            InnerValue::Dec(Decimal::from(1)),
+            &[0x02, 0, 0, 0, 0, 0, 0, 0, 1],
         ),
         (
-            InnerValue::Bool(true),
-            [
-                0xd8, 0x74, 0x15, 0x78, 0x6d, 0x31, 0x97, 0x5d, 0x26, 0xa6, 0xaa, 0xe6, 0xdf, 0x1b,
-                0x5a, 0x95,
-            ],
+            InnerValue::Big(BigInt::from(1)),
+            &[0x02, 0, 0, 0, 0, 0, 0, 0, 1],
         ),
-        (InnerValue::Int(1), int_hash),
-        (InnerValue::F64(1.0), int_hash),
-        (InnerValue::Dec(Decimal::from(1)), int_hash),
-        (InnerValue::Big(BigInt::from(1)), int_hash),
         (
             InnerValue::Str("hi".into()),
-            [
-                0xc5, 0x0d, 0x71, 0x6d, 0xbf, 0x0a, 0x08, 0x48, 0x03, 0xbc, 0x7c, 0x4c, 0xd8, 0xf4,
-                0x34, 0xd2,
-            ],
+            &[0x06, 0, 0, 0, 2, b'h', b'i'],
         ),
-        (
-            InnerValue::Bin(vec![1, 2]),
-            [
-                0xd8, 0x72, 0xb6, 0x98, 0x25, 0x81, 0x18, 0x25, 0x3d, 0xbb, 0x51, 0xb6, 0xd6, 0x98,
-                0x07, 0x2a,
-            ],
-        ),
+        (InnerValue::Bin(vec![1, 2]), &[0x07, 0, 0, 0, 2, 1, 2]),
         (
             InnerValue::List(vec![InnerValue::Int(1), InnerValue::Int(2)]),
-            [
-                0x4b, 0x93, 0x75, 0xc8, 0x3b, 0xc4, 0xe3, 0x0a, 0x65, 0x18, 0x41, 0xc0, 0x09, 0x12,
-                0x44, 0xf0,
-            ],
-        ),
-        (
-            InnerValue::Set(set),
-            [
-                0x85, 0xec, 0xa7, 0x75, 0x46, 0xa8, 0xc6, 0xd8, 0x05, 0x67, 0xaa, 0xd6, 0x01, 0x76,
-                0xd1, 0x68,
-            ],
-        ),
-        (
-            InnerValue::Map(map),
-            [
-                0x76, 0x01, 0x2f, 0xfd, 0x72, 0x19, 0xd9, 0x78, 0x1c, 0xee, 0x25, 0x80, 0x05, 0x4d,
-                0x72, 0x86,
+            &[
+                0x08, 0, 0, 0, 2, 0x02, 0, 0, 0, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 0, 0, 0, 2,
             ],
         ),
     ];
-    for (value, expected_hash) in cases {
+    for (value, expected_identity) in cases {
         let rec = make_num_rec(&interner, value.clone());
         let ops = backend.plan_insert(rid, &rec).await.unwrap();
         assert_eq!(ops.len(), 1, "{value:?}");
@@ -477,12 +439,66 @@ async fn rv_index_605eec5d_golden_functional_postings() {
         else {
             panic!("expected SetPosting for {value:?}");
         };
-        let mut expected = vec![0x02, 0x00, 0x00, 0x00, 0x02];
-        expected.extend_from_slice(&expected_hash);
+        let mut expected = vec![0x02, 0x00, 0x00, 0x00, 0x12];
+        expected.extend_from_slice(expected_identity);
         expected.extend_from_slice(&[0x11; 16]);
         assert_eq!(key.as_ref(), expected.as_slice(), "{value:?}");
         assert!(posting_value.is_empty());
     }
+    for value in [InnerValue::Set(set), InnerValue::Map(map)] {
+        let rec = make_num_rec(&interner, value.clone());
+        let ops = backend.plan_insert(rid, &rec).await.unwrap();
+        assert_eq!(ops.len(), 1, "{value:?}");
+        let IndexWriteOp::SetPosting {
+            key,
+            value: posting_value,
+            ..
+        } = &ops[0]
+        else {
+            panic!("expected SetPosting");
+        };
+        let expected_identity: &[u8] = match &value {
+            InnerValue::Set(_) => &[
+                0x09, 0, 0, 0, 2, 0x02, 0, 0, 0, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 0, 0, 0, 2,
+            ],
+            InnerValue::Map(_) => &[
+                0x0A, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 1, 0x02, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+                0, 0, 1, 2, 0x02, 0, 0, 0, 0, 0, 0, 0, 2,
+            ],
+            _ => unreachable!(),
+        };
+        let mut expected = vec![0x02, 0, 0, 0, 0x12];
+        expected.extend_from_slice(expected_identity);
+        expected.extend_from_slice(&[0x11; 16]);
+        assert_eq!(key.as_ref(), expected.as_slice());
+        assert!(posting_value.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rv_index_fbb72544_functional_map_reversed_insertion_hits_same_posting() {
+    let interner = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_numeric_backend(&interner, Arc::clone(&store));
+    let rid = RecordId::new();
+    let a = intern(&interner, "a");
+    let b = intern(&interner, "b");
+    let mut stored = new_map_wc(2);
+    stored.insert(InternerKey::new(a), InnerValue::Int(1));
+    stored.insert(InternerKey::new(b), InnerValue::Int(2));
+    let mut reversed = new_map_wc(2);
+    reversed.insert(InternerKey::new(b), InnerValue::Int(2));
+    reversed.insert(InternerKey::new(a), InnerValue::Int(1));
+    apply_insert_fn(
+        &backend,
+        &store,
+        rid,
+        &make_num_rec(&interner, InnerValue::Map(stored)),
+    )
+    .await;
+    assert!(numeric_lookup(&backend, &InnerValue::Map(reversed))
+        .await
+        .contains(&rid));
 }
 
 fn make_num_rec(interner: &Interner, n: InnerValue) -> InnerValue {

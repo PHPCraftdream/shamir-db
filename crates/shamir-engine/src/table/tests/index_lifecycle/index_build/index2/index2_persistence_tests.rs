@@ -7,8 +7,8 @@
 //! reopen cycle.
 
 use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
-use crate::index2::tokenizer::token_hash;
 use crate::table::table_manager::TableManager;
+use shamir_index::tokenizer::token_identity;
 use shamir_query_types::admin::types::CreateIndexOp;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -280,7 +280,7 @@ async fn fts_ranked_index_survives_reopen() {
 
     let result = backend
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("rust")],
+            tokens: vec![token_identity("rust")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -344,7 +344,7 @@ async fn fts_ranked_index_survives_reopen() {
     // Same query — must return the same labels in the same order.
     let result2 = backend2
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("rust")],
+            tokens: vec![token_identity("rust")],
             mode: FtsMode::AndAll,
             limit: None,
         })

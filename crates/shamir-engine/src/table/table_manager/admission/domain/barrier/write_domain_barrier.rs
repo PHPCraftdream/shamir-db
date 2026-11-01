@@ -119,23 +119,23 @@ impl TableManager {
         write_domain: Arc<RepoWriteDomain>,
         permit: &RepoWritePermit,
     ) -> DbResult<Self> {
-        Self::open_with_domain_admitted(name, data_store, info_store, write_domain, permit, true)
+        Self::open_with_domain_admitted(name, data_store, info_store, write_domain, permit, None)
             .await
     }
 
-    /// The open/create body behind `create_with_domain_admitted`. A caller that
-    /// attaches an `MvccStore` AFTER this returns (the repository: `__data__`
-    /// is inert under MVCC and the records live behind the MVCC view) passes
-    /// `run_identity_migration = false` and runs `ensure_base_identity_current`
-    /// itself once the view is attached; run here, the migration would rebuild
-    /// every base index from an empty store.
+    /// The open/create body behind `create_with_domain_admitted`. The
+    /// repository passes the table's `MvccStore` HERE rather than attaching it
+    /// afterwards: `__data__` is inert under MVCC and the records live behind
+    /// the MVCC view, so every open-time rebuild (identity migration, index2
+    /// restart-from-scratch) must read through it or it would rebuild from an
+    /// empty store.
     pub(crate) async fn open_with_domain_admitted(
         name: String,
         data_store: Arc<dyn Store>,
         info_store: Arc<dyn Store>,
         write_domain: Arc<RepoWriteDomain>,
         permit: &RepoWritePermit,
-        run_identity_migration: bool,
+        mvcc: Option<Arc<shamir_tx::MvccStore>>,
     ) -> DbResult<Self> {
         write_domain.debug_check_permit(permit);
         let interner = InternerManager::new(Arc::clone(&info_store));
@@ -230,7 +230,7 @@ impl TableManager {
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             #[cfg(test)]
             filtered_ann_thresholds: None,
-            mvcc_store: None,
+            mvcc_store: mvcc,
             validator_bindings,
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
             validator_registry: None,
@@ -308,15 +308,66 @@ impl TableManager {
         // (and pointlessly) attempt to restore a backend already known to
         // be broken.
         let mut failed_recovery_ids: Vec<u32> = Vec::new();
-        if let Some(persisted) =
+        if let Some((envelope_version, mut persisted)) =
             crate::index2::persistence::load_index2_metadata(&mgr.info_store).await?
         {
+            // The envelope-v1 -> v2 flip is the durable commit point: preserve
+            // all descriptors, but mark every FTS/functional family Building
+            // before drop_all or backfill can touch any posting.
+            let migration_ids: Vec<u32> = if envelope_version == 1 {
+                persisted
+                    .descriptors
+                    .iter()
+                    .filter(|desc| {
+                        matches!(
+                            desc.kind,
+                            crate::index2::kind::IndexKind::Fts { .. }
+                                | crate::index2::kind::IndexKind::Functional { .. }
+                        )
+                    })
+                    .map(|desc| desc.id)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let has_identity_descriptors = persisted.descriptors.iter().any(|desc| {
+                matches!(
+                    desc.kind,
+                    crate::index2::kind::IndexKind::Fts { .. }
+                        | crate::index2::kind::IndexKind::Functional { .. }
+                )
+            });
+            if !migration_ids.is_empty() {
+                for descriptor in &mut persisted.descriptors {
+                    if migration_ids.contains(&descriptor.id) {
+                        descriptor.state = crate::index2::state::IndexState::Building;
+                    }
+                }
+                crate::index2::persistence::save_persisted_index2_metadata(
+                    persisted.clone(),
+                    &mgr.info_store,
+                )
+                .await?;
+                mgr.identity_migrated_this_open
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
             mgr.index2_registry.set_next_id(persisted.next_id);
             for desc in persisted.descriptors {
                 if matches!(desc.kind, crate::index2::kind::IndexKind::Btree { .. }) {
                     continue;
                 }
                 let was_building = desc.state == crate::index2::state::IndexState::Building;
+                let was_identity_migration = has_identity_descriptors
+                    && was_building
+                    && matches!(
+                        desc.kind,
+                        crate::index2::kind::IndexKind::Fts { .. }
+                            | crate::index2::kind::IndexKind::Functional { .. }
+                    );
+                // Flipped to Building by THIS open (envelope v1 -> v2): a storage
+                // fault aborts the open so the next one retries. An ordinary
+                // Building recovery keeps the fail-closed `Failed` policy.
+                let flipped_now = migration_ids.contains(&desc.id);
                 let backend = crate::index2::build_index2_backend_with_resolver(
                     desc,
                     &info_store,
@@ -330,6 +381,10 @@ impl TableManager {
                 // postings; the backfill that follows rebuilds a complete,
                 // consistent index.
                 if was_building {
+                    if was_identity_migration {
+                        mgr.identity_migrated_this_open
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                     log::warn!(
                         "index2 backend '{}' (id={}) was persisted in Building state — \
                          build was interrupted by a crash; restarting the build from scratch \
@@ -348,6 +403,15 @@ impl TableManager {
                     // Ready-flip, instead of proceeding as if recovery
                     // succeeded.
                     if let Err(e) = backend.drop_all().await {
+                        if flipped_now
+                            && matches!(
+                                e,
+                                crate::index2::IndexError::Db(_)
+                                    | crate::index2::IndexError::Storage(_)
+                            )
+                        {
+                            return Err(e.into());
+                        }
                         let reason = format!(
                             "index2 drop_all during restart-from-scratch for '{}' (id={}) \
                              failed: {e} — partial postings may persist; NOT proceeding with \
@@ -365,6 +429,10 @@ impl TableManager {
                                 &e,
                             )
                         })?;
+                        if was_identity_migration {
+                            mgr.save_index2_identity_failure(recovered_id, reason.clone())
+                                .await?;
+                        }
                         mgr.index2_registry.set_failed(recovered_id, reason).await;
                         failed_recovery_ids.push(recovered_id);
                         continue;
@@ -390,6 +458,36 @@ impl TableManager {
                             failed_recovery_ids.push(recovered_id);
                             continue;
                         }
+                        Err(e)
+                            if was_identity_migration
+                                && matches!(
+                                    e,
+                                    crate::index2::IndexError::Storage(_)
+                                        | crate::index2::IndexError::Db(_)
+                                ) =>
+                        {
+                            return Err(e.into())
+                        }
+                        Err(e) if was_identity_migration => {
+                            let reason = format!(
+                                "identity migration for index '{}' (id={recovered_id}) could not backfill: {e}; register its scalar with set_scalar_resolver(), then call TableManager::repair()",
+                                backend.descriptor().name
+                            );
+                            log::error!("{reason}");
+                            let backend_name = backend.descriptor().name.clone();
+                            mgr.index2_registry.insert(backend).await.map_err(|e| {
+                                Self::duplicate_persisted_index2_name_error(
+                                    &backend_name,
+                                    recovered_id,
+                                    &e,
+                                )
+                            })?;
+                            mgr.save_index2_identity_failure(recovered_id, reason.clone())
+                                .await?;
+                            mgr.index2_registry.set_failed(recovered_id, reason).await;
+                            failed_recovery_ids.push(recovered_id);
+                            continue;
+                        }
                         Err(e) => return Err(e.into()),
                     }
                     let backend_name = backend.descriptor().name.clone();
@@ -401,6 +499,7 @@ impl TableManager {
                     mgr.index2_registry
                         .set_state(recovered_id, crate::index2::state::IndexState::Ready)
                         .await;
+                    mgr.clear_index2_identity_failure(recovered_id).await?;
                     recovered_building_ids.push(recovered_id);
                     continue;
                 }
@@ -414,13 +513,16 @@ impl TableManager {
             // state. Without this, a second crash before the next
             // `save_index2_metadata` would leave `Building` on disk and force
             // a redundant re-backfill on the NEXT reopen (correct but wasteful).
-            if !recovered_building_ids.is_empty() {
+            if !recovered_building_ids.is_empty() || !failed_recovery_ids.is_empty() {
                 if let Err(e) = crate::index2::persistence::save_index2_metadata(
                     &mgr.index2_registry,
                     &mgr.info_store,
                 )
                 .await
                 {
+                    if mgr.identity_migrated_this_open() {
+                        return Err(e);
+                    }
                     log::warn!(
                         "recovery: failed to re-persist index2 metadata after Building→Ready \
                          flip: {e}; on-disk state stays Building, forcing a redundant \
@@ -473,6 +575,7 @@ impl TableManager {
         // crash-state matrix.
         mgr.recover_hash_renames_admitted(open_permit).await?;
 
+        mgr.restore_index2_identity_failures().await?;
         // Restore in-memory state from persisted data.
         //
         // Each backend restores itself via `restore_on_open`: most
@@ -516,6 +619,9 @@ impl TableManager {
                         b.descriptor().name
                     );
                     log::error!("{reason}");
+                    if mgr.identity_migrated_this_open() {
+                        mgr.save_index2_identity_failure(id, reason.clone()).await?;
+                    }
                     mgr.index2_registry.set_failed(id, reason).await;
                 }
             }
@@ -531,12 +637,10 @@ impl TableManager {
         // migration. Replaces the S9b `_m.idx.lfv` gate: need =
         // !(idv == 2 && lfv absent); the three-step protocol lives in
         // `identity_migration.rs` (remove both markers -> in-place rebuild -> set idv = 2)
-        // Backfill streams regular definitions and materializes the shared unique snapshot.
         // `idv > 2` is a typed, fail-closed open error; tables without base
         // indexes only move markers.
-        if run_identity_migration {
-            mgr.ensure_base_identity_current(open_permit).await?;
-        }
+        // Backfill streams regular definitions and materializes the shared unique snapshot.
+        mgr.ensure_base_identity_current(open_permit).await?;
 
         // #1068: catch up the DDL op-log FIFO retention sweep at open time.
         // The throttled trigger in `ddl_op_log::write_op_status` lives behind

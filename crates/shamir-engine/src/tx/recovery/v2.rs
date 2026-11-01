@@ -439,7 +439,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
     // missing from the v2 index. Track every table that received an index
     // op during replay (broadcast ops: all tables); after the loop, every
     // table with BOTH marks (index op replayed this recovery AND identity
-    // migration ran at this open) re-runs the base migration. The data ops
+    // migration ran at this open) re-runs both base and index2 migration.
     // have been replayed by then, so the rebuild is complete. This also
     // closes the same latent hole for the S9b v2->v3 bump. No WAL format
     // change.
@@ -477,6 +477,7 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
                      pre-upgrade index op after migrating this open; rebuilding"
                 );
                 tbl.rerun_identity_migration_admitted(permit).await?;
+                tbl.rerun_index2_identity_migration().await?;
             }
         }
     }

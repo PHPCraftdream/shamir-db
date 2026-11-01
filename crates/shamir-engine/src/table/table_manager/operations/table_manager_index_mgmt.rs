@@ -70,7 +70,7 @@ impl TableManager {
         if dropping_ids.is_empty() {
             return Ok(());
         }
-        if let Some(persisted) =
+        if let Some((_envelope_version, persisted)) =
             crate::index2::persistence::load_index2_metadata(&self.info_store).await?
         {
             for d in &persisted.descriptors {

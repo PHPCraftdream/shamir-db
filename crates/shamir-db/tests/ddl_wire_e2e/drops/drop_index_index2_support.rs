@@ -73,7 +73,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
     // 3. Capture the backend's compact id + the info_store handle, and prove
     //    postings exist BEFORE the drop (otherwise the cleanup assertion
     //    below would be vacuous). Functional posting key layout is
-    //    [index_id LE u32][type_tag u8 = FUNCTIONAL].
+    //    [index_id LE u32][type_tag u8 = FUNCTIONAL_V2].
     let (info_store, posting_prefix) = {
         let table = db.get_table("testdb", "main", "users").await.unwrap();
         let interner = table.interner_for_test().get().await.unwrap();
@@ -89,7 +89,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
 
         let mut prefix = Vec::with_capacity(5);
         prefix.extend_from_slice(&backend_id.to_le_bytes());
-        prefix.push(type_tag::FUNCTIONAL);
+        prefix.push(type_tag::FUNCTIONAL_V2);
         let prefix = bytes::Bytes::from(prefix);
 
         let info_store = table.info_store_for_test();
@@ -143,7 +143,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
     //     `TableManager::create` reads on reopen) and confirm the descriptor
     //     does NOT resurrect.
     let persisted = load_index2_metadata(&info_store).await.unwrap();
-    let descriptors = persisted.map(|p| p.descriptors).unwrap_or_default();
+    let descriptors = persisted.map(|p| p.1.descriptors).unwrap_or_default();
     assert!(
         descriptors.iter().all(|d| d.name != "func_idx"),
         "dropped index2 backend must not be in persisted metadata (would resurrect on reopen)"

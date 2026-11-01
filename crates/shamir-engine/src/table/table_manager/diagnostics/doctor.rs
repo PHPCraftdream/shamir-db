@@ -458,7 +458,7 @@ impl TableManager {
         }
 
         // (2) live registry vs the persisted blob.
-        if let Some(persisted) =
+        if let Some((_envelope_version, persisted)) =
             crate::index2::persistence::load_index2_metadata(&self.info_store).await?
         {
             let persisted_by_id: TFxMap<u32, &crate::index2::IndexDescriptor> =
@@ -732,6 +732,7 @@ impl TableManager {
         // propagates and the index stays `Failed` (unhealed) rather than
         // being counted below.
         let mut index2_healed: u64 = 0;
+        let mut healed_ids: Vec<u32> = Vec::new();
         let index2_descs = self.index2_registry().all_descriptors().await;
         for desc in &index2_descs {
             if !matches!(desc.state, IndexState::Building | IndexState::Failed) {
@@ -759,21 +760,29 @@ impl TableManager {
                 self.index2_registry()
                     .set_state(desc.id, IndexState::Ready)
                     .await;
+                healed_ids.push(desc.id);
                 index2_healed += 1;
             }
         }
         if index2_healed > 0 {
-            if let Err(e) = crate::index2::persistence::save_index2_metadata(
+            match crate::index2::persistence::save_index2_metadata(
                 &self.index2_registry,
                 &self.info_store,
             )
             .await
             {
-                log::warn!(
+                // The persisted failure reasons go only once the Ready state is
+                // durable; a Failed descriptor on disk keeps its explanation.
+                Ok(()) => {
+                    for id in healed_ids {
+                        self.clear_index2_identity_failure(id).await?;
+                    }
+                }
+                Err(e) => log::warn!(
                     "repair: failed to persist index2 metadata after healing {index2_healed} \
                      backend(s): {e}; on-disk state stays stale, forcing a redundant \
                      re-backfill on the next reopen (correct but wasteful)"
-                );
+                ),
             }
         }
 

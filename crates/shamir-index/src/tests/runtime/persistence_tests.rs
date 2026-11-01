@@ -23,6 +23,123 @@ fn meta_key_indexes() -> RecordId {
 }
 
 #[tokio::test]
+async fn p34_12_index2_envelope_version_tracks_fts_functional_membership() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let registry = crate::IndexRegistry::new();
+    let vector = IndexDescriptor::new(
+        71,
+        "vector_only",
+        710,
+        SmallVec::new(),
+        IndexKind::Vector(Box::new(VectorConfig {
+            dim: 3,
+            metric: VectorMetric::Cosine,
+            backend: VectorBackendRef::InProcessHnsw {
+                ef_construct: 64,
+                m: 16,
+            },
+            quantization: None,
+        })),
+    );
+    registry
+        .insert(Arc::new(DummyBackend(vector.clone())))
+        .await
+        .unwrap();
+
+    save_index2_metadata(&registry, &store).await.unwrap();
+    let (v, persisted) = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert_eq!(v, 1);
+    assert!(MetaEnvelope::<PersistedIndexes>::open(
+        &store
+            .get(meta_key_indexes().to_bytes().into())
+            .await
+            .unwrap()
+    )
+    .is_ok());
+    assert_eq!(persisted.descriptors.len(), 1);
+    assert!(matches!(
+        persisted.descriptors[0].kind,
+        IndexKind::Vector(_)
+    ));
+
+    let fts = IndexDescriptor::new(
+        72,
+        "fts",
+        720,
+        SmallVec::new(),
+        IndexKind::Fts {
+            tokenizer: TokenizerKind::Whitespace,
+            language: None,
+        },
+    );
+    registry.insert(Arc::new(DummyBackend(fts))).await.unwrap();
+    save_index2_metadata(&registry, &store).await.unwrap();
+    let (v, persisted) = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert_eq!(v, 2);
+    assert!(matches!(
+        MetaEnvelope::<PersistedIndexes>::open(
+            &store
+                .get(meta_key_indexes().to_bytes().into())
+                .await
+                .unwrap()
+        ),
+        Err(crate::MetaError::UnsupportedVersion(2))
+    ));
+    assert!(persisted
+        .descriptors
+        .iter()
+        .any(|d| matches!(d.kind, IndexKind::Vector(_))));
+    assert!(persisted
+        .descriptors
+        .iter()
+        .any(|d| matches!(d.kind, IndexKind::Fts { .. })));
+
+    let functional = IndexDescriptor::new(
+        73,
+        "functional",
+        730,
+        SmallVec::new(),
+        IndexKind::Functional(Box::new(FunctionalConfig {
+            expr: crate::expr::IndexExpr::Lower(Box::new(crate::expr::IndexExpr::Field(vec![730]))),
+        })),
+    );
+    registry
+        .insert(Arc::new(DummyBackend(functional)))
+        .await
+        .unwrap();
+    save_index2_metadata(&registry, &store).await.unwrap();
+    let (v, persisted) = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert_eq!(v, 2);
+    assert!(persisted
+        .descriptors
+        .iter()
+        .any(|d| matches!(d.kind, IndexKind::Functional(_))));
+
+    assert!(registry.remove_by_id(72).await.is_some());
+    save_index2_metadata(&registry, &store).await.unwrap();
+    let (v, persisted) = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert_eq!(v, 2);
+    assert!(persisted
+        .descriptors
+        .iter()
+        .any(|d| matches!(d.kind, IndexKind::Functional(_))));
+    assert!(!persisted
+        .descriptors
+        .iter()
+        .any(|d| matches!(d.kind, IndexKind::Fts { .. })));
+
+    assert!(registry.remove_by_id(73).await.is_some());
+    save_index2_metadata(&registry, &store).await.unwrap();
+    let (v, persisted) = load_index2_metadata(&store).await.unwrap().unwrap();
+    assert_eq!(v, 1);
+    assert_eq!(persisted.descriptors.len(), 1);
+    assert!(matches!(
+        persisted.descriptors[0].kind,
+        IndexKind::Vector(_)
+    ));
+}
+
+#[tokio::test]
 async fn rv_index_cf86432e_external_raw_secret_rejected_without_store_write() {
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     let registry = crate::IndexRegistry::new();
@@ -75,7 +192,7 @@ async fn rv_index_cf86432e_external_raw_secret_rejected_without_store_write() {
     save_index2_metadata_with_pending(&registry, &store, Some(empty_external))
         .await
         .expect("empty external credential should persist");
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert!(matches!(
         &loaded.descriptors[0].kind,
         IndexKind::Vector(config)
@@ -100,7 +217,8 @@ async fn rv_index_cf86432e_external_raw_secret_rejected_without_store_write() {
     let loaded = load_index2_metadata(&ordinary_store)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .1;
     assert!(matches!(loaded.descriptors[0].kind, IndexKind::Fts { .. }));
 }
 
@@ -161,7 +279,7 @@ async fn rv_index_cf86432e_allows_unchanged_legacy_credential_on_rewrite() {
         .unwrap();
 
     save_index2_metadata(&registry, &store).await.unwrap();
-    let persisted = load_index2_metadata(&store).await.unwrap().unwrap();
+    let persisted = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(persisted.descriptors.len(), 2);
     assert!(matches!(
         persisted
@@ -265,7 +383,7 @@ async fn round_trip_save_load() {
     let _ = registry.allocate_id();
 
     save_index2_metadata(&registry, &store).await.unwrap();
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(loaded.next_id, 3);
     assert!(loaded.descriptors.is_empty());
 }
@@ -310,7 +428,7 @@ async fn round_trip_with_descriptors() {
         .await
         .unwrap();
 
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(loaded.next_id, 3);
     assert_eq!(loaded.descriptors.len(), 2);
     assert_eq!(loaded.descriptors[0].name, "fts_body");

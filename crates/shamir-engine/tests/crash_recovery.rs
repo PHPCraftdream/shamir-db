@@ -60,10 +60,10 @@ use shamir_types::types::value::InnerValue;
 use admitted_field_id::field_id;
 
 use shamir_engine::index2::backend::{FtsMode, IndexQuery, IndexResult};
-use shamir_engine::index2::tokenizer::token_hash;
 use shamir_engine::repo::repo_types::BoxRepoFactory;
 use shamir_engine::repo::RepoInstance;
 use shamir_engine::table::{TableConfig, TableManager};
+use shamir_index::tokenizer::token_identity;
 
 /// Env sentinel: when present the test binary is the spawned CHILD and
 /// runs [`run_child_scenario`] instead of asserting anything.
@@ -219,7 +219,7 @@ async fn fts_hit_count(tbl: &TableManager) -> usize {
     };
     match backend
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("atomicity")],
+            tokens: vec![token_identity("atomicity")],
             mode: FtsMode::AndAll,
             limit: None,
         })

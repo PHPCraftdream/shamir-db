@@ -30,13 +30,92 @@
 
 use std::sync::atomic::Ordering;
 
+use bytes::Bytes;
 use futures::StreamExt;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::RecordKey;
 
 use super::TableManager;
 use crate::repo::RepoWritePermit;
 
 impl TableManager {
+    const INDEX2_IDENTITY_FAILURE_KEY: &'static str = "_m.idx.err";
+
+    fn index2_identity_failure_key() -> RecordKey {
+        RecordKey::from_slice(
+            shamir_types::types::record_id::RecordId::system(Self::INDEX2_IDENTITY_FAILURE_KEY)
+                .as_bytes(),
+        )
+    }
+
+    async fn load_index2_identity_failures(&self) -> DbResult<Vec<(u32, String)>> {
+        match self
+            .info_store
+            .get(Self::index2_identity_failure_key())
+            .await
+        {
+            Ok(bytes) => crate::meta::MetaEnvelope::open(&bytes)
+                .map_err(|e| DbError::Codec(format!("index2 identity failures: {e}"))),
+            Err(DbError::NotFound(_)) => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn write_index2_identity_failures(&self, failures: Vec<(u32, String)>) -> DbResult<()> {
+        let bytes = crate::meta::MetaEnvelope::new(failures)
+            .encode()
+            .map_err(|e| DbError::Codec(format!("index2 identity failures: {e}")))?;
+        self.info_store
+            .set(Self::index2_identity_failure_key(), Bytes::from(bytes))
+            .await?;
+        Ok(())
+    }
+
+    pub(super) async fn save_index2_identity_failure(
+        &self,
+        id: u32,
+        reason: String,
+    ) -> DbResult<()> {
+        let mut failures = self.load_index2_identity_failures().await?;
+        if let Some((_, existing)) = failures.iter_mut().find(|(saved_id, _)| *saved_id == id) {
+            *existing = reason;
+        } else {
+            failures.push((id, reason));
+        }
+        self.write_index2_identity_failures(failures).await
+    }
+
+    pub(super) async fn clear_index2_identity_failure(&self, id: u32) -> DbResult<()> {
+        let mut failures = self.load_index2_identity_failures().await?;
+        if !failures.iter().any(|(saved_id, _)| *saved_id == id) {
+            return Ok(());
+        }
+        failures.retain(|(saved_id, _)| *saved_id != id);
+        if failures.is_empty() {
+            match self
+                .info_store
+                .remove(Self::index2_identity_failure_key())
+                .await
+            {
+                Ok(_) | Err(DbError::NotFound(_)) => Ok(()),
+                Err(error) => Err(error),
+            }
+        } else {
+            self.write_index2_identity_failures(failures).await
+        }
+    }
+
+    pub(super) async fn restore_index2_identity_failures(&self) -> DbResult<()> {
+        for (id, reason) in self.load_index2_identity_failures().await? {
+            if self.index2_registry.state_of(id).await
+                == Some(crate::index2::state::IndexState::Failed)
+            {
+                self.index2_registry.set_failed(id, reason).await;
+            }
+        }
+        Ok(())
+    }
+
     /// Ensure the base index family is on identity v2 for THIS table.
     /// Returns `true` when the migration ran (either because the stored
     /// markers said `need`, or because `force` is set by the post-replay
@@ -44,7 +123,7 @@ impl TableManager {
     ///
     /// Failure gate (fail-closed): `idv > 2` is a typed open error — the
     /// table was written by a newer binary.
-    pub(crate) async fn ensure_base_identity_current(
+    pub(in crate::table) async fn ensure_base_identity_current(
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
@@ -70,6 +149,76 @@ impl TableManager {
         self.run_base_identity_migration(permit, true).await
     }
 
+    pub(crate) async fn rerun_index2_identity_migration(&self) -> DbResult<()> {
+        let Some((_, mut persisted)) =
+            crate::index2::persistence::load_index2_metadata(&self.info_store).await?
+        else {
+            return Ok(());
+        };
+        let ids: Vec<_> = persisted
+            .descriptors
+            .iter()
+            .filter(|desc| {
+                matches!(
+                    desc.kind,
+                    crate::index2::kind::IndexKind::Fts { .. }
+                        | crate::index2::kind::IndexKind::Functional { .. }
+                )
+            })
+            .map(|desc| desc.id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        for desc in &mut persisted.descriptors {
+            if ids.contains(&desc.id) {
+                desc.state = crate::index2::state::IndexState::Building;
+            }
+        }
+        for &id in &ids {
+            self.index2_registry
+                .set_state(id, crate::index2::state::IndexState::Building)
+                .await;
+        }
+        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
+            .await?;
+        self.identity_migrated_this_open
+            .store(true, Ordering::Release);
+        for id in ids {
+            if let Some(backend) = self.index2_registry.get_by_id(id).await {
+                backend.drop_all().await?;
+                if let Err(error) = self.backfill_index2_backend(backend.as_ref()).await {
+                    if matches!(
+                        error,
+                        crate::index2::IndexError::Storage(_) | crate::index2::IndexError::Db(_)
+                    ) {
+                        return Err(error.into());
+                    }
+                    let reason = format!("identity migration for index '{}' (id={id}) could not backfill: {error}; register its scalar with set_scalar_resolver(), then call TableManager::repair()", backend.descriptor().name);
+                    self.save_index2_identity_failure(id, reason.clone())
+                        .await?;
+                    self.index2_registry.set_failed(id, reason).await;
+                    crate::index2::persistence::save_index2_metadata(
+                        &self.index2_registry,
+                        &self.info_store,
+                    )
+                    .await?;
+                    continue;
+                }
+                self.index2_registry
+                    .set_state(id, crate::index2::state::IndexState::Ready)
+                    .await;
+                self.clear_index2_identity_failure(id).await?;
+                crate::index2::persistence::save_index2_metadata(
+                    &self.index2_registry,
+                    &self.info_store,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// The three-step protocol itself. `force` skips the cheap `need` check
     /// (the re-run path); the non-forced entry points gate on it.
     async fn run_base_identity_migration(
@@ -77,18 +226,14 @@ impl TableManager {
         permit: &RepoWritePermit,
         force: bool,
     ) -> DbResult<()> {
-        if !force {
-            let need =
-                shamir_index::persistence::identity_migration_needed(&self.info_store).await?;
-            if !need {
-                return Ok(());
-            }
+        if !force && !shamir_index::persistence::identity_migration_needed(&self.info_store).await?
+        {
+            return Ok(());
         }
         log::info!(
             "identity migration: rebuilding base index postings in identity v2 for table '{}'",
             self.name
         );
-
         // Step 1: one atomic transaction removing BOTH markers. Commit
         // point for "every binary must rebuild/migrate from here".
         shamir_index::persistence::clear_identity_markers(&self.info_store).await?;
@@ -132,7 +277,6 @@ impl TableManager {
         }
         drop(_barrier);
         drop(_unique_lock);
-
         // Step 3: set idv = 2. Commit point: the table is identity-current.
         shamir_index::persistence::save_index_identity_version(&self.info_store).await?;
         self.identity_migrated_this_open
