@@ -5,7 +5,7 @@ use crate::fts_backend::FtsBackend;
 use crate::fts_ranked_backend::{ranked_top_k, FtsRankedBackend};
 use crate::kind::{IndexKind, TokenizerKind};
 use crate::tests::support::log_sink::capture_session;
-use crate::tokenizer::token_hash;
+use crate::tokenizer::token_identity;
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryStore;
@@ -68,7 +68,6 @@ fn make_backend(interner: &Interner, store: Arc<dyn Store>) -> FtsRankedBackend 
     FtsRankedBackend::new(desc, vec![intern(interner, "body")], store)
 }
 
-#[cfg(target_pointer_width = "64")]
 #[tokio::test]
 async fn rv_index_605eec5d_golden_fts_posting() {
     let interner = Interner::new();
@@ -86,11 +85,11 @@ async fn rv_index_605eec5d_golden_fts_posting() {
             _ => None,
         })
         .collect();
-    // Index id 20, FTS tag 1, little-endian hello hash, and the fixed record id.
-    let expected: [u8; 29] = [
-        0x14, 0, 0, 0, 1, 0xe4, 0xe6, 0xbc, 0xc8, 0x07, 0x6c, 0x13, 0x15, 0x11, 0x11, 0x11, 0x11,
-        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    // Index id 20, FTS tag 0x11, canonical hello identity, and fixed record id.
+    let mut expected = vec![
+        0x14, 0, 0, 0, 0x11, 0x06, 0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o',
     ];
+    expected.extend_from_slice(&[0x11; 16]);
     assert_eq!(postings, vec![expected.as_slice()]);
 }
 
@@ -114,7 +113,7 @@ async fn rv_index_9733f1f3_corrupt_posting_rejected_empty_legacy_accepted() {
         })
         .unwrap();
     let query = || IndexQuery::Fts {
-        tokens: vec![token_hash("alpha")],
+        tokens: vec![token_identity("alpha")],
         mode: FtsMode::OrAny,
         limit: None,
     };
@@ -125,11 +124,7 @@ async fn rv_index_9733f1f3_corrupt_posting_rejected_empty_legacy_accepted() {
     assert!(backend.lookup(query()).await.is_err());
     assert!(logs.contains("corrupt FTS posting for index 20"));
     store.set(key.into(), Bytes::new()).await.unwrap();
-    backend.lookup(query()).await.unwrap();
-    assert!(logs.contains("empty legacy FTS posting for index 20"));
-    assert!(
-        matches!(backend.lookup(query()).await.unwrap(), IndexResult::Ranked(rows) if rows.len() == 1)
-    );
+    assert!(backend.lookup(query()).await.is_err());
 }
 
 #[test]
@@ -164,7 +159,7 @@ async fn ranked_and_query_returns_scores() {
 
     let result = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("rust")],
+            tokens: vec![token_identity("rust")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -197,7 +192,7 @@ async fn ranked_or_query_union() {
 
     let result = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("alpha"), token_hash("gamma")],
+            tokens: vec![token_identity("alpha"), token_identity("gamma")],
             mode: FtsMode::OrAny,
             limit: None,
         })
@@ -229,6 +224,23 @@ async fn stats_track_across_insert_delete() {
 
     apply_delete(&fts, &store, r1, &rec).await;
     assert_eq!(fts.stats.doc_count(), 0);
+}
+
+#[tokio::test]
+async fn drop_all_clears_postings_and_resets_stats_so_a_rebuild_counts_once() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let fts = make_backend(&i, Arc::clone(&store));
+    let rec = make_rec(&i, "hello world foo bar");
+    apply_insert(&fts, &store, RecordId::new(), &rec).await;
+    assert_eq!(fts.stats.doc_count(), 1);
+
+    fts.drop_all().await.unwrap();
+    assert_eq!(fts.stats.snapshot(), FtsStatsSnapshot::default());
+
+    // Rebuilding the same document on the SAME backend counts it once.
+    apply_insert(&fts, &store, RecordId::new(), &rec).await;
+    assert_eq!(fts.stats.doc_count(), 1);
 }
 
 #[tokio::test]
@@ -297,7 +309,7 @@ async fn longer_doc_gets_lower_score() {
 
     let result = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("rust")],
+            tokens: vec![token_identity("rust")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -489,7 +501,7 @@ async fn plan_apply_round_trip_ranked() {
     // Lookup should find the record
     let result = backend
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("rust")],
+            tokens: vec![token_identity("rust")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -547,7 +559,7 @@ async fn rv_index_dc5c642e_backend_collector_high_water_is_bounded() {
     }
     let result = backend
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("common")],
+            tokens: vec![token_identity("common")],
             mode: FtsMode::OrAny,
             limit: Some(3),
         })
@@ -578,7 +590,7 @@ async fn rv_index_dc5c642e_limited_backend_matches_unlimited_for_modes_ties_and_
     for mode in [FtsMode::AndAll, FtsMode::OrAny] {
         let lookup = |limit| {
             backend.lookup(IndexQuery::Fts {
-                tokens: vec![token_hash("alpha"), token_hash("beta")],
+                tokens: vec![token_identity("alpha"), token_identity("beta")],
                 mode,
                 limit,
             })
@@ -710,4 +722,62 @@ async fn rv_index_0695aada_budget_and_legacy_paths() {
             (text.len() - usize::from(n) + 1) as u64
         );
     }
+}
+#[tokio::test]
+async fn rv_index_53cef405_ranked_token_identity_exact() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let backend = make_backend(&i, Arc::clone(&store));
+    let rid = RecordId::new();
+    let long = "x".repeat(300);
+    let rec = make_rec(&i, &long);
+    let ops = backend.plan_insert(rid, &rec).await.unwrap();
+    let (key, value) = ops
+        .iter()
+        .find_map(|op| match op {
+            IndexWriteOp::SetPosting { key, value, .. } => Some((key.clone(), value.clone())),
+            _ => None,
+        })
+        .unwrap();
+    let canonical = token_identity(&long);
+    let canonical_bytes = crate::model::identity::identity_bytes::identity_bytes(&canonical);
+    assert_eq!(&key[5..key.len() - 16], canonical_bytes.as_slice());
+    assert_eq!(&value[..8], &[1, 0, 0, 0, 1, 0, 0, 0]);
+    assert_eq!(&value[8..], canonical.as_slice());
+    let original_key = key.clone();
+    crate::apply_index_ops(&ops, &store, &backend)
+        .await
+        .unwrap();
+    let result = backend
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_identity(&long)],
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(result, IndexResult::Ranked(rows) if rows.len() == 1 && rows[0].0 == rid));
+    let foreign_rid = RecordId::new();
+    let foreign_token = token_identity(&"y".repeat(300));
+    let foreign_key = crate::posting_layout::build_posting_key(
+        20,
+        0x11,
+        &original_key[5..original_key.len() - 16],
+        &foreign_rid,
+    );
+    let mut foreign_value = vec![1, 0, 0, 0, 1, 0, 0, 0];
+    foreign_value.extend_from_slice(&foreign_token);
+    store
+        .set(Bytes::from(foreign_key).into(), Bytes::from(foreign_value))
+        .await
+        .unwrap();
+    let result = backend
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_identity(&long)],
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(result, IndexResult::Ranked(rows) if rows.len() == 1 && rows[0].0 == rid));
 }

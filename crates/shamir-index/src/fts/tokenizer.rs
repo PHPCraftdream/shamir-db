@@ -9,7 +9,7 @@
 //! vtable indirection.
 
 use rustc_hash::FxHasher;
-use shamir_collections::TFxSet;
+use shamir_collections::{TFxMap, TFxSet};
 use std::borrow::Cow;
 use std::hash::Hasher;
 use std::sync::OnceLock;
@@ -48,14 +48,55 @@ impl TokenizerEnum {
         }
     }
 
-    pub(crate) fn for_each_token_hash(&self, text: &str, mut visitor: impl FnMut(u64)) {
+    pub(crate) fn try_token_frequencies_with(
+        &self,
+        text: &str,
+        mut encode: impl FnMut(&str) -> Vec<u8>,
+    ) -> Result<(TFxMap<Vec<u8>, u32>, u32), IndexError> {
+        let tokens = self.try_tokenize(text)?;
+        let mut text_freq: TFxMap<String, u32> = TFxMap::default();
+        for token in tokens {
+            if let Some(count) = text_freq.get_mut(token.as_ref()) {
+                *count += 1;
+            } else {
+                text_freq.insert(token.into_owned(), 1);
+            }
+        }
+        let doc_len = text_freq.values().copied().sum();
+        let mut freq: TFxMap<Vec<u8>, u32> = TFxMap::default();
+        for (text, count) in text_freq {
+            *freq.entry(encode(&text)).or_insert(0) += count;
+        }
+        Ok((freq, doc_len))
+    }
+
+    pub(crate) fn for_each_token_identity(&self, text: &str, visitor: impl FnMut(&[u8])) {
+        self.for_each_token_identity_with(text, token_identity, visitor);
+    }
+
+    pub(crate) fn for_each_token_identity_with(
+        &self,
+        text: &str,
+        mut encode: impl FnMut(&str) -> Vec<u8>,
+        mut visitor: impl FnMut(&[u8]),
+    ) {
+        let mut identities: TFxMap<String, Vec<u8>> = TFxMap::default();
+        let mut visit = |token: &str| {
+            if let Some(identity) = identities.get(token) {
+                visitor(identity);
+            } else {
+                let identity = encode(token);
+                identities.insert(token.to_owned(), identity);
+                visitor(identities.get(token).expect("identity inserted"));
+            }
+        };
         match self {
             Self::Ngram(tokenizer) => {
-                ngram_budget::visit(text, tokenizer.n, |token| visitor(token_hash(token)));
+                ngram_budget::visit(text, tokenizer.n, |token| visit(token));
             }
             _ => {
                 for token in self.tokenize(text) {
-                    visitor(token_hash(&token));
+                    visit(&token);
                 }
             }
         }
@@ -443,8 +484,15 @@ pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> TokenizerEnum {
     }
 }
 
-/// Hash a token to its persisted posting identity. Change only with an identity
-/// version bump; golden-vector tests guard the existing identity.
+/// Canonical IDV2 identity of a token string.
+pub fn token_identity(token: &str) -> Vec<u8> {
+    crate::model::identity::canonical::encode_inner_value(
+        &shamir_types::types::value::InnerValue::Str(token.to_owned()),
+    )
+    .expect("token strings fit the canonical length format")
+}
+
+/// Legacy token hash retained for decoding historical fixtures only.
 pub fn token_hash(token: &str) -> u64 {
     let mut h = FxHasher::default();
     h.write(token.as_bytes());

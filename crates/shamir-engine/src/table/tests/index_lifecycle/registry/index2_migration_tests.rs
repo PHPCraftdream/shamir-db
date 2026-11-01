@@ -15,10 +15,10 @@
 
 use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
 use crate::index2::functional_backend::FunctionalBackend;
-use crate::index2::tokenizer::token_hash;
 use crate::table::table_manager::TableManager;
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_index::tokenizer::token_identity;
 use shamir_query_types::admin::types::CreateIndexOp;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
@@ -106,7 +106,7 @@ async fn migrate_index2_fts() {
 
     let result = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("hello"), token_hash("world")],
+            tokens: vec![token_identity("hello"), token_identity("world")],
             mode: FtsMode::AndAll,
             limit: None,
         })

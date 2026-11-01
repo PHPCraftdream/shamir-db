@@ -37,7 +37,6 @@ use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
 
 use crate::index2::backend::{FtsMode, IndexQuery, IndexResult};
-use crate::index2::tokenizer::token_hash;
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
 use crate::table::table_manager::table_token_for;
@@ -45,6 +44,7 @@ use crate::table::TableConfig;
 use crate::tx::commit_phases::{FAIL_VECTOR_DELTA_TX_ID, FAIL_VECTOR_PROMOTE_TX_ID};
 use crate::tx::tx_outcome::MaterializationState;
 use serial_test::serial;
+use shamir_index::tokenizer::token_identity;
 
 fn make_repo() -> RepoInstance {
     let repo = Arc::new(InMemoryRepo::new());
@@ -150,7 +150,7 @@ async fn committed_tx_index_postings_visible() {
 
     let result = backend
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("transaction")],
+            tokens: vec![token_identity("transaction")],
             mode: FtsMode::AndAll,
             limit: None,
         })

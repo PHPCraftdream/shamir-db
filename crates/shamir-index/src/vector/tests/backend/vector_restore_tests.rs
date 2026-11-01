@@ -435,6 +435,7 @@ async fn reopen_vector(info: &Arc<dyn Store>, data: &Arc<dyn Store>) -> Arc<dyn 
         .await
         .unwrap()
         .unwrap()
+        .1
         .descriptors
         .remove(0);
     let backend = crate::build_index2_backend(descriptor, info);
@@ -585,6 +586,7 @@ async fn legacy_fitted_snapshot_self_heals_options() {
         .await
         .unwrap()
         .unwrap()
+        .1
         .descriptors[0]
         .options
         .is_empty());
@@ -619,6 +621,7 @@ async fn legacy_fitted_snapshot_self_heals_options() {
         .await
         .unwrap()
         .unwrap()
+        .1
         .descriptors
         .remove(0);
     assert!(!descriptor.options.is_empty());

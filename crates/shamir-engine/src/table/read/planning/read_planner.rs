@@ -133,11 +133,11 @@ impl TableManager {
                 let Some(resolved) = filter_value_to_inner(value) else {
                     return Ok(None);
                 };
-                let hash =
+                let canonical =
                     crate::index2::functional_backend::FunctionalBackend::hash_value(&resolved);
                 let result = backend
                     .lookup(IndexQuery::Point {
-                        keys: smallvec::smallvec![hash.to_vec()],
+                        keys: smallvec::smallvec![canonical],
                     })
                     .await
                     .map_err(DbError::from)?;

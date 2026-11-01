@@ -7,7 +7,7 @@
 use crate::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
 use crate::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
-use crate::tokenizer::{self, token_hash, TokenizerEnum, WhitespaceTokenizer};
+use crate::tokenizer::{self, token_identity, TokenizerEnum, WhitespaceTokenizer};
 use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -67,56 +67,72 @@ impl FtsBackend {
             .collect()
     }
 
-    fn tokenize_record(&self, rec: &dyn RecordRef) -> TFxSet<u64> {
+    fn tokenize_record(&self, rec: &dyn RecordRef) -> TFxSet<Vec<u8>> {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
             Some(text) => {
-                let mut hashes = TFxSet::default();
-                self.tokenizer.for_each_token_hash(text, |hash| {
-                    hashes.insert(hash);
+                let mut identities = TFxSet::default();
+                self.tokenizer.for_each_token_identity(text, |identity| {
+                    if !identities.contains(identity) {
+                        identities.insert(identity.to_vec());
+                    }
                 });
-                hashes
+                identities
             }
             None => TFxSet::default(),
         }
     }
 
-    fn try_tokenize_record(&self, rec: &dyn RecordRef) -> Result<TFxSet<u64>, IndexError> {
+    fn try_tokenize_record(&self, rec: &dyn RecordRef) -> Result<TFxSet<Vec<u8>>, IndexError> {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
-            Some(text) => Ok(self
-                .tokenizer
-                .try_tokenize(text)?
-                .into_iter()
-                .map(|t| token_hash(&t))
-                .collect()),
+            Some(text) => {
+                let (frequencies, _) = self
+                    .tokenizer
+                    .try_token_frequencies_with(text, token_identity)?;
+                Ok(frequencies.into_keys().collect())
+            }
             None => Ok(TFxSet::default()),
         }
     }
 
-    fn posting_key_for_token(&self, th: u64, rid: &RecordId) -> Vec<u8> {
-        build_posting_key(self.descriptor.id, type_tag::FTS, &th.to_le_bytes(), rid)
+    fn posting_key_for_token(&self, canonical: &[u8], rid: &RecordId) -> Vec<u8> {
+        let identity = crate::model::identity::identity_bytes::identity_bytes(canonical);
+        build_posting_key(self.descriptor.id, type_tag::FTS_V2, &identity, rid)
     }
 
-    fn prefix_for_token(&self, th: u64) -> Vec<u8> {
-        let mut prefix = Vec::with_capacity(4 + 1 + 8);
+    fn prefix_for_token(&self, canonical: &[u8]) -> Vec<u8> {
+        let identity = crate::model::identity::identity_bytes::identity_bytes(canonical);
+        let mut prefix = Vec::with_capacity(5 + identity.len());
         prefix.extend_from_slice(&self.descriptor.id.to_le_bytes());
-        prefix.push(type_tag::FTS);
-        prefix.extend_from_slice(&th.to_le_bytes());
+        prefix.push(type_tag::FTS_V2);
+        prefix.extend_from_slice(&identity);
         prefix
     }
 
-    async fn scan_token_postings(&self, th: u64) -> Result<BTreeSet<RecordId>, IndexError> {
-        let prefix = self.prefix_for_token(th);
+    async fn scan_token_postings(
+        &self,
+        canonical: &[u8],
+    ) -> Result<BTreeSet<RecordId>, IndexError> {
+        let prefix = self.prefix_for_token(canonical);
+        let identity = crate::model::identity::identity_bytes::identity_bytes(canonical);
         let mut stream = self
             .store
             .scan_prefix_stream(Bytes::from(prefix.clone()), 1024);
         let mut rids = BTreeSet::new();
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(IndexError::from)?;
-            for (key_bytes, _) in batch {
+            for (key_bytes, value_bytes) in batch {
                 if let Some(pk) = PostingKeyRef::decode(&key_bytes) {
-                    if pk.index_id == self.descriptor.id && pk.type_tag == type_tag::FTS {
+                    if pk.index_id == self.descriptor.id
+                        && pk.type_tag == type_tag::FTS_V2
+                        && pk.value_bytes == identity
+                        && if canonical.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+                            value_bytes.as_ref() == canonical
+                        } else {
+                            value_bytes.is_empty()
+                        }
+                    {
                         rids.insert(pk.record_id_owned());
                     }
                 }
@@ -136,12 +152,12 @@ impl IndexBackend for FtsBackend {
         &self.descriptor
     }
 
-    fn tokenize_query(&self, query: &str) -> Result<Vec<u64>, IndexError> {
+    fn tokenize_query(&self, query: &str) -> Result<Vec<Vec<u8>>, IndexError> {
         Ok(self
             .tokenizer
             .try_tokenize(query)?
             .iter()
-            .map(|t| token_hash(t))
+            .map(|t| token_identity(t))
             .collect())
     }
 
@@ -153,11 +169,17 @@ impl IndexBackend for FtsBackend {
         let tokens = self.try_tokenize_record(rec)?;
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(tokens.len());
-        for th in tokens {
-            let key = self.posting_key_for_token(th, &rid);
+        for identity in tokens {
+            let key = self.posting_key_for_token(&identity, &rid);
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
-                value: Bytes::new(),
+                value: Bytes::from(
+                    if identity.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+                        identity.clone()
+                    } else {
+                        Vec::new()
+                    },
+                ),
                 provenance,
             });
         }
@@ -175,7 +197,7 @@ impl IndexBackend for FtsBackend {
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::new();
         // Remove tokens that disappeared.
-        for &th in old_tokens.difference(&new_tokens) {
+        for th in old_tokens.difference(&new_tokens) {
             let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
@@ -184,11 +206,17 @@ impl IndexBackend for FtsBackend {
             });
         }
         // Add tokens that appeared.
-        for &th in new_tokens.difference(&old_tokens) {
-            let key = self.posting_key_for_token(th, &rid);
+        for identity in new_tokens.difference(&old_tokens) {
+            let key = self.posting_key_for_token(identity, &rid);
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
-                value: Bytes::new(),
+                value: Bytes::from(
+                    if identity.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+                        identity.clone()
+                    } else {
+                        Vec::new()
+                    },
+                ),
                 provenance,
             });
         }
@@ -203,8 +231,8 @@ impl IndexBackend for FtsBackend {
         let tokens = self.tokenize_record(rec);
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(tokens.len());
-        for th in tokens {
-            let key = self.posting_key_for_token(th, &rid);
+        for identity in tokens {
+            let key = self.posting_key_for_token(&identity, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
                 provenance,
@@ -222,7 +250,7 @@ impl IndexBackend for FtsBackend {
                 }
                 let mut sets: Vec<BTreeSet<RecordId>> = Vec::with_capacity(tokens.len());
                 for th in &tokens {
-                    sets.push(self.scan_token_postings(*th).await?);
+                    sets.push(self.scan_token_postings(th).await?);
                 }
                 let result = match mode {
                     FtsMode::AndAll => {

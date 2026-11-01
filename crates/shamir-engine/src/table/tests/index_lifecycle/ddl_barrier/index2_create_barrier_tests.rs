@@ -311,10 +311,11 @@ async fn crashed_index2_id_is_not_reallocated_after_restart() {
 
     // --- "process 2": restart restores next_id from persisted metadata. ---
     let reg2 = crate::index2::IndexRegistry::new();
-    let persisted = crate::index2::persistence::load_index2_metadata(&info_store)
-        .await
-        .unwrap()
-        .expect("reserved metadata must have been persisted");
+    let (_envelope_version, persisted) =
+        crate::index2::persistence::load_index2_metadata(&info_store)
+            .await
+            .unwrap()
+            .expect("reserved metadata must have been persisted");
     reg2.set_next_id(persisted.next_id);
 
     // The next allocation MUST NOT reuse the crashed id.

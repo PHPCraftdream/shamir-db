@@ -18,6 +18,28 @@
 //!       `hash_scalar_ref`/`hash_inner_value`; covering projection as
 //!       `Vec<(String, QueryValue)>` (scalar-only, wire-compat with
 //!       InnerValue decode).
+//!
+//! # Identity v2 (P34-12)
+//!
+//! The base family (regular and unique postings) moved to canonical-byte
+//! identities. `LEGACY_INDEX_FORMAT_VERSION` stays 3 and `_m.idx.lfv` is
+//! no longer written by this binary; the family is current iff
+//! `_m.idx.idv == 2` AND `_m.idx.lfv` is absent
+//! ([`identity_migration_needed`]). An old binary that touches the table
+//! rebuilds in v3 and stamps `lfv`, which makes the next new open migrate
+//! again. `idv > 2` (written by a newer binary) is a typed fail-closed open
+//! error ([`check_identity_version`]); an `idv` marker that is not exactly
+//! four bytes is a codec error. Step 1 of the migration clears both markers
+//! in one transaction ([`clear_identity_markers`]), step 3 stamps `idv`.
+//!
+//! The index2 metadata envelope (`_m.idx`) is version 2 whenever any FTS or
+//! functional descriptor is persisted (those postings live in the
+//! `FTS_V2`/`FUNCTIONAL_V2` namespaces), and version 1 otherwise (empty,
+//! btree- or vector-only), so an older binary can still open a table that
+//! has no FTS/functional index and refuses one that has. Dropping the last
+//! such index returns the envelope to version 1. The flip from 1 to 2 with
+//! every FTS/functional descriptor marked `Building` is the durable commit
+//! point of the index2 migration ([`save_persisted_index2_metadata`]).
 
 use crate::descriptor::IndexDescriptor;
 use crate::{MetaEnvelope, MetaError};
@@ -124,15 +146,38 @@ pub async fn save_index2_metadata_with_pending(
         next_id: registry.peek_next_id(),
         descriptors,
     };
-    let envelope = MetaEnvelope::new(p);
+    save_persisted_index2_metadata(p, info_store).await
+}
+
+/// Persist an already-loaded descriptor snapshot without routing through a
+/// partially populated live registry. Used for the atomic identity-v2 flip:
+/// every FTS/functional descriptor is marked Building before postings change.
+pub async fn save_persisted_index2_metadata(
+    persisted: PersistedIndexes,
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let version = if descriptors_have_identity_v2(&persisted.descriptors) {
+        2
+    } else {
+        1
+    };
+    let envelope = MetaEnvelope::new_with_version(version, persisted);
     let bytes = envelope
         .encode()
         .map_err(|e| shamir_storage::error::DbError::Internal(e.to_string()))?;
-    let key = meta_key_indexes();
     info_store
-        .set(key.to_bytes().into(), Bytes::from(bytes))
+        .set(meta_key_indexes().to_bytes().into(), Bytes::from(bytes))
         .await?;
     Ok(())
+}
+
+fn descriptors_have_identity_v2(descriptors: &[IndexDescriptor]) -> bool {
+    descriptors.iter().any(|d| {
+        matches!(
+            d.kind,
+            crate::kind::IndexKind::Fts { .. } | crate::kind::IndexKind::Functional { .. }
+        )
+    })
 }
 
 fn has_inline_credential(descriptor: &IndexDescriptor) -> bool {
@@ -189,14 +234,15 @@ fn descriptor_matches_ignoring_credential(old: &IndexDescriptor, new: &IndexDesc
 
 pub async fn load_index2_metadata(
     info_store: &Arc<dyn Store>,
-) -> Result<Option<PersistedIndexes>, shamir_storage::error::DbError> {
+) -> Result<Option<(u16, PersistedIndexes)>, shamir_storage::error::DbError> {
     let key = meta_key_indexes();
     let bytes = match info_store.get(key.to_bytes().into()).await {
         Ok(bytes) => bytes,
         Err(shamir_storage::error::DbError::NotFound(_)) => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(Some(decode_persisted_indexes(&bytes)?))
+    let (version, persisted) = decode_persisted_indexes_with_version(&bytes)?;
+    Ok(Some((version, persisted)))
 }
 
 /// Decode the `__meta__/indexes` blob into the current [`PersistedIndexes`],
@@ -216,38 +262,45 @@ pub async fn load_index2_metadata(
 pub(crate) fn decode_persisted_indexes(
     bytes: &[u8],
 ) -> Result<PersistedIndexes, shamir_storage::error::DbError> {
-    let mut persisted = match MetaEnvelope::<PersistedIndexes>::open(bytes) {
-        Ok(p) => Ok(p),
-        Err(MetaError::Decode(new_err)) => {
-            // Possible pre-`state` blob — try the legacy shadow shape.
-            match MetaEnvelope::<forward_compat::PersistedIndexesNoState>::open(bytes) {
-                Ok(legacy) => {
-                    log::warn!(
-                        "index2 metadata: decoded with pre-`state` legacy fallback \
+    decode_persisted_indexes_with_version(bytes).map(|(_, p)| p)
+}
+
+pub(crate) fn decode_persisted_indexes_with_version(
+    bytes: &[u8],
+) -> Result<(u16, PersistedIndexes), shamir_storage::error::DbError> {
+    let (version, mut persisted) =
+        match MetaEnvelope::<PersistedIndexes>::open_accepting(bytes, &[1, 2]) {
+            Ok((version, p)) => Ok((version, p)),
+            Err(MetaError::Decode(new_err)) => {
+                // Possible pre-`state` blob — try the legacy shadow shape.
+                match MetaEnvelope::<forward_compat::PersistedIndexesNoState>::open(bytes) {
+                    Ok(legacy) => {
+                        log::warn!(
+                            "index2 metadata: decoded with pre-`state` legacy fallback \
                          ({} descriptor(s) lifted to state=Ready). \
                          New-shape decode error: {}",
-                        legacy.descriptors.len(),
-                        new_err
-                    );
-                    Ok(PersistedIndexes::from(legacy))
-                }
-                Err(legacy_err) => {
-                    // Decodes as neither shape — genuine corruption.
-                    Err(shamir_storage::error::DbError::Internal(format!(
-                        "index2 metadata decode failed (new shape: {new_err}; \
+                            legacy.descriptors.len(),
+                            new_err
+                        );
+                        Ok((1, PersistedIndexes::from(legacy)))
+                    }
+                    Err(legacy_err) => {
+                        // Decodes as neither shape — genuine corruption.
+                        Err(shamir_storage::error::DbError::Internal(format!(
+                            "index2 metadata decode failed (new shape: {new_err}; \
                          legacy shape: {legacy_err})"
-                    )))
+                        )))
+                    }
                 }
             }
-        }
-        Err(e) => Err(shamir_storage::error::DbError::Internal(e.to_string())),
-    }?;
+            Err(e) => Err(shamir_storage::error::DbError::Internal(e.to_string())),
+        }?;
     for descriptor in &mut persisted.descriptors {
         if let crate::kind::IndexKind::Vector(config) = &mut descriptor.kind {
             config.quantization = super::index_options::decode(&descriptor.options)?;
         }
     }
-    Ok(persisted)
+    Ok((version, persisted))
 }
 
 /// Pre-`state` on-disk shadow shapes used ONLY by the forward-compat

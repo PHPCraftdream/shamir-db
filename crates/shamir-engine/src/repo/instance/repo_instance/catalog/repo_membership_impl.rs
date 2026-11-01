@@ -192,19 +192,20 @@ impl RepoInstance {
         // __data__ is inert under MVCC; __info__ keeps its wrappers.
         let data_store = fully_unwrap_store(&data_store).await;
         self.write_domain.debug_check_permit(permit);
-        // The identity migration is deferred until the MVCC view is attached
-        // (below): `__data__` is inert here, so a rebuild now would see no rows.
+        // The MVCC store is handed to the open itself (not registered yet):
+        // open-time index rebuilds read the records through it, `__data__` is
+        // inert here and would yield no rows.
+        let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
         let tbl = TableManager::open_with_domain_admitted(
             table_name.to_string(),
             data_store,
             info_store,
             Arc::clone(&self.write_domain),
             permit,
-            false,
+            Some(Arc::clone(&mvcc)),
         )
         .await?;
         let repo_interner = self.repo_interner().await?;
-        let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
 
         let token = table_token_for(table_name);
         // A13 follow-up: `insert_sync` returns `Err` when the token is
@@ -253,15 +254,7 @@ impl RepoInstance {
                 "Table '{table_name}' was removed during initialization"
             )));
         }
-        let tbl = tbl
-            .with_mvcc_store(Arc::clone(&mvcc))
-            .with_interner(repo_interner);
-        if let Err(error) = tbl.ensure_base_identity_current(permit).await {
-            let _ = self
-                .per_table_mvcc
-                .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
-            return Err(error);
-        }
+        let tbl = tbl.with_mvcc_store(mvcc).with_interner(repo_interner);
 
         // Wire the non-tx write path to the per-repo gate so that
         // Serializable transactions see non-tx writes in their Phase 2-bis

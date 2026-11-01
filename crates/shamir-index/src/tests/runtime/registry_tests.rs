@@ -381,7 +381,7 @@ async fn assert_rename_survives_reopen(kind: IndexKind, kind_label: &str) {
     save_index2_metadata(&reg, &store).await.unwrap();
 
     // ── (2) Assert BOTH name fields in the persisted descriptor ───────────
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(
         loaded.descriptors.len(),
         1,
