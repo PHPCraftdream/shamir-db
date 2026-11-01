@@ -56,10 +56,14 @@ async fn boot_and_shutdown_with_replication_config() {
         username: "admin".into(),
         password: zeroize::Zeroizing::new(b"admin-password-123".to_vec()),
     };
-    let handle = shamir_server::server::ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot");
+    let handle = shamir_server::server::ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot");
 
     assert!(handle.first_tls_exporter_addr().is_some());
     tokio::time::sleep(Duration::from_millis(50)).await;

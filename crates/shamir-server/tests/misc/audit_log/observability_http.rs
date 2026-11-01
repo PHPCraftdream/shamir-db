@@ -39,6 +39,7 @@ fn make_config_with_public_metrics(
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -97,6 +98,7 @@ async fn launch_on_free_port(
             make_config_with_public_metrics(&temp, &format!("{host}:{port}"), allow_public_metrics);
         let launcher = ServerLauncher {
             config: cfg,
+            node_mode: Default::default(),
             bootstrap: BootstrapMode::Password {
                 username: "admin".into(),
                 password: Zeroizing::new(b"hunter2".to_vec()),
@@ -295,6 +297,7 @@ async fn boot_path_still_rejects_non_loopback_bind_by_default() {
     let cfg = make_config_with_public_metrics(&temp, "0.0.0.0:0", false);
     let launcher = ServerLauncher {
         config: cfg,
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(b"hunter2".to_vec()),

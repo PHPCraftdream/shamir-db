@@ -23,7 +23,11 @@ async fn coarse_gate_describe_and_get_schema_follow_own_table_authz() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");
 
@@ -265,7 +269,11 @@ async fn coarse_gate_access_tree_and_list_semantics() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");
 
@@ -434,7 +442,11 @@ async fn coarse_gate_non_exempted_ops_stay_superuser_only() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");
 
