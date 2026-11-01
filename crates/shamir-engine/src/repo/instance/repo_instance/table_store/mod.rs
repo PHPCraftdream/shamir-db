@@ -6,5 +6,5 @@ pub(crate) mod record_id;
 mod tests;
 
 pub(crate) use copy::copy_table_store;
-pub(crate) use names::table_store_names;
+pub(crate) use names::{table_store_names, validate_table_store_name};
 pub(crate) use record_id::new_table_store_id;
