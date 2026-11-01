@@ -143,7 +143,7 @@ async fn drop_index2_backend_by_name_via_ddl() {
     //     `TableManager::create` reads on reopen) and confirm the descriptor
     //     does NOT resurrect.
     let persisted = load_index2_metadata(&info_store).await.unwrap();
-    let descriptors = persisted.map(|p| p.descriptors).unwrap_or_default();
+    let descriptors = persisted.map(|p| p.1.descriptors).unwrap_or_default();
     assert!(
         descriptors.iter().all(|d| d.name != "func_idx"),
         "dropped index2 backend must not be in persisted metadata (would resurrect on reopen)"

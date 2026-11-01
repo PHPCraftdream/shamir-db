@@ -75,7 +75,7 @@ async fn rv_index_cf86432e_external_raw_secret_rejected_without_store_write() {
     save_index2_metadata_with_pending(&registry, &store, Some(empty_external))
         .await
         .expect("empty external credential should persist");
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert!(matches!(
         &loaded.descriptors[0].kind,
         IndexKind::Vector(config)
@@ -100,7 +100,8 @@ async fn rv_index_cf86432e_external_raw_secret_rejected_without_store_write() {
     let loaded = load_index2_metadata(&ordinary_store)
         .await
         .unwrap()
-        .unwrap();
+        .unwrap()
+        .1;
     assert!(matches!(loaded.descriptors[0].kind, IndexKind::Fts { .. }));
 }
 
@@ -161,7 +162,7 @@ async fn rv_index_cf86432e_allows_unchanged_legacy_credential_on_rewrite() {
         .unwrap();
 
     save_index2_metadata(&registry, &store).await.unwrap();
-    let persisted = load_index2_metadata(&store).await.unwrap().unwrap();
+    let persisted = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(persisted.descriptors.len(), 2);
     assert!(matches!(
         persisted
@@ -265,7 +266,7 @@ async fn round_trip_save_load() {
     let _ = registry.allocate_id();
 
     save_index2_metadata(&registry, &store).await.unwrap();
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(loaded.next_id, 3);
     assert!(loaded.descriptors.is_empty());
 }
@@ -310,7 +311,7 @@ async fn round_trip_with_descriptors() {
         .await
         .unwrap();
 
-    let loaded = load_index2_metadata(&store).await.unwrap().unwrap();
+    let loaded = load_index2_metadata(&store).await.unwrap().unwrap().1;
     assert_eq!(loaded.next_id, 3);
     assert_eq!(loaded.descriptors.len(), 2);
     assert_eq!(loaded.descriptors[0].name, "fts_body");

@@ -1,7 +1,7 @@
 use crate::backend::IndexError;
 use crate::fts::ngram_budget::{MAX_NGRAM_BYTES_PER_VALUE, MAX_NGRAM_TOKENS_PER_VALUE};
 use crate::kind::{StemLanguage, TokenizerKind};
-use crate::tokenizer::{build_tokenizer, token_hash};
+use crate::tokenizer::{build_tokenizer, token_identity};
 use shamir_collections::TFxMap;
 
 fn assert_budget(error: IndexError, kind: &str, limit: u64, observed: u64) {
@@ -107,11 +107,11 @@ fn rv_index_0695aada_streamed_tokens_match_materialized_output() {
     let materialized = tokenizer.tokenize(&over_budget);
     let mut expected = TFxMap::default();
     for token in &materialized {
-        *expected.entry(token_hash(token)).or_insert(0_u32) += 1;
+        *expected.entry(token_identity(token)).or_insert(0_u32) += 1;
     }
     let mut streamed = TFxMap::default();
     let mut streamed_len = 0_u32;
-    tokenizer.for_each_token_hash(&over_budget, |hash| {
+    tokenizer.for_each_token_identity(&over_budget, |hash| {
         streamed_len = streamed_len.wrapping_add(1);
         *streamed.entry(hash).or_insert(0_u32) += 1;
     });
@@ -124,10 +124,10 @@ fn rv_index_0695aada_streamed_tokens_match_materialized_output() {
             let expected: Vec<_> = tokenizer
                 .tokenize(text)
                 .iter()
-                .map(|token| token_hash(token))
+                .map(|token| token_identity(token))
                 .collect();
             let mut actual = Vec::new();
-            tokenizer.for_each_token_hash(text, |hash| actual.push(hash));
+            tokenizer.for_each_token_identity(text, |hash| actual.push(hash));
             assert_eq!(actual, expected);
         }
     }
@@ -145,11 +145,11 @@ fn rv_index_0695aada_streamed_hash_frequency_and_length_parity() {
         let tokens = tokenizer.tokenize(text);
         let mut expected = TFxMap::default();
         for token in &tokens {
-            *expected.entry(token_hash(token)).or_insert(0_u32) += 1;
+            *expected.entry(token_identity(token)).or_insert(0_u32) += 1;
         }
         let mut actual = TFxMap::default();
         let mut len = 0_u32;
-        tokenizer.for_each_token_hash(text, |hash| {
+        tokenizer.for_each_token_identity(text, |hash| {
             len = len.wrapping_add(1);
             *actual.entry(hash).or_insert(0_u32) += 1;
         });

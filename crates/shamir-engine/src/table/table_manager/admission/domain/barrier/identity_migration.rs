@@ -70,6 +70,73 @@ impl TableManager {
         self.run_base_identity_migration(permit, true).await
     }
 
+    pub(crate) async fn rerun_index2_identity_migration(&self) -> DbResult<()> {
+        let Some((_, mut persisted)) =
+            crate::index2::persistence::load_index2_metadata(&self.info_store).await?
+        else {
+            return Ok(());
+        };
+        let ids: Vec<_> = persisted
+            .descriptors
+            .iter()
+            .filter(|desc| {
+                matches!(
+                    desc.kind,
+                    crate::index2::kind::IndexKind::Fts { .. }
+                        | crate::index2::kind::IndexKind::Functional { .. }
+                )
+            })
+            .map(|desc| desc.id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        for desc in &mut persisted.descriptors {
+            if ids.contains(&desc.id) {
+                desc.state = crate::index2::state::IndexState::Building;
+            }
+        }
+        for &id in &ids {
+            self.index2_registry
+                .set_state(id, crate::index2::state::IndexState::Building)
+                .await;
+        }
+        crate::index2::persistence::save_index2_metadata(&self.index2_registry, &self.info_store)
+            .await?;
+        self.identity_migrated_this_open
+            .store(true, Ordering::Release);
+        for id in ids {
+            if let Some(backend) = self.index2_registry.get_by_id(id).await {
+                backend.drop_all().await?;
+                if let Err(error) = self.backfill_index2_backend(backend.as_ref()).await {
+                    if matches!(
+                        error,
+                        crate::index2::IndexError::Storage(_) | crate::index2::IndexError::Db(_)
+                    ) {
+                        return Err(error.into());
+                    }
+                    let reason = format!("identity migration for index '{}' (id={id}) could not backfill: {error}; register its scalar with set_scalar_resolver(), then call TableManager::repair()", backend.descriptor().name);
+                    self.index2_registry.set_failed(id, reason).await;
+                    crate::index2::persistence::save_index2_metadata(
+                        &self.index2_registry,
+                        &self.info_store,
+                    )
+                    .await?;
+                    continue;
+                }
+                self.index2_registry
+                    .set_state(id, crate::index2::state::IndexState::Ready)
+                    .await;
+                crate::index2::persistence::save_index2_metadata(
+                    &self.index2_registry,
+                    &self.info_store,
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// The three-step protocol itself. `force` skips the cheap `need` check
     /// (the re-run path); the non-forced entry points gate on it.
     async fn run_base_identity_migration(
@@ -77,18 +144,14 @@ impl TableManager {
         permit: &RepoWritePermit,
         force: bool,
     ) -> DbResult<()> {
-        if !force {
-            let need =
-                shamir_index::persistence::identity_migration_needed(&self.info_store).await?;
-            if !need {
-                return Ok(());
-            }
+        if !force && !shamir_index::persistence::identity_migration_needed(&self.info_store).await?
+        {
+            return Ok(());
         }
         log::info!(
             "identity migration: rebuilding base index postings in identity v2 for table '{}'",
             self.name
         );
-
         // Step 1: one atomic transaction removing BOTH markers. Commit
         // point for "every binary must rebuild/migrate from here".
         shamir_index::persistence::clear_identity_markers(&self.info_store).await?;
@@ -132,7 +195,6 @@ impl TableManager {
         }
         drop(_barrier);
         drop(_unique_lock);
-
         // Step 3: set idv = 2. Commit point: the table is identity-current.
         shamir_index::persistence::save_index_identity_version(&self.info_store).await?;
         self.identity_migrated_this_open

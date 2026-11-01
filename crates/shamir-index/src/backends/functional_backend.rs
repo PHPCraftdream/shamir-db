@@ -1,8 +1,7 @@
 //! `IndexBackend` for functional (computed) indexes.
 //!
-//! On insert / update / delete, evaluates `IndexExpr` against the
-//! record, hashes the result, and stores/removes a type-tagged
-//! posting in the backing `Store`.
+//! On insert / update / delete, evaluates `IndexExpr` and stores canonical
+//! IDV2 identities in the functional posting namespace.
 
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
@@ -12,16 +11,11 @@ use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
-use rustc_hash::FxHasher;
-use shamir_storage::types::RecordKey;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::record_view::RecordRef;
-use shamir_types::types::numeric_key::decimal_exact_parts;
-use shamir_types::types::numeric_key::NumericKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 pub struct FunctionalBackend {
@@ -63,54 +57,44 @@ impl FunctionalBackend {
             descriptor,
             expr,
             store,
-            resolver: arc_swap::ArcSwapOption::new(Some(std::sync::Arc::new(resolver))),
+            resolver: arc_swap::ArcSwapOption::new(Some(Arc::new(resolver))),
         }
     }
 
-    pub fn hash_value(val: &InnerValue) -> [u8; 16] {
-        let mut h1 = FxHasher::default();
-        let mut h2 = FxHasher::default();
-        hash_inner(val, &mut h1);
-        h2.write_u64(h1.finish());
-        h2.write_u8(0xFF);
-        hash_inner(val, &mut h2);
-        let a = h1.finish().to_le_bytes();
-        let b = h2.finish().to_le_bytes();
-        let mut out = [0u8; 16];
-        out[..8].copy_from_slice(&a);
-        out[8..].copy_from_slice(&b);
-        out
+    pub fn hash_value(val: &InnerValue) -> Vec<u8> {
+        crate::model::identity::canonical::encode_inner_value(val)
+            .expect("functional index values have canonical encodings")
     }
 
-    fn posting_key(&self, val: &InnerValue, rid: &RecordId) -> Vec<u8> {
-        let h = Self::hash_value(val);
-        build_posting_key(self.descriptor.id, type_tag::FUNCTIONAL, &h, rid)
+    fn identity(val: &InnerValue) -> Result<(Vec<u8>, Vec<u8>), IndexError> {
+        let canonical = crate::model::identity::canonical::encode_inner_value(val)
+            .map_err(|e| IndexError::Backend(e.to_string()))?;
+        let identity = crate::model::identity::identity_bytes::identity_bytes(&canonical);
+        let tail = if canonical.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+            canonical
+        } else {
+            Vec::new()
+        };
+        Ok((identity, tail))
     }
 
-    /// Evaluate the index expression. `FieldNotFound`, `TypeMismatch`,
-    /// and `DivisionByZero` collapse to `InnerValue::Null` (a missing or
-    /// wrong-type field yields a stable Null posting key — that is correct
-    /// behaviour). `ScalarError` PROPAGATES — an unresolved user scalar
-    /// (e.g. not re-registered after reopen) must NOT be silently turned
-    /// into a Null index key, because every record would hash to the same
-    /// key, silently corrupting the index.
-    fn eval_or_null(&self, rec: &dyn RecordRef) -> Result<InnerValue, ExprError> {
-        let resolver_guard = self.resolver.load();
-        let resolver: Option<&_> = resolver_guard.as_deref();
-        match self.expr.eval_with_scalars(rec, resolver) {
-            Ok(v) => Ok(v),
-            Err(ExprError::FieldNotFound) => Ok(InnerValue::Null),
-            Err(ExprError::TypeMismatch { .. }) => Ok(InnerValue::Null),
-            Err(ExprError::DivisionByZero) => Ok(InnerValue::Null),
-            Err(scalar_err) => Err(scalar_err),
-        }
+    fn posting_key(
+        &self,
+        val: &InnerValue,
+        rid: &RecordId,
+    ) -> Result<(Vec<u8>, Bytes), IndexError> {
+        let (identity, tail) = Self::identity(val)?;
+        Ok((
+            build_posting_key(self.descriptor.id, type_tag::FUNCTIONAL_V2, &identity, rid),
+            Bytes::from(tail),
+        ))
     }
 
-    fn prefix_for_value_hash(&self, value_hash: &[u8]) -> Vec<u8> {
-        let mut prefix = Vec::with_capacity(4 + 1 + value_hash.len());
+    fn prefix_for_value(&self, identity: &[u8]) -> Vec<u8> {
+        let mut prefix = Vec::with_capacity(5 + identity.len());
         prefix.extend_from_slice(&self.descriptor.id.to_le_bytes());
-        prefix.push(type_tag::FUNCTIONAL);
-        prefix.extend_from_slice(value_hash);
+        prefix.push(type_tag::FUNCTIONAL_V2);
+        prefix.extend_from_slice(identity);
         prefix
     }
 
@@ -122,107 +106,34 @@ impl FunctionalBackend {
             .store
             .scan_prefix_stream(Bytes::copy_from_slice(prefix), 1024);
         let mut all = Vec::new();
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result.map_err(IndexError::from)?;
-            all.extend(batch);
+        while let Some(batch) = stream.next().await {
+            all.extend(batch.map_err(IndexError::from)?);
         }
         Ok(all)
     }
-}
 
-/// Hash a computed expression value into the FUNCTIONAL posting key using
-/// EXPLICIT u8 type tags (0..=6, plus tags 7..=10 for Dec/Big/Bin/Set),
-/// NOT `std::mem::discriminant`.
-///
-/// §5b/byte-identity floor: this is the persisted posting hash format —
-/// the tag scheme is part of on-disk index compatibility and must stay
-/// stable. Tags 7..=10 (Dec/Big/Bin/Set) EXTEND the persisted scheme,
-/// mirroring `base_index::infra::index_keys::hash_inner_value`; the old
-/// wildcard collapsed Dec/Big/Bin/Set to one shared hash. Set hashes are
-/// order-independent (XOR of per-element hashes). The `InnerValue` here is the owned computed expression result
-/// (see `IndexExpr::eval`), not a record materialization.
-/// Top-level NaN leaf (RV-FUNCLIB-5FA455F7): NaN claims no posting,
-/// same as the scan filter, which never matches NaN.
-fn inner_is_top_level_nan(v: &InnerValue) -> bool {
-    matches!(v, InnerValue::F64(f) if f.is_nan())
-}
-
-/// Hash a persisted posting identity; change only with an identity-version
-/// bump. Golden-vector tests guard the existing outputs.
-fn hash_inner(val: &InnerValue, h: &mut FxHasher) {
-    match val {
-        InnerValue::Null => h.write_u8(0),
-        InnerValue::Bool(b) => {
-            h.write_u8(1);
-            h.write_u8(*b as u8);
-        }
-        InnerValue::Int(n) => {
-            h.write_u8(2);
-            h.write_i64(*n);
-        }
-        InnerValue::F64(f) => {
-            // Shared canonical numeric key (RV-FUNCLIB-5FA455F7, S1/S2) —
-            // ONE implementation in `shamir_types::types::numeric_key`,
-            // also used by the legacy index hashes, DISTINCT, GROUP BY and
-            // FK matching: integral f64 in i64 range keys like the equal
-            // Int, -0.0 keys as 0, NaN keys to its own bit pattern.
-            NumericKey::from_f64(*f).hash_tagged(2, 8, 3, h);
-        }
-        InnerValue::Str(s) => {
-            h.write_u8(4);
-            h.write(s.as_bytes());
-        }
-        InnerValue::List(items) => {
-            h.write_u8(5);
-            h.write_usize(items.len());
-            for item in items {
-                hash_inner(item, h);
-            }
-        }
-        InnerValue::Map(m) => {
-            h.write_u8(6);
-            h.write_usize(m.len());
-            for (k, v) in m.iter() {
-                let (buf, len) = k.as_bytes_buf();
-                h.write(&buf[..len]);
-                hash_inner(v, h);
-            }
-        }
-        InnerValue::Dec(d) => {
-            // Exact Int↔Dec parity (S2): integral Dec keys like the equal
-            // Int; non-integral Dec keys by exact decimal value.
-            if let Some(key) = NumericKey::from_decimal(d) {
-                key.hash_tagged(2, 8, 3, h);
-            } else {
-                h.write_u8(7);
-                let (mantissa, scale) = decimal_exact_parts(d);
-                mantissa.hash(h);
-                scale.hash(h);
-            }
-        }
-        InnerValue::Big(b) => {
-            // Exact Int↔Big parity (S2): Big equal to an Int keys like
-            // that Int; beyond i64 keys by sign + magnitude bytes.
-            NumericKey::from_bigint(b).hash_tagged(2, 8, 3, h);
-        }
-        InnerValue::Bin(b) => {
-            h.write_u8(9);
-            h.write_usize(b.len());
-            h.write(b);
-        }
-        InnerValue::Set(s) => {
-            h.write_u8(10);
-            h.write_usize(s.len());
-            // Order-independent: XOR of per-element hashes into fresh hashers.
-            let mut xor: u64 = 0;
-            for item in s {
-                let mut eh = FxHasher::default();
-                hash_inner(item, &mut eh);
-                xor ^= eh.finish();
-            }
-            h.write_u64(xor);
+    /// A missing field, type mismatch, or division by zero means the expression
+    /// does not produce an indexable value, so these cases are represented as
+    /// Null. Other errors (including unavailable user scalars) must propagate:
+    /// silently turning them into Null would corrupt the index.
+    fn eval_or_null(&self, rec: &dyn RecordRef) -> Result<InnerValue, ExprError> {
+        let resolver_guard = self.resolver.load();
+        match self.expr.eval_with_scalars(rec, resolver_guard.as_deref()) {
+            Ok(v) => Ok(v),
+            Err(
+                ExprError::FieldNotFound
+                | ExprError::TypeMismatch { .. }
+                | ExprError::DivisionByZero,
+            ) => Ok(InnerValue::Null),
+            Err(error) => Err(error),
         }
     }
+}
+
+/// Top-level NaN leaf (RV-FUNCLIB-5FA455F7): NaN claims no posting,
+/// same as the scan filter, which never matches NaN.
+fn inner_is_top_level_nan(value: &InnerValue) -> bool {
+    matches!(value, InnerValue::F64(f) if f.is_nan())
 }
 
 #[async_trait]
@@ -230,7 +141,6 @@ impl IndexBackend for FunctionalBackend {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-
     fn descriptor(&self) -> &IndexDescriptor {
         &self.descriptor
     }
@@ -240,21 +150,19 @@ impl IndexBackend for FunctionalBackend {
         rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let val = self.eval_or_null(rec).map_err(|e| {
+        let value = self.eval_or_null(rec).map_err(|e| {
             IndexError::Backend(format!(
-                "functional index '{}': scalar eval failed: {}",
-                self.descriptor.name, e
+                "functional index '{}': scalar eval failed: {e}",
+                self.descriptor.name
             ))
         })?;
-        // NaN claims no posting — a NaN probe must match nothing, same
-        // as the scan filter (RV-FUNCLIB-5FA455F7).
-        if inner_is_top_level_nan(&val) {
+        if inner_is_top_level_nan(&value) {
             return Ok(vec![]);
         }
-        let key = self.posting_key(&val, &rid);
+        let (key, tail) = self.posting_key(&value, &rid)?;
         Ok(vec![IndexWriteOp::SetPosting {
             key: Bytes::from(key),
-            value: Bytes::new(),
+            value: tail,
             provenance: crate::write_ops::index2_provenance(&self.descriptor),
         }])
     }
@@ -265,43 +173,47 @@ impl IndexBackend for FunctionalBackend {
         old: &(dyn RecordRef + Sync + '_),
         new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let eval_err = |e: ExprError| {
-            IndexError::Backend(format!(
-                "functional index '{}': scalar eval failed: {}",
-                self.descriptor.name, e
-            ))
+        let eval = |rec: &(dyn RecordRef + Sync + '_)| {
+            self.eval_or_null(rec).map_err(|e| {
+                IndexError::Backend(format!(
+                    "functional index '{}': scalar eval failed: {e}",
+                    self.descriptor.name
+                ))
+            })
         };
-        let old_val = self.eval_or_null(old).map_err(&eval_err)?;
-        let new_val = self.eval_or_null(new).map_err(&eval_err)?;
+        let old_value = eval(old)?;
+        let new_value = eval(new)?;
+        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         // NaN claims no posting: remove the old one, never write a NaN
         // one (RV-FUNCLIB-5FA455F7).
-        let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         match (
-            inner_is_top_level_nan(&old_val),
-            inner_is_top_level_nan(&new_val),
+            inner_is_top_level_nan(&old_value),
+            inner_is_top_level_nan(&new_value),
         ) {
             (true, true) => return Ok(vec![]),
             (true, false) => {
+                let (key, value) = self.posting_key(&new_value, &rid)?;
                 return Ok(vec![IndexWriteOp::SetPosting {
-                    key: Bytes::from(self.posting_key(&new_val, &rid)),
-                    value: Bytes::new(),
+                    key: Bytes::from(key),
+                    value,
                     provenance,
                 }]);
             }
             (false, true) => {
+                let (key, _) = self.posting_key(&old_value, &rid)?;
                 return Ok(vec![IndexWriteOp::RemovePosting {
-                    key: Bytes::from(self.posting_key(&old_val, &rid)),
+                    key: Bytes::from(key),
                     provenance,
                     owner: None,
                 }]);
             }
-            (false, false) => {}
+            _ => {}
         }
-        let old_hash = Self::hash_value(&old_val);
-        let new_hash = Self::hash_value(&new_val);
-        if old_hash != new_hash {
-            let old_key = self.posting_key(&old_val, &rid);
-            let new_key = self.posting_key(&new_val, &rid);
+        let (old_identity, old_tail) = Self::identity(&old_value)?;
+        let (new_identity, new_tail) = Self::identity(&new_value)?;
+        if old_identity != new_identity || old_tail != new_tail {
+            let (old_key, _) = self.posting_key(&old_value, &rid)?;
+            let (new_key, new_value) = self.posting_key(&new_value, &rid)?;
             Ok(vec![
                 IndexWriteOp::RemovePosting {
                     key: Bytes::from(old_key),
@@ -310,7 +222,7 @@ impl IndexBackend for FunctionalBackend {
                 },
                 IndexWriteOp::SetPosting {
                     key: Bytes::from(new_key),
-                    value: Bytes::new(),
+                    value: new_value,
                     provenance,
                 },
             ])
@@ -324,17 +236,16 @@ impl IndexBackend for FunctionalBackend {
         rid: RecordId,
         rec: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
-        let val = self.eval_or_null(rec).map_err(|e| {
+        let value = self.eval_or_null(rec).map_err(|e| {
             IndexError::Backend(format!(
-                "functional index '{}': scalar eval failed: {}",
-                self.descriptor.name, e
+                "functional index '{}': scalar eval failed: {e}",
+                self.descriptor.name
             ))
         })?;
-        // NaN has no posting — nothing to remove.
-        if inner_is_top_level_nan(&val) {
+        if inner_is_top_level_nan(&value) {
             return Ok(vec![]);
         }
-        let key = self.posting_key(&val, &rid);
+        let (key, _) = self.posting_key(&value, &rid)?;
         Ok(vec![IndexWriteOp::RemovePosting {
             key: Bytes::from(key),
             provenance: crate::write_ops::index2_provenance(&self.descriptor),
@@ -346,14 +257,24 @@ impl IndexBackend for FunctionalBackend {
         match query {
             IndexQuery::Point { keys } => {
                 let mut result = BTreeSet::new();
-                for value_hash in &keys {
-                    let prefix = self.prefix_for_value_hash(value_hash);
-                    let entries = self.scan_postings_by_prefix(&prefix).await?;
-                    for (key_bytes, _) in entries {
+                for canonical in keys {
+                    let identity =
+                        crate::model::identity::identity_bytes::identity_bytes(&canonical);
+                    for (key_bytes, value_bytes) in self
+                        .scan_postings_by_prefix(&self.prefix_for_value(&identity))
+                        .await?
+                    {
                         if let Some(pk) = PostingKeyRef::decode(&key_bytes) {
                             if pk.index_id == self.descriptor.id
-                                && pk.type_tag == type_tag::FUNCTIONAL
-                                && pk.value_bytes == value_hash.as_slice()
+                                && pk.type_tag == type_tag::FUNCTIONAL_V2
+                                && pk.value_bytes == identity.as_slice()
+                                && if canonical.len()
+                                    > crate::model::identity::identity_bytes::INLINE_MAX
+                                {
+                                    value_bytes.as_ref() == canonical.as_slice()
+                                } else {
+                                    value_bytes.is_empty()
+                                }
                             {
                                 result.insert(pk.record_id_owned());
                             }
@@ -375,13 +296,11 @@ impl IndexBackend for FunctionalBackend {
     }
 
     async fn drop_all(&self) -> Result<(), IndexError> {
-        let prefix = self.descriptor.id.to_le_bytes();
-        let entries = self.scan_postings_by_prefix(&prefix).await?;
-        for (key_bytes, _) in entries {
-            self.store
-                .remove(key_bytes)
-                .await
-                .map_err(IndexError::from)?;
+        let entries = self
+            .scan_postings_by_prefix(&self.descriptor.id.to_le_bytes())
+            .await?;
+        for (key, _) in entries {
+            self.store.remove(key).await.map_err(IndexError::from)?;
         }
         Ok(())
     }
@@ -390,7 +309,6 @@ impl IndexBackend for FunctionalBackend {
         // Clone the ScalarResolver into an Arc and store it — the old
         // resolver (if any) is replaced atomically. Subsequent eval_or_null
         // calls will pick up the new resolver via the ArcSwapOption load.
-        self.resolver
-            .store(Some(std::sync::Arc::new(resolver.clone())));
+        self.resolver.store(Some(Arc::new(resolver.clone())));
     }
 }

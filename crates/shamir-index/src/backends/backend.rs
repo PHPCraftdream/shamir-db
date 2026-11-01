@@ -68,7 +68,7 @@ pub enum IndexQuery {
     /// FTS — interned token IDs + combination mode. `limit` bounds ranked
     /// results when set; membership lookups remain complete.
     Fts {
-        tokens: Vec<u64>,
+        tokens: Vec<Vec<u8>>,
         mode: FtsMode,
         limit: Option<usize>,
     },
@@ -322,14 +322,14 @@ pub trait IndexBackend: Send + Sync {
         self.plan_delete(rid, rec).await
     }
 
-    /// Tokenize a query string into posting-key hashes using THIS index's
+    /// Tokenize a query string into canonical token bytes using THIS index's
     /// tokenizer, so query terms match the way documents were indexed
     /// (stemming, n-grams, etc.). Default mirrors the legacy behaviour
     /// (whitespace split + lowercase) for backends without a real tokenizer.
-    fn tokenize_query(&self, query: &str) -> Result<Vec<u64>, IndexError> {
+    fn tokenize_query(&self, query: &str) -> Result<Vec<Vec<u8>>, IndexError> {
         Ok(query
             .split_whitespace()
-            .map(|w| crate::tokenizer::token_hash(&w.to_lowercase()))
+            .map(|w| crate::tokenizer::token_identity(&w.to_lowercase()))
             .collect())
     }
 

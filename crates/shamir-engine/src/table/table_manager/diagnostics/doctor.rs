@@ -458,7 +458,7 @@ impl TableManager {
         }
 
         // (2) live registry vs the persisted blob.
-        if let Some(persisted) =
+        if let Some((_envelope_version, persisted)) =
             crate::index2::persistence::load_index2_metadata(&self.info_store).await?
         {
             let persisted_by_id: TFxMap<u32, &crate::index2::IndexDescriptor> =

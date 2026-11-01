@@ -13,6 +13,8 @@ pub mod type_tag {
     pub const FTS: u8 = 1;
     pub const FUNCTIONAL: u8 = 2;
     pub const VECTOR: u8 = 3;
+    pub const FTS_V2: u8 = 0x11;
+    pub const FUNCTIONAL_V2: u8 = 0x12;
 }
 
 /// `index_id` (4) + `type_tag` (1) + `record_id` (16). The variable

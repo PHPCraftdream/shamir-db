@@ -209,10 +209,11 @@ async fn building_index_self_heals_on_reopen() {
     assert_eq!(bob.len(), 1, "Bob must be indexed after self-heal backfill");
 
     // The persisted metadata must now reflect Ready (the open path re-persisted).
-    let persisted = crate::index2::persistence::load_index2_metadata(&info_store)
-        .await
-        .unwrap()
-        .expect("metadata must exist after reopen");
+    let (_envelope_version, persisted) =
+        crate::index2::persistence::load_index2_metadata(&info_store)
+            .await
+            .unwrap()
+            .expect("metadata must exist after reopen");
     assert_eq!(persisted.descriptors.len(), 1);
     assert_eq!(
         persisted.descriptors[0].state,

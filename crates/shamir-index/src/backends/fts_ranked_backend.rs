@@ -8,7 +8,7 @@ use crate::backend::{FtsMode, IndexBackend, IndexError, IndexQuery, IndexResult}
 use crate::bm25::{self, Bm25Params, FtsPostingValue, FtsStats};
 use crate::descriptor::IndexDescriptor;
 use crate::posting_layout::{build_posting_key, type_tag, PostingKeyRef};
-use crate::tokenizer::{self, token_hash, TokenizerEnum, WhitespaceTokenizer};
+use crate::tokenizer::{self, token_identity, TokenizerEnum, WhitespaceTokenizer};
 use crate::write_ops::IndexWriteOp;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -133,15 +133,15 @@ impl FtsRankedBackend {
             .collect()
     }
 
-    fn tokenize_with_freq(&self, rec: &dyn RecordRef) -> (TFxMap<u64, u32>, u32) {
+    fn tokenize_with_freq(&self, rec: &dyn RecordRef) -> (TFxMap<Vec<u8>, u32>, u32) {
         let ipath = self.ipath();
         match rec.str_at(&ipath) {
             Some(text) => {
-                let mut freq: TFxMap<u64, u32> = TFxMap::default();
+                let mut freq: TFxMap<Vec<u8>, u32> = TFxMap::default();
                 let mut doc_len = 0_u32;
-                self.tokenizer.for_each_token_hash(text, |hash| {
+                self.tokenizer.for_each_token_identity(text, |identity| {
                     doc_len = doc_len.wrapping_add(1);
-                    *freq.entry(hash).or_insert(0) += 1;
+                    *freq.entry(identity).or_insert(0) += 1;
                 });
                 (freq, doc_len)
             }
@@ -152,7 +152,7 @@ impl FtsRankedBackend {
     fn try_tokenize_with_freq(
         &self,
         rec: &dyn RecordRef,
-    ) -> Result<(TFxMap<u64, u32>, u32), IndexError> {
+    ) -> Result<(TFxMap<Vec<u8>, u32>, u32), IndexError> {
         let ipath = self.ipath();
         let Some(text) = rec.str_at(&ipath) else {
             return Ok((TFxMap::default(), 0));
@@ -161,50 +161,75 @@ impl FtsRankedBackend {
         let doc_len = tokens.len() as u32;
         let mut freq = TFxMap::default();
         for token in tokens {
-            *freq.entry(token_hash(&token)).or_insert(0) += 1;
+            *freq.entry(token_identity(&token)).or_insert(0) += 1;
         }
         Ok((freq, doc_len))
     }
 
-    fn posting_key_for_token(&self, th: u64, rid: &RecordId) -> Vec<u8> {
-        build_posting_key(self.descriptor.id, type_tag::FTS, &th.to_le_bytes(), rid)
+    fn posting_key_for_token(&self, canonical: &[u8], rid: &RecordId) -> Vec<u8> {
+        let identity = crate::model::identity::identity_bytes::identity_bytes(canonical);
+        build_posting_key(self.descriptor.id, type_tag::FTS_V2, &identity, rid)
     }
 
-    fn prefix_for_token(&self, th: u64) -> Vec<u8> {
-        let mut prefix = Vec::with_capacity(4 + 1 + 8);
+    fn prefix_for_token(&self, canonical: &[u8]) -> Vec<u8> {
+        let identity = crate::model::identity::identity_bytes::identity_bytes(canonical);
+        let mut prefix = Vec::with_capacity(5 + identity.len());
         prefix.extend_from_slice(&self.descriptor.id.to_le_bytes());
-        prefix.push(type_tag::FTS);
-        prefix.extend_from_slice(&th.to_le_bytes());
+        prefix.push(type_tag::FTS_V2);
+        prefix.extend_from_slice(&identity);
         prefix
     }
 
     async fn scan_token_with_values(
         &self,
-        th: u64,
+        canonical: &[u8],
     ) -> Result<Vec<(RecordId, FtsPostingValue)>, IndexError> {
-        let prefix = self.prefix_for_token(th);
+        let identity = crate::model::identity::identity_bytes::identity_bytes(canonical);
+        let prefix = self.prefix_for_token(canonical);
         let mut stream = self.store.scan_prefix_stream(Bytes::from(prefix), 1024);
         let mut results = Vec::with_capacity(16);
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(IndexError::from)?;
             for (key_bytes, val_bytes) in batch {
                 if let Some(pk) = PostingKeyRef::decode(&key_bytes) {
-                    if pk.index_id == self.descriptor.id && pk.type_tag == type_tag::FTS {
-                        let pv: FtsPostingValue = if val_bytes.is_empty() {
-                            log::warn!("empty legacy FTS posting for index {}", self.descriptor.id);
-                            FtsPostingValue { tf: 1, doc_len: 1 }
-                        } else {
-                            bincode::deserialize(&val_bytes).map_err(|error| {
-                                log::warn!(
-                                    "corrupt FTS posting for index {}: {error}",
-                                    self.descriptor.id
-                                );
+                    if pk.index_id == self.descriptor.id
+                        && pk.type_tag == type_tag::FTS_V2
+                        && pk.value_bytes == identity
+                    {
+                        if canonical.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+                            if val_bytes.len() <= 8 || val_bytes[8..] != canonical[..] {
+                                continue;
+                            }
+                        } else if val_bytes.len() != 8 {
+                            log::warn!(
+                                "corrupt FTS posting for index {}: expected 8-byte payload",
+                                self.descriptor.id
+                            );
+                            return Err(IndexError::Backend(format!(
+                                "corrupt FTS posting for index {}: expected 8-byte payload",
+                                self.descriptor.id
+                            )));
+                        }
+                        let payload = &val_bytes[..8];
+                        let pv: FtsPostingValue =
+                            bincode::deserialize(payload).map_err(|error| {
                                 IndexError::Backend(format!(
                                     "corrupt FTS posting for index {}: {error}",
                                     self.descriptor.id
                                 ))
-                            })?
-                        };
+                            })?;
+                        if pv.tf == 0 || pv.doc_len == 0 || pv.tf > pv.doc_len {
+                            log::warn!(
+                                "corrupt FTS posting values for index {}: tf={}, doc_len={}",
+                                self.descriptor.id,
+                                pv.tf,
+                                pv.doc_len
+                            );
+                            return Err(IndexError::Backend(format!(
+                                "corrupt FTS posting for index {}: invalid tf/doc_len",
+                                self.descriptor.id
+                            )));
+                        }
                         results.push((pk.record_id_owned(), pv));
                     }
                 }
@@ -224,12 +249,12 @@ impl IndexBackend for FtsRankedBackend {
         &self.descriptor
     }
 
-    fn tokenize_query(&self, query: &str) -> Result<Vec<u64>, IndexError> {
+    fn tokenize_query(&self, query: &str) -> Result<Vec<Vec<u8>>, IndexError> {
         Ok(self
             .tokenizer
             .try_tokenize(query)?
             .iter()
-            .map(|t| token_hash(t))
+            .map(|t| token_identity(t))
             .collect())
     }
 
@@ -244,10 +269,14 @@ impl IndexBackend for FtsRankedBackend {
         }
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(freq.len() + 1);
-        for (th, tf) in &freq {
-            let key = self.posting_key_for_token(*th, &rid);
+        for (identity, tf) in &freq {
+            let key = self.posting_key_for_token(identity, &rid);
             let pv = FtsPostingValue { tf: *tf, doc_len };
-            let val = bincode::serialize(&pv).map_err(|e| IndexError::Backend(e.to_string()))?;
+            let mut val =
+                bincode::serialize(&pv).map_err(|e| IndexError::Backend(e.to_string()))?;
+            if identity.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+                val.extend_from_slice(identity);
+            }
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
                 value: Bytes::from(val),
@@ -269,14 +298,14 @@ impl IndexBackend for FtsRankedBackend {
         new: &(dyn RecordRef + Sync + '_),
     ) -> Result<Vec<IndexWriteOp>, IndexError> {
         let (old_freq, old_doc_len) = self.tokenize_with_freq(old);
-        let old_set: TFxSet<u64> = old_freq.keys().copied().collect();
+        let old_set: TFxSet<Vec<u8>> = old_freq.keys().cloned().collect();
         let (new_freq, new_doc_len) = self.try_tokenize_with_freq(new)?;
-        let new_set: TFxSet<u64> = new_freq.keys().copied().collect();
+        let new_set: TFxSet<Vec<u8>> = new_freq.keys().cloned().collect();
 
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::new();
         // Remove disappeared tokens.
-        for &th in old_set.difference(&new_set) {
+        for th in old_set.difference(&new_set) {
             let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
@@ -285,13 +314,17 @@ impl IndexBackend for FtsRankedBackend {
             });
         }
         // Add/update all tokens in new (tf or doc_len may have changed).
-        for (th, tf) in &new_freq {
-            let key = self.posting_key_for_token(*th, &rid);
+        for (identity, tf) in &new_freq {
+            let key = self.posting_key_for_token(identity, &rid);
             let pv = FtsPostingValue {
                 tf: *tf,
                 doc_len: new_doc_len,
             };
-            let val = bincode::serialize(&pv).map_err(|e| IndexError::Backend(e.to_string()))?;
+            let mut val =
+                bincode::serialize(&pv).map_err(|e| IndexError::Backend(e.to_string()))?;
+            if identity.len() > crate::model::identity::identity_bytes::INLINE_MAX {
+                val.extend_from_slice(identity);
+            }
             ops.push(IndexWriteOp::SetPosting {
                 key: Bytes::from(key),
                 value: Bytes::from(val),
@@ -324,7 +357,7 @@ impl IndexBackend for FtsRankedBackend {
         let provenance = crate::write_ops::index2_provenance(&self.descriptor);
         let mut ops = Vec::with_capacity(freq.len() + 1);
         for th in freq.keys() {
-            let key = self.posting_key_for_token(*th, &rid);
+            let key = self.posting_key_for_token(th, &rid);
             ops.push(IndexWriteOp::RemovePosting {
                 key: Bytes::from(key),
                 provenance,
@@ -398,7 +431,7 @@ impl IndexBackend for FtsRankedBackend {
                 let mut per_token: Vec<Vec<(RecordId, FtsPostingValue)>> =
                     Vec::with_capacity(tokens.len());
                 for th in &tokens {
-                    per_token.push(self.scan_token_with_values(*th).await?);
+                    per_token.push(self.scan_token_with_values(th).await?);
                 }
 
                 let rank = |scores: TFxMap<RecordId, f64>, limit: Option<usize>| match limit {

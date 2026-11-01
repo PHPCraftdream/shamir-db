@@ -48,14 +48,14 @@ impl TokenizerEnum {
         }
     }
 
-    pub(crate) fn for_each_token_hash(&self, text: &str, mut visitor: impl FnMut(u64)) {
+    pub(crate) fn for_each_token_identity(&self, text: &str, mut visitor: impl FnMut(Vec<u8>)) {
         match self {
             Self::Ngram(tokenizer) => {
-                ngram_budget::visit(text, tokenizer.n, |token| visitor(token_hash(token)));
+                ngram_budget::visit(text, tokenizer.n, |token| visitor(token_identity(token)));
             }
             _ => {
                 for token in self.tokenize(text) {
-                    visitor(token_hash(&token));
+                    visitor(token_identity(&token));
                 }
             }
         }
@@ -443,8 +443,15 @@ pub fn build_tokenizer(kind: &crate::kind::TokenizerKind) -> TokenizerEnum {
     }
 }
 
-/// Hash a token to its persisted posting identity. Change only with an identity
-/// version bump; golden-vector tests guard the existing identity.
+/// Canonical IDV2 identity of a token string.
+pub fn token_identity(token: &str) -> Vec<u8> {
+    crate::model::identity::canonical::encode_inner_value(
+        &shamir_types::types::value::InnerValue::Str(token.to_owned()),
+    )
+    .expect("token strings fit the canonical length format")
+}
+
+/// Legacy token hash retained for decoding historical fixtures only.
 pub fn token_hash(token: &str) -> u64 {
     let mut h = FxHasher::default();
     h.write(token.as_bytes());

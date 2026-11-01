@@ -1,6 +1,6 @@
 use crate::kind::{StemLanguage, TokenizerKind};
 use crate::tokenizer::{
-    build_tokenizer, token_hash, FullTokenizer, NgramTokenizer, Tokenizer, UnicodeTokenizer,
+    build_tokenizer, token_identity, FullTokenizer, NgramTokenizer, Tokenizer, UnicodeTokenizer,
     WhitespaceTokenizer,
 };
 use std::borrow::Cow;
@@ -47,18 +47,24 @@ fn unicode_mixed() {
     assert_eq!(tokens, vec!["foo123", "bar", "baz"]);
 }
 
-#[cfg(target_pointer_width = "64")]
 #[test]
 fn rv_index_605eec5d_golden_token_hash() {
-    assert_eq!(token_hash("hello"), 0x1513_6c07_c8bc_e6e4);
-    assert_eq!(token_hash("привет"), 0x0113_43a5_da6e_3f18);
-    assert_eq!(token_hash(""), 0xf456_d268_76d7_2d91);
+    assert_eq!(
+        token_identity("hello"),
+        vec![0x06, 0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o']
+    );
+    assert_eq!(token_identity("привет"), {
+        let mut v = vec![0x06, 0, 0, 0, 12];
+        v.extend_from_slice("привет".as_bytes());
+        v
+    });
+    assert_eq!(token_identity(""), vec![0x06, 0, 0, 0, 0]);
 }
 
 #[test]
-fn token_hash_deterministic() {
-    assert_eq!(token_hash("hello"), token_hash("hello"));
-    assert_ne!(token_hash("hello"), token_hash("world"));
+fn token_identity_deterministic() {
+    assert_eq!(token_identity("hello"), token_identity("hello"));
+    assert_ne!(token_identity("hello"), token_identity("world"));
 }
 
 // ----- Full tokenizer: stemming -----

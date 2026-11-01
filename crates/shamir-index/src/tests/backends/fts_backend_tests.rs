@@ -3,7 +3,7 @@ use crate::descriptor::IndexDescriptor;
 use crate::fts_backend::FtsBackend;
 use crate::kind::{IndexKind, TokenizerKind};
 use crate::tests::backends::remove_fail_store::RemoveFailStore;
-use crate::tokenizer::{build_tokenizer, token_hash};
+use crate::tokenizer::{build_tokenizer, token_identity};
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use futures::StreamExt;
@@ -112,7 +112,7 @@ async fn and_query() {
     // AND("hello", "world") → only r1
     let result = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("hello"), token_hash("world")],
+            tokens: vec![token_identity("hello"), token_identity("world")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -144,7 +144,7 @@ async fn or_query() {
     // OR("hello", "baz") → r1, r2, r3
     let result = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("hello"), token_hash("baz")],
+            tokens: vec![token_identity("hello"), token_identity("baz")],
             mode: FtsMode::OrAny,
             limit: None,
         })
@@ -176,7 +176,7 @@ async fn update_diff_tokens() {
     // "beta" gone
     let r = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("beta")],
+            tokens: vec![token_identity("beta")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -190,7 +190,7 @@ async fn update_diff_tokens() {
     // "delta" present
     let r = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("delta")],
+            tokens: vec![token_identity("delta")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -204,7 +204,7 @@ async fn update_diff_tokens() {
     // "alpha" still present (unchanged)
     let r = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("alpha")],
+            tokens: vec![token_identity("alpha")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -229,7 +229,7 @@ async fn delete_removes_all_tokens() {
 
     let r = fts
         .lookup(IndexQuery::Fts {
-            tokens: vec![token_hash("hello")],
+            tokens: vec![token_identity("hello")],
             mode: FtsMode::AndAll,
             limit: None,
         })
@@ -344,7 +344,7 @@ async fn rv_index_0695aada_delete_streams_all_distinct_legacy_grams() {
         build_tokenizer(&TokenizerKind::Ngram { n: 255 })
             .tokenize(&text)
             .iter()
-            .map(|token| token_hash(token))
+            .map(|token| token_identity(token))
             .collect();
     let expected: std::collections::BTreeSet<Bytes> = expected_hashes
         .iter()
@@ -352,7 +352,7 @@ async fn rv_index_0695aada_delete_streams_all_distinct_legacy_grams() {
             Bytes::from(crate::posting_layout::build_posting_key(
                 11,
                 crate::posting_layout::type_tag::FTS,
-                &hash.to_le_bytes(),
+                hash.as_slice(),
                 &rid,
             ))
         })
@@ -397,7 +397,7 @@ async fn plan_apply_round_trip() {
     for token in &["alpha", "beta", "gamma"] {
         let result = backend
             .lookup(IndexQuery::Fts {
-                tokens: vec![token_hash(token)],
+                tokens: vec![token_identity(token)],
                 mode: FtsMode::AndAll,
                 limit: None,
             })
@@ -439,4 +439,111 @@ async fn plan_insert_writes_postings_per_token() {
         count, 2,
         "store should hold exactly two postings after apply"
     );
+}
+
+#[tokio::test]
+async fn rv_index_53cef405_fts_token_identity_exact() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let fts = make_fts(&i, Arc::clone(&store));
+
+    let run = RecordId::new();
+    let running = RecordId::new();
+    let long_rid = RecordId::new();
+    let long = "x".repeat(300);
+    let long_rec = make_rec(&i, &long);
+    apply_insert(&fts, &store, run, &make_rec(&i, "run")).await;
+    apply_insert(&fts, &store, running, &make_rec(&i, "running")).await;
+    let ops = fts.plan_insert(long_rid, &long_rec).await.unwrap();
+    let (key, value) = ops
+        .iter()
+        .find_map(|op| match op {
+            IndexWriteOp::SetPosting { key, value, .. } => Some((key, value)),
+            _ => None,
+        })
+        .unwrap();
+    let canonical = token_identity(&long);
+    assert_eq!(key[4], 0x11);
+    assert_eq!(key[5], 0xff);
+    assert_eq!(value.as_ref(), canonical.as_slice());
+    crate::apply_index_ops(&ops, &store, &fts).await.unwrap();
+
+    for (token, expected) in [
+        ("run", vec![run]),
+        ("running", vec![running]),
+        (long.as_str(), vec![long_rid]),
+    ] {
+        let result = fts
+            .lookup(IndexQuery::Fts {
+                tokens: vec![token_identity(token)],
+                mode: FtsMode::AndAll,
+                limit: None,
+            })
+            .await
+            .unwrap();
+        match result {
+            IndexResult::Set(s) => assert_eq!(s, expected.into_iter().collect()),
+            _ => panic!("expected Set"),
+        }
+    }
+
+    let forged_rid = RecordId::new();
+    let forged_key =
+        crate::posting_layout::build_posting_key(10, 0x11, &key[5..key.len() - 16], &forged_rid);
+    store
+        .set(Bytes::from(forged_key).into(), Bytes::from("y".repeat(300)))
+        .await
+        .unwrap();
+    let result = fts
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_identity(&long)],
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    match result {
+        IndexResult::Set(s) => assert_eq!(s, [long_rid].into_iter().collect()),
+        _ => panic!("expected Set"),
+    }
+
+    let updated = make_rec(&i, "replacement");
+    apply_update(&fts, &store, long_rid, &long_rec, &updated).await;
+    let result = fts
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_identity(&long)],
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    match result {
+        IndexResult::Set(s) => assert!(s.is_empty()),
+        _ => panic!("expected Set"),
+    }
+    let result = fts
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_identity("replacement")],
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    match result {
+        IndexResult::Set(s) => assert_eq!(s, [long_rid].into_iter().collect()),
+        _ => panic!("expected Set"),
+    }
+    apply_delete(&fts, &store, long_rid, &updated).await;
+    let result = fts
+        .lookup(IndexQuery::Fts {
+            tokens: vec![token_identity("replacement")],
+            mode: FtsMode::AndAll,
+            limit: None,
+        })
+        .await
+        .unwrap();
+    match result {
+        IndexResult::Set(s) => assert!(s.is_empty()),
+        _ => panic!("expected Set"),
+    }
 }
