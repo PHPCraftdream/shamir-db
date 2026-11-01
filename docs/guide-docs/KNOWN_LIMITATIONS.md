@@ -414,16 +414,40 @@ artifact).
 
 ## 3. Indexes
 
-- **Persisted hash identity is collision-prone and not portable.** Unique
-  indexes and full-text postings identify values or tokens by hashes alone;
-  writers can craft collisions, including false unique conflicts. This is an
-  accepted risk, not collision resolution. Functional Map hashes also depend
-  on insertion order. Drop and recreate affected indexes (`DROP` + `CREATE`)
-  when identity compatibility is lost. A portable, collision-resolving index
-  identity v2 and its versioned migration are deferred. Sources:
-  `crates/shamir-index/src/base_index/infra/index_keys.rs`,
+- **Index identity is canonical bytes (identity v2); older binaries cannot
+  open FTS or functional indexes written by it.** Regular and unique
+  postings, FTS token postings and functional postings identify a value by
+  its canonical encoding (the frozen codec in
+  `crates/shamir-index/src/model/identity/`): the encoding itself when it is
+  at most 256 bytes, otherwise `0xFF || BLAKE3-256(encoding)` with the
+  encoding kept in the posting value. Every equality decision is made on the
+  canonical bytes, so a crafted hash collision can no longer produce a false
+  unique conflict or a wrong lookup hit, and functional Map identities no
+  longer depend on insertion order. Residual risk: a BLAKE3-256 collision of
+  two distinct long values is computationally infeasible; if one ever
+  appeared it fails closed with an internal error instead of being treated
+  as a duplicate.
+  **Migration** is automatic and blocking on the first open after the
+  upgrade, once per table, O(rows × indexes). The base family is marked by
+  `_m.idx.idv` (= 2; the legacy `_m.idx.lfv` is no longer written) and every
+  regular and unique definition is swept in both key namespaces and rebuilt
+  in place from the data store; definitions are never dropped before the
+  commit point, so a crash repeats the rebuild from scratch on the next
+  open. FTS and functional descriptors are re-marked `Building` under
+  metadata envelope version 2 and rebuilt by the existing
+  restart-from-scratch path. A pre-upgrade WAL index operation replayed
+  after the migration triggers a rebuild of that table.
+  **Downgrade:** an older binary refuses a table with FTS or functional
+  indexes written by identity v2 (envelope version 2). `DROP` those indexes
+  with the new binary, or restore a backup, before going back; there is no
+  downgrade command. An older binary rebuilds the base family itself and
+  stamps the legacy marker, which makes the next new open migrate again.
+  A functional index over a user scalar that is not registered at open ends
+  `Failed` with a persisted reason; register the scalar and call `repair()`.
+  Sources: `crates/shamir-index/src/base_index/infra/index_keys.rs`,
   `crates/shamir-index/src/fts/tokenizer.rs`,
-  `crates/shamir-index/src/backends/functional_backend.rs`.
+  `crates/shamir-index/src/backends/functional_backend.rs`,
+  `crates/shamir-index/src/model/meta/persistence.rs`.
 
 - **`unique` and `sorted` are mutually exclusive on the same index.**
   Creating an index with both `unique: true` and `sorted: true` is

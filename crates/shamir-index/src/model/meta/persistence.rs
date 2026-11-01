@@ -18,6 +18,28 @@
 //!       `hash_scalar_ref`/`hash_inner_value`; covering projection as
 //!       `Vec<(String, QueryValue)>` (scalar-only, wire-compat with
 //!       InnerValue decode).
+//!
+//! # Identity v2 (P34-12)
+//!
+//! The base family (regular and unique postings) moved to canonical-byte
+//! identities. `LEGACY_INDEX_FORMAT_VERSION` stays 3 and `_m.idx.lfv` is
+//! no longer written by this binary; the family is current iff
+//! `_m.idx.idv == 2` AND `_m.idx.lfv` is absent
+//! ([`identity_migration_needed`]). An old binary that touches the table
+//! rebuilds in v3 and stamps `lfv`, which makes the next new open migrate
+//! again. `idv > 2` (written by a newer binary) is a typed fail-closed open
+//! error ([`check_identity_version`]); an `idv` marker that is not exactly
+//! four bytes is a codec error. Step 1 of the migration clears both markers
+//! in one transaction ([`clear_identity_markers`]), step 3 stamps `idv`.
+//!
+//! The index2 metadata envelope (`_m.idx`) is version 2 whenever any FTS or
+//! functional descriptor is persisted (those postings live in the
+//! `FTS_V2`/`FUNCTIONAL_V2` namespaces), and version 1 otherwise (empty,
+//! btree- or vector-only), so an older binary can still open a table that
+//! has no FTS/functional index and refuses one that has. Dropping the last
+//! such index returns the envelope to version 1. The flip from 1 to 2 with
+//! every FTS/functional descriptor marked `Building` is the durable commit
+//! point of the index2 migration ([`save_persisted_index2_metadata`]).
 
 use crate::descriptor::IndexDescriptor;
 use crate::{MetaEnvelope, MetaError};

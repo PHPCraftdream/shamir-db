@@ -2,6 +2,26 @@
 //!
 //! On insert / update / delete, evaluates `IndexExpr` and stores canonical
 //! IDV2 identities in the functional posting namespace.
+//!
+//! # Persisted format
+//!
+//! A posting key is `[index_id u32 LE][0x12][I][record_id 16]`
+//! (`type_tag::FUNCTIONAL_V2`). `I` is the canonical encoding `C` of the
+//! evaluated value (the frozen codec in `crate::model::identity`) when
+//! `|C| <= 256`, otherwise `0xFF || BLAKE3-256(C)`; the posting VALUE is
+//! empty for the inline form and `C` itself for the digest form, so a lookup
+//! compares canonical bytes and never trusts a digest alone. Equal values of
+//! every numeric class share one identity, and a Map is encoded sorted by
+//! key id, so the identity does not depend on insertion order. A NaN result
+//! has no identity and writes no posting.
+//!
+//! History: v1 keys used `type_tag::FUNCTIONAL` (`0x02`) with a 64-bit
+//! FxHash of the value, which was collision-prone and insertion-order
+//! dependent for maps. The open-time migration sweeps those postings and
+//! rebuilds under identity v2 (envelope version 2, see
+//! `crate::persistence`). An index over a user-registered scalar that cannot
+//! be resolved at open stays `Failed` with a persisted reason until the
+//! scalar is registered and `TableManager::repair()` runs.
 
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
 use crate::descriptor::IndexDescriptor;
