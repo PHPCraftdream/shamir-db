@@ -215,6 +215,6 @@ Avoid new siblings under full directories; do not add `src/__tests__/token/`. Ke
 
 Normative browser transport values are maintained in TOKEN_API §10, not copied into this design.
 
-## Proposed spec amendments
+## Spec amendments (applied)
 
 Accepted amendments applied to the normative files `TOKEN_API.md`, `TRANSPORT_WS.md`, `SECURITY_MODEL.md`, and `CLIENT_BROWSER.md`. This remains the client design for stages JS1–JS5; normative text is authoritative.

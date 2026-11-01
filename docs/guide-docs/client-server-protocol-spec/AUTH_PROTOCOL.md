@@ -901,7 +901,7 @@ access.
 - `unsupported_version`
 - `bootstrap_failed`
 
-**14.4.** User existence, authentication failure reason and lockout state are never disclosed by the native SCRAM protocol. HTTP login has its explicitly specified transport-specific BEGIN response: `429` with `Retry-After` for retained-pair backoff or active lock (TOKEN_LOGIN_HTTP §4); this does not alter native behavior.
+14.4. **Никогда не раскрывается:** существование юзера, причина auth_failed, lockout state. Native lockout remains silent. HTTP login BEGIN returns 429 with `Retry-After` for pair backoff or active pair lock: this is the explicit transport-specific exception (TOKEN_LOGIN_HTTP §4), not a change to native behavior.
 
 ---
 

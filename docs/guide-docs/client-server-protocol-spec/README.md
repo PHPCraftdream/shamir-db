@@ -34,7 +34,7 @@
 - **[SESSION_RESUMPTION.md](SESSION_RESUMPTION.md)** — fast reconnect, anti-downgrade rules.
 - **[SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)** — live subscriptions v1.1: SubscribeOp/UnsubscribeOp, PushEnvelope, grant rejection codes, filter contract, early-buffer rule.
 - **[CURSORS.md](CURSORS.md)** — server-side result cursors v1: CreateCursor/FetchNext/CancelCursor, CursorPage/CursorClosed, error codes. Backed by real MVCC-snapshot-pinned engine/session state (not wire-only scaffolding).
-- **[TOKEN_API.md](TOKEN_API.md)** — REST и WebSocket по bearer API-токену (HTTP, WS, HTTPS, WSS): формат токена, проверка, allowlist запросов, статусы, коды закрытия 4010-4012, выдача токенов. Отдельный путь без SCRAM; SCRAM-протокол не меняет. Статус: спецификация, реализация не начата.
+- **[TOKEN_API.md](TOKEN_API.md)** — REST и WebSocket по bearer API-токену (HTTP, WS, HTTPS, WSS): формат токена, проверка, allowlist запросов, статусы, коды закрытия 4010-4014 и 1013, браузерный WebSocket endpoint, выдача токенов. Отдельный путь без SCRAM; SCRAM-протокол не меняет. Статус: спецификация, реализация не начата.
 - **[TOKEN_LOGIN_HTTP.md](TOKEN_LOGIN_HTTP.md)** — proposed fresh-password HTTP proof ceremony issuing ordinary scoped bearer token; no cookie/session/shared SCRAM enum change; unimplemented.
 
 ### Reference (informative)
