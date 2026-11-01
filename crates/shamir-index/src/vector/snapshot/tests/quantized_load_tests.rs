@@ -29,13 +29,17 @@ fn dumped_u8_graph() -> (String, Vec<u8>, Vec<u8>, Arc<Sq8Quantizer>) {
 #[test]
 fn rv_index_8db6b1ec_success_cleans_tempdir_and_graph_remains_live() {
     let (basename, graph_bytes, data_bytes, quantizer) = dumped_u8_graph();
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().to_path_buf();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let graph_path = temp_dir.path().join(format!("{basename}.hnsw.graph"));
+    let data_path = temp_dir.path().join(format!("{basename}.hnsw.data"));
+    std::fs::write(&graph_path, &graph_bytes).unwrap();
+    std::fs::write(&data_path, &data_bytes).unwrap();
+    let path = temp_dir.path().to_path_buf();
     let graph = load_quantized_graph(
-        temp,
+        temp_dir,
         &basename,
-        &graph_bytes,
-        &data_bytes,
+        graph_path,
+        data_path,
         quantizer,
         VectorMetric::L2,
     )
@@ -54,12 +58,16 @@ fn rv_index_8db6b1ec_success_cleans_tempdir_and_graph_remains_live() {
 fn rv_index_8db6b1ec_failure_cleans_tempdir() {
     let (_basename, graph_bytes, data_bytes, quantizer) = dumped_u8_graph();
     let temp = tempfile::tempdir().unwrap();
+    let graph_path = temp.path().join("rv_index_8db6b1ec.hnsw.graph");
+    let data_path = temp.path().join("rv_index_8db6b1ec.hnsw.data");
+    std::fs::write(&graph_path, &graph_bytes[..4]).unwrap();
+    std::fs::write(&data_path, &data_bytes).unwrap();
     let path = temp.path().to_path_buf();
     let result = load_quantized_graph(
         temp,
         "rv_index_8db6b1ec",
-        &graph_bytes[..4],
-        &data_bytes,
+        graph_path,
+        data_path,
         quantizer,
         VectorMetric::L2,
     );

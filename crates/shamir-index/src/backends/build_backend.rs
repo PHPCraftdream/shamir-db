@@ -54,10 +54,6 @@ pub fn build_index2_backend_with_resolver(
                 crate::kind::VectorBackendRef::InProcessHnsw { m, ef_construct } => {
                     (*m as usize, *ef_construct as usize)
                 }
-                crate::kind::VectorBackendRef::External { .. } => {
-                    log::warn!("external vector backend is unsupported by index2; using in-process HNSW fallback");
-                    (16, 200)
-                }
             };
             let adapter = Arc::new(HnswAdapter::new_with_quantization(
                 cfg.dim,

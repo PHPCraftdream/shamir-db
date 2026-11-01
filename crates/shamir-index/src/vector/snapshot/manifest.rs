@@ -1,6 +1,60 @@
 use super::SnapshotError;
 use bytes::Bytes;
-use shamir_storage::types::RecordKey;
+use futures::StreamExt;
+use shamir_storage::types::{KvOp, RecordKey, Store};
+
+const ORPHAN_SWEEP_BATCH: usize = 128;
+
+/// Remove chunk and sidecar records for generations other than the verified active one.
+pub(super) async fn sweep_orphan_generations(
+    store: &std::sync::Arc<dyn Store>,
+    keyspace: &str,
+    active_gen: u32,
+) -> Result<(), SnapshotError> {
+    let prefix = Bytes::from(format!("{keyspace}.g"));
+    let mut stream = store.scan_prefix_stream(prefix, ORPHAN_SWEEP_BATCH);
+    let mut removals = Vec::with_capacity(ORPHAN_SWEEP_BATCH);
+    while let Some(batch) = stream.next().await {
+        for (key, _) in batch? {
+            let raw = key.as_ref();
+            let text = std::str::from_utf8(raw).map_err(|error| {
+                SnapshotError::Corrupt(format!("snapshot key not utf8: {error}"))
+            })?;
+            let Some(rest) = text.strip_prefix(&format!("{keyspace}.g")) else {
+                continue;
+            };
+            let Some((gen_text, suffix)) = rest.split_once('.') else {
+                continue;
+            };
+            let Ok(gen) = gen_text.parse::<u32>() else {
+                continue;
+            };
+            if gen == active_gen || !is_generation_record(suffix) {
+                continue;
+            }
+            removals.push(KvOp::Remove(key));
+            if removals.len() == ORPHAN_SWEEP_BATCH {
+                store.transact(std::mem::take(&mut removals)).await?;
+            }
+        }
+    }
+    if !removals.is_empty() {
+        store.transact(removals).await?;
+    }
+    Ok(())
+}
+
+fn is_generation_record(suffix: &str) -> bool {
+    if suffix == "sidecar" {
+        return true;
+    }
+    let Some((section, index)) = suffix.rsplit_once('.') else {
+        return false;
+    };
+    matches!(section, "graph" | "data" | "qgraph" | "qdata")
+        && index.len() == 6
+        && index.bytes().all(|byte| byte.is_ascii_digit())
+}
 
 // CRC detects accidental corruption, not malicious modification.
 pub(super) fn integrity_key(keyspace: &str) -> RecordKey {

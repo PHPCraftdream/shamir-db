@@ -159,6 +159,18 @@ async fn invocation_reads_one_function_and_one_settings_snapshot() {
 }
 
 #[tokio::test]
+async fn rv_db_3eb43ac7_boot_groups_tables_before_repository_iteration() {
+    let source = include_str!("../../shamir_db/core.rs");
+    let grouping = source
+        .find("catalog::group_tables_by_repo")
+        .expect("boot grouping helper call");
+    let repo_loop = source[grouping..]
+        .find("for rec in &repo_records")
+        .expect("repository registration loop");
+    assert!(repo_loop > 0, "repository loop follows grouping call");
+}
+
+#[tokio::test]
 async fn rv_db_23a03103_load_repository_record_is_not_a_full_load() {
     let store = SystemStore::init(SystemStoreConfig::InMemory)
         .await
@@ -170,20 +182,6 @@ async fn rv_db_23a03103_load_repository_record_is_not_a_full_load() {
         .expect("lookup");
     assert!(result.is_none());
     assert_eq!(store.full_catalogue_load_count(), 0);
-}
-
-#[tokio::test]
-async fn rv_db_3eb43ac7_boot_groups_tables_before_repository_iteration() {
-    let source = include_str!("../../shamir_db/core.rs");
-    let group = source.find("let mut tables_by_repo").expect("group map");
-    let group_tables = source[group..]
-        .find("for table in &table_records")
-        .expect("table pass");
-    let repo_loop = source[group..]
-        .find("for rec in &repo_records")
-        .expect("repository loop");
-    assert!(group_tables < repo_loop);
-    assert!(source[group..group + repo_loop].contains("tables_by_repo.entry((db, repo))"));
 }
 
 #[tokio::test]

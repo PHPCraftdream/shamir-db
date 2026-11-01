@@ -1,6 +1,26 @@
+use crate::descriptor::IndexDescriptor;
 use crate::kind::{
     IndexKind, StemLanguage, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
 };
+use crate::persistence::{decode_persisted_indexes, PersistedIndexes};
+use crate::MetaEnvelope;
+use smallvec::SmallVec;
+
+const VECTOR_PERSISTED_GOLDEN: &[u8] = &[
+    // Header: magic (4), version (2), timestamp (8).
+    0x53, 0x44, 0x42, 0x32, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, // next_id (4).
+    2, 0, 0, 0, // descriptors length (8).
+    1, 0, 0, 0, 0, 0, 0, 0, // descriptor id (4).
+    1, 0, 0, 0, // name length (8), name (1).
+    1, 0, 0, 0, 0, 0, 0, 0, b'v', // name_interned (8).
+    1, 0, 0, 0, 0, 0, 0, 0, // paths length (8).
+    0, 0, 0, 0, 0, 0, 0, 0, // IndexKind::Vector tag (3), dim (3), metric Cosine (1).
+    3, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0,
+    // VectorBackendRef::InProcessHnsw tag (0), ef_construct (200), m (16).
+    0, 0, 0, 0, 200, 0, 0, 0, 16, 0, 0, 0,
+    // created_at_nanos (8), options length (8), IndexState::Ready (0).
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
 
 #[test]
 fn serde_round_trip_btree() {
@@ -118,6 +138,74 @@ fn ddl_roundtrip_sq8_into_vector_config() {
     assert!(cfg_none.quantization.is_none());
 }
 
+#[test]
+fn vector_backend_persisted_indexes_golden_bytes() {
+    let persisted = PersistedIndexes {
+        next_id: 2,
+        descriptors: vec![IndexDescriptor {
+            id: 1,
+            name: "v".to_string(),
+            name_interned: 1,
+            paths: SmallVec::new(),
+            kind: IndexKind::Vector(Box::new(VectorConfig {
+                dim: 3,
+                metric: VectorMetric::Cosine,
+                backend: VectorBackendRef::InProcessHnsw {
+                    ef_construct: 200,
+                    m: 16,
+                },
+                quantization: None,
+            })),
+            created_at_nanos: 0,
+            options: Vec::new(),
+            state: crate::state::IndexState::Ready,
+        }],
+    };
+    let envelope = MetaEnvelope {
+        magic: crate::ENVELOPE_MAGIC,
+        version: 1,
+        written_at_nanos: 0,
+        payload: persisted,
+    };
+    assert_eq!(
+        envelope.encode().unwrap().as_slice(),
+        VECTOR_PERSISTED_GOLDEN
+    );
+    let decoded = decode_persisted_indexes(VECTOR_PERSISTED_GOLDEN).unwrap();
+    assert!(matches!(
+        &decoded.descriptors[0].kind,
+        IndexKind::Vector(config) if matches!(config.backend, VectorBackendRef::InProcessHnsw { .. })
+    ));
+}
+
+#[test]
+fn vector_backend_removed_legacy_variant_fails_decode() {
+    let mut bytes = VECTOR_PERSISTED_GOLDEN[..67].to_vec();
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(
+        &bincode::serialize(&(
+            "legacy-driver".to_string(),
+            "https://example.invalid".to_string(),
+            "legacy-key".to_string(),
+        ))
+        .unwrap(),
+    );
+    bytes.extend_from_slice(&VECTOR_PERSISTED_GOLDEN[79..]);
+
+    let legacy_payload: (String, String, String) = bincode::deserialize(&bytes[71..]).unwrap();
+    assert_eq!(legacy_payload.0, "legacy-driver");
+    assert_eq!(legacy_payload.1, "https://example.invalid");
+    assert_eq!(legacy_payload.2, "legacy-key");
+    assert!(matches!(
+        MetaEnvelope::<PersistedIndexes>::open(&bytes),
+        Err(crate::MetaError::Decode(_))
+    ));
+    assert!(matches!(
+        decode_persisted_indexes(&bytes),
+        Err(shamir_storage::error::DbError::Internal(_))
+    ));
+}
+
 // ----- StemLanguage ordinal stability -----
 
 #[test]
@@ -183,24 +271,4 @@ fn from_dsl_unknown_returns_none() {
     assert_eq!(StemLanguage::from_dsl("klingon"), None);
     assert_eq!(StemLanguage::from_dsl(""), None);
     assert_eq!(StemLanguage::from_dsl("EN"), None); // case-sensitive
-}
-
-// ----- VectorBackendRef::External.api_key_secret redaction -----
-
-#[test]
-fn vector_backend_ref_external_debug_redacts_api_key_secret() {
-    let backend = VectorBackendRef::External {
-        driver: "pinecone".to_string(),
-        url: "https://example.invalid".to_string(),
-        api_key_secret: "sk-super-secret-key".into(),
-    };
-    let dbg = format!("{:?}", backend);
-    assert!(
-        !dbg.contains("sk-super-secret-key"),
-        "Debug output must not leak the cleartext api key: {dbg}"
-    );
-    assert!(
-        dbg.contains("SecretString(***)"),
-        "Debug output must show the redacted SecretString marker: {dbg}"
-    );
 }

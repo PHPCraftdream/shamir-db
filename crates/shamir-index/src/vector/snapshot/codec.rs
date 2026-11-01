@@ -2,7 +2,7 @@
 //! (write) path of the snapshot codec. The load path + delta-log live in
 //! [`super::load`].
 
-use super::manifest::{integrity_bytes, integrity_key};
+use super::manifest::{integrity_bytes, integrity_key, sweep_orphan_generations};
 use crate::kind::VectorMetric;
 use crate::meta_envelope::{MetaEnvelope, MetaError};
 use crate::vector::hnsw_adapter::HnswAdapter;
@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use shamir_storage::error::DbError;
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_types::types::record_id::RecordId;
+use std::fs::File;
+use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
@@ -304,13 +306,12 @@ impl From<bincode::Error> for SnapshotError {
 // Dump path
 // ============================================================================
 
-/// Dump the adapter's live HNSW graph + sidecar + manifest into `store` under
-/// `keyspace`. Overwrites any existing snapshot (the generation-flip protocol
-/// of #402 will make this incremental; for V2.1 a single full dump is fine).
+/// Dump a fresh initial generation (zero on a fresh keyspace; subsequent
+/// generations are selected after reading the manifest). Callers needing the
+/// actual selected value must read the manifest afterward.
 ///
-/// CPU/IO-bound work (file_dump, file reads) runs under `spawn_blocking`.
-/// The chunk + sidecar + manifest write is a single `transact` so backends
-/// that override `transact` expose the dump atomically.
+/// Dump files are streamed using small transactions so source files and all
+/// serialized chunks are never retained together.
 pub async fn dump_snapshot(
     adapter: &HnswAdapter,
     store: &Arc<dyn Store>,
@@ -319,9 +320,10 @@ pub async fn dump_snapshot(
     dump_snapshot_with_gen(adapter, store, keyspace, 0).await
 }
 
-/// Same as [`dump_snapshot`] but lets the caller pick the generation index.
-/// The generation flip in #402 will call this with the next gen; V2.1's
-/// `dump_snapshot` always uses `0`.
+/// The explicit generation is a requested value. If it is the verified active
+/// generation, the writer selects its checked successor to avoid overwriting
+/// records the published manifest still references. Readers needing the actual
+/// published generation must use `read_manifest`.
 ///
 /// V5.3 (#412): For a fitted quantized adapter (`adapter.is_quantized()`),
 /// this dumps the u8 graph into a SECOND pair of chunk sections
@@ -335,69 +337,58 @@ pub async fn dump_snapshot_with_gen(
     keyspace: &str,
     gen: u32,
 ) -> Result<(), SnapshotError> {
+    let verified_active = match super::load::read_manifest(store, keyspace).await {
+        Ok(active) => Some(active),
+        Err(
+            SnapshotError::NotFound | SnapshotError::Corrupt(_) | SnapshotError::VersionMismatch(_),
+        ) => None,
+        Err(error) => return Err(error),
+    };
+    let mut gen = gen;
+    if let Some(active) = verified_active.as_ref() {
+        if gen == active.gen {
+            gen = active
+                .gen
+                .checked_add(1)
+                .ok_or_else(|| SnapshotError::Backend("snapshot generation exhausted".into()))?;
+        }
+        sweep_orphan_generations(store, keyspace, active.gen).await?;
+    }
+
     // ---- 1. file_dump the f32 graph in a TempDir (CPU/IO) ----------------
-    //
-    // The f32 graph is dumped UNLESS the adapter is a fitted quantized one
-    // (#418): such an adapter has DROPPED its f32 graph post-fit (the u8
-    // graph + `vectors_u8` codes are the authoritative post-fit state, and
-    // retaining the f32 graph would defeat SQ8's 4× memory win). For a
-    // fitted quantized adapter we emit ZERO-length graph/data sections; the
-    // load path (`load_snapshot`) recognises a quantized sidecar +
-    // `qgraph_chunks > 0` and assembles the adapter via
-    // `from_parts_with_quantization`, which drops the throwaway f32 graph
-    // immediately.
-    //
-    // `file_dump` is a TRAIT method — only callable after `use AnnT`.
-    let (graph_bytes, data_bytes, basename): (Vec<u8>, Vec<u8>, String) =
-        if let Some(hnsw) = adapter.hnsw_load() {
-            let dump_dir = tempfile::tempdir()?;
-            let dump_dir_path: PathBuf = dump_dir.path().to_path_buf();
-            let basename_seed = DUMP_BASENAME_SEED.to_string();
-            let basename = tokio::task::spawn_blocking(move || {
-                hnsw.file_dump(&dump_dir_path, &basename_seed)
-                    .map_err(|e| SnapshotError::Io(format!("hnsw_rs file_dump failed: {e}")))
-            })
-            .await
-            .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+    // The f32 graph is dumped UNLESS this is a fitted quantized adapter
+    // (#418): post-fit it has dropped the f32 graph, and the u8 graph plus
+    // `vectors_u8` codes are authoritative. In that case preserve the
+    // established zero-length graph/data sections.
+    let mut dump_dirs = Vec::new();
+    let (basename, graph_path, data_path) = if let Some(hnsw) = adapter.hnsw_load() {
+        let dump_dir = tempfile::tempdir()?;
+        let dump_dir_path = dump_dir.path().to_path_buf();
+        let basename_seed = DUMP_BASENAME_SEED.to_string();
+        let basename = tokio::task::spawn_blocking(move || {
+            // `file_dump` is a trait method, available through `use AnnT`.
+            hnsw.file_dump(&dump_dir_path, &basename_seed)
+                .map_err(|e| SnapshotError::Io(format!("hnsw_rs file_dump failed: {e}")))
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+        let graph = dump_dir.path().join(format!("{basename}.hnsw.graph"));
+        let data = dump_dir.path().join(format!("{basename}.hnsw.data"));
+        dump_dirs.push(dump_dir);
+        (basename, Some(graph), Some(data))
+    } else {
+        (DUMP_BASENAME_SEED.to_string(), None, None)
+    };
 
-            // ---- 2. read both dump files, slice into chunks, compute crcs --
-            let graph_path = dump_dir.path().join(format!("{basename}.hnsw.graph"));
-            let data_path = dump_dir.path().join(format!("{basename}.hnsw.data"));
-            let graph_path_b = graph_path.clone();
-            let data_path_b = data_path.clone();
-            let (g, d) = tokio::task::spawn_blocking(move || {
-                let g = std::fs::read(&graph_path_b)?;
-                let d = std::fs::read(&data_path_b)?;
-                Ok::<_, SnapshotError>((g, d))
-            })
-            .await
-            .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
-            (g, d, basename)
-        } else {
-            // #418 — fitted quantized adapter: f32 graph dropped. Emit empty
-            // graph/data sections (basename is a placeholder; no files read).
-            // The load path keys off the quantized sidecar + `qgraph_chunks
-            // > 0` and skips the f32 load entirely.
-            (Vec::new(), Vec::new(), DUMP_BASENAME_SEED.to_string())
-        };
-
-    // Build the KvOp batch. We accumulate every chunk + the sidecar + the
-    // manifest and apply them under ONE `transact` so the dump is observable
-    // as a single all-or-nothing batch on backends that override `transact`.
-    let mut ops: Vec<KvOp> = Vec::new();
-
-    let (graph_chunks, data_chunks) = (
-        slice_into_chunk_ops(&graph_bytes, keyspace, gen, "graph", &mut ops),
-        slice_into_chunk_ops(&data_bytes, keyspace, gen, "data", &mut ops),
-    );
-
-    // Cross-section crc32 over the f32 sections (graph + data). For a
-    // quantized dump the u8 sections get their OWN cross-section crc carried
-    // in `QuantMeta`-adjacent fields (we extend the sidecar crc to cover all
-    // sections — see below).
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&graph_bytes);
-    hasher.update(&data_bytes);
+    let mut ops = Vec::with_capacity(4);
+    let hasher = crc32fast::Hasher::new();
+    let (graph_chunks, graph_len, hasher) =
+        stream_section(graph_path, keyspace, "graph", store, gen, &mut ops, hasher).await?;
+    let (data_chunks, data_len, hasher) =
+        stream_section(data_path, keyspace, "data", store, gen, &mut ops, hasher).await?;
+    if !ops.is_empty() {
+        store.transact(std::mem::take(&mut ops)).await?;
+    }
 
     // ---- 2b. V5.3 (#412): dump the u8 graph for a fitted adapter ---------
     //
@@ -408,16 +399,12 @@ pub async fn dump_snapshot_with_gen(
     //
     // `quant_dump` carries the manifest-side fields (chunk counts + basename)
     // out of the branch so the manifest writer below can populate them.
-    let quant_dump: Option<QuantDumpInfo> = if adapter.is_quantized() {
+    let (quant_dump, hasher) = if adapter.is_quantized() {
         let q = adapter
             .quantizer()
             .ok_or_else(|| SnapshotError::Backend("fitted adapter has no quantizer".into()))?;
         // Build a QuantMeta from the frozen quantizer.
         let meta = super::QuantMeta::from_quantizer(q);
-        // Dump the u8 graph into its OWN TempDir (#418 — the f32 dump_dir is
-        // no longer always created: a fitted quantized adapter skips the f32
-        // dump, so we cannot reuse its TempDir). The TempDir is dropped after
-        // the files are read into memory below.
         let hnsw_u8 = adapter
             .hnsw_u8_handle()
             .ok_or_else(|| SnapshotError::Backend("fitted adapter has no u8 graph".into()))?;
@@ -435,35 +422,42 @@ pub async fn dump_snapshot_with_gen(
 
         let qgraph_path = dump_dir_q.path().join(format!("{qbasename}.hnsw.graph"));
         let qdata_path = dump_dir_q.path().join(format!("{qbasename}.hnsw.data"));
-        let qgraph_path_b = qgraph_path.clone();
-        let qdata_path_b = qdata_path.clone();
-        let (qgraph_bytes, qdata_bytes) = tokio::task::spawn_blocking(move || {
-            let g = std::fs::read(&qgraph_path_b)?;
-            let d = std::fs::read(&qdata_path_b)?;
-            Ok::<_, SnapshotError>((g, d))
-        })
-        .await
-        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+        dump_dirs.push(dump_dir_q);
+        let (qgraph_chunks, _, next_hasher) = stream_section(
+            Some(qgraph_path),
+            keyspace,
+            "qgraph",
+            store,
+            gen,
+            &mut ops,
+            hasher,
+        )
+        .await?;
+        let (qdata_chunks, _, final_hasher) = stream_section(
+            Some(qdata_path),
+            keyspace,
+            "qdata",
+            store,
+            gen,
+            &mut ops,
+            next_hasher,
+        )
+        .await?;
+        if !ops.is_empty() {
+            store.transact(std::mem::take(&mut ops)).await?;
+        }
 
-        // Slice + crc the u8 sections.
-        let (qgraph_chunks, qdata_chunks) = (
-            slice_into_chunk_ops(&qgraph_bytes, keyspace, gen, "qgraph", &mut ops),
-            slice_into_chunk_ops(&qdata_bytes, keyspace, gen, "qdata", &mut ops),
-        );
-
-        // Extend the cross-section crc32 over the u8 sections too, so a
-        // section-key-swap (qgraph chunk mis-attributed to graph) is caught.
-        hasher.update(&qgraph_bytes);
-        hasher.update(&qdata_bytes);
-
-        Some(QuantDumpInfo {
-            meta,
-            qbasename,
-            qgraph_chunks,
-            qdata_chunks,
-        })
+        (
+            Some(QuantDumpInfo {
+                meta,
+                qbasename,
+                qgraph_chunks,
+                qdata_chunks,
+            }),
+            final_hasher,
+        )
     } else {
-        None
+        (None, hasher)
     };
 
     // ---- 3. build the sidecar --------------------------------------------
@@ -527,20 +521,11 @@ pub async fn dump_snapshot_with_gen(
         hnsw_rs_version: HNSW_RS_VERSION.to_string(),
         quantization: quantization_blob,
         sections_crc32,
-        graph_len: graph_bytes.len() as u64,
-        data_len: data_bytes.len() as u64,
+        graph_len,
+        data_len,
         // V5.3 (#412): carry the u8 codes for the quantized path.
         vectors_u8,
     };
-    let sidecar_env = MetaEnvelope::new(sidecar);
-    let sidecar_bytes = sidecar_env
-        .encode()
-        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
-    ops.push(KvOp::Set(
-        sidecar_key(keyspace, gen),
-        Bytes::from(sidecar_bytes.clone()),
-    ));
-
     // ---- 4. build the manifest -------------------------------------------
     //
     // V5.3 (#412): populate `qgraph_chunks`/`qdata_chunks`/`qbasename` for a
@@ -573,69 +558,137 @@ pub async fn dump_snapshot_with_gen(
         .encode()
         .map_err(|e| SnapshotError::Serde(e.to_string()))?;
 
-    // Wipe any PRIOR generation's chunks first so a load can never mix
-    // generations. For V2.1 there is only gen 0; the generation flip in
-    // #402 will keep the old gen alive until the new one is verified.
-    // We do this as a separate pass (not part of the main `transact`)
-    // because we don't know the prior gen's chunk counts here without
-    // reading its manifest; leaving stale chunks is harmless for V2.1
-    // since the manifest points unambiguously at the new gen.
+    let sidecar_env = MetaEnvelope::new(sidecar);
+    let sidecar_bytes = tokio::task::spawn_blocking(move || sidecar_env.encode())
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))?
+        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
+    let integrity = integrity_bytes(&manifest_bytes, &sidecar_bytes);
     ops.push(KvOp::Set(
-        integrity_key(keyspace),
-        integrity_bytes(&manifest_bytes, &sidecar_bytes),
+        sidecar_key(keyspace, gen),
+        Bytes::from(sidecar_bytes),
     ));
+    ops.push(KvOp::Set(integrity_key(keyspace), integrity));
     ops.push(KvOp::Set(
         manifest_key(keyspace),
         Bytes::from(manifest_bytes),
     ));
-
-    // ---- 5. atomic write -------------------------------------------------
     store.transact(ops).await?;
     Ok(())
 }
 
-/// Slice `bytes` into ~`CHUNK_SIZE` chunks; push a `Set` op per chunk into
-/// `ops` and return the chunk count. Each chunk carries its own crc32 in a
-/// [`ChunkHeader`].
-fn slice_into_chunk_ops(
-    bytes: &[u8],
+async fn stream_section(
+    path: Option<PathBuf>,
     keyspace: &str,
-    gen: u32,
     section: &str,
+    store: &Arc<dyn Store>,
+    gen: u32,
     ops: &mut Vec<KvOp>,
-) -> u32 {
-    if bytes.is_empty() {
-        // An empty file still gets a single zero-length chunk so the load
-        // path's "read N chunks" loop has exactly N=N_manifest entries to
-        // fetch (no off-by-one for the empty case).
-        let header = ChunkHeader {
-            idx: 0,
-            crc32: crc32fast::hash(&[]),
-            bytes: Vec::new(),
-        };
-        let encoded = bincode::serialize(&header).expect("chunk header serializable");
+    mut hasher: crc32fast::Hasher,
+) -> Result<(u32, u64, crc32fast::Hasher), SnapshotError> {
+    let Some(path) = path else {
+        let encoded = tokio::task::spawn_blocking(|| {
+            let header = ChunkHeader {
+                idx: 0,
+                crc32: crc32fast::hash(&[]),
+                bytes: Vec::new(),
+            };
+            bincode::serialize(&header).expect("chunk header serializable")
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))?;
         ops.push(KvOp::Set(
             chunk_key(keyspace, gen, section, 0),
             Bytes::from(encoded),
         ));
-        return 1;
-    }
+        return Ok((1, 0, hasher));
+    };
+
     let mut idx = 0u32;
-    for chunk in bytes.chunks(CHUNK_SIZE) {
-        let crc = crc32fast::hash(chunk);
-        let header = ChunkHeader {
-            idx,
-            crc32: crc,
-            bytes: chunk.to_vec(),
-        };
-        let encoded = bincode::serialize(&header).expect("chunk header serializable");
-        ops.push(KvOp::Set(
-            chunk_key(keyspace, gen, section, idx as usize),
-            Bytes::from(encoded),
-        ));
-        idx += 1;
+    let mut total = 0u64;
+    loop {
+        let path_for_read = path.clone();
+        let start = idx;
+        let hasher_for_batch = hasher.clone();
+        let (batch, next_hasher, batch_bytes) = tokio::task::spawn_blocking(move || {
+            let mut file = File::open(path_for_read)?;
+            file.seek(std::io::SeekFrom::Start(
+                u64::from(start) * CHUNK_SIZE as u64,
+            ))?;
+            let mut records: Vec<(u32, Bytes)> = Vec::with_capacity(4);
+            let mut batch_hasher = hasher_for_batch;
+            let mut batch_bytes = 0u64;
+            for offset in 0..4u32 {
+                let mut bytes = vec![0; CHUNK_SIZE];
+                let mut used = 0;
+                loop {
+                    match file.read(&mut bytes[used..]) {
+                        Ok(0) => break,
+                        Ok(count) => used += count,
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(error) => return Err(error),
+                    }
+                }
+                if used == 0 {
+                    break;
+                }
+                batch_bytes += used as u64;
+                batch_hasher.update(&bytes[..used]);
+                bytes.truncate(used);
+                let header = ChunkHeader {
+                    idx: start + offset,
+                    crc32: crc32fast::hash(&bytes),
+                    bytes,
+                };
+                let encoded = bincode::serialize(&header).expect("chunk header serializable");
+                records.push((start + offset, Bytes::from(encoded)));
+                if used < CHUNK_SIZE {
+                    break;
+                }
+            }
+            Ok::<_, std::io::Error>((records, batch_hasher, batch_bytes))
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+
+        if batch.is_empty() {
+            if idx == 0 {
+                let encoded = tokio::task::spawn_blocking(|| {
+                    let header = ChunkHeader {
+                        idx: 0,
+                        crc32: crc32fast::hash(&[]),
+                        bytes: Vec::new(),
+                    };
+                    bincode::serialize(&header).expect("chunk header serializable")
+                })
+                .await
+                .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))?;
+                ops.push(KvOp::Set(
+                    chunk_key(keyspace, gen, section, 0),
+                    Bytes::from(encoded),
+                ));
+                return Ok((1, 0, hasher));
+            }
+            break;
+        }
+        let batch_len = batch.len();
+        for (chunk_idx, encoded) in batch {
+            ops.push(KvOp::Set(
+                chunk_key(keyspace, gen, section, chunk_idx as usize),
+                encoded,
+            ));
+        }
+        hasher = next_hasher;
+        total += batch_bytes;
+        if ops.len() >= 4 {
+            store.transact(std::mem::take(ops)).await?;
+        }
+        idx += batch_len as u32;
+        if batch_len < 4 {
+            break;
+        }
     }
-    idx
+    Ok((idx, total, hasher))
 }
 
 /// Map a `MetaEnvelope::open` failure to the right snapshot error. An

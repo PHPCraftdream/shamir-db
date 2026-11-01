@@ -161,6 +161,7 @@ impl SystemStore {
 
     /// Load a single repository's catalogue record by `(db_name, repo_name)`.
     /// Returns `Ok(None)` when no matching row exists.
+    // Filtered read over an index-less catalogue table; this preserves corrupt-record errors.
     pub async fn load_repository_record(
         &self,
         db_name: &str,

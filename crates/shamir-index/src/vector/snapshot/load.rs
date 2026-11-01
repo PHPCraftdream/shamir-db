@@ -15,6 +15,7 @@ use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
+use std::fs::File;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
@@ -55,11 +56,12 @@ pub async fn read_manifest(
     Ok(manifest)
 }
 
-// Keep the verified bytes together: never re-fetch a sidecar after its CRC.
+// Keep the verified metadata bytes together; never re-fetch a sidecar after its CRC.
+// Legacy snapshots may lack an integrity companion; still reject malformed sidecars.
 async fn read_metadata(
     store: &Arc<dyn Store>,
     keyspace: &str,
-) -> Result<(SnapshotManifest, Bytes), SnapshotError> {
+) -> Result<(SnapshotManifest, super::SnapshotSidecar), SnapshotError> {
     let manifest_bytes = store.get(manifest_key(keyspace)).await?;
     let manifest = decode_manifest(&manifest_bytes)?;
     let sidecar = store
@@ -76,9 +78,8 @@ async fn read_metadata(
         Err(shamir_storage::error::DbError::NotFound(_)) => {}
         Err(error) => return Err(error.into()),
     }
-    // Legacy snapshots may lack a companion; still reject malformed sidecars.
-    decode_sidecar(&sidecar)?;
-    Ok((manifest, sidecar))
+    let sidecar_value = decode_sidecar(&sidecar)?;
+    Ok((manifest, sidecar_value))
 }
 
 /// Load the snapshot stored under `keyspace` and rebuild a working
@@ -114,11 +115,10 @@ pub(crate) async fn load_snapshot_with_intent(
     quantization: Option<crate::kind::VectorQuantization>,
 ) -> Result<HnswAdapter, SnapshotError> {
     // ---- 1. manifest -----------------------------------------------------
-    let (manifest, sidecar_bytes) = read_metadata(store, keyspace).await?;
+    let (manifest, sidecar) = read_metadata(store, keyspace).await?;
     let gen = manifest.gen;
 
     // ---- 2. sidecar ------------------------------------------------------
-    let sidecar = decode_sidecar(&sidecar_bytes)?;
     let dim = sidecar.dim as usize;
     if dim == 0
         || sidecar.m == 0
@@ -147,54 +147,34 @@ pub(crate) async fn load_snapshot_with_intent(
     };
     validate_basename(used_basename)?;
 
-    // ---- 3. fetch + verify + reassemble both f32 files -------------------
-    //
-    // The chunk keys for a given (gen, section) are sequential 0..N — we
-    // build them from the manifest's chunk count, fetch them via `get_many`
-    // (a single vectored read on backends that override it), and verify each
-    // crc before stitching. We do NOT use `scan_prefix_stream` here because
-    // that would also pick up chunks of OTHER generations sharing the
-    // keyspace (gen-flip #402); the manifest is the single source of truth
-    // for which chunks belong to the active gen.
-    let mut graph_chunk_keys: Vec<RecordKey> = Vec::with_capacity(manifest.graph_chunks as usize);
-    for i in 0..manifest.graph_chunks as usize {
-        graph_chunk_keys.push(chunk_key(keyspace, gen, "graph", i));
-    }
-    let mut data_chunk_keys: Vec<RecordKey> = Vec::with_capacity(manifest.data_chunks as usize);
-    for i in 0..manifest.data_chunks as usize {
-        data_chunk_keys.push(chunk_key(keyspace, gen, "data", i));
-    }
+    // ---- 3. stream + verify section files -------------------------------
+    let load_dir = tempfile::tempdir()?;
+    let f32_basename = if quantized {
+        "shamir"
+    } else {
+        &manifest.basename
+    };
+    validate_basename(f32_basename)?;
+    let graph_path = load_dir.path().join(format!("{f32_basename}.hnsw.graph"));
+    let data_path = load_dir.path().join(format!("{f32_basename}.hnsw.data"));
+    let hasher = crc32fast::Hasher::new();
+    let (graph_len, hasher) = stream_section_to_file(
+        store,
+        (keyspace, gen, "graph", manifest.graph_chunks),
+        &graph_path,
+        hasher,
+    )
+    .await?;
+    let (data_len, hasher) = stream_section_to_file(
+        store,
+        (keyspace, gen, "data", manifest.data_chunks),
+        &data_path,
+        hasher,
+    )
+    .await?;
+    verify_section_len("graph", graph_len, sidecar.graph_len)?;
+    verify_section_len("data", data_len, sidecar.data_len)?;
 
-    let graph_vals = store.get_many(graph_chunk_keys).await?;
-    let data_vals = store.get_many(data_chunk_keys).await?;
-
-    let graph_bytes = reassemble_and_verify(&graph_vals, "graph")?;
-    let data_bytes = reassemble_and_verify(&data_vals, "data")?;
-
-    // Cross-section crc32 verify (independent of the per-chunk checks).
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&graph_bytes);
-    hasher.update(&data_bytes);
-    if graph_bytes.len() as u64 != sidecar.graph_len {
-        return Err(SnapshotError::Corrupt(format!(
-            "graph length mismatch: expected {}, got {}",
-            sidecar.graph_len,
-            graph_bytes.len()
-        )));
-    }
-    if data_bytes.len() as u64 != sidecar.data_len {
-        return Err(SnapshotError::Corrupt(format!(
-            "data length mismatch: expected {}, got {}",
-            sidecar.data_len,
-            data_bytes.len()
-        )));
-    }
-
-    // ---- 3b. V5.3 (#412): fetch + verify the u8 graph sections -----------
-    //
-    // For a quantized snapshot the qgraph/qdata chunks are present. We
-    // reassemble + crc them here, then extend the cross-section crc32 to
-    // cover them (the dump path hashed all four sections together).
     let quantizer: Option<Arc<Sq8Quantizer>> = match &sidecar.quantization {
         Some(blob) => {
             let meta: QuantMeta = bincode::deserialize(blob).map_err(|error| {
@@ -208,29 +188,37 @@ pub(crate) async fn load_snapshot_with_intent(
         None => None,
     };
 
-    let (qgraph_bytes, qdata_bytes) = if manifest.qgraph_chunks > 0 {
-        let mut qgraph_keys: Vec<RecordKey> = Vec::with_capacity(manifest.qgraph_chunks as usize);
-        for i in 0..manifest.qgraph_chunks as usize {
-            qgraph_keys.push(chunk_key(keyspace, gen, "qgraph", i));
-        }
-        let mut qdata_keys: Vec<RecordKey> = Vec::with_capacity(manifest.qdata_chunks as usize);
-        for i in 0..manifest.qdata_chunks as usize {
-            qdata_keys.push(chunk_key(keyspace, gen, "qdata", i));
-        }
-        let qg_vals = store.get_many(qgraph_keys).await?;
-        let qd_vals = store.get_many(qdata_keys).await?;
-        let qg = reassemble_and_verify(&qg_vals, "qgraph")?;
-        let qd = reassemble_and_verify(&qd_vals, "qdata")?;
-        (qg, qd)
+    // The qgraph directory remains owned through HnswIo loading below.
+    let (qgraph_dir, qbasename, hasher) = if manifest.qgraph_chunks > 0 {
+        let qbasename = &manifest.qbasename;
+        validate_basename(qbasename)?;
+        let qload_dir = tempfile::tempdir()?;
+        let qgraph_path = qload_dir.path().join(format!("{qbasename}.hnsw.graph"));
+        let qdata_path = qload_dir.path().join(format!("{qbasename}.hnsw.data"));
+        let (qgraph_len, next_hasher) = stream_section_to_file(
+            store,
+            (keyspace, gen, "qgraph", manifest.qgraph_chunks),
+            &qgraph_path,
+            hasher,
+        )
+        .await?;
+        let (qdata_len, final_hasher) = stream_section_to_file(
+            store,
+            (keyspace, gen, "qdata", manifest.qdata_chunks),
+            &qdata_path,
+            next_hasher,
+        )
+        .await?;
+        let _ = (qgraph_len, qdata_len);
+        (Some(qload_dir), Some(qbasename.clone()), final_hasher)
     } else {
-        (Vec::new(), Vec::new())
+        if manifest.qgraph_chunks != 0 || manifest.qdata_chunks != 0 {
+            return Err(SnapshotError::Corrupt(
+                "inconsistent quantized graph sections".into(),
+            ));
+        }
+        (None, None, hasher)
     };
-
-    // Extend the cross-section crc32 over the u8 sections (the dump path
-    // hashed all four sections together; a non-quant snapshot hashes only
-    // the f32 pair, matching the pre-#412 behaviour).
-    hasher.update(&qgraph_bytes);
-    hasher.update(&qdata_bytes);
     if hasher.finalize() != sidecar.sections_crc32 {
         return Err(SnapshotError::Corrupt(
             "cross-section crc32 mismatch".to_string(),
@@ -246,8 +234,7 @@ pub(crate) async fn load_snapshot_with_intent(
     // drops it immediately on assembly, so its contents are irrelevant — it
     // exists only to satisfy the function's `Arc<Hnsw<f32>>` parameter shape.
     // A non-quant snapshot always has real f32 bytes and loads as before.
-    let load_dir = tempfile::tempdir()?;
-    let basename = manifest.basename.clone();
+    let basename = f32_basename.to_string();
     let dist = ShamirDist {
         metric: sidecar.metric,
     };
@@ -259,11 +246,11 @@ pub(crate) async fn load_snapshot_with_intent(
     let ef_construction = sidecar.ef_construction;
     let hnsw_rs_version = sidecar.hnsw_rs_version.clone();
     let next_id = sidecar.next_id;
-    let rid_map_pairs = sidecar.rid_map.clone();
-    let rid_to_internal_pairs = sidecar.rid_to_internal.clone();
-    let tombstones = sidecar.tombstones.clone();
-    let vectors_pairs = sidecar.vectors.clone();
-    let vectors_u8_pairs = sidecar.vectors_u8.clone();
+    let rid_map_pairs = sidecar.rid_map;
+    let rid_to_internal_pairs = sidecar.rid_to_internal;
+    let tombstones = sidecar.tombstones;
+    let vectors_pairs = sidecar.vectors;
+    let vectors_u8_pairs = sidecar.vectors_u8;
 
     // Verify the dump came from a compatible `hnsw_rs` BEFORE we hand it to
     // the loader — `load_hnsw_with_dist` will panic on an unknown format.
@@ -282,20 +269,7 @@ pub(crate) async fn load_snapshot_with_intent(
         // assembly, so the size is irrelevant; we just need the right shape.
         Arc::new(Hnsw::new(m as usize, 1, max_layer, ef_construction, dist))
     } else {
-        let graph_path = load_dir.path().join(format!("{basename}.hnsw.graph"));
-        let data_path = load_dir.path().join(format!("{basename}.hnsw.data"));
         tokio::task::spawn_blocking(move || {
-            // Write the reassembled bytes to the temp files. `file_dump` writes
-            // both files with `create+truncate+write`, so we mirror that.
-            let mut gf = std::fs::File::create(&graph_path)?;
-            gf.write_all(&graph_bytes)?;
-            gf.flush()?;
-            let mut df = std::fs::File::create(&data_path)?;
-            df.write_all(&data_bytes)?;
-            df.flush()?;
-            drop(gf);
-            drop(df);
-
             // Boot-only, intentional leak: `load_hnsw_with_dist<'b,'a>` ties
             // `'a: 'b` where `'a` is the borrow of the `HnswIo` loader. To hand
             // the reloaded graph to long-lived storage as `Arc<Hnsw<'static,...>>`
@@ -351,17 +325,19 @@ pub(crate) async fn load_snapshot_with_intent(
     #[allow(clippy::type_complexity)] // local carrier tuple — see comment above
     let hnsw_u8_opt: Option<(Arc<Hnsw<'static, u8, ShamirDistU8>>, Arc<Sq8Quantizer>)> =
         if let Some(quantizer) = quantizer {
-            let qbasename = manifest.qbasename.clone();
-            let qload_dir = tempfile::tempdir()?;
-            let qgraph_bytes_move = qgraph_bytes.clone();
-            let qdata_bytes_move = qdata_bytes.clone();
+            let (qload_dir, qbasename) = (
+                qgraph_dir.expect("quantized directory already created"),
+                qbasename.expect("quantized basename already validated"),
+            );
+            let qgraph_path = qload_dir.path().join(format!("{qbasename}.hnsw.graph"));
+            let qdata_path = qload_dir.path().join(format!("{qbasename}.hnsw.data"));
             let quantizer_for_load = Arc::clone(&quantizer);
             let hnsw_u8 = tokio::task::spawn_blocking(move || {
                 load_quantized_graph(
                     qload_dir,
                     &qbasename,
-                    &qgraph_bytes_move,
-                    &qdata_bytes_move,
+                    qgraph_path,
+                    qdata_path,
                     quantizer_for_load,
                     metric,
                 )
@@ -380,7 +356,6 @@ pub(crate) async fn load_snapshot_with_intent(
         } else {
             None
         };
-
     // ---- 5. rebuild the adapter maps -------------------------------------
     let cap = rid_map_pairs.len().max(64);
     let rid_map = scc::HashMap::with_capacity_and_hasher(cap, THasher::default());
@@ -439,36 +414,75 @@ pub(crate) async fn load_snapshot_with_intent(
     Ok(adapter)
 }
 
-/// Decode each chunk header, verify its crc32, and concatenate the raw bytes
-/// back into the original file. Returns `Corrupt` on the first mismatch with
-/// the chunk index in the message.
-fn reassemble_and_verify(
-    vals: &[Option<Bytes>],
-    section: &'static str,
-) -> Result<Vec<u8>, SnapshotError> {
-    let mut out = Vec::new();
-    for (i, opt) in vals.iter().enumerate() {
-        let bytes = opt
-            .clone()
-            .ok_or_else(|| SnapshotError::Corrupt(format!("missing {section} chunk {i}")))?;
-        let header: ChunkHeader = bincode::deserialize(&bytes)
-            .map_err(|e| SnapshotError::Corrupt(format!("{section} chunk {i} decode: {e}")))?;
-        if header.idx as usize != i {
-            return Err(SnapshotError::Corrupt(format!(
-                "{section} chunk idx mismatch: expected {i}, got {}",
-                header.idx
-            )));
-        }
-        let actual = crc32fast::hash(&header.bytes);
-        if actual != header.crc32 {
-            return Err(SnapshotError::Corrupt(format!(
-                "{section} chunk {i} crc32 mismatch: expected {}, got {}",
-                header.crc32, actual
-            )));
-        }
-        out.extend_from_slice(&header.bytes);
+fn verify_section_len(section: &str, actual: u64, expected: u64) -> Result<(), SnapshotError> {
+    if actual != expected {
+        return Err(SnapshotError::Corrupt(format!(
+            "{section} length mismatch: expected {expected}, got {actual}"
+        )));
     }
-    Ok(out)
+    Ok(())
+}
+
+async fn stream_section_to_file(
+    store: &Arc<dyn Store>,
+    location: (&str, u32, &'static str, u32),
+    path: &std::path::Path,
+    hasher: crc32fast::Hasher,
+) -> Result<(u64, crc32fast::Hasher), SnapshotError> {
+    let (keyspace, gen, section, count) = location;
+    let mut file = tokio::task::spawn_blocking({
+        let path = path.to_path_buf();
+        move || File::create(path)
+    })
+    .await
+    .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+    let mut total = 0u64;
+    let mut section_hasher = hasher;
+    for idx in 0..count {
+        let key = chunk_key(keyspace, gen, section, idx as usize);
+        let record = store
+            .get_many(vec![key])
+            .await?
+            .into_iter()
+            .next()
+            .flatten()
+            .ok_or_else(|| SnapshotError::Corrupt(format!("missing {section} chunk {idx}")))?;
+        let file_for_chunk = file;
+        let hasher_for_chunk = section_hasher.clone();
+        let (next_file, next_hasher, bytes_read) = tokio::task::spawn_blocking(move || {
+            let header: ChunkHeader = bincode::deserialize(&record).map_err(|error| {
+                SnapshotError::Corrupt(format!("{section} chunk {idx} decode: {error}"))
+            })?;
+            if header.idx != idx {
+                return Err(SnapshotError::Corrupt(format!(
+                    "{section} chunk idx mismatch: expected {idx}, got {}",
+                    header.idx
+                )));
+            }
+            let actual = crc32fast::hash(&header.bytes);
+            if actual != header.crc32 {
+                return Err(SnapshotError::Corrupt(format!(
+                    "{section} chunk {idx} crc32 mismatch: expected {}, got {actual}",
+                    header.crc32
+                )));
+            }
+            let mut section_hasher = hasher_for_chunk;
+            section_hasher.update(&header.bytes);
+            let length = header.bytes.len() as u64;
+            let mut file = file_for_chunk;
+            file.write_all(&header.bytes)?;
+            Ok::<_, SnapshotError>((file, section_hasher, length))
+        })
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+        file = next_file;
+        section_hasher = next_hasher;
+        total += bytes_read;
+    }
+    tokio::task::spawn_blocking(move || file.flush())
+        .await
+        .map_err(|e| SnapshotError::Io(format!("spawn_blocking join error: {e}")))??;
+    Ok((total, section_hasher))
 }
 
 // ============================================================================
@@ -664,18 +678,9 @@ async fn flush_replay_upserts(
     Ok(())
 }
 
-/// Atomically flip the manifest to a new generation, prune the superseded
-/// generation's chunks, and prune every delta chunk with index ≤
-/// `new_delta_applied_upto`. The whole flip is ONE `Store::transact` so a
-/// backend that overrides `transact` exposes the new generation + the prune
-/// as a single all-or-nothing batch.
+/// Publish the new metadata first, then prune old chunks and absorbed deltas in bounded batches.
 ///
-/// Crash-safety: a crash between this call and a later one is benign. If the
-/// flip landed but the prune of orphan chunks from a PREVIOUS flip did not
-/// (the `transact` covers THIS flip's prune; an earlier flip's prune may
-/// have been interrupted), the orphans sit harmlessly in the store — the
-/// manifest points unambiguously at the new gen, and the next
-/// `dump_snapshot_with_gen` run prunes them idempotently.
+/// A failure while pruning leaves the newly published snapshot valid; stale keys are harmless.
 pub async fn flip_generation(
     store: &Arc<dyn Store>,
     keyspace: &str,
@@ -684,50 +689,33 @@ pub async fn flip_generation(
     new_manifest: SnapshotManifest,
     new_delta_applied_upto: u64,
 ) -> Result<(), SnapshotError> {
-    let mut ops: Vec<KvOp> = Vec::new();
+    // Publish the new metadata before pruning so a prune failure cannot undo the flip.
+    publish_manifest_without_prune(store, keyspace, new_manifest).await?;
 
-    // Prune the OLD generation's chunks + sidecar. The manifest's chunk
-    // counts tell us exactly how many keys to remove — no scan needed.
-    for i in 0..old_chunks.graph as usize {
-        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "graph", i)));
-    }
-    for i in 0..old_chunks.data as usize {
-        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "data", i)));
-    }
-    for i in 0..old_chunks.qgraph as usize {
-        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "qgraph", i)));
-    }
-    for i in 0..old_chunks.qdata as usize {
-        ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, "qdata", i)));
+    let mut ops = Vec::with_capacity(MAINT_SCAN_BATCH);
+    for (section, count) in [
+        ("graph", old_chunks.graph),
+        ("data", old_chunks.data),
+        ("qgraph", old_chunks.qgraph),
+        ("qdata", old_chunks.qdata),
+    ] {
+        for idx in 0..count as usize {
+            ops.push(KvOp::Remove(chunk_key(keyspace, old_gen, section, idx)));
+            if ops.len() == MAINT_SCAN_BATCH {
+                store.transact(std::mem::take(&mut ops)).await?;
+            }
+        }
     }
     ops.push(KvOp::Remove(sidecar_key(keyspace, old_gen)));
-
-    // Prune every delta chunk absorbed by the new snapshot (indices
-    // `0..new_delta_applied_upto`, exclusive). `delta_applied_upto` counts
-    // the absorbed chunks, so chunk `delta_applied_upto - 1` is the last one
-    // absorbed; chunk `delta_applied_upto` survives (it was written AFTER
-    // the snapshot captured its HWM). Chunks in this range that were never
-    // written (an empty promote) are a no-op `KvOp::Remove` on every backend.
     for idx in 0..new_delta_applied_upto {
         ops.push(KvOp::Remove(delta_chunk_key(keyspace, idx)));
+        if ops.len() == MAINT_SCAN_BATCH {
+            store.transact(std::mem::take(&mut ops)).await?;
+        }
     }
-
-    // Publish the new manifest — the generation flip itself.
-    let sidecar_bytes = store.get(sidecar_key(keyspace, new_manifest.gen)).await?;
-    let manifest_env = MetaEnvelope::new(new_manifest);
-    let manifest_bytes = manifest_env
-        .encode()
-        .map_err(|e| SnapshotError::Serde(e.to_string()))?;
-    ops.push(KvOp::Set(
-        integrity_key(keyspace),
-        integrity_bytes(&manifest_bytes, &sidecar_bytes),
-    ));
-    ops.push(KvOp::Set(
-        manifest_key(keyspace),
-        Bytes::from(manifest_bytes),
-    ));
-
-    store.transact(ops).await?;
+    if !ops.is_empty() {
+        store.transact(ops).await?;
+    }
     Ok(())
 }
 
