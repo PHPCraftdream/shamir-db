@@ -36,7 +36,7 @@ use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbResult;
 
-struct TestResolver {
+pub(crate) struct TestResolver {
     db: DbInstance,
 }
 
@@ -53,7 +53,7 @@ impl TableResolver for TestResolver {
     }
 }
 
-async fn setup() -> TestResolver {
+pub(crate) async fn setup() -> TestResolver {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),

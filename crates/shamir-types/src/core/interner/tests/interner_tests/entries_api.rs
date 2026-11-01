@@ -15,6 +15,7 @@ fn max_published_id_does_not_materialize_entries() {
     interner.touch_with_id("sparse", 100).unwrap();
     assert_eq!(interner.all_entries_call_count(), 0);
     assert_eq!(interner.max_published_id(), 100);
+    assert_eq!(interner.max_published_id_reverse_slots_inspected(), 101);
     assert_eq!(interner.all_entries_call_count(), 0);
     assert_eq!(interner.all_entries().len(), 1);
     assert_eq!(interner.all_entries_call_count(), 1);
@@ -29,6 +30,10 @@ fn max_published_id_handles_empty_gaps_explicit_ids_and_retouch() {
     interner.touch_with_id("low", 3).unwrap();
     interner.touch_with_id("high", 100).unwrap();
     assert_eq!(interner.max_published_id(), 100);
+    // Three max_published_id() calls: on the fresh interner (reverse len 1),
+    // after touching id 100 (len 101), and after the retouch (len still 101):
+    // 1 + 101 + 101 = 203.
+    assert_eq!(interner.max_published_id_reverse_slots_inspected(), 203);
 }
 
 #[test]
@@ -131,3 +136,15 @@ fn test_make_key() {
 // ---------------------------------------------------------------------------
 // UserKey: construction, Display, Borrow<str>, FromStr, serde
 // ---------------------------------------------------------------------------
+
+#[test]
+fn interner_touch_max_epoch_does_not_materialize_all_entries() {
+    let interner = Interner::new();
+    interner.touch_with_id("published", 12_345).unwrap();
+    assert_eq!(interner.all_entries_call_count(), 0);
+    assert_eq!(interner.max_published_id(), 12_345);
+    assert_eq!(interner.max_published_id_reverse_slots_inspected(), 12_346);
+    assert_eq!(interner.all_entries_call_count(), 0);
+    interner.all_entries();
+    assert_eq!(interner.all_entries_call_count(), 1);
+}

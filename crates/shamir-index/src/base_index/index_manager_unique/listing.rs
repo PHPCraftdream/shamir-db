@@ -24,7 +24,7 @@ impl IndexManager {
         }
         let mut keys = Vec::with_capacity(4);
         for def in self.indexes_unique.iter() {
-            if let Some(irk) =
+            if let Some((irk, _canonical)) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
                 keys.push(irk.to_bytes());
@@ -45,8 +45,22 @@ impl IndexManager {
         name_interned: u64,
         values: &[InnerValue],
     ) -> DbResult<Option<RecordId>> {
-        let index_key = build_index_key(true, name_interned, values).to_bytes();
-        self.check_unique_key(&index_key).await
+        let Some(index_key) = build_index_key(true, name_interned, values) else {
+            // No identity (NaN probe): matches nothing.
+            return Ok(None);
+        };
+        let index_key = index_key.to_bytes();
+        // Digest-form probe: the posting's canonical tail must equal the
+        // probe's `C` (design (a)); a foreign tail is a digest collision
+        // and fails closed inside `check_unique_key`.
+        let probe_canonical = crate::base_index::index_keys::canonical_from_values(values);
+        self.check_unique_key(
+            &index_key,
+            probe_canonical
+                .as_deref()
+                .filter(|c| c.len() > crate::model::identity::identity_bytes::INLINE_MAX),
+        )
+        .await
     }
 
     /// Check a unique constraint by its pre-computed index key bytes.

@@ -32,14 +32,7 @@ fn assert_same_wire(a: &ReadQuery, b: &ReadQuery) {
 fn assert_same_wire_value<T: serde::Serialize + PartialEq + std::fmt::Debug>(a: &T, b: &T) {
     let bytes_a = rmp_serde::to_vec_named(a).expect("serialize a");
     let bytes_b = rmp_serde::to_vec_named(b).expect("serialize b");
-    let ja: shamir_types::types::value::QueryValue =
-        rmp_serde::from_slice(&bytes_a).expect("decode a");
-    let jb: shamir_types::types::value::QueryValue =
-        rmp_serde::from_slice(&bytes_b).expect("decode b");
-    assert_eq!(
-        ja, jb,
-        "wire shape mismatch:\n  left:  {ja:?}\n  right: {jb:?}"
-    );
+    assert_eq!(bytes_a, bytes_b, "wire bytes differ");
 }
 
 #[test]
@@ -659,6 +652,64 @@ fn q_write_composes_into_batch() {
 // ══════════════════════════════════════════════════════════════════
 // Call statement tests
 // ══════════════════════════════════════════════════════════════════
+
+#[test]
+fn q_call_builder_and_batch_constructor_wire_parity() {
+    let macro_zero: CallOp = q!(call ping());
+    let constructor_zero = CallOp::new("ping", std::iter::empty::<FilterValue>());
+    assert_same_wire_value(&macro_zero, &constructor_zero);
+
+    let macro_many: CallOp = q!(call my_fn(7, "x"));
+    let constructor_many = CallOp::new(
+        "my_fn",
+        [FilterValue::Int(7), FilterValue::String("x".into())],
+    );
+    assert_same_wire_value(&macro_many, &constructor_many);
+
+    let macro_repo: CallOp = q!(call archive.my_fn(7, "x"));
+    let constructor_repo = CallOp::in_repo(
+        "my_fn",
+        "archive",
+        [FilterValue::Int(7), FilterValue::String("x".into())],
+    );
+    assert_same_wire_value(&macro_repo, &constructor_repo);
+
+    let mut batch = Batch::new();
+    batch.call(
+        "many",
+        "my_fn",
+        [FilterValue::Int(7), FilterValue::String("x".into())],
+    );
+    let request = batch.build();
+    let entry_call = &request.queries["many"].op;
+    let expected_op = shamir_query_types::batch::BatchOp::Call(constructor_many.clone());
+    let bytes_batch = rmp_serde::to_vec_named(entry_call).expect("serialize Batch call");
+    let bytes_ctor = rmp_serde::to_vec_named(&expected_op).expect("serialize constructor BatchOp");
+    assert_eq!(bytes_batch, bytes_ctor);
+
+    let mut empty_batch = Batch::new();
+    empty_batch.call("zero", "ping", std::iter::empty::<FilterValue>());
+    let empty_request = empty_batch.build();
+    let expected_empty = shamir_query_types::batch::BatchOp::Call(constructor_zero.clone());
+    assert_eq!(
+        rmp_serde::to_vec_named(&empty_request.queries["zero"].op).unwrap(),
+        rmp_serde::to_vec_named(&expected_empty).unwrap()
+    );
+
+    let mut repo_batch = Batch::new();
+    repo_batch.call_in_repo(
+        "repo",
+        "my_fn",
+        "archive",
+        [FilterValue::Int(7), FilterValue::String("x".into())],
+    );
+    let repo_request = repo_batch.build();
+    let expected_repo = shamir_query_types::batch::BatchOp::Call(constructor_repo.clone());
+    assert_eq!(
+        rmp_serde::to_vec_named(&repo_request.queries["repo"].op).unwrap(),
+        rmp_serde::to_vec_named(&expected_repo).unwrap()
+    );
+}
 
 #[test]
 fn q_call_ident_name_with_literals() {

@@ -11,6 +11,22 @@ use core::task::{Context, Poll};
 use std::rc::Rc;
 
 #[test]
+fn rv_sdk_6d2497ca_codec_errors_preserve_source_chain() {
+    let error = __rt::decode_params(&[0xc1]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Codec);
+    assert_codec_source(&error);
+
+    let error = __rt::decode_value_bytes(&[0xc1]).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Codec);
+    assert_codec_source(&error);
+}
+
+fn assert_codec_source(error: &crate::Error) {
+    assert!(std::error::Error::source(error)
+        .and_then(|source| source.downcast_ref::<rmp_serde::decode::Error>())
+        .is_some());
+}
+#[test]
 fn rv_sdk_6d2497ca_abi_codes_pinned() {
     assert_eq!(ErrorKind::User.abi_code(), 1);
     assert_eq!(ErrorKind::InvalidArgument.abi_code(), 2);

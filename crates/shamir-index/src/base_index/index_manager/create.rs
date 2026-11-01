@@ -8,7 +8,9 @@ use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
 use shamir_types::types::record_id::RecordId;
 
 use crate::base_index::index_definition::IndexDefinition;
-use crate::base_index::index_keys::{build_index_key_from_record, build_posting_key};
+use crate::base_index::index_keys::{
+    build_index_key_from_record, build_posting_key, is_digest_form,
+};
 use crate::base_index::write_barrier_flags::REGULAR_INDEX_EXISTS;
 use shamir_types::types::value::InnerValue;
 
@@ -121,11 +123,19 @@ impl IndexManager {
                          the row)"
                     ))
                 })?;
-                if let Some(irk) = build_index_key_from_record(false, name_interned, &value, &paths)
+                if let Some((irk, canonical)) =
+                    build_index_key_from_record(false, name_interned, &value, &paths)
                 {
                     let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, &record_id);
-                    posting_writes.push((posting_key, Bytes::new()));
+                    // Value: empty for the inline form, canonical `C` for the
+                    // digest form (design (a)).
+                    let value = if is_digest_form(&canonical) {
+                        Bytes::from(canonical)
+                    } else {
+                        Bytes::new()
+                    };
+                    posting_writes.push((posting_key, value));
                     cache_index_keys.push(index_key);
                     count += 1;
                 }
@@ -273,10 +283,19 @@ impl IndexManager {
         let mut posting_writes: Vec<(Bytes, Bytes)> = Vec::with_capacity(131072);
         let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(131072);
         for (record_id, value) in &records {
-            if let Some(irk) = build_index_key_from_record(false, name_interned, value, &paths) {
+            if let Some((irk, canonical)) =
+                build_index_key_from_record(false, name_interned, value, &paths)
+            {
                 let index_key = irk.to_bytes();
                 let posting_key = build_posting_key(&index_key, record_id);
-                posting_writes.push((posting_key, Bytes::new()));
+                // Value: empty for the inline form, canonical `C` for the
+                // digest form (design (a)).
+                let value = if is_digest_form(&canonical) {
+                    Bytes::from(canonical)
+                } else {
+                    Bytes::new()
+                };
+                posting_writes.push((posting_key, value));
                 cache_index_keys.push(index_key);
                 count += 1;
             }
@@ -503,11 +522,19 @@ impl IndexManager {
                 Vec::with_capacity(batch.len().min(131_072));
             let mut cache_index_keys: Vec<Bytes> = Vec::with_capacity(posting_writes.capacity());
             for (record_id, value) in &batch {
-                if let Some(irk) = build_index_key_from_record(false, name_interned, value, &paths)
+                if let Some((irk, canonical)) =
+                    build_index_key_from_record(false, name_interned, value, &paths)
                 {
                     let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, record_id);
-                    posting_writes.push((posting_key, Bytes::new()));
+                    // Value: empty for the inline form, canonical `C` for the
+                    // digest form (design (a)).
+                    let value = if is_digest_form(&canonical) {
+                        Bytes::from(canonical)
+                    } else {
+                        Bytes::new()
+                    };
+                    posting_writes.push((posting_key, value));
                     cache_index_keys.push(index_key);
                     count += 1;
                 }
@@ -652,24 +679,35 @@ impl IndexManager {
         let mut cache_keys: Vec<Bytes> = Vec::new();
 
         for (record_id, old_value, new_value) in &deltas {
+            // (key bytes, canonical C) pairs; "unchanged" compares BOTH (the
+            // digest key alone is only a locator — design (a)).
             let old_key = old_value
                 .as_ref()
-                .and_then(|v| build_index_key_from_record(false, name_interned, v, &def.paths))
-                .map(|irk| irk.to_bytes());
+                .and_then(|v| build_index_key_from_record(false, name_interned, v, &def.paths));
             let new_key = new_value
                 .as_ref()
-                .and_then(|v| build_index_key_from_record(false, name_interned, v, &def.paths))
-                .map(|irk| irk.to_bytes());
+                .and_then(|v| build_index_key_from_record(false, name_interned, v, &def.paths));
 
-            if old_key == new_key {
-                continue; // unchanged: both None, or same computed key
+            match (&old_key, &new_key) {
+                (None, None) => continue,
+                (Some((ok, oc)), Some((nk, nc))) if ok.to_bytes() == nk.to_bytes() && oc == nc => {
+                    continue
+                }
+                _ => {}
             }
-            if let Some(ok) = &old_key {
-                removes.push(build_posting_key(ok, record_id).into());
+            if let Some((ok, _)) = &old_key {
+                let ok = ok.to_bytes();
+                removes.push(build_posting_key(&ok, record_id).into());
                 cache_keys.push(ok.clone());
             }
-            if let Some(nk) = &new_key {
-                sets.push((build_posting_key(nk, record_id).into(), Bytes::new()));
+            if let Some((nk, nc)) = &new_key {
+                let nk = nk.to_bytes();
+                let value = if is_digest_form(nc) {
+                    Bytes::from(nc.clone())
+                } else {
+                    Bytes::new()
+                };
+                sets.push((build_posting_key(&nk, record_id).into(), value));
                 cache_keys.push(nk.clone());
             }
         }

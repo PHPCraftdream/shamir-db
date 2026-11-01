@@ -2,6 +2,7 @@
 
 use std::fmt::{self, Write};
 
+use num_bigint::{BigInt, Sign};
 use serde::{Deserialize, Serialize};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
@@ -87,7 +88,8 @@ pub enum Pagination {
 /// Manual equality because `QueryValue` does not implement `PartialEq`.
 ///
 /// For `After`, values are compared in their MessagePack wire representation.
-/// Big integers compared with strings or decimals require a decimal allocation.
+/// Big integers compared with strings or decimals allocate only for a
+/// candidate wider than `i128` whose sign, digits and length can match.
 impl PartialEq for Pagination {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -136,6 +138,21 @@ struct DecimalText {
     len: usize,
 }
 
+impl DecimalText {
+    fn of(value: &impl fmt::Display) -> Option<Self> {
+        let mut text = DecimalText {
+            bytes: [0; 64],
+            len: 0,
+        };
+        write!(&mut text, "{value}").ok()?;
+        Some(text)
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
 impl Write for DecimalText {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let end = self.len.checked_add(text.len()).ok_or(fmt::Error)?;
@@ -154,6 +171,45 @@ fn decimal_eq_text(decimal: &impl fmt::Display, text: &str) -> bool {
     write!(&mut buffer, "{decimal}").is_ok() && &buffer.bytes[..buffer.len] == text.as_bytes()
 }
 
+// Every Big up to 38 digits formats into the stack buffer. A wider one can
+// only equal a canonical decimal string of its own sign and digit count, so
+// anything else is rejected before the one heap formatting a real candidate
+// needs.
+fn big_eq_text(big: &BigInt, text: &str) -> bool {
+    if let Ok(small) = i128::try_from(big) {
+        return DecimalText::of(&small).is_some_and(|d| d.as_bytes() == text.as_bytes());
+    }
+    big_text_shape_matches(big, text) && big.to_string() == text
+}
+
+// A decimal's text is at most 31 bytes and a Big outside `i128` has at least
+// 39 digits, so only the stack-formatted range can be equal.
+fn big_eq_decimal(big: &BigInt, decimal: &impl fmt::Display) -> bool {
+    i128::try_from(big).is_ok_and(|small| {
+        matches!(
+            (DecimalText::of(&small), DecimalText::of(decimal)),
+            (Some(a), Some(b)) if a.as_bytes() == b.as_bytes()
+        )
+    })
+}
+
+// 2^(bits-1) <= |big| < 2^bits and log10(2) lies in (0.30102, 0.30103), so
+// the digit count is bounded by these integer estimates without slack.
+fn big_text_shape_matches(big: &BigInt, text: &str) -> bool {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    let bits = u128::from(big.bits());
+    let fewest = bits.saturating_sub(1) * 30102 / 100_000 + 1;
+    let most = bits * 30103 / 100_000 + 1;
+    let count = digits.len() as u128;
+    negative == (big.sign() == Sign::Minus)
+        && !digits.starts_with('0')
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (fewest..=most).contains(&count)
+}
+
 fn sequence_eq<'a>(
     left: impl ExactSizeIterator<Item = &'a QueryValue>,
     right: impl ExactSizeIterator<Item = &'a QueryValue>,
@@ -163,7 +219,7 @@ fn sequence_eq<'a>(
 
 // Mirror QueryValue::serialize, including cross-variant string and sequence
 // representations and insertion order. BigInt's decimal Display allocates;
-// confine that cost to comparisons against another string-shaped variant.
+// `big_eq_text` and `big_eq_decimal` keep that off every non-candidate path.
 fn wire_value_eq(left: &QueryValue, right: &QueryValue) -> bool {
     match (left, right) {
         (Null, Null) => true,
@@ -181,8 +237,8 @@ fn wire_value_eq(left: &QueryValue, right: &QueryValue) -> bool {
             write!(&mut text, "{a}").is_ok()
                 && std::str::from_utf8(&text.bytes[..text.len]).is_ok_and(|s| decimal_eq_text(b, s))
         }
-        (Big(a), Str(b)) | (Str(b), Big(a)) => a.to_string() == *b,
-        (Big(a), Dec(b)) | (Dec(b), Big(a)) => decimal_eq_text(b, &a.to_string()),
+        (Big(a), Str(b)) | (Str(b), Big(a)) => big_eq_text(a, b),
+        (Big(a), Dec(b)) | (Dec(b), Big(a)) => big_eq_decimal(a, b),
         (Bin(a), Bin(b)) => a == b,
         (List(a), List(b)) => sequence_eq(a.iter(), b.iter()),
         (Set(a), Set(b)) => sequence_eq(a.iter(), b.iter()),

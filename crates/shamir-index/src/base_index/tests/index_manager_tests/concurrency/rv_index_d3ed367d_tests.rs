@@ -107,7 +107,9 @@ async fn rv_index_d3ed367d_stale_cache_entry_not_served_after_generation_bump() 
     // Scan-visible new posting written straight to info_store (bypasses the
     // write hooks, so no per-key invalidation fires on its own).
     let b = RecordId::new();
-    let index_key = build_index_key(false, 1001, &[InnerValue::Int(7)]).to_bytes();
+    let index_key = build_index_key(false, 1001, &[InnerValue::Int(7)])
+        .expect("probe has identity")
+        .to_bytes();
     let posting_key = build_posting_key(&index_key, &b);
     manager
         .info_store
@@ -238,7 +240,9 @@ async fn posting_cache_invalidation_paths_release_charge() {
     let value = create_test_value(&[(1, InnerValue::Int(7))]);
     let id = RecordId::new();
     manager.on_record_created(&id, &value).await.unwrap();
-    let index_key = build_index_key(false, 1001, &[InnerValue::Int(7)]).to_bytes();
+    let index_key = build_index_key(false, 1001, &[InnerValue::Int(7)])
+        .expect("probe has identity")
+        .to_bytes();
     let posting_key = build_posting_key(&index_key, &id);
     let _ = manager
         .lookup_by_index(1001, &[InnerValue::Int(7)])

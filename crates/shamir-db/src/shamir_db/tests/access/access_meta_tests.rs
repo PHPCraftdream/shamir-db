@@ -894,6 +894,7 @@ async fn resource_meta_group_fails_closed_on_storage_error() {
     // must propagate it, NOT collapse it into ResourceMeta::open() (owner=
     // System, mode 0o777 — accessible to everyone).
     fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    shamir.system_store().unpublish_group_names_for_test();
 
     let result = shamir
         .resource_meta(&ResourcePath::Group {
@@ -971,15 +972,14 @@ async fn authorize_access_denies_when_group_resource_meta_errors() {
     let (shamir, fault) = shamir_with_failing_groups_table().await;
     shamir.create_group("testgroup").await.unwrap();
 
-    // Under the OLD fail-open code, a group whose resolve_group_id call
-    // errors would collapse to ResourceMeta::open() (owner=System, mode
-    // 0o777) — any Actor::User would then be PERMITTED Read via the
-    // Other-rwx bits. Confirm the actor is a non-owner (User(999) is not
-    // System, and default owner is System) so a fail-open bug would show
-    // up as `Ok(())` here.
+    // Under the OLD fail-open code a group whose resolve_group_id errors would
+    // collapse to ResourceMeta::open() (owner=System, mode 0o777) and permit
+    // any Actor::User Read via the Other-rwx bits. User(999) is a non-owner,
+    // so a fail-open bug would show up as `Ok(())` here.
     let actor = Actor::User(999);
 
     fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    shamir.system_store().unpublish_group_names_for_test();
 
     let result = shamir
         .authorize_access(

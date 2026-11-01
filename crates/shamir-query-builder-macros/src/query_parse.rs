@@ -461,6 +461,7 @@ fn parse_select_item(input: ParseStream) -> syn::Result<SelectItemAst> {
     if fork.peek(Ident) {
         let id: Ident = fork.parse()?;
         let id_str = id.to_string();
+        let id_str = id_str.strip_prefix("r#").unwrap_or(&id_str).to_owned();
 
         // Check for function call form: ident(...)
         if fork.peek(syn::token::Paren) {

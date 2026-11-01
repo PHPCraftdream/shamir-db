@@ -303,14 +303,16 @@ mod test_imp {
                     }
                     return Err(error);
                 }
-                rmp_serde::from_slice(&bytes)
-                    .map(Some)
-                    .map_err(|error| Error::codec(error.to_string()))
+                rmp_serde::from_slice(&bytes).map(Some).map_err(|error| {
+                    Error::codec_with_source(format!("decode database response: {error}"), error)
+                })
             }
             #[cfg(feature = "query-builder")]
-            super::NativeReply::Raw(bytes) => rmp_serde::from_slice(&bytes)
-                .map(Some)
-                .map_err(|error| Error::codec(error.to_string())),
+            super::NativeReply::Raw(bytes) => {
+                rmp_serde::from_slice(&bytes).map(Some).map_err(|error| {
+                    Error::codec_with_source(format!("decode database response: {error}"), error)
+                })
+            }
         }
     }
 
@@ -330,18 +332,24 @@ mod test_imp {
         host_only()
     }
     pub fn db_get(table: &str, key: &Value) -> Result<Option<Value>> {
-        let bytes = rmp_serde::to_vec(key).map_err(|error| Error::codec(error.to_string()))?;
+        let bytes = rmp_serde::to_vec(key).map_err(|error| {
+            Error::codec_with_source(format!("encode database request: {error}"), error)
+        })?;
         reply("db_get", table, &bytes, false)
     }
     pub fn db_insert(table: &str, doc: &Value) -> Result<Value> {
-        let bytes = rmp_serde::to_vec(doc).map_err(|error| Error::codec(error.to_string()))?;
+        let bytes = rmp_serde::to_vec(doc).map_err(|error| {
+            Error::codec_with_source(format!("encode database request: {error}"), error)
+        })?;
         reply("db_insert", table, &bytes, true)?.ok_or_else(|| super::missing_result("db_insert"))
     }
     pub fn db_query(table: &str, filter: Option<&Value>) -> Result<Value> {
         let bytes = filter
             .map(rmp_serde::to_vec)
             .transpose()
-            .map_err(|error| Error::codec(error.to_string()))?
+            .map_err(|error| {
+                Error::codec_with_source(format!("encode database request: {error}"), error)
+            })?
             .unwrap_or_default();
         reply("db_query", table, &bytes, true)?.ok_or_else(|| super::missing_result("db_query"))
     }

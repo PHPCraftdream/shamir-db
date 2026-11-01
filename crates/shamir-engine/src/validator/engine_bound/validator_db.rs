@@ -37,6 +37,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt;
+use shamir_collections::THasher;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tx::staging_store::StagedKind;
 use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
@@ -47,6 +48,92 @@ use crate::query::TableRef;
 use crate::query::TableResolver;
 use crate::table::TableManager;
 use crate::validator::ValidatorDbProbe;
+
+/// Batch-scoped FK parent-membership cache (L4-RV-ENGINE-3C71057D).
+///
+/// Created ONCE per write batch by the write executor (see
+/// `execute_insert_tx`'s per-row validator loop) and threaded through
+/// `run_validators_qv` → [`ValidatorDb`], it deduplicates the per-child-row
+/// `exists_in_table` probes of the same (parent table, field, value): a
+/// batch of N children referencing the same parent pays ONE committed-state
+/// parent probe instead of N.
+///
+/// Only the COMMITTED-state verdict is cached. Transaction-staged parent
+/// visibility stays structural and always-on:
+/// * a cached positive stores the proving `RecordId`; every hit re-checks
+///   the tx's staging overlay for that id (a staged `Removed`, or a staged
+///   `Set` whose new bytes no longer match, voids the cached verdict);
+/// * a cached negative never short-circuits past the tx's own staged
+///   writes — the `staged_field_matches` overlay probe still runs on every
+///   call, so a parent row staged earlier in the SAME batch is always seen
+///   (read-your-own-writes, FG-3, preserved).
+#[derive(Default)]
+pub struct BatchFkCache {
+    /// `(target table token, field id, value debug-repr) -> verdict`.
+    /// Lock-free `scc` map ([`ValidatorDbProbe`] requires `Send + Sync`, and
+    /// the cache is read once per child row). The key string costs one small
+    /// allocation per probe, far below the parent-table scan it replaces.
+    entries: scc::HashMap<FkCacheKey, FkCacheEntry, THasher>,
+}
+
+type FkCacheKey = (u64, u64, String);
+
+/// Cached committed-state membership verdict for one `(table, field, value)`.
+#[derive(Clone, Copy, Debug)]
+pub enum FkCacheEntry {
+    /// A committed row with this `(field, value)` exists; carries the
+    /// `RecordId` that proved it (re-validated against the staging overlay
+    /// on every hit — see [`BatchFkCache`]).
+    Proven(RecordId),
+    /// No committed row matches.
+    Absent,
+}
+
+impl BatchFkCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn get(&self, table_token: u64, field_id: u64, value: &QueryValue) -> Option<FkCacheEntry> {
+        let key = (table_token, field_id, format!("{value:?}"));
+        self.entries.read_sync(&key, |_, entry| *entry)
+    }
+
+    fn store(&self, table_token: u64, field_id: u64, value: &QueryValue, entry: FkCacheEntry) {
+        let key = (table_token, field_id, format!("{value:?}"));
+        // Validation correctness never depends on the cache being written.
+        self.entries.upsert_sync(key, entry);
+    }
+
+    /// Distinct cached keys (test oracle for the N-children-1-probe test).
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        let mut count = 0;
+        self.entries.iter_sync(|_, _| {
+            count += 1;
+            true
+        });
+        count
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only count of FULL parent-table scans in `exists_in_table`'s
+    /// fallback path — the observable for "N children referencing the same
+    /// parent perform exactly ONE parent scan per batch".
+    static FK_FULL_SCANS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_fk_full_scans() {
+    FK_FULL_SCANS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn fk_full_scans() -> u64 {
+    FK_FULL_SCANS.with(std::cell::Cell::get)
+}
 
 // ── QueryValue → InnerValue scalar conversion ───────────────────────────────
 
@@ -180,6 +267,25 @@ pub struct ValidatorDb<'a> {
     /// Cross-table resolver for FK semi-joins. `None` in contexts without a
     /// repo-level resolver (tests, standalone tables).
     pub resolver: Option<&'a dyn TableResolver>,
+    /// Optional batch-scoped FK parent-membership cache
+    /// (L4-RV-ENGINE-3C71057D). `None` (the default via
+    /// [`ValidatorDb::new`]) keeps the historical probe-per-call behavior;
+    /// the write executor attaches one per write batch via
+    /// [`ValidatorDb::new_with_fk_cache`] so N children referencing the
+    /// same parent row perform ONE committed-state probe.
+    pub fk_cache: Option<&'a BatchFkCache>,
+}
+
+/// Grouped optional context threaded into `run_validators_qv` /
+/// `run_validators_view` (keeps those signatures within clippy's
+/// argument budget): the cross-table [`TableResolver`] and the
+/// batch-scoped [`BatchFkCache`].
+#[derive(Default)]
+pub struct ValidatorFkCtx<'a> {
+    /// Cross-table resolver for FK semi-joins. `None` when unavailable.
+    pub resolver: Option<&'a dyn crate::query::TableResolver>,
+    /// Batch-scoped FK parent-membership cache; `None` for probe-per-call.
+    pub fk_cache: Option<&'a BatchFkCache>,
 }
 
 impl<'a> ValidatorDb<'a> {
@@ -197,6 +303,25 @@ impl<'a> ValidatorDb<'a> {
             tx,
             self_table,
             resolver,
+            fk_cache: None,
+        }
+    }
+
+    /// Construct a validator DB handle with a batch-scoped FK membership
+    /// cache attached (L4-RV-ENGINE-3C71057D). The cache MUST be created
+    /// once per write batch and shared by every per-row
+    /// `run_validators_qv` invocation of that batch.
+    pub fn new_with_fk_cache(
+        tx: &'a shamir_tx::TxContext,
+        self_table: &'a TableManager,
+        resolver: Option<&'a dyn TableResolver>,
+        fk_cache: &'a BatchFkCache,
+    ) -> Self {
+        Self {
+            tx,
+            self_table,
+            resolver,
+            fk_cache: Some(fk_cache),
         }
     }
 
@@ -243,6 +368,17 @@ impl<'a> ValidatorDb<'a> {
     }
 
     /// Internal: probe a resolved target table for `field == value`.
+    ///
+    /// L4-RV-ENGINE-3C71057D: when a batch-scoped [`BatchFkCache`] is
+    /// attached (see [`ValidatorDb::new_with_fk_cache`]), the COMMITTED-state
+    /// membership verdict is cached per (target table, field, value) for the
+    /// whole write batch. Staged visibility is preserved structurally:
+    /// * a cached positive carries the proving `RecordId`, re-checked against
+    ///   the staging overlay on every hit (a staged `Removed`, or a staged
+    ///   `Set` that no longer matches, voids the cached verdict), and
+    /// * a cached negative never short-circuits past the tx's own staged
+    ///   writes — `staged_field_matches` still runs on every call, so a
+    ///   parent row staged earlier in the SAME batch/tx is always seen.
     async fn exists_in_table(
         &self,
         target: &TableManager,
@@ -261,6 +397,103 @@ impl<'a> ValidatorDb<'a> {
             .get_id(field)
             .await
             .map(shamir_types::core::interner::InternerKey::new);
+
+        // ── Batch-scoped cache lookup (committed-state verdict only) ──
+        if let Some(cache) = self.fk_cache {
+            if let Some(field_id) = interner.get_ind(field) {
+                if let Some(hit) = cache.get(target_token, field_id.id(), value) {
+                    match hit {
+                        FkCacheEntry::Proven(id) => {
+                            // Re-validate the proving row against this tx's
+                            // staged overlay. A staged removal/overwrite of
+                            // the proving row invalidates the cached verdict —
+                            // and because another committed row may still
+                            // match (parent fields are not necessarily
+                            // unique), invalidation must fall through to a
+                            // FULL committed re-probe, not conclude absent
+                            // from this one id.
+                            let invalidated = match staging.and_then(|s| s.staged_op(id.as_bytes()))
+                            {
+                                Some(StagedKind::Removed) => true,
+                                Some(StagedKind::Set(bytes)) => {
+                                    !record_field_matches_by_id(bytes.as_ref(), &field_id, value)?
+                                }
+                                None => false,
+                            };
+                            if !invalidated {
+                                return Ok(true);
+                            }
+                            // Fall through to the committed re-probe below;
+                            // the staged-overlay probe runs after it as usual.
+                        }
+                        FkCacheEntry::Absent => {
+                            // Cached-absent is safe to combine with the
+                            // staged-overlay probe only: this tx's staged
+                            // parents stay visible (FG-3), and committed
+                            // state at the tx snapshot cannot gain rows.
+                            return match staged_field_id.as_ref() {
+                                Some(field_id) => {
+                                    self.staged_field_matches(target_token, field_id, value)
+                                }
+                                None => Ok(false),
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Committed-state probe (index fast-path, then full scan) ──
+        let proven = self
+            .committed_membership_probe(target, field, value)
+            .await?;
+        if let Some(cache) = self.fk_cache {
+            if let Some(field_id) = interner.get_ind(field) {
+                cache.store(
+                    target_token,
+                    field_id.id(),
+                    value,
+                    proven.map_or(FkCacheEntry::Absent, FkCacheEntry::Proven),
+                );
+            }
+        }
+        // A committed parent satisfies the FK on its own; the staged overlay
+        // below only adds parents that exist solely in this tx's write set.
+        if proven.is_some() {
+            return Ok(true);
+        }
+
+        // FG-3: read-your-own-writes for cross-table FK checks — probe this
+        // tx's own staged writes to the TARGET table (a parent row inserted
+        // earlier in the SAME tx, not yet committed, never reachable via the
+        // index or the committed-store scan above, and — now — never
+        // short-circuited by the batch cache either). Resolved through the
+        // TARGET table's token, not `self_table`'s — this is the key
+        // difference from `exists_in_self`'s self-table staged probe.
+        if let Some(field_id) = staged_field_id {
+            if self.staged_field_matches(target_token, &field_id, value)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Committed-state membership probe for `exists_in_table`: returns the
+    /// `RecordId` of a committed (non-staged-superseded) row whose `field`
+    /// equals `value`, or `None` when no committed row matches.
+    ///
+    /// Fast path: single-field index lookup (staging-aware). Fallback: full
+    /// scan with field match (committed store only) — the O(parent_rows)
+    /// path the batch cache amortizes to once per (table, field, value) key.
+    async fn committed_membership_probe(
+        &self,
+        target: &TableManager,
+        field: &str,
+        value: &QueryValue,
+    ) -> DbResult<Option<RecordId>> {
+        let interner = target.interner().get().await?;
+        let target_token = target.table_token();
+        let staging = self.tx.write_set.get(&target_token);
 
         // Fast path: single-field index lookup.
         if let Some(inner_value) = qv_scalar_to_inner(value) {
@@ -282,61 +515,35 @@ impl<'a> ValidatorDb<'a> {
                                 Some(StagedKind::Set(bytes)) => {
                                     if record_field_matches_by_id(bytes.as_ref(), &field_id, value)?
                                     {
-                                        return Ok(true);
+                                        return Ok(Some(*id));
                                     }
                                 }
-                                None => return Ok(true),
+                                None => return Ok(Some(*id)),
                             }
                         }
                         // Index candidates are exhausted after applying staging;
-                        // skip the full-scan fallback below entirely
-                        // (it would re-scan the same store the index already
-                        // covers and can only agree). The index alone cannot
-                        // rule out a same-tx FK match though: a staged insert
-                        // into the target table (this tx, not yet committed) is
-                        // never in the index (indexing happens at commit), so go
-                        // straight to the staged-overlay probe.
-                        return match staged_field_id.as_ref() {
-                            Some(field_id) => {
-                                self.staged_field_matches(target_token, field_id, value)
-                            }
-                            None => Ok(false),
-                        };
+                        // the index already covers the whole store and can only
+                        // agree with a scan — conclusive absent.
+                        return Ok(None);
                     }
                 } else {
                     // Audit group 25 / defect 1: no single-field index covers
                     // this FK's referenced field on the parent table, so the
-                    // scan below is O(parent_rows). `exists_in_table` runs
-                    // once PER CHILD ROW from `SchemaValidator::validate`'s
-                    // per-record FK check, so an M-row batch write against
-                    // this table pays O(M × parent_rows) in total.
-                    //
-                    // Not fixed here as a semi-join (batching every child
-                    // row's value into ONE parent-table pass): that requires
-                    // a batch-scoped cache threaded through the per-record
-                    // validator invocation loop in `write_exec.rs`
-                    // (`execute_insert_tx`/`execute_update_tx`), which is a
-                    // cross-cutting change to the transactional write path
-                    // (FG-2/FG-3/FG-7/SSI/CAS invariants live there) — too
-                    // large a blast radius for this fix. Nor is it fixed as
-                    // a hard DDL-time refusal (mirroring the `unique` ⟹
-                    // single-field-index invariant `validate_unique_indexes`
-                    // enforces): that gate lives in `shamir-db`
-                    // (`admin_schema.rs`), outside this crate. Surfacing the
-                    // hazard here at least makes it actionable instead of a
-                    // silent perf cliff.
+                    // scan below is O(parent_rows). With a batch-scoped
+                    // [`BatchFkCache`] attached (L4-RV-ENGINE-3C71057D) the
+                    // scan amortizes to once per (table, field, value) per
+                    // write batch instead of once per child row; without one
+                    // it still runs per child row.
                     log::warn!(
-                        "ValidatorDb::exists_in_table: FK check on field {field:?} \
-                         has no single-field index on the referenced table — \
-                         falling back to a full table scan per child row \
-                         (O(batch_size * parent_rows) for a multi-row write). \
-                         Add a single-field index on {field:?} to avoid this."
+                        "ValidatorDb::exists_in_table: FK check on field {field:?}                          has no single-field index on the referenced table —                          falling back to a full table scan per child row                          (O(batch_size * parent_rows) for a multi-row write).                          Add a single-field index on {field:?} to avoid this."
                     );
                 }
             }
         }
 
         // Fallback: full scan with field match (committed store only).
+        #[cfg(test)]
+        FK_FULL_SCANS.with(|c| c.set(c.get() + 1));
         let batch_size = 1000;
         let stream = target.list_stream(batch_size);
         futures::pin_mut!(stream);
@@ -358,23 +565,11 @@ impl<'a> ValidatorDb<'a> {
                     }
                 };
                 if record_field_matches(bytes.as_ref(), field, value, interner)? {
-                    return Ok(true);
+                    return Ok(Some(id));
                 }
             }
         }
-
-        // FG-3: read-your-own-writes for cross-table FK checks — probe this
-        // tx's own staged writes to the TARGET table (a parent row inserted
-        // earlier in the SAME tx, not yet committed, never reachable via the
-        // index or the committed-store scan above). Resolved through the
-        // TARGET table's token, not `self_table`'s — this is the key
-        // difference from `exists_in_self`'s self-table staged probe.
-        if let Some(field_id) = staged_field_id {
-            if self.staged_field_matches(target_token, &field_id, value)? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(None)
     }
 
     /// FG-3 helper: does this tx's own staged (uncommitted) write_set for

@@ -1,9 +1,6 @@
 //! Structural return-type matcher tests + `expand_validator` oracle.
 
-use crate::{
-    expand_function, expand_procedure, expand_scalar, expand_validator, is_result_value_return,
-    is_validation_return,
-};
+use crate::{expand_function, expand_procedure, expand_scalar, expand_validator};
 use quote::ToTokens;
 
 #[test]
@@ -40,49 +37,47 @@ fn rv_sdk_macros_c8189c06_substitutes_generated_paths() {
     assert!(!output.contains("shamir_sdk"));
 }
 
-fn rt(src: &str) -> bool {
-    is_result_value_return(&syn::parse_str(src).unwrap())
-}
-
-fn vr(src: &str) -> bool {
-    is_validation_return(&syn::parse_str(src).unwrap())
+#[test]
+fn rv_sdk_macros_853fc350_explicit_std_result_return_expands_verbatim() {
+    let source = syn::parse_str(
+        "async fn f(c: Ctx, b: Batch, p: Params) -> ::std::result::Result<Value, Error> { todo!() }",
+    )
+    .unwrap();
+    let output = expand_function(source, &syn::parse_quote!(::renamed))
+        .unwrap()
+        .to_string();
+    assert!(output.contains(":: std :: result :: Result"), "{output}");
 }
 
 #[test]
-fn rv_sdk_macros_853fc350_result_value_accepts_all_rooted_and_bare_spellings() {
-    assert!(rt("::std::result::Result<Value, shamir_sdk::Error>"));
-    assert!(rt("std::result::Result<Value, Error>"));
-    assert!(rt("core::result::Result<Value, Error>"));
-    assert!(rt("Result<Value>"));
-    assert!(rt("Result<Value, Error>"));
-    assert!(rt("shamir_sdk::Result<shamir_sdk::Value>"));
-    assert!(rt("crate::Result<Value>"));
-}
-
-#[test]
-fn rv_sdk_macros_853fc350_result_value_rejects_mismatched_types() {
-    assert!(!rt("std::result::Result<String, Error>"));
-    assert!(!rt("Result"));
-    assert!(!rt("Result<Value, Error, Extra>"));
-    assert!(!rt("Option<Value>"));
-    assert!(!rt("Validation<T>"));
+fn rv_sdk_macros_853fc350_plain_result_value_return_expands() {
+    let source =
+        syn::parse_str("async fn f(c: Ctx,b:Batch,p:Params)->Result<Value>{todo!()}").unwrap();
+    assert!(expand_function(source, &syn::parse_quote!(::renamed)).is_ok());
 }
 
 #[test]
 fn rv_sdk_macros_853fc350_validation_accepts_any_prefix() {
-    assert!(vr("::shamir_sdk::Validation"));
-    assert!(vr("shamir_sdk::Validation"));
-    assert!(vr("Validation"));
-    assert!(vr("crate::Validation"));
-    // Any prefix is structurally accepted; the compiler is the real guard.
-    assert!(vr("mycrate::Validation"));
+    let source = syn::parse_str(
+        "async fn v(r: Value, o: Option<Value>, c: Ctx) -> alias::Validation { todo!() }",
+    )
+    .unwrap();
+    let output = expand_validator(source, &syn::parse_quote!(::renamed))
+        .unwrap()
+        .to_string();
+    assert!(output.contains(":: renamed :: Validation"), "{output}");
 }
 
 #[test]
-fn rv_sdk_macros_853fc350_validation_rejects_generified_and_other_types() {
-    assert!(!vr("Validation<T>"));
-    assert!(!vr("Result<Value>"));
-    assert!(!vr("Option<Validation>"));
+fn rv_sdk_macros_853fc350_validation_expansion_uses_concrete_signature() {
+    let source = syn::parse_str(
+        "async fn v(r: Value, o: Option<Value>, c: Ctx) -> crate::Validation { todo!() }",
+    )
+    .unwrap();
+    let output = expand_validator(source, &syn::parse_quote!(::renamed))
+        .unwrap()
+        .to_string();
+    assert!(output.contains("-> :: renamed :: Validation"), "{output}");
 }
 
 #[test]
@@ -202,13 +197,13 @@ fn rv_sdk_macros_fb968c81_all_emitters_return_spanned_signature_errors() {
         ),
         (
             "#[procedure]",
-            "pub async fn p(c: Ctx, p: Params) -> String { todo!() }",
-            "invalid return type",
+            "pub async fn p(c: Ctx, p: Params) { todo!() }",
+            "requires an explicit return type",
         ),
         (
             "#[scalar]",
-            "pub async fn s(c: Ctx) -> String { todo!() }",
-            "has an invalid return type",
+            "pub async fn s(c: Ctx) { todo!() }",
+            "requires an explicit return type",
         ),
     ];
     for (kind, source, expected) in cases {

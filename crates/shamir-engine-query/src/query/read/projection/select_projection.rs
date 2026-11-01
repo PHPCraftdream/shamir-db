@@ -215,7 +215,7 @@ impl SelectProjection {
         // runtime data not available here). `project_value` reuses all three
         // caches for every record instead of re-running `compile_filter` /
         // `intern_field_path` / path-parsing per row per node.
-        let mut funcs_cond_cache: CondCache = shamir_types::types::common::new_map();
+        let mut funcs_cond_cache = CondCache::new();
         let funcs_field_path_cache: FieldPathCache = if interner_overlay.is_none() {
             let mut cache = shamir_types::types::common::new_map();
             for (_, fv) in &funcs {

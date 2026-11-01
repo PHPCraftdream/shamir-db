@@ -80,23 +80,16 @@ pub struct ShamirDb {
         Arc<std::sync::RwLock<Option<Arc<dyn crate::ResumeProbe>>>>,
     pub(super) dbs: Arc<DashMap<String, DbInstance, THasher>>,
     pub(super) system_store: SystemStore,
-    /// Serialises admin RMW ops (GrantRole/RevokeRole) per user_name
-    /// to close the §B9 read-modify-write race when two concurrent
-    /// admin commands target the same user.  Entries leak by design
-    /// (each unique user occupies a slot forever), but admin ops are
-    /// rare so the memory cost is negligible.
+    /// Per-user lock map used only for schema read-modify-write operations
+    /// keyed by `schema_lock_key`; grant/revoke do not acquire this lock.
+    /// Entries are retained forever, one per distinct key ever locked, and
+    /// inserted only after authorization at admin/DDL frequency. The map is
+    /// publicly reachable; eviction could split locking for a live key.
     pub(super) admin_user_locks: Arc<DashMap<String, Arc<Mutex<()>>, THasher>>,
-    /// Per-`group_id` lock map used to serialise group-record
-    /// read-modify-write mutations (`add_group_member_as` /
-    /// `remove_group_member_as` / `set_resource_meta(Group)` /
-    /// `rename_group_as` / `drop_group_as`) and close the §81 / #563
-    /// last-writer-wins-on-whole-record race when two concurrent mutations
-    /// target the SAME `group_id`. Keyed by `group_id` (a `u64`, unlike
-    /// `admin_user_locks`'s `String` key, since groups are id-keyed not
-    /// name-keyed). Entries leak by design (each unique group occupies a
-    /// slot forever), but group mutations are rare so the memory cost is
-    /// negligible — exactly the `admin_user_locks`/`repo_create_locks`
-    /// tradeoff.
+    /// Per-group lock map for group-record read-modify-write operations.
+    /// Entries are retained forever, one per distinct group id ever locked,
+    /// inserted only after authorization at admin/DDL frequency. The public
+    /// accessor exposes it; eviction could split locking for a live id.
     pub(super) group_member_locks: Arc<DashMap<u64, Arc<Mutex<()>>, THasher>>,
     pub(super) active_migrations: Arc<DashMap<String, Arc<MigrationCoordinator>, THasher>>,
     /// Live function registry (builtins + WASM functions loaded on open).
@@ -123,11 +116,10 @@ pub struct ShamirDb {
     /// rare, so holding this across the (bounded) await sequence mirrors
     /// `group_id_lock`'s established pattern.
     pub(super) db_create_lock: Arc<Mutex<()>>,
-    /// Per-database lock serialising `handle_create_repo`'s exists-check →
-    /// authorize → create sequence, keyed by `db_name`. Mirrors
-    /// `admin_user_locks`' per-key pattern: entries leak by design (each
-    /// unique db occupies a slot forever), fine since database creation is
-    /// rare and the map is bounded by the distinct databases ever created.
+    /// Per-database lock map for repository create/rename admission, keyed by
+    /// database name. Entries are retained forever, one per distinct key ever
+    /// locked, inserted only after authorization at admin/DDL frequency. The
+    /// public accessor exposes it; eviction could split synchronization for a live key.
     pub(super) repo_create_locks: Arc<DashMap<String, Arc<Mutex<()>>, THasher>>,
     /// Live validator registry (compiled WASM validators loaded on open).
     pub(super) validators: Arc<ValidatorRegistry>,
@@ -382,8 +374,7 @@ impl ShamirDb {
             // do NOT hold the DashMap shard guard across the `add_repo` /
             // recovery awaits below.
             if let Some(db) = shamir.get_db(db_name) {
-                let factory = Self::factory_from_meta(engine, path);
-                if let Some(factory) = factory {
+                if let Some(factory) = Self::factory_from_meta(engine, path) {
                     // I.2: re-attach the repo WITH its persisted table
                     // catalogue, so the tables exist (and the token→name
                     // reverse index is populated) BEFORE recovery runs.
@@ -419,6 +410,14 @@ impl ShamirDb {
                         None => shamir.durability_policy,
                     };
                     db.add_repo_with_durability(config, policy).await?;
+                } else {
+                    log::warn!(
+                        "shamir_db::init: skipping repository '{}/{}' (backend='{}', path={:?}): no factory available",
+                        db_name,
+                        repo_name,
+                        engine,
+                        path
+                    );
                 }
             } else {
                 return Err(DbError::Internal(format!(
@@ -664,16 +663,19 @@ impl ShamirDb {
         &self.system_store
     }
 
-    /// Per-user lock map used to serialise admin RMW ops (GrantRole /
-    /// RevokeRole) and close the §B9 read-modify-write race.
+    /// Per-user lock map used only for the per-table schema RMW path keyed
+    /// by `schema_lock_key`; GrantRole/RevokeRole no longer acquire it.
+    /// Entries are retained forever, one per distinct key ever locked,
+    /// inserted only after authorization at admin/DDL frequency. The public
+    /// accessor exposes it; eviction could split synchronization for a live key.
     pub fn admin_user_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
         &self.admin_user_locks
     }
 
-    /// Per-`group_id` lock map used to serialise group-record read-modify-write
-    /// mutations (add/remove member, set owner, rename, drop) and close the
-    /// §81 / #563 last-writer-wins-on-whole-record race when two concurrent
-    /// mutations target the same `group_id`.
+    /// Per-group lock map for record RMWs keyed by group id.
+    /// Entries are retained forever, one per distinct id ever locked, inserted
+    /// only after authorization at group-admin frequency. The public accessor
+    /// exposes the map; eviction could split synchronization for a live id.
     pub fn group_member_locks(&self) -> &Arc<DashMap<u64, Arc<Mutex<()>>, THasher>> {
         &self.group_member_locks
     }
@@ -703,10 +705,10 @@ impl ShamirDb {
         ReplicationControlGuard::new(self.replication_control_lock.lock().await)
     }
 
-    /// Per-database lock serialising repo admin mutations, keyed by
-    /// `db_name` (task #546 TOCTOU close). Alter-repo operations clone the
-    /// entry's Arc out of the DashMap before awaiting the mutex so guards
-    /// are never held across async suspension.
+    /// Per-database lock map for repository create/rename admission, keyed by
+    /// database name. Entries are retained forever, one per distinct key ever
+    /// locked, inserted only after authorization at admin/DDL frequency. The
+    /// public accessor exposes the map; eviction could split synchronization for a live key.
     pub fn repo_create_locks(&self) -> &Arc<DashMap<String, Arc<Mutex<()>>, THasher>> {
         &self.repo_create_locks
     }

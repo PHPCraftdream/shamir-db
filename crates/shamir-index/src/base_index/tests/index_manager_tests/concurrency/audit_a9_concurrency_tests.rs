@@ -94,7 +94,8 @@ async fn create_index_register_first_indexes_concurrent_write() {
     let name_interned = index_def.name_interned;
     let mut posting_writes = Vec::new();
     for (rid, val) in &records {
-        if let Some(irk) = build_index_key_from_record(false, name_interned, val, &index_def.paths)
+        if let Some((irk, _canonical)) =
+            build_index_key_from_record(false, name_interned, val, &index_def.paths)
         {
             let pk = build_posting_key(&irk.to_bytes(), rid);
             posting_writes.push((pk.into(), bytes::Bytes::new()));
@@ -167,7 +168,8 @@ async fn create_index_backfill_then_register_loses_concurrent_write() {
     let name_interned = index_def.name_interned;
     let mut posting_writes = Vec::new();
     for (rid, val) in &records {
-        if let Some(irk) = build_index_key_from_record(false, name_interned, val, &index_def.paths)
+        if let Some((irk, _canonical)) =
+            build_index_key_from_record(false, name_interned, val, &index_def.paths)
         {
             let pk = build_posting_key(&irk.to_bytes(), rid);
             posting_writes.push((pk.into(), bytes::Bytes::new()));
