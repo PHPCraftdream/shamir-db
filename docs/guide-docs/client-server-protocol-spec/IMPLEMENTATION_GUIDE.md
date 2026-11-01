@@ -382,7 +382,7 @@ Audit-line (одна запись на строку, no inner whitespace в prod
 
 **Revocation:** `revoke_user_tickets`, `revoke_all_tickets`.
 
-**API tokens (TOKEN_API.md §13):** `api_token_created`, `api_token_revoked`, `api_token_user_revoked`, `api_token_auth_failed`. Запись содержит `id` токена, владельца и канал, **никогда** секрет или MAC. `api_token_auth_failed` для malformed и unknown-id **агрегируется по подсети и сэмплируется** (запись без аутентификации иначе усиливает запись на диск); неудачи с известным `id` пишутся по правилам rate limit.
+**API tokens (TOKEN_API.md §13):** `api_token_created`, `api_token_revoked`, `api_token_user_revoked`, `api_token_auth_failed`, `api_token_exposed`. Запись содержит `id` токена (если известен), владельца (только после успешной проверки MAC), канал и подсеть, **никогда** секрет или MAC; пишется вне пути ответа. Добавляется `api_token_exposed` (`read_write` токен отвергнут на удалённом plaintext listener-е). `api_token_auth_failed` для malformed и unknown-id **агрегируется по подсети и сэмплируется** (запись без аутентификации иначе усиливает запись на диск); неудачи с известным `id` пишутся по правилам rate limit.
 
 ### 3.3. HMAC chaining + truncation defence (NORMATIVE v1)
 
@@ -588,16 +588,17 @@ Trade-off: атакующий получает clean slate (50 attempts зано
 
 Аналогично — при disk corruption suspected, replication failover, OS reinstall с restored data dir.
 
-**API-токены при restore.** Restore повышает `tokens_invalid_before_ns` для **всех** пользователей (TOKEN_API.md §5): токены, созданные до восстановленного состояния, перестают действовать, отозванные токены не воскресают. При restore из недоверенной копии дополнительно выполняется `shamir-server token revoke-all` (§5.8).
+**API-токены при restore.** Команда `shamir-server restore` и флаг `--revoke-all-tickets-on-start` повышают **глобальный** порог `tokens_invalid_before_ns` в хранилище токенов (TOKEN_API.md §5): токены, созданные до восстановленного состояния, перестают действовать, отозванные токены не воскресают. При restore из недоверенной копии дополнительно выполняется `shamir-server token revoke-all` (§5.8).
 
 ### 5.8. `token_key` или резервная копия `server_meta` утекла
 
 `token_key` в v1 **не ротируется** (ротация потребовала бы схемы нескольких ключей; `key_id` и `format_version` уже входят в MAC-вход, поэтому такая схема добавится без смены формата токена).
 
-1. Остановить сервер, выполнить `shamir-server token revoke-all` (отзывает все токены, аудит `api_token_user_revoked` на каждого владельца).
-2. Сгенерировать новый `token_key` в `server_meta` (старые токены всё равно отозваны).
-3. Запустить сервер, владельцы выпускают токены заново (`CreateApiToken`).
-4. Если утёк весь `server_meta`, применяется §5.5.
+1. Остановить сервер, выполнить `shamir-server token revoke-all`: команда отзывает все токены (аудит `api_token_user_revoked` на каждого владельца) и **генерирует новый `token_key`** (единственный способ смены ключа; старые токены всё равно отозваны).
+2. Запустить сервер, владельцы выпускают токены заново (`CreateApiToken`).
+3. Если утёк весь `server_meta`, применяется §5.5.
+
+Для подделки токена одного `token_key` недостаточно: нужна ещё запись в хранилище токенов, потому что проверка ищет `id` в хранилище.
 
 ### 5.9. Утёк один токен
 
@@ -610,7 +611,7 @@ Trade-off: атакующий получает clean slate (50 attempts зано
 
 ## 6. Observability — Metrics
 
-Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin_session>`.
+Prometheus-style. Фактически отдаётся observability-listener-ом (`observability.addr`, по умолчанию `127.0.0.1:9090`, маршрут `/metrics`; не-loopback требует `allow_public_metrics`). Маршрут `/admin/metrics` с `Bearer <admin_session>` относится к нереализованному admin-эскизу (ADMIN_UI_HOSTING). Токен-listener метрик не отдаёт.
 
 ### 6.1. Counters
 
@@ -626,7 +627,7 @@ Prometheus-style, exposed на `/admin/metrics` с `Authorization: Bearer <admin
 - `shamir_frame_oversized_total{transport}`
 - `shamir_admin_command_total{command, result}`
 - `shamir_audit_chain_verify_failures_total`
-- `shamir_token_auth_total{channel, result}` (`channel`: `rest`|`ws`; `result`: ok|malformed|unknown|bad_mac|expired|revoked|owner_invalid|channel_denied|plaintext_denied|rate_limited). Меток с токеном или владельцем нет.
+- `shamir_token_auth_total{channel, result}` (`channel`: `rest`|`ws`; `result`: ok|invalid|expired|revoked|owner_invalid|channel_denied|plaintext_denied|rate_limited; `invalid` объединяет malformed, unknown id и неверный MAC). Меток с токеном или владельцем нет.
 
 ### 6.2. Histograms
 

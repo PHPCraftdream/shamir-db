@@ -34,7 +34,7 @@
 - **[SESSION_RESUMPTION.md](SESSION_RESUMPTION.md)** — fast reconnect, anti-downgrade rules.
 - **[SUBSCRIPTIONS.md](SUBSCRIPTIONS.md)** — live subscriptions v1.1: SubscribeOp/UnsubscribeOp, PushEnvelope, grant rejection codes, filter contract, early-buffer rule.
 - **[CURSORS.md](CURSORS.md)** — server-side result cursors v1: CreateCursor/FetchNext/CancelCursor, CursorPage/CursorClosed, error codes. Backed by real MVCC-snapshot-pinned engine/session state (not wire-only scaffolding).
-- **[TOKEN_API.md](TOKEN_API.md)** — REST и WebSocket по bearer API-токену (HTTP, WS, HTTPS, WSS): формат токена, проверка, allowlist запросов, статусы, коды закрытия 4010-4012, выдача токенов. Отдельный путь без SCRAM; SCRAM-протокол не меняет. Статус: спецификация, реализация в работе.
+- **[TOKEN_API.md](TOKEN_API.md)** — REST и WebSocket по bearer API-токену (HTTP, WS, HTTPS, WSS): формат токена, проверка, allowlist запросов, статусы, коды закрытия 4010-4012, выдача токенов. Отдельный путь без SCRAM; SCRAM-протокол не меняет. Статус: спецификация, реализация не начата.
 
 ### Reference (informative)
 - **[TRANSACTION_OUTCOMES.md](TRANSACTION_OUTCOMES.md)** — transaction status/reason/error, WAL durability warnings, materialization, `invalid_request` and other batch error codes, interactive handle cleanup and retry decisions.

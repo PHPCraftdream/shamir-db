@@ -67,7 +67,7 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | Повышение прав через токен (superuser/replicator-владелец) | A13 | Права токена строятся `SessionPermissions::new(false, false, roles)`, deny-by-default allowlist, admin-листья запрещены (TOKEN_API §6, §7) |
 | Подмена сессии между токен- и SCRAM-listener-ами | A13, A2 | Отдельное `TokenSessionStore`, соединение принимает только свой случайный `sid`, close `4010` (TOKEN_API §10) |
 | Живой сокет или подписка переживают отзыв токена | A13 | Публикация отзыва, затем отмена сессий; перепроверка перед каждым запросом; close `4011` (TOKEN_API §10) |
-| Воскрешение отозванных токенов из резервной копии | A6 | Restore повышает `tokens_invalid_before_ns` для всех пользователей; runbook `token revoke-all` (IMPLEMENTATION_GUIDE §5.8) |
+| Воскрешение отозванных токенов из резервной копии | A6 | Restore повышает `tokens_invalid_before_ns` для всех пользователей; `shamir-server restore` и `--revoke-all-tickets-on-start` повышают глобальный порог, runbook `token revoke-all` (IMPLEMENTATION_GUIDE §5.7, §5.8) |
 | Утечка токена в логи, метрики, аудит | A13 | Редактирование `Authorization` в самой ранней точке, тест редактирования логов (TOKEN_API §13) |
 
 ---
@@ -91,7 +91,7 @@ Detailed runbooks — IMPLEMENTATION_GUIDE.md §5.
 | `ticket_key` | Forge tickets для всех юзеров | `revokeAllTickets` |
 | Browser session ticket (XSS) | One resume-then-counter-blocked | `kickSession` + `revokeUserTickets` |
 | Один API-токен | Доступ в пределах scope токена и прав владельца до срока | `RevokeApiToken` (онлайн) или `shamir-server token revoke <id>` (офлайн) |
-| `token_key` или `server_meta` из резервной копии | Возможность подделать MAC токена | `shamir-server token revoke-all`, перевыпуск токенов; ротации `token_key` в v1 нет (IMPLEMENTATION_GUIDE §5.8) |
+| `token_key` или `server_meta` из резервной копии | Валидные MAC для записей, которые атакующий сумеет вставить в хранилище токенов (нужна ещё запись в хранилище) | `shamir-server token revoke-all` (заодно генерирует новый `token_key`), перевыпуск токенов (IMPLEMENTATION_GUIDE §5.8) |
 
 ---
 
@@ -150,9 +150,9 @@ Resumption tickets из browser path **не могут upgrade** в native sessi
 
 4.14. **Clock dependency.** Auth flow зависит от server clock (timestamps в tickets, expires_at, tickets_invalid_before_ns). Server MUST использовать synchronized clock (NTP/PTP). При clock jumps > 5s — recommended manual `revokeAllTickets`. Audit event `clock_anomaly_detected` если abs(now - last_observed) > 5s.
 
-4.15. **Bearer-токен по plaintext и без TLS-привязки.** API-токен (TOKEN_API.md) — bearer-секрет: любой, кто его видит, действует от его имени в пределах scope. Токен-listener с `tls: false` по умолчанию loopback-only; наружу он открывается только явным `allow_plaintext_remote`, при этом принимаются лишь `read_only` токены, если не задан `allow_plaintext_write`. Эти rails снижают случайное раскрытие, но не устраняют перехват на пути. У токен-клиента нет Ed25519 pin сервера: единственная аутентификация сервера — сертификат (поэтому не-loopback TLS не стартует с автосгенерированным сертификатом без `allow_self_signed`). Токен не даёт forward secrecy, не привязан к каналу и действует до срока или отзыва.
+4.15. **Bearer-токен по plaintext и без TLS-привязки.** API-токен (TOKEN_API.md) — bearer-секрет: любой, кто его видит, действует от его имени в пределах scope. Токен-listener с `tls: false` по умолчанию loopback-only; наружу он открывается только явным `allow_plaintext_remote`, при этом принимаются лишь `read_only` токены, если не задан `allow_plaintext_write`. Эти rails снижают случайное раскрытие, но не устраняют перехват на пути. У токен-клиента нет Ed25519 pin сервера: единственная аутентификация сервера — сертификат (поэтому не-loopback TLS не стартует с автосгенерированным сертификатом без `allow_self_signed`). Токен не даёт forward secrecy, не привязан к каналу и действует до срока или отзыва. Сессия браузерного пути (`binding_mode = 0x02`, §4.9) токены создавать не может: захваченная браузерная сессия иначе превратилась бы в год доступа.
 
-4.16. **Токен не администратор.** Токен никогда не несёт `is_superuser` и `is_replicator`, не выпускает и не отзывает токены, не меняет пароль, не выполняет DDL. Это сознательное ограничение, не пробел: компрометация токена не даёт административного доступа.
+4.16. **Токен не администратор.** Токен никогда не несёт `is_superuser` и `is_replicator`, не выпускает и не отзывает токены, не меняет пароль, не выполняет DDL. Это сознательное ограничение, не пробел: компрометация токена не даёт административных операций. Права на данные при этом равны правам владельца как обычного принципала, включая ресурсы, созданные владельцем при работе как администратор (`session_actor` записывает superuser владельцем от имени `Actor::Admin`); для автоматизации заводятся отдельные сервисные аккаунты без `superuser`.
 
 ---
 

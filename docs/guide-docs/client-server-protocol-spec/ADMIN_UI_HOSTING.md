@@ -15,12 +15,12 @@ GET  /admin/                        — admin SPA index.html
 GET  /admin/static/*                — bundle (JS/CSS/WASM)
 GET  /shamir/v1/health              — liveness probe (no auth)
 GET  /shamir/v1/version             — version, supported protocol versions (no auth)
-GET  /admin/metrics                 — Prometheus metrics (Bearer admin session)
+GET  /admin/metrics                 — Prometheus metrics (Bearer admin session) — НЕ РЕАЛИЗОВАН: метрики отдаёт observability-listener (`observability.addr`, `/metrics`)
 POST /shamir/v1/query               — REST query (Bearer session_id) — ЗАМЕНЁН: TOKEN_API.md §9
 POST /shamir/v1/admin/<command>     — admin commands (Bearer admin session_id) — НЕ РЕАЛИЗОВАН
 ```
 
-WS upgrade endpoints `/shamir/v1` и `/shamir/v1/browser` — обслуживаются на том же HTTP listener (см. TRANSPORT_WS.md).
+WS upgrade endpoints `/shamir/v1` и `/shamir/v1/browser` обслуживаются SCRAM-listener-ами `kind: ws` (см. TRANSPORT_WS.md), токен-listener `kind: http` их не обслуживает.
 
 ---
 
@@ -151,9 +151,9 @@ Cache-Control: no-store, no-cache, must-revalidate, max-age=0
 
 - GET /admin/ → CSP, HSTS headers presence
 - GET /admin/static/argon2.wasm → Content-Type: application/wasm
-- POST /shamir/v1/query без Bearer → 401
-- POST /shamir/v1/query с invalid Bearer → 401
-- POST /shamir/v1/query с expired session_id → 401, `session_expired`
+- (заменено токен-REST, TOKEN_API.md §15) POST /shamir/v1/query без Bearer → 401
+- (заменено) POST /shamir/v1/query с invalid Bearer → 401
+- (заменено) POST /shamir/v1/query с expired session_id → 401, `session_expired`
 - CSP violations при попытке inline script — browser blocks
 - CORS preflight для allowed origin → headers present; для disallowed → no CORS headers
 - WASM load via instantiateStreaming работает без `wasm-unsafe-eval`
