@@ -1,27 +1,15 @@
-//! Regression test for sub-bug 2c's retain-filter key-collision safety.
+//! Regression test for the v2 keyspace boundaries used by index-op filtering.
 //!
-//! The retain filter in `tx/pre_commit.rs`
-//! (`rederive_base_index_ops_post_stage`) identifies base_index posting ops
-//! by a physical-layout heuristic: key length exactly 41 or 25 bytes **and**
-//! first byte <= 1.  This test locks in the **current safe key-length /
-//! prefix facts for every existing backend** so the test breaks loudly at CI
-//! time the moment any backend's key format changes to collide — and serves
-//! as the obvious "extend me when you add a backend" example referenced by
-//! the contract comment above the filter.
-//!
-//! Backends that never produce posting ops (vector — its state lives in an
-//! in-memory HNSW graph, not the posting-op pipeline) are intentionally
-//! absent.
+//! The old v1 namespace is retained for drop/recovery sweeps; v2 postings
+//! use namespaces 0x02/0x03 and variable-length canonical identities.
 
 use shamir_types::types::record_id::RecordId;
 
 use crate::index::index_record_key::IndexRecordKey;
 use crate::index2::{build_posting_key, type_tag};
 
-/// Mirrors the retain filter's danger-zone logic from
-/// `pre_commit.rs::rederive_base_index_ops_post_stage` (the `retain`
-/// closure): a posting key is treated as a base_index candidate iff its
-/// length is exactly 41 or 25 bytes AND its first byte is <= 1.
+/// Current key layouts: v2 regular `[0x02][name LE][I][rid]`, v2 unique
+/// `[0x03][name LE][I]`, and legacy `[0x00|0x01][name][hashes]` for migration.
 fn is_base_index_retain_candidate(key: &[u8]) -> bool {
     (key.len() == 41 || key.len() == 25) && key.first().is_some_and(|&b| b <= 1)
 }
@@ -40,45 +28,52 @@ fn retain_filter_key_collision_safety() {
     let rid = RecordId::new();
 
     // ══════════════════════════════════════════════════════════════════════
-    // base_index regular — the filter's TARGET (MUST be in the danger zone).
-    // Format: IndexRecordKey(25 bytes) || RecordId(16 bytes) = 41 bytes.
-    // IndexRecordKey::to_bytes = [is_unique=0:1][name_interned:8LE][h1:8LE][h2:8LE].
+    // base_index regular — identity v2 (P34-12 S2).
+    // Format: [ns=0x02:1][name_interned:8LE][I:var][rid:16] — VARIABLE
+    // length, first byte 0x02. This documents WHY the historical 41/25
+    // + ns<=1 danger-zone heuristic (kept below as the local mirror) would
+    // MISS every v2 key: identity-based retraction is decided by PROVENANCE
+    // (name_interned, instance_epoch) since R0-B, never by byte shape.
     // ══════════════════════════════════════════════════════════════════════
-    let regular_irk = IndexRecordKey::new(false, 42).with_hash(0xDEAD_BEEF_CAFE, 0x1234_5678);
+    let regular_irk = IndexRecordKey::new(false, 42).with_identity(vec![
+        0x02, 0, 0, 0, 0, 0, 0, 0, 7, // canonical Int(7)
+    ]);
     let mut regular_key = regular_irk.to_bytes().to_vec();
     regular_key.extend_from_slice(rid.as_bytes());
     assert_eq!(
         regular_key.len(),
-        41,
-        "regular posting key must be 41 bytes"
+        9 + 9 + 16,
+        "regular posting key = 9-byte prefix + 9-byte identity + rid"
     );
     assert_eq!(
-        regular_key[0], 0,
-        "regular key first byte is is_unique=false=0"
+        regular_key[0], 0x02,
+        "regular key first byte is the v2 regular namespace"
     );
     assert!(
-        is_base_index_retain_candidate(&regular_key),
-        "base_index regular posting key MUST be in the danger zone — \
-         it is the filter's target"
+        !is_base_index_retain_candidate(&regular_key),
+        "a v2 regular key is OUTSIDE the historical heuristic's danger zone — \
+         retraction is provenance-based (R0-B), not byte-shape-based"
     );
 
-    // ══════════════════════════════════════════════════════════════════════
-    // base_index unique — the filter's TARGET (MUST be in the danger zone).
-    // Format: IndexRecordKey(25 bytes) only (no RecordId suffix — unique
-    // keys map to a single record).
-    // ══════════════════════════════════════════════════════════════════════
-    let unique_irk = IndexRecordKey::new(true, 42).with_hash(0xDEAD_BEEF_CAFE, 0x1234_5678);
-    let unique_key = unique_irk.to_bytes().to_vec();
-    assert_eq!(unique_key.len(), 25, "unique posting key must be 25 bytes");
-    assert_eq!(
-        unique_key[0], 1,
-        "unique key first byte is is_unique=true=1"
-    );
-    assert!(
-        is_base_index_retain_candidate(&unique_key),
-        "base_index unique posting key MUST be in the danger zone — \
-         it is the filter's target"
-    );
+    let legacy_key = IndexRecordKey::legacy_v1(true, 42)
+        .with_identity(vec![0xAA; 16])
+        .to_bytes();
+    assert_eq!(legacy_key.len(), 25);
+    assert!(is_base_index_retain_candidate(&legacy_key));
+
+    let unique_v2_key = IndexRecordKey::new(true, 42)
+        .with_identity(vec![0x02, 0, 0, 0, 0, 0, 0, 0, 7])
+        .to_bytes();
+    assert_eq!(unique_v2_key.len(), 18);
+    assert_eq!(unique_v2_key[0], 0x03);
+    assert!(!is_base_index_retain_candidate(&unique_v2_key));
+
+    let unique_v2_digest_key = IndexRecordKey::new(true, 42)
+        .with_identity(vec![0xFF; 33])
+        .to_bytes()
+        .to_vec();
+    assert_eq!(unique_v2_digest_key.len(), 42);
+    assert!(!is_base_index_retain_candidate(&unique_v2_digest_key));
 
     // ══════════════════════════════════════════════════════════════════════
     // sorted — safe via FIRST-BYTE guard (not length).

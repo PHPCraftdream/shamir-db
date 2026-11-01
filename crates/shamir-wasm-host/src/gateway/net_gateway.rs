@@ -20,9 +20,9 @@ use std::net::{IpAddr, Ipv4Addr};
 use super::env_policy::glob_matches;
 use super::ip_policy::{classify_ip, IpClass};
 
-/// Typed error for [`NetGateway`] and the egress guards
-/// (RV-WASM-HOST-DF4AD1DA). Replaces the previous stringly-typed errors so
-/// callers can classify allowlist/SSRF denials vs. DNS vs. transport failures.
+/// Typed error for [`NetGateway`] and the egress guards.
+/// Replaces stringly-typed errors so callers can classify allowlist/SSRF
+/// denials vs. DNS vs. transport failures.
 #[derive(Debug, thiserror::Error)]
 pub enum NetGatewayError {
     /// Request denied by the allowlist / SSRF guard (or bad URL/scheme).

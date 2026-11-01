@@ -38,7 +38,7 @@ Length-prefixed msgpack:
 
 3.3. **Certificate verification на клиенте:** НЕ через CA. Identity = Ed25519 pin.
 
-3.4. **TLS exporter:** `EXPORTER-ShamirDB-AUTH-v1`, контекст пустой, длина 32 байта (RFC 9266).
+3.4. **TLS exporter:** `EXPORTER-ShamirDB-AUTH-v1`, контекст пустой, длина 32 байта. Это проектно-специфичный экспортер: он использует механизм TLS-экспортеров по RFC 8446 §7.5 в реализации rustls, но НЕ является `tls-exporter`-меткой/регистрацией RFC 9266 — метка своя, байты на проводе не меняются (см. SECURITY_MODEL.md и `crates/shamir-transport-tcp/src/tls.rs:57`).
 
 3.5. **TLS 1.3 0-RTT:** запрещён.
 

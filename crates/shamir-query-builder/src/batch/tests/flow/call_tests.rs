@@ -8,6 +8,36 @@ use shamir_query_types::call::CallOp;
 use shamir_query_types::filter::FilterValue;
 use shamir_types::types::value::QueryValue;
 
+#[test]
+fn constructors_and_batch_calls_have_identical_msgpack_bytes() {
+    let default_values = [FilterValue::Int(7), FilterValue::String("x".into())];
+    let expected = CallOp::new("f", default_values.clone());
+    let mut batch = Batch::new();
+    batch.call("f", "f", default_values.clone());
+    let built = batch.build();
+    let BatchOp::Call(actual) = built.queries["f"].op.clone() else {
+        panic!("expected call operation");
+    };
+    assert_eq!(actual, expected);
+    assert_eq!(
+        rmp_serde::to_vec_named(&actual).unwrap(),
+        rmp_serde::to_vec_named(&expected).unwrap()
+    );
+
+    let explicit = CallOp::in_repo("f", "archive", default_values.clone());
+    let mut batch = Batch::new();
+    batch.call_in_repo("f", "f", "archive", default_values);
+    let built = batch.build();
+    let BatchOp::Call(actual) = built.queries["f"].op.clone() else {
+        panic!("expected repo-qualified call operation");
+    };
+    assert_eq!(actual, explicit);
+    assert_eq!(
+        rmp_serde::to_vec_named(&actual).unwrap(),
+        rmp_serde::to_vec_named(&explicit).unwrap()
+    );
+}
+
 // ============================================================================
 // Batch::call — basic construction
 // ============================================================================

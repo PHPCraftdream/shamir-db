@@ -34,8 +34,8 @@
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 
-/// Typed error for [`DbGateway`] (RV-WASM-HOST-DF4AD1DA). Replaces the
-/// previous stringly-typed errors so callers can classify failures.
+/// Typed error for [`DbGateway`]. Replaces stringly-typed errors so callers
+/// can classify failures.
 #[derive(Debug, thiserror::Error)]
 pub enum DbGatewayError {
     /// The requested table/record does not exist.

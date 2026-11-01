@@ -16,7 +16,6 @@
 
 use std::sync::Arc;
 
-use shamir_index::LEGACY_INDEX_FORMAT_VERSION;
 use shamir_query_types::admin::CreateIndexOp;
 use shamir_storage::types::{Repo, Store};
 use shamir_types::core::interner::TouchInd;
@@ -316,15 +315,24 @@ async fn create_does_not_error_or_panic_across_restart() {
     tbl1.interner().persist().await.unwrap();
     tbl1.flush_metadata().await.unwrap();
 
-    // legacy_indexes_need_rebuild's marker (`_m.idx.lfv`) must have been
-    // stamped by the first open — confirm it round-trips as durable
-    // config on its own (independent of the index-def check above).
-    let stamped_before = crate::index2::persistence::load_legacy_index_version(tbl1.info_store())
+    // The identity marker (`_m.idx.idv`) must have been stamped by the first
+    // open — confirm it round-trips as durable config on its own
+    // (independent of the index-def check above). New binaries never write
+    // the legacy `_m.idx.lfv` marker (0 = absent).
+    let stamped_before = crate::index2::persistence::load_index_identity_version(tbl1.info_store())
         .await
         .unwrap();
     assert_eq!(
-        stamped_before, LEGACY_INDEX_FORMAT_VERSION,
-        "first open must stamp the current legacy index format version"
+        stamped_before,
+        Some(crate::index2::persistence::INDEX_IDENTITY_VERSION),
+        "first open must stamp the current index identity version"
+    );
+    assert_eq!(
+        crate::index2::persistence::load_legacy_index_version(tbl1.info_store())
+            .await
+            .unwrap(),
+        0,
+        "a new-binary open must not write the legacy index format marker"
     );
 
     drop(tbl1);
@@ -340,12 +348,20 @@ async fn create_does_not_error_or_panic_across_restart() {
     // __history__ without misfiring `repair()` into an inconsistent state.
     let tbl2 = open_table(&repo2, "plain").await;
 
-    let stamped_after = crate::index2::persistence::load_legacy_index_version(tbl2.info_store())
+    let stamped_after = crate::index2::persistence::load_index_identity_version(tbl2.info_store())
         .await
         .unwrap();
     assert_eq!(
-        stamped_after, LEGACY_INDEX_FORMAT_VERSION,
-        "marker survives restart and stays current — no wasted repair() re-stamp"
+        stamped_after,
+        Some(crate::index2::persistence::INDEX_IDENTITY_VERSION),
+        "marker survives restart and stays current — no wasted migration re-stamp"
+    );
+    assert_eq!(
+        crate::index2::persistence::load_legacy_index_version(tbl2.info_store())
+            .await
+            .unwrap(),
+        0,
+        "the legacy index format marker stays absent after a restart"
     );
 
     let report = tbl2.verify().await.unwrap();

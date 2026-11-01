@@ -193,11 +193,21 @@ impl TableManager {
             let mut cache_index_keys: Vec<bytes::Bytes> = Vec::with_capacity(131_072);
 
             for (record_id, value) in &batch {
-                if let Some(irk) = build_index_key_from_record(false, name_interned, value, &paths)
+                if let Some((irk, canonical)) =
+                    build_index_key_from_record(false, name_interned, value, &paths)
                 {
                     let index_key = irk.to_bytes();
                     let posting_key = build_posting_key(&index_key, record_id);
-                    posting_writes.push((posting_key, bytes::Bytes::new()));
+                    // Value: empty for the inline form, canonical `C` for the
+                    // digest form (design P34-12 (a)).
+                    let value = if shamir_index::model::identity::identity_bytes::INLINE_MAX
+                        < canonical.len()
+                    {
+                        bytes::Bytes::from(canonical)
+                    } else {
+                        bytes::Bytes::new()
+                    };
+                    posting_writes.push((posting_key, value));
                     cache_index_keys.push(index_key);
                     count += 1;
                 }

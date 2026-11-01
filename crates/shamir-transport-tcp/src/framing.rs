@@ -303,17 +303,20 @@ pub async fn write_frame_prereserved_with_cap<W: AsyncWrite + Unpin>(
         return Err(FrameError::EmptyPayload);
     }
     // The payload length on the wire must match what's in the buffer.
+    // Malformed-buffer detection (RV-TRANSPORT-TCP-884DDBF5) takes priority
+    // over the size cap: a caller bug must surface as MalformedBuffer even
+    // when the bogus declared length also exceeds the cap.
     let actual_payload = buf.len() - 4;
+    if declared_len != actual_payload {
+        return Err(FrameError::MalformedBuffer(
+            "declared length does not match payload length",
+        ));
+    }
     if declared_len > max_frame_size {
         return Err(FrameError::TooLarge {
             actual: declared_len,
             max: max_frame_size,
         });
-    }
-    if declared_len != actual_payload {
-        return Err(FrameError::MalformedBuffer(
-            "declared length does not match payload length",
-        ));
     }
     writer.write_all(buf).await?;
     writer.flush().await?;

@@ -70,6 +70,7 @@ async fn seed_regular_index(
             &[IndexInfoItem::new(vec![field_key])],
         )
         .unwrap();
+        let (irk, _canonical) = irk;
         let index_key = irk.to_bytes();
         let record_id = RecordId::new();
         let posting_key = build_posting_key(&index_key, &record_id);
@@ -106,6 +107,7 @@ async fn seed_unique_index(
             &[IndexInfoItem::new(vec![field_key])],
         )
         .unwrap();
+        let (irk, _canonical) = irk;
         let index_key = irk.to_bytes();
         let record_id = RecordId::new();
         entries.push((

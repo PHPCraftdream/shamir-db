@@ -5,27 +5,76 @@ use crate::batch::build_error::BuildError;
 use crate::batch::handle::Handle;
 use crate::batch::into_batch_op::IntoBatchOp;
 use crate::filter::{and, not, or};
+use serde::Serialize;
+use shamir_collections::TMap;
 use shamir_query_types::batch::extract_base_alias;
 use shamir_query_types::batch::{BatchOp, BatchRequest, QueryEntry};
 use shamir_query_types::filter::{Filter, FilterValue};
 use shamir_query_types::read::{ReadQuery, Select, SelectItem};
 use shamir_types::types::value::QueryValue;
 
+#[derive(Serialize)]
+struct BorrowedBatchRequest<'a> {
+    id: &'a QueryValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: &'a Option<String>,
+    transactional: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    isolation: &'a Option<shamir_query_types::batch::IsolationLevel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    durability: &'a Option<shamir_query_types::batch::RequestDurability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_visibility: &'a Option<shamir_query_types::batch::IndexVisibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visibility_wait: &'a Option<shamir_query_types::batch::VisibilityWait>,
+    queries: &'a TMap<String, QueryEntry>,
+    return_all: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    return_only: &'a Option<Vec<String>>,
+    limits: &'a shamir_query_types::batch::BatchLimits,
+    #[serde(skip_serializing_if = "TMap::is_empty")]
+    interner_epochs: &'a TMap<String, u64>,
+    result_encoding: shamir_query_types::batch::ResultEncoding,
+}
+
+impl<'a> From<&'a Batch> for BorrowedBatchRequest<'a> {
+    fn from(batch: &'a Batch) -> Self {
+        Self {
+            id: &batch.id,
+            name: &batch.name,
+            transactional: batch.transactional,
+            isolation: &batch.isolation,
+            durability: &batch.durability,
+            index_visibility: &batch.index_visibility,
+            visibility_wait: &batch.visibility_wait,
+            queries: &batch.queries,
+            return_all: batch.return_all,
+            return_only: &batch.return_only,
+            limits: &batch.limits,
+            interner_epochs: &batch.interner_epochs,
+            result_encoding: batch.result_encoding,
+        }
+    }
+}
+
 impl Batch {
     // ── wire encoding (build + encode in one step) ─────────────────
 
     /// Validate and encode as msgpack (named fields) — primary wire format.
+    /// Serialization borrows all request payloads, avoiding a deep clone.
     ///
-    /// Runs [`Batch::try_build`] first, so deferred registration errors
+    /// Applies the same validation as [`Batch::try_build`] before encoding: deferred registration errors
     /// (duplicate alias, unknown `after`/`when` handle) and unresolved
     /// `$query` refs surface here as [`BuildError`] instead of being sent
     /// silently to the server. The rare codec failure on an already-validated
     /// request is mapped to [`BuildError::SerializationFailed`].
     pub fn to_msgpack(&self) -> Result<Vec<u8>, BuildError> {
-        let req = self.try_build()?;
-        rmp_serde::to_vec_named(&req).map_err(|e| BuildError::SerializationFailed {
-            alias: String::new(),
-            reason: e.to_string(),
+        self.validate()?;
+        rmp_serde::to_vec_named(&BorrowedBatchRequest::from(self)).map_err(|e| {
+            BuildError::SerializationFailed {
+                alias: String::new(),
+                reason: e.to_string(),
+            }
         })
     }
 

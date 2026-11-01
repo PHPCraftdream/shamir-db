@@ -390,6 +390,46 @@ async fn receipt_preflight_reuses_root_classification_and_matches_fallback() {
     );
 }
 
+struct BoundedDefaultResolver(Resolver);
+
+#[async_trait::async_trait]
+impl TableResolver for BoundedDefaultResolver {
+    async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
+        self.0.resolve(table).await
+    }
+
+    async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
+        let repo = self.0.resolve_repo(name).await?;
+        Ok(if name == "default" {
+            repo.with_commit_visibility_wait(STATUS)
+        } else {
+            repo
+        })
+    }
+}
+
+// The Call sits in an unbounded repository; only a write two bodies deeper
+// touches the bounded one, so the preflight must see the grandchild's repository.
+#[tokio::test]
+async fn nested_preflight_sees_bounded_repository_of_deeper_body() {
+    let resolver = BoundedDefaultResolver(fixture().await);
+    let mut innermost = Batch::new();
+    innermost.insert(
+        "deep",
+        Insert::with_repo("default", "items").row(doc().set("n", 1).unwrap()),
+    );
+    let mut middle = Batch::new();
+    middle.call_in_repo("call", "unavailable", "other", Vec::<i32>::new());
+    middle.sub_batch_no_bind("inner", innermost.build());
+    let mut outer = Batch::new();
+    outer.sub_batch_no_bind("middle", middle.build());
+    let request = outer.build();
+    let error = super::super::policy::validate(&request, &resolver, None)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), Some("validation"));
+}
+
 #[test]
 fn receipt_accounting_includes_metadata_and_nested_envelope_key() {
     let plain = crate::query::read::QueryResult::default();

@@ -8,4 +8,7 @@
 
 pub mod call_op;
 
+#[cfg(test)]
+mod tests;
+
 pub use call_op::CallOp;

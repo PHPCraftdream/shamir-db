@@ -1,6 +1,7 @@
 use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_keys::build_index_key_from_record;
 use crate::base_index::index_manager::IndexManager;
+use crate::model::identity::identity_bytes::{encode_unique_posting_value, INLINE_MAX};
 use crate::write_ops::IndexWriteOp;
 use bytes::Bytes;
 use shamir_storage::error::DbResult;
@@ -8,6 +9,30 @@ use shamir_storage::types::KvOp;
 use shamir_tx::{IndexFamily, Provenance};
 use shamir_types::record_view::RecordRef;
 use shamir_types::types::record_id::RecordId;
+
+/// The probe argument of [`IndexManager::check_unique_key`]: `None` for an
+/// INLINE probe (the key IS the canonical bytes `C`, so a posting found at
+/// that exact key is inline-form by construction and its 16-byte owner is
+/// authoritative), `Some(c)` for a DIGEST-form probe (`|c| > INLINE_MAX`):
+/// the key is only a locator, and the posting's value tail must equal `c`
+/// for a genuine duplicate.
+fn unique_probe(canonical: &[u8]) -> Option<&[u8]> {
+    if canonical.len() > INLINE_MAX {
+        Some(canonical)
+    } else {
+        None
+    }
+}
+
+/// Unique-posting VALUE for a record: owner only (inline form) or owner +
+/// `C` tail (digest form).
+fn unique_posting_value(record_id: &RecordId, canonical: &[u8]) -> Bytes {
+    let digest = canonical.len() > INLINE_MAX;
+    Bytes::from(encode_unique_posting_value(
+        record_id,
+        digest.then_some(canonical),
+    ))
+}
 
 /// R0-B (#1008): [`Provenance`] for an op planned against `def` on the
 /// UNIQUE base_index family. See `IndexDefinition::provenance`'s doc.
@@ -105,11 +130,14 @@ impl IndexManager {
             return Ok(());
         }
         for def in defs {
-            if let Some(irk) =
+            if let Some((irk, canonical)) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
                 let index_key = irk.to_bytes();
-                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
+                if let Some(existing_id) = self
+                    .check_unique_key(&index_key, unique_probe(&canonical))
+                    .await?
+                {
                     return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                         "Unique index '{}' violated: value already exists for record {:?}",
                         def.name_interned, existing_id
@@ -166,11 +194,14 @@ impl IndexManager {
         }
         let defs = self.indexes_unique.snapshot();
         for def in defs.iter() {
-            if let Some(irk) =
+            if let Some((irk, canonical)) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
                 let index_key = irk.to_bytes();
-                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
+                if let Some(existing_id) = self
+                    .check_unique_key(&index_key, unique_probe(&canonical))
+                    .await?
+                {
                     if released_in_tx.contains(index_key.as_ref())
                         && is_record_touched(&existing_id)
                     {
@@ -214,17 +245,24 @@ impl IndexManager {
             let new_key =
                 build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
 
-            // If the key is unchanged or both absent, skip.
+            // If the key is unchanged or both absent, skip. The comparison is
+            // on the canonical bytes (design (a)): equal canonical bytes imply
+            // equal keys AND equal digest tails, so an unchanged digest-form
+            // value can never be misread as "unchanged" from its digest alone.
             match (&old_key, &new_key) {
                 (None, None) => continue,
-                (Some(o), Some(n)) if o.to_bytes() == n.to_bytes() => continue,
+                (Some((o, oc)), Some((n, nc))) if o.to_bytes() == n.to_bytes() && oc == nc => {
+                    continue
+                }
                 _ => {}
             }
 
             // Check the new key (if present).
-            if let Some(nk) = &new_key {
+            if let Some((nk, nc)) = &new_key {
                 let index_key = nk.to_bytes();
-                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
+                if let Some(existing_id) =
+                    self.check_unique_key(&index_key, unique_probe(nc)).await?
+                {
                     if &existing_id != record_id {
                         return Err(shamir_storage::error::DbError::DuplicateKey(format!(
                             "Unique index '{}' violated: value already exists for record {:?}",
@@ -277,17 +315,22 @@ impl IndexManager {
             let new_key =
                 build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
 
-            // If the key is unchanged or both absent, skip.
+            // If the key is unchanged or both absent, skip (canonical-byte
+            // comparison — see `validate_unique_for_update`).
             match (&old_key, &new_key) {
                 (None, None) => continue,
-                (Some(o), Some(n)) if o.to_bytes() == n.to_bytes() => continue,
+                (Some((o, oc)), Some((n, nc))) if o.to_bytes() == n.to_bytes() && oc == nc => {
+                    continue
+                }
                 _ => {}
             }
 
             // Check the new key (if present).
-            if let Some(nk) = &new_key {
+            if let Some((nk, nc)) = &new_key {
                 let index_key = nk.to_bytes();
-                if let Some(existing_id) = self.check_unique_key(&index_key).await? {
+                if let Some(existing_id) =
+                    self.check_unique_key(&index_key, unique_probe(nc)).await?
+                {
                     if &existing_id == record_id {
                         continue;
                     }
@@ -310,39 +353,84 @@ impl IndexManager {
     pub(in crate::base_index) async fn check_unique_key(
         &self,
         index_key: &Bytes,
+        probe_canonical: Option<&[u8]>,
     ) -> DbResult<Option<RecordId>> {
         match self.info_store.get(index_key.clone().into()).await {
             Ok(bytes) => {
-                // P0-4 (#960): a unique-index posting MUST store exactly a
-                // 16-byte `RecordId`. Any other length is NECESSARILY genuine
-                // corruption of the posting value. Fail CLOSED by surfacing a
-                // typed `Codec` error, mirroring the F-83 (#911) corruption
-                // policy for `system:indexes` / `system:indexes_unique` blobs
-                // in `IndexManager::new`.
-                //
-                // The prior code logged a warning and returned `Ok(None)` —
-                // the SAME value as the genuine not-found arm below, which
-                // callers (`validate_unique_for_create/update`,
-                // `lookup_by_unique_index`) treat as "key is free". A
-                // corrupted unique posting was therefore silently treated as
-                // an EMPTY, insertable key, the opposite of this codebase's
-                // fail-closed policy: a subsequent write could pass
-                // unique-constraint validation and commit a duplicate on top
-                // of corrupted storage.
-                //
-                // The `NotFound` arm below remains the ONLY legitimate "key is
-                // free" path (a key that was never written). The `try_into`
-                // maps any length other than 16 (including 0, 15, 17, ...) to
-                // the typed error, so there is no infallible `unwrap()` left
-                // that would silently break if this path is ever reworked.
-                let arr: [u8; 16] = bytes.as_ref().try_into().map_err(|_| {
-                    shamir_storage::error::DbError::Codec(format!(
-                        "unique index posting corrupt: expected 16-byte RecordId, \
-                         got {} bytes (genuine corruption — fail-closed)",
-                        bytes.len()
-                    ))
-                })?;
-                Ok(Some(RecordId(arr)))
+                // P0-4 (#960) corruption policy, EXTENDED for identity v2
+                // (design section (a), fail-closed):
+                //   - an INLINE unique posting (inline key) must be exactly
+                //     the 16-byte owner `RecordId`;
+                //   - a DIGEST unique posting (`0xFF || BLAKE3-256(C)` key)
+                //     must be `16 + |C|` with `|C| > INLINE_MAX` — the
+                //     canonical tail is what a duplicate decision is made
+                //     on, so a digest posting without it is corruption;
+                //   - a digest probe whose posting tail differs from the
+                //     probe's `C` is a BLAKE3-256 collision of two DISTINCT
+                //     values: fail closed with `Internal` + `log::error!` —
+                //     never `DuplicateKey`, never an overwrite.
+                // Any other length is genuine corruption → typed `Codec`
+                // error (the prior code treated it as "key is free", the
+                // opposite of this codebase's fail-closed policy).
+                // The `NotFound` arm below remains the ONLY legitimate
+                // "key is free" path.
+                match probe_canonical {
+                    None => {
+                        // Inline probe: the key is the canonical bytes, so a
+                        // posting under it can only be inline-form.
+                        let arr: [u8; 16] = bytes.as_ref().try_into().map_err(|_| {
+                            shamir_storage::error::DbError::Codec(format!(
+                                "unique index posting corrupt: expected 16-byte RecordId, \
+                                 got {} bytes (genuine corruption — fail-closed)",
+                                bytes.len()
+                            ))
+                        })?;
+                        Ok(Some(RecordId(arr)))
+                    }
+                    Some(probe_c) => {
+                        let tail = crate::model::identity::identity_bytes::posting_value_tail(
+                            bytes.as_ref(),
+                        );
+                        match tail {
+                            Some(tail) if tail == probe_c => {
+                                let owner =
+                                    crate::model::identity::identity_bytes::unique_posting_owner(
+                                        bytes.as_ref(),
+                                    )
+                                    .ok_or_else(|| {
+                                        shamir_storage::error::DbError::Codec(
+                                            "unique index digest posting corrupt: missing owner"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                Ok(Some(owner))
+                            }
+                            Some(foreign_tail) => {
+                                let detail = format!(
+                                    "unique index identity digest collision: probe C is {} \
+                                     bytes, the posting at the same digest key carries a \
+                                     different {}-byte tail (BLAKE3-256 collision of two \
+                                     distinct values — failing closed, not DuplicateKey)",
+                                    probe_c.len(),
+                                    foreign_tail.len()
+                                );
+                                log::error!("{}", detail);
+                                Err(shamir_storage::error::DbError::Internal(detail))
+                            }
+                            None => {
+                                // No tail (16 B or short): a digest-form key
+                                // must always carry its canonical tail.
+                                Err(shamir_storage::error::DbError::Codec(format!(
+                                    "unique index posting corrupt: digest-form key with \
+                                     {}-byte value, expected 16 + |C| with |C| > {} \
+                                     (genuine corruption — fail-closed)",
+                                    bytes.len(),
+                                    crate::model::identity::identity_bytes::INLINE_MAX
+                                )))
+                            }
+                        }
+                    }
+                }
             }
             Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
@@ -373,10 +461,13 @@ impl IndexManager {
         let defs = self.indexes_unique.snapshot();
         let mut ops: Vec<KvOp> = Vec::with_capacity(defs.len());
         for def in defs.iter() {
-            if let Some(irk) =
+            if let Some((irk, canonical)) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
-                ops.push(KvOp::Set(irk.to_bytes().into(), record_id.to_bytes()));
+                ops.push(KvOp::Set(
+                    irk.to_bytes().into(),
+                    unique_posting_value(record_id, &canonical),
+                ));
             }
         }
         if !ops.is_empty() {
@@ -416,18 +507,24 @@ impl IndexManager {
             // on the same key, and remove-then-set never swaps to set-then-remove.
             match (old_key, new_key) {
                 (None, None) => {}
-                (None, Some(nk)) => {
-                    ops.push(KvOp::Set(nk.to_bytes().into(), record_id.to_bytes()));
+                (None, Some((nk, nc))) => {
+                    ops.push(KvOp::Set(
+                        nk.to_bytes().into(),
+                        unique_posting_value(record_id, &nc),
+                    ));
                 }
-                (Some(ok), None) => {
+                (Some((ok, _)), None) => {
                     ops.push(KvOp::Remove(ok.to_bytes().into()));
                 }
-                (Some(ok), Some(nk)) => {
+                (Some((ok, oc)), Some((nk, nc))) => {
                     let old_bytes = ok.to_bytes();
                     let new_bytes = nk.to_bytes();
-                    if old_bytes != new_bytes {
+                    if old_bytes != new_bytes || oc != nc {
                         ops.push(KvOp::Remove(old_bytes.into()));
-                        ops.push(KvOp::Set(new_bytes.into(), record_id.to_bytes()));
+                        ops.push(KvOp::Set(
+                            new_bytes.into(),
+                            unique_posting_value(record_id, &nc),
+                        ));
                     }
                 }
             }
@@ -455,7 +552,7 @@ impl IndexManager {
         let defs = self.indexes_unique.snapshot();
         let mut ops: Vec<KvOp> = Vec::with_capacity(defs.len());
         for def in defs.iter() {
-            if let Some(irk) =
+            if let Some((irk, _canonical)) =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
             {
                 ops.push(KvOp::Remove(irk.to_bytes().into()));
@@ -495,12 +592,12 @@ impl IndexManager {
         let defs = self.indexes_unique.snapshot();
         let mut ops = Vec::new();
         for def in defs.iter() {
-            if let Some(irk) =
+            if let Some((irk, canonical)) =
                 build_index_key_from_record(true, def.name_interned, value, &def.paths)
             {
                 ops.push(IndexWriteOp::SetPosting {
                     key: irk.to_bytes(),
-                    value: Bytes::copy_from_slice(record_id.as_bytes()),
+                    value: unique_posting_value(record_id, &canonical),
                     provenance: unique_provenance(def),
                 });
             }
@@ -533,24 +630,24 @@ impl IndexManager {
                 build_index_key_from_record(true, def.name_interned, new_value, &def.paths);
             match (old_key, new_key) {
                 (None, None) => {}
-                (None, Some(nk)) => {
+                (None, Some((nk, nc))) => {
                     ops.push(IndexWriteOp::SetPosting {
                         key: nk.to_bytes(),
-                        value: Bytes::copy_from_slice(record_id.as_bytes()),
+                        value: unique_posting_value(record_id, &nc),
                         provenance,
                     });
                 }
-                (Some(ok), None) => {
+                (Some((ok, _)), None) => {
                     ops.push(IndexWriteOp::RemovePosting {
                         key: ok.to_bytes(),
                         provenance,
                         owner: Some(*record_id.as_bytes()),
                     });
                 }
-                (Some(ok), Some(nk)) => {
+                (Some((ok, oc)), Some((nk, nc))) => {
                     let old_bytes = ok.to_bytes();
                     let new_bytes = nk.to_bytes();
-                    if old_bytes != new_bytes {
+                    if old_bytes != new_bytes || oc != nc {
                         ops.push(IndexWriteOp::RemovePosting {
                             key: old_bytes,
                             provenance,
@@ -558,7 +655,7 @@ impl IndexManager {
                         });
                         ops.push(IndexWriteOp::SetPosting {
                             key: new_bytes,
-                            value: Bytes::copy_from_slice(record_id.as_bytes()),
+                            value: unique_posting_value(record_id, &nc),
                             provenance,
                         });
                     }
@@ -582,7 +679,7 @@ impl IndexManager {
         let defs = self.indexes_unique.snapshot();
         let mut ops = Vec::new();
         for def in defs.iter() {
-            if let Some(irk) =
+            if let Some((irk, _canonical)) =
                 build_index_key_from_record(true, def.name_interned, old_value, &def.paths)
             {
                 ops.push(IndexWriteOp::RemovePosting {
@@ -615,12 +712,12 @@ impl IndexManager {
         for def in defs.iter() {
             let provenance = unique_provenance(def);
             for (rid, value) in items.clone() {
-                if let Some(irk) =
+                if let Some((irk, canonical)) =
                     build_index_key_from_record(true, def.name_interned, value, &def.paths)
                 {
                     ops.push(IndexWriteOp::SetPosting {
                         key: irk.to_bytes(),
-                        value: Bytes::copy_from_slice(rid.as_bytes()),
+                        value: unique_posting_value(rid, &canonical),
                         provenance,
                     });
                 }

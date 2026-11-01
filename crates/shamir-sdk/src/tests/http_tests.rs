@@ -38,6 +38,91 @@ fn rv_wasm_host_4c69cfe0_request_duplicate_headers_survive_wire() {
 }
 
 #[test]
+fn l3_rv_sdk_b5acd67d_http_response_rejects_malformed_envelopes() {
+    let invalid = [
+        Value::Null,
+        Value::Map(vec![]),
+        Value::Map(vec![("status".into(), Value::Int(700))]),
+        Value::Map(vec![("status".into(), Value::Str("200".into()))]),
+        Value::Map(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::List(vec![Value::Str("bad".into())]),
+            ),
+        ]),
+        Value::Map(vec![
+            ("status".into(), Value::Int(200)),
+            (
+                "headers".into(),
+                Value::Map(vec![("x".into(), Value::Int(1))]),
+            ),
+        ]),
+        Value::Map(vec![
+            ("status".into(), Value::Int(200)),
+            ("body".into(), Value::Str("not binary".into())),
+        ]),
+    ];
+    for value in invalid {
+        assert!(
+            crate::api::http::HttpResponse::from_value(&value).is_err(),
+            "{value:?}"
+        );
+    }
+}
+
+#[test]
+fn l3_rv_sdk_b5acd67d_http_response_rejects_duplicate_top_level_fields() {
+    for field in ["status", "headers", "body"] {
+        let value = if field == "status" {
+            Value::Map(vec![
+                ("status".into(), Value::Int(200)),
+                ("status".into(), Value::Int(201)),
+            ])
+        } else if field == "headers" {
+            Value::Map(vec![
+                ("status".into(), Value::Int(200)),
+                ("headers".into(), Value::List(vec![])),
+                ("body".into(), Value::Bin(vec![])),
+                ("headers".into(), Value::List(vec![])),
+            ])
+        } else {
+            Value::Map(vec![
+                ("status".into(), Value::Int(200)),
+                ("headers".into(), Value::List(vec![])),
+                ("body".into(), Value::Bin(vec![])),
+                ("body".into(), Value::Bin(vec![])),
+            ])
+        };
+        assert!(
+            crate::api::http::HttpResponse::from_value(&value).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn l3_rv_sdk_b5acd67d_http_response_decodes_exact_envelope() {
+    let wire = Value::Map(vec![
+        ("status".into(), Value::Int(201)),
+        (
+            "headers".into(),
+            Value::List(vec![Value::List(vec![
+                Value::Str("X-Test".into()),
+                Value::Str("yes".into()),
+            ])]),
+        ),
+        ("body".into(), Value::Bin(vec![0, 255, 1])),
+    ]);
+    let response = crate::api::http::HttpResponse::from_value(&wire).expect("valid envelope");
+    assert_eq!(response.status(), 201);
+    assert_eq!(
+        response.headers(),
+        &[("X-Test".to_string(), "yes".to_string())]
+    );
+    assert_eq!(response.body(), &[0, 255, 1]);
+}
+#[test]
 fn rv_wasm_host_4c69cfe0_response_duplicate_headers_round_trip() {
     // Host-style wire value: pair-list headers with two Set-Cookie entries.
     let wire = Value::Map(vec![

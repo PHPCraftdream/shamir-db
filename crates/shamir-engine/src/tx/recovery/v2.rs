@@ -431,6 +431,56 @@ pub async fn recover_inflight_v2(repo: &RepoInstance, permit: &RepoWritePermit) 
         finalized.push((entry.txn_id, entry.commit_version));
     }
 
+    // Identity-migration post-replay re-run (design P34-12 (c),
+    // "Pre-upgrade WAL entries"): WAL replay applies `IndexPut`/`IndexDel`
+    // with literal keys AFTER the tables are reachable — so a crash of an
+    // OLD binary followed by the first NEW open would replay v1/v3 keys
+    // after the open-time identity migration, leaving those records
+    // missing from the v2 index. Track every table that received an index
+    // op during replay (broadcast ops: all tables); after the loop, every
+    // table with BOTH marks (index op replayed this recovery AND identity
+    // migration ran at this open) re-runs the base migration. The data ops
+    // have been replayed by then, so the rebuild is complete. This also
+    // closes the same latent hole for the S9b v2->v3 bump. No WAL format
+    // change.
+    let mut replayed_index_tables: Vec<u64> = Vec::new();
+    let mut replayed_index_broadcast = false;
+    for entry in &entries {
+        for op in &entry.ops {
+            match op {
+                WalOpV2::IndexPut {
+                    table_id_interned: 0,
+                    ..
+                }
+                | WalOpV2::IndexDel {
+                    table_id_interned: 0,
+                    ..
+                } => replayed_index_broadcast = true,
+                WalOpV2::IndexPut {
+                    table_id_interned, ..
+                }
+                | WalOpV2::IndexDel {
+                    table_id_interned, ..
+                } => replayed_index_tables.push(*table_id_interned),
+                _ => {}
+            }
+        }
+    }
+    if replayed_index_broadcast || !replayed_index_tables.is_empty() {
+        for name in repo.list_table_names() {
+            let tbl = repo.get_table_admitted(&name, permit).await?;
+            let targeted =
+                replayed_index_broadcast || replayed_index_tables.contains(&tbl.table_token());
+            if targeted && tbl.identity_migrated_this_open() {
+                log::warn!(
+                    "post-replay identity re-run: table '{name}' received a replayed \
+                     pre-upgrade index op after migrating this open; rebuilding"
+                );
+                tbl.rerun_identity_migration_admitted(permit).await?;
+            }
+        }
+    }
+
     // Phase B (A11): force ONE interner persist so every replayed delta is
     // durably checkpointed before any entry is finalized. The persisted
     // high-water mark now covers every id any replayed entry referenced,

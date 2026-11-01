@@ -160,8 +160,7 @@ impl SystemStore {
     }
 
     /// Load a single repository's catalogue record by `(db_name, repo_name)`.
-    /// Returns `Ok(None)` when no matching row exists. Used by rename_repo to
-    /// preserve `engine` / `path` / `ResourceMeta` across the re-key.
+    /// Returns `Ok(None)` when no matching row exists.
     pub async fn load_repository_record(
         &self,
         db_name: &str,

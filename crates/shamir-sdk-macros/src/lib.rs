@@ -10,7 +10,7 @@ extern crate proc_macro;
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, FnArg, ItemFn, PatType, PathArguments, ReturnType, Type};
+use syn::{parse_macro_input, FnArg, ItemFn, PatType, ReturnType, Type};
 
 struct SdkPath(syn::Path);
 
@@ -58,7 +58,7 @@ fn validate_signature(
     if !return_valid {
         return Err(syn::Error::new_spanned(
             &sig.output,
-            format!("#[{name}] has an invalid return type"),
+            format!("#[{name}] requires an explicit return type"),
         ));
     }
     for arg in &sig.inputs {
@@ -139,12 +139,8 @@ pub fn validator(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand_validator(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
-    validate_signature(
-        &fn_item,
-        "validator",
-        3,
-        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_validation_return(ty)),
-    )?;
+    let return_type = matches!(fn_item.sig.output, ReturnType::Type(..));
+    validate_signature(&fn_item, "validator", 3, return_type)?;
     let arg_names = wrapper_idents(&fn_item);
 
     let arg0 = &arg_names[0]; // record
@@ -291,12 +287,8 @@ pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand_function(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
-    validate_signature(
-        &fn_item,
-        "function",
-        3,
-        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_result_value_return(ty)),
-    )?;
+    let return_type = matches!(fn_item.sig.output, ReturnType::Type(..));
+    validate_signature(&fn_item, "function", 3, return_type)?;
     let arg_names = wrapper_idents(&fn_item);
 
     let arg0 = &arg_names[0]; // ctx
@@ -377,6 +369,8 @@ fn expand_function(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2:
             let ctx = #sdk::Ctx::new();
             let batch = #sdk::Batch::new();
 
+            // The shared ABI driver polls every wrapper kind exactly once;
+            // Pending is rejected because the guest ABI cannot suspend.
             let outcome: #sdk::Result<#sdk::Result<#sdk::Value>> =
                 #sdk::__rt::block_on(#inner_name(ctx, batch, params));
 
@@ -425,7 +419,7 @@ fn expand_function(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2:
 /// Compile-time checks:
 /// - Must be `async`.
 /// - Exactly 2 arguments: `(ctx: Ctx, params: Params)`.
-/// - Return type must be `Result<Value>`.
+/// - Must declare a return type compatible with the SDK's concrete wrapper output (`Result<Value>`).
 #[proc_macro_attribute]
 pub fn procedure(attr: TokenStream, item: TokenStream) -> TokenStream {
     let SdkPath(sdk) = parse_macro_input!(attr as SdkPath);
@@ -439,12 +433,8 @@ pub fn procedure(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand_procedure(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
-    validate_signature(
-        &fn_item,
-        "procedure",
-        2,
-        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_result_value_return(ty)),
-    )?;
+    let return_type = matches!(fn_item.sig.output, ReturnType::Type(..));
+    validate_signature(&fn_item, "procedure", 2, return_type)?;
     let arg_names = wrapper_idents(&fn_item);
     let arg0 = &arg_names[0]; // ctx
     let arg1 = &arg_names[1]; // params
@@ -543,54 +533,6 @@ fn expand_procedure(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2
     Ok(expanded)
 }
 
-/// Returns `true` if the return type structurally matches `Result<Value>` in
-/// any qualification form accepted by the SDK: bare `Result<Value>` (via
-/// import), `shamir_sdk::Result<shamir_sdk::Value>`, `crate::Result<...>`,
-/// `::std::result::Result<Value, Error>`, `core::result::Result<...>`, and
-/// the rooted spellings of each. Any leading path prefix is accepted — the
-/// compiler is the real type guard; this only produces a clear message.
-fn is_result_value_return(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else { return false };
-    let Some(seg) = tp.path.segments.last() else {
-        return false;
-    };
-    if seg.ident != "Result" {
-        return false;
-    }
-    let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return false;
-    };
-    let mut it = args.args.iter();
-    let ok_ty = it.next().is_some_and(ga_ends_with("Value"));
-    match args.args.len() {
-        // `Result<Value>` (SDK alias) or `Result<Value, Error>`.
-        1 => ok_ty,
-        2 => ok_ty && it.next().is_some_and(ga_ends_with("Error")),
-        _ => false,
-    }
-}
-
-/// Returns `true` if the return type structurally matches `Validation` in any
-/// qualification form (`Validation`, `shamir_sdk::Validation`,
-/// `::shamir_sdk::Validation`, `crate::Validation`).
-fn is_validation_return(ty: &Type) -> bool {
-    let Type::Path(tp) = ty else { return false };
-    let Some(seg) = tp.path.segments.last() else {
-        return false;
-    };
-    seg.ident == "Validation" && matches!(&seg.arguments, PathArguments::None)
-}
-
-/// Closure checking that a generic argument's final path segment is `ident`.
-fn ga_ends_with(ident: &'static str) -> impl Fn(&syn::GenericArgument) -> bool {
-    move |ga: &syn::GenericArgument| matches!(ga, syn::GenericArgument::Type(ty) if last_ident_is_inner(ty, ident))
-}
-
-/// True if `ty`'s final path segment is `ident`.
-fn last_ident_is_inner(ty: &Type, ident: &str) -> bool {
-    matches!(ty, Type::Path(tp) if tp.path.segments.last().is_some_and(|s| s.ident == ident))
-}
-
 /// Returns `true` if the type token-stream contains `Ctx` anywhere.
 ///
 /// Used by `#[scalar]` as a best-effort signature diagnostic; aliases are not resolved.
@@ -629,7 +571,7 @@ fn type_contains_ctx(ty: &Type) -> bool {
 /// Compile-time checks:
 /// - Must be `async`.
 /// - Exactly 1 argument: `(params: Params)`.
-/// - Return type must be `Result<Value>`.
+/// - Must declare a return type compatible with the SDK's concrete wrapper output (`Result<Value>`).
 /// - **No argument type may contain `Ctx`** — compile error if it does.
 ///   Use `#[procedure]` for functions that need database access.
 #[proc_macro_attribute]
@@ -645,12 +587,8 @@ pub fn scalar(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand_scalar(fn_item: ItemFn, sdk: &syn::Path) -> syn::Result<proc_macro2::TokenStream> {
     let fn_name = &fn_item.sig.ident;
     let inner_name = helper_ident(fn_name);
-    validate_signature(
-        &fn_item,
-        "scalar",
-        1,
-        matches!(&fn_item.sig.output, ReturnType::Type(_, ty) if is_result_value_return(ty)),
-    )?;
+    let return_type = matches!(fn_item.sig.output, ReturnType::Type(..));
+    validate_signature(&fn_item, "scalar", 1, return_type)?;
     let arg_names = wrapper_idents(&fn_item);
     for arg in &fn_item.sig.inputs {
         if let FnArg::Typed(PatType { ty, .. }) = arg {

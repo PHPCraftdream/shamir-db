@@ -16,6 +16,7 @@ pub enum ErrorKind {
 pub struct Error {
     kind: ErrorKind,
     message: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 impl Error {
@@ -34,6 +35,18 @@ impl Error {
         Self::new(ErrorKind::Codec, msg)
     }
 
+    /// Create a codec error retaining its structured cause.
+    pub(crate) fn codec_with_source(
+        msg: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            kind: ErrorKind::Codec,
+            message: msg.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+
     /// Create a host/infrastructure error.
     pub fn host(msg: impl Into<String>) -> Self {
         Self::new(ErrorKind::Host, msg)
@@ -43,6 +56,7 @@ impl Error {
         Self {
             kind,
             message: msg.into(),
+            source: None,
         }
     }
 
@@ -75,7 +89,11 @@ impl std::fmt::Display for Error {
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|error| error as _)
+    }
+}
 
 /// Result alias for user-defined function returns.
 pub type Result<T> = core::result::Result<T, Error>;

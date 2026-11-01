@@ -24,14 +24,14 @@ pub fn decode_params(bytes: &[u8]) -> Result<Params> {
     match rmp_serde::from_slice::<Value>(bytes) {
         Ok(Value::Map(entries)) => Ok(Params::from_map(entries)),
         Ok(_) => Err(Error::codec("decode params: expected a string-keyed map")),
-        Err(e) => Err(Error::codec(format!("decode params: {e}"))),
+        Err(e) => Err(Error::codec_with_source(format!("decode params: {e}"), e)),
     }
 }
 
 /// Encode a `Value` to msgpack bytes. Codec failures surface as errors
 /// instead of an empty-byte fallback.
 pub fn encode_value(value: &Value) -> Result<Vec<u8>> {
-    rmp_serde::to_vec(value).map_err(|e| Error::codec(format!("encode value: {e}")))
+    rmp_serde::to_vec(value).map_err(|e| Error::codec_with_source(format!("encode value: {e}"), e))
 }
 
 /// Convert an exchange buffer to signed ABI fields after checking its range.
@@ -231,7 +231,8 @@ pub(crate) fn live_response_bytes() -> usize {
 /// Pure core of host-import response decoding: fail closed with the codec
 /// cause instead of a plausible fallback value.
 pub fn decode_value_bytes(bytes: &[u8]) -> Result<Value> {
-    rmp_serde::from_slice(bytes).map_err(|e| Error::codec(format!("decode host response: {e}")))
+    rmp_serde::from_slice(bytes)
+        .map_err(|e| Error::codec_with_source(format!("decode host response: {e}"), e))
 }
 
 /// Decode a packed `i64` host-import return into `(ptr, len)`.
@@ -247,9 +248,9 @@ pub fn unpack_ptr_len(packed: i64) -> Option<(i32, i32)> {
 
 /// Poll a future once on a no-op waker.
 ///
-/// Pure functions (the only kind this slice supports) are `Ready` on the
-/// first poll. A genuinely `Pending` future is an explicit error — the
-/// guest ABI has no suspension protocol, so there is no re-poll loop.
+/// Wrapper futures across all guest function kinds are polled exactly once on
+/// a no-op waker. A genuinely `Pending` future is an explicit error — the guest
+/// ABI has no suspension protocol, so there is no re-poll loop.
 pub fn block_on<F: Future>(future: F) -> Result<F::Output> {
     // Safety: a no-op waker that does nothing on wake/clone/drop.
     const VTABLE: RawWakerVTable = RawWakerVTable::new(

@@ -26,11 +26,23 @@ fn value_compare_op_to_compare_op(op: ValueCompareOp) -> CompareOp {
 }
 
 /// Compile a Filter AST into a tree of `FilterNode` (static dispatch).
+///
+/// This infallible adapter is for pre-validated filters. Invalid or over-cap
+/// patterns fold the whole filter to `False` (match nothing); validate wire
+/// input with `validate_executable_guards` before calling it. Compilation
+/// errors propagate through `Not`, `And`, and `Or`, so negation cannot invert
+/// this fail-closed result.
 pub fn compile_filter(filter: &Filter, interner: &Interner) -> FilterNode {
     try_compile_filter(filter, interner).unwrap_or(FilterNode::False)
 }
 
 /// Compile using the overlay snapshot already captured in the read context.
+///
+/// This infallible adapter is for pre-validated filters. Invalid or over-cap
+/// patterns fold the whole filter to `False` (match nothing); validate wire
+/// input with `validate_executable_guards` before calling it. Compilation
+/// errors propagate through `Not`, `And`, and `Or`, so negation cannot invert
+/// this fail-closed result.
 pub fn compile_filter_with_context(
     filter: &Filter,
     ctx: &crate::query::filter::FilterContext<'_>,

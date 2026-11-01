@@ -143,14 +143,24 @@ fn rv_types_18ac0cfc_index_key_raw_u64_parity() {
         let blob = raw_uint64_record(&interner, "n", value);
         let view = RecordView::new(&blob).expect("RecordView decodes uint64 record");
         let tree = InnerValue::from_bytes(&blob).expect("tree decodes uint64 record");
-        let view_key = build_index_key_from_record(false, name_interned, &view, &paths)
-            .expect("present raw field has an index key");
-        let tree_key = build_index_key_from_record(false, name_interned, &tree, &paths)
-            .expect("present tree field has an index key");
-        assert_eq!(view_key.hash1, tree_key.hash1, "hash1 for {value}");
-        assert_eq!(view_key.hash2, tree_key.hash2, "hash2 for {value}");
-        assert_eq!(view_key.is_unique, tree_key.is_unique);
-        assert_eq!(view_key.name_interned, tree_key.name_interned);
+        let (view_key, view_canonical) =
+            build_index_key_from_record(false, name_interned, &view, &paths)
+                .expect("present raw field has an index key");
+        let (tree_key, tree_canonical) =
+            build_index_key_from_record(false, name_interned, &tree, &paths)
+                .expect("present tree field has an index key");
+        // Identity v2: the canonical identity replaces the two hash words, and
+        // the key bytes carry the namespace (regular/unique) and the index name.
+        assert_eq!(
+            view_canonical, tree_canonical,
+            "canonical identity for {value}"
+        );
+        assert_eq!(
+            view_key.to_bytes(),
+            tree_key.to_bytes(),
+            "key bytes for {value}"
+        );
+        assert_eq!(view_key.name_interned(), tree_key.name_interned());
     }
 }
 

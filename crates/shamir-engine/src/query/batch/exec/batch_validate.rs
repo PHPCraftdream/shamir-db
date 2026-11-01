@@ -160,6 +160,27 @@ fn validate_entry_surfaces(entry: &QueryEntry, alias: &str) -> Result<(), BatchE
         BatchOp::Update(update) => filters.extend(update.where_clause.iter()),
         BatchOp::Batch(sub) => values.extend(sub.bind.values()),
         BatchOp::ForEach(for_each) => values.push(&for_each.over),
+        BatchOp::Call(call) => values.extend(&call.params),
+        BatchOp::Subscribe(subscribe) => {
+            filters.extend(
+                subscribe
+                    .subscribe
+                    .iter()
+                    .filter_map(|source| source.filter.as_ref()),
+            );
+        }
+        BatchOp::SetTableSchema(op) => {
+            values.extend(
+                op.schema
+                    .iter()
+                    .filter_map(|rule| rule.constraints.default.as_ref()),
+            );
+        }
+        BatchOp::AddSchemaRule(op) => {
+            if let Some(default) = &op.rule.constraints.default {
+                values.push(default);
+            }
+        }
         _ => {}
     }
     for filter in filters {

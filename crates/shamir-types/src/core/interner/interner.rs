@@ -98,6 +98,8 @@ pub struct Interner {
     counters: QuotaCounters,
     #[cfg(test)]
     all_entries_calls: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    max_id_slots_inspected: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for Interner {
@@ -121,6 +123,8 @@ impl Interner {
             counters: QuotaCounters::new(0, 0),
             #[cfg(test)]
             all_entries_calls: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            max_id_slots_inspected: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -199,6 +203,8 @@ impl Interner {
             counters: QuotaCounters::new(count, bytes),
             #[cfg(test)]
             all_entries_calls: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            max_id_slots_inspected: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -490,10 +496,18 @@ impl Interner {
         self.all_entries_calls.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub(crate) fn max_published_id_reverse_slots_inspected(&self) -> usize {
+        self.max_id_slots_inspected.load(Ordering::Relaxed)
+    }
+
     /// Highest currently published reverse ID, or zero when empty.
     pub fn max_published_id(&self) -> u64 {
-        self.reverse
-            .load()
+        let reverse = self.reverse.load();
+        #[cfg(test)]
+        self.max_id_slots_inspected
+            .fetch_add(reverse.len(), Ordering::Relaxed);
+        reverse
             .iter()
             .rposition(|slot| slot.get().is_some())
             .unwrap_or(0) as u64

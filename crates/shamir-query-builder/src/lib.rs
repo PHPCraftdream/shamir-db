@@ -46,6 +46,10 @@
 #[cfg(test)]
 extern crate self as shamir_query_builder;
 
+#[cfg(test)]
+#[path = "batch/tests/op/allocation_counter.rs"]
+mod testing_alloc;
+
 pub mod batch;
 #[doc(hidden)]
 pub use shamir_collections;

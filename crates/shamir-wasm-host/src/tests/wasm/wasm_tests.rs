@@ -8,6 +8,37 @@ use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
 use wasmtime::Module;
 
+const NESTED_CALL_NON_MAP_PARAMS_WAT: &str = r#"
+(module
+  (import "shamir_host" "call" (func $call (param i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "child\00\07")
+  (func (export "run")
+    (drop (call $call (i32.const 0) (i32.const 5) (i32.const 6) (i32.const 1))))
+)
+"#;
+
+const NESTED_CALL_MALFORMED_PARAMS_WAT: &str = r#"
+(module
+  (import "shamir_host" "call" (func $call (param i32 i32 i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "child\00\c1")
+  (func (export "run")
+    (drop (call $call (i32.const 0) (i32.const 5) (i32.const 6) (i32.const 1))))
+)
+"#;
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_nested_call_non_map_params_traps() {
+    let error = import_error(NESTED_CALL_NON_MAP_PARAMS_WAT).await;
+    assert!(error.contains("params not a map"), "{error}");
+}
+
+#[tokio::test]
+async fn rv_wasm_host_91385be0_nested_call_malformed_params_traps() {
+    let error = import_error(NESTED_CALL_MALFORMED_PARAMS_WAT).await;
+    assert!(error.contains("params decode error"), "{error}");
+}
 #[test]
 fn borrowed_params_encoding_matches_query_value_map() {
     let mut nested = new_map();

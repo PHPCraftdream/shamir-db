@@ -147,8 +147,16 @@ async fn test_delete_last_record_removes_index_key() {
 
     // Verify key is actually removed from store (not just empty BTreeSet)
     // The index key should not exist at all
+    // Identity v2: compute the key via the shared codec instead of the
+    // removed deprecated `with_values` helper (P34-12 S2).
+    let identity = crate::base_index::index_keys::canonical_from_values(&[InnerValue::Str(
+        "unique_value".to_string(),
+    )])
+    .expect("probe has identity");
     let index_key = IndexRecordKey::new(false, 1001)
-        .with_values(&[&InnerValue::Str("unique_value".to_string())])
+        .with_identity(crate::model::identity::identity_bytes::identity_bytes(
+            &identity,
+        ))
         .to_bytes();
     let store_result = info_store.get(index_key.into()).await;
     assert!(

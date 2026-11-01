@@ -196,7 +196,11 @@ impl TableManager {
                         Some(&view),
                         actor,
                         tx,
-                        resolver,
+                        crate::validator::ValidatorFkCtx {
+                            resolver,
+                            // Deletes never gain FK parents; no batch cache.
+                            fk_cache: None,
+                        },
                     )
                     .await
                     .map_err(validator_failure_to_db_error)?;

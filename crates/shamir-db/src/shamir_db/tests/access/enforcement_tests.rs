@@ -567,7 +567,7 @@ async fn make_fn_with_security(
     fn_rec_map.insert("mode".to_string(), QueryValue::Int(mode as i64));
     let mut fn_rec = QueryValue::Map(fn_rec_map);
     // Inject the declared `security` (and visibility / empty grants) into
-    // the persisted record so `FunctionMeta::from_record` reads it back.
+    // the persisted record so `try_from_record` reads it back.
     shamir_engine::function::FunctionMeta::new(
         shamir_engine::function::Visibility::Private,
         security,

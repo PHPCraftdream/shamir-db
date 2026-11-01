@@ -24,6 +24,7 @@ pub use options::{
 };
 
 #[cfg(test)]
+pub(crate) use api::encode_named_into;
 pub(crate) use api::should_advertise_interner_epochs;
 #[cfg(test)]
 pub(crate) use connect::resume_security::{

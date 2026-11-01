@@ -36,3 +36,26 @@ pub struct CallOp {
     #[serde(default = "default_repo")]
     pub repo: String,
 }
+
+impl CallOp {
+    /// Construct a call in the default repository context.
+    pub fn new(
+        call: impl Into<String>,
+        params: impl IntoIterator<Item = impl Into<FilterValue>>,
+    ) -> Self {
+        Self::in_repo(call, default_repo(), params)
+    }
+
+    /// Construct a call in an explicitly selected repository context.
+    pub fn in_repo(
+        call: impl Into<String>,
+        repo: impl Into<String>,
+        params: impl IntoIterator<Item = impl Into<FilterValue>>,
+    ) -> Self {
+        Self {
+            call: call.into(),
+            params: params.into_iter().map(Into::into).collect(),
+            repo: repo.into(),
+        }
+    }
+}

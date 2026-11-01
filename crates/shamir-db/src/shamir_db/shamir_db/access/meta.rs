@@ -140,12 +140,16 @@ impl ShamirDb {
             },
             ResourcePathRef::FunctionFolder { .. }
             | ResourcePathRef::FunctionFolderPrefix { .. } => {
-                let path_key: Cow<'_, str> = match table_path {
-                    ResourcePathRef::FunctionFolder { path } => Cow::Owned(path.join("/")),
-                    ResourcePathRef::FunctionFolderPrefix { prefix } => Cow::Borrowed(prefix),
+                let result = match table_path {
+                    ResourcePathRef::FunctionFolder { path } => {
+                        self.system_store.load_function_folder_path(path).await
+                    }
+                    ResourcePathRef::FunctionFolderPrefix { prefix } => {
+                        self.system_store.load_function_folder(prefix).await
+                    }
                     _ => unreachable!(),
                 };
-                match self.system_store.load_function_folder(&path_key).await {
+                match result {
                     Ok(Some(r)) => Ok(ResourceMeta::from_record(&r)),
                     // Read persisted meta if the folder was explicitly created;
                     // fall back to open so functions with slash-names under
@@ -154,6 +158,18 @@ impl ShamirDb {
                     // do not change this arm.
                     Ok(None) => Ok(ResourceMeta::default()),
                     Err(e) => {
+                        // L3-RV-TYPES-A7B1FCEC (a): the failure diagnostic must
+                        // carry the FULL folder path, not just the last
+                        // segment. The join runs only here — on the cold
+                        // (error) path — so the hot authorization traversal
+                        // performs no diagnostic allocation on success.
+                        let path_key: Cow<'_, str> = match table_path {
+                            ResourcePathRef::FunctionFolderPrefix { prefix } => {
+                                Cow::Borrowed(prefix)
+                            }
+                            ResourcePathRef::FunctionFolder { path } => Cow::Owned(path.join("/")),
+                            _ => unreachable!(),
+                        };
                         log::warn!(
                             "resource_meta: failed to load function folder '{}' meta: {}",
                             escape_resource_diagnostic(&path_key),

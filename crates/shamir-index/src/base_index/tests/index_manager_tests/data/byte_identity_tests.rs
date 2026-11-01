@@ -34,92 +34,68 @@ use crate::base_index::index_manager::IndexManager;
 
 use crate::base_index::tests::index_manager_tests::helpers::create_manager;
 
-// Derived independently from rustc-hash 2.1.2: wrapping (state + word) * K,
-// finish rotate-left 26, and the 25-byte little-endian IndexRecordKey layout.
-// String bytes use hash_bytes followed by Rust's 0xff str terminator; decimal
-// uses normalized (123456_i128, 3_u32), Big uses positive 2^63 magnitude.
-#[cfg(target_pointer_width = "64")]
+// Identity v2 golden (rewritten from the v3 rustc-hash pins by
+// rv_index_605eec5d; design P34-12 (a) freezes the canonical codec, so any
+// byte below is an identity-version bump and MUST fail CI). Key layout:
+// `[ns][name_interned LE][C]` with ns 0x02 regular / 0x03 unique; C is the
+// canonical encoding computed by hand from the frozen codec (leaf tags in
+// `model::identity::canonical`). name_interned 5000 LE = 0x88 0x13.
 #[test]
 fn rv_index_605eec5d_golden_regular_unique_keys() {
-    type GoldenCase = (&'static str, Vec<InnerValue>, [u8; 25], [u8; 25]);
+    // (label, lookup values, canonical bytes C expected for that value)
+    type GoldenCase = (&'static str, Vec<InnerValue>, &'static [u8]);
     let cases: Vec<GoldenCase> = vec![
+        // Int(-42): tag 0x02 + i64 BE (-42).
         (
             "Int",
             vec![InnerValue::Int(-42)],
-            [
-                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x06, 0x61, 0xf3, 0x20, 0x31, 0x97, 0x69, 0xc9,
-                0xf4, 0x58, 0xd8, 0x34, 0x0a, 0x50, 0xf8, 0xfa,
-            ],
-            [
-                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x06, 0x61, 0xf3, 0x20, 0x31, 0x97, 0x69, 0xc9,
-                0xf4, 0x58, 0xd8, 0x34, 0x0a, 0x50, 0xf8, 0xfa,
-            ],
+            &[0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xD6],
         ),
+        // Str("hello"): tag 0x06 + u32 BE len + bytes.
         (
             "Str",
             vec![InnerValue::Str("hello".to_string())],
-            [
-                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xf0, 0xea, 0x08, 0xc4, 0x49, 0x82, 0x24, 0xcf,
-                0xc2, 0x1f, 0x50, 0x2a, 0x8a, 0xb7, 0xb1, 0x36,
-            ],
-            [
-                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xf0, 0xea, 0x08, 0xc4, 0x49, 0x82, 0x24, 0xcf,
-                0xc2, 0x1f, 0x50, 0x2a, 0x8a, 0xb7, 0xb1, 0x36,
-            ],
+            &[0x06, 0x00, 0x00, 0x00, 0x05, b'h', b'e', b'l', b'l', b'o'],
         ),
+        // F64(42.0): integral f64 lands in the INTEGER class — the exact
+        // bytes of Int(42) (the ONE NumericKey rule).
         (
             "F64 integral",
             vec![InnerValue::F64(42.0)],
-            [
-                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x5a, 0x92, 0x89, 0xb1, 0x03, 0x16, 0x4b, 0x26,
-                0x48, 0x8a, 0x6e, 0xc5, 0xdc, 0xce, 0xd9, 0x57,
-            ],
-            [
-                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x5a, 0x92, 0x89, 0xb1, 0x03, 0x16, 0x4b, 0x26,
-                0x48, 0x8a, 0x6e, 0xc5, 0xdc, 0xce, 0xd9, 0x57,
-            ],
+            &[0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A],
         ),
+        // Dec(123.456): non-integral exact decimal — tag 0x05 + i128 BE
+        // mantissa (123456) + u32 BE scale (3).
         (
             "Dec",
             vec![InnerValue::Dec(
                 rust_decimal::Decimal::from_str("123.456").unwrap(),
             )],
-            [
-                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xb9, 0xea, 0x0e, 0x77, 0x21, 0x4e, 0x9e, 0x02,
-                0x5d, 0xe1, 0x69, 0x69, 0xb2, 0x12, 0x0e, 0x47,
-            ],
-            [
-                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xb9, 0xea, 0x0e, 0x77, 0x21, 0x4e, 0x9e, 0x02,
-                0x5d, 0xe1, 0x69, 0x69, 0xb2, 0x12, 0x0e, 0x47,
+            &[
+                0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xE2, 0x40, 0x00, 0x00, 0x00, 0x03,
             ],
         ),
+        // Big(2^63): canonical BigBits class (i64 overflow), tag 0x03, non-negative sign, u32 length 8, magnitude BE.
         (
             "Big",
             vec![InnerValue::Big(BigInt::from(1_u64) << 63_usize)],
-            [
-                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x61, 0x12, 0xb8, 0xa5, 0xfd, 0x79, 0x50, 0x6c,
-                0x05, 0x09, 0x13, 0x98, 0x8e, 0x3e, 0xc0, 0xb0,
-            ],
-            [
-                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0x61, 0x12, 0xb8, 0xa5, 0xfd, 0x79, 0x50, 0x6c,
-                0x05, 0x09, 0x13, 0x98, 0x8e, 0x3e, 0xc0, 0xb0,
+            &[
+                0x03, 0x00, 0x00, 0x00, 0x00, 0x08, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             ],
         ),
+        // composite (Int 7, Int -11): two integer leaves concatenated.
         (
             "composite Int,Int",
             vec![InnerValue::Int(7), InnerValue::Int(-11)],
-            [
-                0, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xe8, 0xef, 0x9d, 0xc2, 0x57, 0xa3, 0xdd, 0x8f,
-                0x8c, 0xe6, 0xf8, 0xb4, 0xe8, 0x67, 0x4d, 0xd4,
-            ],
-            [
-                1, 0x88, 0x13, 0, 0, 0, 0, 0, 0, 0xe8, 0xef, 0x9d, 0xc2, 0x57, 0xa3, 0xdd, 0x8f,
-                0x8c, 0xe6, 0xf8, 0xb4, 0xe8, 0x67, 0x4d, 0xd4,
+            &[
+                0x02, 0, 0, 0, 0, 0, 0, 0, 7, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF5,
             ],
         ),
     ];
 
-    for (label, values, regular, unique) in cases {
+    // Intentionally pinned IDV2 literals; the Big(2^63) row is BigBits (i64 overflow).
+    let _frozen_namespace_bytes = [0x02u8, 0x03];
+    for (label, values, canonical) in cases {
         let mut fields = new_map();
         let mut paths = Vec::new();
         for (id, value) in [401_u64, 402].into_iter().zip(&values) {
@@ -127,18 +103,36 @@ fn rv_index_605eec5d_golden_regular_unique_keys() {
             paths.push(IndexInfoItem::new(vec![id]));
         }
         let record = InnerValue::Map(fields);
-        for (is_unique, expected) in [(false, regular), (true, unique)] {
-            let written = build_index_key_from_record(is_unique, 5000, &record, &paths)
-                .expect("indexed fields exist")
-                .to_bytes();
-            let lookup = build_index_key(is_unique, 5000, &values).to_bytes();
+        for (is_unique, ns) in [(false, 0x02u8), (true, 0x03u8)] {
+            // Golden literals above remain independent of the codec constants.
+            assert_eq!(ns, if is_unique { 0x03 } else { 0x02 });
+            let mut expected = Vec::with_capacity(9 + canonical.len());
+            expected.push(ns);
+            expected.extend_from_slice(&5000u64.to_le_bytes());
+            if canonical.len() <= crate::model::identity::identity_bytes::INLINE_MAX {
+                expected.extend_from_slice(canonical);
+            } else {
+                expected.push(0xFF);
+                expected.extend_from_slice(
+                    &crate::model::identity::identity_bytes::digest_identity(canonical),
+                );
+            }
+
+            let (written, written_canonical) =
+                build_index_key_from_record(is_unique, 5000, &record, &paths)
+                    .expect("indexed fields exist");
             assert_eq!(
-                written.as_ref(),
+                written_canonical, canonical,
+                "{label} canonical {is_unique}"
+            );
+            assert_eq!(
+                written.to_bytes().as_ref(),
                 expected.as_slice(),
                 "{label} write {is_unique}"
             );
+            let lookup = build_index_key(is_unique, 5000, &values).expect("probe has identity");
             assert_eq!(
-                lookup.as_ref(),
+                lookup.to_bytes().as_ref(),
                 expected.as_slice(),
                 "{label} lookup {is_unique}"
             );
@@ -298,9 +292,11 @@ fn deterministic_same_record_same_key() {
     for case in single_field_cases() {
         let paths = vec![IndexInfoItem::new(vec![case.field])];
         let key1 = build_index_key_from_record(false, 5000, &rec, &paths)
-            .unwrap_or_else(|| panic!("{}: must produce a key", case.label));
+            .unwrap_or_else(|| panic!("{}: must produce a key", case.label))
+            .0;
         let key2 = build_index_key_from_record(false, 5000, &rec, &paths)
-            .unwrap_or_else(|| panic!("{}: must produce a key", case.label));
+            .unwrap_or_else(|| panic!("{}: must produce a key", case.label))
+            .0;
         assert_eq!(
             key1.to_bytes(),
             key2.to_bytes(),
@@ -318,14 +314,15 @@ fn write_path_matches_lookup_path() {
         let paths = vec![IndexInfoItem::new(vec![case.field])];
         // Write path (via RecordRef).
         let write_key = build_index_key_from_record(false, 5000, &rec, &paths)
-            .unwrap_or_else(|| panic!("{}: must produce a key", case.label));
+            .unwrap_or_else(|| panic!("{}: must produce a key", case.label))
+            .0;
         // Lookup path (via InnerValue).
         let mut cur = &rec;
         cur = match cur {
             InnerValue::Map(map) => &map[&InternerKey::new(case.field)],
             _ => unreachable!(),
         };
-        let lookup_key = build_index_key(false, 5000, &[cur.clone()]);
+        let lookup_key = build_index_key(false, 5000, &[cur.clone()]).expect("probe has identity");
         assert_eq!(
             write_key.to_bytes(),
             lookup_key.to_bytes(),
@@ -347,8 +344,12 @@ fn different_values_different_keys() {
     let rec2 = InnerValue::Map(m2);
 
     let paths = vec![IndexInfoItem::new(vec![F_INT])];
-    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths).unwrap();
-    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths).unwrap();
+    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths)
+        .unwrap()
+        .0;
+    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths)
+        .unwrap()
+        .0;
     assert_ne!(
         key1.to_bytes(),
         key2.to_bytes(),
@@ -379,8 +380,12 @@ fn set_order_independent() {
     let rec2 = InnerValue::Map(m2);
 
     let paths = vec![IndexInfoItem::new(vec![100])];
-    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths).unwrap();
-    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths).unwrap();
+    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths)
+        .unwrap()
+        .0;
+    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths)
+        .unwrap()
+        .0;
     assert_eq!(
         key1.to_bytes(),
         key2.to_bytes(),
@@ -408,8 +413,12 @@ fn map_order_independent() {
     let rec2 = InnerValue::Map(m2);
 
     let paths = vec![IndexInfoItem::new(vec![100])];
-    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths).unwrap();
-    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths).unwrap();
+    let key1 = build_index_key_from_record(false, 5000, &rec1, &paths)
+        .unwrap()
+        .0;
+    let key2 = build_index_key_from_record(false, 5000, &rec2, &paths)
+        .unwrap()
+        .0;
     assert_eq!(
         key1.to_bytes(),
         key2.to_bytes(),
@@ -466,8 +475,12 @@ async fn round_trip_composite_index() {
 fn unique_flag_flips_key() {
     let rec = record_with_every_type();
     let paths = vec![IndexInfoItem::new(vec![F_DEC])];
-    let unique_key = build_index_key_from_record(true, 5002, &rec, &paths).unwrap();
-    let nonunique_key = build_index_key_from_record(false, 5002, &rec, &paths).unwrap();
+    let unique_key = build_index_key_from_record(true, 5002, &rec, &paths)
+        .unwrap()
+        .0;
+    let nonunique_key = build_index_key_from_record(false, 5002, &rec, &paths)
+        .unwrap()
+        .0;
     assert_ne!(
         unique_key.to_bytes(),
         nonunique_key.to_bytes(),

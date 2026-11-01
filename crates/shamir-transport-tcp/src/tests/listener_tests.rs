@@ -134,8 +134,11 @@ async fn bind_validated_refuses_plain_on_unspecified() {
     assert!(matches!(r, Err(ListenerBindError::PlainOnNonLoopback(_))));
 }
 
+/// RV-TRANSPORT-TCP-93246CAF: renamed from `..._on_unspecified` — the body
+/// binds 127.0.0.1 (loopback). The real unspecified-bind regression is
+/// `rv_transport_tcp_93246caf_bind_validated_tls_unspecified_address`.
 #[tokio::test]
-async fn bind_validated_succeeds_for_tls_on_unspecified() {
+async fn bind_validated_succeeds_for_tls_on_loopback() {
     let addr = sa("127.0.0.1", 0); // use loopback to avoid firewall prompts in CI
     let _l = crate::listener::bind_validated(addr, ListenerProfile::TlsExporter)
         .await

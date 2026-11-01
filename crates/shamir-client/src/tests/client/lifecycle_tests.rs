@@ -726,15 +726,27 @@ async fn rv_client_b42b8576_no_write_midframe_after_close() {
 fn rv_client_e16a04e5_roundtrip_serialize_uses_borrowed_request_bytes() {
     let source = include_str!("../../client/api.rs");
     let start = source
-        .find("REQ_BUF.with(|cell| -> Result")
+        .find("let encode_result: Result<(), ClientError> = {")
         .expect("scratch serializer exists");
     let end = source[start..]
-        .find("let (tx, rx)")
-        .expect("registration follows encoding");
+        .find("encode_result?;")
+        .expect("encoding feeds the write phase");
     let serializer = &source[start..start + end];
+    // Cards RV-CLIENT-E16A04E5 / RV-CLIENT-35A189A9 / RV-TRANSPORT-TCP-79910BA5:
+    // the roundtrip serializes the borrowed envelope against the OWNED
+    // thread-local scratch slots (`mem`-take style `take()` out of the
+    // `RefCell`, borrow released before any `.await`), via the typed-source
+    // `encode_named_into` helper, with no clone of the request bytes.
+    assert!(serializer.contains("REQ_BUF.with(|cell| std::mem::take(&mut *cell.borrow_mut()))"));
+    assert!(
+        serializer.contains("REQ_BODY_BUF.with(|cell| std::mem::take(&mut *cell.borrow_mut()))")
+    );
     assert!(serializer.contains("RequestEnvelopeRef"));
-    assert!(serializer.contains("req: &buf"));
+    assert!(serializer.contains("encode_named_into"));
+    // The frame prefix is patched in place — no second/third frame buffer.
+    assert!(serializer.contains("framed_vec[0..4].copy_from_slice(&len)"));
     assert!(!serializer.contains("buf.clone()"));
+    assert!(!serializer.contains("to_msgpack"));
 }
 
 /// Structural synchronization guard: scopes contain lock acquisition through

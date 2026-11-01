@@ -8,6 +8,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_storage::error::DbError;
 use shamir_types::types::value::QueryValue;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Identity-echo WAT matching the slice-2 ABI.
 ///
@@ -133,10 +134,17 @@ pub(crate) async fn start_mock_http_server(response_body: &[u8]) -> u16 {
 
     tokio::spawn(async move {
         if let Ok((mut sock, _)) = listener.accept().await {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
             let mut buf = vec![0u8; 4096];
-            // Read until \r\n\r\n (end of headers).
-            let _ = sock.read(&mut buf).await;
+            let mut received = 0;
+            while received < buf.len() && !buf[..received].windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf[received..]).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => received += n,
+                }
+            }
+            if !buf[..received].windows(4).any(|w| w == b"\r\n\r\n") {
+                return;
+            }
             let resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()

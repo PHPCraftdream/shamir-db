@@ -3,6 +3,7 @@ use crate::base_index::index_definition::IndexDefinition;
 use crate::base_index::index_keys::build_index_key_from_record;
 use crate::base_index::index_manager::IndexManager;
 use crate::base_index::write_barrier_flags::UNIQUE_INDEX_EXISTS;
+use crate::model::identity::identity_bytes::{encode_unique_posting_value, INLINE_MAX};
 use bytes::Bytes;
 use futures::StreamExt;
 use shamir_storage::error::DbResult;
@@ -134,23 +135,43 @@ impl IndexManager {
             )));
         }
 
-        // Collect (record_id, index_key_bytes) for duplicate detection and bulk write.
-        let mut key_counts: TMap<Bytes, usize> = new_map();
-        let mut entries: Vec<(RecordId, Bytes)> = Vec::with_capacity(16);
+        // Collect (record_id, index_key_bytes, canonical C) for duplicate
+        // detection and bulk write. Duplicate detection is on the exact v2
+        // key bytes — injective on equality classes for the inline form; a
+        // digest-form duplicate within one build shares both the digest key
+        // and (failing the build here) is never written with a foreign tail.
+        let mut key_counts: TMap<Bytes, (usize, Vec<u8>)> = new_map();
+        let mut entries: Vec<(RecordId, Bytes, Vec<u8>)> = Vec::with_capacity(16);
 
         for (record_id, value) in records {
-            if let Some(irk) =
+            if let Some((irk, canonical)) =
                 build_index_key_from_record(true, name_interned, value, &index_def.paths)
             {
                 let index_key = irk.to_bytes();
-                *key_counts.entry(index_key.clone()).or_insert(0) += 1;
-                entries.push((*record_id, index_key));
+                let prior = key_counts.get_mut(&index_key);
+                if let Some((count, existing_canonical)) = prior {
+                    if existing_canonical != &canonical {
+                        let detail = format!(
+                            "unique index identity digest collision during creation for index {name_interned}"
+                        );
+                        log::error!("{}", detail);
+                        return Err(shamir_storage::error::DbError::Internal(detail));
+                    }
+                    *count += 1;
+                } else {
+                    key_counts.insert(index_key.clone(), (1, canonical.clone()));
+                }
+                entries.push((*record_id, index_key, canonical));
             }
         }
 
-        let duplicates: Vec<(&Bytes, &usize)> = key_counts.iter().filter(|(_, &c)| c > 1).collect();
+        let duplicates: Vec<(&Bytes, &(usize, Vec<u8>))> = key_counts
+            .iter()
+            .filter(|(_, (count, _))| *count > 1)
+            .collect();
         if !duplicates.is_empty() {
-            let duplicate_record_count: usize = duplicates.iter().map(|(_, &c)| c).sum();
+            let duplicate_record_count: usize =
+                duplicates.iter().map(|(_, (count, _))| *count).sum();
             // Sample: we can't decode the hash back to values, so give a generic message.
             let sample_str = "<duplicate indexed values>".to_string();
             return Err(shamir_storage::error::DbError::UniqueIndexCreationFailed(
@@ -163,12 +184,16 @@ impl IndexManager {
         let count = entries.len();
         // `RecordKey` keys (fed to the store `set_many`); index keys are
         // built as `Bytes` and converted byte-identically at each push.
+        // Values: owner-only for the inline form, owner + `C` tail for the
+        // digest form (design (a)).
         let mut writes: Vec<(RecordKey, Bytes)> = Vec::with_capacity(count);
-        for (record_id, index_key) in entries {
-            writes.push((
-                index_key.into(),
-                Bytes::copy_from_slice(record_id.as_bytes()),
+        for (record_id, index_key, canonical) in entries {
+            let digest = canonical.len() > INLINE_MAX;
+            let value = Bytes::from(encode_unique_posting_value(
+                &record_id,
+                digest.then_some(canonical.as_slice()),
             ));
+            writes.push((index_key.into(), value));
         }
         if !writes.is_empty() {
             self.info_store.set_many(writes).await?;

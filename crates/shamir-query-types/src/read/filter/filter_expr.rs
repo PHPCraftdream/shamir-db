@@ -1,11 +1,12 @@
 //! FilterExpr — expression ($expr) for arithmetic and string operations.
 
+#[path = "../core/field_path.rs"]
+mod field_path;
+pub use field_path::FieldPath;
+
 use serde::{Deserialize, Serialize};
 
 use super::FilterValue;
-
-/// Path into a record field tree.
-pub type FieldPath = Vec<String>;
 
 /// Expression operator for $expr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

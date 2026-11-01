@@ -151,7 +151,7 @@ async fn drop_regular_before_commit_no_resurrected_posting() {
         &record_with_str(name_key, "alice"),
         &[IndexInfoItem::new(vec![name_key])],
     );
-    if let Some(irk) = irk {
+    if let Some((irk, _canonical)) = irk {
         let mut posting_key = irk.to_bytes().to_vec();
         posting_key.extend_from_slice(rid.as_bytes());
         let orphan = tbl
@@ -206,7 +206,7 @@ async fn drop_unique_before_commit_no_resurrected_posting() {
         &record_with_str(email_key, "alice@example.com"),
         &[IndexInfoItem::new(vec![email_key])],
     );
-    if let Some(irk) = irk {
+    if let Some((irk, _canonical)) = irk {
         let key = irk.to_bytes();
         let orphan = tbl
             .info_store()

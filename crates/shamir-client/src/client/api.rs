@@ -11,7 +11,7 @@ use zeroize::{Zeroize, Zeroizing};
 use shamir_connect::common::envelope::RequestEnvelopeRef;
 use shamir_connect::common::wire::RotationInProgressPayload;
 
-use shamir_transport_tcp::framing::write_frame;
+use shamir_transport_tcp::framing::write_frame_prereserved;
 
 use shamir_query_types::batch::{BatchRequest, BatchResponse};
 use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
@@ -23,7 +23,62 @@ use crate::client::Client;
 use crate::error::{ClientError, CloseCause};
 
 thread_local! {
-    static REQ_BUF: RefCell<Vec<u8>> = RefCell::new(Vec::with_capacity(1024));
+    /// Card RV-TRANSPORT-TCP-79910BA5: the scratch holds the FRAMED,
+    /// secret-bearing request (`[u32 BE len][envelope]`), reused across
+    /// calls so the write phase needs no third buffer. `Zeroizing` wipes
+    /// the allocation when the buffer is ever dropped; the encode path
+    /// additionally zeroizes at the start of every reuse and the
+    /// [`ScratchReturn`] guard zeroizes before handing the buffer back.
+    static REQ_BUF: RefCell<Zeroizing<Vec<u8>>> =
+        RefCell::new(Zeroizing::new(Vec::with_capacity(1024)));
+    /// Card RV-TRANSPORT-TCP-79910BA5 (design note): the envelope serializer
+    /// borrows the request body (`req: &[u8]`) while writing the envelope
+    /// bytes, so the body cannot live in the SAME `Vec` it is being written
+    /// into (simultaneous shared+mut borrow of one buffer is unsound).
+    /// The body therefore gets its own zeroizing scratch slot; both slots
+    /// are taken out (owned) for the duration of the roundtrip and returned
+    /// zeroized afterwards — no per-call heap allocation in steady state.
+    static REQ_BODY_BUF: RefCell<Zeroizing<Vec<u8>>> =
+        RefCell::new(Zeroizing::new(Vec::with_capacity(1024)));
+}
+
+/// Card RV-CLIENT-35A189A9: envelope encoding failures keep their typed
+/// rmp_serde source (`ClientError::Encode`) instead of a stringly
+/// `Protocol` message. Generic over `T: Serialize` so it can be tested
+/// with a failing `Serialize` impl; partial output on failure is zeroized
+/// by the caller ([`ScratchReturn`]).
+pub(crate) fn encode_named_into<T: serde::Serialize>(
+    buf: &mut Vec<u8>,
+    value: &T,
+) -> Result<(), ClientError> {
+    rmp_serde::encode::write_named(buf, value).map_err(ClientError::Encode)
+}
+
+/// Which thread-local scratch slot a [`ScratchReturn`] guard hands its
+/// buffer back to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScratchSlot {
+    Framed,
+    Body,
+}
+
+/// Returns a taken thread-local scratch buffer to its slot (including on
+/// early returns), zeroizing it first so no secret bytes ever sit in the
+/// slot between requests. Never holds a `RefCell` borrow across `.await`:
+/// the guard owns the buffer; the borrow happens only inside `Drop`.
+struct ScratchReturn(Option<Zeroizing<Vec<u8>>>, ScratchSlot);
+
+impl Drop for ScratchReturn {
+    fn drop(&mut self) {
+        if let Some(mut buf) = self.0.take() {
+            // `Vec::zeroize` wipes the WHOLE allocation capacity and clears.
+            (*buf).zeroize();
+            match self.1 {
+                ScratchSlot::Framed => REQ_BUF.with(|cell| *cell.borrow_mut() = buf),
+                ScratchSlot::Body => REQ_BODY_BUF.with(|cell| *cell.borrow_mut() = buf),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -59,6 +114,44 @@ pub(crate) unsafe fn request_scratch_capacity_bytes_for_test(expected_capacity: 
             buf.capacity(),
             expected_capacity,
             "scratch capacity changed"
+        );
+        // SAFETY: upheld by this function's caller: every byte in this allocation
+        // was initialized, and no operation wrote beyond its original capacity.
+        unsafe { std::slice::from_raw_parts(buf.as_ptr(), buf.capacity()) }.to_vec()
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn request_body_scratch_len_for_test() -> usize {
+    REQ_BODY_BUF.with(|cell| cell.borrow().len())
+}
+
+#[cfg(test)]
+pub(crate) fn request_body_scratch_capacity_for_test() -> usize {
+    REQ_BODY_BUF.with(|cell| cell.borrow().capacity())
+}
+
+/// Reads the entire BODY-slot allocation (see `REQ_BODY_BUF`) after the
+/// [`ScratchReturn`] guard has handed it back: the `zeroize` impl on
+/// `Vec` writes every capacity byte (via a full-capacity `set_len`), so the
+/// whole allocation is initialized.
+///
+/// # Safety
+/// The caller must have captured the slot's capacity beforehand and must
+/// ensure no operation has grown/reallocated the buffer since (the helper
+/// asserts the capacity still matches), and that every byte up to capacity
+/// is initialized (guaranteed once the slot was written to and returned
+/// zeroized by [`ScratchReturn`]).
+#[cfg(test)]
+pub(crate) unsafe fn request_body_scratch_capacity_bytes_for_test(
+    expected_capacity: usize,
+) -> Vec<u8> {
+    REQ_BODY_BUF.with(|cell| {
+        let buf = cell.borrow();
+        assert_eq!(
+            buf.capacity(),
+            expected_capacity,
+            "body scratch capacity changed"
         );
         // SAFETY: upheld by this function's caller: every byte in this allocation
         // was initialized, and no operation wrote beyond its original capacity.
@@ -142,6 +235,32 @@ impl Client {
     ) -> Vec<u8> {
         // SAFETY: forwarded caller obligations are the helper's safety contract.
         unsafe { request_scratch_capacity_bytes_for_test(expected_capacity) }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_body_scratch_len_for_test(&self) -> usize {
+        request_body_scratch_len_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn request_body_scratch_capacity_for_test(&self) -> usize {
+        request_body_scratch_capacity_for_test()
+    }
+
+    /// Reads the BODY scratch slot's whole allocation (zeroized on the fixed
+    /// code path).
+    ///
+    /// # Safety
+    /// Same contract as [`request_body_scratch_capacity_bytes_for_test`]: the
+    /// caller captured the capacity beforehand and every capacity byte is
+    /// initialized (see the free function's `# Safety` section).
+    #[cfg(test)]
+    pub(crate) unsafe fn request_body_scratch_capacity_bytes_for_test(
+        &self,
+        expected_capacity: usize,
+    ) -> Vec<u8> {
+        // SAFETY: forwarded caller obligations are the helper's safety contract.
+        unsafe { request_body_scratch_capacity_bytes_for_test(expected_capacity) }
     }
 
     #[cfg(test)]
@@ -471,14 +590,17 @@ impl Client {
             hook.fire().await;
         }
 
-        // T-cl-1 + RV-CLIENT-E16A04E5: thread-local scratch buffer for
-        // request serialisation, reused across calls. The buffer's capacity
-        // grows to the high-water mark; the request bytes stay IN the
-        // thread-local (no per-call clone) and the borrowed
-        // `RequestEnvelopeRef` encodes the envelope directly against them —
-        // zero copies of `session_id` or the request body. The whole encode
-        // happens inside the `with` closure so the `RefCell` borrow is
-        // released before any `.await`.
+        // T-cl-1 + RV-CLIENT-E16A04E5 + RV-CLIENT-35A189A9 +
+        // RV-TRANSPORT-TCP-79910BA5: thread-local ZEROIZING scratch slots for
+        // request serialisation, reused across calls. Both buffers are taken
+        // OUT of their `RefCell` slots (borrow released before any `.await`;
+        // owning them across await is fine), the request body encodes into
+        // the body slot via the typed-source `encode_named_into` helper, and
+        // the borrowed envelope encodes into the framed slot with its
+        // 4-byte length prefix patched in place — zero per-call heap
+        // allocations and no clone of the request bytes. The
+        // `ScratchReturn` guards zeroize and restore the slots on every
+        // exit path (including cancellation) after the write phase ends.
         let rid =
             match self
                 .next_request_id
@@ -492,26 +614,53 @@ impl Client {
                     ));
                 }
             };
-        let envelope_bytes: Zeroizing<Vec<u8>> =
-            REQ_BUF.with(|cell| -> Result<Zeroizing<Vec<u8>>, ClientError> {
-                let mut buf = cell.borrow_mut();
-                buf.zeroize();
-                let serialized = rmp_serde::encode::write_named(&mut *buf, req);
-                if let Err(error) = serialized {
-                    buf.zeroize();
-                    return Err(ClientError::Encode(error));
-                }
-                let envelope = RequestEnvelopeRef {
-                    session_id: &self.session_id,
-                    request_id: Some(rid),
-                    req: &buf,
-                };
-                let encoded = envelope
-                    .to_msgpack()
-                    .map_err(|e| ClientError::Protocol(format!("envelope encode: {e}")));
-                buf.zeroize();
-                Ok(Zeroizing::new(encoded?))
-            })?;
+        let mut framed_return = ScratchReturn(None, ScratchSlot::Framed);
+        let mut body_return = ScratchReturn(None, ScratchSlot::Body);
+        let encode_result: Result<(), ClientError> = {
+            // Take BOTH scratch buffers out of their slots (the `RefCell`
+            // borrow ends immediately — no borrow crosses the `.await`s
+            // below; owning the buffers across await is fine). The
+            // [`ScratchReturn`] guards zeroize and return them on every exit
+            // path, including after the write phase and on cancellation.
+            framed_return.0 = Some(REQ_BUF.with(|cell| std::mem::take(&mut *cell.borrow_mut())));
+            body_return.0 = Some(REQ_BODY_BUF.with(|cell| std::mem::take(&mut *cell.borrow_mut())));
+            let framed = framed_return
+                .0
+                .as_mut()
+                .expect("framed scratch taken from slot");
+            let body = body_return
+                .0
+                .as_mut()
+                .expect("body scratch taken from slot");
+            let body_vec: &mut Vec<u8> = &mut *body;
+            // Zeroize-on-reuse: wipe whatever the previous request left.
+            body_vec.zeroize();
+            // Card RV-CLIENT-35A189A9: the request body encodes via
+            // `encode_named_into`, keeping the typed rmp_serde source on
+            // failure. Partial output stays in `body_vec` and is zeroized by
+            // the `ScratchReturn` guard before the slot is refilled.
+            let body_encoded = encode_named_into(body_vec, req);
+            // The `ScratchReturn` guards zeroize the partial output before
+            // the slot is refilled (35A189A9 contract).
+            body_encoded?;
+            let framed_vec: &mut Vec<u8> = &mut *framed;
+            framed_vec.zeroize();
+            // Reserve the frame-length prefix as placeholders; patched in
+            // place below once the envelope size is known (no third buffer,
+            // card RV-TRANSPORT-TCP-79910BA5).
+            framed_vec.extend_from_slice(&[0u8; 4]);
+            let envelope = RequestEnvelopeRef {
+                session_id: &self.session_id,
+                request_id: Some(rid),
+                req: &body_vec[..],
+            };
+            let envelope_encoded = encode_named_into(framed_vec, &envelope);
+            envelope_encoded?;
+            let len = ((framed_vec.len() - 4) as u32).to_be_bytes();
+            framed_vec[0..4].copy_from_slice(&len);
+            Ok(())
+        };
+        encode_result?;
 
         // Register BEFORE writing — avoid a race where the server sends the
         // response before we reach the oneshot registration. Close-vs-register
@@ -571,6 +720,10 @@ impl Client {
             // Mid-frame cancellation safety: only an UNEXPECTED drop of this
             // future leaves the guard armed — every resolved arm defuses it.
             let cancel_guard = WriteCancelGuard::new(&self.state);
+            let framed = framed_return
+                .0
+                .as_deref()
+                .expect("framed scratch in flight during write");
             tokio::select! {
                 // Biased: a pending closure beats a write onto a dying
                 // connection, so a released hook never emits wire bytes.
@@ -580,7 +733,7 @@ impl Client {
                     drop(write);
                     return Err(ClientError::ConnectionClosed(cause));
                 }
-                r = write_frame(&mut *write, &envelope_bytes) => {
+                r = write_frame_prereserved(&mut *write, framed) => {
                     // On Err the shared shutdown(Io) below runs with the real
                     // transport cause — the guard must not double-close.
                     cancel_guard.defuse();
@@ -588,6 +741,17 @@ impl Client {
                 }
             }
         };
+        // RV-CLIENT-E16A04E5-D: the write phase is over — release BOTH
+        // scratch buffers NOW, BEFORE any response await. Their `Drop`
+        // zeroizes full capacity and restores the thread-local slots, so a
+        // concurrent in-flight request on the same thread can reuse them
+        // (zero-alloc multiplexing) and the secret-bearing request body does
+        // not stay live (unwiped, outside the slot) through the whole
+        // response wait. The early-return arm inside the `select!` above
+        // already dropped the guards by returning; do not move this scope
+        // earlier — the write needs the framed borrow.
+        drop(framed_return);
+        drop(body_return);
         if let Err(e) = write_result {
             // Real transport failure: run the shared shutdown FIRST (so the
             // lifecycle records the Io cause and drains all waiters), then

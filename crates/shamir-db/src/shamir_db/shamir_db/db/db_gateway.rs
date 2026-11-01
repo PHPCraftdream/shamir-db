@@ -1,20 +1,15 @@
-use std::sync::Arc;
-
-use async_trait::async_trait;
-
-use crate::access::Actor;
-use crate::engine::function::{DbGateway, DbGatewayError, NetGateway};
-use crate::engine::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry, ResultEncoding};
-use crate::engine::query::read::{ReadQuery, Temporal};
+use crate::engine::query::batch::{BatchError, BatchLimits, BatchOp, BatchRequest, ResultEncoding};
+use crate::engine::query::read::ReadQuery;
 use crate::engine::query::write::InsertOp;
-use crate::engine::query::TableRef;
-use crate::engine::query::{Filter, FilterValue};
-use crate::types::common::new_map;
-use shamir_types::types::value::QueryValue;
-
-use super::super::ShamirDb;
-
-// ── FacadeDbGateway ──────────────────────────────────────────────────
+use crate::engine::query::{Filter, FilterValue, TableRef};
+use crate::types::value::QueryValue;
+use crate::{
+    access::Actor,
+    engine::function::{DbGateway, DbGatewayError, NetGateway},
+    shamir_db::shamir_db::ShamirDb,
+};
+use async_trait::async_trait;
+use std::sync::Arc;
 
 /// [`DbGateway`] implementation that routes through [`ShamirDb::execute`].
 ///
@@ -39,15 +34,16 @@ pub(super) struct FacadeDbGateway {
 
 impl FacadeDbGateway {
     /// Convert a [`QueryValue`] scalar into a [`FilterValue`] for use in a
-    /// `Filter::Eq` predicate.
+    /// `Filter::Eq` predicate. Unsupported values retain the field-specific
+    /// error classification expected by the function gateway.
     fn qv_to_filter_value(val: &QueryValue, field: &str) -> Result<FilterValue, String> {
         match val {
             QueryValue::Null => Ok(FilterValue::Null),
-            QueryValue::Bool(b) => Ok(FilterValue::Bool(*b)),
-            QueryValue::Int(i) => Ok(FilterValue::Int(*i)),
-            QueryValue::F64(f) => Ok(FilterValue::Float(*f)),
-            QueryValue::Str(s) => Ok(FilterValue::String(s.clone())),
-            QueryValue::Bin(b) => Ok(FilterValue::Binary(b.clone())),
+            QueryValue::Bool(v) => Ok(FilterValue::Bool(*v)),
+            QueryValue::Int(v) => Ok(FilterValue::Int(*v)),
+            QueryValue::F64(v) => Ok(FilterValue::Float(*v)),
+            QueryValue::Str(v) => Ok(FilterValue::String(v.clone())),
+            QueryValue::Bin(v) => Ok(FilterValue::Binary(v.clone())),
             QueryValue::List(_) => Err(format!("unsupported key value List for field {field}")),
             QueryValue::Map(_) => Err(format!("unsupported key value Map for field {field}")),
             QueryValue::Set(_) => Err(format!("unsupported key value Set for field {field}")),
@@ -71,24 +67,81 @@ impl FacadeDbGateway {
                 if entries.is_empty() {
                     return Ok(None);
                 }
-                let mut filters = Vec::with_capacity(entries.len());
-                for (field, val) in entries {
-                    filters.push(Filter::Eq {
-                        field: vec![field.clone()],
-                        value: Self::qv_to_filter_value(val, field)?,
-                    });
-                }
-                if filters.len() == 1 {
-                    Ok(filters.pop())
+                let filters: Vec<_> = entries
+                    .iter()
+                    .map(|(field, value)| {
+                        Ok(shamir_query_builder::filter::eq(
+                            vec![field.clone()],
+                            Self::qv_to_filter_value(value, field)?,
+                        ))
+                    })
+                    .collect::<Result<_, String>>()?;
+                Ok(Some(if filters.len() == 1 {
+                    filters.into_iter().next().expect("one filter")
                 } else {
-                    Ok(Some(Filter::And { filters }))
-                }
+                    shamir_query_builder::filter::and(filters)
+                }))
             }
-            other => Ok(Some(Filter::Eq {
-                field: vec!["id".to_string()],
-                value: Self::qv_to_filter_value(other, "id")?,
-            })),
+            value => Ok(Some(shamir_query_builder::filter::eq(
+                "id",
+                Self::qv_to_filter_value(value, "id")?,
+            ))),
         }
+    }
+
+    fn table_ref(repo: &str, table: &str) -> TableRef {
+        if repo == "main" {
+            TableRef::new(table)
+        } else {
+            TableRef::with_repo(repo, table)
+        }
+    }
+
+    /// Construct a read through the query builder, preserving today's defaults.
+    fn read_query(repo: &str, table: &str, filter: Option<Filter>) -> ReadQuery {
+        let query = if repo == "main" {
+            shamir_query_builder::Query::from(table)
+        } else {
+            shamir_query_builder::Query::with_repo(repo, table)
+        };
+        let query = match filter {
+            Some(filter) => query.where_(filter),
+            None => query,
+        };
+        query.build()
+    }
+
+    /// Assemble the one-operation request with EVERY batch field set to
+    /// today's value explicitly (RV-DB-C2DCAC96): via builder setters where
+    /// they exist, else by overriding the built [`BatchRequest`] fields.
+    fn request(alias: &str, id: &str, op: BatchOp) -> BatchRequest {
+        let mut batch = shamir_query_builder::batch::Batch::new();
+        batch.id(QueryValue::Str(id.to_string()));
+        batch.return_only([alias]);
+        match op {
+            BatchOp::Read(query) => {
+                batch.query(alias, query);
+            }
+            BatchOp::Insert(insert) => {
+                batch.insert(alias, insert);
+            }
+            _ => unreachable!("gateway request operation kind is fixed"),
+        }
+        let mut request = batch.build();
+        // The builder has no "unset to None" setters; these four plus the
+        // transaction flags default to None/false in Batch::new() and must
+        // stay exactly that, so they are pinned explicitly here.
+        request.name = None;
+        request.transactional = false;
+        request.isolation = None;
+        request.visibility_wait = None;
+        request.durability = None;
+        request.index_visibility = None;
+        request.return_all = false;
+        request.limits = BatchLimits::default();
+        request.interner_epochs = Default::default();
+        request.result_encoding = ResultEncoding::default();
+        request
     }
 }
 
@@ -126,67 +179,19 @@ impl DbGateway for FacadeDbGateway {
         table: &str,
         key: QueryValue,
     ) -> Result<Option<QueryValue>, DbGatewayError> {
-        let where_clause = Self::key_to_filter(&key).map_err(DbGatewayError::Execution)?;
-        let table_ref = if repo == "main" {
-            TableRef::new(table)
-        } else {
-            TableRef::with_repo(repo, table)
-        };
-
-        let read_query = ReadQuery {
-            from: table_ref,
-            select: crate::engine::query::read::Select::all(),
-            r#where: where_clause,
-            group_by: None,
-            order_by: None,
-            pagination: crate::engine::query::read::Pagination::None,
-            count_total: false,
-            temporal: Temporal::Latest,
-            with_version: false,
-            explain: false,
-        };
-
-        let mut queries = new_map();
-        queries.insert(
-            "r".to_string(),
-            QueryEntry {
-                op: BatchOp::Read(read_query),
-                return_result: true,
-                after: Vec::new(),
-                when: None,
-            },
-        );
-        let req = BatchRequest {
-            id: QueryValue::Str("db_get".into()),
-            name: None,
-            transactional: false,
-            isolation: None,
-            visibility_wait: None,
-            durability: None,
-            index_visibility: None,
-            queries,
-            return_all: false,
-            return_only: Some(vec!["r".to_string()]),
-            limits: crate::engine::query::batch::BatchLimits::default(),
-            interner_epochs: Default::default(),
-            result_encoding: ResultEncoding::default(),
-        };
-
-        let resp = self
+        let filter = Self::key_to_filter(&key).map_err(DbGatewayError::Execution)?;
+        let query = Self::read_query(repo, table, filter);
+        let request = Self::request("r", "db_get", BatchOp::Read(query));
+        let response = self
             .shamir
-            .execute_as(self.actor.clone(), &self.db_name, &req)
+            .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
             .map_err(classify_batch_error)?;
-
-        let result = match resp.results.get("r") {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-
-        match result.records.first() {
-            Some(rec) => Ok(Some(rec.as_value().into_owned())),
-            None => Ok(None),
-        }
+        Ok(response
+            .results
+            .get("r")
+            .and_then(|r| r.records.first())
+            .map(|r| r.as_value().into_owned()))
     }
 
     async fn insert(
@@ -195,52 +200,19 @@ impl DbGateway for FacadeDbGateway {
         table: &str,
         doc: QueryValue,
     ) -> Result<QueryValue, DbGatewayError> {
-        let table_ref = if repo == "main" {
-            TableRef::new(table)
-        } else {
-            TableRef::with_repo(repo, table)
-        };
-
-        let insert_op = InsertOp {
-            insert_into: table_ref,
+        let insert = InsertOp {
+            insert_into: Self::table_ref(repo, table),
             values: vec![doc],
             records_idmsgpack: Vec::new(),
             select: None,
         };
-
-        let mut queries = new_map();
-        queries.insert(
-            "i".to_string(),
-            QueryEntry {
-                op: BatchOp::Insert(insert_op),
-                return_result: true,
-                after: Vec::new(),
-                when: None,
-            },
-        );
-        let req = BatchRequest {
-            id: QueryValue::Str("db_insert".into()),
-            name: None,
-            transactional: false,
-            isolation: None,
-            visibility_wait: None,
-            durability: None,
-            index_visibility: None,
-            queries,
-            return_all: false,
-            return_only: Some(vec!["i".to_string()]),
-            limits: crate::engine::query::batch::BatchLimits::default(),
-            interner_epochs: Default::default(),
-            result_encoding: ResultEncoding::default(),
-        };
-
-        let resp = self
+        let request = Self::request("i", "db_insert", BatchOp::Insert(insert));
+        let response = self
             .shamir
-            .execute_as(self.actor.clone(), &self.db_name, &req)
+            .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
             .map_err(classify_batch_error)?;
-
-        let result = match resp.results.get("i") {
+        let result = match response.results.get("i") {
             Some(r) => r,
             None => {
                 return Err(DbGatewayError::Execution(
@@ -248,7 +220,6 @@ impl DbGateway for FacadeDbGateway {
                 ))
             }
         };
-
         match result.records.first() {
             Some(rec) => Ok(rec.as_value().into_owned()),
             None => Err(DbGatewayError::Execution(
@@ -263,72 +234,29 @@ impl DbGateway for FacadeDbGateway {
         table: &str,
         filter: Option<QueryValue>,
     ) -> Result<Vec<QueryValue>, DbGatewayError> {
-        let table_ref = if repo == "main" {
-            TableRef::new(table)
-        } else {
-            TableRef::with_repo(repo, table)
-        };
-
-        let where_clause = match filter.as_ref() {
-            Some(value) => Self::key_to_filter(value).map_err(DbGatewayError::Execution)?,
-            None => None,
-        };
-
-        let read_query = ReadQuery {
-            from: table_ref,
-            select: crate::engine::query::read::Select::all(),
-            r#where: where_clause,
-            group_by: None,
-            order_by: None,
-            pagination: crate::engine::query::read::Pagination::None,
-            count_total: false,
-            temporal: Temporal::Latest,
-            with_version: false,
-            explain: false,
-        };
-
-        let mut queries = new_map();
-        queries.insert(
-            "q".to_string(),
-            QueryEntry {
-                op: BatchOp::Read(read_query),
-                return_result: true,
-                after: Vec::new(),
-                when: None,
-            },
-        );
-        let req = BatchRequest {
-            id: QueryValue::Str("db_query".into()),
-            name: None,
-            transactional: false,
-            isolation: None,
-            visibility_wait: None,
-            durability: None,
-            index_visibility: None,
-            queries,
-            return_all: false,
-            return_only: Some(vec!["q".to_string()]),
-            limits: crate::engine::query::batch::BatchLimits::default(),
-            interner_epochs: Default::default(),
-            result_encoding: ResultEncoding::default(),
-        };
-
-        let resp = self
+        let filter = filter
+            .as_ref()
+            .map(Self::key_to_filter)
+            .transpose()
+            .map_err(DbGatewayError::Execution)?
+            .flatten();
+        let query = Self::read_query(repo, table, filter);
+        let request = Self::request("q", "db_query", BatchOp::Read(query));
+        let response = self
             .shamir
-            .execute_as(self.actor.clone(), &self.db_name, &req)
+            .execute_as(self.actor.clone(), &self.db_name, &request)
             .await
             .map_err(classify_batch_error)?;
-
-        let result = match resp.results.get("q") {
-            Some(r) => r,
-            None => return Ok(Vec::new()),
-        };
-
-        Ok(result
-            .records
-            .iter()
-            .map(|rec| rec.as_value().into_owned())
-            .collect())
+        Ok(response
+            .results
+            .get("q")
+            .map(|r| {
+                r.records
+                    .iter()
+                    .map(|rec| rec.as_value().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 
     async fn execute(&self, request: &[u8]) -> Result<Vec<u8>, DbGatewayError> {
@@ -337,12 +265,12 @@ impl DbGateway for FacadeDbGateway {
                 message: format!("execute: request decode error: {e}"),
                 source: Box::new(e),
             })?;
-        let resp = self
+        let response = self
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
             .await
             .map_err(classify_batch_error)?;
-        rmp_serde::to_vec_named(&resp).map_err(|e| DbGatewayError::ExecutionSource {
+        rmp_serde::to_vec_named(&response).map_err(|e| DbGatewayError::ExecutionSource {
             message: format!("execute: response encode error: {e}"),
             source: Box::new(e),
         })
@@ -390,3 +318,7 @@ impl ShamirDb {
             .gateway(meta.as_ref().map(|m| m.net_grants.as_slice()))
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/gateway/db_gateway_request_tests.rs"]
+mod db_gateway_request_tests;

@@ -43,6 +43,10 @@ bench-scale-tool = { workspace = true, features = ["async"] }
 name = "framing"
 harness = false
 
+[[bench]]
+name = "measurement"
+harness = false
+
 [lib]
 # Doctests are banned project-wide (slow: recompile-per-example). Examples
 # live as illustration; behavioural coverage is in unit/integration tests.

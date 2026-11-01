@@ -24,7 +24,7 @@ use crate::{MetaEnvelope, MetaError};
 use bytes::Bytes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use shamir_storage::types::{RecordKey, Store};
+use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
@@ -351,6 +351,132 @@ pub async fn legacy_indexes_need_rebuild(
 ) -> Result<bool, shamir_storage::error::DbError> {
     let stored = load_legacy_index_version(info_store).await?;
     Ok(stored < LEGACY_INDEX_FORMAT_VERSION)
+}
+
+// ============================================================================
+// Identity v2 marker (`_m.idx.idv`, design P34-12 sections (b), (e) S2)
+// ============================================================================
+//
+// The base family (regular + unique hash postings) is CURRENT (identity v2)
+// iff `_m.idx.idv` == 2 AND `_m.idx.lfv` is ABSENT. New binaries NEVER write
+// `_m.idx.lfv` again. The S9b helpers above are kept so the engine and tests
+// can detect and simulate old-binary data (`lfv` present ⇒ the next new
+// open re-migrates; an old binary finding `lfv` absent rebuilds in v3 and
+// stamps `lfv`, which forces the next new open to migrate again).
+//
+// Newer-than-me (`idv > 2`) is a typed, fail-closed open error — the
+// forward gate the `lfv` scheme lacked (an old binary silently accepted a
+// newer stamp).
+
+/// The identity version this binary writes: 2 (codec of `model::identity`,
+/// namespaces 0x02/0x03, digest form 0xFF || BLAKE3-256).
+pub const INDEX_IDENTITY_VERSION: u32 = 2;
+
+/// System key for the base-family identity version marker. `"_m.idx.idv"`
+/// is 10 bytes — no `RecordId::system` truncation — and diverges from
+/// `_m.idx.lfv` / `_m.idx.drop` / `_m.idx.ren` at byte 10 (0x64 `d` vs
+/// 0x2e `.` / 0x6c / 0x72), same check as the `_m.idx.drop` analysis above.
+fn meta_key_identity_version() -> RecordId {
+    RecordId::system("_m.idx.idv")
+}
+
+/// Persist the identity version this binary writes (`2`, u32 LE). Commit
+/// point (step 3) of the base migration protocol.
+pub async fn save_index_identity_version(
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let key = meta_key_identity_version();
+    let bytes = INDEX_IDENTITY_VERSION.to_le_bytes();
+    info_store
+        .set(key.to_bytes().into(), Bytes::from(bytes.to_vec()))
+        .await
+        .map(|_| ())
+}
+
+/// Load the stored base-family identity version: `Some(v)` when the
+/// `_m.idx.idv` marker exists with exactly four bytes, `None` when it
+/// is absent (pre-v2 data, or the migration's step 1 removed it).
+pub async fn load_index_identity_version(
+    info_store: &Arc<dyn Store>,
+) -> Result<Option<u32>, shamir_storage::error::DbError> {
+    let key = meta_key_identity_version();
+    match info_store.get(key.to_bytes().into()).await {
+        Ok(bytes) => {
+            if bytes.len() == 4 {
+                let arr: [u8; 4] = bytes[..4].try_into().unwrap_or([0; 4]);
+                Ok(Some(u32::from_le_bytes(arr)))
+            } else {
+                let message = if bytes.len() < 4 {
+                    "shorter than four bytes"
+                } else {
+                    "longer than four bytes"
+                };
+                Err(shamir_storage::error::DbError::Codec(format!(
+                    "system:_m.idx.idv corrupt: {} bytes ({message}), expected exactly 4 (u32 LE)",
+                    bytes.len()
+                )))
+            }
+        }
+        Err(shamir_storage::error::DbError::NotFound(_)) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Forward gate: `idv > 2` means the table was written by a NEWER binary —
+/// typed, fail-closed open error. `idv <= 2` (or absent) is acceptable.
+pub async fn check_identity_version(
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    if let Some(v) = load_index_identity_version(info_store).await? {
+        if v > INDEX_IDENTITY_VERSION {
+            return Err(shamir_storage::error::DbError::Internal(format!(
+                "table index identity version {v} is newer than this binary supports \
+                 ({}): refusing to open fail-closed",
+                INDEX_IDENTITY_VERSION
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the base family needs the blocking open-time identity migration
+/// (design (c)): `need = !(idv == 2 && lfv absent)`. `lfv` present means a
+/// pre-v2 binary (including one that rebuilt in v3 after this binary's step
+/// 1) touched the table — re-migrate.
+pub async fn identity_migration_needed(
+    info_store: &Arc<dyn Store>,
+) -> Result<bool, shamir_storage::error::DbError> {
+    let idv = load_index_identity_version(info_store).await?;
+    // idv == 2 is current ONLY when the legacy marker is absent.
+    Ok(idv != Some(INDEX_IDENTITY_VERSION) || legacy_index_version_is_present(info_store).await?)
+}
+
+/// `true` when a `_m.idx.lfv` marker exists (any value) — the "an old
+/// binary touched this table after (or instead of) the migration" signal.
+/// Kept as a named helper (the S9b read path) for the need rule and the
+/// old-binary simulation tests.
+pub async fn legacy_index_version_is_present(
+    info_store: &Arc<dyn Store>,
+) -> Result<bool, shamir_storage::error::DbError> {
+    let key = meta_key_legacy_index_version();
+    match info_store.get(key.to_bytes().into()).await {
+        Ok(_) => Ok(true),
+        Err(shamir_storage::error::DbError::NotFound(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Step 1 of the base migration protocol: one atomic transaction removing
+/// BOTH markers (`lfv`, `idv`). From here every old binary will rebuild
+/// (lfv absent) and every new binary will migrate (idv absent).
+pub async fn clear_identity_markers(
+    info_store: &Arc<dyn Store>,
+) -> Result<(), shamir_storage::error::DbError> {
+    let ops = vec![
+        KvOp::Remove(meta_key_legacy_index_version().to_bytes().into()),
+        KvOp::Remove(meta_key_identity_version().to_bytes().into()),
+    ];
+    info_store.transact(ops).await
 }
 
 // ============================================================================

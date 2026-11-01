@@ -1,323 +1,102 @@
-//! Pure key-encoding helpers for the index subsystem.
+//! Pure key-encoding helpers for the base index subsystem (identity v2).
 //!
 //! These are free functions shared by `index_manager` and
 //! `index_manager_unique`. They do not access any `IndexManager` fields.
 //!
-//! # S9 — lens-native leaf hashing
+//! # Identity v2 (IDV2, design P34-12 sections (a), (e) S2)
 //!
-//! Index keys are hashed via a STABLE, deterministic, version-local scheme
-//! that works directly from the `RecordRef` lens:
+//! The persisted identity is the CANONICAL byte encoding `C` of the indexed
+//! value's equality class — the frozen codec of
+//! [`crate::model::identity::canonical`], whose numeric classes are the ONE
+//! `NumericKey` rule, so `Int(1) == F64(1.0) == Dec(1) == Big(1)` encode
+//! identically and the equality decisions are unchanged from the v1/v3 hash
+//! scheme. There is NO hash in the inline form: a posting key carries `C`
+//! itself (`|C| <= INLINE_MAX`) or `0xFF || BLAKE3-256(C)` (digest form,
+//! `|C| > INLINE_MAX`), in which case the posting VALUE carries `C` so every
+//! equality decision is made on canonical bytes, never on a hash alone.
 //!
-//! - **Scalars** (Null, Bool, Int, F64, Str, Bin) are hashed via
-//!   `scalar_at` (zero-copy `ScalarRef`) — no owned `InnerValue` needed.
-//! - **Non-scalar leaves** (Dec, Big, containers) are hashed via
-//!   `materialize_at` → transient owned value → `hash_inner_value`.
-//!   This is the ONE unavoidable `InnerValue` usage — the `RecordRef` trait's
-//!   escape hatch method returns `InnerValue` by design. The value is consumed
-//!   immediately; no InnerValue is stored or persisted.
-//!
-//! The hash uses EXPLICIT u8 discriminant tags (0..=10), NOT
-//! `std::mem::discriminant`, so it is stable across rustc versions and enum
-//! layout changes. Set and Map hashes are order-independent (XOR of per-element
-//! hashes).
-//!
-//! The lookup path (`lookup_by_index`, `check_unique_constraint`) receives
-//! `&[InnerValue]` from the engine and feeds each through `hash_inner_value`
-//! with the SAME tag scheme, so write-path and read-path hashes agree.
+//! The write path (`RecordRef` lens: `scalar_at` zero-copy, `materialize_at`
+//! for Dec/Big/containers) and the lookup path (`&[InnerValue]` supplied by
+//! the engine) call the SAME encoder per leaf class; a parity test pins
+//! byte-identity. Top-level NaN has no identity (a NaN matches nothing),
+//! exactly as before. The rustc-hash `FxHasher` streams of the v1/v3 scheme
+//! are removed from the persisted path completely.
 //!
 //! # Index format version
 //!
-//! This hash scheme is VERSION 3 of the legacy index posting format.
-//! V3 (S2) extends the V2 numeric-key rule with EXACT Int↔Big/Dec parity:
-//! an integral Big/Dec keys like the equal Int, so indexes holding Big/Dec
-//! keys are REBUILD-REQUIRED. The V2 encoding itself (Int↔F64 parity,
-//! -0.0→0, NaN unindexed, RV-FUNCLIB-5FA455F7): legacy indexes holding
-//! numeric keys
-//! are REBUILD-REQUIRED after upgrading (manual drop/re-create; no
-//! automatic rebuild). Old V1 postings (based on `<Value<InternerKey> as
-//! Hash>` with `std::mem::discriminant` tags) are NOT byte-compatible
-//! with V2.
-//!
-//! The engine wires rebuild-on-open (S9b / #81): `TableManager::create`
-//! calls `legacy_indexes_need_rebuild` on every table open and, when the
-//! stored version is older than `LEGACY_INDEX_FORMAT_VERSION` (or absent =
-//! pre-S9 data), runs `repair()` to rebuild every legacy posting from the
-//! data store, then stamps the current version via
-//! `save_legacy_index_version`. So a DB written with V1 postings is upgraded
-//! to the V2 hash scheme automatically on its first open — no silent lookup
-//! misses. The detection primitives live in `persistence.rs`.
+//! This is identity VERSION 2 of the base family (marker `_m.idx.idv`,
+//! replacing the legacy `_m.idx.lfv`). The engine wires the blocking
+//! open-time base migration (`identity_migration.rs`): `need = !(idv == 2
+//! && lfv absent)`; the migration drops and rebuilds every base posting
+//! from the data store via the S9b `repair_admitted` machinery, sweeping
+//! BOTH the legacy `[0|1][name]` and the v2 `[2|3][name]` namespaces.
 
-use crate::base_index::index_info_item::IndexInfoItem;
-use crate::base_index::index_record_key::IndexRecordKey;
 use bytes::Bytes;
-use rustc_hash::FxHasher;
 use shamir_types::core::interner::InternerKey;
 use shamir_types::record_view::RecordRef;
-use shamir_types::record_view::ScalarRef;
-use shamir_types::types::numeric_key::decimal_exact_parts;
-use shamir_types::types::numeric_key::NumericKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
-use std::hash::{Hash, Hasher};
 
-// ============================================================================
-// Stable discriminant tags — explicit u8, never `std::mem::discriminant`.
-// ============================================================================
+use crate::base_index::index_info_item::IndexInfoItem;
+use crate::base_index::index_record_key::IndexRecordKey;
+use crate::model::identity::canonical::{encode_inner_value_into, encode_scalar_ref_into};
+use crate::model::identity::identity_bytes::{identity_bytes, INLINE_MAX};
 
-const TAG_NULL: u8 = 0;
-const TAG_BOOL: u8 = 1;
-const TAG_INT: u8 = 2;
-const TAG_F64: u8 = 3;
-const TAG_STR: u8 = 4;
-const TAG_BIN: u8 = 5;
-const TAG_DEC: u8 = 6;
-const TAG_BIG: u8 = 7;
-const TAG_LIST: u8 = 8;
-const TAG_SET: u8 = 9;
-const TAG_MAP: u8 = 10;
-
-// ============================================================================
-// Core hash primitives
-// ============================================================================
-
-/// Canonical numeric key (RV-FUNCLIB-5FA455F7, D1-S1/S2): an integral f64
-/// that fits i64 exactly keys like the equal Int; -0.0 keys like 0; NaN
-/// keys to its own bit pattern — the write path refuses NaN (see
-/// `compute_leaf_hashes`), so this key only arises on a probe and matches
-/// nothing, same as the scan filter's `partial_cmp`. The rule is the ONE
-/// shared implementation in `shamir_types::types::numeric_key`, also used
-/// by DISTINCT, GROUP BY and FK matching.
-fn hash_f64_canonical(f: f64, state: &mut impl Hasher) {
-    NumericKey::from_f64(f).hash_tagged(TAG_INT, TAG_BIG, TAG_F64, state);
+/// Build a regular-family posting key `[2][name][I][rid]`.
+pub fn build_posting_key(index_key: &Bytes, record_id: &RecordId) -> Bytes {
+    let mut k = Vec::with_capacity(index_key.len() + 16);
+    k.extend_from_slice(index_key);
+    k.extend_from_slice(record_id.as_bytes());
+    Bytes::from(k)
 }
 
-fn scalar_ref_is_nan(sr: &ScalarRef<'_>) -> bool {
-    matches!(sr, ScalarRef::F64(f) if f.is_nan())
-}
-
-fn inner_value_is_nan(v: &InnerValue) -> bool {
-    matches!(v, InnerValue::F64(f) if f.is_nan())
-}
-
-/// Hash a `ScalarRef` leaf into the hasher using stable tags.
-/// Covers: Null, Bool, Int, F64, Str, Bin.
-fn hash_scalar_ref(sr: &ScalarRef<'_>, state: &mut impl Hasher) {
-    match sr {
-        ScalarRef::Null => {
-            TAG_NULL.hash(state);
-        }
-        ScalarRef::Bool(b) => {
-            TAG_BOOL.hash(state);
-            b.hash(state);
-        }
-        ScalarRef::Int(i) => {
-            TAG_INT.hash(state);
-            i.hash(state);
-        }
-        ScalarRef::F64(f) => {
-            hash_f64_canonical(*f, state);
-        }
-        ScalarRef::Str(s) => {
-            TAG_STR.hash(state);
-            s.hash(state);
-        }
-        ScalarRef::Bin(b) => {
-            TAG_BIN.hash(state);
-            b.hash(state);
-        }
-    }
-}
-
-/// Hash an `InnerValue` leaf into the hasher using the SAME stable tags
-/// as `hash_scalar_ref`, so the write path (ScalarRef) and the lookup
-/// path (InnerValue) produce IDENTICAL hashes for equivalent values.
+/// Canonical bytes `C` of the composite value selected by `paths` from a
+/// record (write path). Leaves are concatenated in index path order; each
+/// leaf is encoded via `scalar_at` (zero-copy) first, falling back to
+/// `materialize_at` for Dec/Big/containers.
 ///
-/// Set and Map hashes are order-independent: each element is hashed
-/// independently with a fresh FxHasher, the results are XOR'd, and the
-/// XOR sum is fed into `state`.
-fn hash_inner_value(v: &InnerValue, state: &mut impl Hasher) {
-    match v {
-        InnerValue::Null => {
-            TAG_NULL.hash(state);
-        }
-        InnerValue::Bool(b) => {
-            TAG_BOOL.hash(state);
-            b.hash(state);
-        }
-        InnerValue::Int(i) => {
-            TAG_INT.hash(state);
-            i.hash(state);
-        }
-        InnerValue::F64(f) => {
-            hash_f64_canonical(*f, state);
-        }
-        InnerValue::Str(s) => {
-            TAG_STR.hash(state);
-            s.hash(state);
-        }
-        InnerValue::Bin(b) => {
-            TAG_BIN.hash(state);
-            b.hash(state);
-        }
-        InnerValue::Dec(d) => {
-            // Exact Int↔Dec parity (S2): an integral Dec keys like the
-            // equal Int; a non-integral Dec keys by exact decimal value
-            // (normalized mantissa+scale — `0.50` keys as `0.5`).
-            if let Some(key) = NumericKey::from_decimal(d) {
-                key.hash_tagged(TAG_INT, TAG_BIG, TAG_F64, state);
-            } else {
-                TAG_DEC.hash(state);
-                let (mantissa, scale) = decimal_exact_parts(d);
-                mantissa.hash(state);
-                scale.hash(state);
-            }
-        }
-        InnerValue::Big(b) => {
-            // Exact Int↔Big parity (S2): a Big equal to some Int keys like
-            // that Int; a Big beyond i64 keys by sign + magnitude bytes.
-            NumericKey::from_bigint(b).hash_tagged(TAG_INT, TAG_BIG, TAG_F64, state);
-        }
-        InnerValue::List(l) => {
-            TAG_LIST.hash(state);
-            for elem in l {
-                hash_inner_value(elem, state);
-            }
-        }
-        InnerValue::Set(s) => {
-            TAG_SET.hash(state);
-            let mut xor_sum: u64 = 0;
-            for elem in s {
-                let mut h = FxHasher::default();
-                hash_inner_value(elem, &mut h);
-                xor_sum ^= h.finish();
-            }
-            xor_sum.hash(state);
-        }
-        InnerValue::Map(m) => {
-            TAG_MAP.hash(state);
-            let mut xor_sum: u64 = 0;
-            for (k, v) in m {
-                let mut h = FxHasher::default();
-                // Hash the InternerKey's numeric id directly — deterministic
-                // and order-independent.
-                k.id().hash(&mut h);
-                hash_inner_value(v, &mut h);
-                xor_sum ^= h.finish();
-            }
-            xor_sum.hash(state);
-        }
-    }
-}
-
-// ============================================================================
-// Dual-hash computation (hash1 + hash2 with different seeds)
-// ============================================================================
-
-/// Compute the dual `(hash1, hash2)` for one or more leaves hashed from
-/// a `RecordRef`. Each leaf is hashed via `scalar_at` when possible (the
-/// fast zero-copy path); falls back to `materialize_at` for Dec/Big/containers.
-///
-/// Returns `None` if ANY path is absent (all-or-nothing semantics).
-/// This persisted identity may change only with an identity-version bump;
-/// golden-vector tests guard its existing outputs.
-fn compute_leaf_hashes(
+/// Returns `None` if ANY path is absent (all-or-nothing semantics, as
+/// before) or if a leaf has no identity (top-level NaN — a NaN matches
+/// nothing). `CodecError::TooLarge` cannot occur under the frame budget and
+/// is treated the same way (no posting, never a truncated identity).
+pub fn canonical_from_record(
     rec: &(impl RecordRef + ?Sized),
     paths: &[IndexInfoItem],
-    name_interned: u64,
-) -> Option<(u64, u64)> {
-    const SEED2: u64 = 0x9E3779B97F4A7C15;
-
-    let mut h1 = FxHasher::default();
-    let mut h2 = FxHasher::default();
-
-    SEED2.hash(&mut h2);
-    name_interned.hash(&mut h2);
-    name_interned.hash(&mut h1);
-
+) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
     for item in paths {
         let ipath: SmallVec<[InternerKey; 4]> =
             item.path.iter().map(|&id| InternerKey::new(id)).collect();
 
         // Fast path: scalar_at is zero-copy.
         if let Some(sr) = rec.scalar_at(&ipath) {
-            if scalar_ref_is_nan(&sr) {
-                return None;
-            }
-            hash_scalar_ref(&sr, &mut h1);
-            hash_scalar_ref(&sr, &mut h2);
+            encode_scalar_ref_into(&sr, &mut buf).ok()?;
             continue;
         }
 
         // Slow path: materialize the leaf for Dec/Big/containers.
-        // This is the ONE unavoidable InnerValue usage (RecordRef trait
-        // returns InnerValue from materialize_at by design).
         let leaf = rec.materialize_at(&ipath)?;
-        if inner_value_is_nan(&leaf) {
-            return None;
-        }
-        hash_inner_value(&leaf, &mut h1);
-        hash_inner_value(&leaf, &mut h2);
+        encode_inner_value_into(&leaf, &mut buf).ok()?;
     }
-
-    Some((h1.finish(), h2.finish()))
+    Some(buf)
 }
 
-/// Compute the dual `(hash1, hash2)` for lookup values (`&[InnerValue]`)
-/// using the SAME tag scheme as `compute_leaf_hashes`.
-/// This persisted identity may change only with an identity-version bump;
-/// golden-vector tests guard its existing outputs.
-fn compute_lookup_hashes(values: &[InnerValue], name_interned: u64) -> (u64, u64) {
-    const SEED2: u64 = 0x9E3779B97F4A7C15;
-
-    let mut h1 = FxHasher::default();
-    let mut h2 = FxHasher::default();
-
-    SEED2.hash(&mut h2);
-    name_interned.hash(&mut h2);
-    name_interned.hash(&mut h1);
-
+/// Canonical bytes `C` of lookup values (`&[InnerValue]` supplied by the
+/// engine's `lookup_by_index`). Same encoder per class as
+/// [`canonical_from_record`]; `None` when a value has no identity (NaN).
+pub fn canonical_from_values(values: &[InnerValue]) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
     for v in values {
-        hash_inner_value(v, &mut h1);
-        hash_inner_value(v, &mut h2);
+        encode_inner_value_into(v, &mut buf).ok()?;
     }
-
-    (h1.finish(), h2.finish())
+    Some(buf)
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
-
-/// Extract the indexed leaves for a composite index from a record AND
-/// compute the dual posting-key hash in one pass — no intermediate
-/// `Vec<InnerValue>`.
-///
-/// For each `IndexInfoItem` path, tries `scalar_at` (zero-copy) then
-/// falls back to `materialize_at` (owned, for Dec/Big/containers). If
-/// ANY path is absent the WHOLE record is skipped (all-or-nothing).
-///
-/// Returns the fully-formed `IndexRecordKey` or `None`.
-pub fn build_index_key_from_record(
-    is_unique: bool,
-    name_interned: u64,
-    rec: &(impl RecordRef + ?Sized),
-    paths: &[IndexInfoItem],
-) -> Option<IndexRecordKey> {
-    let (h1, h2) = compute_leaf_hashes(rec, paths, name_interned)?;
-    Some(IndexRecordKey::new(is_unique, name_interned).with_hash(h1, h2))
-}
-
-/// Build the index key from lookup values (`&[InnerValue]` supplied by
-/// the engine's `lookup_by_index`). Uses the SAME hash scheme as
-/// `build_index_key_from_record` so write-path and read-path agree.
-pub(in crate::base_index) fn build_index_key(
-    is_unique: bool,
-    name_interned: u64,
-    values: &[InnerValue],
-) -> IndexRecordKey {
-    let (h1, h2) = compute_lookup_hashes(values, name_interned);
-    IndexRecordKey::new(is_unique, name_interned).with_hash(h1, h2)
+/// Whether canonical bytes `C` exceed the inline cap and travel in digest
+/// form (so the posting VALUE must carry `C`).
+pub fn is_digest_form(canonical: &[u8]) -> bool {
+    canonical.len() > INLINE_MAX
 }
 
 /// Extract the indexed leaves for a composite index from a record.
@@ -326,11 +105,10 @@ pub(in crate::base_index) fn build_index_key(
 /// call `rec.materialize_at(path)`. If ANY path is missing (returns `None`)
 /// the WHOLE record is skipped (returns `None`).
 ///
-/// **S9 note**: this function still returns `Vec<InnerValue>` because the
-/// engine uses it for unique-index duplicate detection (serializing values
-/// for comparison). The hot-path write/read cycle uses
-/// `build_index_key_from_record` instead, which hashes directly from the
-/// lens without collecting owned leaves.
+/// The engine still uses this for unique-index duplicate detection in a few
+/// paths (serializing values for comparison); the hot write/read cycle uses
+/// [`build_index_key_from_record`] / [`build_index_key`], which encode
+/// directly from the lens without collecting owned leaves.
 pub fn extract_index_leaves(
     rec: &(impl RecordRef + ?Sized),
     paths: &[IndexInfoItem],
@@ -347,11 +125,40 @@ pub fn extract_index_leaves(
     Some(values)
 }
 
-/// Compose the physical posting key:
-/// `index_key (25b) || record_id (16b)` = 41 bytes.
-pub fn build_posting_key(index_key: &Bytes, record_id: &RecordId) -> Bytes {
-    let mut k = Vec::with_capacity(index_key.len() + 16);
-    k.extend_from_slice(index_key);
-    k.extend_from_slice(record_id.as_bytes());
-    Bytes::from(k)
+/// Extract the indexed leaves AND build the v2 identity in one pass.
+///
+/// For each `IndexInfoItem` path, tries `scalar_at` (zero-copy) then falls
+/// back to `materialize_at` (owned, for Dec/Big/containers). If ANY path is
+/// absent, or a leaf has no identity (NaN), the WHOLE record is skipped
+/// (returns `None`).
+///
+/// Returns `(IndexRecordKey, C)`: the fully-formed posting key (namespace
+/// `0x02`/`0x03` + name + identity bytes `I`) and the canonical bytes `C`
+/// the caller needs for the digest-form posting VALUE (regular family:
+/// value = `C`; unique family: value = owner `RecordId` + `C`).
+pub fn build_index_key_from_record(
+    is_unique: bool,
+    name_interned: u64,
+    rec: &(impl RecordRef + ?Sized),
+    paths: &[IndexInfoItem],
+) -> Option<(IndexRecordKey, Vec<u8>)> {
+    let canonical = canonical_from_record(rec, paths)?;
+    let key =
+        IndexRecordKey::new(is_unique, name_interned).with_identity(identity_bytes(&canonical));
+    Some((key, canonical))
+}
+
+/// Build the index key from lookup values (`&[InnerValue]` supplied by
+/// the engine's `lookup_by_index`). Uses the SAME encoder as
+/// [`build_index_key_from_record`] so write-path and read-path agree.
+/// Returns `None` when the probe has no identity (a NaN probe matches
+/// nothing — no posting can exist for it, including in digest form, because
+/// NaN never produces canonical bytes to digest).
+pub fn build_index_key(
+    is_unique: bool,
+    name_interned: u64,
+    values: &[InnerValue],
+) -> Option<IndexRecordKey> {
+    let canonical = canonical_from_values(values)?;
+    Some(IndexRecordKey::new(is_unique, name_interned).with_identity(identity_bytes(&canonical)))
 }

@@ -1,4 +1,5 @@
 use shamir_collections::{TFxMap, TFxSet};
+use shamir_index::model::identity::identity_bytes::unique_posting_owner;
 use shamir_storage::error::DbError;
 use shamir_tx::{IndexFamily, IndexWriteOp, TxContext};
 use shamir_types::core::interner::InternerKey;
@@ -512,7 +513,10 @@ pub(in crate::tx) async fn pre_commit_prelock(
                 provenance,
             } if provenance.family == IndexFamily::Unique => {
                 let k = (*table_token, key.clone());
-                let owner = RecordId::try_from_bytes(value).unwrap_or_default();
+                // Identity v2 (design P34-12 (a)): a unique posting value is owner
+                // RecordId (16 B) + optional canonical tail (digest form);
+                // decode the owner from the first 16 bytes.
+                let owner = unique_posting_owner(value).unwrap_or_default();
                 if let Some(&prior) = live.get(&k) {
                     if prior != owner {
                         // Two DIFFERENT records claim the same unique key with
@@ -575,7 +579,7 @@ pub(in crate::tx) async fn pre_commit_prelock(
         };
         match tbl.info_store().get(key.clone().into()).await {
             Ok(existing) => {
-                if RecordId::try_from_bytes(&existing) != Some(*declared_owner) {
+                if unique_posting_owner(&existing) != Some(*declared_owner) {
                     // The durable posting is free, or durably owned by a
                     // DIFFERENT record than this removal was planned
                     // against (a concurrent tx reclaimed it after this tx's
@@ -674,7 +678,7 @@ pub(in crate::tx) async fn pre_commit_prelock(
             match tbl.info_store().get(g.index_key.clone().into()).await {
                 Ok(existing) => {
                     let released_and_touched = ever_released.contains(&key)
-                        && RecordId::try_from_bytes(&existing).is_some_and(|existing_id| {
+                        && unique_posting_owner(&existing).is_some_and(|existing_id| {
                             tx.write_set
                                 .get(&g.table_token)
                                 .is_some_and(|s| s.staged_op(existing_id.as_bytes()).is_some())
@@ -696,7 +700,10 @@ pub(in crate::tx) async fn pre_commit_prelock(
                             }
                         }
                         Some(expected_owner) => {
-                            if existing.as_ref() != expected_owner.as_bytes().as_slice()
+                            // Identity v2: compare the OWNER prefix (first 16
+                            // bytes), not the whole value — a digest-form
+                            // posting carries a canonical tail after it.
+                            if unique_posting_owner(&existing) != Some(expected_owner)
                                 && !released_and_touched
                             {
                                 repo.tx_metrics().on_tx_aborted_unique();

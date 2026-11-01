@@ -12,7 +12,6 @@ impl Hasher for ConstantHasher {
     fn finish(&self) -> u64 {
         0
     }
-
     fn write(&mut self, _: &[u8]) {}
 }
 
@@ -117,6 +116,38 @@ fn folder_identity_survives_hash_collisions() {
         paths[2],
         ResourcePathRef::FunctionFolderPrefix { prefix: "a/b" }
     );
+    assert_ne!(paths[2], paths[3]);
+}
+
+#[test]
+fn display_and_owned_conversion_preserve_folder_identity() {
+    for parts in [&[][..], &["a"][..], &["a", "", "b"][..]] {
+        let path = folder(parts);
+        let view = path.as_ref();
+        assert_eq!(view.to_owned(), path);
+        assert_eq!(format!("{view}"), format!("{path}"));
+        assert_eq!(path_hash(view), path_hash(path.as_ref()));
+    }
+}
+
+#[test]
+fn borrowed_folder_canonical_path_matches_segments() {
+    // Production path: a function's nearest folder ancestor is the borrowed
+    // slash-joined prefix; it must equal, display, convert and hash exactly
+    // like the owned folder built from the same segments.
+    let path = ResourcePath::function("tenant/reports/daily");
+    let nearest = path.as_ref().ancestors().next().expect("nearest ancestor");
+    assert_eq!(
+        nearest,
+        ResourcePathRef::FunctionFolderPrefix {
+            prefix: "tenant/reports"
+        }
+    );
+    let owned = folder(&["tenant", "reports"]);
+    assert_eq!(nearest, owned.as_ref());
+    assert_eq!(nearest.to_owned(), owned);
+    assert_eq!(format!("{nearest}"), format!("{owned}"));
+    assert_eq!(path_hash(nearest), path_hash(owned.as_ref()));
 }
 
 #[test]

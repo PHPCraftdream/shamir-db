@@ -517,28 +517,39 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Rebuild prep: sweep stale postings while preserving index definitions.
+    pub async fn sweep_postings_for_rebuild(
+        &self,
+        is_unique: bool,
+        name_interned: u64,
+    ) -> DbResult<()> {
+        self.sweep_index_postings(is_unique, name_interned).await
+    }
+
     /// P0-3 (#959): sweep all posting entries for the given index prefix.
-    /// Extracted from `drop_index` / `drop_unique_index` so the recovery
-    /// path can re-run it idempotently. Removing already-removed keys is a
-    /// no-op on every `Store` backend.
+    /// Extracted from drop paths; idempotent so recovery can repeat it.
+    /// Identity v2 scans current and legacy namespace prefixes.
     pub(in crate::base_index) async fn sweep_index_postings(
         &self,
         is_unique: bool,
         name_interned: u64,
     ) -> DbResult<()> {
-        let prefix = IndexRecordKey::new(is_unique, name_interned).to_prefix_bytes();
-        let mut stream = self
-            .info_store
-            .scan_prefix_stream(prefix.clone(), FULL_SCAN_BATCH);
-        while let Some(batch_result) = stream.next().await {
-            let keys: Vec<RecordKey> = batch_result?.into_iter().map(|(key, _)| key).collect();
-            if !keys.is_empty() {
-                self.info_store.remove_many(keys).await?;
+        let key = IndexRecordKey::new(is_unique, name_interned);
+        let prefixes = [key.to_prefix_bytes(), key.to_legacy_prefix_bytes()];
+        for prefix in &prefixes {
+            let mut stream = self
+                .info_store
+                .scan_prefix_stream(prefix.clone(), FULL_SCAN_BATCH);
+            while let Some(batch_result) = stream.next().await {
+                let keys: Vec<RecordKey> = batch_result?.into_iter().map(|(key, _)| key).collect();
+                if !keys.is_empty() {
+                    self.info_store.remove_many(keys).await?;
+                }
             }
+            self.posting_cache.retain_prefix_excluding(prefix);
         }
         self.posting_cache_generation
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        self.posting_cache.retain_prefix_excluding(&prefix);
         Ok(())
     }
 

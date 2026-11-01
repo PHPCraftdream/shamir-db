@@ -464,7 +464,7 @@ async fn p02_regular_drop_index_before_commit_no_orphan() {
         &record_with_str(name_key, "alice"),
         &[IndexInfoItem::new(vec![name_key])],
     );
-    if let Some(irk) = irk {
+    if let Some((irk, _canonical)) = irk {
         let index_key_bytes = irk.to_bytes();
         let mut posting_key = Vec::with_capacity(41);
         posting_key.extend_from_slice(&index_key_bytes);
@@ -534,7 +534,7 @@ async fn p02_unique_drop_index_before_commit_no_orphan() {
         &record_with_str(email_key, "alice@example.com"),
         &[IndexInfoItem::new(vec![email_key])],
     );
-    if let Some(irk) = irk {
+    if let Some((irk, _canonical)) = irk {
         let key = irk.to_bytes();
         let orphan = tbl
             .info_store()
