@@ -8,7 +8,7 @@ Items A, D and E were completed in the preceding stage: persisted zeroizing toke
 
 ### Item 1 — audit path and redaction
 
-`TokenService` calls `AuditChainWriter::append`, which advances the shared chain and invokes `AuditAppender::append_entry` (`/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-connect/src/server/infra/audit_chain.rs:491-529`). The production launcher constructs the shared writer/appender (`/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/engine/server/server_launcher/launch.rs:312-321`). `FjallAuditAppender` supports batched operation (`/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/observability/logging/audit_appender.rs:13-20`). Token events already use the standard path; no extra queue or production-path change was warranted.
+`TokenService` calls `AuditChainWriter::append`, which advances the shared chain and invokes `AuditAppender::append_entry` (`crates/shamir-connect/src/server/infra/audit_chain.rs:491-529`). The production launcher constructs the shared writer/appender (`crates/shamir-server/src/engine/server/server_launcher/launch.rs:312-321`). `FjallAuditAppender` supports batched operation (`crates/shamir-server/src/security/observability/logging/audit_appender.rs:13-20`). Token events already use the standard path; no extra queue or production-path change was warranted.
 
 `token_audit_events_include_ids_without_secret_or_mac` checks event names, exact payload shapes `([u8; 16], [u8; 16])` / `([u8; 16], Vec<[u8; 16]>)`, both creation payloads and owner/list IDs. It parses both bearer strings and checks both raw secrets, both complete bearer strings and both MACs against every event-details payload. It captures appender entries and compares their sequence, name and details with the chain snapshot. Chain HMAC links are not event details and are excluded from the payload-redaction assertions.
 
@@ -50,12 +50,12 @@ Update imports/re-exports during extraction; moving the current files as-is is i
 ### Item 6 — lint-aware read-through
 
 Read end-to-end after edits:
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/service/token_service.rs`
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/store.rs`
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/tests/service_tests.rs`
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/security/tokens/tests/store_tests.rs`
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/crates/shamir-server/src/tests/boot/server_tests.rs`
-- `/D:/dev/rust/shamir-db/worktrees/p34-t2b-token-server/docs/dev-artifacts/audits/2026-11-01-token-t2b-server/DESIGN.md`
+- `crates/shamir-server/src/security/tokens/service/token_service.rs`
+- `crates/shamir-server/src/security/tokens/store.rs`
+- `crates/shamir-server/src/security/tokens/tests/service_tests.rs`
+- `crates/shamir-server/src/security/tokens/tests/store_tests.rs`
+- `crates/shamir-server/src/tests/boot/server_tests.rs`
+- `docs/dev-artifacts/audits/2026-11-01-token-t2b-server/DESIGN.md`
 
 Reviewed imports/privacy/cfg(test), missing_docs on newly visible items, `Send`/`'static` captures, lock scope across awaits, exhaustive matches, moved values and `?` conversions, struct literals, unused items, clippy patterns including bool/assert comparisons and field-reassign-with-default, std HashMap/HashSet/RandomState bans, absolute path depth, no `#[allow]`/inline cfg(test)/local use, and folder/file layout. This source read-through is not compiler verification.
 
