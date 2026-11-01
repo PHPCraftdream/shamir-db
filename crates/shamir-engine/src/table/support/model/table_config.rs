@@ -1,3 +1,4 @@
+use crate::repo::instance::repo_instance::table_store::new_table_store_id;
 use shamir_types::types::record_id::RecordId;
 
 #[derive(Debug, Clone)]
@@ -22,7 +23,7 @@ impl TableConfig {
     }
 
     pub fn with_new_store_id(self) -> Self {
-        self.with_store_id(crate::repo::instance::repo_instance::table_store::new_table_store_id())
+        self.with_store_id(new_table_store_id())
     }
 
     pub fn with_store_id(mut self, store_id: RecordId) -> Self {

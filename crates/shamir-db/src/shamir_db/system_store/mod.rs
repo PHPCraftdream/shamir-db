@@ -5,6 +5,6 @@ mod settings;
 mod store;
 mod validators;
 
-pub(crate) use catalogue::table_config_from_catalogue_record;
+pub(crate) use catalogue::{table_config_from_catalogue_record, TableRenameKey};
 
 pub use store::{SystemStore, SystemStoreConfig};

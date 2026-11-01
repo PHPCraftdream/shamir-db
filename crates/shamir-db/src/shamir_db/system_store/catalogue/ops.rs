@@ -7,6 +7,7 @@ use crate::{DbError, DbResult};
 
 use super::super::store::{qv_map1, qv_map2, TABLE_DATABASES, TABLE_REPOSITORIES, TABLE_TABLES};
 use super::super::SystemStore;
+use super::rename_key::TableRenameKey;
 
 fn table_catalogue_key(db_name: &str, repo_name: &str, table_name: &str) -> QueryValue {
     let mut key = new_map();
@@ -251,14 +252,17 @@ impl SystemStore {
     /// Rename provenance is local catalogue metadata, not a seed/schema field.
     pub(crate) async fn rename_table_row(
         &self,
-        db_name: &str,
-        repo_name: &str,
-        from: &str,
-        to: &str,
+        key: TableRenameKey<'_>,
         source_store_id: Option<&shamir_types::types::record_id::RecordId>,
         destination_store_id: &shamir_types::types::record_id::RecordId,
         expected_source: &QueryValue,
     ) -> DbResult<()> {
+        let TableRenameKey {
+            db_name,
+            repo_name,
+            from,
+            to,
+        } = key;
         self.catalogue_write_fault_gate()?;
         if let Some(id) = source_store_id {
             id.to_string()

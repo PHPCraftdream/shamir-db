@@ -1,6 +1,7 @@
 use crate::access::Actor;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
+use crate::shamir_db::system_store::TableRenameKey;
 use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 use crate::types::value::{InnerValue, QueryValue};
 use futures::StreamExt;
@@ -132,17 +133,11 @@ async fn rename_recreate_and_swap_names_preserves_each_incarnation() {
         .unwrap();
     let old_a = dbi.get_table("main", "a").await.unwrap();
     let new_a = dbi.get_table("main", "b").await.unwrap();
-    let old_values = old_a
-        .list_stream(32)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .flat_map(Result::unwrap)
-        .collect::<Vec<_>>();
+    let old_values = listed_rows(&old_a).await;
     assert_eq!(old_values.len(), 2);
     let values = old_values
         .iter()
-        .map(|(_, value)| value.into_inner().unwrap())
+        .map(|(_, value)| value.clone())
         .collect::<Vec<_>>();
     assert!(values.iter().all(|value| [
         InnerValue::Str("original-a".into()),
@@ -155,19 +150,10 @@ async fn rename_recreate_and_swap_names_preserves_each_incarnation() {
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(ids.len(), 2);
     assert!(old_ids.iter().all(|id| ids.contains(id)));
-    let new_values = new_a
-        .list_stream(32)
-        .collect::<Vec<_>>()
-        .await
-        .into_iter()
-        .flat_map(Result::unwrap)
-        .collect::<Vec<_>>();
+    let new_values = listed_rows(&new_a).await;
     assert_eq!(new_values.len(), 1);
     assert_eq!(new_values[0].0, recreated_ids[0]);
-    assert_eq!(
-        new_values[0].1.into_inner().unwrap(),
-        InnerValue::Str("recreated-a".into())
-    );
+    assert_eq!(new_values[0].1, InnerValue::Str("recreated-a".into()));
 }
 
 #[tokio::test]
@@ -212,10 +198,12 @@ async fn durability_tail_failure_retry_reconciles_registration_and_is_idempotent
         .rename_table_stores_with("a", "b", move |destination| async move {
             catalogue
                 .rename_table_row(
-                    "retry",
-                    "main",
-                    "a",
-                    "b",
+                    TableRenameKey {
+                        db_name: "retry",
+                        repo_name: "main",
+                        from: "a",
+                        to: "b",
+                    },
                     Some(&source_id),
                     destination.store_id.as_ref().unwrap(),
                     &source_record,

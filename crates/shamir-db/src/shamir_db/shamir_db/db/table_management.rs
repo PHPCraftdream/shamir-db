@@ -1,6 +1,7 @@
 use crate::access::{Actor, ResourceMeta};
 use crate::engine::table::{TableConfig, TableManager};
 use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
+use crate::shamir_db::system_store::TableRenameKey;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
 
@@ -71,7 +72,7 @@ impl ShamirDb {
             config = config.with_indexes();
         }
         config = config.with_new_store_id();
-        let store_id = config.store_id.clone();
+        let store_id = config.store_id;
 
         db.create_table_checked_with_config(repo_name, config)
             .await?;
@@ -367,10 +368,12 @@ impl ShamirDb {
                     })?;
                     self.system_store
                         .complete_table_rename_row(
-                            db_name,
-                            repo_name,
-                            from,
-                            to,
+                            TableRenameKey {
+                                db_name,
+                                repo_name,
+                                from,
+                                to,
+                            },
                             source_id.as_ref(),
                             current_source.is_some(),
                             destination_id,
@@ -406,10 +409,12 @@ impl ShamirDb {
                 })?;
                 self.system_store
                     .rename_table_row(
-                        db_name,
-                        repo_name,
-                        from,
-                        to,
+                        TableRenameKey {
+                            db_name,
+                            repo_name,
+                            from,
+                            to,
+                        },
                         source_id.as_ref(),
                         destination_id,
                         &old_record,
@@ -417,7 +422,9 @@ impl ShamirDb {
                     .await
             })
             .await;
-        result?;
+        if !result? {
+            return Err(DbError::NotFound(format!("Table '{from}' not found")));
+        }
         log::debug!(
             "rename_table_as: exit db={db_name} repo={repo_name} from={from} to={to} elapsed={:?}",
             rename_started.elapsed()

@@ -12,8 +12,8 @@ use shamir_query_builder::ddl::{paused_subscription, repl_scope, replication_pro
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 use shamir_query_types::{DurabilityOverride, ReplicationServe};
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
-use shamir_types::RecordId;
 use tokio_util::sync::CancellationToken;
 
 use crate::replication::{

@@ -175,7 +175,7 @@ impl RepoInstance {
                     "Table '{table_name}' was removed during initialization"
                 ))
             })?;
-        let id = config.store_id.clone();
+        let id = config.store_id;
         let names =
             super::super::table_store::table_store_names(table_name, config.store_id.as_ref());
         let data_store: Arc<dyn Store> = self.repo.store_get(names.data).await?;

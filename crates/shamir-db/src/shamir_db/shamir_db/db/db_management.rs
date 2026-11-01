@@ -431,7 +431,7 @@ impl ShamirDb {
         let inline_tables = config
             .tables
             .iter()
-            .map(|t| (t.name.clone(), t.enable_indexes, t.store_id.clone()))
+            .map(|t| (t.name.clone(), t.enable_indexes, t.store_id))
             .collect::<Vec<_>>();
 
         // DbInstance recovers and certifies before registry insertion.

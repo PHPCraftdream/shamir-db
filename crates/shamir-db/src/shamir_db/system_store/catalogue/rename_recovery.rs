@@ -4,19 +4,23 @@ use crate::{DbError, DbResult};
 
 use super::super::store::TABLE_TABLES;
 use super::super::SystemStore;
+use super::rename_key::TableRenameKey;
 
 impl SystemStore {
     pub(crate) async fn complete_table_rename_row(
         &self,
-        db_name: &str,
-        repo_name: &str,
-        from: &str,
-        to: &str,
+        key: TableRenameKey<'_>,
         source_store_id: Option<&shamir_types::types::record_id::RecordId>,
         source_row_present: bool,
         destination_store_id: &shamir_types::types::record_id::RecordId,
         expected_destination: &QueryValue,
     ) -> DbResult<()> {
+        let TableRenameKey {
+            db_name,
+            repo_name,
+            from,
+            to,
+        } = key;
         self.catalogue_write_fault_gate()?;
         let QueryValue::Map(fields) = expected_destination else {
             return Err(DbError::Internal(

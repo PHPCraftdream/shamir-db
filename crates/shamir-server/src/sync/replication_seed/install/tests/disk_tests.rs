@@ -18,7 +18,7 @@ use crate::replication_seed::exporter::export_open;
 use crate::replication_seed::install;
 use crate::replication_seed::install::installer::install_with;
 use crate::replication_seed::install::staging::{destination, open_image};
-use crate::replication_seed::{export, verify, Manifest};
+use crate::replication_seed::{verify, Manifest};
 
 fn runtime() -> Runtime {
     Builder::new_current_thread().enable_all().build().unwrap()
@@ -170,6 +170,20 @@ fn imported_seed_ids_are_node_local_persisted_and_digest_is_logical() {
             .collect::<Vec<_>>(),
     );
     assert_eq!(verify(&second).unwrap(), after_hash);
+}
+
+#[test]
+fn digest_mismatch_has_no_destination_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("artifact");
+    let data = dir.path().join("absent");
+    let rt = runtime();
+    rt.block_on(artifact(&seed));
+    let error = rt
+        .block_on(install(&data, "app", "main", &seed, &"0".repeat(64)))
+        .unwrap_err();
+    assert!(error.to_string().contains("digest mismatch"));
+    assert!(!data.exists());
 }
 
 fn attempts(data: &Path) -> usize {
