@@ -248,6 +248,8 @@ await client.logout();
 
 SDK responsibilities: Worker для Argon2id, lifecycle, auto-resume в той же вкладке (ticket в memory), error mapping, zeroize на `beforeunload`.
 
+Браузерный bearer-клиент использует token API отдельно от SCRAM `ShamirClient`: строит абсолютный origin-root URL без userinfo/query/fragment/path, использует HTTP того же origin, `credentials: 'omit'` и `redirect: 'error'`. Для WS подключается к `/shamir/v1/ws/browser` и отправляет токен одним первым бинарным msgpack-кадром после upgrade; токен не помещается в URL, cookie, Origin или subprotocol. Browser API не предоставляет TLS-настроек Node или пользовательского Origin. CORS не включается: cross-origin HTTP остаётся недоступным без отдельного изменения серверной политики.
+
 ---
 
 ## 7. Browser Compatibility
@@ -292,6 +294,7 @@ SDK responsibilities: Worker для Argon2id, lifecycle, auto-resume в той �
 - Resumption: browser→browser ok; browser→native (upgrade) ok; native→browser (downgrade) blocked
 - Audit log content (если admin watches metrics) показывает `transport: "ws"` для browser
 - `beforeunload` zeroize ticket + session_id
+- Браузерный bearer WS проверить отдельно в реальном браузере через same-origin WSS: токен отсутствует в URL/журналах, корректный первый бинарный кадр устанавливает сессию, несовпадение Origin/Host отклоняется, истечение ожидания и повреждённые кадры закрываются общим `4000`, проверенный отказ канала — `4013`, исчерпание active cap — `1013`. Псевдо-API не считать существующим SDK-контрактом до реализации.
 
 ---
 

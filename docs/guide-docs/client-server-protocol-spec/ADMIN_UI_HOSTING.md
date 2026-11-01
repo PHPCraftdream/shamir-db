@@ -83,6 +83,8 @@ addr = "0.0.0.0:7335"                 # отдельный listener
 allowed_origins = ["https://admin.example.com"]   # для CORS preflight (не auth)
 ```
 
+For same-origin browser login, keep the admin UI on its separate HTTPS listener and configure a reverse proxy to route `/shamir/v1/auth/begin`, `/shamir/v1/auth/finish`, and the TOKEN_API data paths actually used by the UI to the loopback `kind:http` listener; route SCRAM WebSocket paths only to their SCRAM listener. Configure the backend login listener according to TOKEN_LOGIN_HTTP §5.1. The edge terminates TLS, rejects HTTP, sanitizes/replaces XFF, preserves validated Host/Origin, and adds HSTS. Protect/isolate or authenticate the loopback backend; local processes can otherwise forge XFF or observe credentials. No CORS is added. Exempt the trusted proxy only from per-IP accept caps; global limits still apply.
+
 ### 4.3. Admin UI not used → endpoint disabled
 
 Если admin UI не нужен — `enabled = false`, `/admin/*` возвращает 404.
