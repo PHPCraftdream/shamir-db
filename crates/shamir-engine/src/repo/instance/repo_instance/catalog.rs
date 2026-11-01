@@ -248,6 +248,10 @@ impl RepoInstance {
         count
     }
 
+    pub fn has_table(&self, table_name: &str) -> bool {
+        self.configs.contains_key(table_name)
+    }
+
     pub fn table_config(&self, name: &str) -> Option<TableConfig> {
         self.configs.get(name).map(|entry| entry.value().clone())
     }
