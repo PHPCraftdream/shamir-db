@@ -274,7 +274,11 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
             .await
             .unwrap();
     }
-    snapshot::dump_snapshot_with_gen(&adapter2, &info_store, &keyspace, 1)
+    let gen_zero = snapshot::read_manifest(&info_store, &keyspace)
+        .await
+        .unwrap();
+    assert_eq!(gen_zero.gen, 0);
+    snapshot::dump_snapshot_with_gen(&adapter2, &info_store, &keyspace, gen_zero.gen + 1)
         .await
         .unwrap();
 
@@ -289,7 +293,7 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
     .unwrap();
     let final_manifest = SnapshotManifest {
         format_version: written.format_version,
-        gen: 1,
+        gen: gen_zero.gen + 1,
         graph_chunks: written.graph_chunks,
         data_chunks: written.data_chunks,
         qgraph_chunks: written.qgraph_chunks,
@@ -326,7 +330,8 @@ async fn generation_flip_advances_manifest_and_prunes_old_delta() {
     )
     .unwrap();
     assert_eq!(
-        manifest_after.gen, 1,
+        manifest_after.gen,
+        gen_zero.gen + 1,
         "manifest must advance to gen 1 after the flip"
     );
     assert_eq!(
@@ -431,7 +436,11 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         .upsert(rid(101), &lcg_vec(DIM as usize, 101))
         .await
         .unwrap();
-    snapshot::dump_snapshot_with_gen(&adapter2, &info_store, &keyspace, 1)
+    let current = snapshot::read_manifest(&info_store, &keyspace)
+        .await
+        .unwrap();
+    assert_eq!(current.gen, 0);
+    snapshot::dump_snapshot_with_gen(&adapter2, &info_store, &keyspace, current.gen + 1)
         .await
         .unwrap();
     // Overwrite the manifest with the correct delta_applied_upto (mirroring
@@ -520,7 +529,11 @@ async fn crash_between_flip_and_prune_leaves_orphans_but_load_is_correct() {
         .upsert(rid(101), &lcg_vec(DIM as usize, 101))
         .await
         .unwrap();
-    snapshot::dump_snapshot_with_gen(&adapter3, &info_store, &keyspace, 2)
+    let current = snapshot::read_manifest(&info_store, &keyspace)
+        .await
+        .unwrap();
+    assert_eq!(current.gen, 1);
+    snapshot::dump_snapshot_with_gen(&adapter3, &info_store, &keyspace, current.gen + 1)
         .await
         .unwrap();
     let written2: SnapshotManifest = MetaEnvelope::open(

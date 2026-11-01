@@ -414,6 +414,8 @@ artifact).
 
 ## 3. Indexes
 
+- Persisted vector descriptors support the in-process HNSW backend only. Legacy metadata using removed backend ordinal 1 fails decoding; the engine create path writes only `InProcessHnsw` (`crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_index_admitted.rs`).
+
 - **Index identity is canonical bytes (identity v2); older binaries cannot
   open FTS or functional indexes written by it.** Regular and unique
   postings, FTS token postings and functional postings identify a value by

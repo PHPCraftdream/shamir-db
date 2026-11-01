@@ -5,7 +5,6 @@
 //! compact on the hot path.
 
 use serde::{Deserialize, Serialize};
-use shamir_types::secret::SecretString;
 
 /// Bincode persists variant ordinals: never reorder or remove variants; append only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,15 +176,9 @@ pub struct VectorConfig {
     pub quantization: Option<VectorQuantization>,
 }
 
+/// A persisted legacy External variant (ordinal 1) is rejected during decode;
+/// only the database's in-process HNSW backend is supported.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum VectorBackendRef {
-    InProcessHnsw {
-        ef_construct: u32,
-        m: u32,
-    },
-    External {
-        driver: String,
-        url: String,
-        api_key_secret: SecretString,
-    },
+    InProcessHnsw { ef_construct: u32, m: u32 },
 }

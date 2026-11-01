@@ -32,18 +32,146 @@ use crate::vector::adapter::VectorAdapter;
 use crate::vector::hnsw_adapter::{await_fitted, HnswAdapter, HnswConfig};
 use crate::vector::snapshot;
 use crate::vector::vector_backend::VectorBackend;
+use async_trait::async_trait;
+use bytes::Bytes;
+use futures::Stream;
+use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::Store;
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 use smallvec::SmallVec;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 // ----------------------------------------------------------------------------
 // helpers
 // ----------------------------------------------------------------------------
+
+struct FailManifestStore {
+    inner: Arc<dyn Store>,
+    fail_once: AtomicBool,
+    integrity_written: AtomicBool,
+    keyspace: String,
+}
+
+type RestoreStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
+
+#[async_trait]
+impl Store for FailManifestStore {
+    async fn insert(&self, value: Bytes) -> DbResult<RecordKey> {
+        self.inner.insert(value).await
+    }
+    async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        let integrity: RecordKey = Bytes::from(format!("{}.integrity", self.keyspace)).into();
+        let manifest: RecordKey = Bytes::from(format!("{}.manifest", self.keyspace)).into();
+        if key == integrity {
+            let result = self.inner.set(key, value).await?;
+            self.integrity_written.store(true, Ordering::SeqCst);
+            return Ok(result);
+        }
+        if key == manifest && self.fail_once.swap(false, Ordering::SeqCst) {
+            return Err(DbError::Storage(
+                "injected sequential manifest Set failure".into(),
+            ));
+        }
+        self.inner.set(key, value).await
+    }
+    async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
+        self.inner.get(key).await
+    }
+    async fn remove(&self, key: RecordKey) -> DbResult<bool> {
+        self.inner.remove(key).await
+    }
+    fn iter_stream(&self, batch_size: usize) -> RestoreStream {
+        self.inner.iter_stream(batch_size)
+    }
+    fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> RestoreStream {
+        self.inner.scan_prefix_stream(prefix, batch_size)
+    }
+}
+
+#[tokio::test]
+async fn sequential_metadata_failure_triggers_backend_rebuild_from_source_records() {
+    let interner = Interner::new();
+    let info: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let index_id = 24;
+    let keyspace = format!("__vec_snap__{index_id}");
+    let items: Vec<_> = (0..N)
+        .map(|n| (rid(n), lcg_vec(DIM as usize, n as u64 * 7 + 1)))
+        .collect();
+    let original = HnswAdapter::new(DIM, VectorMetric::L2, HnswConfig::default());
+    original.upsert_batch(&items).await.unwrap();
+    snapshot::dump_snapshot(&original, &info, &keyspace)
+        .await
+        .unwrap();
+    let previous_manifest = info
+        .get(bytes::Bytes::from(format!("{keyspace}.manifest")).into())
+        .await
+        .unwrap();
+    for (record_id, vector) in &items {
+        let record = make_rec(
+            &interner,
+            &vector
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect::<Vec<_>>(),
+        );
+        data.set(record_id.0.to_vec().into(), record.to_bytes().unwrap())
+            .await
+            .unwrap();
+    }
+    let injected = Arc::new(FailManifestStore {
+        inner: Arc::clone(&info),
+        fail_once: AtomicBool::new(true),
+        integrity_written: AtomicBool::new(false),
+        keyspace: keyspace.clone(),
+    });
+    let injected_store: Arc<dyn Store> = injected.clone();
+    let active = snapshot::read_manifest(&info, &keyspace).await.unwrap();
+    let failure =
+        snapshot::dump_snapshot_with_gen(&original, &injected_store, &keyspace, active.gen + 1)
+            .await;
+    assert!(failure.is_err());
+    assert!(injected.integrity_written.load(Ordering::SeqCst));
+    assert_eq!(
+        info.get(bytes::Bytes::from(format!("{keyspace}.manifest")).into())
+            .await
+            .unwrap(),
+        previous_manifest
+    );
+    assert!(
+        matches!(snapshot::load_snapshot(&info, &keyspace).await, Err(snapshot::SnapshotError::Corrupt(message)) if message == "snapshot metadata integrity mismatch")
+    );
+    let backend = make_backend(&interner, index_id, DIM, VectorMetric::L2);
+    backend
+        .restore_on_open(Arc::clone(&info), Arc::clone(&data))
+        .await
+        .unwrap();
+    assert_eq!(backend.rebuild_count(), 1);
+    let adapter_ref = backend
+        .as_any()
+        .downcast_ref::<VectorBackend>()
+        .unwrap()
+        .adapter_for_test();
+    let hnsw = adapter_ref.as_hnsw_adapter().unwrap();
+    let mut recovered = Vec::with_capacity(N);
+    hnsw.for_each_rid_map(|_, record_id| recovered.push(record_id));
+    let mut expected_ids: Vec<_> = items.iter().map(|(record_id, _)| *record_id).collect();
+    recovered.sort_unstable();
+    expected_ids.sort_unstable();
+    assert_eq!(
+        recovered, expected_ids,
+        "fallback rebuilt exactly the source RecordIds"
+    );
+    let top = topk_ids(&backend, &lcg_vec(DIM as usize, 42), 5).await;
+    assert_eq!(top.len(), 5);
+    assert!(top.iter().all(|record_id| expected_ids.contains(record_id)));
+}
 
 /// Vector dim used by the round-trip tests. Small enough to keep the test
 /// fast, large enough that the HNSW graph path is exercised (the adapter

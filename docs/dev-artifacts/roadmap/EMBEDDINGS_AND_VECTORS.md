@@ -465,7 +465,7 @@ a symbol reference.
 | `Filter::VectorSearch { field, vector, k, metric }` | `Filter::VectorSimilarity { field, query, k }` (no per-query `metric` override; uses the index's metric) | `crates/shamir-query-types/src/filter/filter_enum.rs` |
 | `CreateVectorIndexOp { create_vector_index, table, field, dim, metric, … }` | `CreateIndexOp { …, index_type: "vector", vector_dim, vector_metric }` — vector is a *variant* of the general create-index op, not a separate op | `crates/shamir-query-types/src/admin`, builder `crates/shamir-query-builder/src/ddl/create_index.rs` (`index_type("vector").vector_dim(..).vector_metric(..)`) |
 | `VectorMetric::{ Cosine, DotProduct, EuclideanL2 }` | `VectorMetric::{ L2, Cosine, Dot }` (the `EuclideanL2` ⇒ `L2` rename; `DotProduct` ⇒ `Dot`) | `crates/shamir-index/src/kind.rs` |
-| `VectorConfig { dim, metric, backend }` ✓ | matches (plus `VectorBackendRef::{ InProcessHnsw, External }`) | `crates/shamir-index/src/kind.rs` |
+| `VectorConfig { dim, metric, backend }` ✓ | matches (plus `VectorBackendRef::InProcessHnsw` only; external services are client-side) | `crates/shamir-index/src/model/kind.rs` |
 | DDL builder `ddl.createIndex(..., { index_type: 'vector', vector_dim, vector_metric })` ✓ | matches (Rust + TS builder already shipped) | `crates/shamir-query-builder`, `crates/shamir-client-ts` |
 | `filter.vectorSimilarity(field, vector, k)` ✓ | matches (TS builder already shipped under that name) | `crates/shamir-client-ts` |
 

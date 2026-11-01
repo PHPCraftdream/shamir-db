@@ -5,7 +5,7 @@ use crate::engine::db_instance::db_instance::DbInstance;
 use crate::repl_binding::SubscriptionLease;
 use crate::{DbError, DbResult};
 use dashmap::DashMap;
-use shamir_collections::{TFxMap, THasher};
+use shamir_collections::THasher;
 use shamir_engine::function::{
     EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, WasmEngine, WasmFunction,
     WasmLimits,
@@ -353,13 +353,7 @@ impl ShamirDb {
         // `table_by_token` resolves and Put/Delete/Index ops actually replay
         // for disk-backed repos.
         let table_records = shamir.system_store.load_tables().await?;
-        let mut tables_by_repo: TFxMap<(&str, &str), Vec<&QueryValue>> = TFxMap::default();
-        for table in &table_records {
-            if let (Some(db), Some(repo)) = (table["db_name"].as_str(), table["repo_name"].as_str())
-            {
-                tables_by_repo.entry((db, repo)).or_default().push(table);
-            }
-        }
+        let tables_by_repo = super::catalog::group_tables_by_repo(&table_records, || {});
         for rec in &repo_records {
             let db_name = rec["db_name"].as_str().ok_or_else(|| {
                 DbError::Internal("repository catalogue row is missing db_name".to_string())

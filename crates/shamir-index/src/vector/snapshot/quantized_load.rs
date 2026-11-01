@@ -7,29 +7,26 @@ use crate::vector::quantized_dist::ShamirDistU8;
 use crate::vector::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
-use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub(super) fn load_quantized_graph(
     temp_dir: tempfile::TempDir,
     basename: &str,
-    graph_bytes: &[u8],
-    data_bytes: &[u8],
+    graph_path: PathBuf,
+    data_path: PathBuf,
     quantizer: Arc<Sq8Quantizer>,
     metric: VectorMetric,
 ) -> Result<Arc<Hnsw<'static, u8, ShamirDistU8>>, SnapshotError> {
     validate_basename(basename)?;
-    let graph_path = temp_dir.path().join(format!("{basename}.hnsw.graph"));
-    let data_path = temp_dir.path().join(format!("{basename}.hnsw.data"));
-    let mut graph_file = std::fs::File::create(graph_path)?;
-    graph_file.write_all(graph_bytes)?;
-    graph_file.flush()?;
-    let mut data_file = std::fs::File::create(data_path)?;
-    data_file.write_all(data_bytes)?;
-    data_file.flush()?;
-    drop(graph_file);
-    drop(data_file);
+    let expected_graph_path = temp_dir.path().join(format!("{basename}.hnsw.graph"));
+    let expected_data_path = temp_dir.path().join(format!("{basename}.hnsw.data"));
+    if graph_path != expected_graph_path || data_path != expected_data_path {
+        return Err(SnapshotError::Corrupt(
+            "quantized graph path mismatch".into(),
+        ));
+    }
 
     let loader: &'static HnswIo = Box::leak(Box::new(HnswIo::new(temp_dir.path(), basename)));
     let distance = ShamirDistU8::new(quantizer, metric);
