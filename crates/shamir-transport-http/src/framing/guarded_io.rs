@@ -129,11 +129,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
             &mut self.head_deadline,
             &mut self.request_deadline,
             &mut self.write_deadline,
-        ] {
-            if let Some(timer) = timer {
-                if timer.as_mut().poll(cx).is_ready() {
-                    expired = true;
-                }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if timer.as_mut().poll(cx).is_ready() {
+                expired = true;
             }
         }
         if expired {
