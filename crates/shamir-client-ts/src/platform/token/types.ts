@@ -1,3 +1,5 @@
+import type { ApiToken } from '../../entry/api-token.js';
+
 export interface TokenHttpRequestInit {
   method: 'GET' | 'POST';
   headers: Readonly<Record<string, string>>;
@@ -14,7 +16,7 @@ export interface TokenHttpResponse {
 }
 
 export interface TokenPlatform {
-  requestHttp(url: URL, token: import('../../../entry/api-token.js').ApiToken, init: TokenHttpRequestInit): Promise<TokenHttpResponse>;
+  requestHttp(url: URL, token: ApiToken, init: TokenHttpRequestInit): Promise<TokenHttpResponse>;
   close(): Promise<void>;
 }
 

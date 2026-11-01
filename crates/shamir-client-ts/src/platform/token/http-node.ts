@@ -44,7 +44,7 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions): T
       const requestOptions: RequestOptions = {
         protocol: url.protocol, hostname: url.hostname.replace(/^\[|\]$/g, ''), port: url.port || undefined,
         path: `${url.pathname}${url.search}`, method: init.method,
-        headers: { ...init.headers, ...(normalized.origin ? { Origin: normalized.origin } : {}), Authorization: `Bearer ${tokenValueForTransport(token)}` },
+        headers: { ...init.headers, ...(init.body ? { 'Content-Length': String(init.body.byteLength) } : {}), ...(normalized.origin ? { Origin: normalized.origin } : {}), Authorization: `Bearer ${tokenValueForTransport(token)}` },
         agent: secure ? httpsAgent : httpAgent,
         ...(secure ? { ALPNProtocols: ['http/1.1'] } : {}),
       };
@@ -77,7 +77,7 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions): T
         const chunks: Buffer[] = [];
         let total = 0;
         try {
-          request = (secure ? https.request : http.request)(requestOptions, (response) => {
+          const onResponse = (response: IncomingMessage): void => {
             if (connectTimer !== undefined) { clearTimeout(connectTimer); connectTimer = undefined; }
             const status = response.statusCode ?? 0;
             if (status === 401) {
@@ -99,7 +99,8 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions): T
             response.on('error', () => finishError(failure('network_error')));
             response.on('close', () => { if (!settled && !response.complete) finishError(failure('network_error')); });
             response.on('end', () => finishResponse(response, Buffer.concat(chunks, total)));
-          });
+          };
+          request = secure ? https.request(requestOptions, onResponse) : http.request(requestOptions, onResponse);
         } catch { finishError(failure('network_error', 'connect')); return; }
         pending.add(request);
         activeFailures.set(request, finishError);

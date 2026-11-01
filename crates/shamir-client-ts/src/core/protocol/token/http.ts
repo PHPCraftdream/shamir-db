@@ -27,7 +27,7 @@ function appError(value: unknown, status: number): Error | undefined {
     }
   }
   if (!object(value) || value.kind !== 'error' || typeof value.code !== 'string' || typeof value.message !== 'string') return undefined;
-  if (!SAFE_CODE.test(value.code)) return fail(status === 403 ? 'protocol_error' : 'http_bad_request', status);
+  if (!SAFE_CODE.test(value.code)) return fail(status === 400 ? 'http_bad_request' : 'protocol_error', status);
   if (value.code === 'timeout' || value.code === 'lock_timeout' || value.code === 'tx_conflict' || value.code === 'read_only_replica' || value.code === 'wal_retention_exceeded') return new ShamirDbError(value.code, 'Remote application error');
   if (isTokenTransportErrorCode(value.code)) return new TokenTransportError(value.code, 'Token HTTP request failed', { status, retryable: isRetryableCode(value.code) });
   return new ShamirDbError(value.code, 'Remote application error');
