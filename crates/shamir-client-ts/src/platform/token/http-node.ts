@@ -1,9 +1,10 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http';
-import type { NodeTokenHttpConnectOptions } from '../../core/types/connection.js';
 import { tokenValueForTransport } from '../../entry/api-token.js';
-import type { TokenPlatform, TokenHttpRequestInit, TokenHttpResponse } from './types.js';
+import type { NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions } from '../../core/types/connection.js';
+import type { TokenHttpRequestInit, TokenHttpResponse } from './types.js';
+import { openNodeTokenSocket } from './socket-node.js';
 import { DEFAULT_TOKEN_CONNECT_TIMEOUT_MS, DEFAULT_TOKEN_REQUEST_TIMEOUT_MS, normalizeTokenHttpOptions } from '../../core/protocol/token/options.js';
 import { TokenTransportError, type TokenTransportErrorCode } from '../../core/protocol/token/errors.js';
 
@@ -18,8 +19,8 @@ function safeHeaders(headers: http.IncomingHttpHeaders): Readonly<{ get(name: st
   } });
 }
 
-export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions): TokenPlatform {
-  const normalized = normalizeTokenHttpOptions(options);
+export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions | NodeTokenWsConnectOptions): import('./types.js').TokenPlatform {
+  const normalized = normalizeTokenHttpOptions({ ...options, channel: 'http', url: options.url.replace(/^ws:/i, 'http:').replace(/^wss:/i, 'https:') });
   const requestTimeout = normalized.requestTimeoutMs ?? DEFAULT_TOKEN_REQUEST_TIMEOUT_MS;
   const connectTimeout = normalized.connectTimeoutMs ?? DEFAULT_TOKEN_CONNECT_TIMEOUT_MS;
   const insecure = normalized.tls?.allowInsecureTlsForDevelopment === true;
@@ -33,8 +34,21 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions): T
   let closed = false;
   const pending = new Set<ClientRequest>();
   const activeFailures = new Map<ClientRequest, (error: TokenTransportError) => void>();
+  const sockets = new Set<Promise<TokenSocket>>();
+  const onLifetimeAbort = (): void => { closed = true; for (const opening of sockets) void opening.then((socket) => socket.close(), () => {}); };
+  options.signal?.addEventListener('abort', onLifetimeAbort, { once: true });
+
+
 
   return {
+    openTokenSocket(url, token, opts) {
+      if (closed || normalized.signal?.aborted) return Promise.reject(failure('connection_closed', 'close'));
+      const nodeOptions = { ...(options as NodeTokenWsConnectOptions), ...(opts.tls === undefined ? {} : { tls: opts.tls }), ...(opts.origin === undefined ? {} : { origin: opts.origin }) };
+      const opening = openNodeTokenSocket(url, token, nodeOptions, opts);
+      sockets.add(opening);
+      void opening.then((socket) => { if (closed) void socket.close(); }, () => { sockets.delete(opening); });
+      return opening;
+    },
     async requestHttp(url: URL, token, init: TokenHttpRequestInit): Promise<TokenHttpResponse> {
       if (closed) throw failure('connection_closed', 'close');
       if (init.signal.aborted || normalized.signal?.aborted) throw failure('client_aborted');
@@ -132,8 +146,12 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions): T
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
+      options.signal?.removeEventListener('abort', onLifetimeAbort);
       for (const request of pending) activeFailures.get(request)?.(failure('connection_closed', 'close'));
       pending.clear(); activeFailures.clear();
+      const opened = await Promise.allSettled(sockets);
+      for (const result of opened) if (result.status === 'fulfilled') await result.value.close();
+      sockets.clear();
       httpAgent.destroy(); httpsAgent.destroy();
     },
   };
