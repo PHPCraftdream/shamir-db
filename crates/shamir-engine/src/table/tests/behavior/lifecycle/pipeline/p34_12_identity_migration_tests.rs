@@ -646,6 +646,9 @@ async fn p34_12_recover_inflight_v2_replays_pre_upgrade_index_put_and_reruns_mig
         .unwrap();
     let rid = table.insert(&record_with_ints(a, 7, b, -11)).await.unwrap();
     table.flush_metadata().await.unwrap();
+    // The reopen below rebuilds from the base data store: drain the committed
+    // overlay first, otherwise the evicted table takes the record with it.
+    repo.flush_buffers().await.unwrap();
     let info = table.info_store_for_test();
     info.set(
         RecordId::system("_m.idx.lfv").to_bytes().into(),
