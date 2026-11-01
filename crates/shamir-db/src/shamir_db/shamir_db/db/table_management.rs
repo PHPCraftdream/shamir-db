@@ -71,7 +71,8 @@ impl ShamirDb {
         if enable_indexes {
             config = config.with_indexes();
         }
-        config = config.with_new_store_id();
+        let config = config.with_new_store_id();
+        config.validate_store_name()?;
         let store_id = config.store_id;
 
         db.create_table_checked_with_config(repo_name, config)

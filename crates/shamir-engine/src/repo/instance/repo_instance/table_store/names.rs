@@ -7,6 +7,14 @@ pub(crate) struct TableStoreNames {
     pub history: String,
 }
 
+/// Checks the mapped UTF-8 byte lengths against fjall's 255-byte store limit.
+pub(crate) fn validate_table_store_name(name: &str, id: &RecordId) -> bool {
+    let names = table_store_names(name, Some(id));
+    [names.data, names.info, names.history]
+        .iter()
+        .all(|store_name| store_name.len() <= 255)
+}
+
 pub(crate) fn table_store_names(name: &str, id: Option<&RecordId>) -> TableStoreNames {
     let suffix = id.map(|id| format!("--{id}")).unwrap_or_default();
     TableStoreNames {

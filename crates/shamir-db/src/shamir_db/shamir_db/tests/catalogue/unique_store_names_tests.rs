@@ -1,4 +1,4 @@
-use crate::access::Actor;
+use crate::access::{Actor, ResourceMeta};
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::system_store::TableRenameKey;
@@ -431,18 +431,117 @@ async fn retry_removes_stale_source_catalogue_row_only() {
 }
 
 #[tokio::test]
+async fn create_table_rejects_overlong_generated_store_mapping_before_catalogue_write() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("create-too-long").await.unwrap();
+    db.add_repo(
+        "create-too-long",
+        RepoConfig::new("main", BoxRepoFactory::in_memory()),
+    )
+    .await
+    .unwrap();
+    let table_name = "a".repeat(255);
+    let result = db
+        .add_table_as("create-too-long", "main", &table_name, false, Actor::System)
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::DbError::Validation(message)) if message.contains("too long")
+    ));
+    assert!(db
+        .system_store()
+        .load_table_record("create-too-long", "main", &table_name)
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn inline_repo_tables_receive_store_ids() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("inline-id").await.unwrap();
+    let mut config = RepoConfig::new("main", BoxRepoFactory::in_memory());
+    config.tables = vec![TableConfig::new("inline")];
+    db.add_repo("inline-id", config).await.unwrap();
+    let row = db
+        .system_store()
+        .load_table_record("inline-id", "main", "inline")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.get("store_id").is_some());
+}
+
+#[tokio::test]
+async fn inline_repo_rejects_overlong_generated_store_mapping_before_catalogue_write() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("inline-too-long").await.unwrap();
+    let config = RepoConfig::new("main", BoxRepoFactory::in_memory())
+        .add_table(TableConfig::new("a".repeat(255)));
+    assert!(matches!(
+        db.add_repo("inline-too-long", config).await,
+        Err(crate::DbError::Validation(message)) if message.contains("too long")
+    ));
+    assert!(db
+        .system_store()
+        .load_repositories()
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn legacy_inline_catalogue_rows_remain_idless() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    db.create_db("legacy-inline").await.unwrap();
+    let repo = RepoConfig::new("main", BoxRepoFactory::in_memory());
+    db.add_repo("legacy-inline", repo).await.unwrap();
+    db.system_store()
+        .save_table(
+            "legacy-inline",
+            "main",
+            "old",
+            false,
+            None,
+            &ResourceMeta::owned_enforced(Actor::System),
+        )
+        .await
+        .unwrap();
+    let row = db
+        .system_store()
+        .load_table_record("legacy-inline", "main", "old")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.get("store_id").is_none());
+}
+
+#[tokio::test]
 async fn legacy_idless_stale_source_row_is_removed_on_retry() {
     let dir = tempfile::tempdir().unwrap();
     let db = ShamirDb::init(SystemStoreConfig::Fjall(dir.path().join("system")))
         .await
         .unwrap();
     db.create_db("legacy-retry").await.unwrap();
-    db.add_repo(
-        "legacy-retry",
-        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("a")),
-    )
-    .await
-    .unwrap();
+    let config = RepoConfig::new("main", BoxRepoFactory::in_memory());
+    db.add_repo("legacy-retry", config).await.unwrap();
+    let catalogue = db.system_store();
+    catalogue
+        .save_table(
+            "legacy-retry",
+            "main",
+            "a",
+            false,
+            None,
+            &ResourceMeta::owned_enforced(Actor::System),
+        )
+        .await
+        .unwrap();
+    db.get_db("legacy-retry")
+        .unwrap()
+        .create_table_checked_with_config("main", TableConfig::new("a"))
+        .await
+        .unwrap();
     let source = db.get_table("legacy-retry", "main", "a").await.unwrap();
     let ids = write_rows(&source, &["legacy-a", "legacy-b"]).await;
     let expected = vec![
@@ -479,12 +578,19 @@ async fn legacy_idless_stale_source_row_is_removed_on_retry() {
 async fn legacy_row_stays_idless_and_malformed_id_is_rejected() {
     let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("legacy").await.unwrap();
-    db.add_repo(
-        "legacy",
-        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("old")),
-    )
-    .await
-    .unwrap();
+    let config = RepoConfig::new("main", BoxRepoFactory::in_memory());
+    db.add_repo("legacy", config).await.unwrap();
+    db.system_store()
+        .save_table(
+            "legacy",
+            "main",
+            "old",
+            false,
+            None,
+            &ResourceMeta::owned_enforced(Actor::System),
+        )
+        .await
+        .unwrap();
     let row = db
         .system_store()
         .load_table_record("legacy", "main", "old")

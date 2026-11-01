@@ -1,4 +1,7 @@
-use crate::repo::instance::repo_instance::table_store::new_table_store_id;
+use crate::repo::instance::repo_instance::table_store::{
+    new_table_store_id, validate_table_store_name,
+};
+use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
 
 #[derive(Debug, Clone)]
@@ -29,5 +32,21 @@ impl TableConfig {
     pub fn with_store_id(mut self, store_id: RecordId) -> Self {
         self.store_id = Some(store_id);
         self
+    }
+
+    /// Validate the mapped names for a persisted incarnation. Id-less legacy
+    /// mappings remain unchanged and do not receive the generated suffix.
+    pub fn validate_store_name(&self) -> DbResult<()> {
+        let Some(store_id) = self.store_id.as_ref() else {
+            return Ok(());
+        };
+        if validate_table_store_name(&self.name, store_id) {
+            Ok(())
+        } else {
+            Err(DbError::Validation(format!(
+                "table name '{}' is too long for generated store names",
+                self.name
+            )))
+        }
     }
 }

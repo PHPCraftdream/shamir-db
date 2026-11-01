@@ -1,10 +1,24 @@
 use crate::repo::instance::repo_instance::table_store::table_store_names;
 use crate::repo::journal::backend::repo_types::RepoFactory;
 use crate::repo::repo_types::BoxRepoFactory;
+use crate::table::TableConfig;
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_cached::WriteMode;
 use shamir_storage::types::Repo;
 use shamir_types::types::record_id::RecordId;
+
+#[test]
+fn generated_store_name_limit_checks_longest_mapped_name_in_bytes() {
+    let id = RecordId([u8::MAX; 16]);
+    let max_prefix = 255 - "__history__".len() - 2 - id.to_string().len();
+    let fits = TableConfig::new("a".repeat(max_prefix)).with_store_id(id);
+    let too_long = TableConfig::new("a".repeat(max_prefix + 1)).with_store_id(id);
+    assert!(fits.validate_store_name().is_ok());
+    assert!(matches!(
+        too_long.validate_store_name(),
+        Err(shamir_storage::error::DbError::Validation(message)) if message.contains("too long")
+    ));
+}
 
 #[test]
 fn legacy_and_incarnation_mappings_are_distinct() {

@@ -428,6 +428,13 @@ impl ShamirDb {
         // Capture the inline table list before `config` is moved into
         // `db.add_repo`, so the per-repo table catalogue can be persisted
         // alongside the repo record (I.2).
+        let mut config = config;
+        for table in &mut config.tables {
+            if table.store_id.is_none() {
+                *table = table.clone().with_new_store_id();
+            }
+            table.validate_store_name()?;
+        }
         let inline_tables = config
             .tables
             .iter()

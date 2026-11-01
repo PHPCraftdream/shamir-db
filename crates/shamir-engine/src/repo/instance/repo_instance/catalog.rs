@@ -470,7 +470,14 @@ impl RepoInstance {
         let source_names =
             super::table_store::table_store_names(from, old_config.store_id.as_ref());
         let new_id = super::table_store::new_table_store_id();
-        let destination_names = super::table_store::table_store_names(to, Some(&new_id));
+        let new_config = TableConfig {
+            name: to.to_string(),
+            enable_indexes: old_config.enable_indexes,
+            store_id: Some(new_id),
+        };
+        new_config.validate_store_name()?;
+        let destination_names =
+            super::table_store::table_store_names(to, new_config.store_id.as_ref());
         let existing = self.repo.stores_list().await?;
         if existing.iter().any(|name| {
             [
@@ -502,11 +509,7 @@ impl RepoInstance {
             &destination_names.history,
         )
         .await?;
-        Ok(TableConfig {
-            name: to.to_string(),
-            enable_indexes: old_config.enable_indexes,
-            store_id: Some(new_id),
-        })
+        Ok(new_config)
     }
 
     /// Commit the prepared rename after its destination catalogue row is durable.
