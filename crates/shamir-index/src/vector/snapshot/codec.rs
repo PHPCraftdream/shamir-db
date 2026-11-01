@@ -306,9 +306,9 @@ impl From<bincode::Error> for SnapshotError {
 // Dump path
 // ============================================================================
 
-/// Dump the adapter's live HNSW graph + sidecar + manifest into `store` under
-/// `keyspace`. Overwrites any existing snapshot (the generation-flip protocol
-/// of #402 will make this incremental; for V2.1 a single full dump is fine).
+/// Dump a fresh initial generation (zero on a fresh keyspace; subsequent
+/// generations are selected after reading the manifest). Callers needing the
+/// actual selected value must read the manifest afterward.
 ///
 /// Dump files are streamed using small transactions so source files and all
 /// serialized chunks are never retained together.
@@ -320,9 +320,10 @@ pub async fn dump_snapshot(
     dump_snapshot_with_gen(adapter, store, keyspace, 0).await
 }
 
-/// Same as [`dump_snapshot`] but lets the caller pick the generation index.
-/// The generation flip in #402 will call this with the next gen; V2.1's
-/// `dump_snapshot` always uses `0`.
+/// The explicit generation is a requested value. If it is the verified active
+/// generation, the writer selects its checked successor to avoid overwriting
+/// records the published manifest still references. Readers needing the actual
+/// published generation must use `read_manifest`.
 ///
 /// V5.3 (#412): For a fitted quantized adapter (`adapter.is_quantized()`),
 /// this dumps the u8 graph into a SECOND pair of chunk sections

@@ -15,6 +15,8 @@ use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
+use std::fs::File;
+use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
@@ -427,9 +429,6 @@ async fn stream_section_to_file(
     path: &std::path::Path,
     hasher: crc32fast::Hasher,
 ) -> Result<(u64, crc32fast::Hasher), SnapshotError> {
-    use std::fs::File;
-    use std::io::Write;
-
     let (keyspace, gen, section, count) = location;
     let mut file = tokio::task::spawn_blocking({
         let path = path.to_path_buf();

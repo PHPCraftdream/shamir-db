@@ -1,4 +1,4 @@
-//! Streaming snapshot dump parity and transaction-boundary regressions.
+//! Streaming snapshot chunk, metadata-failure, and corruption regressions.
 
 use crate::kind::{VectorMetric, VectorQuantization};
 use crate::meta_envelope::MetaEnvelope;
@@ -14,9 +14,10 @@ use bytes::Bytes;
 use futures::Stream;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
-use shamir_storage::types::{KvOp, RecordKey, Store};
+use shamir_storage::types::{RecordKey, Store};
 use shamir_types::types::record_id::RecordId;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 type TestStream = Pin<Box<dyn Stream<Item = DbResult<Vec<(RecordKey, Bytes)>>> + Send>>;
@@ -24,6 +25,8 @@ const KEYSPACE: &str = "snapshot.streaming";
 
 struct FailMetadataStore {
     inner: Arc<dyn Store>,
+    fail_manifest: AtomicBool,
+    integrity_written: AtomicBool,
 }
 
 #[async_trait]
@@ -32,6 +35,16 @@ impl Store for FailMetadataStore {
         self.inner.insert(value).await
     }
     async fn set(&self, key: RecordKey, value: Bytes) -> DbResult<bool> {
+        if key == integrity_key(KEYSPACE) {
+            let updated = self.inner.set(key, value).await?;
+            self.integrity_written.store(true, Ordering::SeqCst);
+            return Ok(updated);
+        }
+        if key == manifest_key(KEYSPACE) && self.fail_manifest.swap(false, Ordering::SeqCst) {
+            return Err(DbError::Storage(
+                "injected after integrity, before manifest".into(),
+            ));
+        }
         self.inner.set(key, value).await
     }
     async fn get(&self, key: RecordKey) -> DbResult<Bytes> {
@@ -45,17 +58,6 @@ impl Store for FailMetadataStore {
     }
     fn scan_prefix_stream(&self, prefix: Bytes, batch_size: usize) -> TestStream {
         self.inner.scan_prefix_stream(prefix, batch_size)
-    }
-    async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
-        if ops
-            .iter()
-            .any(|op| matches!(op, KvOp::Set(key, _) if *key == manifest_key(KEYSPACE)))
-        {
-            return Err(DbError::Storage(
-                "injected before manifest publication".into(),
-            ));
-        }
-        self.inner.transact(ops).await
     }
 }
 
@@ -81,8 +83,7 @@ async fn adapter() -> HnswAdapter {
 }
 
 async fn manifest(store: &Arc<dyn Store>) -> SnapshotManifest {
-    let bytes = store.get(manifest_key(KEYSPACE)).await.unwrap();
-    MetaEnvelope::open(&bytes).unwrap()
+    MetaEnvelope::open(&store.get(manifest_key(KEYSPACE)).await.unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -100,8 +101,10 @@ async fn streamed_quantized_chunks_preserve_header_and_crc() {
         ("qdata", manifest.qdata_chunks),
     ] {
         for index in 0..count {
-            let key = chunk_key(KEYSPACE, manifest.gen, section, index as usize);
-            let encoded = store.get(key).await.unwrap();
+            let encoded = store
+                .get(chunk_key(KEYSPACE, manifest.gen, section, index as usize))
+                .await
+                .unwrap();
             let header: ChunkHeader = bincode::deserialize(&encoded).unwrap();
             assert_eq!(header.idx, index);
             assert_eq!(header.crc32, crc32fast::hash(&header.bytes));
@@ -118,22 +121,43 @@ async fn streamed_quantized_chunks_preserve_header_and_crc() {
     );
 }
 
+/// Does not override `transact`: the Store default applies each operation by
+/// calling `set`, exposing integrity-before-manifest failure ordering.
 #[tokio::test]
-async fn failed_before_manifest_keeps_previous_generation_loadable() {
+async fn failure_after_integrity_before_manifest_is_detected_and_rebuildable() {
     let adapter = adapter().await;
     let inner: Arc<dyn Store> = Arc::new(InMemoryStore::new());
     dump_snapshot_with_gen(&adapter, &inner, KEYSPACE, 0)
         .await
         .unwrap();
-    let before = manifest(&inner).await;
-    let failing: Arc<dyn Store> = Arc::new(FailMetadataStore {
+    let old_manifest = inner.get(manifest_key(KEYSPACE)).await.unwrap();
+    let old_integrity = inner.get(integrity_key(KEYSPACE)).await.unwrap();
+    let failing = Arc::new(FailMetadataStore {
         inner: Arc::clone(&inner),
+        fail_manifest: AtomicBool::new(true),
+        integrity_written: AtomicBool::new(false),
     });
-    assert!(dump_snapshot_with_gen(&adapter, &failing, KEYSPACE, 1)
-        .await
-        .is_err());
-    assert_eq!(manifest(&inner).await.gen, before.gen);
-    assert!(load_snapshot(&inner, KEYSPACE).await.is_ok());
+    let active = manifest(&inner).await;
+    let failing_store: Arc<dyn Store> = failing.clone();
+    let failed = dump_snapshot_with_gen(&adapter, &failing_store, KEYSPACE, active.gen + 1).await;
+    assert!(failed.is_err(), "manifest Set failure must abort dump");
+    assert!(
+        failing.integrity_written.load(Ordering::SeqCst),
+        "integrity companion must have been written first"
+    );
+    assert_eq!(
+        inner.get(manifest_key(KEYSPACE)).await.unwrap(),
+        old_manifest,
+        "manifest remains old"
+    );
+    assert_ne!(
+        inner.get(integrity_key(KEYSPACE)).await.unwrap(),
+        old_integrity,
+        "integrity belongs to unpublished generation"
+    );
+    assert!(
+        matches!(load_snapshot(&inner, KEYSPACE).await, Err(SnapshotError::Corrupt(message)) if message == "snapshot metadata integrity mismatch")
+    );
 }
 
 #[tokio::test]

@@ -472,7 +472,7 @@ async fn dump_and_flip_publish_companion_before_bounded_prune() {
         store.get(integrity_key(KS)).await.unwrap(),
         integrity_bytes(&manifest_bytes, &sidecar_bytes)
     );
-    dump_snapshot_with_gen(&adapter, &store, KS, 1)
+    dump_snapshot_with_gen(&adapter, &store, KS, old.gen + 1)
         .await
         .unwrap();
     let (next, _) = metadata(&store).await;
