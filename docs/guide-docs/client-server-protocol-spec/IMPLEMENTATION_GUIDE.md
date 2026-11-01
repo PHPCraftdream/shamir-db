@@ -72,9 +72,9 @@ struct FailureState {
 }
 ```
 - subnet = `/24 IPv4` или `/64 IPv6`
-- `username_hash = HMAC-SHA256(lockout_secret, username_nfc)[..16]` — anti-enumeration через **отдельный** `lockout_secret` (НЕ ротируется, см. §1.2)
-- Background GC каждые 60s: удалить entries с `now - last_fail > BACKOFF_RESET`
-- Hard cap `MAX_AUTH_FAILURES_ENTRIES = 1M`, LRU eviction
+- `username_hash = HMAC-SHA256(lockout_secret, username_nfc)[..16]` — anti-enumeration через отдельный, неротируемый `lockout_secret` (см. §1.2)
+- Background GC каждые 60s: удалять entries с `now - last_fail > BACKOFF_RESET`; для bounded LockoutStore GC может удалять только unlocked pre-threshold failure pairs и никогда active locks.
+- Shared LockoutStore cap: 8,192 pair slots including active locks, 64 per IPv4 /24 or IPv6 /64, 512 per IPv4 /16 or IPv6 /48. Evict unlocked pre-threshold pairs lowest-count then oldest: within each exhausted owner quota, or globally when only the table is full. Never evict active locks; if no candidate exists, drop new-pair accounting (TOKEN_LOGIN_HTTP §3).
 - **[NORMATIVE] Reset on success**: при успешной auth соответствующая `(subnet, username_hash)` entry **немедленно удаляется** из `auth_failures` И `lockout_state` (если pre-threshold). Иначе legitimate user видит persistent backoff после typo. См. AUTH §5.2.5.
 
 #### `lockout_state: DashMap<(subnet, username_hash), LockoutState>` [NORMATIVE]
@@ -84,6 +84,8 @@ struct LockoutState {
     fail_count_in_window: u32,
 }
 ```
+The shared bounded LockoutStore snapshots pair failures and active locks using `LockoutSnapshot { failures, lockouts, ... }` and rehydrates at boot. The existing native mechanism snapshots about every 60 seconds (`lockout.rs` snapshot persistence); this source description does not claim that the runtime already implements immediate threshold flush, nor weaken the durability requirements below. On load discard stale entries, enforce the same 8,192-global, 64-base-prefix and 512-parent caps, loading active locks first, then highest-count failure pairs; drop overflow. A failure and active lock with the same pair key occupy one charged slot. HTTP pending handshakes are volatile and are not restored.
+
 **Persistent в SystemStore** с **батчингом** (NORMATIVE):
 - RECOMMENDED flush interval: 5 секунд
 - MUST: ≤ 60 секунд
