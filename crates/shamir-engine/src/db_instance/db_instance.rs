@@ -232,6 +232,11 @@ impl DbInstance {
             repo.write_domain().admit().await.map_err(|e| {
                 DbError::Internal(format!("repository write admission failed: {e}"))
             })?;
+        let config = if config.store_id.is_some() {
+            config
+        } else {
+            config.with_new_store_id()
+        };
         repo.add_table_admitted(config, &permit).await
     }
 

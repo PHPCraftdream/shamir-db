@@ -4,6 +4,7 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::Repo;
 use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -247,8 +248,14 @@ impl RepoInstance {
         count
     }
 
-    pub fn has_table(&self, table_name: &str) -> bool {
-        self.configs.contains_key(table_name)
+    pub fn table_config(&self, name: &str) -> Option<TableConfig> {
+        self.configs.get(name).map(|entry| entry.value().clone())
+    }
+
+    pub(crate) fn mapped_table_store_names(&self, name: &str) -> Option<(String, String, String)> {
+        let config = self.configs.get(name).map(|entry| entry.value().clone())?;
+        let names = super::table_store::table_store_names(name, config.store_id.as_ref());
+        Some((names.data, names.info, names.history))
     }
 
     pub fn table_count(&self) -> usize {
@@ -274,6 +281,109 @@ impl RepoInstance {
         self.rename_table_stores_admitted(from, to, &permit).await
     }
 
+    /// Safe only with a persisted destination row; source registration is switched after the write.
+    pub async fn rename_table_stores_with<F, Fut>(
+        &self,
+        from: &str,
+        to: &str,
+        persist: F,
+    ) -> DbResult<bool>
+    where
+        F: FnOnce(TableConfig) -> Fut,
+        Fut: Future<Output = DbResult<()>>,
+    {
+        self.rename_table_transition(from, to, |config| async move {
+            persist(config).await?;
+            Ok(true)
+        })
+        .await
+    }
+
+    pub async fn recover_table_rename_with<F, Fut>(
+        &self,
+        from: &str,
+        to: &str,
+        config: TableConfig,
+        expected_source_id: Option<&shamir_types::types::record_id::RecordId>,
+        persist: F,
+    ) -> DbResult<bool>
+    where
+        F: FnOnce(TableConfig) -> Fut,
+        Fut: Future<Output = DbResult<()>>,
+    {
+        let permit = self
+            .write_domain
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        self.write_domain.debug_check_permit(&permit);
+        if config.name != to || from == to {
+            return Err(DbError::Validation(
+                "rename recovery identity mismatch".into(),
+            ));
+        }
+        let source = self.configs.get(from).map(|entry| entry.value().clone());
+        let destination = self.configs.get(to).map(|entry| entry.value().clone());
+        let source_matches = source
+            .as_ref()
+            .is_some_and(|source| source.store_id.as_ref() == expected_source_id);
+        if source.is_some() && !source_matches {
+            return Err(DbError::Validation(
+                "rename source incarnation changed".into(),
+            ));
+        }
+        if let Some(destination) = destination {
+            if destination.store_id != config.store_id
+                || destination.enable_indexes != config.enable_indexes
+            {
+                return Err(DbError::Validation(
+                    "rename destination incarnation changed".into(),
+                ));
+            }
+            persist(config).await?;
+            if source_matches {
+                self.remove_table(from, &permit);
+            }
+            return Ok(false);
+        }
+        if !source_matches {
+            return Err(DbError::Validation(
+                "rename source registration is missing".into(),
+            ));
+        }
+        persist(config.clone()).await?;
+        self.remove_table(from, &permit);
+        self.add_table(config, &permit);
+        Ok(true)
+    }
+
+    async fn rename_table_transition<F, Fut>(
+        &self,
+        from: &str,
+        to: &str,
+        persist: F,
+    ) -> DbResult<bool>
+    where
+        F: FnOnce(TableConfig) -> Fut,
+        Fut: Future<Output = DbResult<bool>>,
+    {
+        let permit = self
+            .write_domain
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
+        let Some(config) = self
+            .prepare_table_rename_admitted(from, to, &permit)
+            .await?
+        else {
+            return Ok(false);
+        };
+        let register = persist(config.clone()).await?;
+        self.commit_table_rename_admitted(from, config, register, &permit)
+            .await?;
+        Ok(true)
+    }
+
     /// Rename while holding this repository's write-admission permit.
     pub async fn rename_table_stores_admitted(
         &self,
@@ -286,14 +396,31 @@ impl RepoInstance {
         // timestamped entry/exit — NOT a behavior change, logging only.
         let rts_started = std::time::Instant::now();
         log::debug!("rename_table_stores: enter from={from} to={to}");
-        // Snapshot the old config BEFORE mutating `configs` so a missing
-        // table is reported cleanly and a concurrent `remove_table` can
-        // only make us return `false` (no half-applied rename).
-        let old_config = match self.configs.get(from) {
-            Some(c) => c.clone(),
-            None => return Ok(false),
+        let Some(new_config) = self.prepare_table_rename_admitted(from, to, permit).await? else {
+            return Ok(false);
         };
+        self.commit_table_rename_admitted(from, new_config, true, permit)
+            .await?;
+        log::debug!(
+            "rename_table_stores: exit from={from} to={to} elapsed={:?}",
+            rts_started.elapsed()
+        );
+        Ok(true)
+    }
 
+    pub(crate) async fn prepare_table_rename_admitted(
+        &self,
+        from: &str,
+        to: &str,
+        permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
+    ) -> DbResult<Option<TableConfig>> {
+        self.write_domain.debug_check_permit(permit);
+        let Some(config) = self.configs.get(from).map(|entry| entry.value().clone()) else {
+            return Ok(None);
+        };
+        if self.configs.contains_key(to) {
+            return Err(DbError::Validation(format!("Table '{to}' already exists")));
+        }
         // 0. Force-drain the source table's MVCC overlay into
         //    `__history__<from>` so the copy picks up EVERY committed row.
         //    `drain_to_history` snapshots the overlay up to the visibility
@@ -314,9 +441,9 @@ impl RepoInstance {
             .read_sync(&from_token, |_, mvcc| Arc::clone(mvcc));
         if let Some(mvcc) = from_mvcc {
             // F-68 (#895) cluster D / task #124: timestamped before/after
-            // around `drain_to_history` — this synchronously walks the
-            // overlay and writes each drained version to `__history__`, the
-            // one potentially I/O-heavy step in this function.
+            // around `drain_to_history` — this synchronously walks the overlay
+            // and writes each drained version to `__history__`, the one
+            // potentially I/O-heavy step in this function.
             let drain_started = std::time::Instant::now();
             log::debug!("rename_table_stores: calling drain_to_history from={from}");
             mvcc.drain_to_history().await?;
@@ -325,47 +452,95 @@ impl RepoInstance {
                 drain_started.elapsed()
             );
         }
+        self.copy_table_stores_for_rename(from, to, config)
+            .await
+            .map(Some)
+    }
 
-        // 1. Copy physical stores under the new name. `copy_store` is
-        //    idempotent on an empty destination (a fresh store).
-        self.repo
-            .copy_store(&format!("__data__{}", from), &format!("__data__{}", to))
-            .await?;
-        self.repo
-            .copy_store(&format!("__info__{}", from), &format!("__info__{}", to))
-            .await?;
-        self.repo
-            .copy_store(
-                &format!("__history__{}", from),
-                &format!("__history__{}", to),
-            )
-            .await?;
-
-        // 2. Drop the old live registration. `remove_table` also clears
-        //    the in-memory `OnceCell<TableManager>`, the old
-        //    `token_names` reverse-index entry, AND the old
-        //    `per_table_mvcc` registration (A13) so a future CREATE under
-        //    the `from` name re-registers cleanly.
-        let _ = self.remove_table(from, permit);
-
-        // 3. Register the new table config (preserving `enable_indexes`)
-        //    and install its reverse-index entry. Reuses `add_table` so
-        //    the new `OnceCell` lazily constructs a fresh `TableManager`
-        //    pointing at the just-copied stores on first access.
-        let new_config = TableConfig {
+    async fn copy_table_stores_for_rename(
+        &self,
+        from: &str,
+        to: &str,
+        old_config: TableConfig,
+    ) -> DbResult<TableConfig> {
+        let source_names =
+            super::table_store::table_store_names(from, old_config.store_id.as_ref());
+        let new_id = super::table_store::new_table_store_id();
+        let destination_names = super::table_store::table_store_names(to, Some(&new_id));
+        let existing = self.repo.stores_list().await?;
+        if existing.iter().any(|name| {
+            [
+                destination_names.data.as_str(),
+                destination_names.info.as_str(),
+                destination_names.history.as_str(),
+            ]
+            .contains(&name.as_str())
+        }) {
+            return Err(DbError::Validation(format!(
+                "rename destination storage for '{to}' is already present"
+            )));
+        }
+        super::table_store::copy_table_store(
+            &self.repo,
+            &source_names.data,
+            &destination_names.data,
+        )
+        .await?;
+        super::table_store::copy_table_store(
+            &self.repo,
+            &source_names.info,
+            &destination_names.info,
+        )
+        .await?;
+        super::table_store::copy_table_store(
+            &self.repo,
+            &source_names.history,
+            &destination_names.history,
+        )
+        .await?;
+        Ok(TableConfig {
             name: to.to_string(),
             enable_indexes: old_config.enable_indexes,
-        };
-        self.add_table(new_config, permit);
+            store_id: Some(new_id),
+        })
+    }
 
-        // F-68 (#895) cluster D / task #124: exit timestamp, paired with
-        // the "enter" log above.
-        log::debug!(
-            "rename_table_stores: exit from={from} to={to} elapsed={:?}",
-            rts_started.elapsed()
-        );
-
-        Ok(true)
+    /// Commit the prepared rename after its destination catalogue row is durable.
+    async fn commit_table_rename_admitted(
+        &self,
+        from: &str,
+        new_config: TableConfig,
+        remove_source: bool,
+        permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
+    ) -> DbResult<()> {
+        self.write_domain.debug_check_permit(permit);
+        let to = new_config.name.clone();
+        if to == from {
+            return Err(DbError::Validation(
+                "rename source and destination must differ".into(),
+            ));
+        }
+        if self.configs.contains_key(&to) {
+            return Err(DbError::Validation(format!("Table '{to}' already exists")));
+        }
+        if remove_source {
+            let source_config = self
+                .configs
+                .get(from)
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| DbError::NotFound(format!("Table '{from}' not found")))?;
+            self.remove_table(from, permit);
+            self.add_table(new_config, permit);
+            drop(source_config);
+        } else {
+            if self.configs.contains_key(from) {
+                return Err(DbError::Validation(format!(
+                    "Table '{from}' already exists"
+                )));
+            }
+            self.add_table(new_config, permit);
+        }
+        Ok(())
     }
 
     pub async fn repo_identity(&self) -> DbResult<crate::meta::repo_identity::RepoIdentity> {

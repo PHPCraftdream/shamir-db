@@ -1,6 +1,5 @@
 mod cascade_drop_error_tests;
-mod catalogue_lifecycle_tests;
-mod catalogue_rename_order_tests;
+mod catalogue;
 mod keyset_safe_write_barrier_tests;
 mod schema_parse_tests;
 mod schema_rollback_tests;

@@ -140,8 +140,14 @@ impl SeedImageWriter {
         // main-thread server poll chain, and its admitted twins are already
         // shallow (identity load / table lookup). No heap pinning needed.
         repo.repo_identity_admitted(&permit).await?;
+        let mut configs = Vec::with_capacity(tables.len());
         for table in &tables {
-            repo.add_table_admitted(table.config(), &permit).await?;
+            let mut config = table.config().with_new_store_id();
+            repo.add_table_admitted(config.clone(), &permit).await?;
+            config = repo
+                .table_config(&table.name)
+                .ok_or_else(|| DbError::Storage("seed table config missing".into()))?;
+            configs.push(config);
             let manager = repo.get_table_admitted(&table.name, &permit).await?;
             if manager.mvcc_store().is_none() || manager.has_any_index() {
                 return Err(DbError::Storage(
@@ -149,6 +155,10 @@ impl SeedImageWriter {
                 ));
             }
         }
+        // Any failure after inventory publication leaves a recognizable
+        // incomplete seed attempt that recovery can reject before table load.
+        SeedTable::save_inventory(&info, &tables).await?;
+        SeedTable::save_local_ids(&info, &tables, &configs).await?;
         Ok(Self {
             counts: vec![0; tables.len()],
             last_keys: vec![None; tables.len()],
@@ -294,6 +304,16 @@ impl SeedImageWriter {
         self.boundary(3)?;
         let info = self.repo.tx_info_store().await?;
         SeedTable::save_inventory(&info, &self.tables).await?;
+        let configs = self
+            .tables
+            .iter()
+            .map(|table| {
+                self.repo
+                    .table_config(&table.name)
+                    .ok_or_else(|| DbError::Storage("seed table config missing".into()))
+            })
+            .collect::<DbResult<Vec<_>>>()?;
+        SeedTable::save_local_ids(&info, &self.tables, &configs).await?;
         save_next_tx_id_snapshot(&info, 1).await?;
         save_last_committed_flushed(&info, 1).await?;
         let gate = self.repo.tx_gate().await?;

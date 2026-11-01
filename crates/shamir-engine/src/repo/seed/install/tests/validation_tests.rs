@@ -2,10 +2,74 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_storage::types::RecordKey;
+use shamir_types::types::record_id::RecordId;
 
-use crate::repo::{SeedImageWriter, SeedInstallState};
+use crate::meta::MetaEnvelope;
+use crate::repo::{SeedImageWriter, SeedInstallState, SeedTable};
 
 use super::helpers::{inventory, payload, receipt, repo};
+
+#[tokio::test]
+async fn optional_local_mapping_accepts_legacy_and_rejects_corrupt_maps() {
+    let backing = Arc::new(InMemoryRepo::new());
+    let image = repo(backing.clone(), Vec::new());
+    let info = image.tx_info_store().await.unwrap();
+    let bytes = MetaEnvelope::new(inventory()).encode().unwrap();
+    info.set(
+        RecordKey::from_slice(b"__meta__/seed_install/inventory"),
+        Bytes::from(bytes),
+    )
+    .await
+    .unwrap();
+    let configs = SeedTable::load_configs(&info).await.unwrap();
+    assert_eq!(configs.len(), 2);
+    assert!(configs.iter().all(|config| config.store_id.is_none()));
+    info.set(
+        RecordKey::from_slice(b"__meta__/seed_install/local_table_ids"),
+        Bytes::from_static(&[]),
+    )
+    .await
+    .unwrap();
+    assert!(SeedTable::load_configs(&info).await.is_err());
+    let malformed = MetaEnvelope::new(vec![("wrong".to_owned(), RecordId::new())])
+        .encode()
+        .unwrap();
+    info.set(
+        RecordKey::from_slice(b"__meta__/seed_install/local_table_ids"),
+        Bytes::from(malformed),
+    )
+    .await
+    .unwrap();
+    assert!(SeedTable::load_configs(&info).await.is_err());
+    let mismatch = MetaEnvelope::new(vec![
+        ("renamed".to_owned(), RecordId::new()),
+        ("empty".to_owned(), RecordId::new()),
+    ])
+    .encode()
+    .unwrap();
+    info.set(
+        RecordKey::from_slice(b"__meta__/seed_install/local_table_ids"),
+        Bytes::from(mismatch),
+    )
+    .await
+    .unwrap();
+    assert!(SeedTable::load_configs(&info).await.is_err());
+    info.set(
+        RecordKey::from_slice(b"__meta__/seed_install/local_table_ids"),
+        Bytes::from_static(&[]),
+    )
+    .await
+    .unwrap();
+    assert!(SeedTable::load_configs(&info).await.is_err());
+    info.set(
+        RecordKey::from_slice(b"__meta__/seed_install/local_table_ids"),
+        Bytes::from_static(b"malformed"),
+    )
+    .await
+    .unwrap();
+    assert!(SeedTable::load_configs(&info).await.is_err());
+}
 
 #[tokio::test]
 async fn fresh_repo_identity_epoch_zero_is_valid_receipt_evidence() {

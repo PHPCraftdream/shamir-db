@@ -166,18 +166,21 @@ impl RepoInstance {
         cell: &Arc<OnceCell<TableManager>>,
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
-        let data_store: Arc<dyn Store> = self
-            .repo
-            .store_get(format!("__data__{}", table_name))
-            .await?;
-        let info_store: Arc<dyn Store> = self
-            .repo
-            .store_get(format!("__info__{}", table_name))
-            .await?;
-        let history_store: Arc<dyn Store> = self
-            .repo
-            .store_get(format!("__history__{}", table_name))
-            .await?;
+        let config = self
+            .configs
+            .get(table_name)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| {
+                DbError::NotFound(format!(
+                    "Table '{table_name}' was removed during initialization"
+                ))
+            })?;
+        let id = config.store_id.clone();
+        let names =
+            super::super::table_store::table_store_names(table_name, config.store_id.as_ref());
+        let data_store: Arc<dyn Store> = self.repo.store_get(names.data).await?;
+        let info_store: Arc<dyn Store> = self.repo.store_get(names.info).await?;
+        let history_store: Arc<dyn Store> = self.repo.store_get(names.history).await?;
 
         let gate = self.tx_gate().await?;
 
@@ -196,6 +199,16 @@ impl RepoInstance {
         // open-time index rebuilds read the records through it, `__data__` is
         // inert here and would yield no rows.
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
+        if self
+            .configs
+            .get(table_name)
+            .is_none_or(|current| current.value().store_id != id)
+        {
+            return Err(DbError::NotFound(format!(
+                "Table '{table_name}' changed identity during initialization"
+            )));
+        }
+
         let tbl = TableManager::open_with_domain_admitted(
             table_name.to_string(),
             data_store,

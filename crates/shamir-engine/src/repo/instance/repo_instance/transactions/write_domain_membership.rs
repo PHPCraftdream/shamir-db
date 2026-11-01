@@ -16,6 +16,13 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        let config = if config.store_id.is_some() {
+            config
+        } else {
+            config.with_store_id(
+                crate::repo::instance::repo_instance::table_store::new_table_store_id(),
+            )
+        };
         self.add_table(config, permit);
         Ok(())
     }

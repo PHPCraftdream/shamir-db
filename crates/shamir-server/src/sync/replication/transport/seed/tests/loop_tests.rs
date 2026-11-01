@@ -12,6 +12,8 @@ use shamir_query_builder::ddl::{paused_subscription, repl_scope, replication_pro
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_query_types::wire::repl::{ReplRepoInfo, ReplResponse};
 use shamir_query_types::{DurabilityOverride, ReplicationServe};
+use shamir_types::types::value::QueryValue;
+use shamir_types::RecordId;
 use tokio_util::sync::CancellationToken;
 
 use crate::replication::{
@@ -303,9 +305,35 @@ async fn real_in_process_hello_advertises_schema_settled_position_and_named_publ
     assert!(visible
         .iter()
         .all(|publication| publication.create_publication != "wide"));
-    let expected = super::super::fence::live_schema(&source, "app", "main")
+    let mut row = source
+        .system_store()
+        .load_table_record("app", "main", "rows")
+        .await
+        .unwrap()
+        .unwrap();
+    let before = super::super::fence::live_schema(&source, "app", "main")
         .await
         .unwrap();
+    let original_store_id = row
+        .get("store_id")
+        .and_then(QueryValue::as_str)
+        .expect("table store_id must be present")
+        .to_string();
+    let changed_store_id = loop {
+        let candidate = RecordId::new().to_string();
+        if candidate != original_store_id {
+            break candidate;
+        }
+    };
+    if let QueryValue::Map(fields) = &mut row {
+        fields.insert("store_id".to_string(), QueryValue::Str(changed_store_id));
+    }
+    source.system_store().save_table_meta(&row).await.unwrap();
+    let after = super::super::fence::live_schema(&source, "app", "main")
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    let expected = after;
     let repo = source.get_db("app").unwrap().get_repo("main").unwrap();
     let identity = repo.repo_identity().await.unwrap();
     let peer = crate::replication::in_process::InProcessReplSource::new(source);

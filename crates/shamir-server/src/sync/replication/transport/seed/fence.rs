@@ -100,6 +100,8 @@ pub(crate) async fn live_schema(
             interner,
         )
         .map_err(|_| ReplError::Seed(SeedRefusal::WrongSchema))?;
+        // store_id is deliberately not copied: this digest fences logical schema,
+        // not the follower-local physical store incarnation.
         tables.push(TableRecord {
             name,
             schema,

@@ -14,6 +14,10 @@ follow-up, that is noted as "planned, see roadmap" rather than an internal
 task id (task IDs are internal to the development process, not a public
 artifact).
 
+## P34-03b — physical table-store naming compatibility
+
+Table catalogue records may contain an optional node-local `store_id`, and tables created or renamed by a new binary use incarnation-qualified physical store names. New binaries open old id-less catalogue rows and old store names unchanged; old binaries are not guaranteed to open ID-bearing tables. Rolling back after new CREATE/RENAME requires restoring a pre-change backup. No migration or orphan-store purge is performed by this change.
+
 ## 1. Transactions
 
 - **Write acknowledgements wait for contiguous settlement, not just their own

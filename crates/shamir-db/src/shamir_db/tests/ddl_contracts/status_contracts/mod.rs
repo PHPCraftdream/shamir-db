@@ -1,0 +1,3 @@
+mod p1065_ddl_status_contract_tests;
+mod p1067_ddl_family_classification_tests;
+mod p1_2_ddl_result_contract_tests;

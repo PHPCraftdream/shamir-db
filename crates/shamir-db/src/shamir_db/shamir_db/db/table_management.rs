@@ -70,19 +70,28 @@ impl ShamirDb {
         if enable_indexes {
             config = config.with_indexes();
         }
+        config = config.with_new_store_id();
+        let store_id = config.store_id.clone();
+
         db.create_table_checked_with_config(repo_name, config)
             .await?;
 
         // Propagation per RV-DB-6540DC7B.
-        self.system_store
+        if let Err(error) = self
+            .system_store
             .save_table(
                 db_name,
                 repo_name,
                 table_name,
                 enable_indexes,
+                store_id.as_ref(),
                 &ResourceMeta::owned_enforced(actor),
             )
-            .await?;
+            .await
+        {
+            db.drop_table_checked(repo_name, table_name).await?;
+            return Err(error);
+        }
 
         Ok(())
     }
@@ -259,102 +268,160 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
-
-        // Existence guards.
-        if !db.has_table(repo_name, from) {
-            return Err(DbError::NotFound(format!(
-                "Table '{}/{}/{}' not found",
-                db_name, repo_name, from
-            )));
-        }
-        if db.has_table(repo_name, to) {
-            return Err(DbError::Validation(format!(
-                "cannot rename '{}/{}' to '{}': destination table already exists",
-                repo_name, from, to
-            )));
-        }
-
-        // Load the persisted catalogue row to (a) guard against schema /
-        // FK references and (b) preserve ResourceMeta across the re-key.
-        let old_record = self
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let old = self
             .system_store
             .load_table_record(db_name, repo_name, from)
-            .await?
-            .ok_or_else(|| {
-                DbError::NotFound(format!(
-                    "table catalogue record for '{}/{}/{}' not found",
-                    db_name, repo_name, from
-                ))
-            })?;
-
-        // Schema guard: a declarative schema registers a validator whose
-        // name embeds the table path. Renaming would orphan it.
+            .await?;
+        let destination = self
+            .system_store
+            .load_table_record(db_name, repo_name, to)
+            .await?;
+        let has_source = db.has_table(repo_name, from);
+        let has_destination = db.has_table(repo_name, to);
+        // Reject identity mismatches and unrelated destination rows before recovery.
+        if from == to {
+            return Err(DbError::Validation(
+                "rename recovery identity mismatch".into(),
+            ));
+        }
+        if let Some(target) = destination.as_ref() {
+            let current_source = old.as_ref();
+            if !has_source && !has_destination {
+                return Err(DbError::Validation(format!(
+                    "cannot recover rename '{from}' to '{to}': no matching live registration"
+                )));
+            }
+            let source_id = match target.get("rename_from_store_id") {
+                None => None,
+                Some(value) => {
+                    let text = value
+                        .as_str()
+                        .ok_or_else(|| DbError::Internal("invalid source store_id type".into()))?;
+                    Some(
+                        text.parse::<shamir_types::types::record_id::RecordId>()
+                            .map_err(|error| {
+                                DbError::Internal(format!("invalid source store_id: {error}"))
+                            })?,
+                    )
+                }
+            };
+            let source_text = source_id.as_ref().map(ToString::to_string);
+            if let Some(record) = current_source {
+                let current_id = match record.get("store_id") {
+                    None => None,
+                    Some(value) => Some(
+                        value
+                            .as_str()
+                            .ok_or_else(|| {
+                                DbError::Validation("rename source row is malformed".into())
+                            })?
+                            .parse::<shamir_types::types::record_id::RecordId>()
+                            .map_err(|_| {
+                                DbError::Validation("rename source row is malformed".into())
+                            })?,
+                    ),
+                };
+                if current_id != source_id {
+                    return Err(DbError::Validation(format!(
+                        "cannot recover rename '{from}' to '{to}': incarnation provenance mismatch"
+                    )));
+                }
+            }
+            if target.get("rename_from").and_then(QueryValue::as_str) != Some(from)
+                || target
+                    .get("rename_from_store_id")
+                    .and_then(QueryValue::as_str)
+                    != source_text.as_deref()
+                || target.get("db_name").and_then(QueryValue::as_str) != Some(db_name)
+                || target.get("repo_name").and_then(QueryValue::as_str) != Some(repo_name)
+                || target.get("table_name").and_then(QueryValue::as_str) != Some(to)
+            {
+                return Err(DbError::Validation(format!(
+                    "cannot recover rename '{from}' to '{to}': incarnation provenance mismatch"
+                )));
+            }
+            let destination_id = target
+                .get("store_id")
+                .and_then(QueryValue::as_str)
+                .ok_or_else(|| DbError::Internal("rename destination lacks store_id".into()))?
+                .parse::<shamir_types::types::record_id::RecordId>()
+                .map_err(|error| {
+                    DbError::Internal(format!("invalid destination store_id: {error}"))
+                })?;
+            let mut config = TableConfig::new(to).with_store_id(destination_id);
+            if target.get("enable_indexes").and_then(QueryValue::as_bool) == Some(true) {
+                config = config.with_indexes();
+            }
+            let expected_source_id = source_id;
+            repo.recover_table_rename_with(
+                from,
+                to,
+                config,
+                expected_source_id.as_ref(),
+                |destination| async move {
+                    let destination_id = destination.store_id.as_ref().ok_or_else(|| {
+                        DbError::Internal("rename destination lacks store_id".into())
+                    })?;
+                    self.system_store
+                        .complete_table_rename_row(
+                            db_name,
+                            repo_name,
+                            from,
+                            to,
+                            source_id.as_ref(),
+                            current_source.is_some(),
+                            destination_id,
+                            target,
+                        )
+                        .await
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        let old_record =
+            old.ok_or_else(|| DbError::NotFound(format!("Table '{from}' not found")))?;
+        let source_id = old_record
+            .get("store_id")
+            .and_then(QueryValue::as_str)
+            .map(str::parse::<shamir_types::types::record_id::RecordId>)
+            .transpose()
+            .map_err(|error| DbError::Internal(format!("invalid source store_id: {error}")))?;
         if old_record.get(SCHEMA_FIELD).is_some()
             && !matches!(old_record.get(SCHEMA_FIELD), Some(QueryValue::Null))
         {
             return Err(DbError::Validation(format!(
-                "cannot rename table '{}': it carries a declarative schema; \
-                 rename of schema-bearing tables is not yet supported",
-                from
+                "cannot rename schema-bearing table '{from}'"
             )));
         }
-
-        // Reverse-FK guard: refuse if another table in this repo
-        // references `from` as `ref_table`. The child's persisted schema
-        // stores the parent name literally, so renaming would dangle it.
-        let catalogue = self.table_catalogue_snapshot(db_name, repo_name).await?;
-        Self::check_fk_snapshot(&catalogue, from)?;
-
-        // Preserve ResourceMeta (owner/group/mode) across the re-key.
-        let existing_meta = ResourceMeta::from_record(&old_record);
-        let enable_indexes = old_record
-            .get("enable_indexes")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        // 1. Copy physical stores + swap the live registration
-        //    (configs / tables OnceCell / token_names reverse-index).
-        let repo = db
-            .get_repo(repo_name)
-            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
-        // F-68 (#895) cluster D / task #124: timestamped before/after around
-        // `rename_table_stores` — this is the call that force-drains the
-        // source table's MVCC overlay (`drain_to_history`) and copies the
-        // physical stores; if the hang is inside the engine's rename path
-        // rather than in commit-pipeline locking, this pinpoints it.
-        let stores_started = std::time::Instant::now();
-        log::debug!("rename_table_as: calling rename_table_stores from={from} to={to}");
-        let existed = repo.rename_table_stores(from, to).await?;
+        let snapshot = self.table_catalogue_snapshot(db_name, repo_name).await?;
+        Self::check_fk_snapshot(&snapshot, from)?;
+        let result = repo
+            .rename_table_stores_with(from, to, |destination| async move {
+                let destination_id = destination.store_id.as_ref().ok_or_else(|| {
+                    DbError::Internal("rename destination has no store_id".into())
+                })?;
+                self.system_store
+                    .rename_table_row(
+                        db_name,
+                        repo_name,
+                        from,
+                        to,
+                        source_id.as_ref(),
+                        destination_id,
+                        &old_record,
+                    )
+                    .await
+            })
+            .await;
+        result?;
         log::debug!(
-            "rename_table_as: rename_table_stores returned after {:?}",
-            stores_started.elapsed()
-        );
-        if !existed {
-            return Err(DbError::NotFound(format!(
-                "Table '{}/{}/{}' not found",
-                db_name, repo_name, from
-            )));
-        }
-
-        // 2. Re-key the catalogue row. Write the new row first so a crash
-        //    between the two leaves the new table resolvable on reboot;
-        //    a stale `(db, repo, from)` row resurrects nothing because
-        //    the live registration under `from` is already gone.
-        self.system_store
-            .save_table(db_name, repo_name, to, enable_indexes, &existing_meta)
-            .await?;
-        self.system_store
-            .remove_table(db_name, repo_name, from)
-            .await?;
-
-        // F-68 (#895) cluster D / task #124: exit timestamp, paired with the
-        // "enter" log above.
-        log::debug!(
-            "rename_table_as: exit db={db_name} repo={repo_name} from={from} to={to} \
-             elapsed={:?}",
+            "rename_table_as: exit db={db_name} repo={repo_name} from={from} to={to} elapsed={:?}",
             rename_started.elapsed()
         );
-
         Ok(())
     }
 
