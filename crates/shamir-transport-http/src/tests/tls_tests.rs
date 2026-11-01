@@ -62,10 +62,7 @@ impl crate::ConnAdmission for Admission {
     }
 }
 
-async fn start(
-    hsts: bool,
-    alpn: Vec<Vec<u8>>,
-) -> (
+type TlsHarness = (
     SocketAddr,
     Arc<Gate>,
     Arc<Executor>,
@@ -73,7 +70,9 @@ async fn start(
     tokio::task::JoinHandle<Result<(), crate::ServeError>>,
     Arc<rustls::ClientConfig>,
     RootCertStore,
-) {
+);
+
+async fn start(hsts: bool, alpn: Vec<Vec<u8>>) -> TlsHarness {
     let (cert_pem, key_pem) = tokio::task::spawn_blocking(|| {
         shamir_transport_tcp::tls::generate_self_signed_server_cert(vec!["localhost".into()])
     })

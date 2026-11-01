@@ -256,9 +256,11 @@ impl tokio::io::AsyncWrite for ObservedTcp {
     }
 }
 
+type HttpConnection = Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>>;
+
 struct TcpHarness {
     client: tokio::net::TcpStream,
-    connection: Pin<Box<dyn Future<Output = Result<(), hyper::Error>> + Send>>,
+    connection: HttpConnection,
     count: Arc<AtomicUsize>,
     successful_bytes: Arc<AtomicUsize>,
     write_blocked: Arc<std::sync::atomic::AtomicBool>,

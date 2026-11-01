@@ -297,10 +297,7 @@ async fn hyper_request_deadline_expires_while_service_is_pending() {
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
     let terminal = tokio::time::timeout(
         std::time::Duration::from_secs(1),
-        poll_fn(|cx| match connection.as_mut().poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(result) => Poll::Ready(result),
-        }),
+        poll_fn(|cx| connection.as_mut().poll(cx)),
     )
     .await
     .expect("request deadline must finish the Hyper connection");
