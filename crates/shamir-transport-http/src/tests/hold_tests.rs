@@ -267,11 +267,23 @@ struct TcpHarness {
 }
 
 async fn start_tcp(body: Bytes, write_timeout: Option<Duration>) -> TcpHarness {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
+    // Small buffers keep the 16 MiB response blocked on Windows loopback too; the accepted
+    // socket inherits the listener's send buffer size.
+    let listener_socket = tokio::net::TcpSocket::new_v4().expect("listener socket");
+    listener_socket
+        .set_send_buffer_size(4096)
+        .expect("small send buffer");
+    listener_socket
+        .bind("127.0.0.1:0".parse().expect("loopback address"))
         .expect("bind loopback");
+    let listener = listener_socket.listen(1).expect("listen loopback");
     let address = listener.local_addr().expect("listener address");
-    let client = tokio::net::TcpStream::connect(address)
+    let client_socket = tokio::net::TcpSocket::new_v4().expect("client socket");
+    client_socket
+        .set_recv_buffer_size(4096)
+        .expect("small receive buffer");
+    let client = client_socket
+        .connect(address)
         .await
         .expect("connect loopback");
     let (stream, _) = listener.accept().await.expect("accept loopback");

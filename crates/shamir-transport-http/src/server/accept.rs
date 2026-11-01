@@ -19,6 +19,9 @@ trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 type BoxedIo = Box<dyn IoStream>;
 
+/// Inbound bytes discarded after a rejection before the socket is closed.
+const LINGER_DISCARD_LIMIT: usize = 64 * 1024;
+
 /// Failure to initialize or serve the HTTP listener.
 #[derive(Debug, Error)]
 pub enum ServeError {
@@ -169,6 +172,15 @@ where
                             tokio::io::AsyncWriteExt::shutdown(&mut guarded),
                         )
                         .await;
+                        // Linger: keep reading so a peer that still writes is not reset
+                        // before it has read the final response.
+                        tokio::select! {
+                            _ = token.cancelled() => {}
+                            _ = tokio::time::timeout(
+                                cfg.limits.write_timeout,
+                                guarded.discard_inbound(LINGER_DISCARD_LIMIT),
+                            ) => {}
+                        }
                     }
                 });
             }

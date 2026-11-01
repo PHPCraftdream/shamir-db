@@ -183,6 +183,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         }
         std::future::poll_fn(|cx| self.finish_canned(cx)).await
     }
+    /// Reads and discards inbound bytes until EOF, an error or `limit` bytes, so that
+    /// closing after a rejection does not reset a peer that is still writing.
+    pub(crate) async fn discard_inbound(&mut self, limit: usize) -> io::Result<()> {
+        let mut scratch = [0_u8; 1024];
+        let mut total = 0_usize;
+        while total < limit {
+            let read = tokio::io::AsyncReadExt::read(&mut self.inner, &mut scratch).await?;
+            if read == 0 {
+                break;
+            }
+            total += read;
+        }
+        Ok(())
+    }
     fn finish_canned(
         &mut self,
         cx: &mut std::task::Context<'_>,
