@@ -241,12 +241,12 @@ Per-listener policy (§4.3) исключает MITM подмену `binding_mode
 
 5.1.1. **Pre-Argon2id validation** challenge.kdf_params:
 ```
-memory_kb ≤ 262144  (256 MB)
-time ≤ 8
-parallelism ≤ 8
+memory_kb >= 19456 (19 MiB) AND memory_kb <= 262144 (256 MiB)
+time >= 2 iterations AND time <= 8
+parallelism >= 1 lane AND parallelism <= 8
 argon2_version == 0x13
 ```
-Превышение → disconnect, локально `kdf_params_rejected`.
+Значение ниже минимума, выше максимума или неподдерживаемая версия → disconnect до Argon2, локально `kdf_params_rejected`. `time` — iterations, не seconds; оба конца каждого диапазона принимаются. Client MUST отклонить значения вне этих bounds или неподдерживаемую version локально до Argon2.
 
 5.1.2. **Self-validation**: клиент использует **те же params что прислал сервер** в auth_message. SCRAM proof на mismatched params не сойдётся.
 
@@ -308,7 +308,11 @@ identity_input = "SHAMIR-IDENTITY-v1"
 identity_sig = Ed25519::sign(server_ed25519_priv, identity_input)
 ```
 
-5.2.5. На fail → `{"error": "authentication_failed"}`. Backoff per `(client_ip_subnet, username_hash)` где subnet = `/24 IPv4` или `/64 IPv6`. Backoff: `100ms × 2^N`, cap 30s, reset 5 мин неактивности.
+5.2.5. На fail → `{"error": "authentication_failed"}`. Backoff per `(client_ip_subnet, username_hash)` где subnet = `/24 IPv4` или `/64 IPv6`. Backoff: `100ms × 2^N` (N = count-1, begins at count 1), cap 30s, reset 5 мин неактивности.
+
+For the proposed shared bounded LockoutStore, retain the native pair digest exactly as `HMAC-SHA256(lockout_secret, canonical_username)[..16]` (no domain prefix), combined with normalized IPv4 /24 or IPv6 /64. The store has 8,192 charged 128-byte pair slots (1 MiB), at most 64 pairs per base prefix and 512 per parent. Pair curve is 100 ms × 2^(count-1) from count 1, capped 30 seconds; failure 50 locks one hour; idle reset after five minutes. Native active-pair pre-challenge rejection and post-proof padding remain unchanged. HTTP pre-backoff is new; native adoption is a separate AUTH-PRE decision. IPv4-mapped IPv6 is normalized to IPv4. No parent states exist.
+
+Accounting is per pair only. On quota exhaustion, evict the lowest-count then oldest unlocked pre-threshold pair within every exhausted owner; active pair count is charged against the 64-per-base-prefix and 512-per-parent quotas. At globally full table without exhausted source quota, evict globally lowest-count then oldest unlocked pre-threshold pair. Active locks never evicted. If none eligible, drop new-pair accounting. `unlockUser` clears the user's pair failures and locks across all subnets. Untracked-pair brute force is limited by HTTP source credits; native uses its own admission.
 
 **Reset on success** [NORMATIVE]: при **успешной** аутентификации server **немедленно удаляет** запись `FailureState` для `(subnet, username_hash)`. Иначе legitimate user после нескольких typo получит persistent backoff даже после успешного login. Aналогично `lockout_state` для пары (если pre-threshold) — clear at success.
 
@@ -493,10 +497,10 @@ Cost: один `u64 <=` compare per request — тривиально.
 | `MAX_FRAME_SIZE_DATA` | 16 MB | Query/response, server tunable |
 | `USERNAME_MAX_BYTES` | 255 (после NFC + UsernameCaseMapped) |
 | `RATE_LIMIT_AUTH_INIT_PER_SUBNET` | 10/sec sliding | `/24 IPv4` или `/64 IPv6` (унифицировано с backoff) |
-| `BACKOFF_BASE` | 100 ms × 2^N | per (subnet, username_hash), cap 30s |
+| `BACKOFF_BASE` | `100 ms × 2^(count-1)`, beginning at failure count 1 | per (subnet, username_hash), cap 30s |
 | `BACKOFF_RESET` | 5 минут неактивности |
-| `LOCKOUT_THRESHOLD` | 50 fails/час per (subnet, username_hash) |
-| `LOCKOUT_AUTO_RESET` | 24 часа |
+| `LOCKOUT_THRESHOLD` | 50 failures before one-hour active lock per retained (subnet, username_hash) pair; not a rolling hourly window |
+| `LOCKOUT_AUTO_RESET` | One-hour active pair lock; pair failure count resets after five minutes idle |
 | `KDF_MAX_MEMORY` | 256 MB |
 | `KDF_MAX_TIME` | 8 |
 | `KDF_MAX_PARALLEL` | 8 |
@@ -512,7 +516,7 @@ Cost: один `u64 <=` compare per request — тривиально.
 
 8.3. **Один TCP/WS connection** = один активный handshake state. Повторный `auth_init` в том же connection → close.
 
-8.4. **Lockout silent**: response identical с `authentication_failed`. Внутреннее состояние не раскрывается.
+8.4. **Lockout silent**: response identical с `authentication_failed`. Внутреннее состояние не раскрывается. Native lockout remains silent. HTTP login BEGIN returns 429 with `Retry-After` for pair backoff or active pair lock: this is the explicit transport-specific exception (TOKEN_LOGIN_HTTP §4), not a change to native behavior. FINISH skips proof for `last_fail > begin_time` and returns generic 401 without registering failure or advancing `last_fail`.
 
 8.5. **Latency padding** применяется к **всем** ответам сервера в auth flow (challenge response И negative-path responses). Цель — устранить timing oracle между real-vs-fake user paths (fake уходит в HKDF, real — в DashMap lookup; на microsecond уровне это различимо). Реализация: задержка до `target_constant_time_ms = fixed_floor_ms + uniform[0, jitter_max_ms]` где `fixed_floor_ms = 50` (защищает от LAN/loopback нанo-timing) и `jitter_max_ms = 25` (статистический шум). Эффективный диапазон: `[50, 75]` ms — соответствует диаграмме 01 шаг 14 ("50ms floor + uniform[0,25] jitter").
 
@@ -897,7 +901,7 @@ access.
 - `unsupported_version`
 - `bootstrap_failed`
 
-14.4. **Никогда не раскрывается:** существование юзера, причина auth_failed, lockout state.
+14.4. **Никогда не раскрывается:** существование юзера, причина auth_failed, lockout state. Native lockout remains silent. HTTP login BEGIN returns 429 with `Retry-After` for pair backoff or active pair lock: this is the explicit transport-specific exception (TOKEN_LOGIN_HTTP §4), not a change to native behavior.
 
 ---
 
