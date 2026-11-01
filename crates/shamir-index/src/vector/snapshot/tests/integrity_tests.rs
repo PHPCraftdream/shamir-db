@@ -55,6 +55,11 @@ impl Store for PublicationStore {
         self.inner.scan_prefix_stream(prefix, batch_size)
     }
     async fn transact(&self, ops: Vec<KvOp>) -> DbResult<()> {
+        if self.checked.load(Ordering::SeqCst) == 3
+            && ops.iter().any(|op| matches!(op, KvOp::Remove(_)))
+        {
+            return Err(DbError::Storage("injected prune failure".into()));
+        }
         let manifest = ops.iter().find_map(|op| match op {
             KvOp::Set(key, value) if *key == manifest_key(KS) => Some(value),
             _ => None,
@@ -450,7 +455,7 @@ async fn parser_panics_in_both_graph_branches_are_corrupt_after_all_crcs_pass() 
 }
 
 #[tokio::test]
-async fn dump_and_flip_publish_companion_for_exact_metadata() {
+async fn dump_and_flip_publish_companion_before_bounded_prune() {
     let (source, adapter) = fixture(false).await;
     let wrapped = Arc::new(PublicationStore {
         inner: source,
@@ -470,7 +475,9 @@ async fn dump_and_flip_publish_companion_for_exact_metadata() {
     dump_snapshot_with_gen(&adapter, &store, KS, 1)
         .await
         .unwrap();
-    let (mut next, _) = metadata(&store).await;
+    let (next, _) = metadata(&store).await;
+    let next_gen = next.gen;
+    let mut next = next;
     next.delta_applied_upto = 7;
     flip_generation(
         &store,
@@ -486,11 +493,11 @@ async fn dump_and_flip_publish_companion_for_exact_metadata() {
         7,
     )
     .await
-    .unwrap();
+    .expect_err("prune failure must be reported after metadata commit");
     let manifest_bytes = store.get(manifest_key(KS)).await.unwrap();
     let manifest: SnapshotManifest = MetaEnvelope::open(&manifest_bytes).unwrap();
     let sidecar_bytes = store.get(sidecar_key(KS, manifest.gen)).await.unwrap();
-    assert_eq!(manifest.gen, 1);
+    assert_eq!(manifest.gen, next_gen);
     assert_eq!(manifest.delta_applied_upto, 7);
     assert_eq!(
         store.get(integrity_key(KS)).await.unwrap(),
