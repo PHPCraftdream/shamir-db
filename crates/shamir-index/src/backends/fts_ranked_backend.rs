@@ -543,6 +543,7 @@ impl IndexBackend for FtsRankedBackend {
                     .map_err(IndexError::from)?;
             }
         }
+        self.stats.reset();
         Ok(())
     }
 }

@@ -119,23 +119,23 @@ impl TableManager {
         write_domain: Arc<RepoWriteDomain>,
         permit: &RepoWritePermit,
     ) -> DbResult<Self> {
-        Self::open_with_domain_admitted(name, data_store, info_store, write_domain, permit, true)
+        Self::open_with_domain_admitted(name, data_store, info_store, write_domain, permit, None)
             .await
     }
 
-    /// The open/create body behind `create_with_domain_admitted`. A caller that
-    /// attaches an `MvccStore` AFTER this returns (the repository: `__data__`
-    /// is inert under MVCC and the records live behind the MVCC view) passes
-    /// `run_identity_migration = false` and runs `ensure_base_identity_current`
-    /// itself once the view is attached; run here, the migration would rebuild
-    /// every base index from an empty store.
+    /// The open/create body behind `create_with_domain_admitted`. The
+    /// repository passes the table's `MvccStore` HERE rather than attaching it
+    /// afterwards: `__data__` is inert under MVCC and the records live behind
+    /// the MVCC view, so every open-time rebuild (identity migration, index2
+    /// restart-from-scratch) must read through it or it would rebuild from an
+    /// empty store.
     pub(crate) async fn open_with_domain_admitted(
         name: String,
         data_store: Arc<dyn Store>,
         info_store: Arc<dyn Store>,
         write_domain: Arc<RepoWriteDomain>,
         permit: &RepoWritePermit,
-        run_identity_migration: bool,
+        mvcc: Option<Arc<shamir_tx::MvccStore>>,
     ) -> DbResult<Self> {
         write_domain.debug_check_permit(permit);
         let interner = InternerManager::new(Arc::clone(&info_store));
@@ -230,7 +230,7 @@ impl TableManager {
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
             #[cfg(test)]
             filtered_ann_thresholds: None,
-            mvcc_store: None,
+            mvcc_store: mvcc,
             validator_bindings,
             bindings_lock: Arc::new(tokio::sync::Mutex::new(())),
             validator_registry: None,
@@ -626,9 +626,7 @@ impl TableManager {
         // `identity_migration.rs` (remove both markers -> in-place rebuild -> set idv = 2)
         // `idv > 2` is a typed, fail-closed open error; tables without base
         // indexes only move markers.
-        if run_identity_migration {
-            mgr.ensure_base_identity_current(open_permit).await?;
-        }
+        mgr.ensure_base_identity_current(open_permit).await?;
 
         // #1068: catch up the DDL op-log FIFO retention sweep at open time.
         // The throttled trigger in `ddl_op_log::write_op_status` lives behind

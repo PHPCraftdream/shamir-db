@@ -351,8 +351,8 @@ async fn rv_index_0695aada_delete_streams_all_distinct_legacy_grams() {
         .map(|hash| {
             Bytes::from(crate::posting_layout::build_posting_key(
                 11,
-                crate::posting_layout::type_tag::FTS,
-                hash.as_slice(),
+                crate::posting_layout::type_tag::FTS_V2,
+                &crate::model::identity::identity_bytes::identity_bytes(hash.as_slice()),
                 &rid,
             ))
         })

@@ -227,6 +227,23 @@ async fn stats_track_across_insert_delete() {
 }
 
 #[tokio::test]
+async fn drop_all_clears_postings_and_resets_stats_so_a_rebuild_counts_once() {
+    let i = Interner::new();
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
+    let fts = make_backend(&i, Arc::clone(&store));
+    let rec = make_rec(&i, "hello world foo bar");
+    apply_insert(&fts, &store, RecordId::new(), &rec).await;
+    assert_eq!(fts.stats.doc_count(), 1);
+
+    fts.drop_all().await.unwrap();
+    assert_eq!(fts.stats.snapshot(), FtsStatsSnapshot::default());
+
+    // Rebuilding the same document on the SAME backend counts it once.
+    apply_insert(&fts, &store, RecordId::new(), &rec).await;
+    assert_eq!(fts.stats.doc_count(), 1);
+}
+
+#[tokio::test]
 async fn rv_index_68011961_update_empty_to_nonempty_counts_document() {
     let i = Interner::new();
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
