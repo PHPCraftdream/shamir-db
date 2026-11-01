@@ -43,6 +43,13 @@ pub struct TokenServiceOptions {
     pub clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
 }
 
+/// Callable used to generate token ID and secret pairs.
+pub(crate) type TokenGenerator = dyn Fn() -> Result<
+        (TokenId, shamir_connect::server::token::TokenSecret),
+        shamir_connect::server::token::TokenError,
+    > + Send
+    + Sync;
+
 pub struct TokenService {
     store: TokenStore,
     mirror: Arc<TokenMirror>,
@@ -60,6 +67,8 @@ pub struct TokenService {
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     gc_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     gc_shutdown: CancellationToken,
+    mirror_insert_conflict: Arc<std::sync::atomic::AtomicBool>,
+    test_generator: Arc<TokenGenerator>,
 }
 impl std::fmt::Debug for TokenService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,6 +111,8 @@ impl TokenService {
             clock,
             gc_task: tokio::sync::Mutex::new(None),
             gc_shutdown: CancellationToken::new(),
+            mirror_insert_conflict: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            test_generator: Arc::new(generate_token_parts),
         };
         let mut records = records
             .into_iter()
@@ -119,6 +130,16 @@ impl TokenService {
     pub fn with_canceller(mut self, canceller: Arc<dyn SessionCanceller>) -> Self {
         self.canceller = canceller;
         self
+    }
+    #[cfg(test)]
+    pub(crate) fn force_mirror_insert_conflict(&self) {
+        self.mirror_insert_conflict
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    /// Replace OS-backed token generation in test fixtures.
+    #[cfg(test)]
+    pub(crate) fn inject_generator(&mut self, generator: Arc<TokenGenerator>) {
+        self.test_generator = generator;
     }
     #[cfg(test)]
     pub(crate) fn store_for_tests(&self) -> &TokenStore {
@@ -199,6 +220,8 @@ impl TokenService {
         let key = self.token_key.clone();
         let audit = Arc::clone(&self.audit);
         let counters = Arc::clone(&self.counters);
+        let test_generator = Arc::clone(&self.test_generator);
+        let mirror_insert_conflict = Arc::clone(&self.mirror_insert_conflict);
         let max_per_user = self.max_per_user;
         let result = tokio::task::spawn_blocking(move || {
             let _gate = gate;
@@ -221,7 +244,7 @@ impl TokenService {
             }
             let mut generated = None;
             for _ in 0..8 {
-                let (id, secret) = generate_token_parts().map_err(|_| TokenCreateError::Entropy)?;
+                let (id, secret) = test_generator().map_err(|_| TokenCreateError::Entropy)?;
                 if mirror.get(&id).is_some() {
                     continue;
                 }
@@ -252,6 +275,11 @@ impl TokenService {
                 }
             }
             let (record, token) = generated.ok_or(TokenCreateError::IdCollision)?;
+            if mirror_insert_conflict.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                let mut conflict = record.clone();
+                conflict.label.push_str("-conflict");
+                let _ = mirror.insert(conflict);
+            }
             if !mirror.insert(record.clone()) {
                 store
                     .delete_blocking(&TokenId(record.id))
@@ -319,7 +347,7 @@ impl TokenService {
                         return Ok(Some((current.owner_user_id, false)));
                     }
                     current.revoked_at_ns = Some(now_ns.max(1));
-                    TokenStore::write_locked(db, ks, &current)?;
+                    store.write_locked(db, ks, &current)?;
                     Ok(Some((current.owner_user_id, true)))
                 })?;
                 match outcome {
@@ -369,7 +397,7 @@ impl TokenService {
             }
             let mut next = state.record().clone();
             next.revoked_at_ns = Some(now_ns.max(1));
-            store.with_locked_records(|db, ks| TokenStore::write_locked(db, ks, &next))?;
+            store.with_locked_records(|db, ks| store.write_locked(db, ks, &next))?;
             mirror.revoke(&id, now_ns);
             counters.count_revoked();
             canceller.cancel_token(&id);
@@ -435,6 +463,7 @@ impl TokenService {
                     batch.insert(ks, row.id, bytes.as_slice());
                 }
                 if !rows.is_empty() {
+                    store.fail_locked_write()?;
                     batch.commit()?;
                 }
                 Ok(rows)
@@ -595,6 +624,7 @@ impl GcService {
                     }
                 }
                 if !ids.is_empty() {
+                    store.fail_locked_write()?;
                     batch.commit()?;
                     for id in &ids {
                         mirror.remove(id);

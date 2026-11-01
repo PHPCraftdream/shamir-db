@@ -1,7 +1,7 @@
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use shamir_connect::server::token::{TokenId, TokenRecord};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 const TOKEN_KEYSPACE: &str = "api_tokens_v1";
@@ -21,6 +21,9 @@ pub enum TokenStoreError {
     /// Named MessagePack decoding failure.
     #[error("token record decoding failed")]
     Decoding(#[from] rmp_serde::decode::Error),
+    /// Injected failure requested by the test seam, consumed by the next durable mutation.
+    #[error("injected token-store durable-write failure")]
+    InjectedWriteFailure,
 }
 
 struct StoreInner {
@@ -28,6 +31,7 @@ struct StoreInner {
     records: Keyspace,
     path: PathBuf,
     corrupt_records: AtomicU64,
+    fail_next_durable_write: AtomicBool,
     // Admin-op guard (create/revoke/GC/scan on the blocking pool), contention is nil: never held
     // across an await and never on the verify path, which reads the lock-free mirror.
     operation_lock: Mutex<()>,
@@ -63,6 +67,7 @@ impl TokenStore {
             records,
             path,
             corrupt_records: AtomicU64::new(0),
+            fail_next_durable_write: AtomicBool::new(false),
             operation_lock: Mutex::new(()),
         })))
     }
@@ -146,6 +151,22 @@ impl TokenStore {
         }
     }
 
+    /// Test-only seam shared by clones; production starts with failure injection disabled.
+    #[cfg(test)]
+    pub(crate) fn fail_next_durable_write(&self) {
+        self.0
+            .fail_next_durable_write
+            .store(true, Ordering::Release);
+    }
+
+    fn check_write_fault(&self) -> Result<(), TokenStoreError> {
+        if self.0.fail_next_durable_write.swap(false, Ordering::AcqRel) {
+            Err(TokenStoreError::InjectedWriteFailure)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Insert only when the ID is absent; checks and writes under one store lock.
     pub(crate) fn put_if_absent_blocking(
         &self,
@@ -159,7 +180,7 @@ impl TokenStore {
         if self.0.records.get(record.id)?.is_some() {
             return Ok(false);
         }
-        Self::write_record(&self.0.db, &self.0.records, record)?;
+        self.write_record(&self.0.db, &self.0.records, record)?;
         Ok(true)
     }
 
@@ -177,14 +198,16 @@ impl TokenStore {
             .operation_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::write_record(&self.0.db, &self.0.records, record)
+        self.write_record(&self.0.db, &self.0.records, record)
     }
 
     fn write_record(
+        &self,
         db: &Database,
         records: &Keyspace,
         record: &TokenRecord,
     ) -> Result<(), TokenStoreError> {
+        self.check_write_fault()?;
         let bytes = rmp_serde::to_vec_named(record)?;
         let mut batch = db.batch().durability(Some(PersistMode::SyncAll));
         batch.insert(records, record.id, bytes.as_slice());
@@ -206,6 +229,7 @@ impl TokenStore {
             .operation_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.check_write_fault()?;
         Self::delete_locked(&self.0.db, &self.0.records, id)
     }
 
@@ -237,6 +261,11 @@ impl TokenStore {
         operation(&self.0.db, &self.0.records)
     }
 
+    /// Check the next-mutation fault while the caller holds the operation lock.
+    pub(crate) fn fail_locked_write(&self) -> Result<(), TokenStoreError> {
+        self.check_write_fault()
+    }
+
     /// Scan valid records while the caller holds the store operation lock.
     pub(crate) fn scan_locked(&self) -> Result<Vec<TokenRecord>, TokenStoreError> {
         let mut records = Vec::new();
@@ -264,10 +293,11 @@ impl TokenStore {
     }
 
     pub(crate) fn write_locked(
+        &self,
         db: &Database,
         records: &Keyspace,
         record: &TokenRecord,
     ) -> Result<(), TokenStoreError> {
-        Self::write_record(db, records, record)
+        self.write_record(db, records, record)
     }
 }

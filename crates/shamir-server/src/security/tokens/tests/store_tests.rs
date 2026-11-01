@@ -32,7 +32,6 @@ impl OwnerFloors for KnownOwner {
         Some(0)
     }
 }
-
 struct NullAudit;
 impl AuditAppender for NullAudit {
     fn append_entry(&self, _: &AuditEntry) -> Result<(), std::io::Error> {
@@ -42,7 +41,6 @@ impl AuditAppender for NullAudit {
         Ok(())
     }
 }
-
 fn audit() -> Arc<AuditChainWriter> {
     Arc::new(AuditChainWriter::new(
         AuditChain::new([0; 32]),
@@ -157,16 +155,16 @@ async fn service_open_loads_preseeded_live_records_and_skips_non_live_corrupt() 
 async fn garbage_collection_removes_only_records_beyond_exact_retention_boundary() {
     let temp = TempDir::new().expect("tempdir");
     let store = TokenStore::open(temp.path()).await.expect("store");
-    let mut old_expired = record(1);
-    old_expired.expires_at_ns = 9;
-    let mut recent_expired = record(2);
-    recent_expired.expires_at_ns = 11;
-    let mut old_revoked = record(3);
-    old_revoked.revoked_at_ns = Some(9);
-    let mut recent_revoked = record(4);
-    recent_revoked.revoked_at_ns = Some(11);
-    for row in [old_expired, recent_expired, old_revoked, recent_revoked] {
-        store.put(row).await.expect("put fixture");
+    let mut expiry_boundary = record(1);
+    expiry_boundary.expires_at_ns = 10;
+    let mut expiry_old = record(2);
+    expiry_old.expires_at_ns = 9;
+    let mut revoke_boundary = record(3);
+    revoke_boundary.revoked_at_ns = Some(10);
+    let mut revoke_old = record(4);
+    revoke_old.revoked_at_ns = Some(9);
+    for row in [expiry_boundary, expiry_old, revoke_boundary, revoke_old] {
+        store.put(row).await.expect("fixture");
     }
     let now = 10 + 30 * 86_400_000_000_000_u64;
     drop(store);
@@ -184,15 +182,53 @@ async fn garbage_collection_removes_only_records_beyond_exact_retention_boundary
     .expect("service");
     assert_eq!(service.collect_garbage_now().await.expect("gc"), 0);
     drop(service);
-    let store = TokenStore::open(temp.path())
+    let remaining: Vec<u8> = TokenStore::open(temp.path())
         .await
-        .expect("reopen after service gc");
-    let remaining: Vec<u8> = store
+        .expect("reopen")
         .scan()
         .await
-        .expect("scan after gc")
+        .expect("scan")
         .into_iter()
         .map(|row| row.id[0])
         .collect();
-    assert_eq!(remaining, vec![2, 4]);
+    assert_eq!(remaining, vec![1, 3]);
+}
+
+#[tokio::test]
+async fn injected_write_failure_is_consumed_by_gc_batch_before_publication() {
+    let temp = TempDir::new().expect("tempdir");
+    let store = TokenStore::open(temp.path()).await.expect("store");
+    drop(store);
+    let service = TokenService::open_with_clock(TokenServiceOptions {
+        data_dir: temp.path().to_path_buf(),
+        token_key: zeroize::Zeroizing::new([9; 32]),
+        owners: Arc::new(KnownOwner),
+        sessions: Arc::new(shamir_connect::server::TokenSessionStore::new()),
+        audit: audit(),
+        config: crate::config::TokensConfig::default(),
+        read_only_node: false,
+        clock: Arc::new(|| Some(4_000_000_000_000_000)),
+    })
+    .await
+    .expect("service");
+    let mut expired = record(9);
+    expired.expires_at_ns = 2;
+    service
+        .store_for_tests()
+        .put(expired.clone())
+        .await
+        .expect("seed");
+    service.store_for_tests().fail_next_durable_write();
+    assert!(matches!(
+        service.collect_garbage_now().await,
+        Err(crate::security::tokens::TokenStoreError::InjectedWriteFailure)
+    ));
+    assert_eq!(
+        service
+            .store_for_tests()
+            .get(TokenId(expired.id))
+            .await
+            .expect("get"),
+        Some(expired)
+    );
 }

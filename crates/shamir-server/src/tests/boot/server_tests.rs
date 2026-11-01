@@ -1,4 +1,81 @@
 use fs4::fs_std::FileExt;
+use std::sync::Arc;
+use std::time::Duration;
+use zeroize::Zeroizing;
+
+use crate::config::{
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
+};
+use crate::server::{BootstrapMode, ServerLauncher};
+
+#[tokio::test]
+async fn launcher_shutdown_stops_token_gc_task() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().to_path_buf();
+    let config = Config {
+        data_dir: data_dir.clone(),
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+            file: None,
+            flush_interval_ms: 2000,
+        },
+        durability: Default::default(),
+        transactions: Default::default(),
+        tokens: Default::default(),
+        kdf_defaults: KdfConfig {
+            memory_kb: 19_456,
+            time: 2,
+            parallelism: 1,
+            argon2_version: 0x13,
+        },
+        argon2_concurrent_max: 4,
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Tcp,
+            addr: "127.0.0.1:0".into(),
+            profile: ProfileKind::TlsExporter,
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: vec![],
+        }],
+        tls: TlsConfig {
+            cert_path: data_dir.join("cert.pem"),
+            key_path: data_dir.join("key.pem"),
+        },
+        security: Default::default(),
+        audit: Default::default(),
+        observability: crate::config::ObservabilityConfig {
+            addr: String::new(),
+            allow_public_metrics: false,
+        },
+        replication: None,
+    };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(b"test-password".to_vec()),
+        },
+        node_mode: crate::db_handler::NodeMode::ReadWrite,
+    };
+    let handle = launcher.launch().await.expect("server launch");
+    let service = Arc::clone(&handle.token_service);
+    assert!(!service.gc_task_finished().await);
+    let shutdown = tokio::spawn(handle.shutdown());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !service.gc_task_finished().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("GC stopped during shutdown");
+    drop(service);
+    let report = tokio::time::timeout(Duration::from_secs(30), shutdown)
+        .await
+        .expect("server shutdown bounded")
+        .expect("shutdown task");
+    assert!(report.is_clean(), "{report:?}");
+}
 
 /// Proves the advisory OS file lock mechanism used for the single-instance
 /// guard:
