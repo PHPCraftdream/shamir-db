@@ -18,11 +18,13 @@
 //!
 //! The window runs between the `after_writer_acquired` hook (the last point
 //! before the write call) and the frame being fully readable on the peer
-//! side (which proves `write_all` + `flush` returned). The only allocation
-//! the production path still makes in that window is the `WriteCancelGuard`'s
-//! `Arc<str>` cancellation cause — hence the tight bound of 1, which the OLD
-//! code violates (that `Arc<str>` + `write_frame`'s `Zeroizing<Vec<u8>>`
-//! frame buffer = at least 2).
+//! side (which proves `write_all` + `flush` returned). The request carries a
+//! 16 KiB payload and the bound is on allocated BYTES: the production path
+//! still makes a few small incidental allocations there (the
+//! `WriteCancelGuard`'s `Arc<str>` cancellation cause, plus platform noise
+//! that differs between Linux and Windows), but never a frame buffer or a
+//! payload copy, which the OLD code made (`write_frame`'s
+//! `Zeroizing<Vec<u8>>` of `4 + N` bytes, N >= 16 KiB).
 //!
 //! ## Warm-up
 //! One throwaway ping roundtrip (peer answers a valid framed Pong) runs
@@ -78,6 +80,7 @@ struct CountingAlloc;
 
 thread_local! {
     static WINDOW_ALLOCS: Cell<usize> = const { Cell::new(0) };
+    static WINDOW_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 unsafe impl GlobalAlloc for CountingAlloc {
@@ -85,6 +88,7 @@ unsafe impl GlobalAlloc for CountingAlloc {
         let ptr = unsafe { System.alloc(layout) };
         if !ptr.is_null() {
             WINDOW_ALLOCS.with(|c| c.set(c.get() + 1));
+            WINDOW_BYTES.with(|c| c.set(c.get().saturating_add(layout.size())));
         }
         ptr
     }
@@ -99,10 +103,15 @@ static GLOBAL: CountingAlloc = CountingAlloc;
 
 fn window_reset() {
     WINDOW_ALLOCS.with(|c| c.set(0));
+    WINDOW_BYTES.with(|c| c.set(0));
 }
 
 fn window_load() -> usize {
     WINDOW_ALLOCS.with(Cell::get)
+}
+
+fn window_load_bytes() -> usize {
+    WINDOW_BYTES.with(Cell::get)
 }
 
 /// ALLOCATION-FREE peer-side frame read for the measured window: the 4-byte
@@ -129,10 +138,11 @@ async fn read_frame_no_alloc(reader: &mut (impl AsyncRead + Unpin), body: &mut V
 async fn prewarm_pipe(
     writer: &mut (impl AsyncWrite + Unpin),
     reader: &mut (impl AsyncRead + Unpin),
+    size: usize,
 ) {
-    let chunk = [0u8; 512];
+    let chunk = vec![0u8; size];
     writer.write_all(&chunk).await.expect("pre-warm write");
-    let mut sink = [0u8; 512];
+    let mut sink = vec![0u8; size];
     reader.read_exact(&mut sink).await.expect("pre-warm read");
 }
 
@@ -170,6 +180,18 @@ async fn write_batch_response(writer: &mut (impl AsyncWrite + Unpin), rid: u32) 
     write_response_frame(writer, rid, payload).await;
 }
 
+/// Payload of the request measured by the write-phase oracle.
+const BIG_PAYLOAD: usize = 16 * 1024;
+
+fn big_batch() -> BatchRequest {
+    let mut batch = Batch::new();
+    batch.insert(
+        "big",
+        insert("items").row(QueryValue::Bin(vec![0x5a; BIG_PAYLOAD])),
+    );
+    batch.build()
+}
+
 fn two_repo_batch() -> BatchRequest {
     let mut batch = Batch::new();
     batch.insert("w1", insert("items").row(QueryValue::Null));
@@ -204,9 +226,9 @@ async fn warm_up_scratch_slots() {
 // ─── Card RV-TRANSPORT-TCP-79910BA5 ─────────────────────────────────────────
 
 /// The write phase (writer acquired → frame fully on the wire) must allocate
-/// at most the `WriteCancelGuard` cause string — no frame buffer, no payload
-/// copy. Old code allocates `write_frame`'s fresh `Zeroizing<Vec<u8>>` here,
-/// so this test FAILS on the old implementation.
+/// only incidental small objects — no frame buffer, no payload copy. Old code
+/// allocates `write_frame`'s fresh `Zeroizing<Vec<u8>>` of the whole frame
+/// here, so this test FAILS on the old implementation.
 #[tokio::test(flavor = "current_thread")]
 async fn rv_client_79910ba5_write_phase_allocates_no_frame_buffer() {
     // A current-thread runtime keeps the sampling window single-threaded and
@@ -214,7 +236,7 @@ async fn rv_client_79910ba5_write_phase_allocates_no_frame_buffer() {
     warm_up_scratch_slots().await;
 
     let (mut client_write, mut server_read) = duplex(64 * 1024);
-    prewarm_pipe(&mut client_write, &mut server_read).await;
+    prewarm_pipe(&mut client_write, &mut server_read, 2 * BIG_PAYLOAD).await;
     let (client_read, _server_write) = duplex(64 * 1024);
     let (hook, reached, release) = HookPoint::new();
     let client = Client::for_test(
@@ -230,16 +252,16 @@ async fn rv_client_79910ba5_write_phase_allocates_no_frame_buffer() {
     // Measured request: parks in the hook, writes, then awaits a response
     // that never comes (dropped after the sample).
     let mut measured = pin!(async {
-        let _ = client.ping().await;
+        let _ = client.execute_with_receipts("db", big_batch(), None).await;
     });
 
     // The peer branch is driven by the SAME select as the measured window,
     // so its read buffer is allocated BEFORE the window opens — otherwise it
     // would count as an in-window allocation and break the tight bound.
-    let mut body = Vec::with_capacity(4096);
+    let mut body = Vec::with_capacity(2 * BIG_PAYLOAD);
     let window = tokio::select! {
         w = async {
-            // Ping acquired the writer and parked in the hook.
+            // The request acquired the writer and parked in the hook.
             reached.await.expect("writer acquired hook fired");
             // ── sample window starts ─────────────────────────────────────
             window_reset();
@@ -249,16 +271,17 @@ async fn rv_client_79910ba5_write_phase_allocates_no_frame_buffer() {
             let len = read_frame_no_alloc(&mut server_read, &mut body).await;
             assert!(len > 0, "request frame bytes reached the peer");
             // ── sample window closes: capture BEFORE anything else runs ──
-            window_load()
+            (window_load(), window_load_bytes())
         } => w,
-        r = &mut measured => panic!("measured ping resolved during window: {r:?}"),
+        r = &mut measured => panic!("measured request resolved during window: {r:?}"),
     };
 
+    let (allocs, bytes) = window;
     assert!(
-        window <= 1,
-        "write phase allocated {window} times; bound 1 (WriteCancelGuard \
-         Arc<str>) — old code allocates >= 2 (that Arc<str> PLUS \
-         write_frame's Zeroizing<Vec<u8>>(4+N) frame buffer)"
+        bytes < BIG_PAYLOAD / 4,
+        "write phase allocated {bytes} bytes in {allocs} allocations; a \
+         {BIG_PAYLOAD}-byte payload must reach the wire without a frame \
+         buffer or payload copy (old code allocates the whole frame)"
     );
 
     // The parked request future drops at the end of this test (clippy

@@ -44,7 +44,7 @@ impl TableManager {
     ///
     /// Failure gate (fail-closed): `idv > 2` is a typed open error — the
     /// table was written by a newer binary.
-    pub(in crate::table) async fn ensure_base_identity_current(
+    pub(crate) async fn ensure_base_identity_current(
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
