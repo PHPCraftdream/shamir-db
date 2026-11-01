@@ -1,14 +1,10 @@
 # TOKEN-JS0 — token client design for `shamir-client-ts`
 
-**Status: design proposal only.** No implementation, builds, or tests are claimed. This note contains the ten design decisions and exact proposed normative amendments; amendments are not applied here.
+**Status: design of stages JS1–JS5.** Normative amendments have been applied; this document retains client API, architecture, packaging and implementation-stage design, with normative protocol details left to the specifications.
 
-## Owner decisions needed
+## Owner decisions / implementation candidates
 
-- **Pre-auth limits and close codes:** approve proposed 256 global / 8 per subnet pre-auth permits, 5-second first-frame deadline, 256-byte cap, browser close `4000`, verified denials `4013`/`4014`, and post-upgrade overload `1013`.
-- **Host and proxy authority:** approve explicit `host_authority_allowlist`; trust forwarded authority/address only from configured trusted proxies.
-- **Node baseline:** Node 20+ is a candidate; confirm against supported CI/runtime policy.
-- **CORS:** no cross-origin support proposed. Recommend same-origin proxy; any CORS change needs a separate decision.
-- **AUTH0:** preserve additive `login(options): Promise<ApiToken>`. `TOKEN_LOGIN_HTTP.md` is absent from this worktree; future authoritative specification must define wire fields and KDF parameters.
+The protocol decisions below are accepted in the normative specifications. Remaining client design candidates: Node 20+ requires confirmation against supported CI/runtime policy; no cross-origin CORS support is proposed, and same-origin proxy is recommended. Host/proxy authority rules are specified in TOKEN_API §10.
 
 ## 1. Public API
 
@@ -116,19 +112,11 @@ export type TokenPlatformFactory = (options:NodeTokenHttpConnectOptions|NodeToke
 | Alternative | Security and proxy impact | Decision |
 |---|---|---|
 | Token as second `Sec-WebSocket-Protocol` | May be logged/echoed; replayable; intermediary behavior varies. | Reject. |
-| First binary frame on dedicated browser endpoint | No URL/header exposure, but replayable and exposed to page compromise. Requires strict Origin/Host, bounded pre-auth admission, deadline and redaction; proxy must allow WS. | Recommend `/shamir/v1/ws/browser`. |
-| Query string | Утечка через журналы, скопированные URL и диагностику; попадание в историю или `Referer` зависит от последующей навигации/пересылки и не происходит автоматически при создании WebSocket; токен допускает повторное предъявление. | Отклонить. |
-| HTTP-only browser | Does not meet WS requirement. | Interim fallback only. |
+| First binary frame on dedicated browser endpoint | No URL/header exposure, but replayable and exposed to page compromise. Requires strict Origin/Host, bounded pre-auth admission, deadline and redaction; proxy must allow WS. | Normative endpoint `/shamir/v1/ws/browser`. |
+| Query string | Leaks through logs, copied URLs and diagnostics; replayable credential. | Reject. |
+| HTTP-only browser | Does not meet WS requirement. | Not selected. |
 
-Native `/shamir/v1/ws` сохраняет аутентификацию по заголовку Authorization и проверку токена/лимита активных соединений до `101`: отказ credentials остаётся единым HTTP 401; проверенный отказ — HTTP 403; исчерпание лимита — HTTP 503. Browser проверяет Host/Origin и резервирует pre-auth ресурсы до `101`, затем проверяет первый кадр. Только непроверенные ошибки browser закрываются общим кодом 4000; проверенные отказы канала/незашифрованной политики — 4013/4014; исчерпание активного лимита после upgrade — 1013. Нативные статусы не меняются.
-
-Origin браузера обязателен, единственен, не равен `null` и имеет допустимый синтаксис; точное нормализованное значение сверяется с `browser_origin_allowlist` без wildcard (ошибка/отсутствие — 400, несовпадение — 403). Host должен единственным значением совпадать с нормализованным `host_authority_allowlist` (отсутствие/дубликат/запрет — 400). Forwarded authority/address доверяется только настроенным trusted proxies; `X-Forwarded-Host` нельзя принимать вслепую; `X-Forwarded-For` используется для подсетевой атрибуции только от доверенных прокси. Cookie-аутентификации нет.
-
-Предлагаемые (новые) лимиты browser pre-auth admission: 256 глобально, 8 на подсеть, атомарное резервирование до upgrade; исчерпание — HTTP 503. После проверки атомарно acquire уже существующие конфигурируемые active caps `tokens.max_sockets_per_token` (по умолчанию 8) и `tokens.max_sockets_per_owner` (по умолчанию 32), publish в TokenSessionStore, перепроверить revoke/expiry при promotion, затем освободить pre-auth permit. Освободить все permits на каждом terminal path. Native проверяет/acquires те же конфигурируемые active caps до upgrade. Исчерпание browser active cap после upgrade — 1013, native — HTTP 503. Эти значения не являются существующими defaults.
-
-Первый browser-кадр — один бинарный msgpack map с единственным ключом `token`, канонический ASCII-токен длиной 71; без повторов/неизвестных ключей и завершающих байтов. Обычный размер 80 байт (map 1 + key 6 + str8 prefix 2 + token 71). До выделения памяти предел 256 байт; срок ожидания 5 секунд. Compression выключен, masking обязателен; text, fragmentation, RSV, oversize и дополнительные application frames до проверки отвергаются. Не более 8 control frames за 5 секунд, каждый ≤125 байт; они не продлевают ожидание. Не создавать неограниченные очереди и не вызывать DB handler до проверки. Любые непроверенные malformed/unknown/invalid/expired/revoked/owner-invalid случаи закрываются общим `4000 authentication_failed`, с одинаковыми публичной причиной/timing class и dummy work по TOKEN_API. Отдельный subnet failure limiter не отклоняет verified token; после upgrade HTTP 429 нет. Проверенный отказ `channels` закрывается 4013, plaintext-policy denial — 4014. Admission resource failure может быть различим от credential failure.
-
-Предлагаемый учёт browser pre-auth payload: 64 KiB на сокет = 16 MiB глобально и 512 KiB на подсеть. Отдельный резерв учёта admission — 256 KiB на соединение = 64 MiB при 256; он не гарантирует полного потребления памяти процесса/ядра. Оба токен-маршрута используют `shamir-v1`; нативный клиент не отправляет кадр токена. Browser `ws://` разрешён только на loopback; нативные серверные plaintext rails и SCRAM WS endpoints остаются без изменений.
+Normative sequence, limits and security consequences are specified in TOKEN_API §§4–5, 10, 13 and SECURITY_MODEL §4; this design note does not restate them.
 
 ## 4. Node.js specifics
 
@@ -176,7 +164,7 @@ export type TokenTransportErrorCode =
   | 'timeout' | 'lock_timeout' | 'tx_conflict' | 'read_only_replica' | 'wal_retention_exceeded';
 ```
 
-The union includes all TOKEN_API token errors. Arbitrary application codes remain `ShamirDbError`. HTTP mapping: 400 `http_bad_request` (decode application error only for valid msgpack); 401 uniform `unauthorized`; 403 decoded application error; 404/405 `http_not_found`/`http_method_not_allowed`; 408 server `http_timeout`, local deadline `client_timeout` or compatible `ShamirTimeoutError`; 413/415/431 map body-too-large/unsupported-media-type/bad-headers. HTTP 429/503 map `rate_limited`/`server_unavailable`, retain Retry-After advisory. Never automatically replay writes. Network/abort/TLS/wire/other-close map `network_error`/`client_aborted`/`tls_configuration_error`/`protocol_error`/`connection_closed`. `first_frame_timeout` and `preauth_overloaded` are local/reserved, not inferred wire codes. Browser 4000 is generic auth failure; 4013/4014 and 1013 map as above. Existing retry classification remains advisory.
+The union includes all TOKEN_API token errors. Arbitrary application codes remain `ShamirDbError`. HTTP mapping: 400 `http_bad_request` (decode application error only for valid msgpack); 401 uniform `unauthorized`; 403 decoded application error; 404/405 `http_not_found`/`http_method_not_allowed`; 408 server `http_timeout`, local deadline `client_timeout` or compatible `ShamirTimeoutError`; 413/415/431 map body-too-large/unsupported-media-type/bad-headers. HTTP 429/503 map `rate_limited`/`server_unavailable`, retain Retry-After advisory. Never automatically replay writes. Network/abort/TLS/wire/other-close map `network_error`/`client_aborted`/`tls_configuration_error`/`protocol_error`/`connection_closed`. Browser-specific close mapping is specified in TOKEN_API §10 and TRANSPORT_WS §6; do not infer local timeout/overload codes from wire.
 
 **Observed.** `core/support/errors.ts:31-80` defines ShamirDbError; `:84-108` distinguishes timeout phase. TOKEN_API §§5, 8, 10, 13 govern validation, status mapping and close lifecycle. Sanitize details; never expose peer body/header/cause.
 
@@ -188,7 +176,7 @@ The union includes all TOKEN_API token errors. Arbitrary application codes remai
 
 ## 8. Login flow hook — AUTH0
 
-`TOKEN_LOGIN_HTTP.md` does not exist in the worktree. Do not invent wire fields, budgets/defaults or section numbers. Future authoritative specification titles are provisionally *Endpoints*, *Handshake state*, *Channel binding*, *Issued token*, *Errors*. It will define username/fresh nonce/metadata; challenge salt/KDF/server nonce/opaque handle; finish handle/client proof/requested scope; and result. Password never crosses network; verify server proof if specified. Apply the protocol-defined client KDF floor symbolically; reject unsupported, below-floor or over-cost parameters before expensive derivation without copying server budgets/defaults. Credential failures are generic; other errors typed only per future specification.
+The additive `login(options): Promise<ApiToken>` hook corresponds to TOKEN_LOGIN_HTTP, the normative specification for a proposed feature that is not yet implemented. Login uses a fresh proof and issues an ordinary scoped bearer token; it is distinct from SCRAM session authentication and does not extend shared SCRAM enums or messages. Wire fields, KDF floor, errors and security requirements are defined in TOKEN_LOGIN_HTTP and AUTH_PROTOCOL §5.1.1.
 
 ```ts
 export interface LoginOptions {
@@ -201,13 +189,13 @@ export interface LoginOptions {
 export function login(options: LoginOptions): Promise<ApiToken>;
 ```
 
-This additive API reservation does not assert a current endpoint or implementation.
+The normative login wire contract and policy are in TOKEN_LOGIN_HTTP; this API reservation is not an implementation claim.
 
 ## 9. Test strategy
 
-All tests below are proposals, none run. Node HTTP fake server: auth placement, msgpack, redirects, CA/agent shutdown, abort/deadlines, byte caps, all statuses, uniform 401, Retry-After, redaction, name-keyed execution, no interner fields. WS fakes: native header vs browser first-frame, early greeting buffering, Host/Origin rejection, admission and promotion races, valid 80-byte frame, malformed/duplicate/unknown/trailing/text/oversize/fragment/RSV/extra frames all generic 4000, no pre-auth DB, permit release, 4010–4014, 1013, binding/envelopes, terminal cursor/subscription cleanup and redaction.
+Proposed test strategy only; no tests are claimed as run. Node HTTP fakes cover auth placement, msgpack, redirects, CA/agent shutdown, abort/deadlines, byte caps, statuses, uniform 401, Retry-After, redaction, name-keyed execution and absence of interner fields. WS fakes cover native header versus browser first-frame transport, early-message buffering, Host/Origin handling, admission/promotion races, malformed frames and terminal cleanup as specified in TOKEN_API §§4–5, 10, 13.
 
-Browser unit fakes cover omitted credentials, refused redirects, no Node imports and same-origin behavior; they do not establish CORS or real browser WS. JS4 proposes Playwright real-browser WSS e2e, Linux/Windows, same-origin HTTPS proxy, token operations/cancellation/revocation/cursor/transaction/subscription and no URL/log exposure. Existing citations do not prove automation harness availability. No runtime outcome is claimed.
+Browser unit fakes cover omitted credentials, refused redirects, no Node imports and same-origin behavior; they do not establish CORS or real browser WS. JS4 proposes Playwright real-browser WSS e2e; harness availability is unverified. No runtime outcome is claimed.
 
 ## 10. Stages and folder budgets
 
@@ -215,316 +203,18 @@ Browser unit fakes cover omitted credentials, refused redirects, no Node imports
 
 ### 10.1 File layout and folder budgets
 
-Maximum 7 immediate entries per folder, maximum 1000 lines/file; tests under `__tests__/`.
+Maximum 7 immediate entries per folder, maximum 1000 lines/file; tests under `__tests__`.
 
 - JS1 HTTP: `src/core/types/connection.ts`; `src/core/protocol/token/options.ts`, `errors.ts`, `transport.ts`, `http.ts`, `auth.ts`; `src/platform/token/types.ts`, `http-browser.ts`, `http-node.ts`; `src/entry/api-token.ts`, `token-client.ts`; focused tests.
 - JS2 WS: `src/core/protocol/token/ws.ts`; `src/platform/token/socket-node.ts`, `socket-browser.ts`; `src/entry/token-lifecycle.ts`; token-local lifecycle/router tests.
 - JS3 public API: `src/entry/connect.ts`, `token-client.ts`, `token-db.ts`; Node `index.ts` and browser `browser.ts` preserve SCRAM overloads and add token overloads; no UA detection.
 - JS4 e2e: `src/platform/token/__tests__/`; at most three files in `e2e/`; Playwright Linux/Windows proposal.
-- JS5 docs: `crates/shamir-client-ts/docs/README.md` and transport docs; amendments await approval.
+- JS5 docs: `crates/shamir-client-ts/docs/README.md` and transport docs; normative amendment records live in the audit note.
 
 Avoid new siblings under full directories; do not add `src/__tests__/token/`. Keep `client.ts` unchanged. Order: JS1, JS2, JS3, JS4, JS5.
 
-### 10.2 Capacity accounting
+Normative browser transport values are maintained in TOKEN_API §10, not copied into this design.
 
-| Budget | Value | Scope |
-|---|---:|---|
-| Pre-auth admission | global 256; subnet 8 | Browser before 101; proposed |
-| Active sockets | configurable `tokens.max_sockets_per_token` default 8; configurable `tokens.max_sockets_per_owner` default 32 | Existing shared caps, both endpoints |
-| Browser first frame | 256 bytes; 5 seconds | Before verification; proposed |
-| Payload accounting | 64 KiB/socket; 16 MiB global; 512 KiB/subnet | Browser pre-auth; proposed |
-| Admission accounting | 256 KiB/connection; 64 MiB at 256 | Accounting only; not total-memory guarantee |
+## Proposed spec amendments
 
-| Этап | Нативный `/shamir/v1/ws` | Браузерный `/shamir/v1/ws/browser` |
-|---|---|---|
-| До upgrade | Проверка Authorization и active cap; исчерпание → HTTP 503. | Проверка Host/Origin и pre-auth admission; исчерпание → HTTP 503. |
-| После 101 | Сразу binding; token frame не нужен. | Проверить первый кадр и общий активный лимит. При исчерпании: close `1013`, завершение без кадра привязки. При успехе: переход в активное состояние и кадр привязки. |
-
-Pre-auth/resource значения — предложения, не утверждение о существующих defaults. Admission accounting не гарантирует всю память процесса/ядра; overhead проверяется при реализации.
-
-## Proposed spec amendments (do not apply)
-
-Каждая поправка указывает точный anchor, target, action и полный русский текст. Эти изменения предлагаются, но нормативные документы здесь не редактируются.
-
-### Amendment 1 — TOKEN_API.md §1 Каналы
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §1.
-
-**Exact anchor:**
-```text
-| 2 | WebSocket | `kind: http`, `tls: false` | `GET /shamir/v1/ws` |
-```
-
-**Action:** replace row; following WSS row «как 2» inherits both endpoint choices.
-
-**New text:**
-```text
-| 2 | WebSocket | `kind: http`, `tls: false` | `GET /shamir/v1/ws` (нативный), `GET /shamir/v1/ws/browser` (браузерный; только loopback без TLS) |
-```
-
-### Amendment 2 — TOKEN_API.md §1 граница listener-а
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §1.
-
-**Exact anchor:**
-```text
-Граница безопасности — **тип listener-а**, не путь. Listener `kind: http` обслуживает только токены и никогда не создаёт SCRAM-сессий; listener `kind: tcp|ws|unix` никогда не принимает токен. Путь `/shamir/v1/ws` (токен) отличается от `/shamir/v1` и `/shamir/v1/browser` (SCRAM, TRANSPORT_WS) и обслуживается только `kind: http`. Listener `kind: http` не отдаёт никаких маршрутов без токена: `/shamir/v1/health`, `/shamir/v1/version`, `/admin/*`, метрики на нём не существуют (404).
-```
-
-**Action:** replace the paragraph only.
-
-**New text:**
-> Граница безопасности — **тип listener-а**, не путь. Listener `kind: http` обслуживает только токены и никогда не создаёт SCRAM-сессий; listener `kind: tcp|ws|unix` никогда не принимает токен. Эндпоинты `/shamir/v1/ws` (нативный bearer-WS) и `/shamir/v1/ws/browser` (браузерный bearer-WS) доступны только на `kind: http`; SCRAM-эндпоинты `/shamir/v1` и `/shamir/v1/browser` остаются отдельными и не принимают токены. На `kind: http` нет маршрутов без токена: `/shamir/v1/health`, `/shamir/v1/version`, `/admin/*` и метрики отвечают 404. Исключение browser WS ограничено upgrade и первым кадром bearer-аутентификации; публичные маршруты не добавляются, к БД до проверки токена обращения нет.
-
-### Amendment 3 — TOKEN_API.md §4 Представление токена
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §4.
-
-**Exact anchor:**
-```text
-## 4. Представление токена
-```
-
-**Action:** replace only the three numbered items; keep heading and following section.
-
-**New text:**
-```text
-1. REST и нативный `GET /shamir/v1/ws` принимают ровно один заголовок `Authorization`, схему `Bearer` (регистр схемы не важен), один пробел и токен. Отсутствующий или повторный заголовок, иная схема, лишние пробелы, длина токена не 71 символ или неканоничный base64url обрабатываются по §5; отсутствие заголовка отдельно сохраняет действующее правило лимитера.
-2. Только браузерный `GET /shamir/v1/ws/browser` получает токен из единственного первого бинарного WS-кадра после `101`. Кадр — одна msgpack-карта с единственным строковым ключом `token` и строковым значением каноничного токена §2: 71 ASCII-символ. Неизвестные/повторные ключи и завершающие байты запрещены; размер обычного кодирования — 80 байт, предел до выделения памяти — 256 байт. На этом маршруте заголовок `Authorization` не является источником токена.
-3. На обоих маршрутах токен не принимается из URL, query string, cookie, HTTP-тела или `Sec-WebSocket-Protocol`. Единственное исключение из header-only аутентификации — первый браузерный WS-кадр из пункта 2; ошибки до и после upgrade определены в §5 и §10.
-```
-
-### Amendment 4 — TOKEN_API.md §5 Проверка
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §5.
-
-**Exact anchor:**
-```text
-Выполняется **по заголовкам запроса**, до чтения тела и до `101`:
-```
-
-**Action:** replace opening sentence only; retain existing steps 1–8.
-
-**New text:**
-```text
-Для REST и нативного `/shamir/v1/ws` шаги 1–8 выполняются по заголовкам до чтения тела и до `101`; действующие HTTP-статусы и правила лимитера сохраняются.
-
-Браузерный `/shamir/v1/ws/browser` сначала проверяет Host/Origin и резервирует pre-auth ресурсы (§10), затем выполняет upgrade. Токен первого бинарного кадра проходит разбор и проверки шагов 2–5, включая фиктивный HMAC для неизвестного id, constant-time MAC, состояние владельца и строгое `created_at_ns > tickets_invalid_before_ns(owner)`. Политика шага 6 проверяется после подтверждения секрета: отсутствие `ws`/`both` в `channels` даёт close `4013 token_channel_denied`; plaintext policy — `4014 token_plaintext_write_denied`.
-
-Любая ошибка непроверенного кадра или credentials (malformed, неизвестный id, неверный секрет, отзыв, срок, недействительный владелец) даёт только close `4000 authentication_failed` с одинаковыми публичной причиной и временным классом. Сохраняются subnet failure limiter и аудит aggregation/sampling; HTTP `429` после upgrade не выдаётся, прошедший проверку токен лимитер не отклоняет. До успешной проверки DB handler не вызывается. Сессия из шага 7 создаётся/публикуется только после резервирования общего active cap по последовательности §10.
-```
-
-### Amendment 5 — TOKEN_API.md §10 WebSocket
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §10.
-
-**Exact anchor:**
-```text
-## 10. WebSocket (каналы 2 и 4)
-```
-
-**Action:** replace the section body after the anchored heading up to, but not including, `## 11. Транспортная безопасность`; preserve that following heading.
-
-**New text:**
-```text
-**Конечные точки и подпротокол.** Оба токен-маршрута используют подпротокол `shamir-v1`: нативный `/shamir/v1/ws`, браузерный `/shamir/v1/ws/browser`. Неверный upgrade или подпротокол даёт HTTP `400` до `101`.
-
-**Нативное обновление соединения.** Нативный маршрут принимает `Authorization: Bearer <token>`; проверка по TOKEN_API §5 и атомарный общий лимит активных соединений выполняются до `101`. Настройки `tokens.max_sockets_per_token` (по умолчанию 8) и `tokens.max_sockets_per_owner` (по умолчанию 32) конфигурируемы, а не фиксированы клиентом. Невалидный токен сохраняет единый HTTP `401` и отдельный лимитер неудач; проверенные отказы политики канала/незашифрованного соединения дают `403`; исчерпание active cap — HTTP `503`. Нативный `Origin` необязателен; если задан, сверяется с `browser_origin_allowlist`; пустой список запрещает запрос с Origin (`403`). После успешного `101` сразу отправляется существующий кадр привязки. Нативный клиент не посылает кадр токена.
-
-**Проверка Host/Origin и резервирование до browser upgrade.** Браузерный маршрут до `101` требует единственный корректный Origin и допустимый Host. Отсутствующий, `null`, повторный или некорректный Origin даёт HTTP `400`; несовпадение с точным allowlist Origin без wildcard — `403`; пустой список запрещает все запросы. Host нормализуется как authority и сверяется с явным `host_authority_allowlist`; отсутствующий, повторный или неразрешённый Host даёт `400`. Пересылаемый authority принимается только от настроенных доверенных прокси; `X-Forwarded-Host` без такого доверия не принимается. `X-Forwarded-For` для подсетевого лимитера используется только от доверенных прокси, иначе учитывается адрес пира. Cookie-аутентификации нет.
-
-До browser upgrade атомарно резервируются предлагаемые разрешения учёта pre-auth: 256 глобально, 8 на подсеть; исчерпание даёт HTTP `503`. Эти числа не утверждают наличие существующих настроек. До проверки credentials разрешения не связываются с токеном/владельцем.
-
-**Первый кадр браузера.** После `101` ожидается ровно один первый бинарный кадр не позднее 5 секунд; предел 256 байт проверяется до выделения буфера. Это одна msgpack-карта `{ "token": <71-символьный ASCII-токен> }`, без неизвестных или повторных ключей и завершающих байтов. Обычный размер — 80 байт: карта 1 + ключ 6 + префикс str8 2 + токен 71. Сжатие отключено, маскирование клиента обязательно; текстовые, фрагментированные, RSV, чрезмерно большие кадры и дополнительные application-кадры до проверки запрещены. Не более 8 управляющих кадров размером до 125 байт за период ожидания; они не продлевают срок ожидания. Не создавать неограниченных очередей.
-
-**Непроверенные ошибки browser и перевод в активное состояние.** Выполняются разбор и проверки §5: фиктивный HMAC для неизвестного id, сравнение MAC за постоянное время, проверка состояния токена и порога владельца. Любая непроверенная ошибка кадра или учётных данных (неизвестный, неверный, истёкший, отозванный токен или недействительный владелец) закрывается общим `4000 authentication_failed` с одинаковыми публичной причиной и временным классом; `1003`/`1009` не раскрывают категорию ошибки до проверки. Сохраняются агрегация/сэмплирование аудита и отдельный лимитер подсетевых неудач; HTTP `429` после upgrade не выдаётся, проверенный токен лимитер не отклоняет. До проверки обработчик БД недостижим.
-
-После проверки секрета отсутствие `ws`/`both` в `channels` закрывается `4013 token_channel_denied`; нарушение политики незашифрованного соединения — `4014 token_plaintext_write_denied`. Затем атомарно резервируется общий активный лимит. Его исчерпание после upgrade закрывается `1013 server_busy`. Сессия публикуется в TokenSessionStore с повторной проверкой отзыва/срока при переходе в активное состояние; отзыв в гонке даёт `4011`, истечение — `4012`. Разрешение учёта pre-auth освобождается при успешном переходе или любом завершении; все активные разрешения освобождаются на каждом терминальном пути. Отказ по ресурсам может отличаться от отказа учётных данных.
-
-| Этап | Нативный `/shamir/v1/ws` | Браузерный `/shamir/v1/ws/browser` |
-|---|---|---|
-| До upgrade | Проверка Authorization и общего активного лимита до `101`; исчерпание → HTTP `503`. | Проверка Host/Origin и резервирование pre-auth ресурсов до `101`; исчерпание → HTTP `503`. |
-| После `101` | Сразу кадр привязки; клиентский кадр токена не нужен. | Проверить первый кадр и общий активный лимит. При исчерпании: close `1013`, завершение без кадра привязки. При успехе: переход в активное состояние и кадр привязки. |
-
-**Привязка и установленная сессия.** Кадр привязки `{ "ok": true, "sid": bin(32), "expires_at_ns": N }` отправляется нативному клиенту сразу после `101`, браузерному — только после проверки кадра и перехода в активное состояние; до этого браузер не получает кадр привязки или конверт приложения. Каждый последующий бинарный WS-кадр содержит одну msgpack-карту: запрос `{sid:bin(32),rid?:u32,req:bin(msgpack DbRequest)}`, ответ `{rid?:u32,res:bin(msgpack DbResponse)}`, ошибка `{rid?:u32,error:string}`; push использует `PushEnvelope` из SUBSCRIPTIONS.md. `sid` случаен, ненулевой, 32 байта, принадлежит одному соединению и хранится в общем TokenSessionStore; чужой sid закрывает `4010 token_sid_mismatch`. Лимит запросов после аутентификации возвращает конверт `rate_limited`, соединение остаётся открытым.
-
-Перед каждым обработчиком состояние токена перепроверяется (Acquire). Отмена снимает подписки, прекращает push, откатывает транзакции и закрывает курсоры. Срок сессии — минимум из `token.expires_at_ns` и времени открытия плюс `tokens.session_max_age_hours`; часы переводятся в наносекунды до сложения. SCRAM 24 часа и `SESSION_IDLE_TTL` не применяются; отдельного таймера простоя нет. Heartbeat и предел кадра данных 16 MiB соответствуют TRANSPORT_WS; после аутентификации текстовый кадр закрывается кодом `1003`, превышение размера — `1009`; остановка — `1000`. Отзыв сначала публикуется, затем отменяются сессии; опубликованный отзыв блокирует новые запросы, запрос, уже прошедший проверку, может завершиться. Настройки `tokens.max_sockets_per_token` (по умолчанию 8) и `tokens.max_sockets_per_owner` (по умолчанию 32) остаются конфигурируемыми, а не жёстко заданными; токен-сокеты не расходуют лимит SCRAM-сессий владельца.
-
-### 10.3 Учёт сокетов
-
-Общий активный лимит обоих bearer-маршрутов задаётся `tokens.max_sockets_per_token` (по умолчанию 8) и `tokens.max_sockets_per_owner` (по умолчанию 32). Нативный маршрут проверяет и резервирует лимит до `101`; исчерпание возвращает HTTP `503`. Браузерный маршрут проверяет и резервирует его после успешной проверки первого кадра и до публикации активной сессии; исчерпание после upgrade закрывает `1013 server_busy`. Значения остаются конфигурируемыми. Токен-сокеты не расходуют лимит SCRAM-сессий владельца.
-
-**Остальные коды закрытия.** Коды TRANSPORT_WS §6 продолжают действовать с указанными здесь исключениями. `4000` используется для непроверенной браузерной аутентификации и не применяется на нативном token-пути; `4001 unsupported_version` не используется ни одним token endpoint. Коды `4010`–`4012` сохраняют существующие значения; `4013`/`4014` и `1013` определены выше. Остановка сервера закрывает соединения кодом `1000`.
-
-**Предлагаемый учёт ресурсов.** Учёт browser pre-auth payload: 64 KiB на сокет, 16 MiB глобально и 512 KiB на подсеть. Отдельный admission accounting: 256 KiB на соединение, 64 MiB при 256; это не гарантия полной памяти процесса/ядра, накладные расходы измеряются при реализации. Browser `ws://` разрешён только для loopback; нативные серверные plaintext rails остаются без изменений. Этот браузерный порядок не меняет существующие нативные HTTP-статусы `401`/`403`/`429`/`503`.
-```
-
-### Amendment 6 — TOKEN_API.md §13 Аудит, метрики, логи
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §13.
-
-**Exact anchor:**
-```text
-## 13. Аудит, метрики, логи
-```
-
-**Action:** append.
-
-**New text:**
-> Браузерный WS: первый кадр токена, его байты и представления, подобные Authorization, не записываются в журналы, spans, метрики или аудит — ни при успехе, ни при ошибке. Сохраняются существующие агрегация и сэмплирование событий неудачной аутентификации; секрет и MAC не добавляются.
-
-### Amendment 7 — TOKEN_API.md §14 Вне scope v1
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §14.
-
-**Exact anchor:**
-```text
-mTLS, OAuth/OIDC, JWT, cookies, CORS, JSON-тела, resource-style REST и OpenAPI, браузерные WebSocket-клиенты (браузер не может задать `Authorization` для WebSocket), административные операции через токен, транзакции / курсоры / подписки по REST, репликация токенов между узлами, квоты на токен сверх rate limit, статистика использования токена, ротация `token_key`, токен как параметр подключения в `shamir-client` и `shamir-client-ts` (T9).
-```
-
-**Action:** replace paragraph only.
-
-**New text:**
-> mTLS, OAuth/OIDC, JWT, cookies, CORS, JSON-тела, resource-style REST и OpenAPI, административные операции через токен, транзакции / курсоры / подписки по REST, репликация токенов между узлами, квоты сверх rate limit, статистика использования токена, ротация `token_key`, токен как параметр подключения в `shamir-client` (T9). Браузерный bearer WebSocket на выделенном `/shamir/v1/ws/browser` включён; браузерный SCRAM-путь не изменяется.
-
-### Amendment 8 — TOKEN_API.md §15 Test Checklist
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md`, §15.
-
-**Exact anchor:**
-```text
-## 15. Test Checklist
-```
-
-**Action:** append.
-
-**New text:**
-> Браузерный WS проверить на реальных сокетах в Linux и Windows: Host/Origin и отказы до `101`; исчерпание нативного active cap → HTTP `503` до upgrade; browser pre-auth cap → HTTP `503`; browser active cap → `1013`; timeout, валидный кадр 80 байт, неверные/повторные/неизвестные ключи, завершающие байты и кадр больше 256 байт → общий `4000` без обращения к БД; проверенный отказ канала/незашифрованной политики → `4013`/`4014`; отзыв/истечение → `4011`/`4012`; освобождение разрешений и отсутствие кадра в журналах, spans и аудите.
-
-### Amendment 9 — TRANSPORT_WS.md scope
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TRANSPORT_WS.md`, opening paragraph.
-
-**Exact anchor:**
-```text
-Только `wss://`. Plain WS удалён в v1 (browser требует TLS, native может использовать TCP plain).
-```
-
-**Action:** replace opening paragraph; retain SCRAM scope clarification following it.
-
-**New text:**
-> Только SCRAM WebSocket требует `wss://`; plain SCRAM WS удалён в v1. Bearer WS на listener `kind: http` — отдельный TOKEN_API: нативный `/shamir/v1/ws` использует заголовок Authorization, браузерный `/shamir/v1/ws/browser` — первый бинарный кадр после upgrade. Для browser bearer `ws://` разрешён только loopback; native bearer plaintext подчиняется неизменённым правилам TOKEN_API. SCRAM endpoints не изменяются.
-
-### Amendment 10 — TRANSPORT_WS.md §1 Профили
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TRANSPORT_WS.md`, §1.
-
-**Exact anchor:**
-```text
-## 1. Профили
-```
-
-**Action:** append.
-
-**New text:**
-> Bearer WebSocket на listener `kind: http` — отдельный протокол TOKEN_API, не профиль SCRAM: нативный `/shamir/v1/ws` использует Authorization до upgrade, браузерный `/shamir/v1/ws/browser` — первый бинарный кадр после upgrade. User-Agent не выбирает маршрут. SCRAM `/shamir/v1` и `/shamir/v1/browser`, их binding и handshake остаются без изменений.
-
-### Amendment 11 — TRANSPORT_WS.md §6 Close Codes
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TRANSPORT_WS.md`, §6.
-
-**Exact anchor:**
-```text
-Коды 4010-4012 выдаёт только listener `kind: http`; `4003` остаётся `heartbeat_timeout` на обоих видах соединений.
-```
-
-**Action:** append after sentence.
-
-**New text:**
-> Только для bearer `/shamir/v1/ws/browser`: `4000 authentication_failed` — любая непроверенная ошибка кадра/credentials; `4013 token_channel_denied` и `4014 token_plaintext_write_denied` — только после проверки; `1013 server_busy` — исчерпание active cap после upgrade. Семантика кодов закрытия SCRAM не меняется; native bearer сохраняет HTTP-отказы до upgrade.
-
-### Amendment 12 — TRANSPORT_WS.md §8 Frame Size Limits
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TRANSPORT_WS.md`, §8.
-
-**Exact anchor:**
-```text
-Идентичны TCP. Pre-auth `≤ 4 KB`, data `≤ 16 MB`. Превышение → close 1009.
-```
-
-**Action:** replace sentence.
-
-**New text:**
-> Для SCRAM WS пределы как TCP: pre-auth `≤ 4 KB`, data `≤ 16 MB`, превышение → `1009`. Для bearer browser endpoint TOKEN_API §10 отдельно задаёт первый кадр до проверки: максимум 256 байт, ожидание 5 секунд; некорректный/чрезмерный кадр или истечение времени → `4000`, не `1009`. После аутентификации предел bearer data frame — `≤ 16 MB`.
-
-### Amendment 13 — TRANSPORT_WS.md §9 Origin
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/TRANSPORT_WS.md`, §9.
-
-**Exact anchor:**
-```text
-## 9. Origin Header
-```
-
-**Action:** append.
-
-**New text:**
-> Эти правила относятся к SCRAM. Браузерный bearer endpoint `/shamir/v1/ws/browser` дополнительно проверяет Origin и authority Host до upgrade по TOKEN_API §10; политика SCRAM не меняется. Bearer endpoint не использует cookie-аутентификацию или выбор режима по User-Agent.
-
-### Amendment 14 — SECURITY_MODEL.md §4 Non-Guarantees
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md`, §4.
-
-**Exact anchor:**
-```text
-## 4. Non-Guarantees
-```
-
-**Action:** append.
-
-**New text:**
-> **Браузерный bearer WebSocket.** На `/shamir/v1/ws/browser` bearer принимается первым бинарным кадром после upgrade, не из URL, cookie или subprotocol. Это исключает утечку через URL/referrer, но кадр остаётся повторно предъявляемым bearer credential и уязвим к компрометации страницы, расширений и TLS-потока. До проверки ограничены число соединений, размер кадра и время ожидания; проверяются Origin/Host; обращения к БД невозможны. Меры ограничивают злоупотребление ресурсами и CSWSH, но не обеспечивают proof-of-possession, защиту от компрометации страницы или дополнительную защиту от повторного предъявления. Browser `ws://` только loopback; предпочтителен WSS.
-
-### Amendment 15 — SECURITY_MODEL.md §5 RFC 6750
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/SECURITY_MODEL.md`, §5.
-
-**Exact anchor:**
-```text
-| RFC 6750 (Bearer Token Usage) | Subset | Только заголовок `Authorization`; токен не принимается из query и тела; `WWW-Authenticate: Bearer` на 401 |
-```
-
-**Action:** replace row.
-
-**New text:**
-```text
-| RFC 6750 (Bearer Token Usage) | Subset | REST и нативный WS используют `Authorization`; браузерный WS использует единственный первый бинарный кадр на выделенном endpoint; токен не принимается из query, cookie или тела запроса; `WWW-Authenticate: Bearer` на HTTP 401 |
-```
-
-### Amendment 16 — CLIENT_BROWSER.md §6 Connection Code
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/CLIENT_BROWSER.md`, §6.
-
-**Exact anchor:**
-```text
-## 6. Connection Code (Pseudo-API)
-```
-
-**Action:** append.
-
-**New text:**
-> Браузерный bearer-клиент использует token API отдельно от SCRAM `ShamirClient`: строит абсолютный origin-root URL без userinfo/query/fragment/path, использует HTTP того же origin, `credentials: 'omit'` и `redirect: 'error'`. Для WS подключается к `/shamir/v1/ws/browser` и отправляет токен одним первым бинарным msgpack-кадром после upgrade; токен не помещается в URL, cookie, Origin или subprotocol. Browser API не предоставляет TLS-настроек Node или пользовательского Origin. CORS не включается: cross-origin HTTP остаётся недоступным без отдельного изменения серверной политики.
-
-### Amendment 17 — CLIENT_BROWSER.md §9 Test Checklist
-
-**Target:** `docs/guide-docs/client-server-protocol-spec/CLIENT_BROWSER.md`, §9.
-
-**Exact anchor:**
-```text
-## 9. Test Checklist (release blockers)
-```
-
-**Action:** append.
-
-**New text:**
-> Браузерный bearer WS следует отдельно проверить в реальном браузере через same-origin WSS: токен отсутствует в URL/журналах, корректный первый бинарный кадр устанавливает сессию, несовпадение Origin/Host отклоняется, истечение ожидания и повреждённые кадры закрываются общим `4000`, проверенный отказ канала — `4013`, исчерпание active cap — `1013`. Псевдо-API не считать существующим SDK-контрактом до реализации.
+Accepted amendments applied to the normative files `TOKEN_API.md`, `TRANSPORT_WS.md`, `SECURITY_MODEL.md`, and `CLIENT_BROWSER.md`. This remains the client design for stages JS1–JS5; normative text is authoritative.
