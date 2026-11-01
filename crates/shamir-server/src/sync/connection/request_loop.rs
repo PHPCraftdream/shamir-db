@@ -41,7 +41,7 @@ use shamir_connect::common::envelope::{ErrorEnvelope, RequestEnvelopeView};
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::{dispatch_request_view, DispatchOutcome};
 
-use super::push_sink::MpscPushSink;
+use super::support::push_sink::MpscPushSink;
 
 use shamir_transport_tcp::framing::MAX_FRAME_SIZE_DEFAULT;
 
