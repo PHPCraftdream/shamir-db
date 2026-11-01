@@ -158,11 +158,11 @@ async fn garbage_collection_removes_only_records_beyond_exact_retention_boundary
     let temp = TempDir::new().expect("tempdir");
     let store = TokenStore::open(temp.path()).await.expect("store");
     let mut old_expired = record(1);
-    old_expired.expires_at_ns = 10;
+    old_expired.expires_at_ns = 9;
     let mut recent_expired = record(2);
     recent_expired.expires_at_ns = 11;
     let mut old_revoked = record(3);
-    old_revoked.revoked_at_ns = Some(10);
+    old_revoked.revoked_at_ns = Some(9);
     let mut recent_revoked = record(4);
     recent_revoked.revoked_at_ns = Some(11);
     for row in [old_expired, recent_expired, old_revoked, recent_revoked] {

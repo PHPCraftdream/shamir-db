@@ -37,8 +37,10 @@ data_dir: /tmp/shamir\nkdf_defaults: { memory_kb: 19456, time: 2, parallelism: 1
 
 #[test]
 fn tokens_config_rejects_zero_and_inconsistent_bounds() {
-    let mut tokens = TokensConfig::default();
-    tokens.default_ttl_days = 0;
+    let mut tokens = TokensConfig {
+        default_ttl_days: 0,
+        ..TokensConfig::default()
+    };
     assert!(tokens.validate().is_err());
     tokens = TokensConfig::default();
     tokens.default_ttl_days = 366;

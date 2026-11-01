@@ -185,21 +185,20 @@ async fn create_verify_and_revoke_publishes_after_durable_record() {
         Err(shamir_connect::server::token::VerifyFailure::Revoked)
     ));
     assert_eq!(canceller.count.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        service
-            .revoke(id, now + 9)
-            .await
-            .expect("idempotent revoke"),
-        false
-    );
+    assert!(!service
+        .revoke(id, now + 9)
+        .await
+        .expect("idempotent revoke"));
 }
 
 #[tokio::test]
 async fn labels_and_limits_count_only_active_unexpired_records() {
     let temp = TempDir::new().expect("tempdir");
     let now = 1_000_000_000_u64;
-    let mut config = crate::config::TokensConfig::default();
-    config.max_per_user = 1;
+    let config = crate::config::TokensConfig {
+        max_per_user: 1,
+        ..Default::default()
+    };
     let service = TokenService::open_with_clock(TokenServiceOptions {
         data_dir: temp.path().to_path_buf(),
         token_key: Zeroizing::new([5; 32]),
@@ -277,8 +276,10 @@ async fn database_allowlist_shape_is_rejected_before_persistence() {
 async fn concurrent_owner_creates_never_exceed_active_limit() {
     let temp = TempDir::new().expect("tempdir");
     let now = 20_000_000_000_u64;
-    let mut config = crate::config::TokensConfig::default();
-    config.max_per_user = 3;
+    let config = crate::config::TokensConfig {
+        max_per_user: 3,
+        ..Default::default()
+    };
     let service = Arc::new(
         TokenService::open_with_clock(TokenServiceOptions {
             data_dir: temp.path().to_path_buf(),

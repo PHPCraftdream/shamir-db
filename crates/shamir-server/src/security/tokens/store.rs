@@ -24,11 +24,12 @@ pub enum TokenStoreError {
 }
 
 struct StoreInner {
-    // Cold administrative serialization; never hold across an await or request path.
     db: Database,
     records: Keyspace,
     path: PathBuf,
     corrupt_records: AtomicU64,
+    // Admin-op guard (create/revoke/GC/scan on the blocking pool), contention is nil: never held
+    // across an await and never on the verify path, which reads the lock-free mirror.
     operation_lock: Mutex<()>,
 }
 
@@ -199,7 +200,7 @@ impl TokenStore {
             .map_err(|_| TokenStoreError::Join)?
     }
 
-    fn delete_blocking(&self, id: &TokenId) -> Result<(), TokenStoreError> {
+    pub(crate) fn delete_blocking(&self, id: &TokenId) -> Result<(), TokenStoreError> {
         let _guard = self
             .0
             .operation_lock

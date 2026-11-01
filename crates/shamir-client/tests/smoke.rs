@@ -40,6 +40,7 @@ fn fast_kdf() -> KdfConfig {
 fn make_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -81,6 +82,7 @@ async fn sdk_full_lifecycle() {
     let password = b"correct horse battery staple".to_vec();
 
     let launcher = ServerLauncher {
+        node_mode: Default::default(),
         config: make_config(&temp),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
