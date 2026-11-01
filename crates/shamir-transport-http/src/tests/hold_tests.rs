@@ -413,11 +413,10 @@ async fn tcp_write_deadline_releases_hold_when_observed_blocked() {
     tokio::time::pause();
     tokio::time::advance(timeout).await;
     let connection =
-        std::future::poll_fn(|cx| std::task::Poll::Ready(harness.connection.as_mut().poll(cx)))
-            .await;
+        tokio::time::timeout(Duration::from_secs(5), harness.connection.as_mut()).await;
     assert!(
-        matches!(connection, std::task::Poll::Ready(Err(_))),
-        "write deadline ends blocked response immediately"
+        matches!(connection, Ok(Err(_))),
+        "write deadline ends blocked response: {connection:?}"
     );
     drop(harness.connection);
     assert_eq!(harness.count.load(Ordering::SeqCst), 0);

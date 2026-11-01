@@ -272,9 +272,9 @@ async fn incomplete_request_body_times_out_with_408_and_releases_budget() {
     tokio::time::advance(Duration::from_secs(2)).await;
     let response = read_timeout_response(&mut client).await;
     assert!(response.starts_with(b"HTTP/1.1 408 Request Timeout\r\n"));
-    assert!(response
-        .windows(17)
-        .any(|part| part == b"Connection: close"));
+    assert!(String::from_utf8_lossy(&response)
+        .to_ascii_lowercase()
+        .contains("connection: close"));
     assert_eq!(budget.in_use(), 0);
     assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
     shutdown.cancel();
@@ -345,9 +345,9 @@ async fn allowed_expect_continue_body_stall_times_out_after_interim_response() {
         .await
         .expect("bounded final response read");
     assert!(response.starts_with(b"HTTP/1.1 408 Request Timeout\r\n"));
-    assert!(response
-        .windows(17)
-        .any(|part| part == b"Connection: close"));
+    assert!(String::from_utf8_lossy(&response)
+        .to_ascii_lowercase()
+        .contains("connection: close"));
     let (head, body) = String::from_utf8_lossy(&response)
         .split_once("\r\n\r\n")
         .map(|(head, body)| (head.to_owned(), body.to_owned()))
