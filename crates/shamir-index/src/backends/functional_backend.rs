@@ -38,6 +38,10 @@ use shamir_types::types::value::InnerValue;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+/// `0xFE` is neither a canonical leaf tag nor the digest marker (`0xFF`), so no
+/// stored identity starts with it.
+const NO_IDENTITY_PROBE: [u8; 1] = [0xFE];
+
 pub struct FunctionalBackend {
     descriptor: IndexDescriptor,
     expr: IndexExpr,
@@ -81,9 +85,12 @@ impl FunctionalBackend {
         }
     }
 
+    /// Probe key of `val`: its canonical encoding. A value with no identity
+    /// (a top-level NaN) gets [`NO_IDENTITY_PROBE`], which no posting can
+    /// carry, so the lookup matches nothing.
     pub fn hash_value(val: &InnerValue) -> Vec<u8> {
         crate::model::identity::canonical::encode_inner_value(val)
-            .expect("functional index values have canonical encodings")
+            .unwrap_or_else(|_| NO_IDENTITY_PROBE.to_vec())
     }
 
     fn identity(val: &InnerValue) -> Result<(Vec<u8>, Vec<u8>), IndexError> {

@@ -364,6 +364,10 @@ impl TableManager {
                         crate::index2::kind::IndexKind::Fts { .. }
                             | crate::index2::kind::IndexKind::Functional { .. }
                     );
+                // Flipped to Building by THIS open (envelope v1 -> v2): a storage
+                // fault aborts the open so the next one retries. An ordinary
+                // Building recovery keeps the fail-closed `Failed` policy.
+                let flipped_now = migration_ids.contains(&desc.id);
                 let backend = crate::index2::build_index2_backend_with_resolver(
                     desc,
                     &info_store,
@@ -399,7 +403,7 @@ impl TableManager {
                     // Ready-flip, instead of proceeding as if recovery
                     // succeeded.
                     if let Err(e) = backend.drop_all().await {
-                        if was_identity_migration
+                        if flipped_now
                             && matches!(
                                 e,
                                 crate::index2::IndexError::Db(_)
@@ -436,9 +440,7 @@ impl TableManager {
                     // All backfill errors propagate except the actionable ngram budget failure.
                     match mgr.backfill_index2_backend(backend.as_ref()).await {
                         Ok(()) => {}
-                        Err(crate::index2::IndexError::TokenBudgetExceeded { .. })
-                            if !was_identity_migration =>
-                        {
+                        Err(crate::index2::IndexError::TokenBudgetExceeded { .. }) => {
                             let reason = format!(
                                 "index '{}' (id={recovered_id}): an indexed record exceeds the ngram token budget; shorten or delete the record, then call TableManager::repair(), or DROP INDEX. Repair alone is insufficient.",
                                 backend.descriptor().name
