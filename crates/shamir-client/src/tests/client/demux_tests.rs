@@ -389,22 +389,24 @@ async fn rv_client_d5b9f8a3_early_buffer_aggregate_bound() {
     assert_eq!(rx.await.unwrap().unwrap(), b"ok");
 
     {
-        let mut total: usize = 0;
-        let mut over_key_cap = false;
-        {
-            let subs = state.subs.lock().unwrap_or_else(|p| p.into_inner());
-            for v in subs.early.values() {
-                total += v.len();
-                over_key_cap |= v.len() > crate::client::subscription::EARLY_BUFFER_CAP;
-            }
-            assert_eq!(subs.early_total, total);
-        }
+        let total = state.subs.early_total();
+        assert_eq!(state.subs.debug_early_total(), total);
+        assert!(total <= EARLY_BUFFER_TOTAL_CAP);
+        let denied = EARLY_BUFFER_TOTAL_CAP as u64;
+        state.subs.route(PushEnvelope {
+            push: PushKind::Event,
+            sub: denied,
+            seq: 1,
+            data: None,
+            gap_at: None,
+        });
         assert!(
-            total <= EARLY_BUFFER_TOTAL_CAP,
-            "aggregate early buffer must be <= {EARLY_BUFFER_TOTAL_CAP}, got {total}"
+            !state.subs.contains(&denied),
+            "denied key must not be retained"
         );
-        // Each admitted key still respects the per-key cap.
-        assert!(!over_key_cap, "per-key early cap violated");
+        state.shutdown(CloseCause::PeerEof);
+        assert_eq!(state.subs.early_total(), 0);
+        assert_eq!(state.subs.debug_early_total(), 0);
     }
 
     writer.shutdown().await.expect("shutdown");
@@ -449,12 +451,11 @@ async fn push_frame_routes_to_registered_subscription() {
 
     // Register sub_id=42
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let (term_tx, _term_rx) = oneshot::channel();
     state
         .subs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .live
-        .insert(42, tx);
+        .register(42, tx.clone(), term_tx)
+        .expect("register route");
 
     let (mut writer, reader) = tokio::io::duplex(4096);
     let task = tokio::spawn(reader_task(
@@ -511,29 +512,13 @@ async fn push_frame_for_unknown_sub_is_buffered() {
     assert_eq!(rx1.await.unwrap().unwrap(), b"ok");
 
     // Early buffer holds the push WHILE the reader is running.
-    assert_eq!(
-        state
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early
-            .get(&999)
-            .map(Vec::len),
-        Some(1)
-    );
+    assert_eq!(state.subs.early_total(), 1);
 
     // Terminate the reader: its shutdown transition clears the early buffer.
     writer.shutdown().await.expect("shutdown");
     task.await.expect("reader_task panicked");
-    assert!(
-        !state
-            .subs
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .early
-            .contains_key(&999),
-        "shutdown must clear the early buffer"
-    );
+    assert!(state.subs.is_empty());
+    assert_eq!(state.subs.early_total(), 0);
 }
 
 /// A stalled consumer (never calling `recv`) must not balloon memory:
@@ -547,12 +532,8 @@ async fn push_frame_bounded_channel_drops_on_full() {
     // Tiny cap to exercise the full-channel branch quickly.
     let cap: usize = 4;
     let (tx, mut rx) = tokio::sync::mpsc::channel(cap);
-    state
-        .subs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .live
-        .insert(11, tx);
+    let (term_tx, _term_rx) = oneshot::channel();
+    state.subs.register(11, tx, term_tx).expect("live route");
 
     let (mut writer, reader) = tokio::io::duplex(64 * 1024);
     let task = tokio::spawn(reader_task(
@@ -592,34 +573,54 @@ async fn push_frame_bounded_channel_drops_on_full() {
     );
 }
 
-/// Dropping a SubscriptionHandle removes its entry from the registry.
+/// Stale handle drop must leave a later registration routed and terminable.
+#[test]
+fn rv_client_b80c0d09_stale_handle_drop_preserves_reregistered_route() {
+    let lifecycle = Lifecycle::new();
+    let (old_tx, old_rx) = tokio::sync::mpsc::channel(8);
+    let (old_term_tx, old_term_rx) = oneshot::channel();
+    lifecycle
+        .subs
+        .register(19, old_tx.clone(), old_term_tx)
+        .expect("old route");
+    let old = SubscriptionHandle::new(
+        19,
+        old_rx,
+        old_tx.downgrade(),
+        lifecycle.subs.clone(),
+        old_term_rx,
+    );
+    let (new_tx, mut new_rx) = tokio::sync::mpsc::channel(8);
+    let (new_term_tx, mut new_term_rx) = oneshot::channel();
+    lifecycle
+        .subs
+        .register(19, new_tx.clone(), new_term_tx)
+        .expect("new route");
+    drop(old);
+    lifecycle.subs.route(PushEnvelope {
+        push: PushKind::Event,
+        sub: 19,
+        seq: 1,
+        data: None,
+        gap_at: None,
+    });
+    assert_eq!(new_rx.try_recv().expect("new channel retained").seq, 1);
+    lifecycle.shutdown(CloseCause::PeerEof);
+    assert_eq!(new_term_rx.try_recv(), Ok(CloseCause::PeerEof));
+}
+
+/// Dropping a handle removes only its own route.
 #[tokio::test]
 async fn subscription_handle_drop_removes_from_registry() {
-    let subs_lifecycle = Lifecycle::new();
-    let (tx, rx) =
-        tokio::sync::mpsc::channel::<shamir_connect::common::push_envelope::PushEnvelope>(16);
-    let (_term_tx, term_rx) = oneshot::channel::<CloseCause>();
-    subs_lifecycle
+    let lifecycle = Lifecycle::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<PushEnvelope>(16);
+    let (term_tx, term_rx) = oneshot::channel::<CloseCause>();
+    lifecycle
         .subs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .live
-        .insert(7, tx.clone());
-
-    let handle =
-        SubscriptionHandle::new(7, rx, tx.downgrade(), subs_lifecycle.subs.clone(), term_rx);
-    assert!(subs_lifecycle
-        .subs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .live
-        .contains_key(&7));
-
+        .register(7, tx.clone(), term_tx)
+        .expect("route");
+    let handle = SubscriptionHandle::new(7, rx, tx.downgrade(), lifecycle.subs.clone(), term_rx);
+    assert!(lifecycle.subs.contains(&7));
     drop(handle);
-    assert!(!subs_lifecycle
-        .subs
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .live
-        .contains_key(&7));
+    assert!(!lifecycle.subs.contains(&7));
 }

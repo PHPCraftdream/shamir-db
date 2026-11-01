@@ -1,11 +1,9 @@
-//! Push-frame demultiplexing for live subscriptions.
-
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
 use shamir_connect::common::push_envelope::PushEnvelope;
 
-use crate::client::transport::SubsMap;
+use super::SubsMap;
 use crate::error::CloseCause;
 
 /// Per-subscription channel capacity. A stalled consumer can no longer
@@ -22,16 +20,6 @@ pub type PushSender = mpsc::Sender<PushEnvelope>;
 
 /// Receiver half yielding push frames to the subscription consumer.
 pub type PushReceiver = mpsc::Receiver<PushEnvelope>;
-
-pub(crate) const EARLY_BUFFER_CAP: usize = 256;
-
-/// RV-CLIENT-D5B9F8A3: aggregate cap over ALL early-buffer entries combined
-/// (not per key). The set of subscription ids is server-controlled, so
-/// per-key caps alone leave total memory unbounded for the connection's
-/// life; pushes past this total are dropped (with a `tracing::debug!`).
-/// Budget frees naturally: `subscribe_push` removes its key's buffer on
-/// registration.
-pub(crate) const EARLY_BUFFER_TOTAL_CAP: usize = 1024;
 
 /// Handle to a live subscription stream. Yields push envelopes as they
 /// arrive; after the connection terminates, queued items drain and the
@@ -99,15 +87,11 @@ impl SubscriptionHandle {
 impl Drop for SubscriptionHandle {
     fn drop(&mut self) {
         // Remove from registry so no more pushes are routed here and no
-        // terminal send is attempted on a dead handle.
-        let mut registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());
-        if registry.live.get(&self.sub_id).is_some_and(|tx| {
-            self.owner
-                .upgrade()
-                .is_some_and(|owner| tx.same_channel(&owner))
-        }) {
-            registry.live.remove(&self.sub_id);
-            registry.terminal.remove(&self.sub_id);
+        // terminal send is attempted on a dead handle. The removal is
+        // conditional on the registered sender still being this handle's own
+        // channel, so a replacement registered under the same id survives.
+        if let Some(owner) = self.owner.upgrade() {
+            self.registry.remove_owned(self.sub_id, &owner, None);
         }
     }
 }
