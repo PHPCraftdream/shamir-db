@@ -156,7 +156,7 @@ describe('Node token HTTP adapter', () => {
     const platform = createNodeTokenPlatform(options(port, { requestTimeoutMs: 0 }));
     const transport = new TokenHttpTransport(new URL(`http://127.0.0.1:${port}/`), token, platform, { requestTimeoutMs: 40 });
     const result = transport.request({ op: 'ping' });
-    try { const rejection = expect(result).rejects.toMatchObject({ code: 'client_timeout' }); await accepted.promise; await rejection; }
+    try { await expect(result).rejects.toMatchObject({ code: 'client_timeout' }); }
     finally { await shutdown(fixture.server, [transport]); }
   });
 

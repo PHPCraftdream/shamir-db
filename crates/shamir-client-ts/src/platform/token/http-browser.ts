@@ -37,7 +37,7 @@ function nativeFetch(): TokenFetch {
 }
 
 export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptions | BrowserTokenWsConnectOptions, fetchOverride?: TokenFetch): TokenPlatform & { close(): Promise<void> } {
-  let normalized;
+  let normalized: ReturnType<typeof normalizeTokenHttpOptions>;
   try { normalized = normalizeTokenHttpOptions({ ...options, channel: 'http', url: options.url.replace(/^ws:/i, 'http:').replace(/^wss:/i, 'https:') }); }
   catch { throw failure('invalid_request'); }
   if (normalized.tls !== undefined || normalized.origin !== undefined) throw failure('invalid_request');
