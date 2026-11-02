@@ -255,7 +255,9 @@ pub enum LockoutSnapshotError {
 
 /// Fixed memory and source quota limits for the shared pair table.
 pub const LOCKOUT_PAIR_CAPACITY: usize = 8_192;
+/// Maximum pairs retained per base prefix (IPv4 /24, IPv6 /64).
 pub const LOCKOUT_BASE_QUOTA: usize = 64;
+/// Maximum pairs retained per parent prefix (IPv4 /16, IPv6 /48).
 pub const LOCKOUT_PARENT_QUOTA: usize = 512;
 /// In-memory lockout store backed by a fixed, bounded pair table.
 pub struct InMemoryLockoutStore {
@@ -334,6 +336,7 @@ impl InMemoryLockoutStore {
             .count()
     }
 
+    /// Number of pairs with a recorded lockout (active or not yet collected).
     pub fn active_lockout_count(&self) -> usize {
         self.slots
             .lock()
@@ -342,6 +345,7 @@ impl InMemoryLockoutStore {
             .count()
     }
 
+    /// Total lockout events observed since start.
     pub fn total_lockouts(&self) -> u64 {
         self.total_lockouts.load(Ordering::Relaxed)
     }
@@ -517,10 +521,9 @@ fn find_or_admit(
     } else {
         None
     };
-    chosen.map(|index| {
-        slots[index] = PairSlot::new(key, failure, lockout);
-        index
-    })
+    let index = chosen?;
+    slots[index] = PairSlot::new(key, failure, lockout);
+    Some(index)
 }
 
 impl LockoutStore for InMemoryLockoutStore {
@@ -621,7 +624,7 @@ impl LockoutStore for InMemoryLockoutStore {
                     last_fail_at_ns: 0,
                 };
             }
-            if slot.failure.count == 0 && !slot.lockout.is_some_and(|lock| lock.is_active(now_ns)) {
+            if slot.failure.count == 0 && slot.lockout.is_none_or(|lock| !lock.is_active(now_ns)) {
                 *slot = PairSlot::default();
             } else if slot.lockout.is_some_and(|lock| !lock.is_active(now_ns)) {
                 slot.lockout = None;

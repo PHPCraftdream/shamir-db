@@ -450,6 +450,7 @@ fn concurrent_inserts_obey_strict_base_and_parent_quotas() {
 #[test]
 fn fixed_table_constants_and_quota_relationships() {
     assert_eq!(LOCKOUT_PAIR_CAPACITY, 8192);
+    assert_eq!(LOCKOUT_BASE_QUOTA, 64);
     assert_eq!(LOCKOUT_PARENT_QUOTA, 512);
     assert_eq!(LOCKOUT_PAIR_CAPACITY / LOCKOUT_PARENT_QUOTA, 16);
 }
