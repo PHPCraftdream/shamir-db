@@ -6,9 +6,11 @@ use shamir_tunables::instance_defaults::POST_AUTH_RATE_LIMIT_PER_SEC;
 
 const TEST_NOW: u64 = 10;
 
-fn grant(id: u8) -> Verified {
+fn grant(id: u16) -> Verified {
+    let mut token_id = [0; 16];
+    token_id[14..].copy_from_slice(&id.to_be_bytes());
     let record = TokenRecord {
-        id: [id; 16],
+        id: token_id,
         owner_user_id: [1; 16],
         label: "bucket test".into(),
         mac: [0; 32],
@@ -45,6 +47,60 @@ fn existing_cached_token_works_when_capacity_is_full() {
         cache.session_for(&grant(2), "owner".into(), TEST_NOW),
         Err(BucketError::Unavailable)
     ));
+}
+
+#[test]
+fn idle_bucket_is_evicted_to_admit_new_token() {
+    let cache = BucketCache::with_cap(1);
+    assert!(cache
+        .session_for(&grant(1), "owner".into(), TEST_NOW)
+        .is_ok());
+    assert!(cache
+        .session_for(&grant(2), "owner".into(), TEST_NOW + 1_000_000_001)
+        .is_ok());
+    for _ in 1..POST_AUTH_RATE_LIMIT_PER_SEC {
+        assert!(cache
+            .session_for(&grant(2), "owner".into(), TEST_NOW + 1_000_000_002)
+            .is_ok());
+    }
+    assert!(matches!(
+        cache.session_for(&grant(2), "owner".into(), TEST_NOW + 1_000_000_002),
+        Err(BucketError::RateLimited(_))
+    ));
+    assert_eq!(cache.entries.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(cache
+        .buckets
+        .contains_key(&shamir_connect::server::token::TokenId({
+            let mut id = [0; 16];
+            id[14..].copy_from_slice(&2u16.to_be_bytes());
+            id
+        })));
+    assert!(!cache
+        .buckets
+        .contains_key(&shamir_connect::server::token::TokenId({
+            let mut id = [0; 16];
+            id[14..].copy_from_slice(&1u16.to_be_bytes());
+            id
+        })));
+}
+
+#[test]
+fn full_cache_evicts_idle_entry_and_admits_new_token_without_growth() {
+    let cache = BucketCache::with_cap(4096);
+    for id in 1..=4096u16 {
+        assert!(cache
+            .session_for(&grant(id), "owner".into(), TEST_NOW)
+            .is_ok());
+    }
+    assert_eq!(
+        cache.entries.load(std::sync::atomic::Ordering::Acquire),
+        4096
+    );
+    assert!(cache
+        .session_for(&grant(4097), "owner".into(), TEST_NOW + 1_000_000_001)
+        .is_ok());
+    assert_eq!(cache.entries.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert_eq!(cache.buckets.len(), 1);
 }
 
 #[test]

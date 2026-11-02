@@ -99,7 +99,9 @@ impl RestGate {
         let decision = self.maintenance.failures().check(subnet_of(ip), now);
         if matches!(decision, RateDecision::Allowed) {
             self.maintenance.record_failure(subnet_of(ip), now);
-            self.service.counters().count_auth_result("invalid");
+            self.service
+                .counters()
+                .count_auth_result(TokenEndpoint::Rest, "invalid");
             tracing::trace!(
                 channel = "rest",
                 result = "invalid",
@@ -109,7 +111,9 @@ impl RestGate {
         match decision {
             RateDecision::Allowed => GateDecision::Unauthorized,
             RateDecision::RateLimited { retry_after_secs } => {
-                self.service.counters().count_auth_result("rate_limited");
+                self.service
+                    .counters()
+                    .count_auth_result(TokenEndpoint::Rest, "rate_limited");
                 GateDecision::RateLimited {
                     retry_after_secs: u64::from(retry_after_secs.max(1)),
                 }
@@ -128,14 +132,18 @@ impl TokenGate for RestGate {
         peer: PeerInfo,
     ) -> GateDecision<Self::Grant> {
         let Some(now) = (self.clock)() else {
-            self.service.counters().count_auth_result("unavailable");
+            self.service
+                .counters()
+                .count_auth_result(TokenEndpoint::Rest, "unavailable");
             return GateDecision::Unavailable {
                 retry_after_secs: 1,
             };
         };
         let Some(token) = Self::bearer(auth) else {
             if matches!(auth, AuthHeader::Missing) {
-                self.service.counters().count_auth_result("invalid");
+                self.service
+                    .counters()
+                    .count_auth_result(TokenEndpoint::Rest, "invalid");
                 return GateDecision::Unauthorized;
             }
             return self.failed(peer.addr.ip(), now);
@@ -146,7 +154,9 @@ impl TokenGate for RestGate {
                     && !self.rails.allow_plaintext_write
                     && grant.state.record().mode == TokenMode::ReadWrite
                 {
-                    self.service.counters().count_auth_result("forbidden");
+                    self.service
+                        .counters()
+                        .count_auth_result(TokenEndpoint::Rest, "forbidden");
                     self.maintenance.record_exposed(
                         grant.state.record().id,
                         grant.state.record().owner_user_id,
@@ -155,11 +165,15 @@ impl TokenGate for RestGate {
                     );
                     return GateDecision::Forbidden("token_plaintext_write_denied".into());
                 }
-                self.service.counters().count_auth_result("success");
+                self.service
+                    .counters()
+                    .count_auth_result(TokenEndpoint::Rest, "success");
                 GateDecision::Allow(grant)
             }
             Err(VerifyFailure::ChannelDenied) => {
-                self.service.counters().count_auth_result("forbidden");
+                self.service
+                    .counters()
+                    .count_auth_result(TokenEndpoint::Rest, "forbidden");
                 GateDecision::Forbidden("token_channel_denied".into())
             }
             Err(
@@ -177,7 +191,6 @@ impl TokenGate for RestGate {
 
     fn revalidate(&self, grant: &Self::Grant) -> GateDecision<()> {
         let Some(now) = (self.clock)() else {
-            self.service.counters().count_auth_result("unavailable");
             return GateDecision::Unavailable {
                 retry_after_secs: 1,
             };

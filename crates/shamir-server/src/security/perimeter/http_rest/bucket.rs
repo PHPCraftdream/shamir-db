@@ -12,6 +12,7 @@ use shamir_connect::server::session::Session;
 use shamir_connect::server::token::{TokenId, Verified};
 
 const SESSION_BUCKET_CAP: usize = 4096;
+const BUCKET_IDLE_NS: u64 = 1_000_000_000;
 type SessionBuckets = DashMap<TokenId, Arc<Session>, shamir_collections::THasher>;
 
 pub(crate) enum BucketError {
@@ -47,50 +48,51 @@ impl BucketCache {
     ) -> Result<([u8; 32], Session), BucketError> {
         let id = TokenId(grant.state.record().id);
         if let Some(existing) = self.buckets.get(&id) {
-            let cached = Arc::clone(existing.value());
-            drop(existing);
-            return self.session_from_cached(grant, cached, now_ns);
+            existing
+                .last_activity_ns
+                .fetch_max(now_ns, Ordering::Relaxed);
+            return self.session_from_cached(grant, existing.value(), now_ns);
         }
+        let candidate = Arc::new(Session::for_token(grant, username, now_ns, [1; 32]));
         if self.entries.load(Ordering::Acquire) >= self.cap {
-            let mut removed = 0usize;
-            self.buckets.retain(|token, session| {
-                let live = token == &id
-                    || matches!(&session.origin, SessionOrigin::Token(origin) if origin.is_live(now_ns));
-                if !live {
-                    removed += 1;
-                }
-                live
-            });
-            // Publish freed capacity only after the physical removals are complete.
-            self.entries.fetch_sub(removed, Ordering::AcqRel);
+            self.evict_idle(now_ns);
         }
-        let cached = if let Some(existing) = self.buckets.get(&id) {
-            Arc::clone(existing.value())
-        } else {
-            self.entries
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                    n.checked_add(1).filter(|next| *next <= self.cap)
-                })
-                .map_err(|_| BucketError::Unavailable)?;
-            let candidate = Arc::new(Session::for_token(grant, username, now_ns, [1; 32]));
-            match self.buckets.entry(id) {
-                dashmap::mapref::entry::Entry::Occupied(entry) => {
-                    self.entries.fetch_sub(1, Ordering::AcqRel);
-                    Arc::clone(entry.get())
-                }
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    let inserted = entry.insert(candidate);
-                    Arc::clone(inserted.value())
-                }
+        match self.buckets.entry(id) {
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                entry
+                    .get()
+                    .last_activity_ns
+                    .fetch_max(now_ns, Ordering::Relaxed);
+                self.session_from_cached(grant, entry.get(), now_ns)
             }
-        };
-        self.session_from_cached(grant, cached, now_ns)
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                if self
+                    .entries
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                        count.checked_add(1).filter(|next| *next <= self.cap)
+                    })
+                    .is_err()
+                {
+                    drop(entry);
+                    if let Some(existing) = self.buckets.get(&id) {
+                        existing
+                            .last_activity_ns
+                            .fetch_max(now_ns, Ordering::Relaxed);
+                        return self.session_from_cached(grant, existing.value(), now_ns);
+                    }
+                    return Err(BucketError::Unavailable);
+                }
+                let cached = entry.insert(candidate);
+                cached.last_activity_ns.fetch_max(now_ns, Ordering::Relaxed);
+                self.session_from_cached(grant, &cached, now_ns)
+            }
+        }
     }
 
     fn session_from_cached(
         &self,
         grant: &Verified,
-        cached: Arc<Session>,
+        cached: &Session,
         now_ns: u64,
     ) -> Result<([u8; 32], Session), BucketError> {
         if let Some(retry) = cached.check_post_auth_rate_limit(now_ns) {
@@ -107,6 +109,23 @@ impl BucketCache {
         Ok((sid, session))
     }
 
+    fn evict_idle(&self, now_ns: u64) {
+        let mut removed = 0usize;
+        self.buckets.retain(|_, session| {
+            let last = session.last_activity_ns.load(Ordering::Relaxed);
+            let idle = now_ns.saturating_sub(last) >= BUCKET_IDLE_NS;
+            let dead =
+                !matches!(&session.origin, SessionOrigin::Token(origin) if origin.is_live(now_ns));
+            if idle || dead {
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+        self.entries.fetch_sub(removed, Ordering::AcqRel);
+    }
+
     #[cfg(test)]
     fn with_cap(cap: usize) -> Self {
         Self {
@@ -116,7 +135,6 @@ impl BucketCache {
             sid_generator: || try_random_array::<32>().map_err(|_| ()),
         }
     }
-
     #[cfg(test)]
     fn set_sid_generator(&mut self, generator: fn() -> Result<[u8; 32], ()>) {
         self.sid_generator = generator;

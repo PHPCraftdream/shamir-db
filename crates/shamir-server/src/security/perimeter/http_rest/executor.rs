@@ -1,9 +1,11 @@
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::session::Session;
-use shamir_connect::server::token::Verified;
+use shamir_connect::server::token::{Endpoint as TokenEndpoint, Verified};
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_transport_http::{ExecOutcome, ExecStatus, RestExecutor};
 
@@ -19,21 +21,23 @@ type OwnerName = dyn Fn(&[u8; 16]) -> String + Send + Sync;
 /// Native typed handler adapter for requests accepted by REST scope policy.
 pub struct ScopedHandler {
     handler: Arc<ShamirDbHandler>,
+    #[cfg(test)]
+    native_calls: Option<Arc<AtomicUsize>>,
 }
 
 impl ScopedHandler {
     /// Wrap the concrete native database handler.
     pub fn new(handler: Arc<ShamirDbHandler>) -> Self {
-        Self { handler }
+        Self {
+            handler,
+            #[cfg(test)]
+            native_calls: None,
+        }
     }
 
-    fn classify(
-        &self,
-        request: &DbRequest,
-        mode: shamir_connect::server::token::TokenMode,
-        databases: Option<&[String]>,
-    ) -> Decision {
-        classify_request(request, mode, databases)
+    #[cfg(test)]
+    pub(super) fn observe_native_calls(&mut self, calls: Arc<AtomicUsize>) {
+        self.native_calls = Some(calls);
     }
 
     pub(super) async fn handle(
@@ -46,10 +50,15 @@ impl ScopedHandler {
             return Err(HandleDenial::Forbidden("token_request_denied"));
         };
         let (mode, _, databases) = origin.scope();
-        match classify_request(&request, mode, databases) {
-            Decision::Allowed(_) => tracing::trace!("rest request admitted"),
+        let decision = classify_request(&request, mode, databases);
+        match decision {
+            Decision::Allowed(_) => {}
             Decision::Denied(code) => return Err(HandleDenial::Forbidden(code)),
             Decision::NotSupported(code) => return Err(HandleDenial::BadRequest(code)),
+        }
+        #[cfg(test)]
+        if let Some(calls) = &self.native_calls {
+            calls.fetch_add(1, Ordering::SeqCst);
         }
         self.handler
             .handle_decoded(session, request, conn)
@@ -140,15 +149,17 @@ impl RestExecutor<Verified> for RestHandler {
             Err(_) => return Self::error("invalid_request", ExecStatus::BadRequest),
         };
         let record = grant.state.record();
-        let operation =
-            match self
-                .handler
-                .classify(&request, record.mode, record.databases.as_deref())
-            {
-                Decision::Denied(code) => return Self::error(code, ExecStatus::Forbidden),
-                Decision::NotSupported(code) => return Self::error(code, ExecStatus::BadRequest),
-                Decision::Allowed(operation) => operation,
-            };
+        let prepared = classify_request(&request, record.mode, record.databases.as_deref());
+        let operation = match prepared {
+            Decision::Denied(code) => {
+                self.service
+                    .counters()
+                    .count_auth_result(TokenEndpoint::Rest, "forbidden");
+                return Self::error(code, ExecStatus::Forbidden);
+            }
+            Decision::NotSupported(code) => return Self::error(code, ExecStatus::BadRequest),
+            Decision::Allowed(operation) => operation,
+        };
         tracing::trace!(operation = operation.label(), "rest request admitted");
         let (_, session) =
             match self
@@ -180,7 +191,12 @@ impl RestExecutor<Verified> for RestHandler {
                 retry_after_secs: None,
                 hold: hold.map(|guard| Box::new(guard) as Box<dyn Send + Sync>),
             },
-            Err(HandleDenial::Forbidden(code)) => Self::error(code, ExecStatus::Forbidden),
+            Err(HandleDenial::Forbidden(code)) => {
+                self.service
+                    .counters()
+                    .count_auth_result(TokenEndpoint::Rest, "forbidden");
+                Self::error(code, ExecStatus::Forbidden)
+            }
             Err(HandleDenial::BadRequest(code)) => Self::error(code, ExecStatus::BadRequest),
             Err(HandleDenial::ApplicationError) => Self::error("application_error", ExecStatus::Ok),
         }

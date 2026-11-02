@@ -6,6 +6,7 @@ use tokio::sync::Notify;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
+use shamir_connect::server::lockout::Subnet;
 use shamir_connect::server::token::{OwnerFloors, TokenChannels, TokenMode};
 use shamir_connect::server::TokenSessionStore;
 use tempfile::TempDir;
@@ -313,13 +314,23 @@ async fn rate_limited_failures_are_not_audited_and_admitted_failures_are_aggrega
     let entries = f.audit.entries.lock().expect("audit entries").clone();
     let failures: Vec<_> = entries
         .iter()
-        .filter(|entry| entry.event == "api_token_auth_failed")
+        .filter(|entry| entry.event == "api_token_auth_failures")
         .collect();
     assert_eq!(failures.len(), 1);
     assert_eq!(
-        rmp_serde::from_slice::<(String, String, u64)>(&failures[0].details_canonical_msgpack)
-            .expect("failure details_canonical_msgpack"),
-        ("rest".into(), "invalid".into(), 2)
+        rmp_serde::from_slice::<(String, String, u64, usize, [Option<Subnet>; 4], u64, u64)>(
+            &failures[0].details_canonical_msgpack
+        )
+        .expect("failure details_canonical_msgpack"),
+        (
+            "rest".into(),
+            "invalid".into(),
+            2,
+            1,
+            [Some(Subnet::V4([10, 0, 1])), None, None, None],
+            0,
+            0
+        )
     );
     assert!(!String::from_utf8_lossy(&failures[0].details_canonical_msgpack).contains("secret"));
     assert!(!String::from_utf8_lossy(&failures[0].details_canonical_msgpack).contains("client"));
@@ -346,10 +357,8 @@ async fn rate_limited_failures_are_not_audited_and_admitted_failures_are_aggrega
             GateDecision::RateLimited { .. }
         ));
     }
-    tokio::time::advance(std::time::Duration::from_secs(1)).await;
-    tokio::task::yield_now().await;
-    assert_eq!(f.audit.appended_count.load(Ordering::SeqCst), count);
     shut(&f).await;
+    assert_eq!(f.audit.appended_count.load(Ordering::SeqCst), count);
 }
 #[tokio::test]
 async fn failure_fixture_records_audit_entries_and_missing_header_does_not_hit_failure_path() {

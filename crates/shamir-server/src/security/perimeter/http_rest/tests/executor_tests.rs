@@ -1,5 +1,6 @@
 //! Behavioural regression tests for the concrete REST executor and scoped adapter.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -274,7 +275,9 @@ async fn executor_clock_failure_is_503_and_revocation_is_401() {
 #[tokio::test]
 async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
     let database = Arc::new(ShamirDb::init_memory().await.expect("memory db"));
-    let scoped = ScopedHandler::new(Arc::new(ShamirDbHandler::new(database)));
+    let mut scoped = ScopedHandler::new(Arc::new(ShamirDbHandler::new(database)));
+    let native_calls = Arc::new(AtomicUsize::new(0));
+    scoped.observe_native_calls(Arc::clone(&native_calls));
     let token = TokenMode::ReadOnly;
     let (_temp, _service, _executor, verified, _budget) =
         fixture(token, None, Arc::new(|| Some(NOW))).await;
@@ -301,6 +304,12 @@ async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
         denied,
         Err(HandleDenial::BadRequest("not_supported_over_rest"))
     );
+    assert_eq!(native_calls.load(Ordering::SeqCst), 0);
+    let allowed = scoped
+        .handle(&session, shamir_query_types::wire::DbRequest::Ping, &conn)
+        .await;
+    assert!(allowed.is_ok());
+    assert_eq!(native_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

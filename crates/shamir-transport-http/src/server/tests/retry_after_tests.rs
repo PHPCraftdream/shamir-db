@@ -204,6 +204,28 @@ async fn executor_rate_limit_sends_retry_after_seven_on_wire() {
     let (head, _) = request(&mut harness, "POST /shamir/v1/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/msgpack\r\nContent-Length: 0\r\n\r\n").await;
     assert!(head.starts_with("HTTP/1.1 429"));
     assert!(head.to_ascii_lowercase().contains("retry-after: 7\r\n"));
+    assert_eq!(harness.executor.calls.load(Ordering::SeqCst), 1);
+    finish(harness).await;
+}
+
+#[tokio::test]
+async fn gate_rate_limit_sends_retry_after_nine_on_wire() {
+    let mut harness = setup(
+        GateDecision::RateLimited {
+            retry_after_secs: 9,
+        },
+        ExecStatus::Ok,
+        None,
+    )
+    .await;
+    let (head, _) = request(
+        &mut harness,
+        "GET /shamir/v1/ping HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 429"));
+    assert!(head.to_ascii_lowercase().contains("retry-after: 9\r\n"));
+    assert_eq!(harness.executor.calls.load(Ordering::SeqCst), 0);
     finish(harness).await;
 }
 

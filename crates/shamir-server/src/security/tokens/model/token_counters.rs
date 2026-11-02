@@ -1,3 +1,5 @@
+use shamir_connect::server::token::Endpoint;
+
 /// Cheap process-local service counters.
 #[derive(Debug, Default)]
 pub struct TokenCounters {
@@ -39,8 +41,12 @@ impl TokenCounters {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    pub(crate) fn count_auth_result(&self, result: &'static str) {
-        metrics::counter!("shamir_token_auth_total", "channel" => "rest", "result" => result)
+    pub(crate) fn count_auth_result(&self, channel: Endpoint, result: &'static str) {
+        let channel = match channel {
+            Endpoint::Rest => "rest",
+            Endpoint::Ws => "ws",
+        };
+        metrics::counter!("shamir_token_auth_total", "channel" => channel, "result" => result)
             .increment(1);
     }
 
