@@ -1,10 +1,10 @@
 //! Audit-event coverage for token-admin mutations.
 
-use super::common::{bearer, create, Fixture, OTHER};
+use super::common::{bearer, create, session, Fixture, OTHER, OWNER};
 use crate::boot::config::TokensConfig;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use shamir_connect::common::types::TransportKind;
+use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::token::parse_token;
 use shamir_query_types::wire::{DbRequest, DbResponse};
 
@@ -105,11 +105,17 @@ async fn token_mutations_emit_secret_free_audit_events_and_correct_counters() {
 #[tokio::test]
 async fn audit_records_delegated_actor_transport_and_eight_byte_session_prefix() {
     let fixture = Fixture::new(TokensConfig::default(), true).await;
-    let mut actor = fixture.admin.clone();
-    actor.session_id = [
+    let sid = [
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
         25, 26, 27, 28, 29, 30, 31,
     ];
+    let mut actor = session(
+        fixture.admin.user_id,
+        OWNER,
+        true,
+        sid,
+        BindingMode::TlsExporter,
+    );
     actor.transport_kind = TransportKind::WebSocket;
     let mut request = create("delegated-audit-create");
     if let DbRequest::CreateApiToken { for_user, .. } = &mut request {
@@ -137,7 +143,13 @@ async fn audit_records_delegated_actor_transport_and_eight_byte_session_prefix()
         user: Some(OTHER.into()),
         hmac: None,
     };
-    let mut unix_actor = actor.clone();
+    let mut unix_actor = session(
+        fixture.admin.user_id,
+        OWNER,
+        true,
+        sid,
+        BindingMode::TlsExporter,
+    );
     unix_actor.transport_kind = TransportKind::Unix;
     Fixture::sign(&unix_actor, &mut revoke_user);
     assert!(matches!(
