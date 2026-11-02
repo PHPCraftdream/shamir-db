@@ -14,7 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 const DIM: usize = 2;
-const ELEMENTS: u16 = 8_192;
+// Fewer elements keep the oracle fast (8_192 took ~103 s in CI); the section-size margin
+// over the bound is asserted at run time.
+const ELEMENTS: u16 = 2_048;
 
 fn adapter() -> HnswAdapter {
     let config = HnswConfig {
