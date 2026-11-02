@@ -1,4 +1,5 @@
 import { validateTokenBatchResponse } from '../token-response.js';
+import type { TokenWsClient as PublicTokenWsClient, TokenWsDb } from './token-client.js';
 import { decodeTokenFrame, decodeTokenPayload, decodeTokenPush, encodeTokenPayload } from '../../core/protocol/token/ws.js';
 import type { TokenRequestTransport } from '../../core/protocol/token/transport.js';
 import type { TokenHttpRequest, TokenRequestOptions } from '../../core/protocol/token/options.js';
@@ -53,7 +54,7 @@ class WsOperationsTransport implements TokenRequestTransport {
   close(): Promise<void> { return this.platform.close(); }
 }
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Uint8Array); }
-export class TokenWsClientImpl {
+export class TokenWsClientImpl implements PublicTokenWsClient {
   private readonly router = new SubscriptionRouter();
   private base: TokenHttpClient;
   private readonly lifecycle: TokenWsLifecycle;
@@ -71,7 +72,7 @@ export class TokenWsClientImpl {
   executeWithTouch(db: string, batch: object) { return this.execute(db, batch); }
   waitForVisibility(...args: Parameters<TokenHttpClient['waitForVisibility']>) { return this.base.waitForVisibility(...args); }
   getDdlOpStatus(...args: Parameters<TokenHttpClient['getDdlOpStatus']>) { return this.base.getDdlOpStatus(...args); }
-  db(name: string) { return new TokenWsDb(this, name); }
+  db(name: string) { return new TokenWsDbImpl(this, name); }
   private request(request: TokenWsRequest, options: TokenRequestOptions = {}) { return this.lifecycle.request(request, options); }
   txBegin(db: string, repo: string, isolation?: Exclude<IsolationLevel, 'pessimistic'>): Promise<{ tx_handle: number; snapshot_version: number | bigint; isolation: string }> {
     return this.request({ op: 'tx_begin', query_version: 4, db, repo, ...(isolation ? { isolation } : {}) }).then((r) => {
@@ -151,7 +152,7 @@ export class TokenWsClientImpl {
     }
   }
 }
-export class TokenWsDb extends TokenHttpDb {
+export class TokenWsDbImpl extends TokenHttpDb implements TokenWsDb {
   constructor(private readonly wsClient: TokenWsClientImpl, name: string) { super(wsClient, name); }
   cursor(query: ReadQuery | { build(): ReadQuery }, pageSize: number): TokenCursor { return this.wsClient.cursor(this.name, query, pageSize); }
   tx<T>(fn: (tx: TokenTransactionContext) => Promise<T>, opts?: TransactionOptions): Promise<TransactionResult<T>> { return this.wsClient.runTransaction(this.name, fn, opts); }

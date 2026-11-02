@@ -15,8 +15,10 @@ export type TokenConnectOptions = {
   auth: 'token'; channel?: 'http' | 'ws'; url: string; token: ApiToken | string;
   requestTimeoutMs?: number; connectTimeoutMs?: number; signal?: AbortSignal;
 };
-export type NodeConnectOptions = TokenConnectOptions & { tls?: TokenTlsOptions; origin?: string; username?: never; password?: never; host?: never; port?: never };
-export type BrowserConnectOptions = TokenConnectOptions & { tls?: never; origin?: never; username?: never; password?: never; host?: never; port?: never };
+export type NodeTokenConnectOptions = TokenConnectOptions & { tls?: TokenTlsOptions; origin?: string; username?: never; password?: never; host?: never; port?: never };
+export type BrowserTokenConnectOptions = TokenConnectOptions & { tls?: never; origin?: never; username?: never; password?: never; host?: never; port?: never };
+export type NodeConnectOptions = ScramConnectOptions | NodeTokenConnectOptions;
+export type BrowserConnectOptions = ScramConnectOptions | BrowserTokenConnectOptions;
 
 export interface TokenTlsOptions {
   ca?: string | Uint8Array;
@@ -73,7 +75,7 @@ export interface ResumeOptions {
  * browser storage backend and an `acceptNewHost` UX design pass; until
  * then this client is not MITM-resistant on the initial connection.
  */
-export interface ScramConnectOptions {
+export interface ConnectOptions {
   host: string;
   port: number;
   username: string;
@@ -98,8 +100,7 @@ export interface ScramConnectOptions {
    */
   connectTimeoutMs?: number;
 }
-
-export type ConnectOptions = ScramConnectOptions | NodeConnectOptions | BrowserConnectOptions;
+export type ScramConnectOptions = ConnectOptions;
 
 /**
  * Connection parameters for {@link ShamirClient.connectLocal} — local IPC

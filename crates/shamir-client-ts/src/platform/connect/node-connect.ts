@@ -1,11 +1,10 @@
 import { ApiToken, tokenValueForTransport } from '../../entry/api-token.js';
-import type { NodeConnectOptions, NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions } from '../../core/types/connection.js';
+import type { NodeTokenConnectOptions, NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions } from '../../core/types/connection.js';
 import { TokenTransportError } from '../../core/protocol/token/errors.js';
 import { createTokenHttpClient } from '../../entry/token-client.js';
 import { createTokenWsClient } from '../../entry/ws/token-ws-client.js';
 import { createNodeTokenPlatform } from '../node.js';
-
-export type PublicTokenClient = Awaited<ReturnType<typeof createTokenWsClient>> | ReturnType<typeof createTokenHttpClient>;
+import type { PublicTokenClient } from '../../entry/ws/token-client.js';
 
 const URL_PATTERN = /^(?:https?|wss?):\/\/[^/?#\\\\\s]+\/?$/i;
 function parseUrl(raw: string, schemes: readonly string[]): URL {
@@ -16,7 +15,7 @@ function parseUrl(raw: string, schemes: readonly string[]): URL {
   return url;
 }
 
-export async function connectTokenNode(options: NodeConnectOptions): Promise<PublicTokenClient> {
+export async function connectTokenNode(options: NodeTokenConnectOptions): Promise<PublicTokenClient> {
   if (!options || typeof options !== 'object' || options.auth !== 'token' || !('token' in options) || !('url' in options) || 'username' in options || 'password' in options || 'host' in options || 'port' in options || 'allow_self_signed' in options || !['http', 'ws', undefined].includes(options.channel)) throw new TokenTransportError('invalid_request', 'Invalid token connection options');
   let token: ApiToken;
   try { token = options.token instanceof ApiToken ? options.token : ApiToken.from(options.token); tokenValueForTransport(token); }
@@ -33,9 +32,6 @@ export async function connectTokenNode(options: NodeConnectOptions): Promise<Pub
 
   if (options.requestTimeoutMs !== undefined && (!Number.isSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs < 0 || options.requestTimeoutMs > 0x7fffffff) || options.connectTimeoutMs !== undefined && (!Number.isSafeInteger(options.connectTimeoutMs) || options.connectTimeoutMs < 0 || options.connectTimeoutMs > 0x7fffffff)) throw new TokenTransportError('invalid_request', 'Invalid connection timeout');
   if ('tls' in options && options.tls !== undefined && url.protocol !== 'https:' && url.protocol !== 'wss:') throw new TokenTransportError('invalid_request', 'TLS options require a secure URL');
-  if (url.protocol === 'http:' || url.protocol === 'ws:') {
-    if (!isLoopback(url.hostname)) throw new TokenTransportError('invalid_request', 'Plaintext token connections require loopback');
-  }
   if (channel === 'http') {
     const normalized: NodeTokenHttpConnectOptions = {
       auth: 'token', channel: 'http', token, url: url.origin,
@@ -57,8 +53,4 @@ export async function connectTokenNode(options: NodeConnectOptions): Promise<Pub
   };
   return createTokenWsClient(normalized, (platformOptions) => createNodeTokenPlatform(platformOptions));
 }
-function isLoopback(host: string): boolean {
-  if (host === 'localhost' || host === '[::1]' || host === '::1') return true;
-  const parts = host.split('.');
-  return parts.length === 4 && parts[0] === '127' && parts.slice(1).every((part) => /^(?:0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
-}
+

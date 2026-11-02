@@ -11,3 +11,22 @@
 ## Final report
 
 PARTIAL — Token connect wiring/options/exports, HTTP capability rejections, and public-contract tests are present. Acceptance 2 remains incomplete: token connections return an HTTP/WS client union, not the single nominal ShamirClient requested. Strict TypeScript/Vitest CI is still required; no local builds/tests were run. The permitted layout check passed earlier (untracked paths counted separately). Changes and per-item gaps are recorded in `docs/dev-artifacts/audits/2026-11-02-token-js3/DESIGN.md`. No files were moved/deleted and no git mutation was performed.
+
+## Revision 1 progress
+
+- Item 1 DONE source-level: `crates/shamir-client-ts/src/entry/token-db.ts` declares the async iterator protocol; regression `returns a stable async iterable iterator` in `src/entry/ws/__tests__/token-ws-client-regression.test.ts` is relevant. Tests unrun.
+- Item 2 PARTIAL: SCRAM `ConnectOptions` was restored as an interface and platform token unions renamed, but imports/type references require correction and full strict review.
+- Item 3 PARTIAL: browser overload work is incomplete and has unresolved type references.
+- Item 4 PARTIAL: a public WS interface file was added, but the implementation currently refers to the wrong import/export symbols; not complete.
+- Item 5 PARTIAL: per-channel overloads started; HTTP overload and ordering/type review remain.
+- Item 6 PARTIAL: token type exports started, but browser exports and target declarations are incomplete.
+- Item 7 PARTIAL: types barrel narrowed; imports/entry type* effects require broad review.
+- Item 8 PARTIAL: Node plaintext rejection narrowed to remote ws; corresponding URL test not updated and browser WS validation still needs review.
+- Item 9 PARTIAL: browser connector now accepts browser token options; compile-safety review pending.
+- Item 10 PARTIAL: tests not fully updated (error codes, TLS/plaintext/timeout/channel cases, source graph isolation assertions remain); no test runs.
+- Item 11 PARTIAL: platform re-export removals and direct entry imports started; spies and platform factory usages require adapting.
+
+## Revision 1 report
+
+Items 1–11 are PARTIAL overall except item 1, which is source-level DONE. Several partial edits are not yet type-safe; in particular public WS type layering and entry overload/imports need immediate repair before CI review. Added/retained relevant tests: `returns a stable async iterable iterator`, `preserves SCRAM overload result and passes original options and platform through`, public connect fake platform tests, and entry isolation/redaction assertions. All are UNRUN. No builds, compilers, or tests were run. CI must run strict TypeScript declaration/type checking and Vitest; verify browser-vs-Node graph exclusion, all overload call sites, platform spies, and layout limits. No compile/runtime claims are made.
+

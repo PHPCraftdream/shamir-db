@@ -18,6 +18,7 @@ export interface TokenTransactionContext {
   batch(id?: WireValue): Batch;
 }
 export interface TokenLiveSubscription extends AsyncIterable<SubscriptionEvent> {
+  [Symbol.asyncIterator](): AsyncIterableIterator<SubscriptionEvent>;
   readonly subId: number;
   next(): Promise<SubscriptionEvent | undefined>;
   unsubscribe(): Promise<void>;

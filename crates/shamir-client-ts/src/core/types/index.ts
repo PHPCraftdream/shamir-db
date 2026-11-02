@@ -37,7 +37,7 @@ export type {
   ExplainPlan,
 } from './read/query.js';
 
-export type { ConnectOptions, ScramConnectOptions, TokenConnectOptions, NodeConnectOptions, BrowserConnectOptions, TokenHttpConnectOptions, TokenWsConnectOptions, NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions, BrowserTokenHttpConnectOptions, BrowserTokenWsConnectOptions, TokenTlsOptions, ConnectLocalOptions, ResumeOptions } from './connection.js';
+export type { ConnectOptions, ScramConnectOptions, TokenConnectOptions, ConnectLocalOptions, ResumeOptions } from './connection.js';
 
 export type {
   WireValue,

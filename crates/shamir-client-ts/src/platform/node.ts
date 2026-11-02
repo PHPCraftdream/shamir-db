@@ -27,7 +27,6 @@ import type { TokenPlatform } from './token/types.js';
 export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions | NodeTokenWsConnectOptions): TokenPlatform {
   return createTokenPlatform(options);
 }
-export { connectTokenNode } from './connect/node-connect.js';
 
 class NodeSocket implements Socket {
   private readonly ws: WebSocket;

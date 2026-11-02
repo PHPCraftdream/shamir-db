@@ -26,7 +26,6 @@ import type { TokenPlatform } from './token/types.js';
 export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptions | BrowserTokenWsConnectOptions): TokenPlatform {
   return createTokenPlatform(options);
 }
-export { connectTokenBrowser } from './connect/browser-connect.js';
 
 
 class BrowserSocket implements Socket {

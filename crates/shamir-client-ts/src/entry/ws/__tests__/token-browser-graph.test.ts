@@ -45,4 +45,21 @@ describe('browser runtime source graph', () => {
       }
     }
   });
+  it('keeps Node connectors out of the browser graph and browser connectors out of Node', async () => {
+    const browserGraph = await sourceGraph(resolve(sourceRoot, 'browser.ts'));
+    const nodeGraph = await sourceGraph(resolve(sourceRoot, 'index.ts'));
+    expect(browserGraph.has(resolve(sourceRoot, 'platform/connect/browser-connect.ts'))).toBe(true);
+    expect(browserGraph.has(resolve(sourceRoot, 'platform/connect/node-connect.ts'))).toBe(false);
+    expect(nodeGraph.has(resolve(sourceRoot, 'platform/connect/node-connect.ts'))).toBe(true);
+    expect(nodeGraph.has(resolve(sourceRoot, 'platform/connect/browser-connect.ts'))).toBe(false);
+    for (const path of nodeGraph) {
+      const content = await readFile(path, 'utf8');
+      expect(content).not.toContain('connectTokenBrowser');
+    }
+    for (const path of browserGraph) {
+      const content = await readFile(path, 'utf8');
+      expect(content).not.toContain('connectTokenNode');
+      expect(content).not.toContain('createNodeTokenPlatform');
+    }
+  });
 });
