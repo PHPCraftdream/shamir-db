@@ -17,6 +17,7 @@ fn make_test_config(data_dir: &Path) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.to_path_buf(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -78,6 +79,7 @@ async fn setup_data_with_table() -> (tempfile::TempDir, PathBuf) {
     let launcher = ServerLauncher {
         config: config.clone(),
         bootstrap,
+        node_mode: Default::default(),
     };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");

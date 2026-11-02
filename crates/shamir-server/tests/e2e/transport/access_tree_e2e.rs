@@ -24,6 +24,7 @@ fn make_test_config(temp: &TempDir) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -73,7 +74,11 @@ async fn access_tree_over_the_wire_as_admin() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = match launcher.launch().await {
         Ok(h) => h,
         Err(e) => panic!("launcher boot failed: {e}"),
@@ -152,6 +157,7 @@ async fn access_tree_offline_from_data_dir() {
     let launcher = ServerLauncher {
         config: config.clone(),
         bootstrap,
+        node_mode: Default::default(),
     };
     let handle = launcher.launch().await.expect("boot");
     handle.shutdown().await;

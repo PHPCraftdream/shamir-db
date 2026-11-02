@@ -18,7 +18,11 @@ async fn nested_batch_read_of_forbidden_table_stays_denied() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");
 

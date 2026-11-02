@@ -37,6 +37,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -89,6 +90,7 @@ async fn cap_two_refuses_third_concurrent_client() {
     let cfg = make_config(&temp, 2);
     let launcher = ServerLauncher {
         config: cfg,
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(b"hunter2".to_vec()),

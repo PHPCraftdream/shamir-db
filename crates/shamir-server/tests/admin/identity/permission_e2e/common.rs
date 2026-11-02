@@ -98,6 +98,7 @@ pub(crate) fn make_test_config(temp: &TempDir) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),

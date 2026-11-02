@@ -72,8 +72,10 @@ pub use crate::durability::DurabilityConfig;
 pub use crate::transactions_config::TransactionsConfig;
 
 mod limits;
+mod tokens;
 
 pub use limits::{CursorLimitsConfig, QueryLimitsConfig, TxLimitsConfig};
+pub use tokens::TokensConfig;
 
 /// Top-level configuration as loaded from the `.ktav` file.
 ///
@@ -89,6 +91,9 @@ pub struct Config {
     pub durability: DurabilityConfig,
     #[serde(default)]
     pub transactions: TransactionsConfig,
+    /// API-token lifetime and session caps.
+    #[serde(default)]
+    pub tokens: TokensConfig,
     /// Tracing / logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
@@ -467,6 +472,9 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.durability.resolve_policy()?;
         self.transactions.validate()?;
+        self.tokens
+            .validate()
+            .map_err(|message| ConfigError::Validation(format!("tokens: {message}")))?;
         // KDF: defaults first, then any per-listener override.
         validate_kdf(&self.kdf_defaults)
             .map_err(|m| ConfigError::Validation(format!("kdf_defaults: {m}")))?;

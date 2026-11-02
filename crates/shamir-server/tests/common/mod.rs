@@ -51,6 +51,7 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -141,10 +142,14 @@ pub async fn spawn_ipc_with_password(
         username: "admin".into(),
         password: Zeroizing::new(admin_password.to_vec()),
     };
-    ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot")
+    ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot")
 }
 
 /// Build a minimal single-TCP-listener `Config` with `profile: plain`
@@ -186,10 +191,14 @@ pub async fn spawn_plain_with_password(
         username: "admin".into(),
         password: Zeroizing::new(admin_password.to_vec()),
     };
-    ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot")
+    ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot")
 }
 
 /// Spawn a fresh server with an `admin` superuser bootstrapped to
@@ -210,10 +219,14 @@ pub async fn spawn_with_password(
         username: "admin".into(),
         password: Zeroizing::new(admin_password.to_vec()),
     };
-    ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot")
+    ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot")
 }
 
 /// Convenience: spawn on an OS-assigned port (`127.0.0.1:0`).
@@ -237,10 +250,14 @@ pub async fn spawn_with_random_token(temp: &TempDir, addr: &str) -> (ServerHandl
         username: None,
         token_path: None,
     };
-    let handle = ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot");
+    let handle = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot");
     let token = std::fs::read_to_string(temp.path().join("bootstrap_token.txt"))
         .expect("bootstrap token file must exist right after boot");
     (handle, token)
