@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit_appender::FjallAuditAppender;
+use crate::http_rest::RestGate;
 use crate::scheduler::Scheduler;
 use crate::server::store_release_barrier::wait_stores_released;
 
@@ -61,6 +62,8 @@ pub struct ServerHandle {
     /// for every `kind: unix` listener (the filesystem path / pipe name it
     /// bound to), `None` for every other listener.
     pub bound_ipc_paths: Vec<Option<String>>,
+    /// HTTP REST gate maintenance workers, retained until connections have drained.
+    pub(super) http_gates: Vec<Arc<RestGate>>,
     /// Per-listener accept-loop join handles.
     pub(super) listener_tasks: Vec<JoinHandle<()>>,
     /// Background task scheduler.
@@ -184,19 +187,42 @@ impl ServerHandle {
         //    next poll, and any new caller sees the cancelled state
         //    immediately. No subscribe-window race.
         self.shutdown_token.cancel();
-        self.token_service.shutdown_gc().await;
         // 2. Wait for accept loops to finish, then wait for tracked accepted
         // tasks to quiesce before any repository flush.
-        for task in self.listener_tasks {
-            let _ = task.await;
+        let listener_deadline = tokio::time::Instant::now() + CONN_DRAIN_TIMEOUT;
+        let mut quiesced = true;
+        for mut task in self.listener_tasks {
+            let abort = task.abort_handle();
+            match tokio::time::timeout_at(listener_deadline, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    report.add_error(format!("listener task failed: {error}"));
+                    quiesced = false;
+                }
+                Err(_) => {
+                    abort.abort();
+                    let joined = tokio::time::timeout(CONN_ABORT_TIMEOUT, &mut task)
+                        .await
+                        .is_ok();
+                    report.add_error(format!(
+                        "HTTP listener drain exceeded {CONN_DRAIN_TIMEOUT:?}; aborted"
+                    ));
+                    quiesced &= joined;
+                }
+            }
         }
-        let quiesced = drain_connections(
-            &self.conn_tasks,
-            CONN_DRAIN_TIMEOUT,
-            CONN_ABORT_TIMEOUT,
-            report,
-        )
-        .await;
+        // One drain budget for listeners and accepted connections together, so
+        // the stage stays inside the runtime shutdown deadline.
+        let remaining = listener_deadline.saturating_duration_since(tokio::time::Instant::now());
+        quiesced &=
+            drain_connections(&self.conn_tasks, remaining, CONN_ABORT_TIMEOUT, report).await;
+        // Gates stop after transport and connection tasks drain, so the final
+        // audit flush includes their notices.
+        for gate in &self.http_gates {
+            gate.shutdown().await;
+        }
+        drop(self.http_gates);
+        self.token_service.shutdown_gc().await;
         // 2b. Stop the follower-replication supervisor: cancel every running
         //     follower loop, then join the reconcile-tick task (already told
         //     to stop by the root `shutdown_token.cancel()` above) so it drops

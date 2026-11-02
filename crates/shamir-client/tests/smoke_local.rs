@@ -79,10 +79,11 @@ fn make_config(temp: &TempDir, addr: &str) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Unix,
             addr: addr.to_string(),
-            profile: ProfileKind::Plain,
+            profile: Some(ProfileKind::Plain),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

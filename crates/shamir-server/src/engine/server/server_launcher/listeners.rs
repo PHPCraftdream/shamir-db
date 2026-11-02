@@ -6,6 +6,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_transport_http::BodyBudget;
+
+use crate::db_handler::ShamirDbHandler;
+use crate::http_rest::RestGate;
+use crate::tokens::TokenService;
+
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
@@ -43,6 +49,7 @@ use super::accept_loops::{
     accept_loop_ws_native, WsAcceptParams,
 };
 use super::helpers::{browser_origin_policy_from, build_ctx, kdf_from_config, AcceptPath};
+use super::http::start_http_listener;
 
 /// Everything a listener needs to build its per-connection context, borrowed
 /// from the launcher's locals.
@@ -61,6 +68,8 @@ pub(super) struct ListenerEnv<'a> {
     pub(super) resume_config: &'a Arc<ResumeConfig>,
     pub(super) handler: &'a Arc<dyn RequestHandler>,
     pub(super) meta: &'a Arc<ServerMetaStore>,
+    pub(super) token_service: &'a Arc<TokenService>,
+    pub(super) handler_concrete: &'a Arc<ShamirDbHandler>,
     pub(super) conn_tasks: &'a ConnTasks,
 }
 
@@ -69,6 +78,7 @@ pub(super) struct SpawnedListeners {
     pub(super) bound_addrs: Vec<Option<SocketAddr>>,
     pub(super) bound_ipc_paths: Vec<Option<String>>,
     pub(super) listener_tasks: Vec<JoinHandle<()>>,
+    pub(super) http_gates: Vec<Arc<RestGate>>,
 }
 
 impl ListenerEnv<'_> {
@@ -160,184 +170,253 @@ pub(super) async fn spawn_listeners(
     // fraction of the global cap (audit §2a / top-5 #4). `0` = off.
     let per_ip_limiter =
         PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
+    let body_budget = Arc::new(BodyBudget::new(
+        config
+            .listeners
+            .iter()
+            .filter(|l| l.kind == ListenerKind::Http)
+            .map(|l| l.http.max_request_body_bytes)
+            .max()
+            .unwrap_or(0)
+            .saturating_mul(16),
+    ));
+    let mut http_gates = Vec::new();
 
-    for l in &config.listeners {
-        // Local IPC (`kind: unix`) addresses a filesystem path / pipe
-        // name, not a `SocketAddr` — handled entirely on its own path,
-        // separate from the TCP/WS SocketAddr-based dispatch below
-        // (`Config::validate` already rejected any other `l.kind` +
-        // `l.addr` combination that wouldn't make sense here).
-        if l.kind == ListenerKind::Unix {
-            let listener = IpcListener::bind(&l.addr)
-                .await
-                .map_err(|e| BootError::Bind(format!("unix {}: {e}", l.addr)))?;
-            tracing::info!(path = %l.addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-            let ctx = env.context(BindingMode::None, TransportKind::Unix, l);
-            let token = shutdown_token.clone();
-            let limiter = conn_limiter.clone();
-            let per_ip = per_ip_limiter.clone();
-            listener_tasks.push(tokio::spawn(accept_loop_ipc(
-                listener, ctx, token, limiter, per_ip,
-            )));
-            bound_addrs.push(None);
-            bound_ipc_paths.push(Some(l.addr.clone()));
-            continue;
-        }
-        bound_ipc_paths.push(None);
-
-        let addr: SocketAddr = match l.addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                return Err(BootError::Bind(format!(
-                    "addr {} is not a SocketAddr: {e}",
-                    l.addr
-                )));
-            }
-        };
-
-        // Resolve the right (transport, binding_mode) tuple for this
-        // listener.
-        let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
-            (ListenerKind::Tcp, ProfileKind::TlsExporter) => (
-                TransportKind::Tcp,
-                BindingMode::TlsExporter,
-                AcceptPath::TcpTlsExporter,
-            ),
-            (ListenerKind::Tcp, ProfileKind::Plain) => {
-                (TransportKind::Tcp, BindingMode::None, AcceptPath::TcpPlain)
-            }
-            (ListenerKind::Ws, ProfileKind::TlsExporter) => (
-                TransportKind::WebSocket,
-                BindingMode::TlsExporter,
-                AcceptPath::WsNative,
-            ),
-            (ListenerKind::Ws, ProfileKind::TlsNoExport) => {
-                let policy = browser_origin_policy_from(&l.browser_origin_allowlist)?;
-                (
-                    TransportKind::WebSocket,
-                    BindingMode::TlsNoExport,
-                    AcceptPath::WsBrowser(policy),
+    let result = async {
+        for l in &config.listeners {
+            if l.kind == ListenerKind::Http {
+                let (address, task, gate) = start_http_listener(
+                    env,
+                    l,
+                    &conn_limiter,
+                    &per_ip_limiter,
+                    Arc::clone(&body_budget),
+                    shutdown_token,
                 )
-            }
-            (kind, profile) => {
-                tracing::warn!(
-                    addr = %addr,
-                    ?kind,
-                    ?profile,
-                    "listener skipped (unsupported MVP combination)",
-                );
-                bound_addrs.push(None);
+                .await?;
+                bound_addrs.push(Some(address));
+                bound_ipc_paths.push(None);
+                listener_tasks.push(task);
+                http_gates.push(gate);
                 continue;
             }
-        };
-
-        let local_addr = match accept_path {
-            AcceptPath::TcpTlsExporter => {
-                let listener = bind_tcp(addr, TcpListenerProfile::TlsExporter)
+            // Local IPC (`kind: unix`) addresses a filesystem path / pipe
+            // name, not a `SocketAddr` — handled entirely on its own path,
+            // separate from the TCP/WS SocketAddr-based dispatch below
+            // (`Config::validate` already rejected any other `l.kind` +
+            // `l.addr` combination that wouldn't make sense here).
+            if l.kind == ListenerKind::Unix {
+                let listener = IpcListener::bind(&l.addr)
                     .await
-                    .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
-                let local_addr = listener
-                    .local_addr()
-                    .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                let ctx = env.context(binding_mode, transport_kind, l);
-                let acceptor = tls_acceptor.clone();
+                    .map_err(|e| BootError::Bind(format!("unix {}: {e}", l.addr)))?;
+                tracing::info!(path = %l.addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                let ctx = env.context(BindingMode::None, TransportKind::Unix, l);
                 let token = shutdown_token.clone();
-
                 let limiter = conn_limiter.clone();
                 let per_ip = per_ip_limiter.clone();
-                listener_tasks.push(tokio::spawn(accept_loop_tcp(
-                    listener, acceptor, ctx, token, limiter, per_ip,
-                )));
-                local_addr
-            }
-            AcceptPath::TcpPlain => {
-                let listener = bind_tcp(addr, TcpListenerProfile::Plain)
-                    .await
-                    .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
-                let local_addr = listener
-                    .local_addr()
-                    .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                let ctx = env.context(binding_mode, transport_kind, l);
-                let token = shutdown_token.clone();
-
-                let limiter = conn_limiter.clone();
-                let per_ip = per_ip_limiter.clone();
-                listener_tasks.push(tokio::spawn(accept_loop_plain(
+                listener_tasks.push(tokio::spawn(accept_loop_ipc(
                     listener, ctx, token, limiter, per_ip,
                 )));
-                local_addr
+                bound_addrs.push(None);
+                bound_ipc_paths.push(Some(l.addr.clone()));
+                continue;
             }
-            AcceptPath::WsNative => {
-                let listener = bind_ws(addr, WsListenerProfile::Wss)
-                    .await
-                    .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
-                let local_addr = listener
-                    .local_addr()
-                    .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                let ctx = env.context(binding_mode, transport_kind, l);
-                let acceptor = tls_acceptor.clone();
-                let token = shutdown_token.clone();
+            bound_ipc_paths.push(None);
 
-                let limiter = conn_limiter.clone();
-                let per_ip = per_ip_limiter.clone();
-                let path = l.path.clone().unwrap_or_else(|| NATIVE_WS_PATH.to_string());
-                let policy = Arc::new(
-                    BrowserOriginPolicy::try_allow(l.browser_origin_allowlist.iter().cloned())
-                        .map_err(BootError::Bind)?,
-                );
-                listener_tasks.push(tokio::spawn(accept_loop_ws_native(
-                    listener,
-                    acceptor,
-                    ctx,
-                    token,
-                    limiter,
-                    per_ip,
-                    WsAcceptParams { path, policy },
-                )));
-                local_addr
-            }
-            AcceptPath::WsBrowser(policy) => {
-                let listener = bind_ws(addr, WsListenerProfile::WssBrowser)
-                    .await
-                    .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
-                let local_addr = listener
-                    .local_addr()
-                    .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
-                tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
-                let ctx = env.context(binding_mode, transport_kind, l);
-                let acceptor = tls_acceptor.clone();
-                let token = shutdown_token.clone();
+            let addr: SocketAddr = match l.addr.parse() {
+                Ok(a) => a,
+                Err(e) => {
+                    return Err(BootError::Bind(format!(
+                        "addr {} is not a SocketAddr: {e}",
+                        l.addr
+                    )));
+                }
+            };
 
-                let limiter = conn_limiter.clone();
-                let per_ip = per_ip_limiter.clone();
-                let path = l
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| BROWSER_WS_PATH.to_string());
-                listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
-                    listener,
-                    acceptor,
-                    ctx,
-                    token,
-                    limiter,
-                    per_ip,
-                    WsAcceptParams {
-                        path,
-                        policy: Arc::new(policy),
-                    },
-                )));
-                local_addr
+            // Resolve listener transport dispatch.
+            let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
+                (ListenerKind::Tcp, Some(ProfileKind::TlsExporter)) => (
+                    TransportKind::Tcp,
+                    BindingMode::TlsExporter,
+                    AcceptPath::TcpTlsExporter,
+                ),
+                (ListenerKind::Tcp, Some(ProfileKind::Plain)) => {
+                    (TransportKind::Tcp, BindingMode::None, AcceptPath::TcpPlain)
+                }
+                (ListenerKind::Ws, Some(ProfileKind::TlsExporter)) => (
+                    TransportKind::WebSocket,
+                    BindingMode::TlsExporter,
+                    AcceptPath::WsNative,
+                ),
+                (ListenerKind::Ws, Some(ProfileKind::TlsNoExport)) => {
+                    let policy = browser_origin_policy_from(&l.browser_origin_allowlist)?;
+                    (
+                        TransportKind::WebSocket,
+                        BindingMode::TlsNoExport,
+                        AcceptPath::WsBrowser(policy),
+                    )
+                }
+                (ListenerKind::Http, _) => unreachable!("HTTP handled at loop entry"),
+                (kind, profile) => {
+                    tracing::warn!(
+                        addr = %addr,
+                        ?kind,
+                        ?profile,
+                        "listener skipped (unsupported MVP combination)",
+                    );
+                    bound_addrs.push(None);
+                    continue;
+                }
+            };
+
+            let local_addr = match accept_path {
+                AcceptPath::TcpTlsExporter => {
+                    let listener = bind_tcp(addr, TcpListenerProfile::TlsExporter)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = env.context(binding_mode, transport_kind, l);
+                    let acceptor = tls_acceptor.clone();
+                    let token = shutdown_token.clone();
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_tcp(
+                        listener, acceptor, ctx, token, limiter, per_ip,
+                    )));
+                    local_addr
+                }
+                AcceptPath::TcpPlain => {
+                    let listener = bind_tcp(addr, TcpListenerProfile::Plain)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("tcp {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = env.context(binding_mode, transport_kind, l);
+                    let token = shutdown_token.clone();
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    listener_tasks.push(tokio::spawn(accept_loop_plain(
+                        listener, ctx, token, limiter, per_ip,
+                    )));
+                    local_addr
+                }
+                AcceptPath::WsNative => {
+                    let listener = bind_ws(addr, WsListenerProfile::Wss)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = env.context(binding_mode, transport_kind, l);
+                    let acceptor = tls_acceptor.clone();
+                    let token = shutdown_token.clone();
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    let path = l.path.clone().unwrap_or_else(|| NATIVE_WS_PATH.to_string());
+                    let policy = Arc::new(
+                        BrowserOriginPolicy::try_allow(l.browser_origin_allowlist.iter().cloned())
+                            .map_err(BootError::Bind)?,
+                    );
+                    listener_tasks.push(tokio::spawn(accept_loop_ws_native(
+                        listener,
+                        acceptor,
+                        ctx,
+                        token,
+                        limiter,
+                        per_ip,
+                        WsAcceptParams { path, policy },
+                    )));
+                    local_addr
+                }
+                AcceptPath::WsBrowser(policy) => {
+                    let listener = bind_ws(addr, WsListenerProfile::WssBrowser)
+                        .await
+                        .map_err(|e| BootError::Bind(format!("ws {addr}: {e}")))?;
+                    let local_addr = listener
+                        .local_addr()
+                        .map_err(|e| BootError::Bind(format!("local_addr: {e}")))?;
+                    tracing::info!(local_addr = %local_addr, kind = ?l.kind, profile = ?l.profile, "listener bound");
+                    let ctx = env.context(binding_mode, transport_kind, l);
+                    let acceptor = tls_acceptor.clone();
+                    let token = shutdown_token.clone();
+                    let limiter = conn_limiter.clone();
+                    let per_ip = per_ip_limiter.clone();
+                    let path = l
+                        .path
+                        .clone()
+                        .unwrap_or_else(|| BROWSER_WS_PATH.to_string());
+                    listener_tasks.push(tokio::spawn(accept_loop_ws_browser(
+                        listener,
+                        acceptor,
+                        ctx,
+                        token,
+                        limiter,
+                        per_ip,
+                        WsAcceptParams {
+                            path,
+                            policy: Arc::new(policy),
+                        },
+                    )));
+                    local_addr
+                }
+            };
+            bound_addrs.push(Some(local_addr));
+        }
+
+        Ok::<(), BootError>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        shutdown_token.cancel();
+        let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        for mut task in listener_tasks.drain(..) {
+            let abort = task.abort_handle();
+            match tokio::time::timeout_at(listener_deadline, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_error)) => {
+                    tracing::error!(%join_error, "listener task failed during boot rollback");
+                }
+                Err(_) => {
+                    tracing::error!("HTTP listener drain exceeded during boot rollback; aborting");
+                    abort.abort();
+                    if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                        .await
+                        .is_err()
+                    {
+                        tracing::error!("listener task did not stop after boot rollback abort");
+                    }
+                }
             }
-        };
-        bound_addrs.push(Some(local_addr));
+        }
+        if tokio::time::timeout(Duration::from_secs(10), env.conn_tasks.wait_idle())
+            .await
+            .is_err()
+        {
+            env.conn_tasks.abort_all();
+            if tokio::time::timeout(Duration::from_secs(2), env.conn_tasks.wait_idle())
+                .await
+                .is_err()
+            {
+                tracing::error!("connection tasks did not quiesce after boot rollback abort");
+            }
+        }
+        for gate in http_gates.drain(..) {
+            gate.shutdown().await;
+        }
+        return Err(error);
     }
 
     Ok(SpawnedListeners {
         bound_addrs,
         bound_ipc_paths,
         listener_tasks,
+        http_gates,
     })
 }

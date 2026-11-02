@@ -49,6 +49,14 @@ impl std::fmt::Debug for TokenService {
     }
 }
 impl TokenService {
+    pub(crate) fn audit_writer(&self) -> Arc<AuditChainWriter> {
+        Arc::clone(&self.audit)
+    }
+
+    pub(crate) fn maintenance_shutdown(&self) -> CancellationToken {
+        self.gc_shutdown.clone()
+    }
+
     /// Open storage, validate its full scan, load live records into the mirror, and run GC.
     pub async fn open(options: TokenServiceOptions) -> Result<Self, TokenStoreError> {
         let TokenServiceOptions {
@@ -482,6 +490,22 @@ impl TokenService {
         .await
         .map_err(|_| TokenStoreError::Join)?
     }
+    /// Revalidate a previously verified grant against the in-memory mirror and owner floor.
+    pub fn still_valid(
+        &self,
+        verified: &shamir_connect::server::token::Verified,
+        now_ns: u64,
+    ) -> bool {
+        let state = &verified.state;
+        let record = state.record();
+        !state.is_revoked()
+            && now_ns < record.expires_at_ns
+            && self
+                .owners
+                .floor_if_present(&record.owner_user_id)
+                .is_some_and(|floor| record.created_at_ns > floor)
+    }
+
     /// Verify a bearer token against the mirror and current owner floor.
     pub fn verify(
         &self,

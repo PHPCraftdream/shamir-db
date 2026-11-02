@@ -50,6 +50,7 @@ impl RestExecutor<()> for Executor {
             ExecOutcome {
                 status: ExecStatus::Ok,
                 body: Bytes::from_static(b"pong"),
+                retry_after_secs: None,
                 hold: None,
             }
         }
