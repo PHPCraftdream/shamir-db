@@ -51,6 +51,7 @@ impl RestExecutor<()> for BlockingExecutor {
         ExecOutcome {
             status: ExecStatus::Ok,
             body: Bytes::new(),
+            retry_after_secs: None,
             hold: None,
         }
     }
@@ -166,6 +167,7 @@ impl RestExecutor<()> for CountingExecutor {
             ExecOutcome {
                 status: ExecStatus::Ok,
                 body: Bytes::new(),
+                retry_after_secs: None,
                 hold: None,
             }
         }

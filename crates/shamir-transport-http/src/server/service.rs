@@ -291,13 +291,36 @@ where
             ));
         }
     };
-    Ok(response_held(
+    let mut r = response_held(
         exec_status(outcome.status),
         body,
         context.peer.tls,
         context.cfg.hsts,
         false,
-    ))
+    );
+    if matches!(outcome.status, crate::gate::ExecStatus::Unauthorized) {
+        r = response(
+            StatusCode::UNAUTHORIZED,
+            unauthorized_body(),
+            context.peer.tls,
+            context.cfg.hsts,
+            true,
+        );
+        r.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            http::HeaderValue::from_static("Bearer"),
+        );
+    }
+    if matches!(
+        outcome.status,
+        crate::gate::ExecStatus::RateLimited | crate::gate::ExecStatus::Unavailable
+    ) {
+        let delay = outcome.retry_after_secs.unwrap_or(1);
+        if let Ok(value) = http::HeaderValue::from_str(&delay.to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    Ok(r)
 }
 #[derive(Debug)]
 enum BodyError {
@@ -310,10 +333,11 @@ impl From<hyper::Error> for BodyError {
         Self::Hyper
     }
 }
-fn exec_status(s: crate::gate::ExecStatus) -> StatusCode {
+pub(crate) fn exec_status(s: crate::gate::ExecStatus) -> StatusCode {
     match s {
         crate::gate::ExecStatus::Ok => StatusCode::OK,
         crate::gate::ExecStatus::BadRequest => StatusCode::BAD_REQUEST,
+        crate::gate::ExecStatus::Unauthorized => StatusCode::UNAUTHORIZED,
         crate::gate::ExecStatus::Forbidden => StatusCode::FORBIDDEN,
         crate::gate::ExecStatus::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         crate::gate::ExecStatus::Unavailable => StatusCode::SERVICE_UNAVAILABLE,

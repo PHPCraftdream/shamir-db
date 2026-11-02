@@ -158,6 +158,24 @@ impl TokenService {
     pub fn counters(&self) -> &Arc<TokenCounters> {
         &self.counters
     }
+    /// Append a failed token-authentication audit event without peer-controlled data.
+    pub fn audit_auth_failure(&self, ip_subnet: &str, now_ns: u64) {
+        let mut details = Vec::with_capacity(8);
+        details.extend_from_slice(b"rest");
+        if let Err(error) = self.audit.append(
+            "api_token_auth_failed",
+            "token",
+            "",
+            ip_subnet,
+            [0; 8],
+            "invalid",
+            details,
+            now_ns,
+        ) {
+            tracing::warn!(error = ?error, "token auth failure audit append failed");
+        }
+    }
+
     /// Current count of ACTIVE persisted tokens as of this timestamp.
     pub async fn active_count(&self, now_ns: u64) -> Result<u64, TokenStoreError> {
         let store = self.store.clone();
@@ -512,6 +530,22 @@ impl TokenService {
         .await
         .map_err(|_| TokenStoreError::Join)?
     }
+    /// Revalidate a previously verified grant against the in-memory mirror and owner floor.
+    pub fn still_valid(
+        &self,
+        verified: &shamir_connect::server::token::Verified,
+        now_ns: u64,
+    ) -> bool {
+        let state = &verified.state;
+        let record = state.record();
+        !state.is_revoked()
+            && now_ns < record.expires_at_ns
+            && self
+                .owners
+                .floor_if_present(&record.owner_user_id)
+                .is_some_and(|floor| record.created_at_ns > floor)
+    }
+
     /// Verify a bearer token against the mirror and current owner floor.
     pub fn verify(
         &self,

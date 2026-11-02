@@ -68,6 +68,8 @@ pub struct ExecOutcome {
     pub status: ExecStatus,
     /// MessagePack response body.
     pub body: Bytes,
+    /// Retry delay for rate-limited or unavailable outcomes.
+    pub retry_after_secs: Option<u64>,
     /// Optional value held until response transmission completes.
     pub hold: Option<Box<dyn Send + Sync>>,
 }
@@ -79,6 +81,8 @@ pub enum ExecStatus {
     Ok,
     /// The request was invalid.
     BadRequest,
+    /// Authentication no longer authorizes the request.
+    Unauthorized,
     /// The operation is forbidden.
     Forbidden,
     /// The request is rate-limited.

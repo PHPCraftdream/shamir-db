@@ -86,6 +86,7 @@ impl RestExecutor<u8> for Executor {
             ExecOutcome {
                 status: ExecStatus::Ok,
                 body: Bytes::from_static(b"ok"),
+                retry_after_secs: None,
                 hold: None,
             }
         }

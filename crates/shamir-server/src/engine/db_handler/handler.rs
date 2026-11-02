@@ -370,194 +370,203 @@ impl RequestHandler for ShamirDbHandler {
                         .map_err(|encode_err| format!("response encode: {}", encode_err));
                 }
             };
+            self.handle_decoded(session, request, conn).await
+        })
+    }
+}
 
-            let top_level_canonical = match canon::canonical_db_request(&request) {
-                Ok(bytes) => Some(bytes),
-                Err(canon::CanonicalOpError::UnsupportedOperation) => None,
-                Err(canon::CanonicalOpError::Encoding(_)) => {
-                    let response = DbResponse::Error {
-                        code: "hmac_required".into(),
-                        message: "request canonical encoding failed".into(),
-                    };
-                    return rmp_serde::to_vec_named(&response)
-                        .map_err(|encode_err| format!("response encode: {}", encode_err));
-                }
-            };
-            let response = match request {
-                DbRequest::Ping => DbResponse::Pong,
-                DbRequest::WaitForVisibility {
+impl ShamirDbHandler {
+    /// Handle an already decoded request through the native authorization and execution path.
+    pub(crate) async fn handle_decoded(
+        &self,
+        session: &Session,
+        request: DbRequest,
+        conn: &ConnectionServices,
+    ) -> Result<Vec<u8>, String> {
+        let top_level_canonical = match canon::canonical_db_request(&request) {
+            Ok(bytes) => Some(bytes),
+            Err(canon::CanonicalOpError::UnsupportedOperation) => None,
+            Err(canon::CanonicalOpError::Encoding(_)) => {
+                let response = DbResponse::Error {
+                    code: "hmac_required".into(),
+                    message: "request canonical encoding failed".into(),
+                };
+                return rmp_serde::to_vec_named(&response)
+                    .map_err(|encode_err| format!("response encode: {}", encode_err));
+            }
+        };
+        let response = match request {
+            DbRequest::Ping => DbResponse::Pong,
+            DbRequest::WaitForVisibility {
+                query_version,
+                db,
+                repo,
+                version,
+                visibility_wait,
+            } => {
+                self.wait_for_visibility(
+                    session,
                     query_version,
-                    db,
-                    repo,
+                    &db,
+                    &repo,
                     version,
                     visibility_wait,
-                } => {
-                    self.wait_for_visibility(
-                        session,
-                        query_version,
-                        &db,
-                        &repo,
-                        version,
-                        visibility_wait,
-                    )
-                    .await
-                }
-                DbRequest::Execute {
-                    query_version,
-                    db,
-                    batch,
-                } => self.execute(session, query_version, &db, batch, conn).await,
-                DbRequest::CreateScramUser {
+                )
+                .await
+            }
+            DbRequest::Execute {
+                query_version,
+                db,
+                batch,
+            } => self.execute(session, query_version, &db, batch, conn).await,
+            DbRequest::CreateScramUser {
+                name,
+                password,
+                roles,
+                hmac,
+            } => {
+                create_scram_user(
+                    self.admin.as_ref(),
+                    session,
                     name,
                     password,
                     roles,
                     hmac,
-                } => {
-                    create_scram_user(
-                        self.admin.as_ref(),
-                        session,
-                        name,
-                        password,
-                        roles,
-                        hmac,
-                        top_level_canonical,
-                    )
-                    .await
-                }
-                DbRequest::SetSuperuser { user, on, hmac } => {
-                    set_superuser(
-                        self.admin.as_ref(),
-                        session,
-                        user,
-                        on,
-                        hmac,
-                        top_level_canonical,
-                    )
-                    .await
-                }
-                DbRequest::SetReplicator { user, on, hmac } => {
-                    set_replicator(
-                        self.admin.as_ref(),
-                        session,
-                        user,
-                        on,
-                        hmac,
-                        top_level_canonical,
-                    )
-                    .await
-                }
+                    top_level_canonical,
+                )
+                .await
+            }
+            DbRequest::SetSuperuser { user, on, hmac } => {
+                set_superuser(
+                    self.admin.as_ref(),
+                    session,
+                    user,
+                    on,
+                    hmac,
+                    top_level_canonical,
+                )
+                .await
+            }
+            DbRequest::SetReplicator { user, on, hmac } => {
+                set_replicator(
+                    self.admin.as_ref(),
+                    session,
+                    user,
+                    on,
+                    hmac,
+                    top_level_canonical,
+                )
+                .await
+            }
 
-                // --- Phase B: interactive (multi-call) transactions ---
-                DbRequest::TxBegin {
-                    query_version,
-                    db,
-                    repo,
-                    isolation,
-                } => {
-                    self.tx_begin(session, query_version, &db, &repo, isolation)
-                        .await
-                }
-                DbRequest::TxExecute {
-                    query_version,
-                    db,
-                    tx_handle,
-                    batch,
-                } => {
-                    self.tx_execute(session, query_version, &db, tx_handle, batch)
-                        .await
-                }
-                DbRequest::TxCommit {
-                    query_version,
-                    visibility_wait,
-                    db,
-                    tx_handle,
-                } => {
-                    if let Err(e) = crate::version::check_query_lang(query_version) {
-                        DbResponse::Error {
-                            code: "unsupported_query_version".into(),
-                            message: e.to_string(),
-                        }
-                    } else {
-                        match visibility_wait {
-                            None => self.tx_commit(session, &db, tx_handle).await,
-                            Some(wait) => {
-                                self.tx_commit_with_options(session, &db, tx_handle, Some(wait))
-                                    .await
-                            }
+            // --- Phase B: interactive (multi-call) transactions ---
+            DbRequest::TxBegin {
+                query_version,
+                db,
+                repo,
+                isolation,
+            } => {
+                self.tx_begin(session, query_version, &db, &repo, isolation)
+                    .await
+            }
+            DbRequest::TxExecute {
+                query_version,
+                db,
+                tx_handle,
+                batch,
+            } => {
+                self.tx_execute(session, query_version, &db, tx_handle, batch)
+                    .await
+            }
+            DbRequest::TxCommit {
+                query_version,
+                visibility_wait,
+                db,
+                tx_handle,
+            } => {
+                if let Err(e) = crate::version::check_query_lang(query_version) {
+                    DbResponse::Error {
+                        code: "unsupported_query_version".into(),
+                        message: e.to_string(),
+                    }
+                } else {
+                    match visibility_wait {
+                        None => self.tx_commit(session, &db, tx_handle).await,
+                        Some(wait) => {
+                            self.tx_commit_with_options(session, &db, tx_handle, Some(wait))
+                                .await
                         }
                     }
                 }
-                DbRequest::TxRollback { db, tx_handle } => {
-                    self.tx_rollback(session, &db, tx_handle).await
-                }
-                // REPLICATION §5 — privileged pull-API (R0-b).
-                // Role + per-repo authorisation enforced inside `handle_repl`.
-                DbRequest::Repl(repl_req) => {
-                    DbResponse::Repl(self.handle_repl(session, repl_req).await)
-                }
-
-                // changePassword (spec §12.5) — see `db_handler::admin`.
-                DbRequest::ChangePasswordChallenge { client_nonce_cp } => {
-                    change_password_challenge(self.admin.as_ref(), session, client_nonce_cp).await
-                }
-                DbRequest::ChangePasswordVerify(secrets) => {
-                    change_password_verify(
-                        self.admin.as_ref(),
-                        self.session_store.as_ref(),
-                        session,
-                        secrets.client_proof_old,
-                        secrets.new_salt,
-                        secrets.new_stored_key,
-                        secrets.new_server_key,
-                    )
-                    .await
-                }
-
-                // --- FG-5b: server-side result cursors ---
-                // See `crate::cursor_registry` and `db_handler::cursor_handlers`
-                // for the registry + snapshot-pinning + keyset-pagination
-                // implementation this dispatches into.
-                DbRequest::CreateCursor {
-                    query_version,
-                    db,
-                    query,
-                    page_size,
-                } => {
-                    self.create_cursor(session, query_version, &db, query, page_size)
-                        .await
-                }
-                DbRequest::FetchNext {
-                    cursor_id,
-                    page_size,
-                } => self.fetch_next(session, cursor_id, page_size).await,
-                DbRequest::CancelCursor { cursor_id } => {
-                    self.cancel_cursor(session, cursor_id).await
-                }
-                DbRequest::GetDdlOpStatus {
-                    db,
-                    repo,
-                    table,
-                    op_id,
-                } => {
-                    self.get_ddl_op_status(session, &db, &repo, &table, &op_id)
-                        .await
-                }
-            };
-
-            // CR-B2: `ShamirDbHandler::execute` already serialized this
-            // exact `response` value once (to shrink its upfront RI-15
-            // reservation down to the actual size) and stashed those bytes
-            // via `stash_serialized_response`. Reuse them here instead of
-            // encoding a second time — every OTHER dispatch arm above
-            // (`Ping`, `ChangePassword*`, cursor ops, etc.) never stashes
-            // anything, so this naturally falls through to the fresh
-            // serialize for them.
-            if let Some(bytes) = crate::byte_budget::take_stashed_serialized_response() {
-                return Ok(bytes);
+            }
+            DbRequest::TxRollback { db, tx_handle } => {
+                self.tx_rollback(session, &db, tx_handle).await
+            }
+            // REPLICATION §5 — privileged pull-API (R0-b).
+            // Role + per-repo authorisation enforced inside `handle_repl`.
+            DbRequest::Repl(repl_req) => {
+                DbResponse::Repl(self.handle_repl(session, repl_req).await)
             }
 
-            rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
-        })
+            // changePassword (spec §12.5) — see `db_handler::admin`.
+            DbRequest::ChangePasswordChallenge { client_nonce_cp } => {
+                change_password_challenge(self.admin.as_ref(), session, client_nonce_cp).await
+            }
+            DbRequest::ChangePasswordVerify(secrets) => {
+                change_password_verify(
+                    self.admin.as_ref(),
+                    self.session_store.as_ref(),
+                    session,
+                    secrets.client_proof_old,
+                    secrets.new_salt,
+                    secrets.new_stored_key,
+                    secrets.new_server_key,
+                )
+                .await
+            }
+
+            // --- FG-5b: server-side result cursors ---
+            // See `crate::cursor_registry` and `db_handler::cursor_handlers`
+            // for the registry + snapshot-pinning + keyset-pagination
+            // implementation this dispatches into.
+            DbRequest::CreateCursor {
+                query_version,
+                db,
+                query,
+                page_size,
+            } => {
+                self.create_cursor(session, query_version, &db, query, page_size)
+                    .await
+            }
+            DbRequest::FetchNext {
+                cursor_id,
+                page_size,
+            } => self.fetch_next(session, cursor_id, page_size).await,
+            DbRequest::CancelCursor { cursor_id } => self.cancel_cursor(session, cursor_id).await,
+            DbRequest::GetDdlOpStatus {
+                db,
+                repo,
+                table,
+                op_id,
+            } => {
+                self.get_ddl_op_status(session, &db, &repo, &table, &op_id)
+                    .await
+            }
+        };
+
+        // CR-B2: `ShamirDbHandler::execute` already serialized this
+        // exact `response` value once (to shrink its upfront RI-15
+        // reservation down to the actual size) and stashed those bytes
+        // via `stash_serialized_response`. Reuse them here instead of
+        // encoding a second time — every OTHER dispatch arm above
+        // (`Ping`, `ChangePassword*`, cursor ops, etc.) never stashes
+        // anything, so this naturally falls through to the fresh
+        // serialize for them.
+        if let Some(bytes) = crate::byte_budget::take_stashed_serialized_response() {
+            return Ok(bytes);
+        }
+
+        rmp_serde::to_vec_named(&response).map_err(|e| format!("encode_error: {}", e))
     }
 }
 
