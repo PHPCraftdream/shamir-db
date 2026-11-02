@@ -20,6 +20,7 @@ fn make_config(data_dir: &Path) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.to_path_buf(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -65,6 +66,7 @@ fn make_config(data_dir: &Path) -> Config {
 async fn launch(data_dir: &Path) -> ServerHandle {
     ServerLauncher {
         config: make_config(data_dir),
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(PASSWORD.to_vec()),

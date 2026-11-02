@@ -91,6 +91,7 @@ pub(crate) fn make_config(data_dir: PathBuf, port: u16) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -125,6 +126,7 @@ pub(crate) fn make_config(data_dir: PathBuf, port: u16) -> Config {
 pub(crate) async fn launch(data_dir: PathBuf, port: u16, password: &[u8]) -> ServerHandle {
     ServerLauncher {
         config: make_config(data_dir, port),
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(password.to_vec()),

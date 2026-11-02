@@ -11,6 +11,8 @@ pub enum BootError {
     ServerMeta(String),
     #[error("user_directory: {0}")]
     UserDirectory(String),
+    #[error("token service: {0}")]
+    TokenService(String),
     #[error("counters: {0}")]
     Counters(String),
     #[error("audit_appender: {0}")]

@@ -122,6 +122,7 @@ fn make_test_config(temp: &TempDir) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -170,7 +171,11 @@ async fn mvp_full_pipeline_ws_native_tls_scram_batch_query() {
         username: "admin".into(),
         password: Zeroizing::new(password.clone()),
     };
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle
         .first_tls_exporter_addr()

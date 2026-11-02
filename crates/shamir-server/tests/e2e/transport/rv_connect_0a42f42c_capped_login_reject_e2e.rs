@@ -103,6 +103,7 @@ fn make_test_config(temp: &TempDir) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir_clone,
         logging: LoggingConfig {
             level: "warn".into(),
@@ -287,10 +288,14 @@ async fn rv_connect_0a42f42c_capped_login_rejected_when_all_active() {
         username: "admin".into(),
         password: Zeroizing::new(password.clone()),
     };
-    let handle = ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launch");
+    let handle = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launch");
     let server_addr = handle.first_tls_exporter_addr().expect("addr");
     let username = NormalizedUsername::from_raw("admin").expect("username");
 

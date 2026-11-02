@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
@@ -48,6 +49,7 @@ use super::listeners::{spawn_listeners, ListenerEnv, SpawnedListeners};
 pub struct ServerLauncher {
     pub config: Config,
     pub bootstrap: BootstrapMode,
+    pub node_mode: crate::db_handler::NodeMode,
 }
 
 impl ServerLauncher {
@@ -57,14 +59,29 @@ impl ServerLauncher {
         Self {
             config,
             bootstrap: BootstrapMode::default(),
+            node_mode: crate::db_handler::NodeMode::ReadWrite,
         }
+    }
+
+    pub fn with_node_mode(mut self, mode: crate::db_handler::NodeMode) -> Self {
+        self.node_mode = mode;
+        self
+    }
+
+    pub fn with_bootstrap(mut self, bootstrap: BootstrapMode) -> Self {
+        self.bootstrap = bootstrap;
+        self
     }
 
     /// Run the boot sequence — everything from "open the redb files" to
     /// "spawn the accept loops". Returns when all listeners are bound but
     /// before any connection arrives.
     pub async fn launch(self) -> Result<ServerHandle, BootError> {
-        let ServerLauncher { config, bootstrap } = self;
+        let ServerLauncher {
+            config,
+            bootstrap,
+            node_mode,
+        } = self;
         config.validate()?;
         let durability = config.durability.resolve_policy()?;
         config.durability.warn_unimplemented_retention();
@@ -444,7 +461,8 @@ impl ServerLauncher {
                 max_cursor_page_size: config.security.cursors.max_cursor_page_size,
             })
             .with_byte_budget(byte_budget.clone())
-            .with_session_store(session_store.clone()),
+            .with_session_store(session_store.clone())
+            .with_node_mode(node_mode),
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
@@ -548,6 +566,35 @@ impl ServerLauncher {
         //       loop. They share the root `shutdown_token` created at the top
         //       of `launch()` — `shutdown()` cancels it once and every accept
         //       loop observes the cancel on its next `select!` poll.
+        let token_key = Zeroizing::new(
+            *meta
+                .token_key()
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?
+                .as_bytes(),
+        );
+        let token_service = Arc::new(
+            crate::security::tokens::TokenService::open(
+                crate::security::tokens::TokenServiceOptions {
+                    data_dir: config.data_dir.clone(),
+                    token_key,
+                    owners: Arc::new(crate::security::tokens::DirectoryOwnerFloors::new(
+                        user_dir.clone(),
+                    )),
+                    sessions: Arc::new(shamir_connect::server::TokenSessionStore::new()),
+                    audit: audit_writer.clone(),
+                    config: config.tokens.clone(),
+                    read_only_node: node_mode == crate::db_handler::NodeMode::ReadOnly,
+                    clock: Arc::new(|| {
+                        shamir_connect::common::time::UnixNanos::try_now()
+                            .ok()
+                            .map(|v| v.as_u64())
+                    }),
+                },
+            )
+            .await
+            .map_err(|e| BootError::TokenService(e.to_string()))?,
+        );
+
         let SpawnedListeners {
             bound_addrs,
             bound_ipc_paths,
@@ -573,6 +620,8 @@ impl ServerLauncher {
             &shutdown_token,
         )
         .await?;
+
+        token_service.start_gc(shutdown_token.clone()).await;
 
         // 11. Optional observability HTTP server. Spawned LAST so its
         //     `/readyz` flips to 200 only after every listener is bound.
@@ -666,6 +715,7 @@ impl ServerLauncher {
         };
 
         Ok(ServerHandle {
+            token_service,
             bound_addrs,
             bound_ipc_paths,
             listener_tasks,

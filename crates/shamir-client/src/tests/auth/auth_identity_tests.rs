@@ -14,6 +14,7 @@ use shamir_server::server::{BootstrapMode, ServerLauncher};
 fn auth_test_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -57,6 +58,7 @@ async fn rv_client_2d0142dd_trusted_pin_rejects_substituted_identity() {
     let temp = TempDir::new().expect("tempdir");
     let password = b"correct horse battery staple".to_vec();
     let launcher = ServerLauncher {
+        node_mode: Default::default(),
         config: auth_test_config(&temp),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),

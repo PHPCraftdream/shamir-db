@@ -60,6 +60,7 @@ const KEY_TIMES: &str = "times";
 /// auth bookkeeping persisted across restarts so an attacker cannot reset
 /// brute-force lockout by inducing a restart).
 const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
+const KEY_TOKEN_KEY: &str = "token_key";
 /// Periodic dump of `InMemoryRateLimiter` token buckets.
 const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
 
@@ -192,6 +193,22 @@ pub enum MetaError {
     NotInitialised(&'static str),
 }
 
+/// Secret token MAC key, zeroized when dropped and redacted from Debug.
+pub struct TokenKey(Zeroizing<[u8; 32]>);
+
+impl TokenKey {
+    /// Borrow the key bytes without making another copy.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl core::fmt::Debug for TokenKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("TokenKey(<REDACTED>)")
+    }
+}
+
 /// Read-only snapshot of the three fields the fail-closed bootstrap-TTL
 /// security gate (`connection::handshake::run_handshake`, F-25/F-38) needs
 /// to decide whether to reject a login for an outstanding, expired
@@ -250,6 +267,7 @@ impl core::fmt::Debug for ServerMetaStore {
             .field("db", &"<fjall::Database>")
             .field("server_secret", &"<REDACTED>")
             .field("lockout_secret", &"<REDACTED>")
+            .field("token_key", &"<REDACTED>")
             .field("audit_chain_key", &"<REDACTED>")
             .field("ticket_key", &"<REDACTED>")
             .field("ed25519_seed", &"<REDACTED>")
@@ -275,6 +293,7 @@ impl ServerMetaStore {
         if needs_init {
             store.write_initial_state()?;
         } else {
+            store.ensure_token_key()?;
             store.touch_last_started_at()?;
         }
 
@@ -295,6 +314,8 @@ impl ServerMetaStore {
         try_random_bytes(&mut ticket_key)?;
         let mut ed25519_seed = [0u8; 32];
         try_random_bytes(&mut ed25519_seed)?;
+        let mut token_key = Zeroizing::new([0u8; 32]);
+        try_random_bytes(&mut *token_key)?;
 
         let secrets = PersistedSecrets {
             server_secret: Zeroizing::new(server_secret.to_vec()),
@@ -337,6 +358,24 @@ impl ServerMetaStore {
         self.put(KEY_IDENTITY, &identity)?;
         self.put(KEY_BOOTSTRAP, &bootstrap)?;
         self.put(KEY_TIMES, &times)?;
+        self.meta
+            .insert(KEY_TOKEN_KEY.as_bytes(), token_key.as_slice())?;
+        self.persist()
+    }
+
+    fn ensure_token_key(&self) -> Result<(), MetaError> {
+        let _guard = self.write_lock.lock();
+        if let Some(existing) = self.meta.get(KEY_TOKEN_KEY.as_bytes())? {
+            if existing.len() != 32 {
+                return Err(MetaError::Encoding(
+                    "token_key must contain exactly 32 bytes".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        try_random_bytes(&mut *key)?;
+        self.meta.insert(KEY_TOKEN_KEY.as_bytes(), key.as_slice())?;
         self.persist()
     }
 
@@ -394,6 +433,50 @@ impl ServerMetaStore {
     // -----------------------------------------------------------------
     // Getters (lock-free reads)
     // -----------------------------------------------------------------
+
+    /// Return one metadata value for migration regression tests.
+    #[cfg(test)]
+    pub(crate) fn blob_for_test(&self, key: &str) -> Option<Vec<u8>> {
+        self.meta
+            .get(key.as_bytes())
+            .ok()
+            .flatten()
+            .map(|value| value.to_vec())
+    }
+
+    /// Set the token-key row for strict-length regression tests.
+    #[cfg(test)]
+    pub(crate) fn set_token_key_for_test(&self, bytes: &[u8]) {
+        self.meta
+            .insert(KEY_TOKEN_KEY.as_bytes(), bytes)
+            .expect("set token_key test fixture");
+    }
+
+    /// Remove the token key to recreate a legacy metadata store in tests.
+    #[cfg(test)]
+    pub(crate) fn remove_token_key_for_test(&self) {
+        self.meta
+            .remove(KEY_TOKEN_KEY.as_bytes())
+            .expect("remove token_key test fixture");
+    }
+
+    /// Return the persistent v1 API-token MAC key as a zeroizing copy.
+    ///
+    /// A malformed persisted key length is rejected rather than truncated or padded.
+    pub fn token_key(&self) -> Result<TokenKey, MetaError> {
+        let entry = self
+            .meta
+            .get(KEY_TOKEN_KEY.as_bytes())?
+            .ok_or(MetaError::NotInitialised(KEY_TOKEN_KEY))?;
+        if entry.len() != 32 {
+            return Err(MetaError::Encoding(
+                "token_key must contain exactly 32 bytes".into(),
+            ));
+        }
+        let mut key = Zeroizing::new([0u8; 32]);
+        key.copy_from_slice(&entry);
+        Ok(TokenKey(key))
+    }
 
     /// Return the current `(server_secret, lockout_secret)` as a clonable
     /// `ServerSecrets` value.

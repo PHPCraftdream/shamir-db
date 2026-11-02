@@ -225,6 +225,12 @@ impl FjallUserDirectory {
             .unwrap_or(0)
     }
 
+    /// Read the cached ticket invalidation floor, distinguishing unknown users from zero.
+    pub fn floor_if_present(&self, user_id: &[u8; 16]) -> Option<u64> {
+        self.tickets_cache
+            .read_sync(user_id, |_, value| value.load(Ordering::Relaxed))
+    }
+
     /// Roles live alongside the SCRAM record but are NOT part of
     /// [`UserRecord`] (shamir-connect's snapshot type is SCRAM-only).
     /// Session-creation code looks them up here.

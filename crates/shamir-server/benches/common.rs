@@ -39,6 +39,7 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -81,10 +82,14 @@ pub async fn spawn_with_password(
         username: "admin".into(),
         password: Zeroizing::new(admin_password.to_vec()),
     };
-    ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot")
+    ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot")
 }
 
 pub async fn spawn_ephemeral(temp: &TempDir, admin_password: &[u8]) -> ServerHandle {

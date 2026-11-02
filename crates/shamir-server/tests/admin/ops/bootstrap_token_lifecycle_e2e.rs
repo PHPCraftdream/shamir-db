@@ -187,6 +187,7 @@ async fn ttl_sweep_rotates_unused_expired_token_credential() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let handle2 = shamir_server::server::ServerLauncher {
         config,
+        node_mode: Default::default(),
         bootstrap: shamir_server::server::BootstrapMode::Skip,
     }
     .launch()
@@ -290,6 +291,7 @@ async fn ttl_sweep_rotation_failure_leaves_token_active_for_retry() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let handle2 = shamir_server::server::ServerLauncher {
         config,
+        node_mode: Default::default(),
         bootstrap: shamir_server::server::BootstrapMode::Skip,
     }
     .launch()
