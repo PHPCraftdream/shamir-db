@@ -1,7 +1,8 @@
 import { loginBrowser as login } from './login/browser/browser.js';
 export { login };
 export { LoginError } from './login/errors.js';
-export type { LoginOptions, LoginResult, LoginMetadata, LoginScope, LoginErrorCode } from './login/index.js';
+export type { LoginErrorCode } from './login/errors.js';
+export type { LoginOptions, LoginResult, LoginMetadata, LoginScope } from './login/types.js';
 
 import { ShamirClient } from './core/client/client.js';
 import { BrowserPlatform } from './platform/browser.js';
