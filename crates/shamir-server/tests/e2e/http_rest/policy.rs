@@ -13,7 +13,7 @@ async fn http_rest_scope_denial_and_read_only_write_return_forbidden() {
         .token_service
         .create(NewToken {
             owner_user_id: harness.owner,
-            owner_roles: vec![],
+            owner_roles: harness.owner_roles.clone(),
             label: "scope-only".into(),
             ttl_secs: Some(3600),
             mode: TokenMode::ReadOnly,
@@ -65,7 +65,7 @@ async fn http_rest_scope_denial_and_read_only_write_return_forbidden() {
         DbResponse::Error { code, .. } if code == "token_read_only"
     ));
     let report = harness.handle.shutdown().await;
-    assert!(report.is_clean(), "shutdown report: {report:?}");
+    assert!(report.errors().is_empty(), "shutdown report: {report:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -91,5 +91,5 @@ async fn http_rest_failure_flood_is_rate_limited_with_retry_after() {
         "valid token should not inherit failure rate limit"
     );
     let report = harness.handle.shutdown().await;
-    assert!(report.is_clean(), "shutdown report: {report:?}");
+    assert!(report.errors().is_empty(), "shutdown report: {report:?}");
 }

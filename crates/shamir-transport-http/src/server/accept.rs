@@ -32,7 +32,9 @@ pub enum ServeError {
     TlsConfiguration(#[source] rustls::Error),
 }
 
-fn tls13_config(config: &rustls::ServerConfig) -> Result<Arc<rustls::ServerConfig>, rustls::Error> {
+/// Builds the listener TLS configuration restricted to TLS 1.3, HTTP/1.1 ALPN,
+/// and disabled 0-RTT, preserving the supplied certificate resolver.
+pub fn tls13_config(config: &rustls::ServerConfig) -> Result<Arc<rustls::ServerConfig>, rustls::Error> {
     let builder = rustls::ServerConfig::builder_with_provider(config.crypto_provider().clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?;
     let mut tls = builder

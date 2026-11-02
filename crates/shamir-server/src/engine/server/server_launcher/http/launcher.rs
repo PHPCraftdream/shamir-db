@@ -57,11 +57,11 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
         .map_err(|error| BootError::Bind(format!("HTTP local address: {error}")))?;
     let settings = &listener_config.http;
     let tls = if settings.tls == Some(true) {
-        Some(validate_http_tls(
-            &env.config.tls,
-            address,
-            settings.allow_self_signed,
-        )?)
+        let validated = validate_http_tls(&env.config.tls, address, settings.allow_self_signed)?;
+        Some(
+            shamir_transport_http::server::accept::tls13_config(&validated)
+                .map_err(|error| BootError::Bind(format!("HTTP TLS config: {error}")))?,
+        )
     } else {
         None
     };

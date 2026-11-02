@@ -84,7 +84,7 @@ listeners: [
             https://app.example.com
         ]
     }
-    ## Configuration slice only: HTTP listener startup is not wired yet.
+    ## HTTP REST listener is wired through the server launcher; WebSocket support is separately staged.
     ## {
     ##     kind: http
     ##     addr: 127.0.0.1:7340

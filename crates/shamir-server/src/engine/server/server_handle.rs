@@ -189,12 +189,29 @@ impl ServerHandle {
         self.shutdown_token.cancel();
         // 2. Wait for accept loops to finish, then wait for tracked accepted
         // tasks to quiesce before any repository flush.
-        for task in self.listener_tasks {
-            if let Err(error) = task.await {
-                report.add_error(format!("listener task failed: {error}"));
+        let listener_deadline = tokio::time::Instant::now() + CONN_DRAIN_TIMEOUT;
+        let mut quiesced = true;
+        for mut task in self.listener_tasks {
+            let abort = task.abort_handle();
+            match tokio::time::timeout_at(listener_deadline, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    report.add_error(format!("listener task failed: {error}"));
+                    quiesced = false;
+                }
+                Err(_) => {
+                    abort.abort();
+                    let joined = tokio::time::timeout(CONN_ABORT_TIMEOUT, &mut task)
+                        .await
+                        .is_ok();
+                    report.add_error(format!(
+                        "HTTP listener drain exceeded {CONN_DRAIN_TIMEOUT:?}; aborted"
+                    ));
+                    quiesced &= joined;
+                }
             }
         }
-        let quiesced = drain_connections(
+        quiesced &= drain_connections(
             &self.conn_tasks,
             CONN_DRAIN_TIMEOUT,
             CONN_ABORT_TIMEOUT,

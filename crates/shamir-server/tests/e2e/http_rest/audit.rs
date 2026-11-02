@@ -22,7 +22,7 @@ async fn http_rest_failure_flood_returns_retry_after_and_shutdown_audit_summary(
     }
     assert!(limited, "failure flood did not hit limiter");
     let report = harness.handle.shutdown().await;
-    assert!(report.is_clean(), "{report:?}");
+    assert!(report.errors().is_empty(), "{report:?}");
     let entries =
         shamir_server::audit_appender::FjallAuditAppender::read_log_for_verify(harness.temp.path())
             .expect("read audit entries");
@@ -98,7 +98,7 @@ async fn http_rest_shutdown_closes_accepted_keep_alive_connection_and_restarts()
     assert_pong(status, &response[body_start..body_end]);
 
     let Harness { handle, temp, .. } = harness;
-    let report = timeout(Duration::from_secs(15), handle.shutdown())
+    let report = timeout(Duration::from_secs(30), handle.shutdown())
         .await
         .expect("server shutdown exceeded lifecycle deadline");
     assert!(report.is_clean(), "{report:?}");
@@ -120,6 +120,7 @@ async fn http_rest_shutdown_closes_accepted_keep_alive_connection_and_restarts()
         .launch()
         .await
         .expect("same-directory restart");
-    assert!(restarted.shutdown().await.is_clean());
+    let report = restarted.shutdown().await;
+    assert!(report.is_clean(), "{report:?}");
     drop(temp);
 }

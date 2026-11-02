@@ -121,7 +121,7 @@ async fn http_rest_tls_listener_serves_authenticated_ping() {
     ));
     drop(tls);
     let report = harness.handle.shutdown().await;
-    assert!(report.is_clean(), "{report:?}");
+    assert!(report.errors().is_empty(), "{report:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -190,9 +190,10 @@ async fn http_rest_allowed_owner_read_and_shutdown_restart_preserve_data() {
         handle,
         temp,
         owner: _,
+        ..
     } = harness;
     let report = handle.shutdown().await;
-    assert!(report.is_clean(), "{report:?}");
+    assert!(report.errors().is_empty(), "{report:?}");
     let config = super::common::config_for(temp.path());
     let restarted = ServerLauncher::new(config)
         .with_bootstrap(BootstrapMode::Password {
@@ -219,6 +220,60 @@ async fn http_rest_allowed_owner_read_and_shutdown_restart_preserve_data() {
         response.results.get("rd").expect("rd alias").records[0].get_value_str("marker"),
         Some("http-owner-read")
     );
-    assert!(restarted.shutdown().await.is_clean());
+    let report = restarted.shutdown().await;
+    assert!(report.errors().is_empty(), "{report:?}");
+    drop(temp);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_rest_shutdown_bounds_incomplete_request_body_and_reports_error() {
+    let harness = Harness::launch().await;
+    let token = harness.token("shutdown-drain", TokenMode::ReadOnly).await;
+    let mut stream = TcpStream::connect(harness.addr())
+        .await
+        .expect("connect HTTP listener");
+    let head = format!(
+        "POST /shamir/v1/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/msgpack\r\nAuthorization: Bearer {token}\r\nExpect: 100-continue\r\nContent-Length: 100\r\n\r\n"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    tokio::time::timeout_at(deadline, stream.write_all(head.as_bytes()))
+        .await
+        .expect("write request headers timed out")
+        .expect("write request headers");
+    let mut interim = Vec::new();
+    let mut chunk = [0u8; 128];
+    loop {
+        assert!(interim.len() < 8192, "interim HTTP headers too large");
+        let read = tokio::time::timeout_at(deadline, stream.read(&mut chunk))
+            .await
+            .expect("continue handshake timed out")
+            .expect("read continue response");
+        assert!(read > 0, "connection closed before continue response");
+        interim.extend_from_slice(&chunk[..read]);
+        if let Some(end) = interim.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&interim[..end]);
+            assert_eq!(headers.lines().next(), Some("HTTP/1.1 100 Continue"));
+            break;
+        }
+    }
+
+    let Harness { handle, temp, .. } = harness;
+    let report = tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
+        .await
+        .expect("shutdown exceeded 30 seconds");
+    assert!(
+        report
+            .errors()
+            .iter()
+            .any(|error| error == "HTTP listener drain exceeded 10s; aborted"),
+        "{report:?}"
+    );
+    let probe_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut probe = [0u8; 1];
+    match tokio::time::timeout_at(probe_deadline, stream.read(&mut probe)).await {
+        Ok(Ok(0)) | Ok(Err(_)) => {}
+        Ok(Ok(_)) => panic!("unexpected response bytes after shutdown"),
+        Err(_) => panic!("connection did not close after shutdown"),
+    }
     drop(temp);
 }

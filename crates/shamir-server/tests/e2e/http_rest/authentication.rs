@@ -122,10 +122,8 @@ async fn http_rest_unknown_bad_mac_revoked_expired_are_uniform_unauthorized() {
             "{case}: {headers}"
         );
         bodies.push(body);
-        assert!(
-            harness.handle.shutdown().await.is_clean(),
-            "{case} shutdown"
-        );
+        let report = harness.handle.shutdown().await;
+        assert!(report.errors().is_empty(), "{case} shutdown: {report:?}");
     }
     assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
 }

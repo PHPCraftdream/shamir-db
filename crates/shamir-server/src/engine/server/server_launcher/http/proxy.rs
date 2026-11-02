@@ -39,33 +39,34 @@ impl ProxyGate {
 }
 
 pub(super) fn resolve_peer(peer: &PeerInfo, trusted: &[Cidr]) -> SocketAddr {
-    if !trusted.iter().any(|cidr| cidr.contains(peer.addr.ip())) {
-        return peer.addr;
+    let fallback = SocketAddr::new(peer.addr.ip().to_canonical(), peer.addr.port());
+    if !trusted.iter().any(|cidr| cidr.contains(fallback.ip())) {
+        return fallback;
     }
     let mut total = 0usize;
     let mut chain = Vec::new();
     for header in &peer.forwarded_for {
         total = match total.checked_add(header.len()) {
             Some(total) if total <= MAX_FORWARD_HEADER_BYTES => total,
-            _ => return peer.addr,
+            _ => return fallback,
         };
         let Ok(value) = std::str::from_utf8(header) else {
-            return peer.addr;
+            return fallback;
         };
         for part in value.split(',') {
             let part = part.trim();
             if part.is_empty() {
-                return peer.addr;
+                return fallback;
             }
             let address = match parse_forwarded_ip(part) {
                 Some(address) => address,
-                None => return peer.addr,
+                None => return fallback,
             };
-            chain.push(address);
+            chain.push(address.to_canonical());
         }
     }
     if chain.is_empty() {
-        return peer.addr;
+        return fallback;
     }
     chain.reverse();
     for address in chain {
@@ -73,7 +74,7 @@ pub(super) fn resolve_peer(peer: &PeerInfo, trusted: &[Cidr]) -> SocketAddr {
             return SocketAddr::new(address, peer.addr.port());
         }
     }
-    peer.addr
+    fallback
 }
 
 impl TokenGate for ProxyGate {
@@ -100,10 +101,10 @@ impl TokenGate for ProxyGate {
 
 fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
     if let Ok(address) = value.parse::<IpAddr>() {
-        return Some(address);
+        return Some(address.to_canonical());
     }
     let address = value.parse::<SocketAddr>().ok()?;
-    Some(address.ip())
+    Some(address.ip().to_canonical())
 }
 
 pub(super) fn parse_cidr(value: &str) -> Option<Cidr> {
@@ -121,7 +122,13 @@ pub(super) fn parse_cidr(value: &str) -> Option<Cidr> {
 }
 
 impl Cidr {
+    /// Matches mapped peers to IPv4 CIDRs without rewriting IPv6 CIDR prefixes.
     pub(super) fn contains(self, address: IpAddr) -> bool {
+        let canonical = address.to_canonical();
+        let address = match (self.network, canonical) {
+            (IpAddr::V6(_), IpAddr::V4(address)) => IpAddr::V6(address.to_ipv6_mapped()),
+            (_, address) => address,
+        };
         match (self.network, address) {
             (IpAddr::V4(network), IpAddr::V4(address)) => {
                 let mask = if self.prefix == 0 {

@@ -713,8 +713,29 @@ impl ServerLauncher {
             Ok(handle) => handle,
             Err(error) => {
                 shutdown_token.cancel();
-                for task in listener_tasks {
-                    let _ = task.await;
+                let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                for mut task in listener_tasks {
+                    let abort = task.abort_handle();
+                    match tokio::time::timeout_at(listener_deadline, &mut task).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(join_error)) => {
+                            tracing::error!(%join_error, "listener task failed during launch rollback");
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "HTTP listener drain exceeded during launch rollback; aborting"
+                            );
+                            abort.abort();
+                            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!(
+                                    "listener task did not stop after launch rollback abort"
+                                );
+                            }
+                        }
+                    }
                 }
                 if tokio::time::timeout(Duration::from_secs(10), conn_tasks.wait_idle())
                     .await

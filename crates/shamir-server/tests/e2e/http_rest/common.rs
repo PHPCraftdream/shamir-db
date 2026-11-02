@@ -16,6 +16,7 @@ pub struct Harness {
     pub handle: ServerHandle,
     pub temp: tempfile::TempDir,
     pub owner: [u8; 16],
+    pub(super) owner_roles: Vec<String>,
 }
 
 impl Harness {
@@ -39,15 +40,22 @@ impl Harness {
 
     /// Starts HTTP REST and native TLS-exporter TCP listeners on the same database.
     pub async fn launch_with_native_seed() -> Self {
-        Self::launch_inner(
+        Self::launch_with_native_seed_settings(
             "127.0.0.1:0",
             shamir_server::config::HttpListenerSettings {
                 tls: Some(false),
                 ..Default::default()
             },
-            true,
         )
         .await
+    }
+
+    /// Starts HTTP REST and native TLS-exporter TCP listeners with the specified HTTP settings.
+    pub(super) async fn launch_with_native_seed_settings(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+    ) -> Self {
+        Self::launch_inner(addr, settings, true).await
     }
 
     async fn launch_inner(
@@ -57,7 +65,7 @@ impl Harness {
     ) -> Self {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let data_dir = temp.path().to_path_buf();
-        let owner = seed_owner(&data_dir);
+        let (owner, owner_roles) = seed_owner(&data_dir);
         let mut config = config_for_with(&data_dir, addr, settings);
         if native {
             config.listeners.push(ListenerConfig {
@@ -85,6 +93,7 @@ impl Harness {
             handle,
             temp,
             owner,
+            owner_roles,
         }
     }
 
@@ -111,7 +120,7 @@ impl Harness {
             .token_service
             .create(NewToken {
                 owner_user_id: self.owner,
-                owner_roles: vec![],
+                owner_roles: self.owner_roles.clone(),
                 label: label.into(),
                 ttl_secs: Some(3600),
                 mode,
@@ -125,7 +134,7 @@ impl Harness {
     }
 }
 
-pub fn seed_owner(data_dir: &std::path::Path) -> [u8; 16] {
+pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
     let directory = FjallUserDirectory::open(data_dir.join("users")).expect("directory");
     let kdf = shamir_server::config::KdfConfig {
         memory_kb: 19_456,
@@ -148,8 +157,12 @@ pub fn seed_owner(data_dir: &std::path::Path) -> [u8; 16] {
     .expect("seed admin");
     let owner = shamir_connect::server::admin::UserDirectory::user_id(&directory, "admin")
         .expect("admin owner id");
+    let owner_roles = directory
+        .state_by_user_id(&owner)
+        .expect("seeded owner state")
+        .roles;
     drop(directory);
-    owner
+    (owner, owner_roles)
 }
 
 pub fn config_for(data_dir: &std::path::Path) -> Config {
