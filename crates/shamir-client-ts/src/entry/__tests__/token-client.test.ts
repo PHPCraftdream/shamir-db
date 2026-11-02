@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { decode, encode } from '../../core/protocol/framing.js';
 import { Batch } from '../../core/builders/write/batch.js';
+import { subscribe } from '../../core/builders/stream/subscribe.js';
 import { Query } from '../../core/builders/read/query.js';
 import { ApiToken } from '../api-token.js';
-import { createTokenHttpClient } from '../token-client.js';
+import { createTokenHttpClient, createTokenOperations } from '../token-client.js';
 import type { TokenPlatform, TokenHttpResponse } from '../../platform/token/types.js';
 import type { BatchOpInput } from '../../core/types/write/batch.js';
 import { VisibilityError } from '../../core/visibility/errors.js';
@@ -15,12 +16,13 @@ afterEach(async () => { await Promise.all(clients.splice(0).map((client) => clie
 function harness(responses: unknown[] = []) {
   const requests: Array<{ url: URL; method: string; body?: unknown; headers: Readonly<Record<string,string>> }> = [];
   const platform: TokenPlatform = {
-    async requestHttp(url, _token, init) {
+    runtime: 'node',
+    requestHttp: async (url, _token, init) => {
       requests.push({ url, method: init.method, ...(init.body ? { body: decode(init.body) } : {}), headers: init.headers });
       const value = responses.shift() ?? (init.method === 'GET' ? { kind: 'pong' } : batchResponse());
       const response: TokenHttpResponse = { status: 200, headers: { get: (name) => name.toLowerCase() === 'content-type' ? 'application/msgpack' : null }, body: encode(value) };
       return response;
-    }, async close() {},
+    }, async openTokenSocket() { throw new Error('unexpected socket open'); }, async close() {},
   };
   const options = { auth: 'token' as const, channel: 'http' as const, token, url: 'https://example.test', requestTimeoutMs: 1234 };
   const client = createTokenHttpClient(options, (got) => { expect(got.url).toBe('https://example.test/'); return platform; });
@@ -152,6 +154,29 @@ const request = () => Batch.create().add('read', Query.from('items')).build();
     await expect(client.getDdlOpStatus('db', 'r', 't', 'bad')).rejects.toMatchObject({ code: 'protocol_error' });
   });
 
+  it('allows subscribe delivery options in token batches', async () => {
+    const requests: unknown[] = [];
+    const operations = createTokenOperations(
+      { auth: 'token', channel: 'http', token, url: 'https://example.test' },
+      {
+        async request(request) {
+          requests.push(request);
+          return { kind: 'batch', response: { id: 1, results: {}, execution_plan: [], execution_time_us: 1 } };
+        },
+        async close() {},
+      },
+      true,
+    );
+    const operation = subscribe({ store: 'main', table: 'items', deliver: 'records' }, { initial: true, fromVersion: 7 });
+    await operations.execute('db', Batch.create().add('live', operation).build());
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      op: 'execute',
+      db: 'db',
+      query_version: 4,
+      batch: { queries: { live: { deliver: 'records', initial: true, from_version: 7 } } },
+    });
+  });
   it('allows update where fields and posts them in the batch', async () => {
     const { client, requests } = harness();
     const update = Batch.create().add('change', { update: 'items', set: { count: 2 }, where: { op: 'eq', field: ['id'], value: 1 } }).build();

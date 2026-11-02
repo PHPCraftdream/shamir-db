@@ -14,7 +14,7 @@ export const MAX_TOKEN_RESPONSE_BYTES = MAX_FRAME_SIZE_DEFAULT;
 const SAFE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Uint8Array); }
 function fail(code: TokenTransportErrorCode, status?: number): TokenTransportError { return new TokenTransportError(code, 'Token HTTP request failed', { ...(status === undefined ? {} : { status }) }); }
-function appError(value: unknown, status: number): Error | undefined {
+export function appError(value: unknown, status: number): Error | undefined {
   if (object(value) && value.kind === 'as_of_visibility_timeout') {
     if (value.code !== 'as_of_visibility_timeout' || typeof value.message !== 'string') throw fail('protocol_error', status);
     try {
@@ -45,8 +45,14 @@ function validateResponse(value: unknown): TokenResponseMap {
   }
   const batch = value.kind === 'batch' && object(value.response) ? value.response : undefined;
   if (batch && object(batch.results) && Array.isArray(batch.execution_plan) && batch.execution_plan.every((step: unknown) => Array.isArray(step) && step.every((item: unknown) => typeof item === 'string')) && (typeof batch.execution_time_us === 'number' || typeof batch.execution_time_us === 'bigint') && Number.isSafeInteger(Number(batch.execution_time_us)) && Number(batch.execution_time_us) >= 0 && Object.prototype.hasOwnProperty.call(batch, 'id')) return value;
-  if (value.kind === 'visibility_observed' && 'version' in value && 'visibility' in value) return value;
-  if (value.kind === 'ddl_op_status' && 'status' in value) return value;
+  if (value.kind === 'visibility_observed' && 'version' in value && object(value.visibility) && (value.visibility.state === 'visible' || value.visibility.state === 'pending' && (typeof value.visibility.visible_through === 'bigint' || Number.isSafeInteger(value.visibility.visible_through)) && (typeof value.visibility.blocking_version === 'bigint' || Number.isSafeInteger(value.visibility.blocking_version)) && ['timeout','reopen_required'].includes(String(value.visibility.reason)))) return value;
+  if (value.kind === 'ddl_op_status' && Object.prototype.hasOwnProperty.call(value, 'status') && (value.status === null || object(value.status) && typeof value.status.op_id === 'string' && value.status.state !== undefined && value.status.kind !== undefined)) return value;
+  if (value.kind === 'cursor_page' && 'cursor_id' in value && object(value.page) && Array.isArray(value.page.records) && typeof value.has_more === 'boolean' && (typeof value.cursor_id === 'bigint' || Number.isSafeInteger(value.cursor_id)) && value.page.records.every((row) => object(row)) && (typeof value.page.execution_time_us === 'number' || typeof value.page.execution_time_us === 'bigint') && Number.isFinite(Number(value.page.execution_time_us))) return value;
+  if (value.kind === 'cursor_closed' && (typeof value.cursor_id === 'bigint' || Number.isSafeInteger(value.cursor_id))) return value;
+  if (value.kind === 'tx_opened' && Number.isSafeInteger(value.tx_handle) && Number(value.tx_handle) >= 0 && (typeof value.snapshot_version === 'bigint' && value.snapshot_version >= 0n || typeof value.snapshot_version === 'number' && Number.isSafeInteger(value.snapshot_version) && value.snapshot_version >= 0) && ['snapshot','serializable'].includes(String(value.isolation))) return value;
+  if (value.kind === 'tx_batch' && object(value.response) && object(value.response.results) && Array.isArray(value.response.execution_plan) && (typeof value.response.execution_time_us === 'number' || typeof value.response.execution_time_us === 'bigint')) return value;
+  if (value.kind === 'tx_committed' && object(value.transaction) && (typeof value.transaction.tx_id === 'number' || typeof value.transaction.tx_id === 'bigint') && ['committed','aborted','indeterminate'].includes(String(value.transaction.status)) && typeof value.transaction.materialized === 'boolean') return value;
+  if (value.kind === 'tx_rolled_back') return value;
   throw fail('protocol_error');
 }
 function retryAfter(value: string | null): number | undefined {
@@ -72,8 +78,10 @@ export class TokenHttpTransport {
   async request(request: TokenHttpRequest, options: TokenRequestOptions = {}): Promise<TokenResponseMap> {
     if (!request || typeof request !== 'object') throw fail('token_request_denied');
     const op = (request as { op?: unknown }).op;
+    if (op === 'tx_begin' || op === 'tx_execute' || op === 'tx_commit' || op === 'tx_rollback' || op === 'create_cursor' || op === 'fetch_next' || op === 'cancel_cursor') throw fail('not_supported_over_rest');
     if (op !== 'ping' && op !== 'execute' && op !== 'wait_for_visibility' && op !== 'get_ddl_op_status') {
-      throw fail(typeof op === 'string' && ['tx_begin','tx_execute','tx_commit','tx_rollback','create_cursor','fetch_next','cancel_cursor','subscribe','unsubscribe'].includes(op) ? 'not_supported_over_rest' : 'token_request_denied');
+      if (['subscribe','unsubscribe'].includes(String(op))) throw fail('not_supported_over_rest');
+      throw fail('token_request_denied');
     }
     if (this.closed) throw fail('connection_closed');
     const ping = request.op === 'ping';

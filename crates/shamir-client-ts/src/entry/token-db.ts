@@ -7,8 +7,14 @@ import type { VisibilityState, VisibilityWait } from '../core/visibility/types.j
 
 interface Buildable { build(): object; }
 
+interface TokenDbClient {
+  execute(db: string, batch: object, wait?: VisibilityWait): Promise<BatchResponse>;
+  waitForVisibility(db: string, repo: string, version: bigint, wait: VisibilityWait): Promise<VisibilityState>;
+  getDdlOpStatus(db: string, repo: string, table: string, opId: string): ReturnType<TokenHttpClient['getDdlOpStatus']>;
+}
+
 export class TokenHttpDb {
-  constructor(private readonly client: TokenHttpClient, readonly name: string) {}
+  constructor(private readonly client: TokenDbClient, readonly name: string) {}
 
   async run(op: object): Promise<QueryResult> {
     const built = typeof (op as Partial<Buildable>).build === 'function' ? (op as Buildable).build() : op;

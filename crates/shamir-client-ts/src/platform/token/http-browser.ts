@@ -1,9 +1,12 @@
 import type { ApiToken } from '../../entry/api-token.js';
 import { tokenValueForTransport } from '../../entry/api-token.js';
-import type { BrowserTokenHttpConnectOptions } from '../../core/types/connection.js';
+import type { BrowserTokenHttpConnectOptions, BrowserTokenWsConnectOptions } from '../../core/types/connection.js';
+
 import { normalizeTokenHttpOptions } from '../../core/protocol/token/options.js';
 import { TokenTransportError, type TokenTransportErrorCode } from '../../core/protocol/token/errors.js';
-import type { TokenPlatform, TokenHttpResponse } from './types.js';
+import type { TokenPlatform, TokenHttpResponse, TokenSocket } from './types.js';
+import { openBrowserTokenSocket } from './socket-browser.js';
+
 import { DEFAULT_TOKEN_RESPONSE_BYTES } from './types.js';
 
 export interface BrowserTokenHttpReader {
@@ -33,27 +36,35 @@ function nativeFetch(): TokenFetch {
   return candidate.bind(globalThis);
 }
 
-export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptions, fetchOverride?: TokenFetch): TokenPlatform & { close(): Promise<void> } {
+export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptions | BrowserTokenWsConnectOptions, fetchOverride?: TokenFetch): TokenPlatform & { close(): Promise<void> } {
   let normalized: ReturnType<typeof normalizeTokenHttpOptions>;
-  try { normalized = normalizeTokenHttpOptions(options); }
+  try { normalized = normalizeTokenHttpOptions({ ...options, channel: 'http', url: options.url.replace(/^ws:/i, 'http:').replace(/^wss:/i, 'https:') }); }
   catch { throw failure('invalid_request'); }
   if (normalized.tls !== undefined || normalized.origin !== undefined) throw failure('invalid_request');
   const requestTimeout = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const connectTimeout = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-  const fetcher = fetchOverride ?? nativeFetch();
+  const fetcher = fetchOverride;
   const lifetime = new AbortController();
-  const active = new Set<AbortController>();
+  const sockets = new Set<Promise<TokenSocket>>();
+
   let closed = false;
-  const onLifetimeAbort = (): void => lifetime.abort();
+  const onLifetimeAbort = (): void => { lifetime.abort(); for (const opening of sockets) void opening.then((socket) => socket.close(), () => {}); };
   if (options.signal?.aborted) onLifetimeAbort();
   else options.signal?.addEventListener('abort', onLifetimeAbort, { once: true });
 
   return {
+    runtime: 'browser',
+    openTokenSocket(url, token, opts) {
+      if (closed || options.signal?.aborted) return Promise.reject(failure('connection_closed', 'close'));
+      const opening = openBrowserTokenSocket(url, token, opts); sockets.add(opening);
+      void opening.then((socket) => { if (closed) void socket.close(); }, () => { sockets.delete(opening); });
+      return opening;
+    },
     async requestHttp(url: URL, token: ApiToken, init): Promise<TokenHttpResponse> {
       if (closed) throw failure('connection_closed', 'close');
       if (options.signal?.aborted || init.signal.aborted) throw failure('client_aborted');
       if (!(url instanceof URL) || (url.href !== normalized.pingUrl.href && url.href !== normalized.requestUrl.href)) throw failure('invalid_request');
-      const controller = new AbortController(); active.add(controller);
+      const controller = new AbortController();
       let timedOut = false; let aborted = false; let phase: 'connect' | 'request' = 'connect'; let settledAbort: (() => void) | undefined;
       const abortWait = new Promise<never>((_, reject) => { settledAbort = () => reject(failure(timedOut ? 'client_timeout' : closed ? 'connection_closed' : 'client_aborted', timedOut ? phase : closed ? 'close' : 'request')); });
       const abort = (): void => { aborted = true; controller.abort(); settledAbort?.(); };
@@ -72,7 +83,7 @@ export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptio
       controller.signal.addEventListener('abort', cancelReader, { once: true });
       try {
         const headers = { ...init.headers, Authorization: `Bearer ${tokenValueForTransport(token)}` };
-        const pending = Promise.resolve().then(() => fetcher(url.href, { method: init.method, headers, ...(init.body ? { body: init.body } : {}), signal: controller.signal, redirect: 'error', credentials: 'omit' })).catch(() => { throw failure('network_error', phase); });
+        const pending = Promise.resolve().then(() => (fetcher ?? nativeFetch())(url.href, { method: init.method, headers, ...(init.body ? { body: init.body } : {}), signal: controller.signal, redirect: 'error', credentials: 'omit' })).catch(() => { throw failure('network_error', phase); });
         pending.then((lateResponse) => { if (controller.signal.aborted && lateResponse.body) { try { const lateReader = lateResponse.body.getReader(); try { void Promise.resolve(lateReader.cancel()).catch(() => {}); } catch { /* best-effort cleanup */ } try { lateReader.releaseLock?.(); } catch { /* best-effort cleanup */ } } catch { /* best-effort cleanup */ } } }, () => {});
         const response = await Promise.race([pending, abortWait]);
         phase = 'request';
@@ -105,13 +116,16 @@ export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptio
         throw failure('network_error');
       } finally {
         clearTimers(); init.signal.removeEventListener('abort', abortInit); lifetime.signal.removeEventListener('abort', abort);
-        controller.signal.removeEventListener('abort', cancelReader); active.delete(controller);
+        controller.signal.removeEventListener('abort', cancelReader);
         try { reader?.releaseLock?.(); } catch { /* release lock is best-effort */ }
       }
     },
     async close(): Promise<void> {
-      if (closed) return; closed = true; lifetime.abort();
-      for (const controller of active) controller.abort(); active.clear();
+      if (closed) return;
+      closed = true;
+      lifetime.abort();
+      for (const socketResult of await Promise.allSettled(sockets)) if (socketResult.status === 'fulfilled') await socketResult.value.close();
+      sockets.clear();
       options.signal?.removeEventListener('abort', onLifetimeAbort);
     },
   };
