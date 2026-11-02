@@ -8,11 +8,12 @@
  *   3. verifyServerSignature: accept correct / reject tampered.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   buildAuthMessage,
   computeClientProof,
   verifyServerSignature,
+  validateKdfParams,
   ARGON2_VERSION_13,
   TRANSPORT_KIND_WS,
   BINDING_MODE_TLS_NO_EXPORT,
@@ -47,6 +48,22 @@ const KDF: KdfParams = {
   parallelism: 1,
   argon2Version: ARGON2_VERSION_13,
 };
+
+const INVALID_KDF_OVERRIDES: Array<Partial<Record<keyof KdfParams, unknown>>> = [
+  { memoryKb: 19455 },
+  { memoryKb: 262145 },
+  { time: 1 },
+  { time: 9 },
+  { parallelism: 0 },
+  { parallelism: 9 },
+  { argon2Version: 0x10 },
+  { argon2Version: 0x113 },
+  { memoryKb: Number.NaN },
+  { time: Number.POSITIVE_INFINITY },
+  { parallelism: 1.5 },
+  { memoryKb: undefined },
+  { time: '2' },
+];
 
 const CHALLENGE: AuthMessageChallenge = {
   serverNonce: FIXED_SERVER_NONCE,
@@ -121,7 +138,43 @@ describe('buildAuthMessage', () => {
   });
 });
 
+describe('validateKdfParams', () => {
+  it.each([
+    [19456, 2],
+    [262144, 8],
+  ])('accepts inclusive bounds memoryKb=%i time=%i', (memoryKb, time) => {
+    expect(() => validateKdfParams({ ...KDF, memoryKb, time })).not.toThrow();
+  });
+
+  it.each(INVALID_KDF_OVERRIDES.map((override) => [override]))(
+    'rejects invalid KDF override %j',
+    (override) => {
+      expect(() =>
+        validateKdfParams({ ...KDF, ...override } as KdfParams),
+      ).toThrow('kdf_params_rejected');
+    },
+  );
+});
+
 describe('computeClientProof — SCRAM invariant', () => {
+  it.each(INVALID_KDF_OVERRIDES.map((override) => [override]))(
+    'rejects invalid KDF override %j before invoking Argon2id',
+    async (override) => {
+      const argon2id = vi.fn(NodePlatform.argon2id);
+      const platform = { ...NodePlatform, argon2id };
+      await expect(
+        computeClientProof(
+          platform,
+          'secret',
+          FIXED_SALT,
+          { ...KDF, ...override } as KdfParams,
+          new Uint8Array(),
+        ),
+      ).rejects.toThrow('kdf_params_rejected');
+      expect(argon2id).not.toHaveBeenCalled();
+    },
+  );
+
   it('SHA256(clientKey) === storedKey', async () => {
     const authMessage = buildAuthMessage('alice', FIXED_CLIENT_NONCE, CHALLENGE);
     const { clientKey, storedKey } = await computeClientProof(

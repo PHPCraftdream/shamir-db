@@ -52,13 +52,20 @@
 
 use crate::common::crypto::hmac_sha256;
 use crate::common::time::{ns, UnixNanos};
-use dashmap::DashMap;
-use rustc_hash::FxHasher;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::hash::BuildHasherDefault;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+
+#[path = "lockout_storage/pair_slot.rs"]
+mod pair_slot;
+use pair_slot::PairSlot;
+#[path = "lockout_storage/pair_index.rs"]
+mod pair_index;
+use pair_index::{
+    compact as compact_pairs, insert as insert_pair, lookup as lookup_pair, remove as remove_pair,
+};
 
 /// Per-spec §5.2.5 backoff base: 100 ms × 2^N (capped).
 pub const BACKOFF_BASE_MS: u64 = 100;
@@ -93,6 +100,10 @@ pub fn subnet_of(ip: IpAddr) -> Subnet {
             Subnet::V4([oct[0], oct[1], oct[2]])
         }
         IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                let oct = v4.octets();
+                return Subnet::V4([oct[0], oct[1], oct[2]]);
+            }
             let oct = v6.octets();
             let mut prefix = [0u8; 8];
             prefix.copy_from_slice(&oct[..8]);
@@ -247,28 +258,29 @@ pub enum LockoutSnapshotError {
     Encoding(String),
 }
 
-/// In-memory lockout store — `DashMap<PairKey, FailureState>` plus a
-/// secondary map for active lockouts. Concurrent-safe.
-///
-/// Optionally backed by a [`LockoutSnapshotSink`] for durable
-/// persistence across restarts; see
-/// [`Self::with_snapshot_sink`] / [`Self::persist_snapshot`].
-#[derive(Default)]
+/// Fixed memory and source quota limits for the shared pair table.
+pub const LOCKOUT_PAIR_CAPACITY: usize = 8_192;
+/// Maximum pairs retained per base prefix (IPv4 /24, IPv6 /64).
+pub const LOCKOUT_BASE_QUOTA: usize = 64;
+/// Maximum pairs retained per parent prefix (IPv4 /16, IPv6 /48).
+pub const LOCKOUT_PARENT_QUOTA: usize = 512;
+/// In-memory lockout store backed by a fixed, bounded pair table.
 pub struct InMemoryLockoutStore {
-    failures: DashMap<PairKey, FailureState, BuildHasherDefault<FxHasher>>,
-    lockouts: DashMap<PairKey, LockoutState, BuildHasherDefault<FxHasher>>,
+    // This lock is acquired on every handshake, including the pre-challenge
+    // lock check. Its critical section is bounded and allocation-free; quota
+    // scans occur only on new-pair admission, and the single mutex is needed
+    // to coordinate cross-slot quota decisions.
+    slots: Mutex<Box<[PairSlot]>>,
     /// Optional metric: total locked-out events ever observed.
     total_lockouts: AtomicU64,
-    /// Optional durable backend. `None` for in-memory-only deployments
-    /// (default and most tests).
+    /// Optional durable backend. `None` for in-memory-only deployments.
     snapshot_sink: Option<Arc<dyn LockoutSnapshotSink>>,
 }
 
 impl core::fmt::Debug for InMemoryLockoutStore {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("InMemoryLockoutStore")
-            .field("failures", &self.failures.len())
-            .field("lockouts", &self.lockouts.len())
+            .field("pairs", &self.failure_pair_count())
             .field(
                 "total_lockouts",
                 &self.total_lockouts.load(Ordering::Relaxed),
@@ -281,118 +293,139 @@ impl core::fmt::Debug for InMemoryLockoutStore {
     }
 }
 
+impl Default for InMemoryLockoutStore {
+    fn default() -> Self {
+        let slots = vec![PairSlot::default(); LOCKOUT_PAIR_CAPACITY].into_boxed_slice();
+        Self {
+            slots: Mutex::new(slots),
+            total_lockouts: AtomicU64::new(0),
+            snapshot_sink: None,
+        }
+    }
+}
+
 impl InMemoryLockoutStore {
-    /// Create empty store with no durable backing.
+    /// Create an empty in-memory lockout store.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Create a store from an explicit snapshot. Stale entries
-    /// (failures past `BACKOFF_RESET_NS`, lockouts past expiry) are
-    /// discarded against `now_ns = snapshot.captured_at_ns` so the
-    /// loaded state matches what `gc` would have produced at the
-    /// capture instant.
-    ///
-    /// `total_lockouts` is preserved verbatim — it's a cumulative
-    /// metric, not a real-time decision input.
+    /// Restore lockout state from a previously captured snapshot.
     pub fn with_snapshot(snapshot: LockoutSnapshot) -> Self {
-        let store = Self::default();
+        let mut store = Self::default();
         store.rehydrate(snapshot);
         store
     }
 
-    /// Create a store backed by `sink`. On construction, the sink is
-    /// consulted for a prior snapshot and the store is rehydrated from
-    /// it (errors are logged at `warn` and the store starts empty).
-    ///
-    /// Subsequent calls to [`Self::persist_snapshot`] write through the
-    /// same sink.
+    /// Create a store backed by a snapshot sink, loading its prior state if available.
     pub fn with_snapshot_sink(sink: Arc<dyn LockoutSnapshotSink>) -> Self {
-        let store = Self {
+        let mut store = Self {
             snapshot_sink: Some(sink.clone()),
             ..Self::default()
         };
         match sink.load() {
-            Ok(Some(snap)) => store.rehydrate(snap),
+            Ok(Some(snapshot)) => store.rehydrate(snapshot),
             Ok(None) => {}
-            Err(e) => {
-                log::warn!("lockout snapshot load failed; starting empty: {e}");
-            }
+            Err(error) => log::warn!("lockout snapshot load failed; starting empty: {error}"),
         }
         store
     }
 
-    /// Number of distinct `(subnet, user)` pairs currently in failure state.
+    /// Count pairs with recorded failures.
     pub fn failure_pair_count(&self) -> usize {
-        self.failures.len()
+        self.slots
+            .lock()
+            .iter()
+            .filter(|slot| slot.occupied && slot.failure.count != 0)
+            .count()
     }
 
-    /// Number of currently-active lockouts.
+    /// Number of pairs with a recorded lockout (active or not yet collected).
     pub fn active_lockout_count(&self) -> usize {
-        self.lockouts.len()
+        self.slots
+            .lock()
+            .iter()
+            .filter(|slot| slot.occupied && slot.lockout.is_some())
+            .count()
     }
 
-    /// Total lockout events triggered (cumulative).
+    /// Total lockout events observed since start.
     pub fn total_lockouts(&self) -> u64 {
         self.total_lockouts.load(Ordering::Relaxed)
     }
 
-    /// Capture a point-in-time copy of the entire store for the
-    /// snapshot path. Holds map shards only long enough to clone
-    /// `(key, value)` pairs; no locks are held across an .await
-    /// boundary (this is a synchronous function).
-    ///
-    /// Legacy wrapper; panicking clock read.
-    ///
-    /// # Panics
-    /// Panics when the system clock is invalid.
+    /// Capture the current lockout state for persistence.
     pub fn snapshot(&self) -> LockoutSnapshot {
         let captured_at_ns = UnixNanos::now().as_u64();
-        let mut failures = Vec::with_capacity(self.failures.len());
-        for entry in self.failures.iter() {
-            failures.push((*entry.key(), *entry.value()));
-        }
-        let mut lockouts = Vec::with_capacity(self.lockouts.len());
-        for entry in self.lockouts.iter() {
-            lockouts.push((*entry.key(), *entry.value()));
+        let mut failures = Vec::with_capacity(LOCKOUT_PAIR_CAPACITY);
+        let mut lockouts = Vec::with_capacity(LOCKOUT_PAIR_CAPACITY);
+        {
+            let slots = self.slots.lock();
+            for slot in slots.iter().filter(|slot| slot.occupied) {
+                if slot.failure.count != 0 {
+                    failures.push((slot.key, slot.failure));
+                }
+                if let Some(lock) = slot.lockout {
+                    lockouts.push((slot.key, lock));
+                }
+            }
         }
         LockoutSnapshot {
             failures,
             lockouts,
-            total_lockouts: self.total_lockouts.load(Ordering::Relaxed),
+            total_lockouts: self.total_lockouts(),
             captured_at_ns,
         }
     }
 
-    /// Persist the current store via the installed [`LockoutSnapshotSink`].
-    /// Returns `Ok(false)` when no sink is installed (in-memory-only
-    /// mode); `Ok(true)` after a successful write. Errors are propagated
-    /// so the caller can log and rate-limit.
+    /// Persist a snapshot when a sink is configured; returns false without one.
     pub fn persist_snapshot(&self) -> Result<bool, LockoutSnapshotError> {
         let Some(sink) = self.snapshot_sink.as_ref() else {
             return Ok(false);
         };
-        let snap = self.snapshot();
-        sink.save(&snap)?;
+        sink.save(&self.snapshot())?;
         Ok(true)
     }
 
-    /// Load entries from `snapshot`, discarding stale ones. Idempotent;
-    /// existing in-memory state is REPLACED (this is only called from
-    /// constructors).
-    fn rehydrate(&self, snapshot: LockoutSnapshot) {
-        let now_ns = snapshot.captured_at_ns;
-        self.failures.clear();
-        for (key, state) in snapshot.failures {
-            // Drop entries that would already be stale at capture time.
-            if !state.is_stale(now_ns) {
-                self.failures.insert(key, state);
-            }
+    fn rehydrate(&mut self, snapshot: LockoutSnapshot) {
+        let now = snapshot.captured_at_ns;
+        let mut failures = snapshot.failures;
+        failures.sort_unstable_by(|a, b| {
+            b.1.count
+                .cmp(&a.1.count)
+                .then_with(|| b.1.last_fail_at_ns.cmp(&a.1.last_fail_at_ns))
+        });
+        let mut locks = snapshot.lockouts;
+        locks.sort_unstable_by_key(|(_, lock)| std::cmp::Reverse(lock.triggered_at_ns));
+
+        let slots = self.slots.get_mut();
+        for (key, lock) in locks
+            .iter()
+            .filter(|(_, lock)| lock.is_active(now))
+            .copied()
+        {
+            let failure = FailureState {
+                count: 0,
+                last_fail_at_ns: 0,
+            };
+            let _ = find_or_admit(slots, key, failure, Some(lock), now, false);
         }
-        self.lockouts.clear();
-        for (key, state) in snapshot.lockouts {
-            if state.is_active(now_ns) {
-                self.lockouts.insert(key, state);
+        for (key, failure) in failures
+            .iter()
+            .filter(|(_, failure)| !failure.is_stale(now))
+            .copied()
+        {
+            if let Some(index) = lookup_pair(slots, key) {
+                if (failure.count, failure.last_fail_at_ns)
+                    > (
+                        slots[index].failure.count,
+                        slots[index].failure.last_fail_at_ns,
+                    )
+                {
+                    slots[index].failure = failure;
+                }
+            } else {
+                let _ = find_or_admit(slots, key, failure, None, now, false);
             }
         }
         self.total_lockouts
@@ -400,86 +433,234 @@ impl InMemoryLockoutStore {
     }
 }
 
+fn source_base(subnet: Subnet) -> (u8, [u8; 6]) {
+    match subnet {
+        Subnet::V4(v) => (4, [v[0], v[1], 0, 0, 0, 0]),
+        Subnet::V6(v) => (6, [v[0], v[1], v[2], v[3], v[4], v[5]]),
+    }
+}
+
+fn pair_is_free(slot: &PairSlot, now: u64) -> bool {
+    !slot.occupied
+        || (slot.failure.is_stale(now) && slot.lockout.is_none_or(|lock| !lock.is_active(now)))
+}
+
+fn find_or_admit(
+    slots: &mut [PairSlot],
+    key: PairKey,
+    failure: FailureState,
+    lockout: Option<LockoutState>,
+    now: u64,
+    evict: bool,
+) -> Option<usize> {
+    if let Some(index) = lookup_pair(slots, key) {
+        if (failure.count, failure.last_fail_at_ns)
+            > (
+                slots[index].failure.count,
+                slots[index].failure.last_fail_at_ns,
+            )
+        {
+            slots[index].failure = failure;
+        }
+        if let Some(lock) = lockout {
+            let replace = slots[index].lockout.is_none_or(|existing| {
+                lock.triggered_at_ns.saturating_add(lock.duration_ns)
+                    > existing
+                        .triggered_at_ns
+                        .saturating_add(existing.duration_ns)
+            });
+            if replace {
+                slots[index].lockout = Some(lock);
+            }
+        }
+        return Some(index);
+    }
+    let base = key.0;
+    let parent = source_base(base);
+    let mut base_count = 0;
+    let mut parent_count = 0;
+    let mut free = None;
+    for (index, slot) in slots.iter().enumerate() {
+        if pair_is_free(slot, now) {
+            if free.is_none() {
+                free = Some(index);
+            }
+            continue;
+        }
+        base_count += (slot.key.0 == base) as usize;
+        parent_count += (source_base(slot.key.0) == parent) as usize;
+    }
+    let exhausted_base = base_count >= LOCKOUT_BASE_QUOTA;
+    let exhausted_parent = parent_count >= LOCKOUT_PARENT_QUOTA;
+    let mut candidate: Option<(usize, u32, u64)> = None;
+    for (index, slot) in slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| !pair_is_free(slot, now))
+    {
+        if (exhausted_base && slot.key.0 != base)
+            || (exhausted_parent && source_base(slot.key.0) != parent)
+        {
+            continue;
+        }
+        let effective_count = if slot.failure.is_stale(now) {
+            0
+        } else {
+            slot.failure.count
+        };
+        if slot.lockout.is_some_and(|lock| lock.is_active(now))
+            || effective_count >= LOCKOUT_THRESHOLD
+        {
+            continue;
+        }
+        if candidate.is_none_or(|(_, count, oldest)| {
+            effective_count < count
+                || (effective_count == count && slot.failure.last_fail_at_ns < oldest)
+        }) {
+            candidate = Some((index, effective_count, slot.failure.last_fail_at_ns));
+        }
+    }
+    let chosen = if exhausted_base || exhausted_parent {
+        if evict {
+            candidate.map(|(i, _, _)| i)
+        } else {
+            None
+        }
+    } else if let Some(index) = free {
+        Some(index)
+    } else if evict {
+        candidate.map(|(i, _, _)| i)
+    } else {
+        None
+    };
+    let index = chosen?;
+    if slots[index].occupied {
+        remove_pair(slots, index);
+    }
+    slots[index].replace_payload(key, failure, lockout);
+    insert_pair(slots, index);
+    Some(index)
+}
+
 impl LockoutStore for InMemoryLockoutStore {
     fn register_failure(&self, key: PairKey, now_ns: u64) -> FailureOutcome {
-        // Update / insert failure state.
-        let mut new_count: u32 = 0;
-        self.failures
-            .entry(key)
-            .and_modify(|f| {
-                if f.is_stale(now_ns) {
-                    f.count = 1;
-                } else {
-                    f.count = f.count.saturating_add(1);
-                }
-                f.last_fail_at_ns = now_ns;
-                new_count = f.count;
-            })
-            .or_insert_with(|| {
-                new_count = 1;
-                FailureState {
-                    count: 1,
-                    last_fail_at_ns: now_ns,
-                }
-            });
-
-        // Check lockout threshold.
-        if new_count >= LOCKOUT_THRESHOLD {
-            let lock = LockoutState {
+        let mut slots = self.slots.lock();
+        let position = lookup_pair(&slots, key);
+        let (index, count) = if let Some(index) = position {
+            let slot = &mut slots[index];
+            slot.failure.count = if slot.failure.is_stale(now_ns) {
+                1
+            } else {
+                slot.failure.count.saturating_add(1)
+            };
+            slot.failure.last_fail_at_ns = now_ns;
+            (Some(index), slot.failure.count)
+        } else {
+            let failure = FailureState {
+                count: 1,
+                last_fail_at_ns: now_ns,
+            };
+            let index = find_or_admit(&mut slots, key, failure, None, now_ns, true);
+            (index, 1)
+        };
+        let Some(index) = index else {
+            return FailureOutcome::Backoff { delay_ms: 0 };
+        };
+        if count >= LOCKOUT_THRESHOLD {
+            slots[index].lockout = Some(LockoutState {
                 triggered_at_ns: now_ns,
                 duration_ns: LOCKOUT_DURATION_NS,
-            };
-            self.lockouts.insert(key, lock);
+            });
             self.total_lockouts.fetch_add(1, Ordering::Relaxed);
-            return FailureOutcome::LockedOut;
-        }
-
-        FailureOutcome::Backoff {
-            delay_ms: FailureState {
-                count: new_count,
-                last_fail_at_ns: now_ns,
+            FailureOutcome::LockedOut
+        } else {
+            FailureOutcome::Backoff {
+                delay_ms: FailureState {
+                    count,
+                    last_fail_at_ns: now_ns,
+                }
+                .backoff_ms(),
             }
-            .backoff_ms(),
         }
     }
 
     fn reset_on_success(&self, key: PairKey) {
-        self.failures.remove(&key);
-        self.lockouts.remove(&key);
+        let mut slots = self.slots.lock();
+        if let Some(index) = lookup_pair(&slots, key) {
+            remove_pair(&mut slots, index);
+            slots[index].clear_payload();
+        }
     }
 
     fn is_locked_out(&self, key: PairKey, now_ns: u64) -> bool {
-        match self.lockouts.get(&key) {
-            Some(state) => {
-                if state.is_active(now_ns) {
-                    true
-                } else {
-                    drop(state);
-                    self.lockouts.remove(&key);
-                    false
-                }
+        let mut slots = self.slots.lock();
+        if let Some(index) = lookup_pair(&slots, key) {
+            let slot = &mut slots[index];
+            if slot.lockout.is_some_and(|lock| lock.is_active(now_ns)) {
+                return true;
             }
-            None => false,
+            if slot.lockout.is_some() {
+                slot.lockout = None;
+            }
         }
+        false
     }
 
     fn current_backoff_ms(&self, key: PairKey, now_ns: u64) -> u64 {
-        match self.failures.get(&key) {
-            Some(f) if !f.is_stale(now_ns) => f.backoff_ms(),
-            _ => 0,
-        }
+        let slots = self.slots.lock();
+        lookup_pair(&slots, key)
+            .map(|index| &slots[index])
+            .filter(|slot| slot.failure.count != 0 && !slot.failure.is_stale(now_ns))
+            .map_or(0, |slot| slot.failure.backoff_ms())
     }
 
     fn admin_unlock_user(&self, username_hash: [u8; 16]) {
-        // Remove all entries with matching username_hash across ALL subnets
-        // (spec §12.3).
-        self.failures.retain(|key, _| key.1 != username_hash);
-        self.lockouts.retain(|key, _| key.1 != username_hash);
+        let mut slots = self.slots.lock();
+        let mut cleared = false;
+        let mut index = 0;
+        while index < slots.len() {
+            if slots[index].occupied && slots[index].key.1 == username_hash {
+                slots[index].clear_payload();
+                cleared = true;
+            }
+            index += 1;
+        }
+        if cleared {
+            compact_pairs(&mut slots);
+        }
     }
 
     fn gc(&self, now_ns: u64) {
-        self.failures.retain(|_, f| !f.is_stale(now_ns));
-        self.lockouts.retain(|_, l| l.is_active(now_ns));
+        let mut slots = self.slots.lock();
+        let mut cleared = false;
+        let mut index = 0;
+        while index < slots.len() {
+            if slots[index].occupied {
+                if slots[index].failure.is_stale(now_ns) {
+                    slots[index].failure = FailureState {
+                        count: 0,
+                        last_fail_at_ns: 0,
+                    };
+                }
+                if slots[index].failure.count == 0
+                    && slots[index]
+                        .lockout
+                        .is_none_or(|lock| !lock.is_active(now_ns))
+                {
+                    slots[index].clear_payload();
+                    cleared = true;
+                } else if slots[index]
+                    .lockout
+                    .is_some_and(|lock| !lock.is_active(now_ns))
+                {
+                    slots[index].lockout = None;
+                }
+            }
+            index += 1;
+        }
+        if cleared {
+            compact_pairs(&mut slots);
+        }
     }
 }
 

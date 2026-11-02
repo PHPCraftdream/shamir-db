@@ -31,13 +31,11 @@ fn rv_connect_f43eb41e_old_password_wiped_when_derivation_fails() {
         &mut new_password,
         KdfParams::DEFAULT,
     );
-    // The OLD params only reach Argon2id (the new-params recommendation is
-    // the one validated against client limits), which rejects time = 0.
+    // The server-sent OLD params are validated against the client KDF floor
+    // before any Argon2id work; both buffers are still wiped.
     assert!(matches!(
         result,
-        Err(crate::common::error::Error::Crypto(
-            "argon2id: invalid params"
-        ))
+        Err(crate::common::error::Error::KdfParamsRejected)
     ));
     assert_wiped(&old_password, "old password after derivation error");
     assert_wiped(&new_password, "new password after derivation error");
