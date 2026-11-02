@@ -149,10 +149,9 @@ fn imported_seed_ids_are_node_local_persisted_and_digest_is_logical() {
             .unwrap();
         assert_ne!(recreated["store_id"].as_str(), Some(imported_id.as_str()));
         assert_ne!(recreated["store_id"].as_str(), Some(source_id.as_str()));
-        let after_hash = export_open(&home, "app", "main", &second, 1024)
+        export_open(&home, "app", "main", &second, 1024)
             .await
-            .unwrap();
-        after_hash
+            .unwrap()
     });
     drop(rt);
     let after: Manifest = decode(&fs::read(second.join("manifest.mpack")).unwrap()).unwrap();

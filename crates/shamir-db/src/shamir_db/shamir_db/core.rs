@@ -23,6 +23,7 @@ pub(in crate::shamir_db) const SYSTEM_DB_NAME: &str = "__system__";
 use crate::engine::migration::MigrationCoordinator;
 use crate::engine::repo::{BoxRepoFactory, DurabilityPolicy, RepoConfig};
 use crate::shamir_db::execute::ResyncQuarantineCache;
+use crate::shamir_db::system_store::table_config_from_catalogue_record;
 
 use super::super::ports::{PrincipalResolver, UserAdminPort};
 use super::super::repo_durability::durability_from_record;
@@ -379,7 +380,7 @@ impl ShamirDb {
                     if let Some(tables) = tables_by_repo.get(&(db_name, repo_name)) {
                         for trec in tables {
                             if let Some(name) = trec["table_name"].as_str() {
-                                let table_config = crate::shamir_db::system_store::table_config_from_catalogue_record(name, trec)?;
+                                let table_config = table_config_from_catalogue_record(name, trec)?;
                                 config = config.add_table(table_config);
                             }
                         }
