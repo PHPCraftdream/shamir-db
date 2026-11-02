@@ -10,6 +10,11 @@ use crate::server::{BootstrapMode, ServerLauncher};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launcher_shutdown_stops_token_gc_task() {
+    // Surfaces the shutdown stage timers (`log::warn!`) in the failure output.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("warn")
+        .with_test_writer()
+        .try_init();
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     let config = Config {
@@ -74,9 +79,7 @@ async fn launcher_shutdown_stops_token_gc_task() {
         .await
         .expect("server shutdown bounded")
         .expect("shutdown task");
-    // The subject is the GC task; the system-repo flush budget is disk-speed
-    // dependent on Windows runners, so only structural shutdown errors are asserted.
-    assert!(report.errors().is_empty(), "{report:?}");
+    assert!(report.is_clean(), "{report:?}");
 }
 
 /// Proves the advisory OS file lock mechanism used for the single-instance
