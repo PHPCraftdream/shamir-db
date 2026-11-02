@@ -94,7 +94,7 @@ async fn launcher_shutdown_stops_token_gc_task() {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: "127.0.0.1:0".into(),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],

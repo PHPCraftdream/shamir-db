@@ -44,13 +44,13 @@ impl TokenGate for Gate {
 struct RevalidateUnavailable;
 impl TokenGate for RevalidateUnavailable {
     type Grant = u8;
-    fn authenticate<'a>(
-        &'a self,
-        _: AuthHeader<'a>,
+    async fn authenticate(
+        &self,
+        _: AuthHeader<'_>,
         _: crate::config::Endpoint,
         _: PeerInfo,
-    ) -> impl Future<Output = GateDecision<u8>> + Send + 'a {
-        async { GateDecision::Allow(1) }
+    ) -> GateDecision<u8> {
+        GateDecision::Allow(1)
     }
     fn still_valid(&self, _: &u8) -> bool {
         true
@@ -64,13 +64,13 @@ impl TokenGate for RevalidateUnavailable {
 struct RevalidateForbidden;
 impl TokenGate for RevalidateForbidden {
     type Grant = u8;
-    fn authenticate<'a>(
-        &'a self,
-        _: AuthHeader<'a>,
+    async fn authenticate(
+        &self,
+        _: AuthHeader<'_>,
         _: crate::config::Endpoint,
         _: PeerInfo,
-    ) -> impl Future<Output = GateDecision<u8>> + Send + 'a {
-        async { GateDecision::Allow(1) }
+    ) -> GateDecision<u8> {
+        GateDecision::Allow(1)
     }
     fn still_valid(&self, _: &u8) -> bool {
         true
