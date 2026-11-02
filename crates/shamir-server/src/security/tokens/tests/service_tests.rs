@@ -13,7 +13,7 @@ use std::sync::{Arc, Barrier};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-fn record(id: u8) -> TokenRecord {
+pub(super) fn record(id: u8) -> TokenRecord {
     TokenRecord {
         id: [id; 16],
         owner_user_id: [1; 16],
@@ -83,7 +83,7 @@ fn audit() -> Arc<AuditChainWriter> {
         Arc::new(NoopAppender),
     ))
 }
-fn new_token(label: String, ttl_secs: Option<u64>) -> NewToken {
+pub(super) fn new_token(label: String, ttl_secs: Option<u64>) -> NewToken {
     NewToken {
         owner_user_id: [1; 16],
         owner_roles: vec!["reader".to_string()],
@@ -112,7 +112,7 @@ async fn service_with_owners(
     TokenService::open_with_clock(options).await
 }
 
-async fn service(
+pub(super) async fn service(
     temp: &TempDir,
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
 ) -> TokenService {

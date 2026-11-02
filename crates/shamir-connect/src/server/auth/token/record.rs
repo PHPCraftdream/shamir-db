@@ -49,7 +49,7 @@ pub struct TokenRecord {
     #[serde(with = "serde_bytes")]
     /// Owning user identifier bytes.
     pub owner_user_id: [u8; 16],
-    /// User-visible label, at most 64 bytes.
+    /// User-visible label, at most 128 bytes.
     pub label: String,
     #[serde(with = "serde_bytes")]
     /// Authentication MAC; secret-derived bytes are redacted in Debug.
@@ -66,7 +66,7 @@ pub struct TokenRecord {
     pub mode: TokenMode,
     /// Allowed request channels.
     pub channels: TokenChannels,
-    /// Optional database allowlist; each name is at most 128 bytes.
+    /// Optional database allowlist; each name is at most 255 bytes.
     pub databases: Option<Vec<String>>,
     /// Snapshot of owner roles at token creation.
     pub roles: Vec<String>,
@@ -98,11 +98,11 @@ impl TokenRecord {
         if self.expires_at_ns <= self.created_at_ns {
             return Err("expiry must follow creation");
         }
-        if self.label.is_empty() || self.label.len() > 64 {
+        if self.label.is_empty() || self.label.len() > 128 {
             return Err("invalid label");
         }
         if self.databases.as_ref().is_some_and(|items| {
-            items.len() > 64 || items.iter().any(|name| name.is_empty() || name.len() > 128)
+            items.len() > 64 || items.iter().any(|name| name.is_empty() || name.len() > 255)
         }) {
             return Err("invalid databases");
         }

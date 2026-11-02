@@ -10,7 +10,7 @@
 use shamir_connect::common::types::limits;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditEntry};
 use shamir_connect::server::lockout::{
-    FailureOutcome, InMemoryLockoutStore, LockoutStore, PairKey,
+    FailureOutcome, InMemoryLockoutStore, LockoutStore, PairKey, PairStatus,
 };
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateDecision, RateLimiter};
 use shamir_connect::server::resume::{
@@ -59,6 +59,7 @@ impl ConsumedCounterStore for CountingCounterStore {
 #[derive(Default)]
 struct CountingLockoutStore {
     gc_calls: AtomicUsize,
+    inner: InMemoryLockoutStore,
 }
 
 impl LockoutStore for CountingLockoutStore {
@@ -66,6 +67,9 @@ impl LockoutStore for CountingLockoutStore {
         FailureOutcome::Backoff { delay_ms: 0 }
     }
     fn reset_on_success(&self, _key: PairKey) {}
+    fn pair_status(&self, _key: PairKey, now_ns: u64) -> PairStatus {
+        self.inner.pair_status(_key, now_ns)
+    }
     fn is_locked_out(&self, _key: PairKey, _now_ns: u64) -> bool {
         false
     }

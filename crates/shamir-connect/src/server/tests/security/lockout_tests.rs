@@ -206,6 +206,25 @@ fn subnet_of_normalizes_mapped_ipv4_and_preserves_ipv6_families() {
 }
 
 #[test]
+fn pair_status_is_read_only_and_reports_backoff_lock_and_stale_timestamp() {
+    let store = InMemoryLockoutStore::new();
+    let pair = key(2, 9);
+    assert_eq!(store.pair_status(pair, 10), PairStatus { locked_until_ns: None, backoff_until_ns: None, last_fail_at_ns: None });
+    store.register_failure(pair, 1_000_000_000);
+    let active = store.pair_status(pair, 1_000_000_000);
+    assert_eq!(active.backoff_until_ns, Some(1_100_000_000));
+    assert_eq!(active.last_fail_at_ns, Some(1_000_000_000));
+    assert_eq!(store.pair_status(pair, 1_050_000_000), active);
+    for n in 1..50 { store.register_failure(pair, 2_000_000_000 + u64::from(n) * ns::SECOND); }
+    let locked = store.pair_status(pair, 60_000_000_000);
+    assert_eq!(locked.locked_until_ns, Some(2_049_000_000 + LOCKOUT_DURATION_NS));
+    assert!(locked.backoff_until_ns.is_some());
+    let stale = store.pair_status(pair, 2_049_000_000 + LOCKOUT_DURATION_NS + 1);
+    assert_eq!(stale.locked_until_ns, None);
+    assert_eq!(stale.backoff_until_ns, None);
+    assert_eq!(stale.last_fail_at_ns, Some(2_049_000_000));
+}
+#[test]
 fn username_hash_is_deterministic() {
     let secret = [0xaau8; 32];
     let h1 = username_hash(&secret, b"alice");

@@ -160,7 +160,7 @@ impl TokenService {
             return Err(TokenCreateError::ReadOnlyNode);
         }
         if input.label.is_empty()
-            || input.label.len() > 64
+            || input.label.len() > 128
             || input.owner_roles.len() > 64
             || input
                 .owner_roles
@@ -169,7 +169,7 @@ impl TokenService {
             || input
                 .databases
                 .as_ref()
-                .is_some_and(|d| d.len() > 64 || d.iter().any(|x| x.is_empty() || x.len() > 128))
+                .is_some_and(|d| d.len() > 64 || d.iter().any(|x| x.is_empty() || x.len() > 255))
         {
             return Err(TokenCreateError::InvalidInput);
         }

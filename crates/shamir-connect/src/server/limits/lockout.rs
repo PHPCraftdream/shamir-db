@@ -179,6 +179,18 @@ pub enum FailureOutcome {
     },
 }
 
+/// Read-only snapshot of the current pair failure state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PairStatus {
+    /// Active lock expiry; expired lockouts are reported as absent.
+    pub locked_until_ns: Option<u64>,
+    /// Active backoff expiry, if a failure is recent enough.
+    pub backoff_until_ns: Option<u64>,
+    /// Timestamp of the latest failure, including stale failures.
+    pub last_fail_at_ns: Option<u64>,
+}
+
+
 /// Pluggable backend for failure / lockout state. Production should back
 /// this with durable storage (spec IMPL §1.3 batched ≤5s).
 pub trait LockoutStore: Send + Sync {
@@ -189,6 +201,9 @@ pub trait LockoutStore: Send + Sync {
     /// Reset on success (spec §5.2.5 NORMATIVE): clear FailureState AND
     /// any pre-threshold LockoutState for this pair.
     fn reset_on_success(&self, key: PairKey);
+
+    /// Read current failure state without altering it. Stale failures return `last_fail_at_ns` for begin-time ordering but no active backoff or lock.
+    fn pair_status(&self, key: PairKey, now_ns: u64) -> PairStatus;
 
     /// Check whether the pair is currently locked out.
     fn is_locked_out(&self, key: PairKey, now_ns: u64) -> bool;
@@ -590,6 +605,24 @@ impl LockoutStore for InMemoryLockoutStore {
             remove_pair(&mut slots, index);
             slots[index].clear_payload();
         }
+    }
+
+    fn pair_status(&self, key: PairKey, now_ns: u64) -> PairStatus {
+        let slots = self.slots.lock();
+        let Some(index) = lookup_pair(&slots, key) else {
+            return PairStatus { locked_until_ns: None, backoff_until_ns: None, last_fail_at_ns: None };
+        };
+        let slot = &slots[index];
+        let locked_until_ns = slot.lockout
+            .and_then(|lock| lock.triggered_at_ns.checked_add(lock.duration_ns))
+            .filter(|until| now_ns < *until);
+        let last_fail_at_ns = (slot.failure.last_fail_at_ns != 0).then_some(slot.failure.last_fail_at_ns);
+        let backoff_until_ns = if slot.failure.count != 0 && !slot.failure.is_stale(now_ns) {
+            slot.failure.backoff_ms().checked_mul(ns::MILLISECOND)
+                .and_then(|duration| slot.failure.last_fail_at_ns.checked_add(duration))
+                .filter(|until| now_ns < *until)
+        } else { None };
+        PairStatus { locked_until_ns, backoff_until_ns, last_fail_at_ns }
     }
 
     fn is_locked_out(&self, key: PairKey, now_ns: u64) -> bool {
