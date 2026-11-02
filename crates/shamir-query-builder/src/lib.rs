@@ -28,6 +28,10 @@
 //! no query to construct at all — see that module's doc comment for the
 //! full rationale.
 //!
+//! `token_admin` is a second narrow exception: it prevents callers from
+//! hand-assembling API-token administration `DbRequest` variants, as forbidden
+//! by the builder-only rule.
+//!
 //! See `docs/dev-artifacts/roadmap/QUERY_BUILDER.md` for the full design.
 //!
 //! Modules are wired in here phase by phase as they land:
@@ -38,6 +42,7 @@
 //! - `write`    — Insert / Update / Upsert / Delete + the `Doc` value builder.
 //! - `batch`    — `Batch` + typed `Handle` dependency references.
 //! - `cursor`   — `DbRequest::{CreateCursor,FetchNext,CancelCursor}` constructors (FG-5a).
+//! - `token_admin` — typed API-token administration request builders (a narrow top-level `DbRequest` exception).
 //! - `response` — `BatchResponse` extraction helpers.
 //! - `macros`   — `doc!` / `vals!` declarative macros; `filter!` / `q!` DSL macros.
 
@@ -68,6 +73,7 @@ mod read;
 pub use batch::visibility;
 pub use read::{cursor, filter, query, select, val};
 pub use wire::response;
+pub use wire::token_admin;
 
 // Re-export the headline type for convenience.
 pub use query::{Conds, IntoSelectItem, Query};

@@ -80,16 +80,13 @@ async fn self_create_enforces_labels_ttl_default_maximum_and_per_user_limit() {
         true,
     )
     .await;
-    let DbResponse::ApiTokenCreated {
-        created_at_ns,
-        expires_at_ns,
-        mode,
-        channels,
-        ..
-    } = f.call(&f.other, &create("same-label")).await
-    else {
+    let DbResponse::ApiTokenCreated(created) = f.call(&f.other, &create("same-label")).await else {
         panic!("created")
     };
+    let created_at_ns = created.created_at_ns;
+    let expires_at_ns = created.expires_at_ns;
+    let mode = created.mode;
+    let channels = created.channels;
     assert!(created_at_ns >= NOW);
     assert_eq!(mode, shamir_query_types::wire::ApiTokenMode::ReadOnly);
     assert_eq!(channels, shamir_query_types::wire::ApiTokenChannels::Both);
@@ -117,7 +114,7 @@ async fn self_create_enforces_labels_ttl_default_maximum_and_per_user_limit() {
     }
     assert!(matches!(
         f.call(&f.other, &max_ttl).await,
-        DbResponse::ApiTokenCreated { .. }
+        DbResponse::ApiTokenCreated(_)
     ));
     let _ = bearer(f.call(&f.other, &create("third")).await);
     Fixture::assert_error(

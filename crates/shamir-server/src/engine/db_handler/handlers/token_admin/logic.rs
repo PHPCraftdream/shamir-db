@@ -232,7 +232,7 @@ fn caller_valid(handler: &ShamirDbHandler, session: &Session) -> bool {
 }
 fn created_response(created: CreatedToken, owner: &str) -> DbResponse {
     let row = created.record_view;
-    DbResponse::ApiTokenCreated {
+    DbResponse::ApiTokenCreated(shamir_query_types::wire::CreatedApiToken {
         id: URL_SAFE_NO_PAD.encode(row.id),
         token: shamir_query_types::auth::SecretString::from(created.token.to_string()),
         label: row.label,
@@ -242,7 +242,7 @@ fn created_response(created: CreatedToken, owner: &str) -> DbResponse {
         databases: row.databases,
         created_at_ns: row.created_at_ns,
         expires_at_ns: row.expires_at_ns,
-    }
+    })
 }
 async fn list(
     handler: &ShamirDbHandler,

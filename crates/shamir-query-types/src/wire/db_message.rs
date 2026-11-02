@@ -13,8 +13,7 @@ use crate::read::{QueryResult, ReadQuery};
 use crate::wire::change_password_secrets::ChangePasswordSecrets;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
-use crate::wire::token_admin::ApiTokenView;
-use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
+use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode, ApiTokenView};
 
 /// Current query-language version. Bumped when the on-the-wire
 /// `BatchRequest` schema changes incompatibly. The server keeps a
@@ -396,26 +395,7 @@ pub enum DbResponse {
         on: bool,
     },
     /// Successful API-token creation; secret appears only in this response.
-    ApiTokenCreated {
-        /// Token ID, base64url-encoded from 16 bytes.
-        id: String,
-        /// Secret bearer credential, returned exactly once and redacted by `Debug`.
-        token: crate::auth::SecretString,
-        /// Token label.
-        label: String,
-        /// Owner username.
-        owner: String,
-        /// Scope mode.
-        mode: ApiTokenMode,
-        /// Allowed channels.
-        channels: ApiTokenChannels,
-        /// Database allowlist, or `None` for all accessible databases.
-        databases: Option<Vec<String>>,
-        /// Creation time in unix nanoseconds.
-        created_at_ns: u64,
-        /// Expiration time in unix nanoseconds.
-        expires_at_ns: u64,
-    },
+    ApiTokenCreated(crate::auth::token_admin::CreatedApiToken),
     /// API-token listing response, containing public metadata rows only.
     ApiTokensListed {
         /// Public API-token metadata rows.

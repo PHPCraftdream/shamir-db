@@ -211,8 +211,8 @@ pub(crate) fn create(label: &str) -> DbRequest {
 }
 
 pub(crate) fn bearer(response: DbResponse) -> (String, String) {
-    let DbResponse::ApiTokenCreated { id, token, .. } = response else {
+    let DbResponse::ApiTokenCreated(created) = response else {
         panic!("expected created response")
     };
-    (id, token.reveal().to_owned())
+    (created.id, created.token.reveal().to_owned())
 }
