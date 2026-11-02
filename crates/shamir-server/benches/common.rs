@@ -52,10 +52,11 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: addr.to_string(),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

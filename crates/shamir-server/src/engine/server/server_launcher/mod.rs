@@ -8,8 +8,11 @@
 //! This is enforced by rustls itself: a second install is a no-op.
 
 mod accept_loops;
+#[path = "support/audit.rs"]
 mod audit;
+#[path = "support/helpers.rs"]
 mod helpers;
+mod http;
 mod launch;
 mod listeners;
 

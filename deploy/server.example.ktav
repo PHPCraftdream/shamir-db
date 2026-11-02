@@ -84,6 +84,23 @@ listeners: [
             https://app.example.com
         ]
     }
+    ## HTTP REST listener is wired through the server launcher; WebSocket support is separately staged.
+    ## {
+    ##     kind: http
+    ##     addr: 127.0.0.1:7340
+    ##     tls: false
+    ##     ## Plaintext is loopback-only by default; remote exposure requires explicit opt-in.
+    ##     ## Remote plaintext writes additionally require allow_plaintext_write: true.
+    ##     allow_plaintext_remote: false
+    ##     allow_plaintext_write: false
+    ##     allow_self_signed: false
+    ##     ## browser_origin_allowlist is WebSocket-only; REST does not use it.
+    ##     max_request_body_bytes: 16777216
+    ##     head_timeout_ms: 5000
+    ##     body_timeout_ms: 30000
+    ##     request_timeout_ms: 120000
+    ##     trusted_proxies: []
+    ## }
 ]
 
 tls: {

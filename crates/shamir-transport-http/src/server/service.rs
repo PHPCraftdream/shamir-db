@@ -245,19 +245,47 @@ where
         Ok(Ok(())) => {}
     }
     let reservation = reservation.take();
-    if !context.gate.still_valid(&grant) {
-        let mut r = response(
-            StatusCode::UNAUTHORIZED,
-            unauthorized_body(),
-            context.peer.tls,
-            context.cfg.hsts,
-            true,
-        );
-        r.headers_mut().insert(
-            header::WWW_AUTHENTICATE,
-            http::HeaderValue::from_static("Bearer"),
-        );
-        return Ok(r);
+    match context.gate.revalidate(&grant) {
+        GateDecision::Allow(()) => {}
+        GateDecision::Unauthorized => {
+            let mut r = response(
+                StatusCode::UNAUTHORIZED,
+                unauthorized_body(),
+                context.peer.tls,
+                context.cfg.hsts,
+                true,
+            );
+            r.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                http::HeaderValue::from_static("Bearer"),
+            );
+            return Ok(r);
+        }
+        GateDecision::Unavailable { retry_after_secs } => {
+            return Ok(retry(
+                StatusCode::SERVICE_UNAVAILABLE,
+                retry_after_secs.max(1),
+                context.peer.tls,
+                context.cfg.hsts,
+            ));
+        }
+        GateDecision::RateLimited { retry_after_secs } => {
+            return Ok(retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                retry_after_secs.max(1),
+                context.peer.tls,
+                context.cfg.hsts,
+            ));
+        }
+        GateDecision::Forbidden(code) => {
+            return Ok(response(
+                StatusCode::FORBIDDEN,
+                (context.cfg.forbidden_body)(&code),
+                context.peer.tls,
+                context.cfg.hsts,
+                true,
+            ));
+        }
     }
     let payload = if path.ends_with("/ping") {
         context.cfg.ping_body.clone()
@@ -291,13 +319,40 @@ where
             ));
         }
     };
-    Ok(response_held(
+    let mut r = response_held(
         exec_status(outcome.status),
         body,
         context.peer.tls,
         context.cfg.hsts,
         false,
-    ))
+    );
+    if matches!(outcome.status, crate::gate::ExecStatus::Unauthorized) {
+        r = response(
+            StatusCode::UNAUTHORIZED,
+            unauthorized_body(),
+            context.peer.tls,
+            context.cfg.hsts,
+            true,
+        );
+        r.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            http::HeaderValue::from_static("Bearer"),
+        );
+    }
+    if matches!(outcome.status, crate::gate::ExecStatus::Unavailable) {
+        r.headers_mut()
+            .insert(header::CONNECTION, http::HeaderValue::from_static("close"));
+    }
+    if matches!(
+        outcome.status,
+        crate::gate::ExecStatus::RateLimited | crate::gate::ExecStatus::Unavailable
+    ) {
+        let delay = outcome.retry_after_secs.unwrap_or(1);
+        if let Ok(value) = http::HeaderValue::from_str(&delay.to_string()) {
+            r.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    Ok(r)
 }
 #[derive(Debug)]
 enum BodyError {
@@ -310,10 +365,11 @@ impl From<hyper::Error> for BodyError {
         Self::Hyper
     }
 }
-fn exec_status(s: crate::gate::ExecStatus) -> StatusCode {
+pub(crate) fn exec_status(s: crate::gate::ExecStatus) -> StatusCode {
     match s {
         crate::gate::ExecStatus::Ok => StatusCode::OK,
         crate::gate::ExecStatus::BadRequest => StatusCode::BAD_REQUEST,
+        crate::gate::ExecStatus::Unauthorized => StatusCode::UNAUTHORIZED,
         crate::gate::ExecStatus::Forbidden => StatusCode::FORBIDDEN,
         crate::gate::ExecStatus::RateLimited => StatusCode::TOO_MANY_REQUESTS,
         crate::gate::ExecStatus::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
