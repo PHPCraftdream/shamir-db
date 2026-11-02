@@ -53,8 +53,9 @@ export class TokenWsLifecycle {
           try {
             const binding = decodeTokenBinding(bytes); settled = true; cleanup();
             lifecycle = new TokenWsLifecycle(opened, binding.sid, binding.expiresAtNs, requestTimeoutMs);
-            lifecycle.lifetimeSignal = signal; lifecycle.lifetimeAbort = () => { lifecycle!.terminate(new TokenTransportError('client_aborted', 'Token WebSocket connection aborted')); void opened.close().catch(() => undefined); };
-            signal?.addEventListener('abort', lifecycle.lifetimeAbort, { once: true }); resolve(lifecycle);
+            const onLifetimeAbort = (): void => { lifecycle!.terminate(new TokenTransportError('client_aborted', 'Token WebSocket connection aborted')); void opened.close().catch(() => undefined); };
+            lifecycle.lifetimeSignal = signal; lifecycle.lifetimeAbort = onLifetimeAbort;
+            signal?.addEventListener('abort', onLifetimeAbort, { once: true }); resolve(lifecycle);
           } catch { failBinding(new TokenTransportError('protocol_error', 'Invalid token binding', { phase: 'connect' })); }
         });
       }, (error: unknown) => failBinding(error instanceof TokenTransportError ? error : new TokenTransportError('network_error', 'Token WebSocket connection failed', { phase: 'connect' })));
