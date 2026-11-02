@@ -153,8 +153,8 @@ describe('browser login dependency injection', () => {
     expect(canonicalUser('Ａlice')).toBe('alice');
     expect(canonicalUser('e\u0301')).toBe('é');
     expect(canonicalUser('ΟΔΥΣΣΕΥΣ')).toBe('οδυσσευσ');
-    expect(() => canonicalUser('xÅ')).toThrow();
-    expect(() => canonicalUser('각')).toThrow();
+    expect(() => canonicalUser('xÅ')).toThrow();
+    expect(() => canonicalUser('각')).toThrow();
     let requests = 0;
     const http: LoginHttp = { async request() { requests++; throw new Error('unexpected request'); } };
     for (const username of ['a\u202eb', 'a\ue000', 'a\uffff']) {
