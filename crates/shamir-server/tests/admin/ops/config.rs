@@ -124,21 +124,22 @@ listeners: [
         kind: tcp
         addr: 0.0.0.0:7331
         profile: tls_exporter
-        http: {
-            max_request_body_bytes: 16777216
-        }
+    }
+    {
+        kind: tcp
+        addr: 127.0.0.1:7334
+        profile: plain
     }
     {
         kind: http
         addr: 127.0.0.1:7340
-        http: {
-            max_request_body_bytes: 4096
-            body_timeout_ms: 200
-            request_timeout_ms: 1000
-            trusted_proxies: [
-                10.0.0.0/8
-            ]
-        }
+        tls: false
+        allow_plaintext_remote: false
+        allow_plaintext_write: false
+        max_request_body_bytes: 4096
+        body_timeout_ms: 200
+        request_timeout_ms: 10000
+        trusted_proxies: [10.0.0.0/8]
     }
     {
         kind: ws
@@ -155,7 +156,6 @@ listeners: [
             https://app.example.com
             https://staging.example.com
         ]
-        http: { }
     }
     {
         kind: unix
@@ -177,18 +177,20 @@ tls: {
 
     // Listener 0: native TCP+TLS exporter on public addr.
     assert_eq!(cfg.listeners[0].kind, ListenerKind::Tcp);
-    assert_eq!(cfg.listeners[0].profile, Some(ProfileKind::TlsExporter));
+    assert_eq!(cfg.listeners[0].addr, "0.0.0.0:7331");
     assert!(cfg.listeners[0].path.is_none());
 
     // Listener 1: plain TCP on loopback.
     assert_eq!(cfg.listeners[1].kind, ListenerKind::Tcp);
+    assert_eq!(cfg.listeners[1].addr, "127.0.0.1:7334");
     assert_eq!(cfg.listeners[1].profile, Some(ProfileKind::Plain));
 
     // Listener 2: HTTP REST listener alongside the native transports.
     assert_eq!(cfg.listeners[2].kind, ListenerKind::Http);
+    assert_eq!(cfg.listeners[2].http.tls, Some(false));
     assert_eq!(cfg.listeners[2].http.max_request_body_bytes, 4096);
     assert_eq!(cfg.listeners[2].http.body_timeout_ms, 200);
-    assert_eq!(cfg.listeners[2].http.request_timeout_ms, 1000);
+    assert_eq!(cfg.listeners[2].http.request_timeout_ms, 10000);
     assert_eq!(cfg.listeners[2].http.trusted_proxies, vec!["10.0.0.0/8"]);
 
     // Listener 3: native WebSocket+TLS exporter.
@@ -582,6 +584,7 @@ fn rejects_unix_listener_with_empty_addr() {
         path: None,
         kdf_override: None,
         browser_origin_allowlist: vec![],
+        http: Default::default(),
     }];
     let err = cfg.validate().expect_err("must reject empty unix addr");
     assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");

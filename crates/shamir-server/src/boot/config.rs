@@ -30,6 +30,12 @@
 //!         profile: tls_exporter
 //!     }
 //!     {
+//!         kind: http
+//!         addr: 127.0.0.1:7340
+//!         tls: false
+//!         max_request_body_bytes: 16777216
+//!     }
+//!     {
 //!         kind: ws
 //!         addr: 0.0.0.0:7333
 //!         profile: tls_no_export
@@ -49,6 +55,8 @@
 //! # Validation rules (per spec §3.7.2, §8, §9, TRANSPORT_TCP §2.2)
 //!
 //! - Listener `addr` must parse as a valid `SocketAddr`.
+//! - `kind: http` requires flat HTTP keys including an explicit `tls`; `tls` is forbidden for tcp/ws/unix.
+//! - HTTP plaintext policy, deadlines, body caps, and trusted proxy CIDRs are checked before startup.
 //! - `kind: ws` requires `path` starting with `/`.
 //! - `profile: plain` may only bind loopback (127.0.0.0/8 or ::1).
 //! - `kind: ws` + `profile: tls_no_export` (browser binding_mode = 0x02)
@@ -369,8 +377,8 @@ pub struct ListenerConfig {
     /// TLS is configured by the HTTP policy; TCP/WebSocket use the profile.
     #[serde(default)]
     pub profile: Option<ProfileKind>,
-    /// HTTP/HTTPS listener policy.
-    #[serde(default)]
+    /// HTTP/HTTPS listener policy, parsed from flat listener keys.
+    #[serde(flatten)]
     pub http: HttpListenerSettings,
     /// HTTP path for `ws` listeners. Required for `ws`, ignored for `tcp`.
     #[serde(default)]
@@ -635,6 +643,7 @@ fn validate_listener(
     l: &ListenerConfig,
     auth_init_timeout_ms: u64,
 ) -> Result<(), ConfigError> {
+    http_validation::validate_listener_http_fields(idx, &l.http, l)?;
     if l.kind == ListenerKind::Unix {
         if l.addr.trim().is_empty() {
             return Err(ConfigError::Validation(format!(
@@ -665,13 +674,12 @@ fn validate_listener(
         http_validation::validate_http_settings(idx, &l.http, l, auth_init_timeout_ms)?;
         return Ok(());
     }
-    if l.kind != ListenerKind::Http && l.profile.is_none() {
+    let Some(profile) = l.profile else {
         return Err(ConfigError::Validation(format!(
             "listeners[{idx}] kind={:?} requires profile",
             l.kind
         )));
-    }
-    let profile = l.profile.unwrap_or(ProfileKind::TlsExporter);
+    };
     match l.kind {
         ListenerKind::Http => unreachable!("HTTP settings validated above"),
         ListenerKind::Ws => {

@@ -56,6 +56,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

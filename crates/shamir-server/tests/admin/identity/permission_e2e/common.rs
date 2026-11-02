@@ -115,6 +115,7 @@ pub(crate) fn make_test_config(temp: &TempDir) -> Config {
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

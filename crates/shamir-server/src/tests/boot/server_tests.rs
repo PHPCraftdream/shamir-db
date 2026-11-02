@@ -8,6 +8,67 @@ use crate::config::{
 };
 use crate::server::{BootstrapMode, ServerLauncher};
 
+#[tokio::test]
+async fn launcher_rejects_http_listener_before_creating_data_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("must-not-be-created");
+    let config = Config {
+        data_dir: data_dir.clone(),
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+            file: None,
+            flush_interval_ms: 2000,
+        },
+        durability: Default::default(),
+        transactions: Default::default(),
+        tokens: Default::default(),
+        kdf_defaults: KdfConfig {
+            memory_kb: 19_456,
+            time: 2,
+            parallelism: 1,
+            argon2_version: 0x13,
+        },
+        argon2_concurrent_max: 4,
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Http,
+            addr: "127.0.0.1:7340".into(),
+            profile: None,
+            http: crate::boot::config::HttpListenerSettings {
+                tls: Some(false),
+                ..Default::default()
+            },
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: Vec::new(),
+        }],
+        tls: TlsConfig {
+            cert_path: data_dir.join("cert.pem"),
+            key_path: data_dir.join("key.pem"),
+        },
+        security: Default::default(),
+        audit: Default::default(),
+        observability: crate::config::ObservabilityConfig {
+            addr: String::new(),
+            allow_public_metrics: false,
+        },
+        replication: None,
+    };
+    let error = ServerLauncher::new(config)
+        .launch()
+        .await
+        .err()
+        .expect("HTTP listener is not wired yet");
+    assert!(matches!(&error, crate::server::BootError::Bind(_)));
+    assert!(error
+        .to_string()
+        .contains("kind=http listener is not wired yet"));
+    assert!(
+        !data_dir.exists(),
+        "launcher rejects before creating data dir"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launcher_shutdown_stops_token_gc_task() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -37,6 +98,7 @@ async fn launcher_shutdown_stops_token_gc_task() {
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

@@ -68,6 +68,7 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),
@@ -115,8 +116,10 @@ pub fn make_ipc_test_config(temp: &TempDir, addr: &str) -> Config {
             kind: ListenerKind::Unix,
             addr: addr.to_string(),
             profile: Some(ProfileKind::Plain),
+            path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         ..make_test_config(temp, "127.0.0.1:0")
     }
@@ -162,8 +165,10 @@ pub fn make_plain_test_config(temp: &TempDir, addr: &str) -> Config {
             kind: ListenerKind::Tcp,
             addr: addr.to_string(),
             profile: Some(ProfileKind::Plain),
+            path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         ..make_test_config(temp, addr)
     }
