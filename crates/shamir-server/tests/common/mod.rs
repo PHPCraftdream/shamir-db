@@ -64,7 +64,7 @@ pub fn make_test_config(temp: &TempDir, addr: &str) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: addr.to_string(),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
@@ -114,8 +114,7 @@ pub fn make_ipc_test_config(temp: &TempDir, addr: &str) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Unix,
             addr: addr.to_string(),
-            profile: ProfileKind::Plain,
-            path: None,
+            profile: Some(ProfileKind::Plain),
             kdf_override: None,
             browser_origin_allowlist: vec![],
         }],
@@ -162,8 +161,7 @@ pub fn make_plain_test_config(temp: &TempDir, addr: &str) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: addr.to_string(),
-            profile: ProfileKind::Plain,
-            path: None,
+            profile: Some(ProfileKind::Plain),
             kdf_override: None,
             browser_origin_allowlist: vec![],
         }],

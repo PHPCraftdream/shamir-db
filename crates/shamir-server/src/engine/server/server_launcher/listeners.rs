@@ -162,6 +162,11 @@ pub(super) async fn spawn_listeners(
         PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
 
     for l in &config.listeners {
+        if l.kind == ListenerKind::Http {
+            return Err(BootError::Bind(
+                "kind=http listener is not wired yet".into(),
+            ));
+        }
         // Local IPC (`kind: unix`) addresses a filesystem path / pipe
         // name, not a `SocketAddr` — handled entirely on its own path,
         // separate from the TCP/WS SocketAddr-based dispatch below
@@ -195,23 +200,22 @@ pub(super) async fn spawn_listeners(
             }
         };
 
-        // Resolve the right (transport, binding_mode) tuple for this
-        // listener.
+        // Resolve listener transport dispatch.
         let (transport_kind, binding_mode, accept_path) = match (l.kind, l.profile) {
-            (ListenerKind::Tcp, ProfileKind::TlsExporter) => (
+            (ListenerKind::Tcp, Some(ProfileKind::TlsExporter)) => (
                 TransportKind::Tcp,
                 BindingMode::TlsExporter,
                 AcceptPath::TcpTlsExporter,
             ),
-            (ListenerKind::Tcp, ProfileKind::Plain) => {
+            (ListenerKind::Tcp, Some(ProfileKind::Plain)) => {
                 (TransportKind::Tcp, BindingMode::None, AcceptPath::TcpPlain)
             }
-            (ListenerKind::Ws, ProfileKind::TlsExporter) => (
+            (ListenerKind::Ws, Some(ProfileKind::TlsExporter)) => (
                 TransportKind::WebSocket,
                 BindingMode::TlsExporter,
                 AcceptPath::WsNative,
             ),
-            (ListenerKind::Ws, ProfileKind::TlsNoExport) => {
+            (ListenerKind::Ws, Some(ProfileKind::TlsNoExport)) => {
                 let policy = browser_origin_policy_from(&l.browser_origin_allowlist)?;
                 (
                     TransportKind::WebSocket,
@@ -219,6 +223,7 @@ pub(super) async fn spawn_listeners(
                     AcceptPath::WsBrowser(policy),
                 )
             }
+            (ListenerKind::Http, _) => unreachable!("HTTP listener rejected at loop entry"),
             (kind, profile) => {
                 tracing::warn!(
                     addr = %addr,

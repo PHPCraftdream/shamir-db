@@ -71,8 +71,16 @@ use shamir_query_types::batch::BatchLimits;
 pub use crate::durability::DurabilityConfig;
 pub use crate::transactions_config::TransactionsConfig;
 
+mod http_listener;
+mod http_mapping;
+mod http_validation;
 mod limits;
+#[cfg(test)]
+mod tests;
 mod tokens;
+
+pub use http_listener::HttpListenerSettings;
+pub use http_mapping::to_http_server_config;
 
 pub use limits::{CursorLimitsConfig, QueryLimitsConfig, TxLimitsConfig};
 pub use tokens::TokensConfig;
@@ -350,16 +358,20 @@ pub struct KdfConfig {
     pub argon2_version: u8,
 }
 
-/// One listener (TCP or WebSocket) the server should expose.
+/// One listener (TCP, WebSocket, HTTP, or local IPC) the server should expose.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ListenerConfig {
-    /// Wire protocol: native TCP or WebSocket.
+    /// Wire protocol: native TCP, WebSocket, HTTP, or local IPC.
     pub kind: ListenerKind,
     /// Socket address, e.g. `0.0.0.0:7331` or `127.0.0.1:7334`. Validated
     /// at [`Config::validate`] time, not at deserialization.
     pub addr: String,
-    /// Security profile (drives `binding_mode` per spec §3.4 / §9).
-    pub profile: ProfileKind,
+    /// TLS is configured by the HTTP policy; TCP/WebSocket use the profile.
+    #[serde(default)]
+    pub profile: Option<ProfileKind>,
+    /// HTTP/HTTPS listener policy.
+    #[serde(default)]
+    pub http: HttpListenerSettings,
     /// HTTP path for `ws` listeners. Required for `ws`, ignored for `tcp`.
     #[serde(default)]
     pub path: Option<String>,
@@ -381,6 +393,8 @@ pub enum ListenerKind {
     Tcp,
     /// WebSocket-over-TLS (`wss://`).
     Ws,
+    /// HTTP/HTTPS bearer-token listener.
+    Http,
     /// Local IPC — Unix domain socket (POSIX) or Windows Named Pipe,
     /// behind `shamir-transport-ipc`'s unified `IpcListener` (spec
     /// TRANSPORT_UNIX.md). `addr` is a filesystem path (Unix) or pipe name
@@ -603,7 +617,7 @@ impl Config {
         }
 
         for (idx, l) in self.listeners.iter().enumerate() {
-            validate_listener(idx, l)?;
+            validate_listener(idx, l, self.security.connection.auth_init_timeout_ms)?;
             if let Some(kdf) = &l.kdf_override {
                 validate_kdf(kdf).map_err(|m| {
                     ConfigError::Validation(format!("listeners[{idx}].kdf_override: {m}"))
@@ -615,15 +629,19 @@ impl Config {
     }
 }
 
-/// Validate a single [`ListenerConfig`] against its profile's invariants.
-fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> {
+/// Validate a single [`ListenerConfig`] against its listener-kind invariants.
+fn validate_listener(
+    idx: usize,
+    l: &ListenerConfig,
+    auth_init_timeout_ms: u64,
+) -> Result<(), ConfigError> {
     if l.kind == ListenerKind::Unix {
         if l.addr.trim().is_empty() {
             return Err(ConfigError::Validation(format!(
                 "listeners[{idx}] kind=unix requires a non-empty `addr`"
             )));
         }
-        if l.profile != ProfileKind::Plain {
+        if l.profile != Some(ProfileKind::Plain) {
             return Err(ConfigError::Validation(format!(
                 "listeners[{idx}] kind=unix requires profile=plain; got {:?}",
                 l.profile
@@ -643,8 +661,19 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
         ))
     })?;
 
-    // 3. WebSocket: path required and must start with `/`.
+    if l.kind == ListenerKind::Http {
+        http_validation::validate_http_settings(idx, &l.http, l, auth_init_timeout_ms)?;
+        return Ok(());
+    }
+    if l.kind != ListenerKind::Http && l.profile.is_none() {
+        return Err(ConfigError::Validation(format!(
+            "listeners[{idx}] kind={:?} requires profile",
+            l.kind
+        )));
+    }
+    let profile = l.profile.unwrap_or(ProfileKind::TlsExporter);
     match l.kind {
+        ListenerKind::Http => unreachable!("HTTP settings validated above"),
         ListenerKind::Ws => {
             let path = l.path.as_deref().ok_or_else(|| {
                 ConfigError::Validation(format!(
@@ -665,7 +694,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
     }
 
     // 4. Plain profile: loopback only.
-    if l.profile == ProfileKind::Plain
+    if profile == ProfileKind::Plain
         && !shamir_transport_tcp::listener::ListenerProfile::Plain.allows(&addr)
     {
         return Err(ConfigError::Validation(format!(
@@ -675,7 +704,7 @@ fn validate_listener(idx: usize, l: &ListenerConfig) -> Result<(), ConfigError> 
     }
     // 5. Browser endpoint: must have a non-empty Origin allowlist.
     if l.kind == ListenerKind::Ws
-        && l.profile == ProfileKind::TlsNoExport
+        && profile == ProfileKind::TlsNoExport
         && l.browser_origin_allowlist.is_empty()
     {
         return Err(ConfigError::Validation(format!(

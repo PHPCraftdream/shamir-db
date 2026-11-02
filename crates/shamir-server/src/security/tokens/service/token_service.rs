@@ -1,9 +1,15 @@
-use super::model::{CreatedToken, TokenCounters, TokenCreateError, TokenView};
-use super::store::{TokenStore, TokenStoreError};
+use super::gc::GcService;
+use super::generator::TokenGenerator;
+use super::new_token::NewToken;
+use super::options::TokenServiceOptions;
+use super::session_canceller::{NoopCanceller, SessionCanceller};
+use crate::security::tokens::{
+    CreatedToken, TokenCounters, TokenCreateError, TokenStore, TokenStoreError, TokenView,
+};
 use shamir_connect::server::audit_chain::AuditChainWriter;
 use shamir_connect::server::token::{
-    compute_mac, encode_token, generate_token_parts, verify_token, Endpoint, OwnerFloors,
-    TokenChannels, TokenId, TokenMirror, TokenMode, TokenRecord, VerifyCtx, VerifyFailure,
+    compute_mac, encode_token, generate_token_parts, verify_token, Endpoint, OwnerFloors, TokenId,
+    TokenMirror, TokenRecord, VerifyCtx, VerifyFailure,
 };
 use shamir_connect::server::TokenSessionStore;
 use std::sync::Arc;
@@ -13,43 +19,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-pub trait SessionCanceller: Send + Sync {
-    fn cancel_token(&self, id: &TokenId);
-}
-struct NoopCanceller;
-impl SessionCanceller for NoopCanceller {
-    fn cancel_token(&self, _: &TokenId) {}
-}
-
-#[derive(Debug, Clone)]
-pub struct NewToken {
-    pub owner_user_id: [u8; 16],
-    pub owner_roles: Vec<String>,
-    pub label: String,
-    pub ttl_secs: Option<u64>,
-    pub mode: TokenMode,
-    pub channels: TokenChannels,
-    pub databases: Option<Vec<String>>,
-}
-
-pub struct TokenServiceOptions {
-    pub data_dir: std::path::PathBuf,
-    pub token_key: Zeroizing<[u8; 32]>,
-    pub owners: Arc<dyn OwnerFloors + Send + Sync>,
-    pub sessions: Arc<TokenSessionStore>,
-    pub audit: Arc<AuditChainWriter>,
-    pub config: crate::config::TokensConfig,
-    pub read_only_node: bool,
-    pub clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
-}
-
-/// Callable used to generate token ID and secret pairs.
-pub(crate) type TokenGenerator = dyn Fn() -> Result<
-        (TokenId, shamir_connect::server::token::TokenSecret),
-        shamir_connect::server::token::TokenError,
-    > + Send
-    + Sync;
-
+/// Durable API-token service: issue, verify, revoke, list and retention GC.
 pub struct TokenService {
     store: TokenStore,
     mirror: Arc<TokenMirror>,
@@ -611,63 +581,16 @@ impl TokenService {
         }
     }
     fn clone_for_gc(&self) -> GcService {
-        GcService {
-            store: self.store.clone(),
-            mirror: Arc::clone(&self.mirror),
-            mutation_gates: Arc::clone(&self.mutation_gates),
-            clock: Arc::clone(&self.clock),
-        }
+        GcService::new(
+            self.store.clone(),
+            Arc::clone(&self.mirror),
+            Arc::clone(&self.mutation_gates),
+            Arc::clone(&self.clock),
+        )
     }
 }
 impl Drop for TokenService {
     fn drop(&mut self) {
         self.gc_shutdown.cancel();
-    }
-}
-struct GcService {
-    store: TokenStore,
-    mirror: Arc<TokenMirror>,
-    mutation_gates: Arc<[Arc<AsyncMutex<()>>; 64]>,
-    clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
-}
-impl GcService {
-    async fn collect(&self) -> Result<usize, TokenStoreError> {
-        let Some(now) = (self.clock)() else {
-            return Ok(0);
-        };
-        let mut gates = Vec::with_capacity(64);
-        for gate in self.mutation_gates.iter() {
-            gates.push(Arc::clone(gate).lock_owned().await);
-        }
-        let store = self.store.clone();
-        let mirror = Arc::clone(&self.mirror);
-        tokio::task::spawn_blocking(move || {
-            let _gates = gates;
-            store.with_locked_records(|db, ks| {
-                let mut batch = db.batch().durability(Some(fjall::PersistMode::SyncAll));
-                let mut ids = Vec::new();
-                for row in store.scan_locked()? {
-                    let expired = row.expires_at_ns.saturating_add(30 * 86_400_000_000_000) < now;
-                    let revoked = row
-                        .revoked_at_ns
-                        .is_some_and(|at| at.saturating_add(30 * 86_400_000_000_000) < now);
-                    if expired || revoked {
-                        let id = TokenId(row.id);
-                        batch.remove(ks, id.0);
-                        ids.push(id);
-                    }
-                }
-                if !ids.is_empty() {
-                    store.fail_locked_write()?;
-                    batch.commit()?;
-                    for id in &ids {
-                        mirror.remove(id);
-                    }
-                }
-                Ok(ids.len())
-            })
-        })
-        .await
-        .map_err(|_| TokenStoreError::Join)?
     }
 }

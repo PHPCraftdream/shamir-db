@@ -135,7 +135,7 @@ fn make_test_config(temp: &TempDir) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Ws,
             addr: "127.0.0.1:0".to_string(),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             // Native WSS endpoint per spec TRANSPORT_WS §2.
             path: Some("/shamir/v1".to_string()),
             kdf_override: None,

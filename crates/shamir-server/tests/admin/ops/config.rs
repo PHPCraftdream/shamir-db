@@ -59,7 +59,7 @@ fn rv_server_a65118cc_plain_loopback_contract_matches_tcp() {
     ] {
         let mut cfg: Config = ktav::from_str(minimal_tcp_tls()).expect("parse config");
         cfg.listeners[0].addr = addr.to_owned();
-        cfg.listeners[0].profile = ProfileKind::Plain;
+        cfg.listeners[0].profile = Some(ProfileKind::Plain);
         let transport = shamir_transport_tcp::listener::validate_addr(
             addr.parse().expect("socket address"),
             shamir_transport_tcp::listener::ListenerProfile::Plain,
@@ -85,8 +85,11 @@ fn parses_minimal_valid_config() {
     assert_eq!(cfg.argon2_concurrent_max, 64);
     assert_eq!(cfg.listeners.len(), 1);
     assert_eq!(cfg.listeners[0].kind, ListenerKind::Tcp);
-    assert_eq!(cfg.listeners[0].profile, ProfileKind::TlsExporter);
-    assert_eq!(cfg.listeners[0].addr, "0.0.0.0:7331");
+    assert_eq!(cfg.listeners[0].profile, Some(ProfileKind::TlsExporter));
+    assert_eq!(
+        cfg.listeners[0].http.max_request_body_bytes,
+        16 * 1024 * 1024
+    );
     assert_eq!(
         cfg.tls.cert_path.to_str().unwrap(),
         "/var/lib/shamir-db/cert.pem"
@@ -121,11 +124,21 @@ listeners: [
         kind: tcp
         addr: 0.0.0.0:7331
         profile: tls_exporter
+        http: {
+            max_request_body_bytes: 16777216
+        }
     }
     {
-        kind: tcp
-        addr: 127.0.0.1:7334
-        profile: plain
+        kind: http
+        addr: 127.0.0.1:7340
+        http: {
+            max_request_body_bytes: 4096
+            body_timeout_ms: 200
+            request_timeout_ms: 1000
+            trusted_proxies: [
+                10.0.0.0/8
+            ]
+        }
     }
     {
         kind: ws
@@ -142,6 +155,7 @@ listeners: [
             https://app.example.com
             https://staging.example.com
         ]
+        http: { }
     }
     {
         kind: unix
@@ -159,38 +173,45 @@ tls: {
     let cfg: Config = ktav::from_str(&src).expect("parse ok");
     cfg.validate().expect("validate ok");
 
-    assert_eq!(cfg.listeners.len(), 5);
+    assert_eq!(cfg.listeners.len(), 6);
 
     // Listener 0: native TCP+TLS exporter on public addr.
     assert_eq!(cfg.listeners[0].kind, ListenerKind::Tcp);
-    assert_eq!(cfg.listeners[0].profile, ProfileKind::TlsExporter);
+    assert_eq!(cfg.listeners[0].profile, Some(ProfileKind::TlsExporter));
     assert!(cfg.listeners[0].path.is_none());
 
     // Listener 1: plain TCP on loopback.
     assert_eq!(cfg.listeners[1].kind, ListenerKind::Tcp);
-    assert_eq!(cfg.listeners[1].profile, ProfileKind::Plain);
+    assert_eq!(cfg.listeners[1].profile, Some(ProfileKind::Plain));
 
-    // Listener 2: native WebSocket+TLS exporter.
-    assert_eq!(cfg.listeners[2].kind, ListenerKind::Ws);
-    assert_eq!(cfg.listeners[2].profile, ProfileKind::TlsExporter);
-    assert_eq!(cfg.listeners[2].path.as_deref(), Some("/shamir/v1"));
+    // Listener 2: HTTP REST listener alongside the native transports.
+    assert_eq!(cfg.listeners[2].kind, ListenerKind::Http);
+    assert_eq!(cfg.listeners[2].http.max_request_body_bytes, 4096);
+    assert_eq!(cfg.listeners[2].http.body_timeout_ms, 200);
+    assert_eq!(cfg.listeners[2].http.request_timeout_ms, 1000);
+    assert_eq!(cfg.listeners[2].http.trusted_proxies, vec!["10.0.0.0/8"]);
 
-    // Listener 3: browser WebSocket (tls_no_export).
+    // Listener 3: native WebSocket+TLS exporter.
     assert_eq!(cfg.listeners[3].kind, ListenerKind::Ws);
-    assert_eq!(cfg.listeners[3].profile, ProfileKind::TlsNoExport);
-    assert_eq!(cfg.listeners[3].path.as_deref(), Some("/shamir/v1/browser"));
-    assert_eq!(cfg.listeners[3].browser_origin_allowlist.len(), 2);
+    assert_eq!(cfg.listeners[3].profile, Some(ProfileKind::TlsExporter));
+    assert_eq!(cfg.listeners[3].path.as_deref(), Some("/shamir/v1"));
+
+    // Listener 4: browser WebSocket (tls_no_export).
+    assert_eq!(cfg.listeners[4].kind, ListenerKind::Ws);
+    assert_eq!(cfg.listeners[4].profile, Some(ProfileKind::TlsNoExport));
+    assert_eq!(cfg.listeners[4].path.as_deref(), Some("/shamir/v1/browser"));
+    assert_eq!(cfg.listeners[4].browser_origin_allowlist.len(), 2);
     let mut invalid = cfg.clone();
-    invalid.listeners[3].browser_origin_allowlist = vec!["https://user@app.example.com".into()];
+    invalid.listeners[4].browser_origin_allowlist = vec!["https://user@app.example.com".into()];
     assert!(
         invalid.validate().is_err(),
         "malformed origin must fail configuration validation"
     );
 
-    // Listener 4: local IPC (Unix socket path / Windows pipe name).
-    assert_eq!(cfg.listeners[4].kind, ListenerKind::Unix);
-    assert_eq!(cfg.listeners[4].profile, ProfileKind::Plain);
-    assert_eq!(cfg.listeners[4].addr, ipc_addr);
+    // Listener 5: local IPC (Unix socket path / Windows pipe name).
+    assert_eq!(cfg.listeners[5].kind, ListenerKind::Unix);
+    assert_eq!(cfg.listeners[5].profile, Some(ProfileKind::Plain));
+    assert_eq!(cfg.listeners[5].addr, ipc_addr);
 }
 
 #[test]
@@ -198,7 +219,7 @@ fn validate_rejects_bad_platform_ipc_address() {
     let src = minimal_tcp_tls().to_string();
     let mut config: Config = ktav::from_str(&src).expect("base config parses");
     config.listeners[0].kind = ListenerKind::Unix;
-    config.listeners[0].profile = ProfileKind::Plain;
+    config.listeners[0].profile = Some(ProfileKind::Plain);
     config.listeners[0].addr = if cfg!(windows) {
         "shamir-db"
     } else {
@@ -400,7 +421,7 @@ fn loads_from_file() {
     let cfg = Config::from_file(&path).expect("from_file ok");
     cfg.validate().expect("validate ok");
     assert_eq!(cfg.listeners.len(), 1);
-    assert_eq!(cfg.listeners[0].profile, ProfileKind::TlsExporter);
+    assert_eq!(cfg.listeners[0].profile, Some(ProfileKind::TlsExporter));
 }
 
 // =============== validation-failure tests ===============
@@ -557,7 +578,7 @@ fn rejects_unix_listener_with_empty_addr() {
     cfg.listeners = vec![ListenerConfig {
         kind: ListenerKind::Unix,
         addr: String::new(),
-        profile: ProfileKind::Plain,
+        profile: Some(ProfileKind::Plain),
         path: None,
         kdf_override: None,
         browser_origin_allowlist: vec![],

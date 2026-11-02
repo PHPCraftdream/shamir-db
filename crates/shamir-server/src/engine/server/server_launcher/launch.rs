@@ -83,6 +83,15 @@ impl ServerLauncher {
             node_mode,
         } = self;
         config.validate()?;
+        if config
+            .listeners
+            .iter()
+            .any(|listener| listener.kind == crate::boot::config::ListenerKind::Http)
+        {
+            return Err(BootError::Bind(
+                "kind=http listener is not wired yet".into(),
+            ));
+        }
         let durability = config.durability.resolve_policy()?;
         config.durability.warn_unimplemented_retention();
 
