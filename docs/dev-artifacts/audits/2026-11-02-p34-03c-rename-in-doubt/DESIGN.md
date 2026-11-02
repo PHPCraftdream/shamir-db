@@ -143,3 +143,424 @@ No visibility wait, fence, detach gate, outcome/fence code, public API change, o
 15. PARTIAL — main ran `python -I scripts/ci/check_layout.py`: exit 0, `layout check: OK (0 baselined, 0 hint(s))`. Parent audit directory contains only `DESIGN.md` and is docs-exempt. Rust formatting, import/visibility/signature/struct-literal/exhaustive-match/Send/result_large_err checks are N/A because no Rust file changed. No tests, compilation, clippy or CI ran; future implementation needs CI.
 
 STOPPED at revision Phase 0: stop condition E fires for index-only transaction postings that bypass the source freeze. Only DESIGN.md changed; production code and tests are untouched. No local compilation or tests ran. Next step: amend the prelock/token-write design to cover every mutated table before implementing R1–R11.
+## Progress (revision 2)
+
+- Item 1: **DONE — Phase 0 Q11–Q13** recorded above; H was not established (source analysis only).
+- Item 2: **DONE — S1 and its three sidecar-commit tests** recorded at line 209 above.
+- Item 3: **PARTIAL — S2/S3** as described at line 177; parent-reported correction review accepted core receiver/duplicate-check corrections. No tests/builds run.
+- Item 4: **DONE — S4/S5** as described at lines 210–212. No tests/builds run.
+- Item 5: **PARTIAL — acceptance tests 3–9** as listed at line 213 and in the appended test note below. Rust review/format/CI remain.
+
+## Design (revision 2) — implementation record and remaining scope
+
+### S1 — prelock token union
+
+`prelock.rs` now derives the touched-token set from `write_set`, `index_write_set`, `counter_deltas`, `staged_vectors`, and `staged_vector_deletes`, then sorts/deduplicates. The loop retains existing writer-drain/slow-path logic. Tests recorded at line 209 check frozen index-only and counter-only commits plus an unfrozen index-only control. No runtime result is claimed.
+
+### S2 — detach gate
+
+`TableManager::detached` is `pub(super)` and shared through Clone; constructors initialize false. `detach_for_rename` / `reattach_after_rename` store Release; `ensure_attached` loads Acquire and returns `MigrationFrozen`. `admit` gates public wrappers; explicit gates are in the 24 brief-listed admitted methods, including both migration coordinator twins on source and destination, plus `begin_write_barrier_with_permit`. CRUD/commit do not read detached.
+
+The explicit methods are `add_validator_binding_admitted`, `remove_validator_binding_admitted`, `write_ddl_op_status_admitted`, `drop_all_indexes_for_table_removal_admitted`, `seed_current_versions_admitted`, `reset_and_populate_index2_admitted`, `migration_coordinator_admitted`, `migration_coordinator_recovered_admitted`, `rename_index_admitted`, `create_index_v2_admitted`, `create_index_admitted`, `create_unique_index_admitted`, `drop_index_admitted`, `drop_unique_index_admitted`, `drop_index2_admitted`, `repair_admitted`, `set_buffer_config_admitted`, `replicate_interner_from_admitted`, `replicate_index2_descriptors_from_admitted`, `seed_log_from_data_store_admitted`, `bulk_populate_index2_admitted`, `create_sorted_index_with_include_admitted`, `drop_sorted_index_admitted`, and `begin_write_barrier_with_permit`.
+
+**Exemptions (12 named APIs/types and reasons):** (1) `begin_write_barrier_admitted`, (2) `begin_write_barrier_admitted_impl` — infallible; callers resolve the table under the same permit or are checked twins; (3) `begin_migration_freeze_admitted` — the freeze bit rejects a second claimant; (4) `create_with_domain_admitted`, (5) `open_with_domain_admitted` — construction/open; (6) `recover_hash_renames_admitted`, (7) `rerun_identity_migration_admitted` — open-time recovery/identity setup; (8) `persist_interner_admitted`, (9) `intern_query_value_admitted` — repo-shared interner, not a table store; (10) `RecordCounter::set_admitted`, (11) `RecordCounter::set_to_admitted`, (12) `RecordCounter::persist_admitted` — separate metric/counter APIs; counter persistence is intentionally called on the detached source during rename preparation. No visibility of existing items was widened by S2.
+
+Rejected alternatives: holding `ddl_admission` across the attempt can deadlock; checking `MIGRATION_FREEZE` in DDL would block migration coordinator DDL on its frozen source (`admin_migration.rs:460`); adding a barrier bit is unavailable because the u8 selector space is full. Unmounted accidental file `crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_core.rs` remains untouched per no-delete instruction; current directory listing had four entries, not more than the seven-entry cap. This file is not mounted.
+
+### S3 — guard retirement
+
+`MigrationFreezeGuard` now has private `armed`; `try_set` arms it, `retire` disarms it, and `Drop` clears only while armed. The acceptance tests named above were added, not run.
+
+### S4 — rename freeze RAII and visibility wait
+
+New crate-private type/methods: `RenameFreeze::{begin, await_visible, source, retire}` and `Drop`. It begins the admitted freeze, detaches the source, bounds gate initialization plus high-water visibility wait, matches `Visible` and `ReopenRequired` exhaustively, returns the underlying gate error or a timeout `Conflict`, and on abort/cancel reattaches before explicitly dropping its freeze guard. Successful `retire` keeps source detached/frozen. No existing item visibility was widened.
+
+### S5 — transition integration
+
+`rename_table_transition` and `rename_table_stores_admitted` precheck configuration after admission, resolve source with that permit, freeze and await visibility before prepare, drain history, flush the counter, copy, persist and commit, then retire only on success. Private `prepare_table_rename_admitted` now takes `&RenameFreeze`; its callers remain within `catalog.rs`. `commit_table_rename_admitted` has no freeze parameter. Recovery freezes only when source identity matches, before persistence, and retires after successful source removal; it does not await visibility or flush the counter because it does not copy stores. Public rename/recovery signatures remain unchanged. Counter source review: increment is cache-only (`record_counter.rs:149-185`); dirty `persist_admitted` writes through (`:223-243`), so the counter test is expected to distinguish lazy persistence on master, but this is not a runtime result.
+
+### Test evidence and clarification
+
+The held-version visibility test cannot use strict `insert`: `insert_returning_version` calls `write_receipt` with `VisibilityWait::Strict` (`table_manager/admission/crud.rs:101-110`), which awaits the unsettled version. It instead uses `insert_with_receipt` with a bounded wait, asserts a pending receipt and reads back the row while keeping the version guard alive, then checks admitted buffer-config DDL. Parent source review established `open_index_build_snapshot` uses `snapshot_at` (`shamir-tx/src/mvcc_store/gate.rs:492-505`), which pins without waiting for the settled floor. Therefore the earlier inference that `create_index` must block behind a held gate guard was incorrect; no such claim is made. The test uses buffer-config DDL as a writable probe, a deviation from the brief's suggested index-create probe, for parent review. No test was run.
+
+### M1–M7 remaining failure modes (brief table)
+
+| # | Situation | Sub-stage behaviour | Master behaviour |
+|---|---|---|---|
+| M1 | `persist` fails after the catalogue tx committed (WAL outcome unknown, `WalDurability` turned into `Ok` and then the flush fails, flush error) | Source reattached and unfrozen, `Err` returned. Writes and DDL accepted by `a` afterwards are lost on restart (boot registers `b` on the stores copied at the failure) or on a retry that takes the recovery branch (switch without re-copy). | Identical |
+| M2 | After M1, `b` is free in memory | Create / drop / rename touching `b` can overwrite or remove the committed destination row. | Identical |
+| M3 | Rename future cancelled during `persist` | As M1 (abort on drop). | Identical (no freeze at all) |
+| M4 | Repo rename during M1 | The committed destination row can be stranded (revision-1 R9 analysis). | Identical |
+| M5 | Tx staged through a pre-rename clone, committed after a successful rename | Not gated (the token no longer resolves); rows land in orphaned source stores. | Identical (also DROP TABLE) |
+| M6 | Wire code of rename errors | `code: None` (`admin_table_index.rs:255-259,294`). | Identical |
+| M7 | `RecordCounter` writes through a stale handle | Land in the orphaned `__info__`; metric only. | Identical |
+
+M1 explicitly remains a data-loss window: after the catalogue transaction may have committed but durability flush fails, abort restores source usability although destination registration may persist; subsequent source mutations can be absent from copied destination stores. No lossless recovery claim is made.
+
+### S6 — deferred to 03d
+
+R2 name fence and mirror; `RenamePersistOutcome` and three-state outcome; R5 phases and into-doubt-on-drop; R6, R7, R9 repo-rename guard, R10 wire code, R11; original decisions 2/3/5/6/7 (catalogue split, `resolve_table_rename`, retry convergence, durability-tail seam); on-disk restart test; M5 stale pre-rename transaction fix; stage-before-staging vector shape from stop-E analysis. No production implementation of these items is claimed.
+
+No positive parked-commit test variant is required; no commit-pipeline seam was added. No positive parked-commit test variant is required; no commit-pipeline seam was added. The new production visibility timeout and test timeout have not been exercised locally. All tests, format and CI remain unverified.
+
+## Audit append — correction and authoritative revision-2 status
+
+The original revision-1 final paragraph has been restored verbatim at line 145. Revision-1 progress items 1 and 2 remain at lines 123–124; they are historical revision-1 status, not the current stage status. Current revision-2 progress is recorded under `## Progress (revision 2)` beginning at line 146. The first `## Design (revision 2)` beginning at line 154 is the canonical added implementation record; repeated identical copies later in this file resulted from an append-edit mistake and are preserved rather than deleted under the no-deletion instruction. No pre-existing sections were removed by this documentation correction.
+
+Acceptance 3–9 test files changed: `crates/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs`, `crates/shamir-engine/src/repo/tests/mod.rs`, and `crates/shamir-engine/src/repo/tests/rename/{mod.rs,freeze_tests.rs,visibility_wait_tests.rs,cancel_tests.rs}`. Current test names are listed under Item 5 at line 213. The abort error assertion is variant/message matching, not equality. The visibility test uses a bounded receipt because strict insert waits on the held version; it now verifies the row and attachment, then performs `create_index` while retaining the unresolved version guard. Parent verified `open_snapshot_at` does not wait for settled-floor progress, so this is not expected to block for that reason. The multi-thread writer loops until the first error rather than using a fixed iteration cap; its whole loop is bounded at 30 seconds, with rename/rejection, start signal, join, setup and destination reads also bounded. Early start/rename failures abort and reap the writer before panic. No commands, tests, formatter, layout script, build, or CI were run; full end-to-end review and CI remain outstanding.
+
+Layout observations are from file-tool listing only: the unauthorized unmounted `write_domain_core.rs` remains untouched, and its directory showed four entries, under the seven-entry limit. No Rust test, formatter, layout script, build, or CI was run. No positive parked-commit test variant is required. Acceptance/test code and S4/S5 implementation still require parent review and CI.
+
+- Item 5 follow-up: fixed the three sidecar-map `contains_key` calls in `touched_table_tokens` to dereference filter keys; preserved the index-op token reference and restored the blank separator before `Ok(PreLockResult)`. Concurrent writer acceptance now asserts destination count equals captured successful IDs; `count()` returns `usize` (`table_manager_crud.rs:698-701`). Spawned writer has a 30-second bound and is joined through `&mut JoinHandle`, with abort/reap on start/rename failure. No commands or tests run.
+## Phase 0 (revision 2)
+
+### Q11 — permit waits after version allocation; H is not established
+
+**Observed ordering:** ordinary single-row CRUD does not allocate a repository MVCC version and then request the repository write permit: `TableManager::insert_unacknowledged` enters writer-drain / optional `unique_write_lock` at `crates/shamir-engine/src/table/table_manager/operations/table_manager_crud.rs:206-223`, then writes through MVCC at `:244-258`; the other CRUD families similarly check freeze before data mutation (`:318-332,499-515,593-609`). The transactional batch CRUD routes through an implicit transaction rather than allocating its own version (`:421-430`). `TableManager::admit` is explicitly documented as DDL/registry-flush-only and not called by leader write/commit (`crates/shamir-engine/src/table/table_manager/admission/domain/barrier/write_domain_barrier.rs:34-44`). Thus there is no ordinary CRUD path evidenced here that can hold its own allocated gate version while waiting on `admit()`.
+
+The leader commit allocator is reached only after validation/claim and the empty-tx fast path, at `crates/shamir-engine/src/tx/preparation/pre_commit/locked.rs:150-170` (and `:333-353` for the alternate path). Thereafter it builds WAL ops and starts WAL, not a repository permit (`:173-203`; `:355-405`). Its version guard settles/materialization path is handled by the commit pipeline; no commit code was found acquiring `write_domain.admit()` after allocation. This supports refuting H for ordinary CRUD and leader tx commits, without claiming a universal proof from a search inventory.
+
+**Candidate analysis:** follower receipt application does acquire the repository permit (`crates/shamir-engine/src/tx/replication/follower_durability/receipt/apply.rs:95-147`), but allocation occurs later, after admission and setup (`:349-379`); its worker ownership and parked-guard policy are documented in `crates/shamir-engine/src/tx/replication/follower_durability/receipt/resume/worker.rs:6-33`. It therefore does not evidence a permit wait after allocation. The tx-gate initializer does store/WAL/provenance reads but no write-domain admission (`crates/shamir-engine/src/repo/instance/repo_instance/transactions.rs:51-88`; provenance helper `crates/shamir-engine/src/repo/meta/repl/gate_provenance.rs:15-27`). `PersistRegistry::flush_all` merely awaits registered `Persistable`s (`crates/shamir-engine/src/table/support/storage/persistable.rs:22-63`); the registered interner and counter are installed at `crates/shamir-engine/src/table/table_manager/admission/domain/barrier/write_domain_barrier.rs:147-154`, and `flush_metadata` is a separate explicit facade (`crates/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs:387-395`), not a post-allocation commit step. In particular `RecordCounter::persist` can admit when dirty (`crates/shamir-engine/src/table/support/storage/record_counter.rs:321-336`), but that is a separate flush call; no inspected call chain places it after a version allocation and before settling that version. The orphan replay barrier takes `begin_write_barrier` (`crates/shamir-engine/src/tx/drain/drainer/drain_step.rs:607-624`), but this operation does not request repository permit: its barrier implementation uses the admitted primitive directly (`crates/shamir-engine/src/table/table_manager/admission/domain/barrier/write_domain_barrier.rs:51-87`).
+
+**H verdict:** Stop condition H is **not established / refuted for ordinary CRUD and normal tx commit paths**: neither family necessarily waits for the permit after allocation, and the receipt worker acquires before allocation. This is source analysis, not runtime proof. A parked version can still make the S4 visibility wait time out by design; that is distinct from proving every ordinary write/commit blocks on the permit. No production/test edits are authorized by Phase 0.
+
+### Q12 — matching tests inspected; no stale-handle success assertion found
+
+The in-scope engine search for `rename_table_stores` / `rename_table_as` found these tests (and the `catalog.rs` implementation):
+
+- `crates/shamir-engine/src/repo/tests/core/repo_instance_tests.rs:37-55`, test `rename_membuffer_wrapped_table_flushes_copied_history`: it resolves `source` before rename (`:39-44`), but performs no write or DDL through that old handle after rename; it reads through a newly resolved destination (`:51-55`). No change.
+- `crates/shamir-engine/src/tx/replication/follower_durability/receipt/tests/ddl_interlock_tests.rs:84-167`, test `parked_apply_blocks_ddl_via_the_write_domain`: its rename of `plain` occurs at `:125-151`; no pre-rename table handle is retained or mutated after the rename. No change.
+
+Also read the full existing `migration_freeze_tests.rs` (lines 1-308): `r6_freeze_waits_for_parked_fast_committer_and_observes_row` (`:40-78`), `r7_second_freeze_rejected_without_clearing_first_owner` (`:80-98`), `r8_unique_slow_committer_rechecks_freeze_under_lock` (`:100-136`), `cancelled_freeze_clears_bit_at_both_preparation_awaits` (`:138-166`), `implicit_commit_maps_freeze_to_table_migrating` (`:168-185`), `r8_non_tx_crud_queued_before_freeze_rejects_without_mutation` (`:187-257`), and `tx_error_conversion_preserves_error_categories` (`:259-308`). These test a migration freeze, not post-successful-rename stale-handle behavior, so none requires a Q12 edit.
+
+**Q12 conclusion:** among the matching tests inspected, none writes or runs DDL through a handle resolved before rename and expects success afterward. Therefore no Q12 test change is currently identified. The prompt's literal requested exhaustive inventory is `rg -ln` across `crates`; only file tools were allowed, and available grep reports matching locations but not a guaranteed exhaustive list for a compound expression spanning every test module. Tests requiring Q12 change: **none identified**, not a claim that unrelated DB-level test code was exhaustively opened.
+
+### Q13 — migration coordinator twins mutate self and destination
+
+At `crates/shamir-engine/src/table/table_manager/admission/domain/barrier/admitted_ops.rs:245-275`, `migration_coordinator_admitted` checks the source permit against `self` and the destination permit against `dst` (`:254-255`), then constructs a coordinator from both source (`self`) and destination (`dst`) stores (`:260-268`). Under S2 both managers need attachment checks: one on `self`, one on `dst`; checks against the permits alone do not establish attachment.
+
+At `admitted_ops.rs:285-312`, `migration_coordinator_recovered_admitted` also validates both domains (`:292-293`) and captures both managers' data stores (`:300-303`). Despite the recovery factory not taking a new freeze (`:277-284,305-307`), it mutates/retains coordinator state for both source and destination, so S2 likewise applies to both `self` and `dst`, not only the receiver.
+## Progress (revision 2)
+
+- Item 1: **DONE — Phase 0 Q11–Q13** recorded above; H was not established (source analysis only).
+- Item 2: **DONE — S1 and its three sidecar-commit tests** recorded at line 209 above.
+- Item 3: **PARTIAL — S2/S3** as described at line 177; parent-reported correction review accepted core receiver/duplicate-check corrections. No tests/builds run.
+- Item 4: **DONE — S4/S5** as described at lines 210–212. No tests/builds run.
+- Item 5: **PARTIAL — acceptance tests 3–9** as listed at line 213 and in the appended test note below. Rust review/format/CI remain.
+
+## Design (revision 2) — implementation record and remaining scope
+
+### S1 — prelock token union
+
+`prelock.rs` now derives the touched-token set from `write_set`, `index_write_set`, `counter_deltas`, `staged_vectors`, and `staged_vector_deletes`, then sorts/deduplicates. The loop retains existing writer-drain/slow-path logic. Tests recorded at line 209 check frozen index-only and counter-only commits plus an unfrozen index-only control. No runtime result is claimed.
+
+### S2 — detach gate
+
+`TableManager::detached` is `pub(super)` and shared through Clone; constructors initialize false. `detach_for_rename` / `reattach_after_rename` store Release; `ensure_attached` loads Acquire and returns `MigrationFrozen`. `admit` gates public wrappers; explicit gates are in the 24 brief-listed admitted methods, including both migration coordinator twins on source and destination, plus `begin_write_barrier_with_permit`. CRUD/commit do not read detached.
+
+The explicit methods are `add_validator_binding_admitted`, `remove_validator_binding_admitted`, `write_ddl_op_status_admitted`, `drop_all_indexes_for_table_removal_admitted`, `seed_current_versions_admitted`, `reset_and_populate_index2_admitted`, `migration_coordinator_admitted`, `migration_coordinator_recovered_admitted`, `rename_index_admitted`, `create_index_v2_admitted`, `create_index_admitted`, `create_unique_index_admitted`, `drop_index_admitted`, `drop_unique_index_admitted`, `drop_index2_admitted`, `repair_admitted`, `set_buffer_config_admitted`, `replicate_interner_from_admitted`, `replicate_index2_descriptors_from_admitted`, `seed_log_from_data_store_admitted`, `bulk_populate_index2_admitted`, `create_sorted_index_with_include_admitted`, `drop_sorted_index_admitted`, and `begin_write_barrier_with_permit`.
+
+**Exemptions (12 named APIs/types and reasons):** (1) `begin_write_barrier_admitted`, (2) `begin_write_barrier_admitted_impl` — infallible; callers resolve the table under the same permit or are checked twins; (3) `begin_migration_freeze_admitted` — the freeze bit rejects a second claimant; (4) `create_with_domain_admitted`, (5) `open_with_domain_admitted` — construction/open; (6) `recover_hash_renames_admitted`, (7) `rerun_identity_migration_admitted` — open-time recovery/identity setup; (8) `persist_interner_admitted`, (9) `intern_query_value_admitted` — repo-shared interner, not a table store; (10) `RecordCounter::set_admitted`, (11) `RecordCounter::set_to_admitted`, (12) `RecordCounter::persist_admitted` — separate metric/counter APIs; counter persistence is intentionally called on the detached source during rename preparation. No visibility of existing items was widened by S2.
+
+Rejected alternatives: holding `ddl_admission` across the attempt can deadlock; checking `MIGRATION_FREEZE` in DDL would block migration coordinator DDL on its frozen source (`admin_migration.rs:460`); adding a barrier bit is unavailable because the u8 selector space is full. Unmounted accidental file `crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_core.rs` remains untouched per no-delete instruction; current directory listing had four entries, not more than the seven-entry cap. This file is not mounted.
+
+### S3 — guard retirement
+
+`MigrationFreezeGuard` now has private `armed`; `try_set` arms it, `retire` disarms it, and `Drop` clears only while armed. The acceptance tests named above were added, not run.
+
+### S4 — rename freeze RAII and visibility wait
+
+New crate-private type/methods: `RenameFreeze::{begin, await_visible, source, retire}` and `Drop`. It begins the admitted freeze, detaches the source, bounds gate initialization plus high-water visibility wait, matches `Visible` and `ReopenRequired` exhaustively, returns the underlying gate error or a timeout `Conflict`, and on abort/cancel reattaches before explicitly dropping its freeze guard. Successful `retire` keeps source detached/frozen. No existing item visibility was widened.
+
+### S5 — transition integration
+
+`rename_table_transition` and `rename_table_stores_admitted` precheck configuration after admission, resolve source with that permit, freeze and await visibility before prepare, drain history, flush the counter, copy, persist and commit, then retire only on success. Private `prepare_table_rename_admitted` now takes `&RenameFreeze`; its callers remain within `catalog.rs`. `commit_table_rename_admitted` has no freeze parameter. Recovery freezes only when source identity matches, before persistence, and retires after successful source removal; it does not await visibility or flush the counter because it does not copy stores. Public rename/recovery signatures remain unchanged. Counter source review: increment is cache-only (`record_counter.rs:149-185`); dirty `persist_admitted` writes through (`:223-243`), so the counter test is expected to distinguish lazy persistence on master, but this is not a runtime result.
+
+### Test evidence and clarification
+
+The held-version visibility test cannot use strict `insert`: `insert_returning_version` calls `write_receipt` with `VisibilityWait::Strict` (`table_manager/admission/crud.rs:101-110`), which awaits the unsettled version. It instead uses `insert_with_receipt` with a bounded wait, asserts a pending receipt and reads back the row while keeping the version guard alive, then checks admitted buffer-config DDL. Parent source review established `open_index_build_snapshot` uses `snapshot_at` (`shamir-tx/src/mvcc_store/gate.rs:492-505`), which pins without waiting for the settled floor. Therefore the earlier inference that `create_index` must block behind a held gate guard was incorrect; no such claim is made. The test uses buffer-config DDL as a writable probe, a deviation from the brief's suggested index-create probe, for parent review. No test was run.
+
+### M1–M7 remaining failure modes (brief table)
+
+| # | Situation | Sub-stage behaviour | Master behaviour |
+|---|---|---|---|
+| M1 | `persist` fails after the catalogue tx committed (WAL outcome unknown, `WalDurability` turned into `Ok` and then the flush fails, flush error) | Source reattached and unfrozen, `Err` returned. Writes and DDL accepted by `a` afterwards are lost on restart (boot registers `b` on the stores copied at the failure) or on a retry that takes the recovery branch (switch without re-copy). | Identical |
+| M2 | After M1, `b` is free in memory | Create / drop / rename touching `b` can overwrite or remove the committed destination row. | Identical |
+| M3 | Rename future cancelled during `persist` | As M1 (abort on drop). | Identical (no freeze at all) |
+| M4 | Repo rename during M1 | The committed destination row can be stranded (revision-1 R9 analysis). | Identical |
+| M5 | Tx staged through a pre-rename clone, committed after a successful rename | Not gated (the token no longer resolves); rows land in orphaned source stores. | Identical (also DROP TABLE) |
+| M6 | Wire code of rename errors | `code: None` (`admin_table_index.rs:255-259,294`). | Identical |
+| M7 | `RecordCounter` writes through a stale handle | Land in the orphaned `__info__`; metric only. | Identical |
+
+M1 explicitly remains a data-loss window: after the catalogue transaction may have committed but durability flush fails, abort restores source usability although destination registration may persist; subsequent source mutations can be absent from copied destination stores. No lossless recovery claim is made.
+
+### S6 — deferred to 03d
+
+R2 name fence and mirror; `RenamePersistOutcome` and three-state outcome; R5 phases and into-doubt-on-drop; R6, R7, R9 repo-rename guard, R10 wire code, R11; original decisions 2/3/5/6/7 (catalogue split, `resolve_table_rename`, retry convergence, durability-tail seam); on-disk restart test; M5 stale pre-rename transaction fix; stage-before-staging vector shape from stop-E analysis. No production implementation of these items is claimed.
+
+No positive parked-commit test variant is required; no commit-pipeline seam was added. No positive parked-commit test variant is required; no commit-pipeline seam was added. The new production visibility timeout and test timeout have not been exercised locally. All tests, format and CI remain unverified.
+
+## Audit append — correction and authoritative revision-2 status
+
+The original revision-1 final paragraph has been restored verbatim at line 145. Revision-1 progress items 1 and 2 remain at lines 123–124; they are historical revision-1 status, not the current stage status. Current revision-2 progress is recorded under `## Progress (revision 2)` beginning at line 146. The first `## Design (revision 2)` beginning at line 154 is the canonical added implementation record; repeated identical copies later in this file resulted from an append-edit mistake and are preserved rather than deleted under the no-deletion instruction. No pre-existing sections were removed by this documentation correction.
+
+Acceptance 3–9 test files changed: `crates/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs`, `crates/shamir-engine/src/repo/tests/mod.rs`, and `crates/shamir-engine/src/repo/tests/rename/{mod.rs,freeze_tests.rs,visibility_wait_tests.rs,cancel_tests.rs}`. Current test names are listed under Item 5 at line 213. The abort error assertion is variant/message matching, not equality. The visibility test uses a bounded receipt because strict insert waits on the held version; it now verifies the row and attachment, then performs `create_index` while retaining the unresolved version guard. Parent verified `open_snapshot_at` does not wait for settled-floor progress, so this is not expected to block for that reason. The multi-thread writer loops until the first error rather than using a fixed iteration cap; its whole loop is bounded at 30 seconds, with rename/rejection, start signal, join, setup and destination reads also bounded. Early start/rename failures abort and reap the writer before panic. No commands, tests, formatter, layout script, build, or CI were run; full end-to-end review and CI remain outstanding.
+
+Layout observations are from file-tool listing only: the unauthorized unmounted `write_domain_core.rs` remains untouched, and its directory showed four entries, under the seven-entry limit. No Rust test, formatter, layout script, build, or CI was run. No positive parked-commit test variant is required. Acceptance/test code and S4/S5 implementation still require parent review and CI.
+
+- Item 5 follow-up: fixed the three sidecar-map `contains_key` calls in `touched_table_tokens` to dereference filter keys; preserved the index-op token reference and restored the blank separator before `Ok(PreLockResult)`. Concurrent writer acceptance now asserts destination count equals captured successful IDs; `count()` returns `usize` (`table_manager_crud.rs:698-701`). Spawned writer has a 30-second bound and is joined through `&mut JoinHandle`, with abort/reap on start/rename failure. No commands or tests run.
+- Item 3: **PARTIAL — S2/S3 edits in progress; not fully reviewed or tested.** Added the `detached` lifecycle field/checks and S3 armed retirement in the authorized files. The 24 specified explicit checks were found in the intended mounted files; both migration twins validate source and destination permit domains and attachment. The five required checks are in the mounted `write_domain_index_core.rs`; its unique-index twin retains both duplicate permit checks. Public `begin_write_barrier` relies on `admit()` for attachment. Exemptions: the two admitted barrier helpers are infallible and callers resolve under the permit; freeze acquisition is protected by the freeze bit; create/open and recovery methods are construction/open-time work; interner persistence/interning mutate repo-shared state; `RecordCounter::{set_admitted, set_to_admitted, persist_admitted}` are metric APIs, with persistence intentionally used on detached source. Rejected alternatives: hold `ddl_admission` across attempt (deadlock risk), check `MIGRATION_FREEZE` in DDL (would reject migration coordinator DDL on its frozen source), or allocate a new barrier bit (selector space full). No commands, builds, or tests run. **Blocker:** an unauthorized, unmounted sibling `crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_core.rs` is present and untouched; the directory has four entries, under the stated seven-entry cap, but that file’s content/state has not been modified here. S2/S3 completion is not claimed pending full end-to-end read-through and parent disposition of the stray file.
+## Progress (revision 2)
+
+- Item 1: **DONE — Phase 0 Q11–Q13** recorded above; H was not established (source analysis only).
+- Item 2: **DONE — S1 and its three sidecar-commit tests** recorded at line 209 above.
+- Item 3: **PARTIAL — S2/S3** as described at line 177; parent-reported correction review accepted core receiver/duplicate-check corrections. No tests/builds run.
+- Item 4: **DONE — S4/S5** as described at lines 210–212. No tests/builds run.
+- Item 5: **PARTIAL — acceptance tests 3–9** as listed at line 213 and in the appended test note below. Rust review/format/CI remain.
+
+## Design (revision 2) — implementation record and remaining scope
+
+### S1 — prelock token union
+
+`prelock.rs` now derives the touched-token set from `write_set`, `index_write_set`, `counter_deltas`, `staged_vectors`, and `staged_vector_deletes`, then sorts/deduplicates. The loop retains existing writer-drain/slow-path logic. Tests recorded at line 209 check frozen index-only and counter-only commits plus an unfrozen index-only control. No runtime result is claimed.
+
+### S2 — detach gate
+
+`TableManager::detached` is `pub(super)` and shared through Clone; constructors initialize false. `detach_for_rename` / `reattach_after_rename` store Release; `ensure_attached` loads Acquire and returns `MigrationFrozen`. `admit` gates public wrappers; explicit gates are in the 24 brief-listed admitted methods, including both migration coordinator twins on source and destination, plus `begin_write_barrier_with_permit`. CRUD/commit do not read detached.
+
+The explicit methods are `add_validator_binding_admitted`, `remove_validator_binding_admitted`, `write_ddl_op_status_admitted`, `drop_all_indexes_for_table_removal_admitted`, `seed_current_versions_admitted`, `reset_and_populate_index2_admitted`, `migration_coordinator_admitted`, `migration_coordinator_recovered_admitted`, `rename_index_admitted`, `create_index_v2_admitted`, `create_index_admitted`, `create_unique_index_admitted`, `drop_index_admitted`, `drop_unique_index_admitted`, `drop_index2_admitted`, `repair_admitted`, `set_buffer_config_admitted`, `replicate_interner_from_admitted`, `replicate_index2_descriptors_from_admitted`, `seed_log_from_data_store_admitted`, `bulk_populate_index2_admitted`, `create_sorted_index_with_include_admitted`, `drop_sorted_index_admitted`, and `begin_write_barrier_with_permit`.
+
+**Exemptions (12 named APIs/types and reasons):** (1) `begin_write_barrier_admitted`, (2) `begin_write_barrier_admitted_impl` — infallible; callers resolve the table under the same permit or are checked twins; (3) `begin_migration_freeze_admitted` — the freeze bit rejects a second claimant; (4) `create_with_domain_admitted`, (5) `open_with_domain_admitted` — construction/open; (6) `recover_hash_renames_admitted`, (7) `rerun_identity_migration_admitted` — open-time recovery/identity setup; (8) `persist_interner_admitted`, (9) `intern_query_value_admitted` — repo-shared interner, not a table store; (10) `RecordCounter::set_admitted`, (11) `RecordCounter::set_to_admitted`, (12) `RecordCounter::persist_admitted` — separate metric/counter APIs; counter persistence is intentionally called on the detached source during rename preparation. No visibility of existing items was widened by S2.
+
+Rejected alternatives: holding `ddl_admission` across the attempt can deadlock; checking `MIGRATION_FREEZE` in DDL would block migration coordinator DDL on its frozen source (`admin_migration.rs:460`); adding a barrier bit is unavailable because the u8 selector space is full. Unmounted accidental file `crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_core.rs` remains untouched per no-delete instruction; current directory listing had four entries, not more than the seven-entry cap. This file is not mounted.
+
+### S3 — guard retirement
+
+`MigrationFreezeGuard` now has private `armed`; `try_set` arms it, `retire` disarms it, and `Drop` clears only while armed. The acceptance tests named above were added, not run.
+
+### S4 — rename freeze RAII and visibility wait
+
+New crate-private type/methods: `RenameFreeze::{begin, await_visible, source, retire}` and `Drop`. It begins the admitted freeze, detaches the source, bounds gate initialization plus high-water visibility wait, matches `Visible` and `ReopenRequired` exhaustively, returns the underlying gate error or a timeout `Conflict`, and on abort/cancel reattaches before explicitly dropping its freeze guard. Successful `retire` keeps source detached/frozen. No existing item visibility was widened.
+
+### S5 — transition integration
+
+`rename_table_transition` and `rename_table_stores_admitted` precheck configuration after admission, resolve source with that permit, freeze and await visibility before prepare, drain history, flush the counter, copy, persist and commit, then retire only on success. Private `prepare_table_rename_admitted` now takes `&RenameFreeze`; its callers remain within `catalog.rs`. `commit_table_rename_admitted` has no freeze parameter. Recovery freezes only when source identity matches, before persistence, and retires after successful source removal; it does not await visibility or flush the counter because it does not copy stores. Public rename/recovery signatures remain unchanged. Counter source review: increment is cache-only (`record_counter.rs:149-185`); dirty `persist_admitted` writes through (`:223-243`), so the counter test is expected to distinguish lazy persistence on master, but this is not a runtime result.
+
+### Test evidence and clarification
+
+The held-version visibility test cannot use strict `insert`: `insert_returning_version` calls `write_receipt` with `VisibilityWait::Strict` (`table_manager/admission/crud.rs:101-110`), which awaits the unsettled version. It instead uses `insert_with_receipt` with a bounded wait, asserts a pending receipt and reads back the row while keeping the version guard alive, then checks admitted buffer-config DDL. Parent source review established `open_index_build_snapshot` uses `snapshot_at` (`shamir-tx/src/mvcc_store/gate.rs:492-505`), which pins without waiting for the settled floor. Therefore the earlier inference that `create_index` must block behind a held gate guard was incorrect; no such claim is made. The test uses buffer-config DDL as a writable probe, a deviation from the brief's suggested index-create probe, for parent review. No test was run.
+
+### M1–M7 remaining failure modes (brief table)
+
+| # | Situation | Sub-stage behaviour | Master behaviour |
+|---|---|---|---|
+| M1 | `persist` fails after the catalogue tx committed (WAL outcome unknown, `WalDurability` turned into `Ok` and then the flush fails, flush error) | Source reattached and unfrozen, `Err` returned. Writes and DDL accepted by `a` afterwards are lost on restart (boot registers `b` on the stores copied at the failure) or on a retry that takes the recovery branch (switch without re-copy). | Identical |
+| M2 | After M1, `b` is free in memory | Create / drop / rename touching `b` can overwrite or remove the committed destination row. | Identical |
+| M3 | Rename future cancelled during `persist` | As M1 (abort on drop). | Identical (no freeze at all) |
+| M4 | Repo rename during M1 | The committed destination row can be stranded (revision-1 R9 analysis). | Identical |
+| M5 | Tx staged through a pre-rename clone, committed after a successful rename | Not gated (the token no longer resolves); rows land in orphaned source stores. | Identical (also DROP TABLE) |
+| M6 | Wire code of rename errors | `code: None` (`admin_table_index.rs:255-259,294`). | Identical |
+| M7 | `RecordCounter` writes through a stale handle | Land in the orphaned `__info__`; metric only. | Identical |
+
+M1 explicitly remains a data-loss window: after the catalogue transaction may have committed but durability flush fails, abort restores source usability although destination registration may persist; subsequent source mutations can be absent from copied destination stores. No lossless recovery claim is made.
+
+### S6 — deferred to 03d
+
+R2 name fence and mirror; `RenamePersistOutcome` and three-state outcome; R5 phases and into-doubt-on-drop; R6, R7, R9 repo-rename guard, R10 wire code, R11; original decisions 2/3/5/6/7 (catalogue split, `resolve_table_rename`, retry convergence, durability-tail seam); on-disk restart test; M5 stale pre-rename transaction fix; stage-before-staging vector shape from stop-E analysis. No production implementation of these items is claimed.
+
+No positive parked-commit test variant is required; no commit-pipeline seam was added. No positive parked-commit test variant is required; no commit-pipeline seam was added. The new production visibility timeout and test timeout have not been exercised locally. All tests, format and CI remain unverified.
+
+## Audit append — correction and authoritative revision-2 status
+
+The original revision-1 final paragraph has been restored verbatim at line 145. Revision-1 progress items 1 and 2 remain at lines 123–124; they are historical revision-1 status, not the current stage status. Current revision-2 progress is recorded under `## Progress (revision 2)` beginning at line 146. The first `## Design (revision 2)` beginning at line 154 is the canonical added implementation record; repeated identical copies later in this file resulted from an append-edit mistake and are preserved rather than deleted under the no-deletion instruction. No pre-existing sections were removed by this documentation correction.
+
+Acceptance 3–9 test files changed: `crates/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs`, `crates/shamir-engine/src/repo/tests/mod.rs`, and `crates/shamir-engine/src/repo/tests/rename/{mod.rs,freeze_tests.rs,visibility_wait_tests.rs,cancel_tests.rs}`. Current test names are listed under Item 5 at line 213. The abort error assertion is variant/message matching, not equality. The visibility test uses a bounded receipt because strict insert waits on the held version; it now verifies the row and attachment, then performs `create_index` while retaining the unresolved version guard. Parent verified `open_snapshot_at` does not wait for settled-floor progress, so this is not expected to block for that reason. The multi-thread writer loops until the first error rather than using a fixed iteration cap; its whole loop is bounded at 30 seconds, with rename/rejection, start signal, join, setup and destination reads also bounded. Early start/rename failures abort and reap the writer before panic. No commands, tests, formatter, layout script, build, or CI were run; full end-to-end review and CI remain outstanding.
+
+Layout observations are from file-tool listing only: the unauthorized unmounted `write_domain_core.rs` remains untouched, and its directory showed four entries, under the seven-entry limit. No Rust test, formatter, layout script, build, or CI was run. No positive parked-commit test variant is required. Acceptance/test code and S4/S5 implementation still require parent review and CI.
+
+- Item 5 follow-up: fixed the three sidecar-map `contains_key` calls in `touched_table_tokens` to dereference filter keys; preserved the index-op token reference and restored the blank separator before `Ok(PreLockResult)`. Concurrent writer acceptance now asserts destination count equals captured successful IDs; `count()` returns `usize` (`table_manager_crud.rs:698-701`). Spawned writer has a 30-second bound and is joined through `&mut JoinHandle`, with abort/reap on start/rename failure. No commands or tests run.
+## Phase 0 (revision 2) errata — corrected Q11/Q12 inventory
+
+This errata supplements the preceding Phase 0 text; it does not erase or rewrite the earlier observations. The earlier Q11 statement that orphan replay's public `begin_write_barrier` did not request repository admission was incorrect. The earlier Q12 conclusion was based on an incomplete inventory. These corrections supersede those specific statements.
+
+### Q11 correction — orphan replay can hold an allocated version while waiting for permit; H remains not universal
+
+`drain_step.rs:607-624` identifies orphan posting replay and calls `tbl.begin_write_barrier(SCHEMA_ACTIVATION)` at `:615-620`. Contrary to the earlier note, this public wrapper admits: `ddl_barriers.rs:49-55` calls `self.admit().await?` before its barrier sequence, and `TableManager::admit` obtains the repo permit (`write_domain_barrier.rs:39-44`). Therefore orphan replay can indeed wait for the repository permit while processing already allocated/unsettled WAL versions. If a rename owns that permit and awaits visibility of such a version, this is a plausible obstruction until the bounded visibility wait expires. The `drain_step.rs:607-614` comments also establish that replay holds no commit lock or map guard across the await; they do not negate this permit wait.
+
+This candidate does not establish H. H asserts every ordinary CRUD write or every transaction commit on a table without in-flight DDL takes that path. The permit-waiting site is conditional orphan replay, not universal ordinary write/commit behavior. Ordinary CRUD code has no post-allocation repo admission in the inspected sequence: `table_manager_crud.rs:206-258` checks/drains before writing, and `RecordCounter::increment` is a local counter update (parent independently verified it does not admit; the separate persistence API is `record_counter.rs:321-336`). Main review also independently checked normal commit materialization settles before cleanup and that `gate_provenance` only reads provenance (`gate_provenance.rs:15-27`); the gate initializer itself reads stores/WAL and has no permit call (`transactions.rs:51-88`). The follower receipt path explicitly admits before allocation (`receipt/apply.rs:95-147,349-379`), so it is not evidence of the post-allocation wait candidate.
+
+**Corrected verdict:** H is **not established**: a conditional orphan replay wait is possible and may force a visibility timeout, but it does not show that every ordinary CRUD write or every transaction commit on a table without in-flight DDL must wait for the permit. This is source analysis only, not runtime proof. The timeout remains material to S4.
+
+### Q12 correction — complete parent-supplied matching-file inventory read
+
+The parent supplied the result of its repository-wide `rg -l` inventory. Every listed file was opened/read in full (using successive view ranges for long files). Findings about pre-rename handles and rename outcomes:
+
+1. `crates/shamir-engine/src/repo/tests/core/repo_instance_tests.rs` (725 lines): `rename_membuffer_wrapped_table_flushes_copied_history` resolves and writes through `source` before rename (`:37-49`), then resolves destination afresh and reads it (`:51-55`). It does not mutate the old source handle after success. No stale-handle success assertion.
+2. `crates/shamir-engine/src/tx/replication/follower_durability/receipt/tests/ddl_interlock_tests.rs` (227 lines): `parked_apply_blocks_ddl_via_the_write_domain` renames `plain` while receipt application owns the permit (`:84-167`); it does not resolve or retain a pre-rename `plain` handle, nor write/DDL through one after rename. Remaining test covers paused reservation (`:174-227`), unrelated. No stale-handle success assertion.
+3. `crates/shamir-db/tests/rename_repo_e2e/main.rs` (277 lines): tests logical repository re-key, data and index reads/inserts via repo names, destination conflict and missing source (`:53-277`). It explicitly says repo rename uses no `rename_table_stores` (`:10-13`). No table handle retained across table rename; no stale-handle assertion.
+4. `crates/shamir-db/tests/rename_migration/renames/rename_table_e2e.rs` (323 lines): empty and populated table rename coverage, subsequent old-name inserts fail and new-name inserts/queries succeed (`:64-137,224-323`); destination-exists and schema-bearing refusals (`:139-214`). These are name-based API operations, not writes/DDL through a pre-rename `TableManager`. No stale-handle success assertion.
+5. `crates/shamir-db/src/shamir_db/shamir_db/tests/catalogue/unique_store_names_tests.rs` (617 lines): `drop_recreate_separates_store_incarnations` uses an old handle only before drop (`:41-91`). `rename_recreate_and_swap_names_preserves_each_incarnation` writes before rename and checks the renamed/recreated names afterward (`:93-157`), without using its old manager after successful rename. `durability_tail_failure_retry_reconciles_registration_and_is_idempotent` uses a retained source handle after a *failed* rename, before retry, to verify source rows (`:160-250`); this is not post-success stale-handle behavior. `precommit_persist_failure_retry_uses_fresh_destination_id` likewise checks source after failed persist (`:252-318`). The remaining tests cover source/destination identity conflicts, stale catalogue rows and idless legacy retry (`:320-575), not a post-success write/DDL through an old handle. No Q12 change required.
+6. `crates/shamir-db/src/shamir_db/shamir_db/tests/catalogue/catalogue_rename_order_tests.rs` (820 lines): the entire file tests catalogue-write ordering/error propagation, function/validator and database/repository renames, creation/removal, and duplicate DB registration (`:1-820`). The table-rename failure test injects destination-save failure and checks the source catalogue row remains (`:332-386`); it does not retain a pre-rename table handle or expect stale-handle mutation after successful rename. No Q12 change required.
+7. `crates/shamir-tx/src/mvcc_store/tests/write_tests/drain_tests.rs` (589 lines): unit coverage of overlay/history drain, durable watermark and drain lock/error retry (`:1-589`). It discusses rename as a caller of `drain_to_history` (`:1-5,220-231`), but does not call a table-rename API or use a pre-rename manager. In particular its allocated visible-but-undurable guard setup and drain retry (`:532-590`) are local MVCC unit cases, not successful rename stale-handle writes. No Q12 change required.
+
+**Corrected Q12 verdict:** complete against the parent-provided seven-file matching inventory: **no test asserts successful post-rename write or DDL through a handle resolved before the rename; no Q12 test changes are required.** This is distinct from saying stale-handle behavior is tested; none of these seven files supplies that new acceptance coverage.
+
+## Progress (revision 2) errata
+## Progress (revision 2)
+
+- Item 1: **DONE — Phase 0 Q11–Q13** recorded above; H was not established (source analysis only).
+- Item 2: **DONE — S1 and its three sidecar-commit tests** recorded at line 209 above.
+- Item 3: **PARTIAL — S2/S3** as described at line 177; parent-reported correction review accepted core receiver/duplicate-check corrections. No tests/builds run.
+- Item 4: **DONE — S4/S5** as described at lines 210–212. No tests/builds run.
+- Item 5: **PARTIAL — acceptance tests 3–9** as listed at line 213 and in the appended test note below. Rust review/format/CI remain.
+
+## Design (revision 2) — implementation record and remaining scope
+
+### S1 — prelock token union
+
+`prelock.rs` now derives the touched-token set from `write_set`, `index_write_set`, `counter_deltas`, `staged_vectors`, and `staged_vector_deletes`, then sorts/deduplicates. The loop retains existing writer-drain/slow-path logic. Tests recorded at line 209 check frozen index-only and counter-only commits plus an unfrozen index-only control. No runtime result is claimed.
+
+### S2 — detach gate
+
+`TableManager::detached` is `pub(super)` and shared through Clone; constructors initialize false. `detach_for_rename` / `reattach_after_rename` store Release; `ensure_attached` loads Acquire and returns `MigrationFrozen`. `admit` gates public wrappers; explicit gates are in the 24 brief-listed admitted methods, including both migration coordinator twins on source and destination, plus `begin_write_barrier_with_permit`. CRUD/commit do not read detached.
+
+The explicit methods are `add_validator_binding_admitted`, `remove_validator_binding_admitted`, `write_ddl_op_status_admitted`, `drop_all_indexes_for_table_removal_admitted`, `seed_current_versions_admitted`, `reset_and_populate_index2_admitted`, `migration_coordinator_admitted`, `migration_coordinator_recovered_admitted`, `rename_index_admitted`, `create_index_v2_admitted`, `create_index_admitted`, `create_unique_index_admitted`, `drop_index_admitted`, `drop_unique_index_admitted`, `drop_index2_admitted`, `repair_admitted`, `set_buffer_config_admitted`, `replicate_interner_from_admitted`, `replicate_index2_descriptors_from_admitted`, `seed_log_from_data_store_admitted`, `bulk_populate_index2_admitted`, `create_sorted_index_with_include_admitted`, `drop_sorted_index_admitted`, and `begin_write_barrier_with_permit`.
+
+**Exemptions (12 named APIs/types and reasons):** (1) `begin_write_barrier_admitted`, (2) `begin_write_barrier_admitted_impl` — infallible; callers resolve the table under the same permit or are checked twins; (3) `begin_migration_freeze_admitted` — the freeze bit rejects a second claimant; (4) `create_with_domain_admitted`, (5) `open_with_domain_admitted` — construction/open; (6) `recover_hash_renames_admitted`, (7) `rerun_identity_migration_admitted` — open-time recovery/identity setup; (8) `persist_interner_admitted`, (9) `intern_query_value_admitted` — repo-shared interner, not a table store; (10) `RecordCounter::set_admitted`, (11) `RecordCounter::set_to_admitted`, (12) `RecordCounter::persist_admitted` — separate metric/counter APIs; counter persistence is intentionally called on the detached source during rename preparation. No visibility of existing items was widened by S2.
+
+Rejected alternatives: holding `ddl_admission` across the attempt can deadlock; checking `MIGRATION_FREEZE` in DDL would block migration coordinator DDL on its frozen source (`admin_migration.rs:460`); adding a barrier bit is unavailable because the u8 selector space is full. Unmounted accidental file `crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_core.rs` remains untouched per no-delete instruction; current directory listing had four entries, not more than the seven-entry cap. This file is not mounted.
+
+### S3 — guard retirement
+
+`MigrationFreezeGuard` now has private `armed`; `try_set` arms it, `retire` disarms it, and `Drop` clears only while armed. The acceptance tests named above were added, not run.
+
+### S4 — rename freeze RAII and visibility wait
+
+New crate-private type/methods: `RenameFreeze::{begin, await_visible, source, retire}` and `Drop`. It begins the admitted freeze, detaches the source, bounds gate initialization plus high-water visibility wait, matches `Visible` and `ReopenRequired` exhaustively, returns the underlying gate error or a timeout `Conflict`, and on abort/cancel reattaches before explicitly dropping its freeze guard. Successful `retire` keeps source detached/frozen. No existing item visibility was widened.
+
+### S5 — transition integration
+
+`rename_table_transition` and `rename_table_stores_admitted` precheck configuration after admission, resolve source with that permit, freeze and await visibility before prepare, drain history, flush the counter, copy, persist and commit, then retire only on success. Private `prepare_table_rename_admitted` now takes `&RenameFreeze`; its callers remain within `catalog.rs`. `commit_table_rename_admitted` has no freeze parameter. Recovery freezes only when source identity matches, before persistence, and retires after successful source removal; it does not await visibility or flush the counter because it does not copy stores. Public rename/recovery signatures remain unchanged. Counter source review: increment is cache-only (`record_counter.rs:149-185`); dirty `persist_admitted` writes through (`:223-243`), so the counter test is expected to distinguish lazy persistence on master, but this is not a runtime result.
+
+### Test evidence and clarification
+
+The held-version visibility test cannot use strict `insert`: `insert_returning_version` calls `write_receipt` with `VisibilityWait::Strict` (`table_manager/admission/crud.rs:101-110`), which awaits the unsettled version. It instead uses `insert_with_receipt` with a bounded wait, asserts a pending receipt and reads back the row while keeping the version guard alive, then checks admitted buffer-config DDL. Parent source review established `open_index_build_snapshot` uses `snapshot_at` (`shamir-tx/src/mvcc_store/gate.rs:492-505`), which pins without waiting for the settled floor. Therefore the earlier inference that `create_index` must block behind a held gate guard was incorrect; no such claim is made. The test uses buffer-config DDL as a writable probe, a deviation from the brief's suggested index-create probe, for parent review. No test was run.
+
+### M1–M7 remaining failure modes (brief table)
+
+| # | Situation | Sub-stage behaviour | Master behaviour |
+|---|---|---|---|
+| M1 | `persist` fails after the catalogue tx committed (WAL outcome unknown, `WalDurability` turned into `Ok` and then the flush fails, flush error) | Source reattached and unfrozen, `Err` returned. Writes and DDL accepted by `a` afterwards are lost on restart (boot registers `b` on the stores copied at the failure) or on a retry that takes the recovery branch (switch without re-copy). | Identical |
+| M2 | After M1, `b` is free in memory | Create / drop / rename touching `b` can overwrite or remove the committed destination row. | Identical |
+| M3 | Rename future cancelled during `persist` | As M1 (abort on drop). | Identical (no freeze at all) |
+| M4 | Repo rename during M1 | The committed destination row can be stranded (revision-1 R9 analysis). | Identical |
+| M5 | Tx staged through a pre-rename clone, committed after a successful rename | Not gated (the token no longer resolves); rows land in orphaned source stores. | Identical (also DROP TABLE) |
+| M6 | Wire code of rename errors | `code: None` (`admin_table_index.rs:255-259,294`). | Identical |
+| M7 | `RecordCounter` writes through a stale handle | Land in the orphaned `__info__`; metric only. | Identical |
+
+M1 explicitly remains a data-loss window: after the catalogue transaction may have committed but durability flush fails, abort restores source usability although destination registration may persist; subsequent source mutations can be absent from copied destination stores. No lossless recovery claim is made.
+
+### S6 — deferred to 03d
+
+R2 name fence and mirror; `RenamePersistOutcome` and three-state outcome; R5 phases and into-doubt-on-drop; R6, R7, R9 repo-rename guard, R10 wire code, R11; original decisions 2/3/5/6/7 (catalogue split, `resolve_table_rename`, retry convergence, durability-tail seam); on-disk restart test; M5 stale pre-rename transaction fix; stage-before-staging vector shape from stop-E analysis. No production implementation of these items is claimed.
+
+No positive parked-commit test variant is required; no commit-pipeline seam was added. No positive parked-commit test variant is required; no commit-pipeline seam was added. The new production visibility timeout and test timeout have not been exercised locally. All tests, format and CI remain unverified.
+
+## Audit append — correction and authoritative revision-2 status
+
+The original revision-1 final paragraph has been restored verbatim at line 145. Revision-1 progress items 1 and 2 remain at lines 123–124; they are historical revision-1 status, not the current stage status. Current revision-2 progress is recorded under `## Progress (revision 2)` beginning at line 146. The first `## Design (revision 2)` beginning at line 154 is the canonical added implementation record; repeated identical copies later in this file resulted from an append-edit mistake and are preserved rather than deleted under the no-deletion instruction. No pre-existing sections were removed by this documentation correction.
+
+Acceptance 3–9 test files changed: `crates/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs`, `crates/shamir-engine/src/repo/tests/mod.rs`, and `crates/shamir-engine/src/repo/tests/rename/{mod.rs,freeze_tests.rs,visibility_wait_tests.rs,cancel_tests.rs}`. Current test names are listed under Item 5 at line 213. The abort error assertion is variant/message matching, not equality. The visibility test uses a bounded receipt because strict insert waits on the held version; it now verifies the row and attachment, then performs `create_index` while retaining the unresolved version guard. Parent verified `open_snapshot_at` does not wait for settled-floor progress, so this is not expected to block for that reason. The multi-thread writer loops until the first error rather than using a fixed iteration cap; its whole loop is bounded at 30 seconds, with rename/rejection, start signal, join, setup and destination reads also bounded. Early start/rename failures abort and reap the writer before panic. No commands, tests, formatter, layout script, build, or CI were run; full end-to-end review and CI remain outstanding.
+
+Layout observations are from file-tool listing only: the unauthorized unmounted `write_domain_core.rs` remains untouched, and its directory showed four entries, under the seven-entry limit. No Rust test, formatter, layout script, build, or CI was run. No positive parked-commit test variant is required. Acceptance/test code and S4/S5 implementation still require parent review and CI.
+
+- Item 5 follow-up: fixed the three sidecar-map `contains_key` calls in `touched_table_tokens` to dereference filter keys; preserved the index-op token reference and restored the blank separator before `Ok(PreLockResult)`. Concurrent writer acceptance now asserts destination count equals captured successful IDs; `count()` returns `usize` (`table_manager_crud.rs:698-701`). Spawned writer has a 30-second bound and is joined through `&mut JoinHandle`, with abort/reap on start/rename failure. No commands or tests run.
+- Item 4: **DONE — S4/S5 implementation** in `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs` and `catalog.rs`. `RenameFreeze` takes and owns the freeze, detaches source, awaits `VisibleOutcome` under bounded timeout, exposes source for counter flush, retires on successful transition, and restores attachment before explicitly dropping its guard on abort/cancellation. Normal transitions perform configured-source precheck, freeze/visibility wait before prepare, drain then counter flush then copy; both recovery branches freeze only on source-incarnation match before `persist` and retire only after source removal. The source counter is lazily persisted: increments are cache-only (`record_counter.rs:149-185`), dirty flush writes through (`:223-243`). No visibility widening; no commands/builds/tests run.
+
+- Defect review follow-up: the abort test compares the exact `DbError::Storage` variant/message with `matches!` (no `PartialEq` assumption). The visibility timeout test retains the unresolved guard until its end; strict CRUD acknowledgement would block behind it, so it uses a bounded receipt and confirms the inserted row, then uses admitted buffer-config DDL as a non-snapshot-dependent writable-DDL probe. Its timeout is driven by awaiting the operation's own bounded timeout, not by polling a completed future. The multi-thread writer test now bounds each insert, uses a start signal to prove writer activity, waits for rejection via oneshot inside bounded rename, bounds rename and join, and asserts exact `MigrationFrozen { table: "a" }`. Cancellation recovery checks attachment explicitly and verifies CRUD plus index DDL can proceed.
+** Tests: `retire_keeps_freeze_bit_after_drop`, `dropped_freeze_guard_clears_bit`; `successful_rename_rejects_stale_clone_crud_and_ddl`, `failed_rename_reattaches_and_unfreezes_source`, `writer_is_drained_before_successful_rename`, `rename_flushes_live_record_counter`; `visibility_wait_times_out_before_persist_and_restores_source`; `cancelled_persist_reattaches_and_unfreezes_source`, `cancelled_visibility_wait_reattaches_and_unfreezes_source`. Corrections: storage-error equality uses exact `matches!`; held-version test performs a bounded-receipt insert (and verifies pending receipt/value) instead of strict insert, and probes DDL with `set_buffer_config_admitted` because it is a non-snapshot-dependent writable DDL path; timeout is exercised by awaiting the rename directly, not a poll loop; concurrent writer uses bounded inserts, first-success/rejection oneshots, bounded outer rename/join; freeze errors assert table name. Test files were read individually, not all end-to-end after final correction. No commands/builds/tests run; parent review/format and CI validation remain. S6 deferrals remain for 03d: R2 name fence/mirror; `RenamePersistOutcome` and three-state outcome; R5 phases/into-doubt-on-drop; R6, R7, R9 repo-rename guard, R10 wire code, R11; decisions 2/3/5/6/7 (catalogue split, `resolve_table_rename`, retry convergence, durability-tail seam); on-disk restart test; M5 stale pre-rename transaction path; stage-before-staging vector shape.
+## Progress (revision 2)
+
+- Item 1: **DONE — Phase 0 Q11–Q13** recorded above; H was not established (source analysis only).
+- Item 2: **DONE — S1 and its three sidecar-commit tests** recorded at line 209 above.
+- Item 3: **PARTIAL — S2/S3** as described at line 177; parent-reported correction review accepted core receiver/duplicate-check corrections. No tests/builds run.
+- Item 4: **DONE — S4/S5** as described at lines 210–212. No tests/builds run.
+- Item 5: **PARTIAL — acceptance tests 3–9** as listed at line 213 and in the appended test note below. Rust review/format/CI remain.
+
+## Design (revision 2) — implementation record and remaining scope
+
+### S1 — prelock token union
+
+`prelock.rs` now derives the touched-token set from `write_set`, `index_write_set`, `counter_deltas`, `staged_vectors`, and `staged_vector_deletes`, then sorts/deduplicates. The loop retains existing writer-drain/slow-path logic. Tests recorded at line 209 check frozen index-only and counter-only commits plus an unfrozen index-only control. No runtime result is claimed.
+
+### S2 — detach gate
+
+`TableManager::detached` is `pub(super)` and shared through Clone; constructors initialize false. `detach_for_rename` / `reattach_after_rename` store Release; `ensure_attached` loads Acquire and returns `MigrationFrozen`. `admit` gates public wrappers; explicit gates are in the 24 brief-listed admitted methods, including both migration coordinator twins on source and destination, plus `begin_write_barrier_with_permit`. CRUD/commit do not read detached.
+
+The explicit methods are `add_validator_binding_admitted`, `remove_validator_binding_admitted`, `write_ddl_op_status_admitted`, `drop_all_indexes_for_table_removal_admitted`, `seed_current_versions_admitted`, `reset_and_populate_index2_admitted`, `migration_coordinator_admitted`, `migration_coordinator_recovered_admitted`, `rename_index_admitted`, `create_index_v2_admitted`, `create_index_admitted`, `create_unique_index_admitted`, `drop_index_admitted`, `drop_unique_index_admitted`, `drop_index2_admitted`, `repair_admitted`, `set_buffer_config_admitted`, `replicate_interner_from_admitted`, `replicate_index2_descriptors_from_admitted`, `seed_log_from_data_store_admitted`, `bulk_populate_index2_admitted`, `create_sorted_index_with_include_admitted`, `drop_sorted_index_admitted`, and `begin_write_barrier_with_permit`.
+
+**Exemptions (12 named APIs/types and reasons):** (1) `begin_write_barrier_admitted`, (2) `begin_write_barrier_admitted_impl` — infallible; callers resolve the table under the same permit or are checked twins; (3) `begin_migration_freeze_admitted` — the freeze bit rejects a second claimant; (4) `create_with_domain_admitted`, (5) `open_with_domain_admitted` — construction/open; (6) `recover_hash_renames_admitted`, (7) `rerun_identity_migration_admitted` — open-time recovery/identity setup; (8) `persist_interner_admitted`, (9) `intern_query_value_admitted` — repo-shared interner, not a table store; (10) `RecordCounter::set_admitted`, (11) `RecordCounter::set_to_admitted`, (12) `RecordCounter::persist_admitted` — separate metric/counter APIs; counter persistence is intentionally called on the detached source during rename preparation. No visibility of existing items was widened by S2.
+
+Rejected alternatives: holding `ddl_admission` across the attempt can deadlock; checking `MIGRATION_FREEZE` in DDL would block migration coordinator DDL on its frozen source (`admin_migration.rs:460`); adding a barrier bit is unavailable because the u8 selector space is full. Unmounted accidental file `crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_core.rs` remains untouched per no-delete instruction; current directory listing had four entries, not more than the seven-entry cap. This file is not mounted.
+
+### S3 — guard retirement
+
+`MigrationFreezeGuard` now has private `armed`; `try_set` arms it, `retire` disarms it, and `Drop` clears only while armed. The acceptance tests named above were added, not run.
+
+### S4 — rename freeze RAII and visibility wait
+
+New crate-private type/methods: `RenameFreeze::{begin, await_visible, source, retire}` and `Drop`. It begins the admitted freeze, detaches the source, bounds gate initialization plus high-water visibility wait, matches `Visible` and `ReopenRequired` exhaustively, returns the underlying gate error or a timeout `Conflict`, and on abort/cancel reattaches before explicitly dropping its freeze guard. Successful `retire` keeps source detached/frozen. No existing item visibility was widened.
+
+### S5 — transition integration
+
+`rename_table_transition` and `rename_table_stores_admitted` precheck configuration after admission, resolve source with that permit, freeze and await visibility before prepare, drain history, flush the counter, copy, persist and commit, then retire only on success. Private `prepare_table_rename_admitted` now takes `&RenameFreeze`; its callers remain within `catalog.rs`. `commit_table_rename_admitted` has no freeze parameter. Recovery freezes only when source identity matches, before persistence, and retires after successful source removal; it does not await visibility or flush the counter because it does not copy stores. Public rename/recovery signatures remain unchanged. Counter source review: increment is cache-only (`record_counter.rs:149-185`); dirty `persist_admitted` writes through (`:223-243`), so the counter test is expected to distinguish lazy persistence on master, but this is not a runtime result.
+
+### Test evidence and clarification
+
+The held-version visibility test cannot use strict `insert`: `insert_returning_version` calls `write_receipt` with `VisibilityWait::Strict` (`table_manager/admission/crud.rs:101-110`), which awaits the unsettled version. It instead uses `insert_with_receipt` with a bounded wait, asserts a pending receipt and reads back the row while keeping the version guard alive, then checks admitted buffer-config DDL. Parent source review established `open_index_build_snapshot` uses `snapshot_at` (`shamir-tx/src/mvcc_store/gate.rs:492-505`), which pins without waiting for the settled floor. Therefore the earlier inference that `create_index` must block behind a held gate guard was incorrect; no such claim is made. The test uses buffer-config DDL as a writable probe, a deviation from the brief's suggested index-create probe, for parent review. No test was run.
+
+### M1–M7 remaining failure modes (brief table)
+
+| # | Situation | Sub-stage behaviour | Master behaviour |
+|---|---|---|---|
+| M1 | `persist` fails after the catalogue tx committed (WAL outcome unknown, `WalDurability` turned into `Ok` and then the flush fails, flush error) | Source reattached and unfrozen, `Err` returned. Writes and DDL accepted by `a` afterwards are lost on restart (boot registers `b` on the stores copied at the failure) or on a retry that takes the recovery branch (switch without re-copy). | Identical |
+| M2 | After M1, `b` is free in memory | Create / drop / rename touching `b` can overwrite or remove the committed destination row. | Identical |
+| M3 | Rename future cancelled during `persist` | As M1 (abort on drop). | Identical (no freeze at all) |
+| M4 | Repo rename during M1 | The committed destination row can be stranded (revision-1 R9 analysis). | Identical |
+| M5 | Tx staged through a pre-rename clone, committed after a successful rename | Not gated (the token no longer resolves); rows land in orphaned source stores. | Identical (also DROP TABLE) |
+| M6 | Wire code of rename errors | `code: None` (`admin_table_index.rs:255-259,294`). | Identical |
+| M7 | `RecordCounter` writes through a stale handle | Land in the orphaned `__info__`; metric only. | Identical |
+
+M1 explicitly remains a data-loss window: after the catalogue transaction may have committed but durability flush fails, abort restores source usability although destination registration may persist; subsequent source mutations can be absent from copied destination stores. No lossless recovery claim is made.
+
+### S6 — deferred to 03d
+
+R2 name fence and mirror; `RenamePersistOutcome` and three-state outcome; R5 phases and into-doubt-on-drop; R6, R7, R9 repo-rename guard, R10 wire code, R11; original decisions 2/3/5/6/7 (catalogue split, `resolve_table_rename`, retry convergence, durability-tail seam); on-disk restart test; M5 stale pre-rename transaction fix; stage-before-staging vector shape from stop-E analysis. No production implementation of these items is claimed.
+
+No positive parked-commit test variant is required; no commit-pipeline seam was added. No positive parked-commit test variant is required; no commit-pipeline seam was added. The new production visibility timeout and test timeout have not been exercised locally. All tests, format and CI remain unverified.
+
+## Audit append — correction and authoritative revision-2 status
+
+The original revision-1 final paragraph has been restored verbatim at line 145. Revision-1 progress items 1 and 2 remain at lines 123–124; they are historical revision-1 status, not the current stage status. Current revision-2 progress is recorded under `## Progress (revision 2)` beginning at line 146. The first `## Design (revision 2)` beginning at line 154 is the canonical added implementation record; repeated identical copies later in this file resulted from an append-edit mistake and are preserved rather than deleted under the no-deletion instruction. No pre-existing sections were removed by this documentation correction.
+
+Acceptance 3–9 test files changed: `crates/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs`, `crates/shamir-engine/src/repo/tests/mod.rs`, and `crates/shamir-engine/src/repo/tests/rename/{mod.rs,freeze_tests.rs,visibility_wait_tests.rs,cancel_tests.rs}`. Current test names are listed under Item 5 at line 213. The abort error assertion is variant/message matching, not equality. The visibility test uses a bounded receipt because strict insert waits on the held version; it now verifies the row and attachment, then performs `create_index` while retaining the unresolved version guard. Parent verified `open_snapshot_at` does not wait for settled-floor progress, so this is not expected to block for that reason. The multi-thread writer loops until the first error rather than using a fixed iteration cap; its whole loop is bounded at 30 seconds, with rename/rejection, start signal, join, setup and destination reads also bounded. Early start/rename failures abort and reap the writer before panic. No commands, tests, formatter, layout script, build, or CI were run; full end-to-end review and CI remain outstanding.
+
+Layout observations are from file-tool listing only: the unauthorized unmounted `write_domain_core.rs` remains untouched, and its directory showed four entries, under the seven-entry limit. No Rust test, formatter, layout script, build, or CI was run. No positive parked-commit test variant is required. Acceptance/test code and S4/S5 implementation still require parent review and CI.
+
+- Item 5 follow-up: fixed the three sidecar-map `contains_key` calls in `touched_table_tokens` to dereference filter keys; preserved the index-op token reference and restored the blank separator before `Ok(PreLockResult)`. Concurrent writer acceptance now asserts destination count equals captured successful IDs; `count()` returns `usize` (`table_manager_crud.rs:698-701`). Spawned writer has a 30-second bound and is joined through `&mut JoinHandle`, with abort/reap on start/rename failure. No commands or tests run.
+
+## Final report (revision 2)
+
+1. **DONE — Phase 0 Q11–Q13.** Q11/H analysis and correction are recorded at lines 215–223 and 380–386; Q12 inventory/conclusion at lines 225–234 and 388–400; Q13 at lines 236–240. H did not fire; conclusions are source-based, not runtime results.
+2. **PARTIAL — S1 plus acceptance-2 tests written.** Sidecar token union in `crates/shamir-engine/src/tx/preparation/pre_commit/prelock.rs` (helper near lines 796–831); `sidecar_index_only_commit_rejected_while_frozen`, `sidecar_counter_only_commit_rejected_while_frozen`, and `sidecar_index_only_commit_applies_when_not_frozen` in `crates/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs`. Not executed or CI-validated.
+3. **PARTIAL — S3 and acceptance-3 tests written.** `MigrationFreezeGuard::retire`/armed Drop in `crates/shamir-engine/src/table/support/guards/migration_freeze_guard.rs`; tests `retire_keeps_freeze_bit_after_drop` and `dropped_freeze_guard_clears_bit` in `migration_freeze_tests.rs`. Not run.
+4. **PARTIAL — S2/S4/S5 implementation written, acceptance-4 test written.** Detach lifecycle/check inventory in table manager files as described in Design above; `RenameFreeze` in `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs`; transitions and counter flush in `catalog.rs`; stale clone test `successful_rename_rejects_stale_clone_crud_and_ddl` in `crates/shamir-engine/src/repo/tests/rename/freeze_tests.rs`. No tests or compilation run; the unauthorized unmounted `write_domain_core.rs` remains present and may trigger source-integrity checks if staged.
+5. **PARTIAL — acceptance-5 abort test written.** `failed_rename_reattaches_and_unfreezes_source` in `freeze_tests.rs` asserts the injected `DbError::Storage` variant/message and source registration/flag/writes. Not run.
+6. **PARTIAL — acceptance-6 concurrent writer test written.** `writer_is_drained_before_successful_rename` in `freeze_tests.rs` uses bounded writer/rename waits, oneshot synchronization, abort/reap paths, destination rows/count and exact migration error assertions. Not run.
+7. **PARTIAL — acceptance-7 visibility test written.** `visibility_wait_times_out_before_persist_and_restores_source` in `crates/shamir-engine/src/repo/tests/rename/visibility_wait_tests.rs` holds an allocated guard, checks timeout and uncalled persist, uses bounded receipt because Strict acknowledgement waits for settlement, then checks writable CRUD/DDL. This substitutes a bounded receipt for the brief's strict insert while preserving the unsettled guard; no runtime result is claimed.
+8. **PARTIAL — acceptance-8 cancellation tests written.** `cancelled_persist_reattaches_and_unfreezes_source` and `cancelled_visibility_wait_reattaches_and_unfreezes_source` in `crates/shamir-engine/src/repo/tests/rename/cancel_tests.rs`. Not run.
+9. **PARTIAL — acceptance-9 counter test written.** `rename_flushes_live_record_counter` in `freeze_tests.rs`; counter increments are cache-only by source (`record_counter.rs:149–185`), so this is expected to distinguish lazy persistence on master, not a runtime-proven result.
+10. **PARTIAL — acceptance-10 contracts preserved, not executed.** Existing rename, migration-freeze and hand-staged index tests were not weakened by these edits; test suite/CI has not run.
+11. **PARTIAL — acceptance-11 gates.** Parent observed `cargo fmt -p shamir-engine`, `cargo fmt -p shamir-engine -- --check`, and `python -I scripts/ci/check_layout.py` pass at 00:33–00:34 CET; this child did not run them. The checker does not scan the unauthorized untracked file. Parent reports file/folder counts within limits (including `index_admission/` at four entries). Compilation, clippy, tests, and CI were not run. The audit contains duplicated revision-2 progress/design sections from a prior append-edit error; they remain under the no-delete instruction. Full import-target/source-integrity review and CI remain outstanding.
+
+PARTIAL: S1–S5 and regression tests are written in shamir-engine. Formatting and layout checks passed; compilation, clippy, tests and CI were not run. The accidental unmounted write_domain_core.rs and duplicated audit sections remain under the no-delete rule. In-doubt reconciliation and M1–M7 remain deferred to 03d. All child work has completed; nothing was committed or pushed.

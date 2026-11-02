@@ -222,6 +222,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let old_id = self.intern_string(old_name).await?;
         let new_id = self.intern_string(new_name).await?;
 

@@ -13,6 +13,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let mut index_def = self.build_index_definition(name, paths).await?;
         // #1003: mark THIS index's name as in-flight for the rest of the
         // method body (RAII guard, dropped on every exit path including an
@@ -130,6 +131,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         self.write_domain.debug_check_permit(permit);
         // #1003: the in-flight guard is installed inside `create_unique_index_body`
         // (right after the name is interned), not here — see that method's
@@ -267,6 +269,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let name_id = self.intern_string(name).await?;
         // P0-3 (#959): drain-then-lock — raise the REGULAR_INDEX_CREATE bit,
         // drain in-flight fast-path writers, then take `unique_write_lock`.
@@ -293,6 +296,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let name_id = self.intern_string(name).await?;
         // P0-3 (#959): drain-then-lock — see `drop_index`'s doc.
         let (_barrier, _uwl_guard) = self
@@ -316,6 +320,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let interner = self.interner.get().await?;
         // `get_ind` is a pure lookup (does NOT mint a new id), so dropping a
         // name that was never interned cannot pollute the interner.

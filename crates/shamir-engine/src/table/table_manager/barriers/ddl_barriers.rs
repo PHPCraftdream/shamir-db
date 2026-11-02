@@ -11,6 +11,29 @@ use super::super::{NonTxChangefeed, TableManager};
 use super::guard::WriteBarrierGuard;
 
 impl TableManager {
+    /// Permanently detach this manager's stores after a successful rename.
+    pub(crate) fn detach_for_rename(&self) {
+        self.detached
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Reattach a manager when a rename attempt aborts.
+    pub(crate) fn reattach_after_rename(&self) {
+        self.detached
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Reject DDL through a manager whose stores have been detached.
+    pub(crate) fn ensure_attached(&self) -> DbResult<()> {
+        if self.detached.load(std::sync::atomic::Ordering::Acquire) {
+            Err(shamir_storage::error::DbError::MigrationFrozen {
+                table: self.name.clone(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
     /// F-70 (#897, P0) — THE canonical acquisition path for a DDL-side write
     /// barrier: raise `bit`, [`drain_writers`](Self::drain_writers), THEN
     /// acquire `unique_write_lock` — in that order,

@@ -44,6 +44,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let src_interner = src.interner.get().await?;
         let entries = src_interner.all_entries();
         if entries.is_empty() {
@@ -101,6 +102,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let src_backends = src.index2_registry.all_backends().await;
         if src_backends.is_empty() {
             return Ok(());
@@ -184,6 +186,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let Some(mvcc) = self.mvcc_store_ref() else {
             return Ok(());
         };
@@ -224,6 +227,7 @@ impl TableManager {
     /// Bulk-populate all index2 backends under caller-held repo admission.
     pub async fn bulk_populate_index2_admitted(&self, permit: &RepoWritePermit) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let backends = self.index2_registry.all_backends().await;
         if backends.is_empty() {
             return Ok(());

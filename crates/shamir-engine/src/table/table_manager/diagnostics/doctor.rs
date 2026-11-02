@@ -561,6 +561,8 @@ impl TableManager {
 
     /// S5c-X admitted twin — caller already holds repo admission.
     pub async fn repair_admitted(&self, permit: &RepoWritePermit) -> DbResult<RepairReport> {
+        self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let start = Instant::now();
 
         let regular_defs: Vec<IndexDefinition> = self.index_manager_ref().iter_indexes().collect();
