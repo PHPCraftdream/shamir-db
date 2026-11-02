@@ -117,7 +117,7 @@ async fn read_write_token_is_forbidden_on_remote_plaintext_without_rail() {
             allow_plaintext_write: false,
         },
     );
-    let header = format!("Bearer {}", created.token);
+    let header = format!("Bearer {}", created.token.as_str());
     assert!(
         matches!(gate.authenticate(AuthHeader::Single(header.as_bytes()), Endpoint::Rest, peer()).await, GateDecision::Forbidden(code) if code == "token_plaintext_write_denied")
     );

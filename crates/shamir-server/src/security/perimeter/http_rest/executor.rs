@@ -80,7 +80,7 @@ impl RestHandler {
     }
 
     fn rate_limited(retry: u32) -> ExecOutcome {
-        let seconds = retry.div_ceil(1000).max(1);
+        let seconds = retry.max(1);
         let mut outcome = Self::error("rate_limited", ExecStatus::RateLimited);
         outcome.retry_after_secs = Some(u64::from(seconds));
         outcome
@@ -126,14 +126,16 @@ impl RestExecutor<Verified> for RestHandler {
         {
             return Self::error("token_plaintext_write_denied", ExecStatus::Forbidden);
         }
-        match self
-            .handler
-            .classify(&request, record.mode, record.databases.as_deref())
-        {
-            Decision::Denied(code) => return Self::error(code, ExecStatus::Forbidden),
-            Decision::NotSupported(code) => return Self::error(code, ExecStatus::BadRequest),
-            Decision::Allowed(_) => {}
-        }
+        let operation =
+            match self
+                .handler
+                .classify(&request, record.mode, record.databases.as_deref())
+            {
+                Decision::Denied(code) => return Self::error(code, ExecStatus::Forbidden),
+                Decision::NotSupported(code) => return Self::error(code, ExecStatus::BadRequest),
+                Decision::Allowed(operation) => operation,
+            };
+        tracing::trace!(operation = operation.label(), "rest request admitted");
         let (session_id, session) =
             match self
                 .buckets

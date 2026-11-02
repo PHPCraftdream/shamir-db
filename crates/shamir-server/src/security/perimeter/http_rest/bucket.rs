@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use shamir_connect::common::primitives::crypto::try_random_array;
+use shamir_connect::common::crypto::try_random_array;
 use shamir_connect::server::origin::SessionOrigin;
 use shamir_connect::server::session::Session;
 use shamir_connect::server::token::{TokenId, Verified};

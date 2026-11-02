@@ -1,5 +1,6 @@
 use shamir_connect::server::token::TokenMode;
-use shamir_query_types::batch::{BatchOp, BatchTreeVisitor, ListOp};
+use shamir_query_types::admin::ListOp;
+use shamir_query_types::batch::{BatchOp, BatchTreeVisitor};
 use shamir_query_types::wire::DbRequest;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8,6 +9,18 @@ pub(crate) enum AllowedOperation {
     WaitForVisibility,
     GetDdlOpStatus,
     Execute,
+}
+
+impl AllowedOperation {
+    /// Fixed-vocabulary label for logs and metrics.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::WaitForVisibility => "wait_for_visibility",
+            Self::GetDdlOpStatus => "get_ddl_op_status",
+            Self::Execute => "execute",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
