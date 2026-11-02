@@ -26,7 +26,7 @@ import type {
   FetchNextRequest,
   CancelCursorRequest,
 } from '../types/read/cursor.js';
-import { ShamirDbError, ShamirTimeoutError } from '../support/errors.js';
+import { ShamirTimeoutError } from '../support/errors.js';
 import { CursorIterator } from './cursor-iterator.js';
 import type { QueryBuildable } from './cursor-iterator.js';
 import { WsFramer, encode, decode } from '../protocol/framing.js';

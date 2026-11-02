@@ -29,7 +29,8 @@ export type TokenAdminErrorCode =
   | 'internal'
   | 'token_label_exists'
   | 'token_limit_reached'
-  | 'token_ttl_invalid';
+  | 'token_ttl_invalid'
+  | 'invalid_request';
 
 export const TOKEN_ADMIN_ERROR_CODES: ReadonlySet<string> = new Set<TokenAdminErrorCode>([
   'permission_denied',
@@ -48,9 +49,10 @@ export const TOKEN_ADMIN_ERROR_CODES: ReadonlySet<string> = new Set<TokenAdminEr
   'token_label_exists',
   'token_limit_reached',
   'token_ttl_invalid',
+  'invalid_request',
 ]);
 
-/** Narrow a database error to a token-administration code, optionally matching one code. */
+/** Narrow a database error to a token-administration code, optionally matching one code. Classifies by code only, not by the operation that raised it. */
 export function isTokenAdminError(err: unknown, code?: TokenAdminErrorCode): err is ShamirDbError {
   return err instanceof ShamirDbError && TOKEN_ADMIN_ERROR_CODES.has(err.code) && (code === undefined || err.code === code);
 }

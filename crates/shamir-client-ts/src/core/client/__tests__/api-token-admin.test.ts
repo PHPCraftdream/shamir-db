@@ -362,7 +362,7 @@ describe('ShamirClient.apiTokens', () => {
       'permission_denied', 'token_not_found', 'token_browser_session', 'token_request_denied',
       'token_self_service_disabled', 'read_only_replica', 'hmac_required', 'hmac_mismatch',
       'session_invalidated', 'invalid_username', 'not_found', 'not_supported', 'internal',
-      'token_label_exists', 'token_limit_reached', 'token_ttl_invalid',
+      'token_label_exists', 'token_limit_reached', 'token_ttl_invalid', 'invalid_request',
     ];
     expect([...TOKEN_ADMIN_ERROR_CODES].sort()).toEqual([...expectedCodes].sort());
     for (const code of expectedCodes) {
