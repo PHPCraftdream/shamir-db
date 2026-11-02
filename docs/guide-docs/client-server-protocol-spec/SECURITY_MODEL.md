@@ -40,7 +40,7 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | KDF param downgrade | A2 | Raw kdf_params в auth_message; server-side floor |
 | Mid-session downgrade через admin user update | A5 | Server игнорирует client kdf_params в `createUser`, всегда defaults |
 | Online brute-force | A2 | Backoff + rate limit per (subnet, user_hash), silent lockout |
-| Distributed brute-force через ботнет | A2, A10 | Backoff per subnet; lockout cross subnets per user |
+| Distributed brute-force через ботнет | A2, A10 | Per-source pair backoff/lockout; bounded pair retention may drop accounting under pressure; HTTP has separate source credits. No per-account cap across subnets; see TOKEN_LOGIN_HTTP §3 and AUTH_PROTOCOL §5.2.5 |
 | Offline brute-force после DB leak | A3 | Argon2id 128 MB / time=4 — memory-hard |
 | Replay handshake | A2 | TLS prevents within session; channel_binding per-connection |
 | Bootstrap MITM | A2 | Out-of-band pin обязателен; client_nonce в подписи; native-only |
@@ -63,12 +63,14 @@ Future hardening — **../roadmap/ROADMAP.md**.
 | Audit log truncation | A3 | Periodic `last_audit_hmac` checkpoint в server_meta + startup verify |
 | **Browser TLS MITM → session hijack** | A2, A12 | TLS exporter недоступен в browser → relay attack возможен. SCRAM защищает password, но `session_id` может быть hijacked. См. §4.9 + recommend native client для admin operations. |
 | Backup restore counter rollback → ticket replay | A6, A2 | Mandatory `revokeAllTickets` при любом restore (см. IMPLEMENTATION_GUIDE §5.7) |
-| Подбор или подмена API-токена | A13, A10 | 71-символьный токен с 256-битным секретом; HMAC в памяти, сравнение за постоянное время, единый `401`, отдельный лимитер по подсетям (не SCRAM `LockoutStore`) (TOKEN_API §5) |
+| Подбор или подмена API-токена | A13, A10 | 71-символьный токен с 256-битным секретом; HMAC в памяти, сравнение за постоянное время; REST/native WS дают единый `401`, browser WS до проверки закрывает `4000` без HTTP `429`; отдельный лимитер по подсетям (не SCRAM `LockoutStore`) (TOKEN_API §5, §10) |
 | Повышение прав через токен (superuser/replicator-владелец) | A13 | Права токена строятся `SessionPermissions::new(false, false, roles)`, deny-by-default allowlist, admin-листья запрещены (TOKEN_API §6, §7) |
 | Подмена сессии между токен- и SCRAM-listener-ами | A13, A2 | Отдельное `TokenSessionStore`, соединение принимает только свой случайный `sid`, close `4010` (TOKEN_API §10) |
 | Живой сокет или подписка переживают отзыв токена | A13 | Публикация отзыва, затем отмена сессий; перепроверка перед каждым запросом; close `4011` (TOKEN_API §10) |
 | Воскрешение отозванных токенов из резервной копии | A6 | `restore` вызывает `invalidate_all_tickets`, общий порог `tickets_invalid_before_ns` убивает все токены, созданные до восстановления; runbook `token revoke-all` (IMPLEMENTATION_GUIDE §5.7, §5.8) |
 | Утечка токена в логи, метрики, аудит | A13 | Редактирование `Authorization` в самой ранней точке, тест редактирования логов (TOKEN_API §13) |
+| HTTP login transcript alteration/relay | A2, A10 | Proof binds listener/security/nonce/id/scope; no exporter/session binding; live relay remains. |
+| HTTP login token theft | A1, A2, A6, A12, A13 | No-store scoped bearer, <=24h TTL and shared revocation; trusted proxy/XSS remain risks; remote plaintext forbidden for login only. |
 
 ---
 
@@ -150,9 +152,11 @@ Resumption tickets из browser path **не могут upgrade** в native sessi
 
 4.14. **Clock dependency.** Auth flow зависит от server clock (timestamps в tickets, expires_at, tickets_invalid_before_ns). Server MUST использовать synchronized clock (NTP/PTP). При clock jumps > 5s — recommended manual `revokeAllTickets`. Audit event `clock_anomaly_detected` если abs(now - last_observed) > 5s.
 
-4.15. **Bearer-токен по plaintext и без TLS-привязки.** API-токен (TOKEN_API.md) — bearer-секрет: любой, кто его видит, действует от его имени в пределах scope. Токен-listener с `tls: false` по умолчанию loopback-only; наружу он открывается только явным `allow_plaintext_remote`, при этом принимаются лишь `read_only` токены, если не задан `allow_plaintext_write`. Эти rails снижают случайное раскрытие, но не устраняют перехват на пути. У токен-клиента нет Ed25519 pin сервера: единственная аутентификация сервера — сертификат (поэтому не-loopback TLS не стартует с автосгенерированным сертификатом без `allow_self_signed`). Токен не даёт forward secrecy, не привязан к каналу и действует до срока или отзыва. Сессия браузерного пути (`binding_mode = 0x02`, §4.9) токены создавать не может: захваченная браузерная сессия иначе превратилась бы в год доступа.
+4.15. **Bearer-токен по plaintext и без TLS-привязки.** API-токен (TOKEN_API.md) — bearer-секрет: любой, кто его видит, действует от его имени в пределах scope. Токен-listener с `tls: false` по умолчанию loopback-only; наружу он открывается только явным `allow_plaintext_remote`, при этом принимаются лишь `read_only` токены, если не задан `allow_plaintext_write`. Эти rails снижают случайное раскрытие, но не устраняют перехват на пути. У токен-клиента нет Ed25519 pin сервера: единственная аутентификация сервера — сертификат (поэтому не-loopback TLS не стартует с автосгенерированным сертификатом без `allow_self_signed`). Токен не даёт forward secrecy, не привязан к каналу и действует до срока или отзыва. Сессия браузерного пути (`binding_mode = 0x02`, §4.9) токены создавать не может: захваченная браузерная сессия иначе превратилась бы в год доступа. The proposed fresh-password HTTP login is a separate creation path, weaker than 0x02, refuses superuser/replicator accounts and uses a maximum 24-hour compensating TTL. Remote plaintext is forbidden for HTTP login and for the browser bearer WebSocket `/shamir/v1/ws/browser` (loopback-only `ws://`, see the browser bearer WebSocket row below); REST and native bearer `allow_plaintext_remote` behavior above remains unchanged. In class 0x02 TLS terminates at the external proxy and the backend hop is loopback plaintext; proxy compromise, local observation, relay and XSS remain risks.
 
 4.16. **Токен не администратор.** Токен никогда не несёт `is_superuser` и `is_replicator`, не выпускает и не отзывает токены, не меняет пароль, не выполняет DDL. Это сознательное ограничение, не пробел: компрометация токена не даёт административных операций. Права на данные при этом равны правам владельца как обычного принципала, включая ресурсы, созданные владельцем при работе как администратор (`session_actor` записывает superuser владельцем от имени `Actor::Admin`); для автоматизации заводятся отдельные сервисные аккаунты без `superuser`.
+
+**Браузерный bearer WebSocket.** На `/shamir/v1/ws/browser` bearer принимается первым бинарным кадром после upgrade, не из URL, cookie или subprotocol. Это исключает утечку через URL/referrer, но кадр остаётся повторно предъявляемым bearer credential и уязвим к компрометации страницы, расширений и TLS-потока. До проверки ограничены число соединений, размер кадра и время ожидания; проверяются Origin/Host; обращения к БД невозможны. Меры ограничивают злоупотребление ресурсами и CSWSH, но не обеспечивают proof-of-possession, защиту от компрометации страницы или дополнительную защиту от повторного предъявления. Browser `ws://` только loopback; предпочтителен WSS.
 
 ---
 
@@ -168,7 +172,7 @@ Resumption tickets из browser path **не могут upgrade** в native sessi
 | RFC 5077 (Session Tickets) | Inspired | Self-contained AES-256-GCM encrypted ticket с AAD binding |
 | RFC 8265 (PRECIS) | Compliant | UsernameCaseMapped profile (NFC + casefold + ban control/format) |
 | NIST SP 800-63B | Mostly compliant | Min 12 chars (>NIST 8); salt 128 bits (>32). Argon2id не в NIST allow-list (FIPS profile в ROADMAP) |
-| RFC 6750 (Bearer Token Usage) | Subset | Только заголовок `Authorization`; токен не принимается из query и тела; `WWW-Authenticate: Bearer` на 401 |
+| RFC 6750 (Bearer Token Usage) | Subset | REST и нативный WS используют `Authorization`; браузерный WS использует единственный первый бинарный кадр на выделенном endpoint; токен не принимается из query, cookie или тела запроса; `WWW-Authenticate: Bearer` на HTTP 401 |
 | OWASP ASVS 4.0 V2.4/V2.7/V3.3/V9 | Compliant | Argon2id 128 MB > OWASP min 19 MiB; OOB pin; session timeouts; TLS |
 
 ---
