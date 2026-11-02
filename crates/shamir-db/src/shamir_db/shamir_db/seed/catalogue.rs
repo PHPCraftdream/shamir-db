@@ -130,17 +130,27 @@ impl ShamirDb {
         if !SeedInstallState::completed_retry(&info, receipt).await? {
             return Err(DbError::Storage("publication requires Complete".into()));
         }
-        let tables = SeedTable::load_inventory(&info).await?;
+        let configs = SeedTable::load_configs(&info).await?;
         let schemas = image.seed_schema_store().await?;
         let records = load_schema_records(&schemas).await?;
-        if records.len() != tables.len()
-            || tables.iter().zip(&records).any(|(table, record)| {
+        if records.len() != configs.len()
+            || configs.iter().zip(&records).any(|(config, record)| {
                 record["db_name"].as_str() != Some(receipt.source_db.as_str())
                     || record["repo_name"].as_str() != Some(receipt.source_repo.as_str())
-                    || record["table_name"].as_str() != Some(table.name.as_str())
+                    || record["table_name"].as_str() != Some(config.name.as_str())
             })
         {
             return Err(DbError::Storage("seed schema inventory mismatch".into()));
+        }
+        if configs.len() != records.len()
+            || configs.iter().zip(&records).any(|(config, record)| {
+                config.store_id.as_ref().map(ToString::to_string).as_deref()
+                    != record.get("store_id").and_then(QueryValue::as_str)
+            })
+        {
+            return Err(DbError::Storage(
+                "seed local table ID catalogue mismatch".into(),
+            ));
         }
         let existing = self.system_store.load_tables().await?;
         for record in &records {

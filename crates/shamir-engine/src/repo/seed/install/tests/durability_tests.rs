@@ -19,8 +19,9 @@ async fn real_history_and_bookmark_helpers_propagate_failed_barriers() {
         let image = repo(Arc::new(InMemoryRepo::new()), Vec::new());
         let mut writer = populated(image.clone()).await;
         let info = image.tx_info_store().await.unwrap();
+        let history_name = image.mapped_table_store_names("items").unwrap().2;
         let history = Arc::new(FlushProbe {
-            inner: image.repo.store_get("__history__items").await.unwrap(),
+            inner: image.repo.store_get(history_name).await.unwrap(),
             info: info.clone(),
             fail: AtomicBool::new(history_fails),
             flushed: AtomicBool::new(false),

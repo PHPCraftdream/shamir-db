@@ -1,6 +1,6 @@
-use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance, SeedInstallState, SeedTable};
-
 use super::helpers::{populated, receipt};
+use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance, SeedInstallState, SeedTable};
+use shamir_storage::types::Repo;
 
 // Unix Store::flush cold reopen evidence, not a physical power-loss claim.
 // The independent raw factory bypasses caches and a new RepoInstance rebuilds
@@ -12,8 +12,10 @@ async fn disk_cold_reopen_preserves_receipt_counts_bindings_and_local_floor() {
     let backing = factory.create().await.unwrap();
     let image = RepoInstance::new("main".into(), backing.clone(), Vec::new());
     populated(image.clone()).await.finish(&[]).await.unwrap();
+    let source_item_id = image.table_config("items").unwrap().store_id;
+    assert_ne!(source_item_id, None);
     let info = image.tx_info_store().await.unwrap();
-    let tables = SeedTable::load_inventory(&info).await.unwrap();
+    let configs = SeedTable::load_configs(&info).await.unwrap();
     // No background disk WAL is constructed by RepoInstance::new. The journal
     // worker must release its store before dropping the last backend owner.
     image
@@ -29,11 +31,7 @@ async fn disk_cold_reopen_preserves_receipt_counts_bindings_and_local_floor() {
     drop(backing);
     drop(factory);
     let factory = BoxRepoFactory::fjall_raw(directory.path());
-    let cold = RepoInstance::new(
-        "main".into(),
-        factory.create().await.unwrap(),
-        tables.iter().map(SeedTable::config).collect(),
-    );
+    let cold = RepoInstance::new("main".into(), factory.create().await.unwrap(), configs);
     let info = cold.tx_info_store().await.unwrap();
     assert_eq!(
         SeedInstallState::require_complete(&info, true)
@@ -42,6 +40,12 @@ async fn disk_cold_reopen_preserves_receipt_counts_bindings_and_local_floor() {
         Some(receipt()),
     );
     assert_eq!(cold.replication_bookmark().await.unwrap(), 73);
+    assert_eq!(cold.table_config("items").unwrap().store_id, source_item_id);
+    let stores = cold.repo.stores_list().await.unwrap();
+    assert!(stores
+        .iter()
+        .any(|name| name.starts_with("__history__items--")));
+    assert!(!stores.iter().any(|name| name == "__history__items"));
     let items = cold.get_table("items").await.unwrap();
     let empty = cold.get_table("empty").await.unwrap();
     assert_eq!(items.counter().get().await.unwrap(), 1);

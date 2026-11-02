@@ -84,6 +84,11 @@ impl ShamirDb {
             fields.insert("repo_name".into(), QueryValue::Str(repo_name.into()));
             fields.insert("table_name".into(), QueryValue::Str(name.clone()));
             fields.insert("enable_indexes".into(), QueryValue::Bool(false));
+            let store_id = repo
+                .table_config(name)
+                .and_then(|config| config.store_id)
+                .ok_or_else(|| DbError::Codec("seed table local store ID missing".into()))?;
+            fields.insert("store_id".into(), QueryValue::Str(store_id.to_string()));
             fields.insert("schema".into(), schema);
             fields.insert(
                 "schema_version".into(),
