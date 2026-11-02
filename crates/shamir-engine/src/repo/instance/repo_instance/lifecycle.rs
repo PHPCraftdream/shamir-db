@@ -14,6 +14,7 @@ use super::RepoInstance;
 
 mod clean_horizon_repo_impl;
 mod durability_repo_impl;
+mod journal;
 mod recovery;
 mod seed_backing_impl;
 mod seed_metadata_impl;

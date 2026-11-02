@@ -1,4 +1,4 @@
-use super::ChangefeedHandle;
+use super::super::ChangefeedHandle;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use shamir_storage::error::{DbError, DbResult};
@@ -6,8 +6,8 @@ use shamir_storage::types::{Repo, Store};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::RepoInstance;
-use super::JOURNAL_CONFIRM_BUDGET;
+use super::super::RepoInstance;
+use super::super::JOURNAL_CONFIRM_BUDGET;
 
 impl RepoInstance {
     /// Read the unchanged journal, attaching name bindings only for Pull.

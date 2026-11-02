@@ -726,7 +726,7 @@ async fn stage_materialized_batch(
     #[cfg(all(test, feature = "fjall"))]
     let batch = wrap_materialization_batch(batch, repo.name());
     let mut batch = batch;
-    for (table, history, info_store, count_after) in table_rows(work)? {
+    for (table, history, info_store, count_after) in table_rows(repo, work)? {
         for (index, event) in work.events.iter().enumerate() {
             let Some((_, ops)) = event.tables.iter().find(|group| group.0 == table) else {
                 continue;
@@ -789,7 +789,10 @@ async fn stage_materialized_batch(
 
 /// First-seen table order with the derived store names and the absolute
 /// after-count for each.
-fn table_rows(work: &MaterializedWork) -> DbResult<Vec<(String, String, String, u64)>> {
+fn table_rows(
+    repo: &RepoInstance,
+    work: &MaterializedWork,
+) -> DbResult<Vec<(String, String, String, u64)>> {
     let mut order: Vec<String> = Vec::new();
     let mut seen = TFxMap::<String, ()>::default();
     for event in &work.events {
@@ -807,12 +810,12 @@ fn table_rows(work: &MaterializedWork) -> DbResult<Vec<(String, String, String, 
             )));
         };
         let after = delta.after;
-        rows.push((
-            table.clone(),
-            format!("__history__{table}"),
-            format!("__info__{table}"),
-            after,
-        ));
+        let Some((_, info, history)) = repo.mapped_table_store_names(&table) else {
+            return Err(DbError::RepoRequiresReopen(format!(
+                "materialized work references unknown table {table}"
+            )));
+        };
+        rows.push((table, history, info, after));
     }
     Ok(rows)
 }
