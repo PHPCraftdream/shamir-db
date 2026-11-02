@@ -215,21 +215,21 @@ describe('public connect contract', () => {
   });
   it('derives or honors matching channel choices across Node and browser schemes', async () => {
     const cases = [
-      { connect: connectNode, runtime: 'node' as const, url: 'https://db.example', channel: 'http' as const },
-      { connect: connectNode, runtime: 'node' as const, url: 'http://db.example', channel: 'http' as const },
-      { connect: connectNode, runtime: 'node' as const, url: 'wss://db.example', channel: 'ws' as const },
-      { connect: connectNode, runtime: 'node' as const, url: 'ws://db.example', channel: 'ws' as const },
-      { connect: connectBrowser, runtime: 'browser' as const, url: 'https://db.example', channel: 'http' as const },
-      { connect: connectBrowser, runtime: 'browser' as const, url: 'http://db.example', channel: 'http' as const },
-      { connect: connectBrowser, runtime: 'browser' as const, url: 'wss://db.example', channel: 'ws' as const },
-      { connect: connectBrowser, runtime: 'browser' as const, url: 'ws://127.0.0.1', channel: 'ws' as const },
+      { runtime: 'node' as const, url: 'https://db.example', channel: 'http' as const },
+      { runtime: 'node' as const, url: 'http://db.example', channel: 'http' as const },
+      { runtime: 'node' as const, url: 'wss://db.example', channel: 'ws' as const },
+      { runtime: 'node' as const, url: 'ws://db.example', channel: 'ws' as const },
+      { runtime: 'browser' as const, url: 'https://db.example', channel: 'http' as const },
+      { runtime: 'browser' as const, url: 'http://db.example', channel: 'http' as const },
+      { runtime: 'browser' as const, url: 'wss://db.example', channel: 'ws' as const },
+      { runtime: 'browser' as const, url: 'ws://127.0.0.1', channel: 'ws' as const },
     ];
     for (const entry of cases) for (const explicit of [false, true]) {
       const socket = new FakeSocket(); const platform = fakePlatform(entry.runtime, socket);
       const nodeFactory = entry.runtime === 'node' ? vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(platform) : undefined;
       const browserFactory = entry.runtime === 'browser' ? vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform').mockReturnValue(platform) : undefined;
       const options: { auth: 'token'; url: string; token: NodeApiToken | string; channel?: 'http' | 'ws' } = { auth: 'token', url: entry.url, token, ...(explicit ? { channel: entry.channel } : {}) };
-      const client = await entry.connect(options);
+      const client = await (entry.runtime === 'node' ? connectNode(options) : connectBrowser(options));
       expect(client.channel).toBe(entry.channel);
       expect(nodeFactory ?? browserFactory).toHaveBeenCalledWith(expect.objectContaining({ channel: entry.channel }));
       await client.close(); vi.restoreAllMocks();
