@@ -8,10 +8,10 @@ use crate::config::{
 };
 use crate::server::{BootstrapMode, ServerLauncher};
 
-#[tokio::test]
-async fn launcher_rejects_http_listener_before_creating_data_dir() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let data_dir = temp.path().join("must-not-be-created");
+    let data_dir = temp.path().to_path_buf();
     let config = Config {
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
@@ -32,7 +32,7 @@ async fn launcher_rejects_http_listener_before_creating_data_dir() {
         argon2_concurrent_max: 4,
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Http,
-            addr: "127.0.0.1:7340".into(),
+            addr: "127.0.0.1:0".into(),
             profile: None,
             http: crate::boot::config::HttpListenerSettings {
                 tls: Some(false),
@@ -54,19 +54,27 @@ async fn launcher_rejects_http_listener_before_creating_data_dir() {
         },
         replication: None,
     };
-    let error = ServerLauncher::new(config)
-        .launch()
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Skip,
+        node_mode: crate::db_handler::NodeMode::ReadWrite,
+    };
+    let handle = launcher.launch().await.expect("HTTP server launch");
+    let bound_addr = handle
+        .bound_addrs
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("HTTP listener bound");
+    assert_eq!(bound_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
+    assert_ne!(bound_addr.port(), 0);
+
+    let report = tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
         .await
-        .err()
-        .expect("HTTP listener is not wired yet");
-    assert!(matches!(&error, crate::server::BootError::Bind(_)));
-    assert!(error
-        .to_string()
-        .contains("kind=http listener is not wired yet"));
-    assert!(
-        !data_dir.exists(),
-        "launcher rejects before creating data dir"
-    );
+        .expect("server shutdown bounded");
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(report.exit_code(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

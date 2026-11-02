@@ -6,6 +6,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use shamir_transport_http::BodyBudget;
+
+use crate::db_handler::ShamirDbHandler;
+use crate::http_rest::RestGate;
+use crate::tokens::TokenService;
+
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
@@ -43,6 +49,7 @@ use super::accept_loops::{
     accept_loop_ws_native, WsAcceptParams,
 };
 use super::helpers::{browser_origin_policy_from, build_ctx, kdf_from_config, AcceptPath};
+use super::http::start_http_listener;
 
 /// Everything a listener needs to build its per-connection context, borrowed
 /// from the launcher's locals.
@@ -61,6 +68,8 @@ pub(super) struct ListenerEnv<'a> {
     pub(super) resume_config: &'a Arc<ResumeConfig>,
     pub(super) handler: &'a Arc<dyn RequestHandler>,
     pub(super) meta: &'a Arc<ServerMetaStore>,
+    pub(super) token_service: &'a Arc<TokenService>,
+    pub(super) handler_concrete: &'a Arc<ShamirDbHandler>,
     pub(super) conn_tasks: &'a ConnTasks,
 }
 
@@ -69,6 +78,7 @@ pub(super) struct SpawnedListeners {
     pub(super) bound_addrs: Vec<Option<SocketAddr>>,
     pub(super) bound_ipc_paths: Vec<Option<String>>,
     pub(super) listener_tasks: Vec<JoinHandle<()>>,
+    pub(super) http_gates: Vec<Arc<RestGate>>,
 }
 
 impl ListenerEnv<'_> {
@@ -160,12 +170,35 @@ pub(super) async fn spawn_listeners(
     // fraction of the global cap (audit §2a / top-5 #4). `0` = off.
     let per_ip_limiter =
         PerIpLimiter::new(config.security.connection.max_active_connections_per_ip);
+    let body_budget = Arc::new(BodyBudget::new(
+        config
+            .listeners
+            .iter()
+            .filter(|l| l.kind == ListenerKind::Http)
+            .map(|l| l.http.max_request_body_bytes)
+            .max()
+            .unwrap_or(0)
+            .saturating_mul(16),
+    ));
+    let mut http_gates = Vec::new();
 
-    for l in &config.listeners {
+    let result = async {
+        for l in &config.listeners {
         if l.kind == ListenerKind::Http {
-            return Err(BootError::Bind(
-                "kind=http listener is not wired yet".into(),
-            ));
+            let (address, task, gate) = start_http_listener(
+                env,
+                l,
+                &conn_limiter,
+                &per_ip_limiter,
+                Arc::clone(&body_budget),
+                shutdown_token,
+            )
+            .await?;
+            bound_addrs.push(Some(address));
+            bound_ipc_paths.push(None);
+            listener_tasks.push(task);
+            http_gates.push(gate);
+            continue;
         }
         // Local IPC (`kind: unix`) addresses a filesystem path / pipe
         // name, not a `SocketAddr` — handled entirely on its own path,
@@ -223,7 +256,7 @@ pub(super) async fn spawn_listeners(
                     AcceptPath::WsBrowser(policy),
                 )
             }
-            (ListenerKind::Http, _) => unreachable!("HTTP listener rejected at loop entry"),
+            (ListenerKind::Http, _) => continue,
             (kind, profile) => {
                 tracing::warn!(
                     addr = %addr,
@@ -340,9 +373,39 @@ pub(super) async fn spawn_listeners(
         bound_addrs.push(Some(local_addr));
     }
 
+        Ok::<(), BootError>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        shutdown_token.cancel();
+        for task in listener_tasks.drain(..) {
+            if let Err(join_error) = task.await {
+                tracing::error!(%join_error, "listener task failed during boot rollback");
+            }
+        }
+        if tokio::time::timeout(Duration::from_secs(10), env.conn_tasks.wait_idle())
+            .await
+            .is_err()
+        {
+            env.conn_tasks.abort_all();
+            if tokio::time::timeout(Duration::from_secs(2), env.conn_tasks.wait_idle())
+                .await
+                .is_err()
+            {
+                tracing::error!("connection tasks did not quiesce after boot rollback abort");
+            }
+        }
+        for gate in http_gates.drain(..) {
+            gate.shutdown().await;
+        }
+        return Err(error);
+    }
+
     Ok(SpawnedListeners {
         bound_addrs,
         bound_ipc_paths,
         listener_tasks,
+        http_gates,
     })
 }
