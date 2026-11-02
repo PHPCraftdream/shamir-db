@@ -13,6 +13,48 @@
  * PLATFORM-AGNOSTIC.
  */
 
+export type TokenAdminErrorCode =
+  | 'permission_denied'
+  | 'token_not_found'
+  | 'token_browser_session'
+  | 'token_request_denied'
+  | 'token_self_service_disabled'
+  | 'read_only_replica'
+  | 'hmac_required'
+  | 'hmac_mismatch'
+  | 'session_invalidated'
+  | 'invalid_username'
+  | 'not_found'
+  | 'not_supported'
+  | 'internal'
+  | 'token_label_exists'
+  | 'token_limit_reached'
+  | 'token_ttl_invalid';
+
+export const TOKEN_ADMIN_ERROR_CODES: ReadonlySet<string> = new Set<TokenAdminErrorCode>([
+  'permission_denied',
+  'token_not_found',
+  'token_browser_session',
+  'token_request_denied',
+  'token_self_service_disabled',
+  'read_only_replica',
+  'hmac_required',
+  'hmac_mismatch',
+  'session_invalidated',
+  'invalid_username',
+  'not_found',
+  'not_supported',
+  'internal',
+  'token_label_exists',
+  'token_limit_reached',
+  'token_ttl_invalid',
+]);
+
+/** Narrow a database error to a token-administration code, optionally matching one code. */
+export function isTokenAdminError(err: unknown, code?: TokenAdminErrorCode): err is ShamirDbError {
+  return err instanceof ShamirDbError && TOKEN_ADMIN_ERROR_CODES.has(err.code) && (code === undefined || err.code === code);
+}
+
 /**
  * Server error codes that are transient — the same request may succeed on a
  * retry (possibly after a backoff, or against the leader for

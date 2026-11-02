@@ -49,7 +49,8 @@ import { Db } from './db.js';
 import { SubscriptionRouter } from './subscription-router.js';
 import type { PushEnvelope } from '../types/stream/subscribe.js';
 import { InternerCacheRegistry } from '../support/field-map.js';
-import { withConnectTimeout } from './client-internals.js';
+import { withConnectTimeout, apiTokenAdmin, getDdlOpStatus } from './client-internals.js';
+import type { ApiTokenAdmin } from '../types/access/token-admin.js';
 import {
   createScramUser,
   setSuperuser,
@@ -962,20 +963,12 @@ export class ShamirClient {
     table: string,
     opId: string
   ): Promise<import('../types/write/batch.js').DdlOpStatus | null> {
-    const r = await this.sendDbRequest({
-      op: 'get_ddl_op_status',
-      db,
-      repo,
-      table,
-      op_id: opId,
-    });
-    if (r.kind === 'ddl_op_status') {
-      return (r.status as import('../types/write/batch.js').DdlOpStatus | null) ?? null;
-    }
-    if (r.kind === 'error') {
-      throw new ShamirDbError(r.code as string, r.message as string);
-    }
-    throw new Error(`unexpected DbResponse kind for getDdlOpStatus: ${r.kind as string}`);
+    return getDdlOpStatus(db, repo, table, opId, (req) => this.sendDbRequest(req));
+  }
+
+  /** API-token administration for this SCRAM session (TOKEN_API §12). */
+  get apiTokens(): ApiTokenAdmin {
+    return apiTokenAdmin((req) => this.sendDbRequest(req), (canonical) => this.hmacTagHex(canonical));
   }
 
   /**

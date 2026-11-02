@@ -19,7 +19,7 @@ const uint = (f: Record<string, unknown>, k: string): bigint => BigInt(f[k] as s
 const optU64 = (f: Record<string, unknown>, k: string): bigint | undefined => f[k] === null ? undefined : uint(f, k);
 const list = (f: Record<string, unknown>, k: string): string[] => f[k] as string[];
 
-function vectorCanonical(v: (typeof vectorFixture.vectors)[number]): Uint8Array {
+const vectorCanonical = (v: (typeof vectorFixture.vectors)[number]): Uint8Array => {
   const f = v.fields;
   const resource = (): import('../../types/access/admin.js').ResourceRef => {
     const parts = f.resource as string[];
@@ -71,9 +71,13 @@ function vectorCanonical(v: (typeof vectorFixture.vectors)[number]): Uint8Array 
     case 'set_superuser': return canonicalDbRequest({ op: 'set_superuser', user: str(f, 'user'), on: flag(f, 'on') });
     case 'set_replicator': return canonicalDbRequest({ op: 'set_replicator', user: str(f, 'user'), on: flag(f, 'on') });
     case 'create_scram_user': return canonicalDbRequest({ op: 'create_scram_user', name: str(f, 'name'), roles: list(f, 'roles') });
+    case 'create_api_token': return canonicalDbRequest({ op: 'create_api_token', label: str(f, 'label'), ttl_secs: optU64(f, 'ttl_secs'), mode: f.mode === null ? null : f.mode as 'read_only' | 'read_write', channels: f.channels === null ? null : f.channels as 'rest' | 'ws' | 'both', databases: f.databases === null ? null : [...list(f, 'databases')], for_user: optStr(f, 'for_user') });
+    case 'list_api_tokens': return canonicalDbRequest({ op: 'list_api_tokens', for_user: optStr(f, 'for_user') });
+    case 'revoke_api_token': return canonicalDbRequest({ op: 'revoke_api_token', id: str(f, 'id') });
+    case 'revoke_user_tokens': return canonicalDbRequest({ op: 'revoke_user_tokens', user: optStr(f, 'user') });
     default: throw new Error(`unknown vector op: ${v.op}`);
   }
-}
+};
 
 describe('canonical v2 encoder', () => {
   it('rv_query_types_c7aec31f_matches_known_answer_vectors_for_every_tag', () => {
@@ -93,12 +97,23 @@ describe('canonical v2 encoder', () => {
       expect(bytes(canonical.slice(0, prefixAndTag.length))).toEqual(bytes(prefixAndTag));
       expect(bytes(canonical.slice(prefixAndTag.length))).toEqual(bytes(fromHex(vector.fields_hex)));
       expect(bytes(canonical.slice(0, prefix.length))).toEqual(bytes(prefix));
-      if (tag <= 31) expect(bytes(vectorCanonical(vector))).toEqual(bytes(canonical));
+      const actualCanonical = vectorCanonical(vector);
+      expect(bytes(actualCanonical)).toEqual(bytes(canonical));
+      expect(signCanonical(NodePlatform, sessionId, actualCanonical)).toBe(vector.tag_hex);
       const expectedTag = createHmac('sha256', key).update(canonical).digest('hex');
       expect(expectedTag).toBe(vector.tag_hex);
       expect(signCanonical(NodePlatform, sessionId, canonical)).toBe(vector.tag_hex);
     }
     expect([...tags].sort((a, b) => a - b)).toEqual(Array.from({ length: 35 }, (_, i) => i + 1));
+  });
+
+  it('distinguishes absent token databases from an empty list and rejects unknown operations', () => {
+    const absent = canonicalDbRequest({ op: 'create_api_token', label: 'x' });
+    const nullValue = canonicalDbRequest({ op: 'create_api_token', label: 'x', databases: null });
+    const empty = canonicalDbRequest({ op: 'create_api_token', label: 'x', databases: [] });
+    expect(bytes(absent)).toEqual(bytes(nullValue));
+    expect(bytes(absent)).not.toEqual(bytes(empty));
+    expect(() => canonicalDbRequest({ op: 'unknown' } as never)).toThrow(TypeError);
   });
 
   it('rv_query_types_f1dc8e9a_builder_hmac_uses_fixture_known_answer_tag', () => {
