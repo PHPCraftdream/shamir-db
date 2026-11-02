@@ -32,7 +32,8 @@ async fn seed_e2e_d_reopen_at_install_resume_and_first_batch_boundaries_body() {
     let leader_dir = root.path().join("leader");
     let home_dir = root.path().join("home");
     let artifact = root.path().join("seed");
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
     let upstream = format!("tcp://{addr}");
 
     // -- Leader writes, unclean kill, export, install (boundary 1). --
