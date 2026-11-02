@@ -155,17 +155,15 @@ impl FailureLimiter {
         {
             return false;
         }
-        if self
+        let claimed = self
             .last_evict_scan_ns
             .compare_exchange(previous, now_ns, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            #[cfg(test)]
+            .is_ok();
+        #[cfg(test)]
+        if claimed {
             self.eviction_scans.fetch_add(1, Ordering::Relaxed);
-            true
-        } else {
-            false
         }
+        claimed
     }
 
     fn evict_oldest_idle(&self, now_ns: u64) -> bool {

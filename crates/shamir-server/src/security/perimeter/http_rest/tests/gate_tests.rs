@@ -343,16 +343,17 @@ async fn rate_limited_failures_are_not_audited_and_admitted_failures_are_aggrega
     );
     assert!(!String::from_utf8_lossy(&failures[0].details_canonical_msgpack).contains("secret"));
     assert!(!String::from_utf8_lossy(&failures[0].details_canonical_msgpack).contains("client"));
-    let recording_threads = f
-        .audit
-        .recording_threadids
-        .lock()
-        .expect("recording thread IDs");
-    assert!(!recording_threads.is_empty());
-    assert!(recording_threads
-        .iter()
-        .all(|thread_id| *thread_id != std::thread::current().id()));
-    drop(recording_threads);
+    {
+        let recording_threads = f
+            .audit
+            .recording_threadids
+            .lock()
+            .expect("recording thread IDs");
+        assert!(!recording_threads.is_empty());
+        assert!(recording_threads
+            .iter()
+            .all(|thread_id| *thread_id != std::thread::current().id()));
+    }
     let count = f.audit.appended_count.load(Ordering::SeqCst);
 
     for _ in 0..3 {
