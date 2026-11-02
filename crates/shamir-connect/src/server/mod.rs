@@ -12,13 +12,16 @@ mod limits;
 mod ops;
 mod state;
 
+pub use auth::token;
 pub use auth::{bootstrap, changepw, handshake};
 #[cfg(feature = "durable-fjall")]
 pub use infra::durable_counters;
 pub use infra::{audit_chain, config, conn_services, dispatch};
 pub use limits::{argon2_semaphore, lockout, rate_limit};
 pub use ops::{admin, rotation, user_record};
-pub use state::{admission, resume, session, ticket};
+pub use state::origin::SessionOrigin;
+pub use state::token_session::TokenSessionStore;
+pub use state::{admission, origin, resume, session, ticket, token_session};
 
 pub use conn_services::{ConnectionServices, PushRejected, PushSink};
 pub use dispatch::{dispatch_request, DispatchOutcome, RequestHandler};

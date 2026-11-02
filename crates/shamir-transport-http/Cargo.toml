@@ -1,0 +1,31 @@
+[package]
+name = "shamir-transport-http"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "HTTP/1.1 token transport for ShamirDB."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/shamir-db"
+
+[dependencies]
+bytes = "1"
+http = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "rt", "macros"] }
+tokio-rustls = "0.26"
+rustls = "0.23"
+tokio-util = { version = "0.7", features = ["rt"] }
+shamir-transport-tcp = { path = "../shamir-transport-tcp" }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+
+[lints]
+workspace = true
+
+[lib]
+doctest = false
