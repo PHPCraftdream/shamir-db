@@ -70,7 +70,6 @@ use std::time::Duration;
 use shamir_connect::server::audit_chain::AuditChainWriter;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
-use shamir_connect::server::origin::SessionOrigin;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
@@ -405,22 +404,6 @@ impl ShamirDbHandler {
         request: DbRequest,
         conn: &ConnectionServices,
     ) -> Result<Vec<u8>, String> {
-        if matches!(
-            request,
-            DbRequest::CreateApiToken { .. }
-                | DbRequest::ListApiTokens { .. }
-                | DbRequest::RevokeApiToken { .. }
-                | DbRequest::RevokeUserTokens { .. }
-        ) && matches!(&session.origin, SessionOrigin::Token(_))
-        {
-            let response = DbResponse::Error {
-                code: "token_request_denied".into(),
-                message: "token sessions cannot administer tokens".into(),
-            };
-            return rmp_serde::to_vec_named(&response)
-                .map_err(|encode_err| format!("response encode: {}", encode_err));
-        }
-
         let top_level_canonical = match canon::canonical_db_request(&request) {
             Ok(bytes) => Some(bytes),
             Err(canon::CanonicalOpError::UnsupportedOperation) => None,
