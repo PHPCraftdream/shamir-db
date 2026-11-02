@@ -40,10 +40,7 @@ fn existing_cached_token_works_when_capacity_is_full() {
     let cache = BucketCache::with_cap(1);
     let first = grant(1);
     assert!(cache.session_for(&first, "owner".into(), TEST_NOW).is_ok());
-    assert!(matches!(
-        cache.session_for(&first, "owner".into(), TEST_NOW),
-        Ok(_)
-    ));
+    assert!(cache.session_for(&first, "owner".into(), TEST_NOW).is_ok());
     assert!(matches!(
         cache.session_for(&grant(2), "owner".into(), TEST_NOW),
         Err(BucketError::Unavailable)

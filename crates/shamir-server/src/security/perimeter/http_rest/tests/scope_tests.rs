@@ -44,7 +44,7 @@ fn rest_request_allowlist_and_rest_only_transaction_class_are_distinct() {
             table: "t".into(),
             op_id: "ddl".into(),
         },
-        execute(shamir_query_builder::query::Query::new("t"), "db"),
+        execute(shamir_query_builder::query::Query::from("t"), "db"),
     ] {
         assert!(matches!(
             classify_request(&request, TokenMode::ReadOnly, None),
@@ -339,7 +339,7 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
             query_version: 1,
             db: "outside".into(),
             tx_handle: 1,
-            batch: batch_with(shamir_query_builder::query::Query::new("t")),
+            batch: batch_with(shamir_query_builder::query::Query::from("t")),
         },
         DbRequest::TxCommit {
             query_version: 1,
