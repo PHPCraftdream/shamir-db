@@ -11,6 +11,10 @@ export interface TokenHttpConnectOptions {
   signal?: AbortSignal;
 }
 
+export type NodeTokenWsConnectOptions = Omit<TokenHttpConnectOptions, 'channel'> & { channel: 'ws'; tls?: TokenTlsOptions; origin?: string };
+export type BrowserTokenWsConnectOptions = Omit<TokenHttpConnectOptions, 'channel'> & { channel: 'ws'; tls?: never; origin?: never };
+export type TokenWsConnectOptions = NodeTokenWsConnectOptions | BrowserTokenWsConnectOptions;
+
 export interface TokenTlsOptions {
   ca?: string | Uint8Array;
   allowInsecureTlsForDevelopment?: true;
