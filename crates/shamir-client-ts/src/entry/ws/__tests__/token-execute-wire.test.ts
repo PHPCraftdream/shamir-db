@@ -39,7 +39,7 @@ describe('token WebSocket execute wire shape', () => {
     expect(request.op).toBe('execute');
     expect(request.query_version).toBe(4);
     expect(Object.keys(request.batch.queries)).toEqual(['read']);
-    expect(request.batch.queries.read).toMatchObject({ from: 'items', select: ['name'] });
+    expect(request.batch.queries.read).toEqual(Query.from('items').select(['name']).build());
     expect(JSON.stringify(request)).not.toMatch(/interner/);
     expect(result.results.read?.records).toEqual([{ name: 'ok' }]);
     expect(requestHttp).not.toHaveBeenCalled();

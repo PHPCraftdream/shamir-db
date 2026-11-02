@@ -47,7 +47,7 @@ export class TokenWsLifecycle {
       opening.then((opened) => {
         if (settled || controller.signal.aborted) { void opened.close().catch(() => undefined); return; }
         socket = opened; let lifecycle: TokenWsLifecycle | undefined;
-        opened.onClose((event) => { if (!settled) failBinding(browser ? new TokenTransportError('authentication_failed', 'Token WebSocket authentication failed', { phase: 'connect' }) : closeError(event.code)); else lifecycle?.onClose(event.code); });
+        opened.onClose((event) => { if (!settled) failBinding(browser && ![1013, 4011, 4012, 4013, 4014].includes(event.code) ? new TokenTransportError('authentication_failed', 'Token WebSocket authentication failed', { phase: 'connect' }) : closeError(event.code)); else lifecycle?.onClose(event.code); });
         opened.onMessage((bytes) => {
           if (settled) { lifecycle?.receive(bytes); return; }
           try {
