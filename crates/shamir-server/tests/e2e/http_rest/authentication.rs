@@ -9,14 +9,12 @@ const GOLDEN_401_BODY: &[u8] = b"\x81\xa5error\xacunauthorized";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_rest_unknown_bad_mac_revoked_expired_are_uniform_unauthorized() {
-    // One server for all cases: a launch costs two Argon2 hashes plus fsync, which
-    // dominates the runtime on Windows runners.
-    let harness = Harness::launch().await;
     let mut bodies = Vec::new();
     for case in ["unknown", "bad-mac", "revoked", "expired"] {
-        let token = harness
-            .token(&format!("uniform-{case}"), TokenMode::ReadOnly)
-            .await;
+        // A fresh server per case: the per-source failure limiter would turn the
+        // third rejected request into a 429.
+        let harness = Harness::launch().await;
+        let token = harness.token("uniform-auth", TokenMode::ReadOnly).await;
         let credentials = match case {
             "unknown" => {
                 let parsed = parse_token(token.as_bytes()).expect("issued token parses");
@@ -126,8 +124,8 @@ async fn http_rest_unknown_bad_mac_revoked_expired_are_uniform_unauthorized() {
             "{case}: {headers}"
         );
         bodies.push(body);
+        let report = harness.handle.shutdown().await;
+        assert!(report.errors().is_empty(), "{case} shutdown: {report:?}");
     }
-    let report = harness.handle.shutdown().await;
-    assert!(report.errors().is_empty(), "shutdown: {report:?}");
     assert!(bodies.windows(2).all(|pair| pair[0] == pair[1]));
 }
