@@ -1,0 +1,35 @@
+# TOKEN-JS1 - shamir-client-ts: token HTTP/HTTPS transport (REST) for Node.js and the browser
+
+Sources, read in this order: `docs/dev-artifacts/design/token-client-js.md` (the accepted design note of stage JS0, sections 1, 2, 4, 5, 6, 7, 9 and 10; sections about WebSocket and login are context only), `docs/guide-docs/client-server-protocol-spec/TOKEN_API.md` (normative: sections 2 token format, 4 representation, 7 allowlist, 8 error codes, 9 REST, 13), `crates/shamir-client-ts/package.json`, `configs/*`, then the existing client code you must stay compatible with (`src/core/client/client.ts` public surface, `src/core/support/errors.ts`, `src/core/protocol/*`, `src/platform/{node,browser}.ts`, `src/index.ts`, `src/browser.ts`, `CLAUDE.md`).
+
+## Goal
+
+A working, tested-by-design token REST client for BOTH runtimes: the user gives a bearer token and a base URL and gets `TokenHttpClient` (design note section 1) whose `ping`, `execute`, `executeWithTouch`, `waitForVisibility`, `getDdlOpStatus` and `db(name)` facade run over `POST /shamir/v1/request` and `GET /shamir/v1/ping` with `Authorization: Bearer <token>`. This stage is the HTTP path only.
+
+In scope (file layout from design note 10.1; verify every folder's entry count first and obey the limits: at most 7 direct entries per folder, at most 1000 lines per file, tests under `__tests__/`, never grow `src/core/client/client.ts`):
+- `ApiToken` opaque handle (module-private WeakMap, redacting `toString`/`toJSON`/`toLocaleString`/`Symbol.toPrimitive`, Node inspect hook without importing Node in browser code, canonical-format validation of `shk1.<id22>.<secret43>`, narrow internal accessor not exported from the package entries).
+- `TokenTransportError`, the closed `TokenTransportErrorCode` union and the HTTP status/application-error mapping of design note section 6 (400 decode only valid msgpack application errors, 401 uniform `unauthorized`, 403 decoded application error, 404/405, 408, 413/415/431, 429/503 with `Retry-After` kept as advisory `retryAfterMs`, network/abort/TLS/protocol mapping), never replaying writes, sanitised details (never expose peer body, headers, cause or the token).
+- Request codec for `TokenHttpRequest` (name-keyed, `query_version: 4` where the existing client sends it, no interner touch or de-interning, no SCRAM framing), response validation before the public cast, a response byte cap, `redirect: 'error'`, `credentials: 'omit'` (browser).
+- Platform seam `TokenPlatform.requestHttp` with two adapters: Node (`node:http`/`node:https`, client-owned keep-alive Agent, TLS 1.3 minimum, ALPN `http/1.1`, per-client CA, `allowInsecureTlsForDevelopment` as the only bypass, abort and deadline handling, closing the client destroys only its own agents) and browser (native `fetch` with `AbortController`, no Node imports). Add no runtime dependency.
+- Option validation (absolute origin-root URL without userinfo, query, fragment or path other than empty or `/`; derive `/shamir/v1/ping` and `/shamir/v1/request`; http/https only for this channel; default request timeout 35,000 ms, connect timeout 10,000 ms, zero disables).
+- `TokenHttpClient` and `TokenHttpDb` implementation. Rejected before send: cursors, subscriptions, interactive transactions (`not_supported_over_rest`); admin or unknown operations (`token_request_denied`); a single transactional Execute batch remains allowed. Builders (`Batch`, `Query`) are the existing ones; this stage constructs no query by hand.
+- An internal factory (for stage JS3) such as `createTokenHttpClient(options, platformFactory)`; do NOT touch `connect()` overloads, `src/index.ts` or `src/browser.ts` exports beyond what is strictly needed to compile, and say in your report what you left for JS3.
+
+Non-goals: WebSocket (JS2), login (AUTH2), public `connect` overloads and package exports (JS3), end-to-end tests (JS4), docs (JS5), server changes, new dependencies, reconnect or retry logic.
+
+## Tests (write them, you cannot run them; vitest, `__tests__/` folders, one topic per file)
+
+Node: an in-process HTTP server fake (`node:http`) for auth placement (`Authorization` header present, no token in URL or body), msgpack bodies, uniform 401, every status mapping, `Retry-After`, redirect refusal, response byte cap, abort and deadline behaviour, keep-alive Agent shutdown on close, TLS option plumbing (CA and the explicit development bypass; the TLS handshake itself need not be exercised), redaction of the token everywhere (errors, JSON.stringify, util.inspect, template strings), name-keyed execution and the absence of interner fields. Browser: injected `fetch` fake (fetch is disabled in `configs/vitest.setup.ts`, tests inject it): `credentials: 'omit'`, `redirect: 'error'`, no Node imports in the browser graph (a test that reads the module graph of the browser adapter source files for `node:` specifiers is acceptable), same error mapping. Use the existing test helpers where they exist.
+
+## Rules
+
+- NO LOCAL BUILDS OR TESTS: no `npm`, `npx`, `tsc`, `vitest`, `node` script runs, no installs. CI compiles and tests after the orchestrator pushes (typecheck is strict). Do the lint-aware read-through instead: every import path and extension (ESM with the repo's module resolution; look at how existing files import), every exported name, `noUnusedLocals`/`noUnusedParameters` style errors (read `tsconfig.json` and `configs/tsconfig.build.json` for the strict flags), `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess` effects if enabled, type-only imports, `Uint8Array` vs `Buffer` typing (`BodyInit` and `Buffer` assignability differences between lib.dom and @types/node), unused declarations, discriminated-union narrowing, async functions without await, promise rejections left unhandled in the fakes.
+- Touch only `crates/shamir-client-ts/` and the report. No change to `package.json` dependencies (stop and report if one is unavoidable).
+- Layout: count direct entries of every touched folder with `ls` before and after (the layout checker ignores untracked files), keep every file under 1000 lines, one primary export per file, no inline duplicated helpers.
+- Keep every existing comment. Comments you add are short.
+- NEVER run `git reset` / `checkout` / `clean` / `stash` / `restore` / `rm`, or any git command that mutates the working tree or index. Only edit files; the orchestrator commits. You cannot move or delete files: list such needs. Forward slashes in all paths. The only allowed command besides reading is `python -I scripts/ci/check_layout.py`.
+- Crash resilience: keep a note `docs/dev-artifacts/audits/2026-11-01-token-js1-http/DESIGN.md` (decisions, new exports, deviations from design note JS0, left for JS3); append one line per finished item as you go; write the final report into it under `## Final report`.
+
+## Final report (mandatory, also in the note)
+
+Per item of the scope list DONE / PARTIAL / DISPUTED with file:line evidence; tests added by name; files read end to end for compile errors; every new export; deviations from the design note with a written reason; what is left for JS3; what needs CI.

@@ -1,3 +1,31 @@
+import type { ApiToken } from '../../entry/api-token.js';
+
+/** HTTP bearer transport options; public package overloads are deferred to JS3. */
+export interface TokenHttpConnectOptions {
+  auth: 'token';
+  channel: 'http';
+  url: string;
+  token: ApiToken;
+  requestTimeoutMs?: number;
+  connectTimeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+export interface TokenTlsOptions {
+  ca?: string | Uint8Array;
+  allowInsecureTlsForDevelopment?: true;
+}
+
+export type NodeTokenHttpConnectOptions = TokenHttpConnectOptions & {
+  tls?: TokenTlsOptions;
+  origin?: string;
+};
+
+export type BrowserTokenHttpConnectOptions = TokenHttpConnectOptions & {
+  tls?: never;
+  origin?: never;
+};
+
 /**
  * Connection wire types.
  *
