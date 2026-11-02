@@ -170,10 +170,10 @@ fn failure_limiter_gc_removes_idle_subnets_and_new_subnet_uses_post_warmup_rate(
             RateDecision::Allowed
         ));
     }
-    assert_eq!(
+    assert!(matches!(
         limiter.check(subnet(11), 60_000_000_002),
         RateDecision::RateLimited { .. }
-    );
+    ));
     assert_eq!(limiter.tracked_subnets(), 2);
     limiter.gc(360_000_000_003);
     assert_eq!(limiter.tracked_subnets(), 0);
@@ -448,6 +448,8 @@ async fn stalled_writer_deadline_warns_before_detaching() {
         Arc::new(|| Some(1)),
         CancellationToken::new(),
     );
+    // Let the flusher arm its interval before the clock moves.
+    tokio::task::yield_now().await;
     worker.record_exposed([0x12; 16], [2; 16], subnet(1), 1);
     let (entered_tx, entered_rx) = oneshot::channel();
     let waiter = tokio::task::spawn_blocking(move || {
@@ -457,7 +459,10 @@ async fn stalled_writer_deadline_warns_before_detaching() {
     tokio::time::advance(Duration::from_secs(1)).await;
     entered_rx.await.expect("writer entered");
     let shutdown = tokio::spawn(async move { worker.shutdown().await });
-    tokio::time::advance(Duration::from_secs(2)).await;
+    // A running blocking task inhibits auto-advance: step the clock explicitly.
+    while !shutdown.is_finished() {
+        tokio::time::advance(Duration::from_millis(500)).await;
+    }
     shutdown.await.expect("shutdown task");
     release.send(()).expect("release detached writer");
     waiter.await.expect("writer waiter");

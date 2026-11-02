@@ -151,7 +151,8 @@ impl FailureLimiter {
     }
     fn claim_evict_scan(&self, now_ns: u64) -> bool {
         let previous = self.last_evict_scan_ns.load(Ordering::Acquire);
-        if previous != u64::MAX && now_ns.saturating_sub(previous) < EVICT_SCAN_INTERVAL_NS {
+        if previous != u64::MAX && now_ns >= previous && now_ns - previous < EVICT_SCAN_INTERVAL_NS
+        {
             return false;
         }
         if self

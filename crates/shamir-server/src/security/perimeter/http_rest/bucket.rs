@@ -133,7 +133,8 @@ impl BucketCache {
     }
     fn sweep_if_due(&self, now_ns: u64) {
         let next = self.next_sweep_ns.load(Ordering::Acquire);
-        if now_ns < next {
+        // A wall-clock jump back beyond one interval must not stall sweeps.
+        if now_ns < next && next - now_ns <= BUCKET_IDLE_NS {
             return;
         }
         if self

@@ -71,8 +71,6 @@ DONE — failure-limiter startup anchors from the maintenance clock when availab
 
 DONE — protocol audit event uses `api_token_auth_failures`; duplicate Revision 2 report was reconciled without losing the single historical report, and stale formatting-pending anchor removed. Not executed.
 
-```
-
 ### Final response
 
 Revision 3 items 1–8 implemented in REST cache, gate, executor, maintenance, and their tests; TOKEN_API.md and DESIGN.md updated.
