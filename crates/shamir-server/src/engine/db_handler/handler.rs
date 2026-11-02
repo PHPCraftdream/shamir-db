@@ -70,6 +70,7 @@ use std::time::Duration;
 use shamir_connect::server::audit_chain::AuditChainWriter;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::dispatch::RequestHandler;
+use shamir_connect::server::origin::SessionOrigin;
 use shamir_connect::server::session::{Session, SessionStore};
 
 use shamir_db::access::Actor;
@@ -79,6 +80,7 @@ use shamir_query_types::batch::BatchTreeVisitor;
 use shamir_query_types::hmac as canon;
 
 use crate::byte_budget::{stash_guard, stash_serialized_response, ByteBudget};
+use crate::security::tokens::TokenService;
 
 // Wire DTOs are defined once in `shamir-query-types::wire` so that the
 // SDK (`shamir-client`) and the server share the same definition. Re-
@@ -96,6 +98,7 @@ use super::admin::{
 use super::config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 use super::cursor_handlers::error_response;
 use super::cursor_support::authorize_cursor_read;
+use super::handlers::token_admin;
 use super::repo_audit;
 use super::subscribe_handler;
 
@@ -209,6 +212,10 @@ pub struct ShamirDbHandler {
     /// restructuring `dispatch_request_view`'s signature or the
     /// `RequestHandler` trait.
     pub(super) session_store: Option<Arc<SessionStore>>,
+    /// Shared server token service; absent in handlers constructed without token administration.
+    pub(super) token_service: Option<Arc<TokenService>>,
+    /// Whether users may create their own tokens. Listing and revocation remain allowed.
+    pub(super) allow_self_service: bool,
 }
 
 impl ShamirDbHandler {
@@ -235,6 +242,8 @@ impl ShamirDbHandler {
             cursor_registry: Arc::new(CursorRegistry::new()),
             cursor_limits: CursorLimitsCap::DEFAULT,
             next_cursor_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            token_service: None,
+            allow_self_service: true,
             session_store: None,
         }
     }
@@ -256,8 +265,21 @@ impl ShamirDbHandler {
             cursor_registry: Arc::new(CursorRegistry::new()),
             cursor_limits: CursorLimitsCap::DEFAULT,
             next_cursor_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            token_service: None,
+            allow_self_service: true,
             session_store: None,
         }
+    }
+
+    /// Attach the shared token service and configure self-service creation.
+    pub fn with_token_service(
+        mut self,
+        service: Arc<TokenService>,
+        allow_self_service: bool,
+    ) -> Self {
+        self.token_service = Some(service);
+        self.allow_self_service = allow_self_service;
+        self
     }
 
     /// Set the slow-query threshold (use [`SlowQueryConfig::from_ms`]).
@@ -370,6 +392,22 @@ impl RequestHandler for ShamirDbHandler {
                         .map_err(|encode_err| format!("response encode: {}", encode_err));
                 }
             };
+
+            if matches!(
+                request,
+                DbRequest::CreateApiToken { .. }
+                    | DbRequest::ListApiTokens { .. }
+                    | DbRequest::RevokeApiToken { .. }
+                    | DbRequest::RevokeUserTokens { .. }
+            ) && matches!(&session.origin, SessionOrigin::Token(_))
+            {
+                let response = DbResponse::Error {
+                    code: "token_request_denied".into(),
+                    message: "token sessions cannot administer tokens".into(),
+                };
+                return rmp_serde::to_vec_named(&response)
+                    .map_err(|encode_err| format!("response encode: {}", encode_err));
+            }
 
             let top_level_canonical = match canon::canonical_db_request(&request) {
                 Ok(bytes) => Some(bytes),
@@ -511,6 +549,14 @@ impl RequestHandler for ShamirDbHandler {
                         secrets.new_server_key,
                     )
                     .await
+                }
+
+                DbRequest::CreateApiToken { .. }
+                | DbRequest::ListApiTokens { .. }
+                | DbRequest::RevokeApiToken { .. }
+                | DbRequest::RevokeUserTokens { .. } => {
+                    token_admin::handle(self, session, &request, top_level_canonical.as_deref())
+                        .await
                 }
 
                 // --- FG-5b: server-side result cursors ---

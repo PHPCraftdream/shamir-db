@@ -1,6 +1,7 @@
 //! Auth-related DTOs (User, Role, Permission). Permission-check logic
 //! (`SessionPermissions::check_batch`) lives in shamir-engine.
 
+pub mod token_admin;
 pub mod types;
 
 pub use shamir_types::secret::SecretString;

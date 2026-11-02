@@ -13,6 +13,8 @@ use crate::read::{QueryResult, ReadQuery};
 use crate::wire::change_password_secrets::ChangePasswordSecrets;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::repl::{ReplRequest, ReplResponse};
+use crate::wire::token_admin::ApiTokenView;
+use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 
 /// Current query-language version. Bumped when the on-the-wire
 /// `BatchRequest` schema changes incompatibly. The server keeps a
@@ -239,6 +241,46 @@ pub enum DbRequest {
         hmac: Option<String>,
     },
 
+    /// Create a scoped API token for the caller or an authorized user.
+    CreateApiToken {
+        /// Human-readable label for the token.
+        label: String,
+        /// Optional lifetime in seconds; absence selects the configured default.
+        #[serde(default)]
+        ttl_secs: Option<u64>,
+        /// Scope mode (`read_only` or `read_write`).
+        mode: Option<ApiTokenMode>,
+        /// Allowed channels (`rest`, `ws`, or `both`).
+        channels: Option<ApiTokenChannels>,
+        /// Optional database allowlist; `None` permits all accessible databases.
+        databases: Option<Vec<String>>,
+        /// Optional target username, as resolved by the server directory.
+        for_user: Option<String>,
+        /// Optional confirmation HMAC.
+        hmac: Option<String>,
+    },
+    /// List API tokens for the caller or an authorized user.
+    ListApiTokens {
+        /// Optional target username, as resolved by the server directory.
+        for_user: Option<String>,
+        /// Optional confirmation HMAC.
+        hmac: Option<String>,
+    },
+    /// Revoke an API token identified by base64url-encoded 16-byte ID.
+    RevokeApiToken {
+        /// Token ID encoded as base64url.
+        id: String,
+        /// Optional confirmation HMAC.
+        hmac: Option<String>,
+    },
+    /// Revoke all API tokens for the caller or a specified user.
+    RevokeUserTokens {
+        /// Optional target username, resolved by the directory.
+        user: Option<String>,
+        /// Optional confirmation HMAC.
+        hmac: Option<String>,
+    },
+
     // --- FG-5a: server-side result cursors (wire protocol only; the
     // engine/session state that actually backs these lands in FG-5b — see
     // `docs/guide-docs/client-server-protocol-spec/CURSORS.md`) ---
@@ -353,6 +395,40 @@ pub enum DbResponse {
         /// Echoed requested state (`true` = granted, `false` = revoked).
         on: bool,
     },
+    /// Successful API-token creation; secret appears only in this response.
+    ApiTokenCreated {
+        /// Token ID, base64url-encoded from 16 bytes.
+        id: String,
+        /// Secret bearer credential, returned exactly once and redacted by `Debug`.
+        token: crate::auth::SecretString,
+        /// Token label.
+        label: String,
+        /// Owner username.
+        owner: String,
+        /// Scope mode.
+        mode: ApiTokenMode,
+        /// Allowed channels.
+        channels: ApiTokenChannels,
+        /// Database allowlist, or `None` for all accessible databases.
+        databases: Option<Vec<String>>,
+        /// Creation time in unix nanoseconds.
+        created_at_ns: u64,
+        /// Expiration time in unix nanoseconds.
+        expires_at_ns: u64,
+    },
+    /// API-token listing response, containing public metadata rows only.
+    ApiTokensListed {
+        /// Public API-token metadata rows.
+        tokens: Vec<ApiTokenView>,
+    },
+    /// Confirmation that one token was revoked.
+    ApiTokenRevoked,
+    /// Number of tokens revoked for the selected user.
+    ApiUserTokensRevoked {
+        /// Number of tokens revoked.
+        count: u64,
+    },
+
     /// DB-layer failure (permission, planner, query, lock-timeout, …).
     /// Not a protocol error; the wire frame is a normal `ResponseEnvelope`.
     Error {

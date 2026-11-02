@@ -468,6 +468,19 @@ impl TokenService {
         .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))?
         .map_err(TokenCreateError::Store)
     }
+    /// Find a retained token record by id without exposing its bearer secret.
+    pub async fn lookup(&self, id: [u8; 16]) -> Result<Option<TokenView>, TokenStoreError> {
+        let store = self.store.clone();
+        tokio::task::spawn_blocking(move || {
+            Ok(store
+                .get_blocking(&TokenId(id))?
+                .as_ref()
+                .map(TokenView::from))
+        })
+        .await
+        .map_err(|_| TokenStoreError::Join)?
+    }
+
     /// List the owner's secret-free token metadata.
     pub async fn list(&self, owner: [u8; 16]) -> Result<Vec<TokenView>, TokenStoreError> {
         let store = self.store.clone();
