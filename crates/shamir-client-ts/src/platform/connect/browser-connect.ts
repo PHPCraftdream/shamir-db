@@ -4,6 +4,7 @@ import { TokenTransportError } from '../../core/protocol/token/errors.js';
 import { createTokenHttpClient } from '../../entry/token-client.js';
 import { createTokenWsClient } from '../../entry/ws/token-ws-client.js';
 import { createBrowserTokenPlatform } from '../browser.js';
+import { isBrowserLoopback } from '../token/socket-browser.js';
 
 import type { PublicTokenClient } from '../../entry/ws/token-client.js';
 
@@ -25,7 +26,7 @@ export async function connectTokenBrowser(options: BrowserTokenConnectOptions): 
   const channel = options.channel ?? derived;
   if (channel !== derived) throw new TokenTransportError('invalid_request', 'Token channel does not match URL scheme');
   if (options.requestTimeoutMs !== undefined && (!Number.isSafeInteger(options.requestTimeoutMs) || options.requestTimeoutMs < 0 || options.requestTimeoutMs > 0x7fffffff) || options.connectTimeoutMs !== undefined && (!Number.isSafeInteger(options.connectTimeoutMs) || options.connectTimeoutMs < 0 || options.connectTimeoutMs > 0x7fffffff)) throw new TokenTransportError('invalid_request', 'Invalid connection timeout');
-  if (scheme === 'ws:' && !isLoopback(url.hostname)) throw new TokenTransportError('invalid_request', 'Browser plaintext WebSocket connections require loopback');
+  if (scheme === 'ws:' && !isBrowserLoopback(url.hostname)) throw new TokenTransportError('invalid_request', 'Browser plaintext WebSocket connections require loopback');
   if (channel === 'http') {
     const normalized: BrowserTokenHttpConnectOptions = {
       auth: 'token', channel: 'http', token, url: url.origin,
@@ -42,9 +43,4 @@ export async function connectTokenBrowser(options: BrowserTokenConnectOptions): 
     ...(options.signal === undefined ? {} : { signal: options.signal }),
   };
   return createTokenWsClient(normalized, (platformOptions) => createBrowserTokenPlatform(platformOptions));
-}
-function isLoopback(host: string): boolean {
-  if (host === 'localhost' || host === '[::1]' || host === '::1') return true;
-  const parts = host.split('.');
-  return parts.length === 4 && parts[0] === '127' && parts.slice(1).every((part) => /^(?:0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
 }

@@ -10,6 +10,8 @@ import { subscribe } from '../../../core/builders/stream/subscribe.js';
 import type { ConnectOptions, NodeConnectOptions, BrowserConnectOptions } from '../../../core/types/connection.js';
 import type { TokenHttpClient } from '../../../entry/token-client.js';
 import type { TokenWsClient, PublicTokenClient } from '../../../entry/ws/token-client.js';
+import type { TokenCursor as NodeTokenCursor } from '../../../index.js';
+import type { TokenCursor as BrowserTokenCursor, SubscriptionEvent as BrowserSubscriptionEvent } from '../../../browser.js';
 import { decodeTokenFrame, decodeTokenPayload, encodeTokenPayload } from '../../../core/protocol/token/ws.js';
 import * as NodePlatformModule from '../../../platform/node.js';
 import * as BrowserPlatformModule from '../../../platform/browser.js';
@@ -78,25 +80,40 @@ describe('public connect contract', () => {
     const nodeFactory = vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform');
     const browserFactory = vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform');
     const controller = new AbortController(); controller.abort();
-    const invalidNode: unknown[] = [
-      { auth: 'token', url: 'https://db.example/path', token },
-      { auth: 'token', url: 'https://db.example?query=x', token },
-      { auth: 'token', url: 'https://user:pass@db.example', token },
-      { auth: 'token', url: 'https://db.example', token, tls: [] },
-      { auth: 'token', url: 'https://db.example', token, signal: controller.signal },
+    const invalidNode: Array<[unknown, 'invalid_request' | 'client_aborted']> = [
+      [{ auth: 'token', url: 'https://db.example/path', token }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example?query=x', token }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://user:pass@db.example', token }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, tls: [] }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, signal: controller.signal }, 'client_aborted'],
+      [{ auth: 'token', url: 'https://db.example', token, username: 'alice' }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, username: 'alice', password: 'secret' }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token: Object.create(NodeApiToken.prototype) }, 'invalid_request'],
+      [{ url: 'https://db.example', token }, 'invalid_request'],
+      [{ auth: 'unknown', url: 'https://db.example', token }, 'invalid_request'],
+      [{ auth: 'token', url: 'http://db.example', token, tls: {} }, 'invalid_request'],
+      [{ auth: 'token', url: 'ws://db.example', token, tls: {} }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, tls: { allowInsecureTlsForDevelopment: false } }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, connectTimeoutMs: 1.5 }, 'invalid_request'],
+      [{ auth: 'token', channel: 'ws', url: 'https://db.example', token }, 'invalid_request'],
+      [{ auth: 'token', channel: 'http', url: 'wss://db.example', token }, 'invalid_request'],
+      [{ auth: 'token', channel: 'http', url: 'ws://db.example', token }, 'invalid_request'],
     ];
-    for (const [index, options] of invalidNode.entries()) await expect(connectNode(options as never)).rejects.toMatchObject({ code: index === 4 ? 'client_aborted' : 'invalid_request' });
-    await expect(connectNode({ auth: 'token', channel: 'http', url: 'wss://db.example', token } as never)).rejects.toMatchObject({ code: 'invalid_request' });
-    const invalidBrowser: unknown[] = [
-      { auth: 'token', url: 'https://db.example/path', token },
-      { auth: 'token', url: 'https://db.example', token, tls: {} },
-      { auth: 'token', url: 'https://db.example', token, origin: 'https://other.example' },
-      { auth: 'token', url: 'https://db.example', token, requestTimeoutMs: -1 },
-      { auth: 'token', url: 'https://db.example', token, tls: { allowInsecureTlsForDevelopment: false } },
-      { auth: 'token', url: 'ws://db.remote.example', token },
+    for (const [options, code] of invalidNode) await expect(connectNode(options as never)).rejects.toMatchObject({ code });
+    const invalidBrowser: Array<[unknown, 'invalid_request']> = [
+      [{ auth: 'token', url: 'https://db.example/path', token }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, tls: {} }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, origin: 'https://other.example' }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, requestTimeoutMs: -1 }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, tls: { allowInsecureTlsForDevelopment: false } }, 'invalid_request'],
+      [{ auth: 'token', url: 'ws://db.remote.example', token }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, allow_self_signed: true }, 'invalid_request'],
+      [{ auth: 'token', url: 'https://db.example', token, username: 'alice' }, 'invalid_request'],
+      [{ url: 'https://db.example', token }, 'invalid_request'],
+      [{ auth: 'unknown', url: 'https://db.example', token }, 'invalid_request'],
+      [{ auth: 'token', channel: 'http', url: 'wss://db.example', token }, 'invalid_request'],
     ];
-    for (const options of invalidBrowser) await expect(connectBrowser(options as never)).rejects.toMatchObject({ code: 'invalid_request' });
-    await expect(connectBrowser({ auth: 'token', channel: 'http', url: 'wss://db.example', token } as never)).rejects.toMatchObject({ code: 'invalid_request' });
+    for (const [options, code] of invalidBrowser) await expect(connectBrowser(options as never)).rejects.toMatchObject({ code });
     expect(nodeFactory).not.toHaveBeenCalled(); expect(browserFactory).not.toHaveBeenCalled();
     const client = Object.create(ShamirClient.prototype) as ShamirClient;
     const connectSpy = vi.spyOn(ShamirClient, 'connect').mockResolvedValue(client);
@@ -107,14 +124,81 @@ describe('public connect contract', () => {
     expect(connectSpy).toHaveBeenNthCalledWith(1, NodePlatformModule.NodePlatform, options);
     expect(connectSpy).toHaveBeenNthCalledWith(2, BrowserPlatformModule.BrowserPlatform, options);
   });
-  it('denies REST-only operations before sending', async () => {
-    const platform = fakePlatform('node', new FakeSocket());
-    vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(platform);
-    const client = await connectNode({ auth: 'token', url: 'https://db.example', token });
-    expectRestDenial(() => client.db('db').cursor(Query.from('items'), 10));
-    await expect(client.db('db').tx(async () => 'x')).rejects.toMatchObject({ code: 'not_supported_over_rest' });
-    await expect(client.db('db').runLive(Batch.create().add('read', Query.from('items')))).rejects.toMatchObject({ code: 'not_supported_over_rest' });
-    expect(platform.requests).toHaveLength(0); await client.close();
+  it('selects Node HTTP from scheme and runs ping/query requests through REST', async () => {
+    const socket = new FakeSocket(); const platform = fakePlatform('node', socket);
+    const factory = vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(platform);
+    const client = await connectNode({ auth: 'token', url: 'https://db.example', token: TOKEN_VALUE });
+    await expect(client.ping()).resolves.toEqual({ kind: 'pong' });
+    await expect(client.db('db').run(Query.from('items').select(['name']))).resolves.toMatchObject({ records: [{ name: 'ok' }] });
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({ channel: 'http', token: expect.any(NodeApiToken), url: 'https://db.example/' }));
+    expect(socket.sent).toHaveLength(0); expect(platform.requests.map((url) => url.pathname)).toEqual(['/shamir/v1/ping', '/shamir/v1/request']); await client.close();
+  });
+  it('uses explicit Node WS and never sends HTTP requests', async () => {
+    const socket = new FakeSocket(); const platform = fakePlatform('node', socket);
+    const factory = vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(platform);
+    const client = await connectNode({ auth: 'token', channel: 'ws', url: 'wss://db.example', token: TOKEN_VALUE });
+    await expect(client.ping()).resolves.toEqual({ kind: 'pong' });
+    await expect(client.db('db').run(Query.from('items').select(['name']))).resolves.toMatchObject({ records: [{ name: 'ok' }] });
+    expect(factory).toHaveBeenCalledWith(expect.objectContaining({ channel: 'ws', token: expect.any(NodeApiToken), url: 'wss://db.example' }));
+    expect(platform.requests).toHaveLength(0); expect(socket.sent).toHaveLength(2); await client.close();
+  });
+  it('connects in browser over HTTP and WS using normalized string tokens', async () => {
+    const httpSocket = new FakeSocket(); const httpPlatform = fakePlatform('browser', httpSocket);
+    const httpFactory = vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform').mockReturnValue(httpPlatform);
+    const http = await connectBrowser({ auth: 'token', url: 'https://db.example', token: TOKEN_VALUE });
+    expect(http.channel).toBe('http'); expect(httpPlatform.requests).toHaveLength(0);
+    expect(httpFactory).toHaveBeenCalledWith(expect.objectContaining({ channel: 'http', token: expect.any(BrowserApiToken), url: 'https://db.example/' }));
+    await expect(http.ping()).resolves.toEqual({ kind: 'pong' });
+    await expect(http.db('db').run(Query.from('items').select(['name']))).resolves.toMatchObject({ records: [{ name: 'ok' }] });
+    expect(httpPlatform.requests.map((url) => url.pathname)).toEqual(['/shamir/v1/ping', '/shamir/v1/request']); await http.close();
+    const wsSocket = new FakeSocket(); const wsPlatform = fakePlatform('browser', wsSocket);
+    const wsFactory = vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform').mockReturnValue(wsPlatform);
+    const ws = await connectBrowser({ auth: 'token', channel: 'ws', url: 'wss://db.example', token: TOKEN_VALUE });
+    expect(ws.channel).toBe('ws');
+    expect(wsFactory).toHaveBeenCalledWith(expect.objectContaining({ channel: 'ws', token: expect.any(BrowserApiToken), url: 'wss://db.example' }));
+    await expect(ws.ping()).resolves.toEqual({ kind: 'pong' });
+    await expect(ws.db('db').run(Query.from('items').select(['name']))).resolves.toMatchObject({ records: [{ name: 'ok' }] });
+    expect(wsPlatform.requests).toHaveLength(0); expect(wsSocket.sent).toHaveLength(2); await ws.close();
+  });
+  it('denies REST-only operations before sending through both public entries', async () => {
+    const nodePlatform = fakePlatform('node', new FakeSocket());
+    vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(nodePlatform);
+    const node = await connectNode({ auth: 'token', url: 'https://db.example', token });
+    const nodeCallback = vi.fn(async () => 'x');
+    expectRestDenial(() => node.db('db').cursor(Query.from('items'), 10));
+    await expect(node.db('db').tx(nodeCallback)).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    await expect(node.db('db').runLive(Batch.create().add('read', Query.from('items')))).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    await expect(node.execute('db', Batch.create().add('sub', subscribe({ store: 'main', table: 'items' })).build())).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    expect(nodeCallback).not.toHaveBeenCalled(); expect(nodePlatform.requests).toHaveLength(0); await node.close();
+    const browserPlatform = fakePlatform('browser', new FakeSocket());
+    vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform').mockReturnValue(browserPlatform);
+    const browser = await connectBrowser({ auth: 'token', url: 'https://db.example', token });
+    const browserCallback = vi.fn(async () => 'x');
+    expectRestDenial(() => browser.db('db').cursor(Query.from('items'), 10));
+    await expect(browser.db('db').tx(browserCallback)).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    await expect(browser.db('db').runLive(Batch.create().add('read', Query.from('items')))).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    await expect(browser.execute('db', Batch.create().add('sub', subscribe({ store: 'main', table: 'items' })).build())).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    expect(browserCallback).not.toHaveBeenCalled(); expect(browserPlatform.requests).toHaveLength(0); await browser.close();
+  });
+  it('delivers pushes through both public entries and unsubscribes', async () => {
+    const nodeSocket = new FakeSocket(); const nodePlatform = fakePlatform('node', nodeSocket);
+    vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(nodePlatform);
+    const node = await connectNode({ auth: 'token', url: 'wss://db.example', token });
+    const nodeLive = await node.db('db').runLive(Batch.create().add('sub', subscribe({ store: 'main', table: 'items' })));
+    nodeSocket.deliver({ push: 'event', sub: 7, seq: 0, data: Uint8Array.of(4, 2) });
+    expect(await nodeLive.subs.sub!.next()).toMatchObject({ kind: 'event', seq: 0, data: Uint8Array.of(4, 2) });
+    await nodeLive.subs.sub!.unsubscribe(); expect(nodeSocket.sent).toHaveLength(2);
+    const nodeUnsub = decodeTokenPayload(decodeTokenFrame(nodeSocket.sent[1]!).req as Uint8Array) as { batch?: { queries?: Record<string, unknown> } };
+    expect(nodeUnsub.batch?.queries?._unsub).toEqual({ unsubscribe: 7 }); expect(nodePlatform.requests).toHaveLength(0); await node.close();
+    const browserSocket = new FakeSocket(); const browserPlatform = fakePlatform('browser', browserSocket);
+    vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform').mockReturnValue(browserPlatform);
+    const browser = await connectBrowser({ auth: 'token', url: 'wss://db.example', token });
+    const browserLive = await browser.db('db').runLive(Batch.create().add('sub', subscribe({ store: 'main', table: 'items' })));
+    browserSocket.deliver({ push: 'event', sub: 7, seq: 1, data: Uint8Array.of(8, 5) });
+    expect(await browserLive.subs.sub!.next()).toMatchObject({ kind: 'event', seq: 1, data: Uint8Array.of(8, 5) });
+    await browserLive.subs.sub!.unsubscribe(); expect(browserSocket.sent).toHaveLength(2);
+    const browserUnsub = decodeTokenPayload(decodeTokenFrame(browserSocket.sent[1]!).req as Uint8Array) as { batch?: { queries?: Record<string, unknown> } };
+    expect(browserUnsub.batch?.queries?._unsub).toEqual({ unsubscribe: 7 }); expect(browserPlatform.requests).toHaveLength(0); await browser.close();
   });
   it('routes two subscriptions and makes repeated unsubscribe idempotent', async () => {
     const socket = new FakeSocket();
@@ -129,6 +213,28 @@ describe('public connect contract', () => {
     })).toEqual([7, 8]);
     await client.close();
   });
+  it('derives or honors matching channel choices across Node and browser schemes', async () => {
+    const cases = [
+      { connect: connectNode, runtime: 'node' as const, url: 'https://db.example', channel: 'http' as const },
+      { connect: connectNode, runtime: 'node' as const, url: 'http://db.example', channel: 'http' as const },
+      { connect: connectNode, runtime: 'node' as const, url: 'wss://db.example', channel: 'ws' as const },
+      { connect: connectNode, runtime: 'node' as const, url: 'ws://db.example', channel: 'ws' as const },
+      { connect: connectBrowser, runtime: 'browser' as const, url: 'https://db.example', channel: 'http' as const },
+      { connect: connectBrowser, runtime: 'browser' as const, url: 'http://db.example', channel: 'http' as const },
+      { connect: connectBrowser, runtime: 'browser' as const, url: 'wss://db.example', channel: 'ws' as const },
+      { connect: connectBrowser, runtime: 'browser' as const, url: 'ws://127.0.0.1', channel: 'ws' as const },
+    ];
+    for (const entry of cases) for (const explicit of [false, true]) {
+      const socket = new FakeSocket(); const platform = fakePlatform(entry.runtime, socket);
+      const nodeFactory = entry.runtime === 'node' ? vi.spyOn(NodePlatformModule, 'createNodeTokenPlatform').mockReturnValue(platform) : undefined;
+      const browserFactory = entry.runtime === 'browser' ? vi.spyOn(BrowserPlatformModule, 'createBrowserTokenPlatform').mockReturnValue(platform) : undefined;
+      const options: { auth: 'token'; url: string; token: NodeApiToken | string; channel?: 'http' | 'ws' } = { auth: 'token', url: entry.url, token, ...(explicit ? { channel: entry.channel } : {}) };
+      const client = await entry.connect(options);
+      expect(client.channel).toBe(entry.channel);
+      expect(nodeFactory ?? browserFactory).toHaveBeenCalledWith(expect.objectContaining({ channel: entry.channel }));
+      await client.close(); vi.restoreAllMocks();
+    }
+  });
   it('checks public overload returns without invoking connect', () => {
     type Assert<T extends true> = T;
     type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
@@ -136,7 +242,21 @@ describe('public connect contract', () => {
     type BrowserParams = Assert<Equal<Parameters<typeof connectBrowser>, [BrowserConnectOptions]>>;
     type NodeReturn = Assert<Equal<ReturnType<typeof connectNode>, Promise<ShamirClient | PublicTokenClient>>>;
     type BrowserReturn = Assert<Equal<ReturnType<typeof connectBrowser>, Promise<ShamirClient | PublicTokenClient>>>;
-    type Checks = [NodeParams, BrowserParams, NodeReturn, BrowserReturn]; void (0 as unknown as Checks);
+    const probe = (): void => {
+      const nodeSchemeHttp: Promise<TokenHttpClient> = connectNode({ auth: 'token', url: 'https://db.example', token });
+      const nodeExplicitHttp: Promise<TokenHttpClient> = connectNode({ auth: 'token', channel: 'http', url: 'https://db.example', token });
+      const nodeWs: Promise<TokenWsClient> = connectNode({ auth: 'token', url: 'wss://db.example', token });
+      const nodeGeneric: Promise<PublicTokenClient> = connectNode({ auth: 'token', url: String('https://db.example'), token });
+      const browserSchemeHttp: Promise<TokenHttpClient> = connectBrowser({ auth: 'token', url: 'https://db.example', token });
+      const browserExplicitHttp: Promise<TokenHttpClient> = connectBrowser({ auth: 'token', channel: 'http', url: 'https://db.example', token });
+      const browserWs: Promise<TokenWsClient> = connectBrowser({ auth: 'token', url: 'wss://db.example', token });
+      const browserGeneric: Promise<PublicTokenClient> = connectBrowser({ auth: 'token', url: String('https://db.example'), token });
+      void [nodeSchemeHttp, nodeExplicitHttp, nodeWs, nodeGeneric, browserSchemeHttp, browserExplicitHttp, browserWs, browserGeneric];
+    };
+    void probe;
+    const typeExports: [NodeTokenCursor, BrowserTokenCursor, BrowserSubscriptionEvent] | undefined = undefined; void typeExports;
+    type CursorExports = Assert<Equal<NodeTokenCursor, BrowserTokenCursor>>;
+    type Checks = [NodeParams, BrowserParams, NodeReturn, BrowserReturn, CursorExports]; void (0 as unknown as Checks);
   });
   it('exports no platform internals and redacts public token values', async () => {
     const node = await import('../../../index.js'); const browser = await import('../../../browser.js');

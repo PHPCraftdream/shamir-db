@@ -31,7 +31,9 @@ export type { TokenTransportErrorCode, TokenTransportErrorOptions } from './core
 export type { TokenConnectOptions, BrowserTokenConnectOptions, BrowserConnectOptions, BrowserTokenHttpConnectOptions, BrowserTokenWsConnectOptions } from './core/types/connection.js';
 export type { PublicTokenClient, TokenWsClient } from './entry/ws/token-client.js';
 export type { TokenHttpClient } from './entry/token-client.js';
+export type { TokenCursor } from './entry/ws/token-cursor.js';
 export type { TokenHttpDb, TokenLiveResult, TokenLiveSubscription, TokenTransactionContext } from './entry/token-db.js';
+export type { SubscriptionEvent } from './core/client/subscription-router.js';
 export type { TokenWsDb } from './entry/ws/token-client.js';
 export { VisibilityError } from './core/visibility/errors.js';
 export type { TransactionResult, TransactionOptions } from './core/visibility/types.js';
