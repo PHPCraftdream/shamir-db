@@ -8,6 +8,7 @@
 //! Seed export / verify / install are driven through the real CLI
 //! subcommands of the same binary, exactly as an operator would run them.
 
+use fs4::fs_std::FileExt;
 use std::net::SocketAddr;
 use std::net::TcpListener;
 use std::path::Path;
@@ -60,12 +61,39 @@ pub fn write_home_config(data_dir: &Path, addr: SocketAddr) -> PathBuf {
     config_path
 }
 
-/// Claim a free loopback port race-free (bind port 0, read it, drop).
-pub fn free_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind :0");
-    let addr = listener.local_addr().expect("local addr");
-    drop(listener);
-    addr
+/// A loopback port reserved across all seed test processes until dropped.
+pub struct PortLease {
+    /// The reserved address.
+    pub addr: SocketAddr,
+    _lock: std::fs::File,
+}
+
+/// Reserve a free loopback port for the whole test, including leader restarts.
+///
+/// Bind-and-drop alone leaves the port unbound between this call and the
+/// child's bind (and between a kill and a respawn), so a concurrent seed test
+/// can be handed the same number and two tests end up talking to one leader.
+/// An OS file lock per port number, released when the process dies, makes the
+/// reservation exclusive among the seed tests.
+pub fn free_addr() -> PortLease {
+    let dir = std::env::temp_dir().join("shamir-seed-e2e-ports");
+    std::fs::create_dir_all(&dir).expect("port lease dir");
+    loop {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind :0");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join(addr.port().to_string()))
+            .expect("port lease file");
+        // Held by another live seed test (its leader may be between spawn and
+        // restart): pick another port.
+        if lock.try_lock_exclusive().is_ok() {
+            return PortLease { addr, _lock: lock };
+        }
+    }
 }
 
 /// Spec-floor-but-fast KDF, matching the shared harness `fast_kdf`.
