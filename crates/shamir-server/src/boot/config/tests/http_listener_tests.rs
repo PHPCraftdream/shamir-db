@@ -41,9 +41,9 @@ fn http_listener_defaults_apply() {
 #[test]
 fn minimal_flat_ktav_http_listener_parses_defaults() {
     let source = r#"{
-        kind: http,
-        addr: 127.0.0.1:7340,
-        tls: false,
+        kind: http
+        addr: 127.0.0.1:7340
+        tls: false
     }"#;
     let parsed: ListenerConfig = ktav::from_str(source).expect("minimal listener parses");
     assert_eq!(parsed.kind, ListenerKind::Http);
@@ -55,15 +55,15 @@ fn minimal_flat_ktav_http_listener_parses_defaults() {
 #[test]
 fn full_flat_ktav_http_listener_parses_numeric_settings() {
     let source = r#"{
-        kind: http,
-        addr: 127.0.0.1:7340,
-        tls: true,
-        max_request_body_bytes: 8192,
-        head_timeout_ms: 50,
-        body_timeout_ms: 200,
-        request_timeout_ms: 1000,
-        allow_self_signed: true,
-        trusted_proxies: [10.0.0.0/8],
+        kind: http
+        addr: 127.0.0.1:7340
+        tls: true
+        max_request_body_bytes: 8192
+        head_timeout_ms: 50
+        body_timeout_ms: 200
+        request_timeout_ms: 1000
+        allow_self_signed: true
+        trusted_proxies: [10.0.0.0/8]
     }"#;
     let parsed: ListenerConfig = ktav::from_str(source).expect("full listener parses");
     assert_eq!(parsed.http.tls, Some(true));
@@ -76,11 +76,15 @@ fn full_flat_ktav_http_listener_parses_numeric_settings() {
 }
 
 #[test]
-fn flat_ktav_numeric_buffer_handles_unsigned_range_and_rejects_negative() {
+fn flat_ktav_numeric_buffer_handles_signed_range_and_rejects_negative_and_overflow() {
+    // ktav turns integers above i64::MAX into strings; flatten buffers them as such.
     let source =
+        "{ kind: http, addr: 127.0.0.1:7340, tls: true, request_timeout_ms: 9223372036854775807 }";
+    let parsed: ListenerConfig = ktav::from_str(source).expect("largest ktav integer parses");
+    assert_eq!(parsed.http.request_timeout_ms, i64::MAX as u64);
+    let overflow =
         "{ kind: http, addr: 127.0.0.1:7340, tls: true, request_timeout_ms: 18446744073709551615 }";
-    let parsed: ListenerConfig = ktav::from_str(source).expect("large unsigned integer parses");
-    assert_eq!(parsed.http.request_timeout_ms, u64::MAX);
+    assert!(ktav::from_str::<ListenerConfig>(overflow).is_err());
     let negative = "{ kind: http, addr: 127.0.0.1:7340, tls: true, max_request_body_bytes: -1 }";
     assert!(ktav::from_str::<ListenerConfig>(negative).is_err());
 }
