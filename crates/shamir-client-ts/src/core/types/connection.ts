@@ -1,34 +1,30 @@
 import type { ApiToken } from '../../entry/api-token.js';
 
-/** HTTP bearer transport options; public package overloads are deferred to JS3. */
+/** Internal transport contracts; token is always an opaque validated handle. */
 export interface TokenHttpConnectOptions {
-  auth: 'token';
-  channel: 'http';
-  url: string;
-  token: ApiToken;
-  requestTimeoutMs?: number;
-  connectTimeoutMs?: number;
-  signal?: AbortSignal;
+  auth: 'token'; channel: 'http'; url: string; token: ApiToken;
+  requestTimeoutMs?: number; connectTimeoutMs?: number; signal?: AbortSignal;
 }
-
-export type NodeTokenWsConnectOptions = Omit<TokenHttpConnectOptions, 'channel'> & { channel: 'ws'; tls?: TokenTlsOptions; origin?: string };
-export type BrowserTokenWsConnectOptions = Omit<TokenHttpConnectOptions, 'channel'> & { channel: 'ws'; tls?: never; origin?: never };
+export type NodeTokenHttpConnectOptions = TokenHttpConnectOptions & { tls?: TokenTlsOptions; origin?: string };
+export type BrowserTokenHttpConnectOptions = TokenHttpConnectOptions & { tls?: never; origin?: never };
+export interface NodeTokenWsConnectOptions extends Omit<TokenHttpConnectOptions, 'channel'> { channel: 'ws'; tls?: TokenTlsOptions; origin?: string; }
+export type BrowserTokenWsConnectOptions = Omit<NodeTokenWsConnectOptions, 'tls' | 'origin'> & { tls?: never; origin?: never };
 export type TokenWsConnectOptions = NodeTokenWsConnectOptions | BrowserTokenWsConnectOptions;
+
+export type TokenConnectOptions = {
+  auth: 'token'; channel?: 'http' | 'ws'; url: string; token: ApiToken | string;
+  requestTimeoutMs?: number; connectTimeoutMs?: number; signal?: AbortSignal;
+};
+export type NodeTokenConnectOptions = TokenConnectOptions & { tls?: TokenTlsOptions; origin?: string; username?: never; password?: never; host?: never; port?: never };
+export type BrowserTokenConnectOptions = TokenConnectOptions & { tls?: never; origin?: never; username?: never; password?: never; host?: never; port?: never };
+export type NodeConnectOptions = ScramConnectOptions | NodeTokenConnectOptions;
+export type BrowserConnectOptions = ScramConnectOptions | BrowserTokenConnectOptions;
 
 export interface TokenTlsOptions {
   ca?: string | Uint8Array;
   allowInsecureTlsForDevelopment?: true;
 }
 
-export type NodeTokenHttpConnectOptions = TokenHttpConnectOptions & {
-  tls?: TokenTlsOptions;
-  origin?: string;
-};
-
-export type BrowserTokenHttpConnectOptions = TokenHttpConnectOptions & {
-  tls?: never;
-  origin?: never;
-};
 
 /**
  * Connection wire types.
@@ -104,6 +100,7 @@ export interface ConnectOptions {
    */
   connectTimeoutMs?: number;
 }
+export type ScramConnectOptions = ConnectOptions;
 
 /**
  * Connection parameters for {@link ShamirClient.connectLocal} — local IPC

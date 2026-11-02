@@ -1,23 +1,27 @@
-/**
- * Node.js entry point.
- *
- * Wires ShamirClient (core) with NodePlatform.
- * `connect(opts)` is the public factory that Node consumers call.
- */
-
 import { ShamirClient } from './core/client/client.js';
 import { NodePlatform } from './platform/node.js';
-import type {
-  ConnectOptions,
-  ConnectLocalOptions,
-  ResumeOptions,
-} from './core/types/index.js';
+import type { ConnectOptions, ConnectLocalOptions, ResumeOptions, NodeConnectOptions, NodeTokenConnectOptions } from './core/types/connection.js';
+import { connectTokenNode } from './platform/connect/node-connect.js';
+import type { TokenHttpClient } from './entry/token-client.js';
+import type { TokenWsClient, PublicTokenClient } from './entry/ws/token-client.js';
+import { TokenTransportError } from './core/protocol/token/errors.js';
 
 /**
  * Open an authenticated ShamirDB connection from Node.js.
  * Uses `ws` for the socket and `node:crypto` for HMAC/SHA256.
  */
-export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
+export function connect(opts: ConnectOptions): Promise<ShamirClient>;
+export function connect(opts: NodeTokenConnectOptions & ({ channel: 'http' } | { url: `http://${string}` | `https://${string}` })): Promise<TokenHttpClient>;
+export function connect(opts: NodeTokenConnectOptions & ({ channel: 'ws' } | { url: `ws://${string}` | `wss://${string}` })): Promise<TokenWsClient>;
+export function connect(opts: NodeTokenConnectOptions): Promise<PublicTokenClient>;
+export function connect(opts: NodeConnectOptions): Promise<ShamirClient | PublicTokenClient>;
+export async function connect(opts: NodeConnectOptions): Promise<ShamirClient | PublicTokenClient> {
+  if (!opts || typeof opts !== 'object') throw new TokenTransportError('invalid_request', 'Invalid connection options');
+  if ('auth' in opts) {
+    if (opts.auth !== 'token' || !('token' in opts) || !('url' in opts)) throw new TokenTransportError('invalid_request', 'Invalid token connection options');
+    return connectTokenNode(opts);
+  }
+  if ('token' in opts) throw new TokenTransportError('invalid_request', 'Token authentication must be explicit');
   return ShamirClient.connect(NodePlatform, opts);
 }
 
@@ -28,9 +32,7 @@ export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
  * server-side) stands in for transport encryption. Node-only: NOT exported
  * from `browser.ts` — a browser sandbox has no filesystem/pipe access.
  */
-export async function connectLocal(
-  opts: ConnectLocalOptions,
-): Promise<ShamirClient> {
+export async function connectLocal(opts: ConnectLocalOptions): Promise<ShamirClient> {
   return ShamirClient.connectLocal(NodePlatform, opts);
 }
 
@@ -42,6 +44,15 @@ export async function resume(opts: ResumeOptions): Promise<ShamirClient> {
   return ShamirClient.resume(NodePlatform, opts);
 }
 
+export { ApiToken } from './entry/api-token.js';
+export { TokenTransportError } from './core/protocol/token/errors.js';
+export type { TokenTransportErrorCode, TokenTransportErrorOptions } from './core/protocol/token/errors.js';
+export type { TokenConnectOptions, NodeTokenConnectOptions, NodeConnectOptions, NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions, TokenTlsOptions } from './core/types/connection.js';
+export type { TokenWsClient, PublicTokenClient } from './entry/ws/token-client.js';
+export type { TokenHttpClient } from './entry/token-client.js';
+export type { TokenCursor } from './entry/ws/token-cursor.js';
+export type { TokenHttpDb, TokenLiveResult, TokenLiveSubscription, TokenTransactionContext } from './entry/token-db.js';
+export type { TokenWsDb } from './entry/ws/token-client.js';
 export { VisibilityError } from './core/visibility/errors.js';
 export type { TransactionResult, TransactionOptions } from './core/visibility/types.js';
 export {
@@ -58,8 +69,6 @@ export type {
   RepoObservation,
 } from './core/receipts/index.js';
 export { ShamirClient };
-// Typed error surface (Finding 2.1 / 2.2): callers branch on `.code` /
-// `.retryable` instead of regexing message strings.
 export {
   ShamirDbError,
   ShamirTimeoutError,
@@ -79,10 +88,5 @@ export { SubscriptionHandle } from './core/client/subscription-handle.js';
 export { CursorIterator } from './core/client/cursor-iterator.js';
 export type { ResumeOptions, ConnectLocalOptions };
 export type { Db, Tx } from './core/client/db.js';
-
-// Builders: per-domain namespace objects (filter / select / write / ddl /
-// admin) + Query / Batch / call —
-// `import { filter, write, ddl, Query, Batch } from '@shamir/client'`.
 export * from './core/builders/index.js';
-// The wire type model (platform-agnostic core).
 export type * from './core/types/index.js';
