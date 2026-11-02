@@ -582,6 +582,7 @@ fn rejects_unix_listener_with_empty_addr() {
         path: None,
         kdf_override: None,
         browser_origin_allowlist: vec![],
+        http: Default::default(),
     }];
     let err = cfg.validate().expect_err("must reject empty unix addr");
     assert!(matches!(err, ConfigError::Validation(_)), "got {err:?}");

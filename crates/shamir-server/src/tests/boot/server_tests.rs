@@ -37,6 +37,7 @@ async fn launcher_shutdown_stops_token_gc_task() {
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),
