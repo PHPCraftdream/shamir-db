@@ -67,13 +67,23 @@ impl ShamirDb {
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
 
-        let mut config = TableConfig::new(table_name);
-        if enable_indexes {
-            config = config.with_indexes();
-        }
-        let config = config.with_new_store_id();
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        let existing_config = repo.table_config(table_name);
+        let newly_registered = existing_config.is_none();
+        let config = if let Some(config) = existing_config {
+            config
+        } else {
+            let mut config = TableConfig::new(table_name);
+            if enable_indexes {
+                config = config.with_indexes();
+            }
+            config.with_new_store_id()
+        };
         config.validate_store_name()?;
         let store_id = config.store_id;
+        let actual_enable_indexes = config.enable_indexes;
 
         db.create_table_checked_with_config(repo_name, config)
             .await?;
@@ -85,13 +95,15 @@ impl ShamirDb {
                 db_name,
                 repo_name,
                 table_name,
-                enable_indexes,
+                actual_enable_indexes,
                 store_id.as_ref(),
                 &ResourceMeta::owned_enforced(actor),
             )
             .await
         {
-            db.drop_table_checked(repo_name, table_name).await?;
+            if newly_registered {
+                db.drop_table_checked(repo_name, table_name).await?;
+            }
             return Err(error);
         }
 
@@ -273,14 +285,9 @@ impl ShamirDb {
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
-        let old = self
-            .system_store
-            .load_table_record(db_name, repo_name, from)
-            .await?;
-        let destination = self
-            .system_store
-            .load_table_record(db_name, repo_name, to)
-            .await?;
+        let snapshot = self.table_catalogue_snapshot(db_name, repo_name).await?;
+        let old = snapshot.get(from).cloned();
+        let destination = snapshot.get(to).cloned();
         let has_source = db.has_table(repo_name, from);
         let has_destination = db.has_table(repo_name, to);
         // Reject identity mismatches and unrelated destination rows before recovery.
@@ -401,7 +408,6 @@ impl ShamirDb {
                 "cannot rename schema-bearing table '{from}'"
             )));
         }
-        let snapshot = self.table_catalogue_snapshot(db_name, repo_name).await?;
         Self::check_fk_snapshot(&snapshot, from)?;
         let result = repo
             .rename_table_stores_with(from, to, |destination| async move {

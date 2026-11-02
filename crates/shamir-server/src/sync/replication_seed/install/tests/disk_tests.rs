@@ -5,10 +5,9 @@ use std::path::Path;
 
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, SeedInstallState, SeedTable};
 use shamir_db::storage::types::RecordKey;
-use shamir_db::types::value::InnerValue;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::doc;
-use shamir_types::codecs::interned::query_value_to_inner;
+use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
 use shamir_types::types::record_id::RecordId;
 use tokio::runtime::{Builder, Runtime};
 
@@ -77,8 +76,16 @@ async fn artifact_with_source_id(root: &Path) -> (String, String, Vec<RecordId>)
     let repo = source.get_db("app").unwrap().get_repo("main").unwrap();
     let table = repo.get_table("rows").await.unwrap();
     let rows = [
-        InnerValue::Str("first".into()),
-        InnerValue::Str("second".into()),
+        query_value_to_inner(
+            &doc! { "name" => "first" }.into(),
+            table.interner_for_test().get().await.unwrap(),
+        )
+        .unwrap(),
+        query_value_to_inner(
+            &doc! { "name" => "second" }.into(),
+            table.interner_for_test().get().await.unwrap(),
+        )
+        .unwrap(),
     ];
     let ids = table.insert_many(&rows).await.unwrap();
     let hash = export_open(&source, "app", "main", root, 1024)
@@ -126,8 +133,13 @@ fn imported_seed_ids_are_node_local_persisted_and_digest_is_logical() {
         let values = rows.get_many(&ids).await.unwrap();
         assert_eq!(values.len(), 2);
         assert!(values.iter().all(Option::is_some));
-        assert_eq!(values[0].as_ref(), Some(&InnerValue::Str("first".into())));
-        assert_eq!(values[1].as_ref(), Some(&InnerValue::Str("second".into())));
+        let interner = repo.repo_interner().await.unwrap();
+        for (value, expected) in values.iter().zip(["first", "second"]) {
+            let decoded =
+                inner_value_to_query_value(value.as_ref().unwrap(), interner.get().await.unwrap())
+                    .unwrap();
+            assert_eq!(decoded, doc! { "name" => expected }.build());
+        }
         home.rename_table("app", "main", "rows", "renamed")
             .await
             .unwrap();

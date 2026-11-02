@@ -1,4 +1,4 @@
-use crate::engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
+use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 use crate::types::value::{InnerValue, QueryValue};
@@ -215,12 +215,15 @@ fn legacy_catalogue_row_without_store_id_remains_idless() {
         for name in ["__data__old", "__info__old", "__history__old"] {
             backing.store_get(name).await.unwrap();
         }
-        let fixture = RepoInstance::new(
-            "legacy-fixture".into(),
-            backing.clone(),
-            vec![TableConfig::new("old")],
-        );
-        let table = fixture.get_table("old").await.unwrap();
+        let permit = facade_repo.write_domain().admit().await.unwrap();
+        facade_repo
+            .add_table_admitted(TableConfig::new("old"), &permit)
+            .await
+            .unwrap();
+        drop(permit);
+        assert_eq!(facade_repo.table_config("old").unwrap().store_id, None);
+
+        let table = facade_repo.get_table("old").await.unwrap();
         let ids = table
             .insert_many(&[
                 InnerValue::Str("legacy-1".into()),
@@ -229,11 +232,7 @@ fn legacy_catalogue_row_without_store_id_remains_idless() {
             .await
             .unwrap();
         assert_eq!(ids.len(), 2);
-        fixture.drainer().drain_all(&fixture).await.unwrap();
-        fixture.flush_all_history().await.unwrap();
-        fixture.flush_buffers().await.unwrap();
-        fixture.flush_seed_metadata().await.unwrap();
-        fixture.seed_stop_journal_writer().await.unwrap();
+        assert!(facade_repo.current_commit_version().await.unwrap() > 0);
         let stores = backing.stores_list().await.unwrap();
         for name in ["__data__old", "__info__old", "__history__old"] {
             assert!(stores.iter().any(|stored| stored == name));
@@ -252,7 +251,6 @@ fn legacy_catalogue_row_without_store_id_remains_idless() {
         .into();
         db.system_store().save_table_meta(&record).await.unwrap();
         db.flush_all_for_test().await.unwrap();
-        drop(fixture);
         drop(backing);
         ids
     });
@@ -379,4 +377,169 @@ fn legacy_catalogue_row_without_store_id_remains_idless() {
         );
     });
     drop(runtime);
+}
+
+#[test]
+fn add_table_preserves_pre_registered_config_and_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let system_path = dir.path().join("system");
+    let repo_path = dir.path().join("repo");
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    let cases = runtime.block_on(async {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone()))
+            .await
+            .unwrap();
+        shamir.create_db("p34").await.unwrap();
+        shamir
+            .add_repo(
+                "p34",
+                RepoConfig::new("main", BoxRepoFactory::fjall_raw(&repo_path)),
+            )
+            .await
+            .unwrap();
+        let repo = shamir.get_db("p34").unwrap().get_repo("main").unwrap();
+        let mut cases = Vec::new();
+        for (name, config) in [
+            (
+                "generated",
+                TableConfig::new("generated")
+                    .with_new_store_id()
+                    .with_indexes(),
+            ),
+            ("legacy", TableConfig::new("legacy").with_indexes()),
+        ] {
+            let expected_id = config.store_id;
+            let permit = repo.write_domain().admit().await.unwrap();
+            repo.add_table_admitted(config, &permit).await.unwrap();
+            drop(permit);
+            let table = repo.get_table(name).await.unwrap();
+            let ids = table
+                .insert_many(&[InnerValue::Str(format!("{name}-row"))])
+                .await
+                .unwrap();
+            let expected_rows = vec![(ids[0], InnerValue::Str(format!("{name}-row")))];
+            shamir.add_table("p34", "main", name, false).await.unwrap();
+            let actual = repo.table_config(name).unwrap();
+            assert_eq!(actual.store_id, expected_id);
+            assert!(actual.enable_indexes);
+            let record = shamir
+                .system_store()
+                .load_table_record("p34", "main", name)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.get("store_id").and_then(QueryValue::as_str),
+                expected_id.map(|id| id.to_string()).as_deref()
+            );
+            assert_eq!(
+                record.get("enable_indexes").and_then(QueryValue::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                table
+                    .get_many(&ids)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|value| value.unwrap())
+                    .collect::<Vec<_>>(),
+                vec![InnerValue::Str(format!("{name}-row"))]
+            );
+            cases.push((name.to_owned(), expected_id, ids, expected_rows));
+        }
+        shamir.flush_all_for_test().await.unwrap();
+        cases
+    });
+    drop(runtime);
+
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let shamir = ShamirDb::init(SystemStoreConfig::Fjall(system_path))
+            .await
+            .unwrap();
+        let repo = shamir.get_db("p34").unwrap().get_repo("main").unwrap();
+        for (name, expected_id, ids, expected_rows) in cases {
+            let actual = repo.table_config(&name).unwrap();
+            assert_eq!(actual.store_id, expected_id);
+            assert!(actual.enable_indexes);
+            let table = repo.get_table(&name).await.unwrap();
+            assert_rows(&listed_rows(&table).await, &expected_rows);
+            assert_eq!(
+                table
+                    .get_many(&ids)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|value| value.unwrap())
+                    .collect::<Vec<_>>(),
+                expected_rows
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>()
+            );
+            let record = shamir
+                .system_store()
+                .load_table_record("p34", "main", &name)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                record.get("store_id").and_then(QueryValue::as_str),
+                expected_id.map(|id| id.to_string()).as_deref()
+            );
+            assert_eq!(
+                record.get("enable_indexes").and_then(QueryValue::as_bool),
+                Some(true)
+            );
+        }
+    });
+    drop(runtime);
+}
+
+#[tokio::test]
+async fn add_table_catalogue_failure_preserves_pre_registered_table() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("p34").await.unwrap();
+    shamir
+        .add_repo("p34", RepoConfig::new("main", BoxRepoFactory::in_memory()))
+        .await
+        .unwrap();
+    let repo = shamir.get_db("p34").unwrap().get_repo("main").unwrap();
+    let config = TableConfig::new("existing")
+        .with_new_store_id()
+        .with_indexes();
+    let expected_id = config.store_id;
+    let permit = repo.write_domain().admit().await.unwrap();
+    repo.add_table_admitted(config, &permit).await.unwrap();
+    drop(permit);
+    let table = repo.get_table("existing").await.unwrap();
+    let ids = table
+        .insert_many(&[
+            InnerValue::Str("keep-1".into()),
+            InnerValue::Str("keep-2".into()),
+        ])
+        .await
+        .unwrap();
+    shamir.system_store().arm_catalogue_write_fault(1);
+    assert!(shamir
+        .add_table("p34", "main", "existing", false)
+        .await
+        .is_err());
+    let actual = repo.table_config("existing").unwrap();
+    assert_eq!(actual.store_id, expected_id);
+    assert!(actual.enable_indexes);
+    assert_eq!(
+        table
+            .get_many(&ids)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|value| value.unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            InnerValue::Str("keep-1".into()),
+            InnerValue::Str("keep-2".into())
+        ]
+    );
 }
