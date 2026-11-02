@@ -21,7 +21,7 @@ async fn malformed_later_metadata_prevents_recovery_registration() {
     let records = [QueryValue::Map(good), QueryValue::Map(bad)];
     let registry = shamir_engine::function::FunctionRegistry::new();
     let result =
-        super::super::catalog::with_checked_function_metadata(&records, |metadata| async {
+        super::super::super::catalog::with_checked_function_metadata(&records, |metadata| async {
             for (record, _) in records.iter().zip(metadata) {
                 registry
                     .register(

@@ -6,7 +6,7 @@ use shamir_storage::types::Repo;
 use shamir_types::types::value::InnerValue;
 
 use crate::meta::recovery_marker::load_next_tx_id_snapshot;
-use crate::repo::{SeedImageWriter, SeedInstallState, SeedTable};
+use crate::repo::{BoxRepo, RepoInstance, SeedImageWriter, SeedInstallState, SeedTable};
 
 use super::helpers::{inventory, payload, populated, receipt, repo};
 
@@ -80,9 +80,14 @@ async fn cold_handles_read_remapped_rows_counters_and_bootstrap_gap() {
         receipt().source_identity.lineage_id
     );
     let info = image.tx_info_store().await.unwrap();
+    let configs = SeedTable::load_configs(&info).await.unwrap();
     let tables = SeedTable::load_inventory(&info).await.unwrap();
     assert_eq!(tables, inventory());
-    let cold = repo(backing.clone(), tables);
+    assert!(configs.iter().all(|config| config.store_id.is_some()));
+    let source_id = image.table_config("items").unwrap().store_id;
+    assert_ne!(source_id, None);
+    let cold = RepoInstance::new("main".into(), BoxRepo::InMemory(backing.clone()), configs);
+    assert_eq!(cold.table_config("items").unwrap().store_id, source_id);
     let table = cold.get_table("items").await.unwrap();
     assert_eq!(table.counter().get().await.unwrap(), 1);
     let empty = cold.get_table("empty").await.unwrap();

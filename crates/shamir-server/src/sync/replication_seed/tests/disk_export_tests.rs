@@ -146,8 +146,8 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>, Cha
             before,
             (
                 repo.certified_gap_interval().await.unwrap(),
-                repo.clean_horizon().await.unwrap(),
-            ),
+                repo.clean_horizon().await.unwrap()
+            )
         );
     }
     (version, expected, expected_event)
@@ -254,9 +254,9 @@ fn exercise(clean: bool) {
                 repo.certified_gap_interval().await.unwrap(),
                 repo.clean_horizon().await.unwrap(),
                 repo.consistent_version().await.unwrap(),
-                repo.read_changelog_from(1, 100).await.unwrap().events,
+                repo.read_changelog_from(1, 100).await.unwrap().events
             ),
-            before,
+            before
         );
     });
     drop(rt);
@@ -274,10 +274,10 @@ fn unclean_disk_export_certifies_and_twice_preserves_j_and_gap() {
 }
 
 /// PR8b: the seed exporter must refuse a replication destination whose
-/// subscription is quarantined (`resync_required`) — stale follower data
-/// must never be served as a seed, and no partial artifact may be left
-/// behind. Healthy repos pass the gate (the round-trip tests above cross
-/// the same check un-quarantined and succeed).
+/// subscription is quarantined (`resync_required`) — stale follower data must
+/// never be served as a seed, and no partial artifact may be left behind.
+/// Healthy repos pass the gate (the round-trip tests above cross the same check
+/// un-quarantined and succeed).
 #[test]
 fn disk_export_refuses_resync_quarantined_repo() {
     let dir = tempfile::tempdir().unwrap();

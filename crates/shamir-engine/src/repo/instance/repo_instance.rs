@@ -24,8 +24,8 @@ use std::time::Duration;
 use tokio::sync::OnceCell;
 
 pub(in crate::repo) mod catalog;
-mod journal;
 mod lifecycle;
+pub(crate) mod table_store;
 mod transactions;
 
 /// Fixed read-side budget, not a tunable: a stalled writer returns an older
