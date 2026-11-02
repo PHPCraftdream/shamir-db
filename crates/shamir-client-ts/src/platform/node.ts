@@ -20,6 +20,14 @@ import WebSocket from 'ws';
 import argon2 from 'argon2-browser';
 import type { Platform, Socket, Argon2Params } from '../core/support/platform.js';
 import { ARGON2_VERSION_13 } from '../core/protocol/scram.js';
+import { createNodeTokenPlatform as createTokenPlatform } from './token/http-node.js';
+import type { NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions } from '../core/types/connection.js';
+import type { TokenPlatform } from './token/types.js';
+
+export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions | NodeTokenWsConnectOptions): TokenPlatform {
+  return createTokenPlatform(options);
+}
+export { connectTokenNode } from './connect/node-connect.js';
 
 class NodeSocket implements Socket {
   private readonly ws: WebSocket;

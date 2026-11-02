@@ -19,6 +19,15 @@ import { hmac } from '@noble/hashes/hmac';
 import argon2 from 'argon2-browser';
 import type { Platform, Socket, Argon2Params } from '../core/support/platform.js';
 import { ARGON2_VERSION_13 } from '../core/protocol/scram.js';
+import { createBrowserTokenPlatform as createTokenPlatform } from './token/http-browser.js';
+import type { BrowserTokenHttpConnectOptions, BrowserTokenWsConnectOptions } from '../core/types/connection.js';
+import type { TokenPlatform } from './token/types.js';
+
+export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptions | BrowserTokenWsConnectOptions): TokenPlatform {
+  return createTokenPlatform(options);
+}
+export { connectTokenBrowser } from './connect/browser-connect.js';
+
 
 class BrowserSocket implements Socket {
   private readonly ws: WebSocket;

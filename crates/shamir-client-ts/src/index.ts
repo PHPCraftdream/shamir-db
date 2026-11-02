@@ -7,17 +7,25 @@
 
 import { ShamirClient } from './core/client/client.js';
 import { NodePlatform } from './platform/node.js';
-import type {
-  ConnectOptions,
-  ConnectLocalOptions,
-  ResumeOptions,
-} from './core/types/index.js';
+import type { ConnectOptions, ConnectLocalOptions, ResumeOptions, ScramConnectOptions, NodeConnectOptions } from './core/types/index.js';
+import { connectTokenNode } from './platform/node.js';
+import type { PublicTokenClient } from './platform/connect/node-connect.js';
+import { TokenTransportError } from './core/protocol/token/errors.js';
 
 /**
  * Open an authenticated ShamirDB connection from Node.js.
  * Uses `ws` for the socket and `node:crypto` for HMAC/SHA256.
  */
-export async function connect(opts: ConnectOptions): Promise<ShamirClient> {
+export function connect(opts: ScramConnectOptions): Promise<ShamirClient>;
+export function connect(opts: NodeConnectOptions): Promise<PublicTokenClient>;
+export function connect(opts: ConnectOptions): Promise<ShamirClient | PublicTokenClient>;
+export async function connect(opts: ConnectOptions): Promise<ShamirClient | PublicTokenClient> {
+  if (!opts || typeof opts !== 'object') throw new TokenTransportError('invalid_request', 'Invalid connection options');
+  if ('auth' in opts) {
+    if (opts.auth !== 'token' || !('token' in opts) || !('url' in opts)) throw new TokenTransportError('invalid_request', 'Invalid token connection options');
+    return connectTokenNode(opts);
+  }
+  if ('token' in opts) throw new TokenTransportError('invalid_request', 'Token authentication must be explicit');
   return ShamirClient.connect(NodePlatform, opts);
 }
 
@@ -42,8 +50,15 @@ export async function resume(opts: ResumeOptions): Promise<ShamirClient> {
   return ShamirClient.resume(NodePlatform, opts);
 }
 
+export { ApiToken } from './entry/api-token.js';
+export { TokenTransportError } from './core/protocol/token/errors.js';
+export type { TokenTransportErrorCode, TokenTransportErrorOptions } from './core/protocol/token/errors.js';
+export type { TokenConnectOptions, NodeConnectOptions, ScramConnectOptions, NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions, TokenTlsOptions } from './core/types/connection.js';
+
 export { VisibilityError } from './core/visibility/errors.js';
 export type { TransactionResult, TransactionOptions } from './core/visibility/types.js';
+
+
 export {
   extractReceipts,
   reconcileReceipts,
@@ -58,6 +73,7 @@ export type {
   RepoObservation,
 } from './core/receipts/index.js';
 export { ShamirClient };
+
 // Typed error surface (Finding 2.1 / 2.2): callers branch on `.code` /
 // `.retryable` instead of regexing message strings.
 export {

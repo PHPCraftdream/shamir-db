@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const sourceRoot = resolve(testDirectory, '../../../');
 const roots = [
+  resolve(sourceRoot, 'browser.ts'),
+  resolve(sourceRoot, 'platform/connect/browser-connect.ts'),
   resolve(sourceRoot, 'platform/token/socket-browser.ts'),
   resolve(sourceRoot, 'platform/token/http-browser.ts'),
   resolve(sourceRoot, 'entry/ws/token-ws-client.ts'),

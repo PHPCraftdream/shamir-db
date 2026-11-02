@@ -14,7 +14,7 @@ import { waitForVisibility } from '../visibility/wait.js';
 import { executeWithReceipts, requestChangesSince, type AliasReceipt, type ChangesSinceResult } from '../receipts/index.js';
 import { responseError } from '../visibility/errors.js';
 import type { Platform } from '../support/platform.js';
-import type { ConnectOptions, ConnectLocalOptions, ResumeOptions } from '../types/index.js';
+import type { ConnectLocalOptions, ResumeOptions, ScramConnectOptions } from '../types/index.js';
 import {
   DEFAULT_REQUEST_TIMEOUT_MS,
   DEFAULT_CONNECT_TIMEOUT_MS,
@@ -158,7 +158,7 @@ export class ShamirClient {
    */
   static async connect(
     platform: Platform,
-    opts: ConnectOptions,
+    opts: ScramConnectOptions,
   ): Promise<ShamirClient> {
     const origin = opts.origin ?? `https://${opts.host}`;
     const url = `wss://${opts.host}:${opts.port}/shamir/v1/browser`;
