@@ -1,8 +1,8 @@
 # Transport: WebSocket
 
-Только `wss://`. Plain WS удалён в v1 (browser требует TLS, native может использовать TCP plain).
+Только SCRAM WebSocket требует `wss://`; plain SCRAM WS удалён в v1. Bearer WS на listener `kind: http` — отдельный TOKEN_API: нативный `/shamir/v1/ws` использует Authorization, браузерный `/shamir/v1/ws/browser` принимает первый бинарный bearer-кадр. Browser bearer `ws://` разрешён только loopback; native bearer plaintext допускается только по правилам TOKEN_API §11 (loopback по умолчанию либо отдельный native `allow_plaintext_remote` opt-in); это не расширяет browser bearer за loopback. SCRAM endpoints не изменяются.
 
-**Область действия (поправка Token API).** Это правило относится к SCRAM-listener-ам (`kind: ws`, endpoints `/shamir/v1` и `/shamir/v1/browser`): они остаются только `wss://`. Отдельный listener `kind: http` обслуживает WebSocket по bearer-токену на endpoint `/shamir/v1/ws` и допускает plain `ws://` на loopback или по явному opt-in (`allow_plaintext_remote`), см. TOKEN_API.md §10, §11. Токен-endpoint не принимает SCRAM, SCRAM-endpoints не принимают токен.
+**Область действия (поправка Token API).** Это правило относится только к SCRAM-listener-ам (`kind: ws`, endpoints `/shamir/v1` и `/shamir/v1/browser`): они остаются только `wss://`. Отдельный `kind: http` bearer listener обслуживает native `/shamir/v1/ws` с Authorization и browser `/shamir/v1/ws/browser` с первым бинарным кадром после upgrade. Для browser bearer `ws://` разрешён только loopback; он не наследует `allow_plaintext_remote`. Native bearer transport использует ровно plaintext policy TOKEN_API §11, включая его явно настраиваемое native разрешение удалённого plaintext. Token endpoints не принимают SCRAM, SCRAM endpoints не принимают tokens.
 
 ## 1. Профили
 
@@ -14,6 +14,10 @@
 Server **two listeners на разных endpoints/портах**: native клиенты подключаются к `/shamir/v1`, browser admin UI — к `/shamir/v1/browser`. Endpoint определяет policy `binding_mode`. **Никакого UA-detection.**
 
 Native клиент пытающийся `/shamir/v1/browser` → допустим (но downgrade), browser пытающийся `/shamir/v1` → fail на handshake (нет TLS exporter API).
+
+Bearer WebSocket на listener `kind: http` — отдельный протокол TOKEN_API, не профиль SCRAM: нативный `/shamir/v1/ws` использует Authorization до upgrade, браузерный `/shamir/v1/ws/browser` — первый бинарный кадр после upgrade. User-Agent не выбирает маршрут. SCRAM `/shamir/v1` и `/shamir/v1/browser`, их binding и handshake остаются без изменений.
+
+The proposed HTTP `POST /shamir/v1/auth/begin` and `POST /shamir/v1/auth/finish` are `kind:http`, not WS or SCRAM routes. Shared enums and SCRAM paths remain unchanged; this is a specification of a proposed, not-yet-implemented feature.
 
 ## 2. WebSocket Setup
 
@@ -80,6 +84,8 @@ WS close 1000 ИЛИ logout
 
 Коды 4010-4012 выдаёт только listener `kind: http`; `4003` остаётся `heartbeat_timeout` на обоих видах соединений.
 
+Только для bearer `/shamir/v1/ws/browser`: `4000 authentication_failed` — любая непроверенная ошибка кадра/credentials; `4013 token_channel_denied` и `4014 token_plaintext_write_denied` — только после проверки; `1013 server_busy` — исчерпание active cap после upgrade. Семантика кодов закрытия SCRAM не меняется; native bearer сохраняет HTTP-отказы до upgrade.
+
 ## 7. Heartbeat
 
 The server sends a Ping with an opaque 8-byte payload every 30 seconds. A Pong counts only when its payload matches the latest Ping; the 10-second deadline begins after that Ping has been written. If no matching Pong arrives while the reader is reading the socket, the server sends Close 4003 (`heartbeat_timeout`) and drops the socket. Pongs do not reset the authenticated idle timer.
@@ -90,7 +96,7 @@ The server sends a Ping with an opaque 8-byte payload every 30 seconds. A Pong c
 
 ## 8. Frame Size Limits
 
-Идентичны TCP. Pre-auth `≤ 4 KB`, data `≤ 16 MB`. Превышение → close 1009.
+Для SCRAM WS пределы как TCP: pre-auth `≤ 4 KB`, data `≤ 16 MB`, превышение → `1009`. Для bearer browser endpoint TOKEN_API §10 отдельно задаёт первый кадр до проверки: максимум 256 байт, ожидание 5 секунд; некорректный/чрезмерный кадр или истечение времени → `4000`, не `1009`. После аутентификации предел bearer data frame — `≤ 16 MB`.
 
 ## 9. Origin Header
 
@@ -109,6 +115,8 @@ The server sends a Ping with an opaque 8-byte payload every 30 seconds. A Pong c
 - Если отсутствует — допустим (native client).
 
 Никакого `--no-origin-check` flag.
+
+Эти правила относятся к SCRAM. Браузерный bearer endpoint `/shamir/v1/ws/browser` дополнительно проверяет Origin и authority Host до upgrade по TOKEN_API §10; политика SCRAM не меняется. Bearer endpoint не использует cookie-аутентификацию или выбор режима по User-Agent.
 
 ## 10. Test Checklist
 
