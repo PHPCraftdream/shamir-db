@@ -118,7 +118,7 @@ fn removals_clears_and_replacements_keep_index_reachable() {
         remove(&mut slots, physical);
         slots[physical].clear_payload();
     }
-    for i in 0..512 {
+    for i in 0..512_usize {
         let physical = i;
         if i.is_multiple_of(3) {
             checked_lookup(&slots, key(i), None);
