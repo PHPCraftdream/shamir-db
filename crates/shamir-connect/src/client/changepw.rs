@@ -54,6 +54,7 @@ pub fn build_request(
     // applies to the password being SET.
     validate_password(new_pw.as_slice())?;
     new_kdf_params_recommendation.validate_client_limits()?;
+    kdf_params.validate_client_limits()?;
 
     // Build canonical auth_message_cp.
     let am_cp = build_auth_message_cp(ChangePwAuthMessageInputs {

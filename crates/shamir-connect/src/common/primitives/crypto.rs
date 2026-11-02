@@ -209,10 +209,23 @@ pub fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], out: &mut [u8]) -> Resu
 // Argon2id
 // ----------------------------------------------------------------------------
 
+#[cfg(test)]
+thread_local! {
+    static ARGON2_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Number of Argon2id calls made on the current test thread.
+#[cfg(test)]
+pub(crate) fn argon2_call_count() -> u64 {
+    ARGON2_CALLS.with(std::cell::Cell::get)
+}
+
 /// Argon2id derivation per spec §3.3 / §5.1.3.
 ///
 /// Output: 32 bytes wrapped in [`Zeroizing`] (`SaltedPassword`).
 pub fn argon2id(password: &[u8], salt: &[u8], params: &KdfParams) -> Result<SaltedPassword> {
+    #[cfg(test)]
+    ARGON2_CALLS.with(|calls| calls.set(calls.get().wrapping_add(1)));
     if params.argon2_version != 0x13 {
         return Err(Error::Crypto("argon2id: unsupported version"));
     }
