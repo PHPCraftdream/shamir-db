@@ -25,7 +25,8 @@ pub(super) fn validate_listener_http_fields(
         || settings.allow_plaintext_remote
         || settings.allow_plaintext_write
         || settings.allow_self_signed
-        || !settings.trusted_proxies.is_empty();
+        || !settings.trusted_proxies.is_empty()
+        || !settings.host_authority_allowlist.is_empty();
     if has_http_only_settings {
         return Err(ConfigError::Validation(format!(
             "listeners[{idx}]: HTTP-only settings are not valid for kind={:?}",

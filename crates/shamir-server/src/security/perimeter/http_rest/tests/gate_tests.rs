@@ -7,15 +7,19 @@ use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
 use shamir_connect::server::lockout::Subnet;
-use shamir_connect::server::token::{OwnerFloors, TokenChannels, TokenMode};
+use shamir_connect::server::token::{
+    Endpoint as TokenEndpoint, OwnerFloors, TokenChannels, TokenMode,
+};
 use shamir_connect::server::TokenSessionStore;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-use super::super::gate::{RestGate, RestGateRails};
+use super::super::gate::{BrowserVerdict, RestGate, RestGateRails};
 use crate::config::TokensConfig;
 use crate::security::tokens::{NewToken, TokenService, TokenServiceOptions};
-use shamir_transport_http::{AuthHeader, Endpoint, GateDecision, PeerInfo, TokenGate};
+use shamir_transport_http::{
+    AuthHeader, Endpoint as HttpEndpoint, GateDecision, PeerInfo, TokenGate,
+};
 
 const NOW: u64 = 20_000_000_000;
 
@@ -144,12 +148,79 @@ async fn authenticate(
     header: AuthHeader<'_>,
     peer: PeerInfo,
 ) -> GateDecision<shamir_connect::server::token::Verified> {
-    gate.authenticate(header, Endpoint::Rest, peer).await
+    gate.authenticate(header, HttpEndpoint::Rest, peer).await
 }
 async fn shut(f: &Fixture) {
     f.gate.shutdown().await;
 }
 
+async fn native_ws_auth_accepts_ws_token_and_rejects_rest_channel() {
+    let f = fixture().await;
+    let ws = token(&f, TokenMode::ReadOnly, TokenChannels::Ws).await;
+    let decision = f
+        .gate
+        .authenticate(
+            AuthHeader::Single(format!("Bearer {ws}").as_bytes()),
+            HttpEndpoint::Ws,
+            peer_for(0),
+        )
+        .await;
+    assert!(matches!(decision, GateDecision::Allow(_)));
+    let rest = token(&f, TokenMode::ReadOnly, TokenChannels::Rest).await;
+    let decision = f
+        .gate
+        .authenticate(
+            AuthHeader::Single(format!("Bearer {rest}").as_bytes()),
+            HttpEndpoint::Ws,
+            peer_for(1),
+        )
+        .await;
+    assert!(matches!(decision, GateDecision::Forbidden(code) if code == "token_channel_denied"));
+    shut(&f).await;
+}
+
+#[tokio::test]
+async fn browser_verification_never_rate_limits_valid_token_and_records_frame_failures() {
+    let f = fixture().await;
+    let valid = token(&f, TokenMode::ReadOnly, TokenChannels::Ws).await;
+    for _ in 0..20 {
+        f.gate.record_browser_failure(peer_for(0));
+    }
+    assert!(matches!(
+        f.gate.verify_browser(valid.as_bytes(), peer_for(0)),
+        BrowserVerdict::Verified(_)
+    ));
+    assert!(matches!(
+        f.gate.verify_browser(b"invalid", peer_for(0)),
+        BrowserVerdict::Failed
+    ));
+    shut(&f).await;
+}
+
+#[tokio::test]
+async fn browser_verification_reports_channel_and_plaintext_rails() {
+    let f = fixture().await;
+    let rest = token(&f, TokenMode::ReadOnly, TokenChannels::Rest).await;
+    assert!(matches!(
+        f.gate.verify_browser(rest.as_bytes(), peer_for(0)),
+        BrowserVerdict::ChannelDenied
+    ));
+    let plain = RestGate::new(
+        f.service.clone(),
+        Arc::new(|| Some(NOW)),
+        RestGateRails {
+            plaintext_remote: true,
+            allow_plaintext_write: false,
+        },
+    );
+    let rw = token(&f, TokenMode::ReadWrite, TokenChannels::Ws).await;
+    assert!(matches!(
+        plain.verify_browser(rw.as_bytes(), peer_for(1)),
+        BrowserVerdict::PlaintextWriteDenied
+    ));
+    plain.shutdown().await;
+    shut(&f).await;
+}
 #[tokio::test]
 async fn gate_accepts_valid_read_only_and_read_write_tokens() {
     let f = fixture().await;

@@ -31,7 +31,8 @@ pub use logging::audit_appender;
 pub use observability::doctor;
 pub use observability::logging;
 pub use security::{
-    access_tree, byte_budget, http_rest, observability, service, tls, tokens, user_directory,
+    access_tree, byte_budget, http_rest, http_ws, observability, service, tls, tokens,
+    user_directory,
 };
 #[cfg(windows)]
 pub use service::windows_service;

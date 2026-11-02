@@ -1,17 +1,20 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use shamir_query_types::wire::DbRequest;
-use shamir_transport_http::{serve, BodyBudget, ConnAdmission, EndpointSet};
+use shamir_transport_http::{serve_with_ws, BodyBudget, ConnAdmission, EndpointSet};
 
 use crate::boot::config::{to_http_server_config, ListenerConfig, ListenerKind};
 use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
-use crate::http_rest::{RestGate, RestGateRails, RestHandler};
+use crate::http_ws::{PreAuthAdmission, WsUpgradeService};
 use crate::server::boot_error::BootError;
+use shamir_connect::server::token_session::TokenSocketCaps;
+use shamir_tunables::instance_defaults::{WS_PING_INTERVAL, WS_PONG_TIMEOUT};
 
 use super::super::listeners::ListenerEnv;
 use super::proxy::ProxyGate;
@@ -125,7 +128,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
             settings,
             EndpointSet {
                 rest: true,
-                ws: false,
+                ws: true,
             },
             body_budget,
             env.config.security.connection.auth_init_timeout_ms,
@@ -147,16 +150,45 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
     });
     let task_gate = proxy_gate;
     let task_shutdown = shutdown.child_token();
+    let ws_service = Arc::new(WsUpgradeService {
+        gate: Arc::clone(&gate),
+        service: Arc::clone(env.token_service),
+        handler: Arc::clone(env.handler_concrete),
+        registry: Arc::clone(env.token_ws_cancel_registry),
+        pre_auth: Arc::new(PreAuthAdmission::default()),
+        tls: settings.tls == Some(true),
+        browser_available: settings.tls == Some(true) || address.ip().is_loopback(),
+        origins: listener_config.browser_origin_allowlist.clone(),
+        host_allowlist: settings.host_authority_allowlist.clone(),
+        username: Arc::clone(&username_lookup),
+        caps: TokenSocketCaps {
+            per_token: env.config.tokens.max_sockets_per_token,
+            per_owner: env.config.tokens.max_sockets_per_owner,
+        },
+        session_max_age_hours: env.config.tokens.session_max_age_hours,
+        ping_interval: WS_PING_INTERVAL,
+        pong_timeout: WS_PONG_TIMEOUT,
+        max_in_flight: 8,
+        resolve_peer: Arc::new({
+            let trusted = settings
+                .trusted_proxies
+                .iter()
+                .filter_map(|item| super::proxy::parse_cidr(item))
+                .collect::<Vec<_>>();
+            move |peer| super::proxy::resolve_peer(peer, &trusted)
+        }),
+    });
     let span = tracing::Span::current();
     let task = tokio::spawn(
         async move {
-            if let Err(error) = serve(
+            if let Err(error) = serve_with_ws(
                 listener,
                 Arc::new(config),
                 task_gate,
                 Arc::new(executor),
                 admission,
                 task_shutdown,
+                ws_service,
             )
             .await
             {

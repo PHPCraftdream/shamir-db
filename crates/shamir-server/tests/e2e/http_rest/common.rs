@@ -42,6 +42,17 @@ impl Harness {
         Self::launch_inner(addr, settings, false).await
     }
 
+    pub async fn launch_with_hook<F>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        hook: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut Config),
+    {
+        Self::launch_inner_with_hook(addr, settings, false, hook).await
+    }
+
     /// Starts HTTP REST and native TLS-exporter TCP listeners on the same database.
     pub async fn launch_with_native_seed() -> Self {
         Self::launch_with_native_seed_settings(
@@ -52,6 +63,17 @@ impl Harness {
             },
         )
         .await
+    }
+
+    pub(crate) async fn launch_with_native_seed_hook<F>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        hook: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut Config),
+    {
+        Self::launch_inner_with_hook(addr, settings, true, hook).await
     }
 
     /// Starts HTTP REST and native TLS-exporter TCP listeners with the specified HTTP settings.
@@ -67,10 +89,23 @@ impl Harness {
         settings: shamir_server::config::HttpListenerSettings,
         native: bool,
     ) -> Self {
+        Self::launch_inner_with_hook(addr, settings, native, |_| {}).await
+    }
+
+    async fn launch_inner_with_hook<F>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        native: bool,
+        hook: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut Config),
+    {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let data_dir = temp.path().to_path_buf();
         let (owner, owner_roles) = seed_owner(&data_dir);
         let mut config = config_for_with(&data_dir, addr, settings);
+        hook(&mut config);
         if native {
             config.listeners.push(ListenerConfig {
                 kind: ListenerKind::Tcp,
@@ -117,6 +152,44 @@ impl Harness {
         } else {
             addr
         }
+    }
+
+    pub async fn token_with_ttl(&self, label: &str, mode: TokenMode, ttl_secs: u64) -> String {
+        self.token_with_options(label, mode, ttl_secs, TokenChannels::Both)
+            .await
+    }
+
+    pub async fn token_with_channels(
+        &self,
+        label: &str,
+        mode: TokenMode,
+        channels: TokenChannels,
+    ) -> String {
+        self.token_with_options(label, mode, 3600, channels).await
+    }
+
+    async fn token_with_options(
+        &self,
+        label: &str,
+        mode: TokenMode,
+        ttl_secs: u64,
+        channels: TokenChannels,
+    ) -> String {
+        self.handle
+            .token_service
+            .create(NewToken {
+                owner_user_id: self.owner,
+                owner_roles: self.owner_roles.clone(),
+                label: label.into(),
+                ttl_secs: Some(ttl_secs),
+                mode,
+                channels,
+                databases: None,
+            })
+            .await
+            .expect("create token")
+            .token
+            .to_string()
     }
 
     pub async fn token(&self, label: &str, mode: TokenMode) -> String {

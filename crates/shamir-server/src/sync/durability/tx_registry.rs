@@ -154,9 +154,14 @@ impl InteractiveTx {
         &self.owner_sid
     }
 
+    /// Owning session id.
+    pub fn owner_sid(&self) -> &[u8; 32] {
+        &self.owner_sid
+    }
+
     /// Owning user id.
-    pub fn owner_user_id(&self) -> &[u8; 16] {
-        &self.owner_user_id
+    pub fn owner_sid(&self) -> &[u8; 32] {
+        &self.owner_sid
     }
 
     /// Database the handle is pinned to.
@@ -302,6 +307,22 @@ impl TxRegistry {
         self.by_session
             .remove_if(&arc.owner_sid, |_, h| *h == handle);
         Some(arc)
+    }
+
+    /// Remove the open transaction owned by a disconnecting session. Dropping
+    /// the returned `Arc` runs the existing `TxContext` rollback RAII path.
+    pub fn remove_for_session(&self, sid: &[u8; 32]) -> Option<Arc<InteractiveTx>> {
+        let handle = *self.by_session.get(sid)?.value();
+        let tx = self.remove(handle)?;
+        (tx.owner_sid() == sid).then_some(tx)
+    }
+
+    /// Remove the open transaction owned by a disconnecting session. Dropping
+    /// the returned `Arc` runs the existing `TxContext` rollback RAII path.
+    pub fn remove_for_session(&self, sid: &[u8; 32]) -> Option<Arc<InteractiveTx>> {
+        let handle = *self.by_session.get(sid)?.value();
+        let tx = self.remove(handle)?;
+        (tx.owner_sid() == sid).then_some(tx)
     }
 
     /// Handles whose tx is past its absolute deadline or idle past `idle_ttl`

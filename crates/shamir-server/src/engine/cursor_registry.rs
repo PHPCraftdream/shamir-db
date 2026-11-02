@@ -562,6 +562,26 @@ impl CursorRegistry {
         Some(arc)
     }
 
+    /// Remove all cursors owned by a disconnecting session. The O(N) scan is
+    /// deliberate and confined to teardown, keeping hot registration O(1).
+    pub(crate) fn remove_all_for_session(&self, sid: &[u8; 32]) -> Vec<Arc<Cursor>> {
+        let ids: Vec<u64> = self
+            .open
+            .iter()
+            .filter(|entry| entry.value().owner_sid() == sid)
+            .map(|entry| *entry.key())
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| {
+                let cursor = self.open.get(&id).map(|entry| Arc::clone(entry.value()))?;
+                if cursor.owner_sid() != sid {
+                    return None;
+                }
+                self.remove(id)
+            })
+            .collect()
+    }
+
     /// Decrement the session's live open-cursor count and, if it just
     /// reached zero, remove the `by_session` entry entirely — otherwise a
     /// long-lived server leaks one `[u8; 32] -> Arc<AtomicUsize>` entry per

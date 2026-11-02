@@ -1,28 +1,193 @@
-use super::body::response_body;
 use super::response::{canned, response, response_held};
 use crate::config::{Endpoint, HttpServerConfig};
 use crate::gate::{AuthHeader, GateDecision, PeerInfo, RestExecutor, TokenGate};
+use crate::server::routes::ws::{HeadOk, UpgradeHead, WsReject, WsRoute, WsUpgrade};
 use bytes::Bytes;
 use http::{header, HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::Incoming;
 use std::sync::Arc;
 
-pub(crate) struct Context<G, E> {
+pub(crate) struct Context<G, E, W>
+where
+    G: TokenGate,
+    W: WsUpgrade<G::Grant>,
+{
     pub cfg: Arc<HttpServerConfig>,
     pub gate: Arc<G>,
     pub exec: Arc<E>,
     pub peer: PeerInfo,
     pub holds: tokio::sync::mpsc::Sender<Box<dyn Send + Sync>>,
+    pub ws: Arc<W>,
+    pub upgrade: tokio::sync::Mutex<
+        Option<tokio::sync::oneshot::Sender<(W::Session, hyper::upgrade::OnUpgrade)>>,
+    >,
 }
 
-pub(crate) async fn handle<G, E>(
+async fn handle_ws<G, E, W>(
     request: Request<Incoming>,
-    context: Arc<Context<G, E>>,
+    context: Arc<Context<G, E, W>>,
+    route: WsRoute,
 ) -> Result<Response<BoxBody<Bytes, std::convert::Infallible>>, std::convert::Infallible>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
+    W: WsUpgrade<G::Grant>,
+{
+    if request.method() != Method::GET {
+        let mut response = canned(
+            StatusCode::METHOD_NOT_ALLOWED,
+            context.peer.tls,
+            context.cfg.hsts,
+        );
+        response
+            .headers_mut()
+            .insert(header::ALLOW, http::HeaderValue::from_static("GET"));
+        return Ok(response);
+    }
+    if !context.cfg.endpoints.ws {
+        return Ok(canned(
+            StatusCode::NOT_FOUND,
+            context.peer.tls,
+            context.cfg.hsts,
+        ));
+    }
+    let peer = peer(context.peer.addr, context.peer.tls, request.headers());
+    let head = UpgradeHead {
+        path: request.uri().path(),
+        method: request.method(),
+        headers: request.headers(),
+    };
+    let validated = match context.ws.check_head(route, head, peer.clone()) {
+        Ok(head) => head,
+        Err(reject) => return Ok(ws_rejection(reject, context.peer.tls, context.cfg.hsts)),
+    };
+    let grant = if route == WsRoute::Native {
+        let auth = auth_header(request.headers());
+        match tokio::time::timeout_at(
+            tokio::time::Instant::now() + context.cfg.limits.request_timeout,
+            context.gate.authenticate(auth, Endpoint::Ws, peer.clone()),
+        )
+        .await
+        {
+            Ok(GateDecision::Allow(grant)) => Some(grant),
+            Ok(GateDecision::Unauthorized) | Err(_) => {
+                let mut response = response(
+                    StatusCode::UNAUTHORIZED,
+                    unauthorized_body(),
+                    context.peer.tls,
+                    context.cfg.hsts,
+                    true,
+                );
+                response.headers_mut().insert(
+                    header::WWW_AUTHENTICATE,
+                    http::HeaderValue::from_static("Bearer"),
+                );
+                return Ok(response);
+            }
+            Ok(GateDecision::Forbidden(code)) => {
+                return Ok(response(
+                    StatusCode::FORBIDDEN,
+                    (context.cfg.forbidden_body)(&code),
+                    context.peer.tls,
+                    context.cfg.hsts,
+                    true,
+                ))
+            }
+            Ok(GateDecision::RateLimited { retry_after_secs }) => {
+                return Ok(retry(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    retry_after_secs,
+                    context.peer.tls,
+                    context.cfg.hsts,
+                ));
+            }
+            Ok(GateDecision::Unavailable { retry_after_secs }) => {
+                return Ok(retry(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    retry_after_secs,
+                    context.peer.tls,
+                    context.cfg.hsts,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    let (session, headers) = match context.ws.admit(route, validated, grant, peer) {
+        Ok(admitted) => admitted,
+        Err(reject) => return Ok(ws_rejection(reject, context.peer.tls, context.cfg.hsts)),
+    };
+    let body = http_body_util::Empty::<Bytes>::new()
+        .map_err(|never| match never {})
+        .boxed();
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    response
+        .headers_mut()
+        .insert(header::UPGRADE, http::HeaderValue::from_static("websocket"));
+    response.headers_mut().insert(
+        header::CONNECTION,
+        http::HeaderValue::from_static("Upgrade"),
+    );
+    for (name, value) in headers {
+        if name != header::UPGRADE
+            && name != header::CONNECTION
+            && name.as_str() != "sec-websocket-extensions"
+        {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    let Some(on_upgrade) = request
+        .extensions_mut()
+        .remove::<hyper::upgrade::OnUpgrade>()
+    else {
+        return Ok(canned(
+            StatusCode::BAD_REQUEST,
+            context.peer.tls,
+            context.cfg.hsts,
+        ));
+    };
+    let mut slot = context.upgrade.lock().await;
+    let Some(sender) = slot.take() else {
+        return Ok(canned(
+            StatusCode::BAD_REQUEST,
+            context.peer.tls,
+            context.cfg.hsts,
+        ));
+    };
+    let _ = sender.send((session, on_upgrade));
+    drop(slot);
+    Ok(response)
+}
+
+fn ws_rejection(
+    rejection: WsReject,
+    tls: bool,
+    hsts: bool,
+) -> Response<BoxBody<Bytes, std::convert::Infallible>> {
+    let mut response = canned(rejection.status, tls, hsts);
+    if rejection.close {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, http::HeaderValue::from_static("close"));
+    }
+    if let Some(seconds) = rejection.retry_after {
+        if let Ok(value) = http::HeaderValue::from_str(&seconds.to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+}
+
+pub(crate) async fn handle<G, E, W>(
+    request: Request<Incoming>,
+    context: Arc<Context<G, E, W>>,
+) -> Result<Response<BoxBody<Bytes, std::convert::Infallible>>, std::convert::Infallible>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    W: WsUpgrade<G::Grant>,
 {
     if request.version() != http::Version::HTTP_11 {
         return Ok(canned(
@@ -31,17 +196,20 @@ where
             context.cfg.hsts,
         ));
     }
+    let ws_route = match request.uri().path() {
+        "/shamir/v1/ws" => Some(WsRoute::Native),
+        "/shamir/v1/ws/browser" => Some(WsRoute::Browser),
+        _ => None,
+    };
+    if let Some(route) = ws_route {
+        return handle_ws(request, context, route).await;
+    }
     let started = tokio::time::Instant::now();
     let deadline = started + context.cfg.limits.request_timeout;
     let path = request.uri().path().to_owned();
-    let endpoint = if path == "/shamir/v1/ws" {
-        Endpoint::Ws
-    } else {
-        Endpoint::Rest
-    };
+    let endpoint = Endpoint::Rest;
     let known = match path.as_str() {
         "/shamir/v1/request" | "/shamir/v1/ping" => context.cfg.endpoints.rest,
-        "/shamir/v1/ws" => context.cfg.endpoints.ws,
         _ => false,
     };
     let auth = auth_header(request.headers());
@@ -106,7 +274,7 @@ where
     }
     let method = match path.as_str() {
         "/shamir/v1/request" => Method::POST,
-        "/shamir/v1/ping" | "/shamir/v1/ws" => Method::GET,
+        "/shamir/v1/ping" => Method::GET,
         _ => Method::GET,
     };
     if request.method() != method {
@@ -120,14 +288,6 @@ where
             http::HeaderValue::from_static(if method == Method::GET { "GET" } else { "POST" }),
         );
         return Ok(r);
-    }
-    // T6a: authorize before handing this request to hyper::upgrade.
-    if path.ends_with("/ws") {
-        return Ok(canned(
-            StatusCode::NOT_FOUND,
-            context.peer.tls,
-            context.cfg.hsts,
-        ));
     }
     if path.ends_with("/request")
         && !request

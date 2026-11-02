@@ -12,6 +12,7 @@ enum State {
     ChunkDataCrlf,
     Trailers,
     Closed,
+    Tunnel,
 }
 
 /// Validates a whole request head before exposing it, then limits reads to its body envelope.
@@ -49,6 +50,9 @@ pub(crate) struct GuardedIo<T> {
     request_active: bool,
 }
 impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
+    pub(crate) fn into_inner(self) -> T {
+        self.inner
+    }
     pub(crate) fn new(
         inner: T,
         max_bytes: usize,
@@ -345,7 +349,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
                         }
                     }
                 }
-                State::Head | State::Closed => return false,
+                State::Head | State::Closed | State::Tunnel => return false,
             }
         }
         true
@@ -368,10 +372,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
                 rest = &rest[1..];
                 if self.response_head.ends_with(b"\r\n\r\n") {
                     let h = String::from_utf8_lossy(&self.response_head).into_owned();
-                    self.response_interim = h
-                        .lines()
-                        .next()
-                        .is_some_and(|line| line.starts_with("HTTP/1.1 1"));
+                    let status = h.lines().next().unwrap_or_default();
+                    if status == "HTTP/1.1 101 Switching Protocols" {
+                        self.state = State::Tunnel;
+                        self.head_deadline = None;
+                        self.request_deadline = None;
+                        self.write_deadline = None;
+                        self.canned_deadline = None;
+                        self.request_active = false;
+                        self.response_active = false;
+                        self.active_hold = None;
+                        self.holds = None;
+                        if let Some(waker) = self.reader.take() {
+                            waker.wake();
+                        }
+                        self.response_head.clear();
+                        return;
+                    }
+                    self.response_interim = status.starts_with("HTTP/1.1 1");
                     let len = h
                         .lines()
                         .find_map(|line| {
@@ -401,6 +419,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
         cx: &mut std::task::Context<'_>,
         out: &mut tokio::io::ReadBuf<'_>,
     ) -> std::task::Poll<io::Result<()>> {
+        if self.state == State::Tunnel {
+            return std::pin::Pin::new(&mut self.inner).poll_read(cx, out);
+        }
         let mut reading_head = self.state == State::Head && !self.response_active;
         if self.state == State::Closed {
             if self.canned.is_some() {
@@ -420,6 +441,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
             return self.finish_canned(cx);
         }
         loop {
+            if self.state == State::Tunnel {
+                return std::pin::Pin::new(&mut self.inner).poll_read(cx, out);
+            }
             if self.state == State::Closed {
                 return self.finish_canned(cx);
             }
@@ -460,7 +484,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
             let cap = match self.state {
                 State::Head | State::ChunkSize | State::ChunkDataCrlf | State::Trailers => 1,
                 State::Fixed(n) | State::ChunkData(n) => n.min(temp.len() as u64) as usize,
-                State::Closed => 1,
+                State::Closed | State::Tunnel => 1,
             }
             .max(1);
             let mut buf = tokio::io::ReadBuf::new(&mut temp[..cap]);
@@ -548,6 +572,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for GuardedIo<T> {
         cx: &mut std::task::Context<'_>,
         bytes: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
+        if self.state == State::Tunnel {
+            self.head_deadline = None;
+            self.request_deadline = None;
+            self.write_deadline = None;
+            return std::pin::Pin::new(&mut self.inner).poll_write(cx, bytes);
+        }
         if self.state == State::Closed {
             if self.canned.is_some() {
                 return match self.finish_canned(cx) {
@@ -603,6 +633,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for GuardedIo<T> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<io::Result<()>> {
+        if self.state == State::Tunnel {
+            self.head_deadline = None;
+            self.request_deadline = None;
+            self.write_deadline = None;
+            return std::pin::Pin::new(&mut self.inner).poll_flush(cx);
+        }
         if self.state == State::Closed {
             return match self.finish_canned(cx) {
                 std::task::Poll::Ready(Ok(())) if self.response_started => {
@@ -660,6 +696,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for GuardedIo<T> {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<io::Result<()>> {
+        if self.state == State::Tunnel {
+            self.head_deadline = None;
+            self.request_deadline = None;
+            self.write_deadline = None;
+            return std::pin::Pin::new(&mut self.inner).poll_shutdown(cx);
+        }
         std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }

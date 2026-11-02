@@ -15,7 +15,8 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::{doc, insert};
 use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
 use shamir_transport_http::{
-    AuthHeader, Endpoint, ExecStatus, GateDecision, PeerInfo, RestExecutor, TokenGate,
+    AuthHeader, Endpoint as HttpEndpoint, ExecStatus, GateDecision, PeerInfo, RestExecutor,
+    TokenGate,
 };
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -309,6 +310,7 @@ async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
                 repo: "missing".into(),
                 isolation: None,
             },
+            shamir_connect::server::token::Endpoint::Rest,
             &conn,
         )
         .await;
@@ -328,7 +330,12 @@ async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
         })
     }));
     let allowed = allowed_handler
-        .handle(&session, shamir_query_types::wire::DbRequest::Ping, &conn)
+        .handle(
+            &session,
+            shamir_query_types::wire::DbRequest::Ping,
+            shamir_connect::server::token::Endpoint::Rest,
+            &conn,
+        )
         .await;
     assert!(matches!(
         allowed,
@@ -436,7 +443,7 @@ async fn successful_auth_and_scope_denial_use_separate_metrics() {
     let first = match gate
         .authenticate(
             AuthHeader::Single(header.as_bytes()),
-            Endpoint::Rest,
+            HttpEndpoint::Rest,
             peer(),
         )
         .await
@@ -455,7 +462,7 @@ async fn successful_auth_and_scope_denial_use_separate_metrics() {
     let second = match gate
         .authenticate(
             AuthHeader::Single(header.as_bytes()),
-            Endpoint::Rest,
+            HttpEndpoint::Rest,
             peer(),
         )
         .await

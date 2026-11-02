@@ -10,11 +10,14 @@ use bytes::Bytes;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
-use shamir_connect::server::token::{OwnerFloors, TokenChannels, TokenMode};
+use shamir_connect::server::token::{
+    Endpoint as TokenEndpoint, OwnerFloors, TokenChannels, TokenMode,
+};
 use shamir_connect::server::TokenSessionStore;
 use shamir_transport_http::{
-    serve, AuthHeader, BodyBudget, ConnAdmission, Endpoint, EndpointSet, ExecOutcome, ExecStatus,
-    GateDecision, HttpLimits, HttpServerConfig, PeerInfo, RestExecutor, ServeError, TokenGate,
+    serve, AuthHeader, BodyBudget, ConnAdmission, Endpoint as HttpEndpoint, EndpointSet,
+    ExecOutcome, ExecStatus, GateDecision, HttpLimits, HttpServerConfig, PeerInfo, RestExecutor,
+    ServeError, TokenGate,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -421,7 +424,11 @@ async fn rest_authentication_tracing_redacts_credentials_and_secrets() {
         };
         let decision = f
             .gate
-            .authenticate(AuthHeader::Single(header.as_bytes()), Endpoint::Rest, peer)
+            .authenticate(
+                AuthHeader::Single(header.as_bytes()),
+                HttpEndpoint::Rest,
+                peer,
+            )
             .await;
         if candidate == &valid {
             assert!(matches!(decision, GateDecision::Allow(_)));

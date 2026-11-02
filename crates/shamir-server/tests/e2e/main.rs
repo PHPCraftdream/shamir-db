@@ -12,6 +12,8 @@ mod duplex_loop;
 mod framer_split;
 #[path = "http_rest/mod.rs"]
 mod http_rest;
+#[path = "http_ws/mod.rs"]
+mod http_ws;
 #[path = "core/interactive_tx_e2e.rs"]
 mod interactive_tx_e2e;
 #[path = "transport/ipc_e2e.rs"]

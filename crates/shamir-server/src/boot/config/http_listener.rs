@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use serde::Deserialize;
 
 use crate::boot::config::{ConfigError, ListenerConfig, ListenerKind};
+use crate::security::perimeter::http_ws::browser_policy::canonical_authority;
 
 /// HTTP listener policy and transport limits.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -34,6 +35,9 @@ pub struct HttpListenerSettings {
     /// CIDR list of proxies trusted for REST forwarded-address rate limits.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// Trusted browser Host authorities; entries must use canonical form.
+    #[serde(default)]
+    pub host_authority_allowlist: Vec<String>,
 }
 
 impl Default for HttpListenerSettings {
@@ -48,6 +52,7 @@ impl Default for HttpListenerSettings {
             allow_plaintext_write: false,
             allow_self_signed: false,
             trusted_proxies: Vec::new(),
+            host_authority_allowlist: Vec::new(),
         }
     }
 }
@@ -117,6 +122,20 @@ impl HttpListenerSettings {
             return Err(invalid(
                 "plaintext opt-in flags are only valid when tls is false".into(),
             ));
+        }
+        for authority in &self.host_authority_allowlist {
+            let canonical = canonical_authority(authority, tls);
+            if canonical.as_deref() != Some(authority.as_str()) {
+                return Err(invalid(format!(
+                    "host_authority_allowlist entry `{authority}` is not canonical for this listener scheme"
+                )));
+            }
+        }
+        if !listener.browser_origin_allowlist.is_empty() {
+            shamir_transport_ws::BrowserOriginPolicy::try_allow(
+                listener.browser_origin_allowlist.iter().cloned(),
+            )
+            .map_err(|error| invalid(format!("invalid browser_origin_allowlist: {error}")))?;
         }
         for proxy in &self.trusted_proxies {
             let (address, prefix) = proxy

@@ -6,6 +6,7 @@ pub(crate) mod connection_context;
 pub(crate) mod in_flight_guard;
 pub(crate) mod scram;
 pub(crate) mod wire;
+pub(crate) mod writer_task;
 
 pub(crate) use scram::{auth_ok_hints, resume};
 

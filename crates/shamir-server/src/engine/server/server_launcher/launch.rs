@@ -30,6 +30,7 @@ use crate::connection::ConnTasks;
 use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
 };
+use crate::http_ws::cancel_registry::TokenWsCancelRegistry;
 use crate::ports::DirectoryPorts;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server::boot_error::BootError;
@@ -574,6 +575,7 @@ impl ServerLauncher {
                 .map_err(|e| BootError::ServerMeta(e.to_string()))?
                 .as_bytes(),
         );
+        let token_ws_cancel_registry = Arc::new(TokenWsCancelRegistry::default());
         let token_service = Arc::new(
             crate::security::tokens::TokenService::open(
                 crate::security::tokens::TokenServiceOptions {
@@ -594,7 +596,8 @@ impl ServerLauncher {
                 },
             )
             .await
-            .map_err(|e| BootError::TokenService(e.to_string()))?,
+            .map_err(|e| BootError::TokenService(e.to_string()))?
+            .with_canceller(token_ws_cancel_registry.clone()),
         );
 
         let SpawnedListeners {
@@ -619,6 +622,7 @@ impl ServerLauncher {
                 handler: &handler,
                 meta: &meta,
                 token_service: &token_service,
+                token_ws_cancel_registry: &token_ws_cancel_registry,
                 handler_concrete: &handler_concrete,
                 conn_tasks: &conn_tasks,
             },

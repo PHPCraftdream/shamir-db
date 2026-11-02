@@ -84,7 +84,10 @@ listeners: [
             https://app.example.com
         ]
     }
-    ## HTTP REST listener is wired through the server launcher; WebSocket support is separately staged.
+    ## HTTP listener exposes REST plus /shamir/v1/ws and /shamir/v1/ws/browser.
+    ## Browser route requires Origin; empty Host allowlist rejects requests with HTTP 400.
+    ## Authorities must be lowercase and omit scheme-default ports (80 ws, 443 wss).
+    ## Browser ws:// is available only on loopback plaintext listeners.
     ## {
     ##     kind: http
     ##     addr: 127.0.0.1:7340
@@ -100,6 +103,9 @@ listeners: [
     ##     body_timeout_ms: 30000
     ##     request_timeout_ms: 120000
     ##     trusted_proxies: []
+    ##     browser_origin_allowlist: [https://app.example.com]
+    ##     ## Empty host_authority_allowlist rejects browser requests (400).
+    ##     host_authority_allowlist: [app.example.com]
     ## }
 ]
 

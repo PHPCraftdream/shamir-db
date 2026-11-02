@@ -2,3 +2,5 @@
 mod accept_tests;
 #[path = "retry_after_tests.rs"]
 mod retry_after_tests;
+#[path = "ws_route_tests.rs"]
+mod ws_route_tests;
