@@ -120,7 +120,7 @@ fn removals_clears_and_replacements_keep_index_reachable() {
     }
     for i in 0..512 {
         let physical = i;
-        if i % 3 == 0 {
+        if i.is_multiple_of(3) {
             checked_lookup(&slots, key(i), None);
             add(&mut slots, physical, key(CAPACITY + i));
             checked_lookup(&slots, key(CAPACITY + i), Some(physical));
