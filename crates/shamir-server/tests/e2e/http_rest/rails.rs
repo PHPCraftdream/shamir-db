@@ -3,7 +3,7 @@ use shamir_query_builder::{batch::Batch, ddl, Query};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 use zeroize::Zeroizing;
 
-use super::common::{request, Harness};
+use super::common::{grant_default_main_access, request, Harness};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_rest_remote_plaintext_opt_in_allows_executor_after_write_rail() {
@@ -62,6 +62,7 @@ async fn http_rest_remote_plaintext_opt_in_allows_executor_after_write_rail() {
         .execute("default", create.build())
         .await
         .expect("create table");
+    grant_default_main_access(&client).await;
     drop(client);
     let token = harness
         .token("remote-write-enabled", TokenMode::ReadWrite)

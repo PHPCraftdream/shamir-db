@@ -1,4 +1,8 @@
 use shamir_connect::server::token::{TokenChannels, TokenMode};
+use shamir_query_builder::{batch::Batch, ddl};
+use shamir_query_types::admin::ChmodOp;
+use shamir_query_types::batch::BatchOp;
+use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex, derive_session_hmac_key};
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_server::bootstrap::{ensure_superuser, BootstrapPolicy};
 use shamir_server::config::{Config, ListenerConfig, ListenerKind};
@@ -163,6 +167,41 @@ pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
         .roles;
     drop(directory);
     (owner, owner_roles)
+}
+
+/// Opens `db://default` (other r-x) and `default/main` (other --x): a token
+/// session is `Actor::User` (TOKEN_API section 6), and boot creates both
+/// System-owned at `0o700`, which hides even tables the token owner created.
+pub(super) async fn grant_default_main_access(client: &shamir_client::Client) {
+    let key = derive_session_hmac_key(&client.session_id());
+    let mut batch = Batch::new();
+    for (alias, resource, mode) in [
+        ("chmod_db", ddl::res::database("default"), 0o755),
+        ("chmod_store", ddl::res::store("default", "main"), 0o711),
+    ] {
+        let unsigned = BatchOp::Chmod(ChmodOp {
+            chmod: resource.clone(),
+            mode,
+            hmac: None,
+        });
+        let tag = compute_tag_hex(
+            &key,
+            &canonical_batch_op("default", &unsigned).expect("chmod canonical form"),
+        );
+        batch.chmod(
+            alias,
+            ddl::chmod(resource, mode)
+                .hmac(tag)
+                .build()
+                .expect("build chmod"),
+        );
+    }
+    let response = client
+        .execute("default", batch.build())
+        .await
+        .expect("grant default.main access");
+    assert!(response.results.contains_key("chmod_db"));
+    assert!(response.results.contains_key("chmod_store"));
 }
 
 pub fn config_for(data_dir: &std::path::Path) -> Config {

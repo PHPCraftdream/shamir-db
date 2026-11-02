@@ -9,7 +9,7 @@ use tokio::time::Duration;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use super::common::{request, Harness, ADMIN_PASSWORD};
+use super::common::{grant_default_main_access, request, Harness, ADMIN_PASSWORD};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_rest_tls_listener_serves_authenticated_ping() {
@@ -147,6 +147,7 @@ async fn http_rest_allowed_owner_read_and_shutdown_restart_preserve_data() {
         .execute("default", create.build())
         .await
         .expect("create table");
+    grant_default_main_access(&client).await;
     let mut insert = Batch::new();
     insert.insert(
         "ins",
