@@ -50,6 +50,7 @@ fn fast_kdf() -> KdfConfig {
 fn make_config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -97,6 +98,7 @@ where
     let password = b"correct horse battery staple".to_vec();
 
     let launcher = ServerLauncher {
+        node_mode: Default::default(),
         config: make_config(&temp),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
@@ -150,6 +152,7 @@ async fn rv_client_2d0142dd_denied_tofu_rejects_unpinned_connect() {
     let temp = TempDir::new().expect("tempdir");
     let password = b"correct horse battery staple".to_vec();
     let launcher = ServerLauncher {
+        node_mode: Default::default(),
         config: make_config(&temp),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),

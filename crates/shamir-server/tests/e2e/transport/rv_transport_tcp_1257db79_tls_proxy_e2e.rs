@@ -39,6 +39,7 @@ fn relay_config(temp: &TempDir) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -88,6 +89,7 @@ async fn rv_transport_tcp_1257db79_tls_terminating_relay_rejects_relayed_proof()
     let temp = TempDir::new().unwrap();
     let launcher = ServerLauncher {
         config: relay_config(&temp),
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(b"hunter2".to_vec()),

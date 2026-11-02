@@ -128,6 +128,7 @@ fn make_test_config(temp: &TempDir) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -313,10 +314,14 @@ async fn resume_after_full_auth_succeeds() {
         username: "admin".into(),
         password: Zeroizing::new(password.clone()),
     };
-    let handle = ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launch");
+    let handle = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launch");
     let server_addr = handle.first_tls_exporter_addr().expect("addr");
     let username = NormalizedUsername::from_raw("admin").expect("username");
 
@@ -386,10 +391,14 @@ async fn resume_with_garbage_ticket_closes_connection() {
         username: "admin".into(),
         password: Zeroizing::new(password.clone()),
     };
-    let handle = ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launch");
+    let handle = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launch");
     let server_addr = handle.first_tls_exporter_addr().expect("addr");
 
     let (mut r, mut w, exporter) = new_tls_conn(server_addr).await;

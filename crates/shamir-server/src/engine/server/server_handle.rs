@@ -48,6 +48,8 @@ pub struct ReplSupervisorTask {
 
 /// Owner of the runtime state of a launched server.
 pub struct ServerHandle {
+    /// Live token service, including token mirror and GC lifecycle.
+    pub token_service: Arc<crate::security::tokens::TokenService>,
     /// Addresses the server actually bound, in the same order as
     /// `config.listeners`. `None` entries correspond to either a skipped
     /// listener (an unsupported `(kind, profile)` combination — see the
@@ -182,6 +184,7 @@ impl ServerHandle {
         //    next poll, and any new caller sees the cancelled state
         //    immediately. No subscribe-window race.
         self.shutdown_token.cancel();
+        self.token_service.shutdown_gc().await;
         // 2. Wait for accept loops to finish, then wait for tracked accepted
         // tasks to quiesce before any repository flush.
         for task in self.listener_tasks {
@@ -257,6 +260,7 @@ impl ServerHandle {
         drop(self.shamir);
         drop(self.audit_appender);
         drop(self.repl_supervisor);
+        drop(self.token_service);
         if let Err(still_locked) = wait_stores_released(&data_dir, STORE_RELEASE_TIMEOUT).await {
             tracing::warn!(
                 ?still_locked,

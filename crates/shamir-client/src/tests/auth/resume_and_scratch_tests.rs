@@ -14,6 +14,7 @@ use crate::{Client, ConnectOptions, ResumeOptions, CURRENT_QUERY_LANG_VERSION};
 fn config(temp: &TempDir) -> Config {
     let data_dir: PathBuf = temp.path().to_path_buf();
     Config {
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -60,6 +61,7 @@ async fn start() -> (
     let temp = TempDir::new().expect("tempdir");
     let password = b"correct horse battery staple".to_vec();
     let handle = ServerLauncher {
+        node_mode: Default::default(),
         config: config(&temp),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),

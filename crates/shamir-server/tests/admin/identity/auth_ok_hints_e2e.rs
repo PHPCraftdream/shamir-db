@@ -34,6 +34,7 @@ async fn launch(temp: &TempDir, kdf_defaults: KdfConfig) -> ServerHandle {
     config.security.auth_init_rate_per_second = 1_000;
     ServerLauncher {
         config,
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(PASSWORD.to_vec()),
