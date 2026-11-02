@@ -94,7 +94,9 @@ describe('browser HTTP transport', () => {
     const pending = browserLoginHttp.request(new URL('https://example.test/'), bytes(1, 0), controller.signal, 0);
     const rejection = expect(pending).rejects.toMatchObject({ code: 'client_aborted' });
     await Promise.resolve(); controller.abort(); await rejection;
-    const late = response(); resolveFetch(late.value); await Promise.resolve(); await Promise.resolve();
+    const late = response(); resolveFetch(late.value);
+    // Spies add promise hops in vitest 1.x: flush a bounded number instead of counting.
+    for (let i = 0; i < 16 && late.reader.cancel.mock.calls.length === 0; i++) await Promise.resolve();
     expect(late.reader.cancel).toHaveBeenCalled();
   });
 

@@ -281,9 +281,9 @@ class BoundedReader {
       if (marker === 0xc2) return false;
       if (marker === 0xc3) return true;
       switch (marker) {
-        case 0xc4: return this.take(this.unsigned(1) as number).slice();
-        case 0xc5: return this.take(this.unsigned(2) as number).slice();
-        case 0xc6: return this.take(this.unsigned(4) as number).slice();
+        case 0xc4: return new Uint8Array(this.take(this.unsigned(1) as number));
+        case 0xc5: return new Uint8Array(this.take(this.unsigned(2) as number));
+        case 0xc6: return new Uint8Array(this.take(this.unsigned(4) as number));
         case 0xcc: return this.unsigned(1);
         case 0xcd: return this.unsigned(2);
         case 0xce: return this.unsigned(4);

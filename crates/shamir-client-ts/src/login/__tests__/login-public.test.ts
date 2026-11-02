@@ -44,7 +44,7 @@ function installCrypto(): void {
 function loginHttp(): LoginHttp {
   let nonce: Uint8Array | undefined;
   return { async request(url, body) {
-    if (url.pathname.endsWith('/begin')) { nonce = decodeRecord(body).client_nonce as Uint8Array; return { status: 200, contentType: 'application/msgpack', retryAfter: null, body: encRecord({ protocol_version: 1, binding_mode: 3, security: 0, listener_id: bytes(16, 1), handshake_id: bytes(32, 2), salt: bytes(16, 3), kdf: 'argon2id', memory_kb: 19456, time: 2, parallelism: 1, argon2_version: 19, server_nonce: bytes(32, 4) }) }; }
+    if (url.pathname.endsWith('/begin')) { nonce = new Uint8Array(decodeRecord(body).client_nonce as Uint8Array); return { status: 200, contentType: 'application/msgpack', retryAfter: null, body: encRecord({ protocol_version: 1, binding_mode: 3, security: 0, listener_id: bytes(16, 1), handshake_id: bytes(32, 2), salt: bytes(16, 3), kdf: 'argon2id', memory_kb: 19456, time: 2, parallelism: 1, argon2_version: 19, server_nonce: bytes(32, 4) }) }; }
     if (!nonce) throw new Error('missing begin');
     const t = oracleTranscript(nonce);
     const salted = hmac(enc.encode('correct horse'), Buffer.from('test salted password'));

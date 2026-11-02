@@ -168,8 +168,8 @@ async function awaitSecret(promise: Promise<Uint8Array>, signal: AbortSignal, pa
 
 async function secretHmac(crypto: LoginCrypto, key: Uint8Array, data: Uint8Array,
   signal: AbortSignal, parent?: AbortSignal): Promise<Uint8Array> {
-  const keyCopy = key.slice();
-  const dataCopy = data.slice();
+  const keyCopy = new Uint8Array(key);
+  const dataCopy = new Uint8Array(data);
   let work: Promise<Uint8Array>;
   try { work = crypto.hmac(keyCopy, dataCopy); }
   catch (error) { keyCopy.fill(0); dataCopy.fill(0); throw error; }
@@ -181,7 +181,7 @@ async function secretHmac(crypto: LoginCrypto, key: Uint8Array, data: Uint8Array
 
 async function secretSha(crypto: LoginCrypto, data: Uint8Array,
   signal: AbortSignal, parent?: AbortSignal): Promise<Uint8Array> {
-  const dataCopy = data.slice();
+  const dataCopy = new Uint8Array(data);
   let work: Promise<Uint8Array>;
   try { work = crypto.sha256(dataCopy); }
   catch (error) { dataCopy.fill(0); throw error; }
@@ -321,7 +321,7 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
   const scope = scopeFor(o);
   const user = canonicalUser(o.username);
   const sec = expectedSecurity(url, o.externalTls === true);
-  const listenerId = o.listenerId?.slice();
+  const listenerId = o.listenerId === undefined ? undefined : new Uint8Array(o.listenerId);
   const expectedKdf = o.expectedKdf ? { ...o.expectedKdf } : undefined;
   const parent = o.signal;
   const timeoutMs = o.timeoutMs ?? 0;
@@ -380,7 +380,7 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
     pw = new TextEncoder().encode(password);
     const kdfParams: Argon2Params = { memoryKb: challenge.memoryKb, time: challenge.time,
       parallelism: challenge.parallelism };
-    const passwordBytes = pw.slice();
+    const passwordBytes = new Uint8Array(pw);
     const originalPassword = pw;
     let kdfPromise: Promise<Uint8Array>;
     try { kdfPromise = crypto.argon2id(passwordBytes, challenge.salt, kdfParams); }
@@ -438,7 +438,7 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
       let token: ApiToken;
       try { token = ApiToken.from(success.token); } catch { throw err('protocol_error'); }
       const metadata: LoginMetadata = {
-        id: id.slice(), label: scope.label, owner: user, mode: scope.mode, channels: scope.channels,
+        id: new Uint8Array(id), label: scope.label, owner: user, mode: scope.mode, channels: scope.channels,
         databases: scope.databases === null ? null : Object.freeze([...scope.databases]),
         createdAtNs: created, expiresAtNs: expires,
       };
