@@ -75,7 +75,8 @@ async fn fixture() -> Fixture {
     let leader_dir = root.path().join("leader");
     let home_dir = root.path().join("home");
     let artifact = root.path().join("seed");
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
 
     let mut leader = child::spawn_leader(&leader_dir, addr).await;
     let admin = child::connect_admin(&leader).await;
@@ -244,7 +245,8 @@ async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_conver
 async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body() {
     let fx = fixture().await;
     let home_dir = fx._root.path().join("home-incomplete");
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
     let upstream = format!("tcp://{addr}");
 
     let error = replication_seed::install_with(
@@ -307,7 +309,8 @@ async fn seed_e2e_c_existing_ordinary_destination_refused() {
 async fn seed_e2e_c_existing_ordinary_destination_refused_body() {
     let fx = fixture().await;
     let dir = fx._root.path().join("ordinary-home");
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
 
     // An ordinary (non-seed) destination: db app / repo main with data.
     let ordinary = follower::open_home(&dir).await;
