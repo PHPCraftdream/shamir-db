@@ -10,6 +10,9 @@ use crate::shamir_db::repo_durability::durability_from_record;
 use crate::shamir_db::shamir_db::ReplicationControlGuard;
 use crate::types::value::QueryValue;
 use crate::{DbError, DbResult};
+
+/// Per-repo flush durations at or above this are logged with the budget left.
+const SLOW_FLUSH_LOG: Duration = Duration::from_secs(1);
 use shamir_query_types::durability::DurabilityOverride;
 
 use super::super::SYSTEM_DB_NAME;
@@ -784,7 +787,17 @@ impl ShamirDb {
                     continue;
                 };
                 let remaining = deadline.saturating_duration_since(Instant::now());
+                let started = Instant::now();
                 let result = repo.shutdown_clean(remaining).await;
+                if started.elapsed() >= SLOW_FLUSH_LOG {
+                    log::warn!(
+                        "flush_all: {}/{} took {:?} (budget left {:?})",
+                        db_name,
+                        repo_name,
+                        started.elapsed(),
+                        remaining
+                    );
+                }
                 if let Err(e) = &result {
                     log::warn!("flush_all: {}/{}: {}", db_name, repo_name, e);
                 }
@@ -794,10 +807,19 @@ impl ShamirDb {
                 );
             }
         }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let started = Instant::now();
         let result = self
             .system_store
-            .flush_buffers_with_quiesce_timeout(deadline.saturating_duration_since(Instant::now()))
+            .flush_buffers_with_quiesce_timeout(remaining)
             .await;
+        if started.elapsed() >= SLOW_FLUSH_LOG {
+            log::warn!(
+                "flush_all: system store took {:?} (budget left {:?})",
+                started.elapsed(),
+                remaining
+            );
+        }
         if let Err(e) = &result {
             log::warn!("flush_all: system store: {}", e);
         }
