@@ -275,6 +275,9 @@ export class CursorIterator implements AsyncIterableIterator<CursorRecord> {
     return { done: true, value: undefined };
   }
 
+  /** Force-close locally after the underlying transport terminates. Buffered data is discarded. */
+  terminate(): void { this.done = true; this.hasMore = false; this.buffer = []; this.position = 0; }
+
   /**
    * Explicit alias for {@link CursorIterator.return}, for callers driving
    * the iterator manually outside a `for await` loop (no implicit
