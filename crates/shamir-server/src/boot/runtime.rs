@@ -34,7 +34,11 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()>,
     on_ready: impl FnOnce(),
 ) -> anyhow::Result<ShutdownReport> {
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher::new(config);
+    let launcher = ServerLauncher {
+        bootstrap,
+        ..launcher
+    };
     let handle = launcher
         .launch()
         .await

@@ -1,4 +1,83 @@
 use fs4::fs_std::FileExt;
+use std::sync::Arc;
+use std::time::Duration;
+use zeroize::Zeroizing;
+
+use crate::config::{
+    Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
+};
+use crate::server::{BootstrapMode, ServerLauncher};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launcher_shutdown_stops_token_gc_task() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().to_path_buf();
+    let config = Config {
+        data_dir: data_dir.clone(),
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+            file: None,
+            flush_interval_ms: 2000,
+        },
+        durability: Default::default(),
+        transactions: Default::default(),
+        tokens: Default::default(),
+        kdf_defaults: KdfConfig {
+            memory_kb: 19_456,
+            time: 2,
+            parallelism: 1,
+            argon2_version: 0x13,
+        },
+        argon2_concurrent_max: 4,
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Tcp,
+            addr: "127.0.0.1:0".into(),
+            profile: ProfileKind::TlsExporter,
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: vec![],
+        }],
+        tls: TlsConfig {
+            cert_path: data_dir.join("cert.pem"),
+            key_path: data_dir.join("key.pem"),
+        },
+        security: Default::default(),
+        audit: Default::default(),
+        observability: crate::config::ObservabilityConfig {
+            addr: String::new(),
+            allow_public_metrics: false,
+        },
+        replication: None,
+    };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Password {
+            username: "admin".into(),
+            password: Zeroizing::new(b"test-password".to_vec()),
+        },
+        node_mode: crate::db_handler::NodeMode::ReadWrite,
+    };
+    let handle = launcher.launch().await.expect("server launch");
+    let service = Arc::clone(&handle.token_service);
+    assert!(!service.gc_task_finished().await);
+    let shutdown = tokio::spawn(handle.shutdown());
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !service.gc_task_finished().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("GC stopped during shutdown");
+    drop(service);
+    let report = tokio::time::timeout(Duration::from_secs(30), shutdown)
+        .await
+        .expect("server shutdown bounded")
+        .expect("shutdown task");
+    // The subject is the GC task; the system-repo flush budget is disk-speed
+    // dependent on Windows runners, so only structural shutdown errors are asserted.
+    assert!(report.errors().is_empty(), "{report:?}");
+}
 
 /// Proves the advisory OS file lock mechanism used for the single-instance
 /// guard:
@@ -7,12 +86,10 @@ use fs4::fs_std::FileExt;
 /// 3. After dropping the first lock, a third `try_lock_exclusive` succeeds
 ///    (release-on-drop).
 ///
-/// This tests the lock primitive directly on a tempfile — it does NOT
-/// boot a full `ServerLauncher`. The wiring from `launch()` into
-/// `ServerHandle._data_dir_lock` is verified by compilation (the field
-/// is populated in the `Ok(ServerHandle { ... })` constructor; removing
-/// it is a compile error). A full-launcher test would require TLS certs,
-/// ports, bootstrap, etc. and is covered by `mvp_e2e`.
+/// This tests the lock primitive directly on a tempfile. The wiring from
+/// `launch()` into `ServerHandle._data_dir_lock` is verified by compilation
+/// (the field is populated in the `Ok(ServerHandle { ... })` constructor;
+/// removing it is a compile error).
 #[test]
 fn data_dir_lock_blocks_second_instance() {
     let dir = tempfile::tempdir().expect("tempdir");

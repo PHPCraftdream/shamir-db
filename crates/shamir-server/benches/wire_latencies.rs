@@ -213,6 +213,7 @@ async fn setup_live_server() -> (
 
     let handle = shamir_server::server::ServerLauncher {
         config,
+        node_mode: Default::default(),
         bootstrap: shamir_server::server::BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(password.clone()),

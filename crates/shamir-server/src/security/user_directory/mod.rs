@@ -34,6 +34,8 @@
 
 mod directory;
 mod record;
+#[cfg(test)]
+mod tests;
 
 pub use directory::FjallUserDirectory;
 #[cfg(test)]

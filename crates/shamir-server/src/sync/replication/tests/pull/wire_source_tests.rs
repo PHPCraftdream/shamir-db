@@ -42,6 +42,7 @@ fn leader_config(temp: &tempfile::TempDir) -> Config {
         },
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         kdf_defaults: KdfConfig {
             memory_kb: 19_456,
             time: 2,
@@ -98,6 +99,7 @@ async fn rv_p2_u01_long_poll_does_not_serialize_other_pull_targets() {
             username: "admin".into(),
             password: Zeroizing::new(password.clone()),
         },
+        node_mode: crate::db_handler::NodeMode::ReadWrite,
     };
     let handle = launcher.launch().await.expect("leader boot");
     let addr = handle.first_tls_exporter_addr().expect("tls listener");

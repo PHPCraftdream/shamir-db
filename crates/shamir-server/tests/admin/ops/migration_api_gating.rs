@@ -39,10 +39,14 @@ async fn boot_with_flag_enabled_turns_on_experimental_migration_api() {
         password: Zeroizing::new(b"test-password".to_vec()),
     };
 
-    let handle = ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot with flag enabled");
+    let handle = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot with flag enabled");
     assert!(
         handle.experimental_migration_enabled(),
         "security.enable_experimental_migration_api: true must enable the \
@@ -68,10 +72,14 @@ async fn boot_with_default_config_leaves_experimental_migration_api_disabled() {
         password: Zeroizing::new(b"test-password".to_vec()),
     };
 
-    let handle = ServerLauncher { config, bootstrap }
-        .launch()
-        .await
-        .expect("launcher boot with default config");
+    let handle = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    }
+    .launch()
+    .await
+    .expect("launcher boot with default config");
     assert!(
         !handle.experimental_migration_enabled(),
         "default config must leave the experimental migration API disabled"
