@@ -9,6 +9,75 @@ use crate::config::{
 use crate::server::{BootstrapMode, ServerLauncher};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().to_path_buf();
+    let config = Config {
+        data_dir: data_dir.clone(),
+        logging: LoggingConfig {
+            level: "warn".into(),
+            slow_query_threshold_ms: 0,
+            file: None,
+            flush_interval_ms: 2000,
+        },
+        durability: Default::default(),
+        transactions: Default::default(),
+        tokens: Default::default(),
+        kdf_defaults: KdfConfig {
+            memory_kb: 19_456,
+            time: 2,
+            parallelism: 1,
+            argon2_version: 0x13,
+        },
+        argon2_concurrent_max: 4,
+        listeners: vec![ListenerConfig {
+            kind: ListenerKind::Http,
+            addr: "127.0.0.1:0".into(),
+            profile: None,
+            http: crate::boot::config::HttpListenerSettings {
+                tls: Some(false),
+                ..Default::default()
+            },
+            path: None,
+            kdf_override: None,
+            browser_origin_allowlist: Vec::new(),
+        }],
+        tls: TlsConfig {
+            cert_path: data_dir.join("cert.pem"),
+            key_path: data_dir.join("key.pem"),
+        },
+        security: Default::default(),
+        audit: Default::default(),
+        observability: crate::config::ObservabilityConfig {
+            addr: String::new(),
+            allow_public_metrics: false,
+        },
+        replication: None,
+    };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap: BootstrapMode::Skip,
+        node_mode: crate::db_handler::NodeMode::ReadWrite,
+    };
+    let handle = launcher.launch().await.expect("HTTP server launch");
+    let bound_addr = handle
+        .bound_addrs
+        .iter()
+        .flatten()
+        .next()
+        .copied()
+        .expect("HTTP listener bound");
+    assert_eq!(bound_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
+    assert_ne!(bound_addr.port(), 0);
+
+    let report = tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
+        .await
+        .expect("server shutdown bounded");
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(report.exit_code(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launcher_shutdown_stops_token_gc_task() {
     // Surfaces the shutdown stage timers (`log::warn!`) in the failure output.
     let _ = tracing_subscriber::fmt()
@@ -38,10 +107,11 @@ async fn launcher_shutdown_stops_token_gc_task() {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: "127.0.0.1:0".into(),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

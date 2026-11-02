@@ -57,6 +57,10 @@ wasm-heavy = { max-threads = 4 }
 # ran next to three unlisted ones (system_metadata_tests 22-23 s,
 # flush_all_tests 27 s). A new module that opens on-disk Fjall joins the list.
 fsync-heavy = { max-threads = 1 }
+# Each http_rest e2e test boots a full server (two Argon2 hashes, TLS material,
+# fsync); eight of them next to the other booting tests starved the Windows
+# runner (server-boot tests took 36-84 s instead of 12-18 s).
+http-rest-e2e = { max-threads = 2 }
 
 [profile.default]
 # Print every test result as it completes, with the binary name.
@@ -164,6 +168,10 @@ test-group = "fsync-heavy"
 filter = "package(shamir-server) and test(/(boot::server_tests::launcher_|durability::restore_tests::|durability::restore_identity_tests::|durability::backup_tests::)/)"
 test-group = "fsync-heavy"
 
+[[profile.default.overrides]]
+filter = "package(shamir-server) and binary(e2e) and test(/^http_rest::/)"
+test-group = "http-rest-e2e"
+
 [[profile.ci.overrides]]
 filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
@@ -175,6 +183,10 @@ test-group = "fsync-heavy"
 [[profile.ci.overrides]]
 filter = "package(shamir-server) and test(/(boot::server_tests::launcher_|durability::restore_tests::|durability::restore_identity_tests::|durability::backup_tests::)/)"
 test-group = "fsync-heavy"
+
+[[profile.ci.overrides]]
+filter = "package(shamir-server) and binary(e2e) and test(/^http_rest::/)"
+test-group = "http-rest-e2e"
 
 # ============================================================================
 # Stress profile — the INVERSE of [profile.ci]. Used by the nightly

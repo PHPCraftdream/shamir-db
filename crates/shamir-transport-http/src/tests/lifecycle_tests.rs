@@ -15,6 +15,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+use crate::server::accept::tls13_config;
 use crate::{
     serve, AuthHeader, BodyBudget, Endpoint, EndpointSet, ExecOutcome, ExecStatus, GateDecision,
     HttpLimits, HttpServerConfig, PeerInfo, RestExecutor, ServeError, TokenGate,
@@ -51,6 +52,7 @@ impl RestExecutor<()> for BlockingExecutor {
         ExecOutcome {
             status: ExecStatus::Ok,
             body: Bytes::new(),
+            retry_after_secs: None,
             hold: None,
         }
     }
@@ -166,6 +168,7 @@ impl RestExecutor<()> for CountingExecutor {
             ExecOutcome {
                 status: ExecStatus::Ok,
                 body: Bytes::new(),
+                retry_after_secs: None,
                 hold: None,
             }
         }
@@ -457,6 +460,7 @@ async fn tls12_only_configuration_is_rejected_before_accept_loop() {
         .expect("TLS 1.2 provider config")
         .with_no_client_auth()
         .with_cert_resolver(Arc::new(NoCertificate));
+    assert!(tls13_config(&tls_config).is_err());
     let mut cfg = (*config()).clone();
     cfg.tls = Some(Arc::new(tls_config));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

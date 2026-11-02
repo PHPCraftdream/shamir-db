@@ -43,6 +43,7 @@ use crate::user_directory::FjallUserDirectory;
 use super::helpers::{
     boot_now_ns, default_node_id, kdf_from_config, log_bootstrap_outcome, REPL_RECONCILE_INTERVAL,
 };
+use super::http::BootGuard;
 use super::listeners::{spawn_listeners, ListenerEnv, SpawnedListeners};
 
 /// Launcher: build the server runtime from a [`Config`] + bootstrap policy.
@@ -98,6 +99,7 @@ impl ServerLauncher {
         // silently dropped — the cold-start hang we chased through the accept
         // loops). One concept, race-free by construction.
         let shutdown_token = tokio_util::sync::CancellationToken::new();
+        let mut boot_guard = BootGuard::new(shutdown_token.clone());
         let conn_tasks = ConnTasks::new(shutdown_token.clone());
 
         // 1. Durable stores.
@@ -496,7 +498,7 @@ impl ServerLauncher {
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
-        let handler: Arc<dyn RequestHandler> = handler_concrete;
+        let handler: Arc<dyn RequestHandler> = handler_concrete.clone();
 
         // 5b. Follower-replication supervisor (386-c). Constructed here where
         //     `shamir: Arc<ShamirDb>` is available. It is NOT reconciled yet —
@@ -600,7 +602,8 @@ impl ServerLauncher {
             bound_addrs,
             bound_ipc_paths,
             listener_tasks,
-        } = spawn_listeners(
+            http_gates,
+        } = match spawn_listeners(
             &ListenerEnv {
                 config: &config,
                 identity: &identity,
@@ -616,19 +619,40 @@ impl ServerLauncher {
                 resume_config: &resume_config,
                 handler: &handler,
                 meta: &meta,
+                token_service: &token_service,
+                handler_concrete: &handler_concrete,
                 conn_tasks: &conn_tasks,
             },
             &shutdown_token,
         )
-        .await?;
-
-        token_service.start_gc(shutdown_token.clone()).await;
-
+        .await
+        {
+            Ok(listeners) => listeners,
+            Err(error) => {
+                shutdown_token.cancel();
+                audit_appender.shutdown().await;
+                scheduler.shutdown().await;
+                if let Some(snap) = meta_snapshot_task {
+                    let _ = snap.handle.await;
+                }
+                if let Some(reaper) = interactive_tx_reaper {
+                    let _ = reaper.handle.await;
+                }
+                if let Some(reaper) = cursor_reaper {
+                    let _ = reaper.handle.await;
+                }
+                return Err(error);
+            }
+        };
         // 11. Optional observability HTTP server. Spawned LAST so its
         //     `/readyz` flips to 200 only after every listener is bound.
-        let observability = if config.observability.addr.is_empty() {
-            None
-        } else {
+        let observability_result: Result<
+            Option<crate::observability::ObservabilityHandle>,
+            BootError,
+        > = async {
+            if config.observability.addr.is_empty() {
+                return Ok(None);
+            }
             let addr: std::net::SocketAddr = config.observability.addr.parse().map_err(|e| {
                 BootError::Bind(format!(
                     "observability.addr {} invalid: {e}",
@@ -683,8 +707,64 @@ impl ServerLauncher {
                 Err(e) => return Err(BootError::Bind(format!("observability: {e}"))),
             };
             handle.state.mark_ready();
-            Some(handle)
+            Ok(Some(handle))
+        }
+        .await;
+        let observability = match observability_result {
+            Ok(handle) => handle,
+            Err(error) => {
+                shutdown_token.cancel();
+                let listener_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+                for mut task in listener_tasks {
+                    let abort = task.abort_handle();
+                    match tokio::time::timeout_at(listener_deadline, &mut task).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(join_error)) => {
+                            tracing::error!(%join_error, "listener task failed during launch rollback");
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                "HTTP listener drain exceeded during launch rollback; aborting"
+                            );
+                            abort.abort();
+                            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                                .await
+                                .is_err()
+                            {
+                                tracing::error!(
+                                    "listener task did not stop after launch rollback abort"
+                                );
+                            }
+                        }
+                    }
+                }
+                if tokio::time::timeout(Duration::from_secs(10), conn_tasks.wait_idle())
+                    .await
+                    .is_err()
+                {
+                    conn_tasks.abort_all();
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), conn_tasks.wait_idle()).await;
+                }
+                for gate in http_gates {
+                    gate.shutdown().await;
+                }
+                token_service.shutdown_gc().await;
+                audit_appender.shutdown().await;
+                scheduler.shutdown().await;
+                if let Some(snap) = meta_snapshot_task {
+                    let _ = snap.handle.await;
+                }
+                if let Some(reaper) = interactive_tx_reaper {
+                    let _ = reaper.handle.await;
+                }
+                if let Some(reaper) = cursor_reaper {
+                    let _ = reaper.handle.await;
+                }
+                return Err(error);
+            }
         };
+        token_service.start_gc(shutdown_token.clone()).await;
 
         // 10b. Now that every listener is bound, converge the follower loops
         //      to the declarative `system/subscriptions` catalogue and spawn a
@@ -715,11 +795,13 @@ impl ServerLauncher {
             crate::server::server_handle::ReplSupervisorTask { handle }
         };
 
+        boot_guard.disarm();
         Ok(ServerHandle {
             token_service,
             bound_addrs,
             bound_ipc_paths,
             listener_tasks,
+            http_gates,
             scheduler,
             audit_appender,
             shutdown_token,
