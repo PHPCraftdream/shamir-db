@@ -16,7 +16,8 @@ async fn rv_server_e8e1d11b_mismatch_stops_and_persists() {
 
 async fn mismatch_body() {
     let root = tempfile::tempdir().unwrap();
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
     let mut leader = child::spawn_leader(&root.path().join("leader"), addr).await;
     let admin = child::connect_admin(&leader).await;
     wire::setup_leader(&admin).await;
