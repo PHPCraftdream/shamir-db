@@ -10,6 +10,7 @@ use shamir_transport_http::{
     AuthHeader, Endpoint as HttpEndpoint, GateDecision, PeerInfo, TokenGate,
 };
 
+use super::bucket::BucketCache;
 use super::maintenance::RestMaintenance;
 use crate::security::tokens::TokenService;
 
@@ -48,10 +49,20 @@ impl RestGate {
         clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
         rails: RestGateRails,
     ) -> Self {
+        Self::new_with_buckets(service, clock, rails, Arc::new(BucketCache::default()))
+    }
+
+    pub(super) fn new_with_buckets(
+        service: Arc<TokenService>,
+        clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
+        rails: RestGateRails,
+        buckets: Arc<BucketCache>,
+    ) -> Self {
         let maintenance = RestMaintenance::new(
             service.audit_writer(),
             Arc::clone(&clock),
             service.maintenance_shutdown(),
+            buckets,
         );
         metrics::describe_counter!(
             "shamir_token_auth_total",

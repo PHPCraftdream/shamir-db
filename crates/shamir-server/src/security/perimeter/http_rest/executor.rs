@@ -1,11 +1,11 @@
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::session::Session;
-use shamir_connect::server::token::{Endpoint as TokenEndpoint, Verified};
+use shamir_connect::server::token::Verified;
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_transport_http::{ExecOutcome, ExecStatus, RestExecutor};
 
@@ -17,27 +17,33 @@ use super::scope::{classify_request, Decision};
 use super::RestGateRails;
 
 type OwnerName = dyn Fn(&[u8; 16]) -> String + Send + Sync;
+pub(super) type NativeHandler = dyn for<'a> Fn(
+        &'a Session,
+        DbRequest,
+        &'a ConnectionServices,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, String>> + Send + 'a>>
+    + Send
+    + Sync;
 
 /// Native typed handler adapter for requests accepted by REST scope policy.
 pub struct ScopedHandler {
-    handler: Arc<ShamirDbHandler>,
-    #[cfg(test)]
-    native_calls: Option<Arc<AtomicUsize>>,
+    handler: Arc<NativeHandler>,
 }
 
 impl ScopedHandler {
     /// Wrap the concrete native database handler.
     pub fn new(handler: Arc<ShamirDbHandler>) -> Self {
         Self {
-            handler,
-            #[cfg(test)]
-            native_calls: None,
+            handler: Arc::new(move |session, request, conn| {
+                let handler = Arc::clone(&handler);
+                Box::pin(async move { handler.handle_decoded(session, request, conn).await })
+            }),
         }
     }
 
     #[cfg(test)]
-    pub(super) fn observe_native_calls(&mut self, calls: Arc<AtomicUsize>) {
-        self.native_calls = Some(calls);
+    pub(super) fn with_handler(handler: Arc<NativeHandler>) -> Self {
+        Self { handler }
     }
 
     pub(super) async fn handle(
@@ -56,12 +62,7 @@ impl ScopedHandler {
             Decision::Denied(code) => return Err(HandleDenial::Forbidden(code)),
             Decision::NotSupported(code) => return Err(HandleDenial::BadRequest(code)),
         }
-        #[cfg(test)]
-        if let Some(calls) = &self.native_calls {
-            calls.fetch_add(1, Ordering::SeqCst);
-        }
-        self.handler
-            .handle_decoded(session, request, conn)
+        (self.handler)(session, request, conn)
             .await
             .map_err(|_| HandleDenial::ApplicationError)
     }
@@ -80,7 +81,7 @@ pub struct RestHandler {
     handler: ScopedHandler,
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     username: Arc<OwnerName>,
-    buckets: BucketCache,
+    buckets: Arc<BucketCache>,
 }
 
 impl RestHandler {
@@ -92,7 +93,19 @@ impl RestHandler {
         username: Arc<OwnerName>,
         rails: RestGateRails,
     ) -> (super::RestGate, Self) {
-        let gate = super::RestGate::new(Arc::clone(&service), Arc::clone(&clock), rails);
+        let buckets = Arc::new(BucketCache::default());
+        let gate = super::RestGate::new_with_buckets(
+            Arc::clone(&service),
+            Arc::clone(&clock),
+            rails,
+            Arc::clone(&buckets),
+        );
+        metrics::describe_counter!(
+            "shamir_token_request_denied_total",
+            metrics::Unit::Count,
+            "REST token requests denied by endpoint scope policy"
+        );
+        metrics::counter!("shamir_token_request_denied_total", "endpoint" => "rest").increment(0);
         metrics::describe_histogram!(
             "shamir_token_request_duration_seconds",
             metrics::Unit::Seconds,
@@ -103,7 +116,7 @@ impl RestHandler {
             handler: ScopedHandler::new(handler),
             clock,
             username,
-            buckets: BucketCache::default(),
+            buckets,
         };
         (gate, executor)
     }
@@ -152,9 +165,8 @@ impl RestExecutor<Verified> for RestHandler {
         let prepared = classify_request(&request, record.mode, record.databases.as_deref());
         let operation = match prepared {
             Decision::Denied(code) => {
-                self.service
-                    .counters()
-                    .count_auth_result(TokenEndpoint::Rest, "forbidden");
+                metrics::counter!("shamir_token_request_denied_total", "endpoint" => "rest")
+                    .increment(1);
                 return Self::error(code, ExecStatus::Forbidden);
             }
             Decision::NotSupported(code) => return Self::error(code, ExecStatus::BadRequest),
@@ -192,9 +204,8 @@ impl RestExecutor<Verified> for RestHandler {
                 hold: hold.map(|guard| Box::new(guard) as Box<dyn Send + Sync>),
             },
             Err(HandleDenial::Forbidden(code)) => {
-                self.service
-                    .counters()
-                    .count_auth_result(TokenEndpoint::Rest, "forbidden");
+                metrics::counter!("shamir_token_request_denied_total", "endpoint" => "rest")
+                    .increment(1);
                 Self::error(code, ExecStatus::Forbidden)
             }
             Err(HandleDenial::BadRequest(code)) => Self::error(code, ExecStatus::BadRequest),

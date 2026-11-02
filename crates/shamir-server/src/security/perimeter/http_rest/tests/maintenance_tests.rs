@@ -11,7 +11,7 @@ use shamir_connect::server::rate_limit::RateDecision;
 use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
-use super::{FailureLimiter, RestMaintenance, NOTICE_CAPACITY};
+use super::{BucketCache, FailureLimiter, RestMaintenance, FLUSH_LIMIT, NOTICE_CAPACITY};
 
 struct Capture {
     entries: Mutex<Vec<AuditEntry>>,
@@ -61,7 +61,61 @@ fn maintenance(
         Arc::new(AuditChainWriter::new(AuditChain::new([9; 32]), appender)),
         clock,
         stop,
+        Arc::new(BucketCache::default()),
     )
+}
+
+#[test]
+fn failure_limiter_throttles_full_capacity_eviction_scans() {
+    let limiter = FailureLimiter::new();
+    for index in 0..4096u32 {
+        assert!(matches!(
+            limiter.check(subnet(index), 1),
+            RateDecision::Allowed
+        ));
+    }
+    for index in 4096..5120u32 {
+        assert!(matches!(
+            limiter.check(subnet(index), 1),
+            RateDecision::RateLimited { .. }
+        ));
+    }
+    assert_eq!(limiter.eviction_scans(), 1);
+    assert_eq!(limiter.tracked_subnets(), 4096);
+
+    assert!(matches!(
+        limiter.check(subnet(5120), 100_000_001),
+        RateDecision::RateLimited { .. }
+    ));
+    assert_eq!(limiter.eviction_scans(), 2);
+    assert_eq!(limiter.tracked_subnets(), 4096);
+}
+
+#[test]
+fn failure_limiter_enforces_two_attempt_warmup_and_ten_after_anchor() {
+    let limiter = FailureLimiter::with_warmup_anchor(Some(10));
+    assert!(matches!(
+        limiter.check(subnet(1), 10),
+        RateDecision::Allowed
+    ));
+    assert!(matches!(
+        limiter.check(subnet(1), 10),
+        RateDecision::Allowed
+    ));
+    assert!(matches!(
+        limiter.check(subnet(1), 10),
+        RateDecision::RateLimited { .. }
+    ));
+    for _ in 0..10 {
+        assert!(matches!(
+            limiter.check(subnet(2), 60_000_000_010),
+            RateDecision::Allowed
+        ));
+    }
+    assert!(matches!(
+        limiter.check(subnet(2), 60_000_000_010),
+        RateDecision::RateLimited { .. }
+    ));
 }
 
 #[test]
@@ -95,18 +149,32 @@ fn failure_limiter_hard_caps_entries_and_preserves_existing_subnets() {
 
 #[test]
 fn failure_limiter_gc_removes_idle_subnets_and_new_subnet_uses_post_warmup_rate() {
-    let limiter = FailureLimiter::new();
-    for index in 0..4096u32 {
+    let limiter = FailureLimiter::with_warmup_anchor(Some(2));
+    for _ in 0..2 {
         assert!(matches!(
-            limiter.check(subnet(index), 1),
+            limiter.check(subnet(10), 2),
             RateDecision::Allowed
         ));
     }
     assert!(matches!(
-        limiter.check(subnet(4096), 60_000_000_002),
+        limiter.check(subnet(10), 2),
+        RateDecision::RateLimited { .. }
+    ));
+    assert!(matches!(
+        limiter.check(subnet(11), 60_000_000_002),
         RateDecision::Allowed
     ));
-    assert_eq!(limiter.tracked_subnets(), 4096);
+    for _ in 0..9 {
+        assert!(matches!(
+            limiter.check(subnet(11), 60_000_000_002),
+            RateDecision::Allowed
+        ));
+    }
+    assert_eq!(
+        limiter.check(subnet(11), 60_000_000_002),
+        RateDecision::RateLimited { .. }
+    );
+    assert_eq!(limiter.tracked_subnets(), 2);
     limiter.gc(360_000_000_003);
     assert_eq!(limiter.tracked_subnets(), 0);
 }
@@ -131,7 +199,27 @@ fn failure_summary_tracks_bounded_ipv4_ipv6_samples_and_untracked_overflow() {
     assert!(summary.details().expect("summary details").len() < 256);
 }
 
-#[tokio::test(start_paused = true)]
+#[test]
+fn failure_summary_tracks_failure_and_exposure_drops_separately() {
+    let mut summary = super::FailureSummary::new();
+    summary.dropped = 3;
+    summary.exposure_dropped = 5;
+    let details: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&summary.details().expect("summary details"))
+        .expect("decode summary");
+    assert_eq!(details.5, 3);
+    assert_eq!(details.7, 5);
+}
+
+#[tokio::test]
 async fn exposure_queue_is_independent_and_survives_failure_flood() {
     let appender = Arc::new(Capture::new());
     let stop = CancellationToken::new();
@@ -140,7 +228,6 @@ async fn exposure_queue_is_independent_and_survives_failure_flood() {
         worker.record_failure(subnet(index as u32), 1);
     }
     worker.record_exposed([0x12; 16], [0x34; 16], subnet(4), 1);
-    tokio::time::advance(Duration::from_secs(1)).await;
     worker.shutdown().await;
     assert!(appender
         .entries
@@ -150,7 +237,7 @@ async fn exposure_queue_is_independent_and_survives_failure_flood() {
         .any(|entry| entry.event == "api_token_exposed"));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn failures_produce_one_bounded_summary_and_account_overflow_and_drops() {
     let appender = Arc::new(Capture::new());
     let worker = maintenance(
@@ -158,26 +245,227 @@ async fn failures_produce_one_bounded_summary_and_account_overflow_and_drops() {
         Arc::new(|| Some(10)),
         CancellationToken::new(),
     );
-    for index in 0..NOTICE_CAPACITY + 64 {
+    for index in 0..NOTICE_CAPACITY {
         worker.record_failure(subnet(index as u32), 10);
     }
-    tokio::time::advance(Duration::from_secs(1)).await;
+    let permits = worker
+        .sender
+        .reserve_many(NOTICE_CAPACITY)
+        .await
+        .expect("failure channel remains open");
+    drop(permits);
+    for index in NOTICE_CAPACITY..NOTICE_CAPACITY + 64 {
+        worker.record_failure(subnet(index as u32), 10);
+    }
+    let permits = worker
+        .sender
+        .reserve_many(NOTICE_CAPACITY)
+        .await
+        .expect("failure channel drained");
+    drop(permits);
+    appender.appended.notified().await;
+    worker.record_failure(subnet(9000), 20);
     worker.shutdown().await;
     let entries = appender.entries.lock().expect("entries").clone();
     let summaries: Vec<_> = entries
         .iter()
         .filter(|entry| entry.event == "api_token_auth_failures")
         .collect();
-    assert_eq!(summaries.len(), 1);
-    let details: (String, String, u64, usize, [Option<Subnet>; 4], u64, u64) =
-        rmp_serde::from_slice(&summaries[0].details_canonical_msgpack).expect("summary");
-    assert_eq!(details.0, "rest");
-    assert_eq!(details.1, "invalid");
-    assert_eq!(details.2, 256);
-    assert_eq!(details.3, 256);
-    assert_eq!(details.5, 64);
-    assert_eq!(details.6, 0);
-    assert!(summaries[0].details_canonical_msgpack.len() < 256);
+    assert_eq!(summaries.len(), 2);
+    let first: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&summaries[0].details_canonical_msgpack).expect("first summary");
+    assert_eq!((first.2, first.3, first.5, first.6), (320, 256, 0, 64));
+    let second: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&summaries[1].details_canonical_msgpack).expect("second summary");
+    assert_eq!((second.2, second.3, second.5, second.6), (1, 1, 0, 0));
+}
+
+#[tokio::test]
+async fn exposure_notice_channel_full_counts_drops_in_separate_summary_field() {
+    let appender = Arc::new(Capture::new());
+    let worker = maintenance(
+        appender.clone(),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    for id in 0..NOTICE_CAPACITY + 1 {
+        let mut token_id = [0; 16];
+        token_id[14..].copy_from_slice(&(id as u16).to_be_bytes());
+        worker.record_exposed(token_id, [0x34; 16], subnet(4), 1);
+    }
+    worker.record_failure(subnet(7), 1);
+    worker.shutdown().await;
+    let entries = appender.entries.lock().expect("entries").clone();
+    let summary = entries
+        .iter()
+        .find(|entry| entry.event == "api_token_auth_failures")
+        .expect("summary");
+    let details: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&summary.details_canonical_msgpack).expect("summary details");
+    assert_eq!(details.5, 0);
+    assert_eq!(details.7, 1);
+}
+
+#[derive(Clone, Default)]
+struct LogCapture(Arc<Mutex<Vec<u8>>>);
+impl std::io::Write for LogCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log capture").extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test]
+async fn exposure_drops_log_token_ids_when_channel_is_full_closed_or_disabled() {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let worker = maintenance(
+        Arc::new(Capture::new()),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    for index in 0..NOTICE_CAPACITY + 1 {
+        let mut id = [0; 16];
+        id[14..].copy_from_slice(&(index as u16).to_be_bytes());
+        worker.record_exposed(id, [3; 16], subnet(1), 1);
+    }
+    worker.shutdown().await;
+    worker.record_exposed([0xA1; 16], [3; 16], subnet(1), 1);
+    worker.disabled.store(true, Ordering::Release);
+    worker.record_exposed([0xB2; 16], [3; 16], subnet(1), 1);
+    let logs =
+        String::from_utf8(capture.0.lock().expect("log capture").clone()).expect("UTF-8 logs");
+    assert!(logs.contains("token exposure audit channel full or closed"));
+    assert!(logs.contains("token exposure audit unavailable"));
+    assert!(logs.contains("token_id=[161,"));
+    assert!(logs.contains("token_id=[178,"));
+}
+
+#[tokio::test]
+async fn stop_drains_exposures_in_bounded_batches_and_ignores_late_drops() {
+    let inner = Arc::new(Capture::new());
+    let appender = Arc::new(LateDropsCapture {
+        inner: Arc::clone(&inner),
+        failure_drops: Mutex::new(None),
+    });
+    let worker = maintenance(
+        appender.clone(),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    *appender.failure_drops.lock().expect("failure drop counter") =
+        Some(Arc::clone(&worker.failure_drops));
+    for index in 0..(FLUSH_LIMIT + 1) {
+        let mut id = [0; 16];
+        id[14..].copy_from_slice(&(index as u16).to_be_bytes());
+        worker.record_exposed(id, [2; 16], subnet(1), 1);
+    }
+    worker.record_failure(subnet(1), 1);
+    worker.shutdown().await;
+    let entries = inner.entries.lock().expect("entries").clone();
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.event == "api_token_exposed")
+            .count(),
+        FLUSH_LIMIT + 1
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry.event == "api_token_auth_failures")
+            .count(),
+        1
+    );
+    assert!(worker.failure_drops.load(Ordering::Acquire) > 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn disabled_writer_terminates_shutdown_without_waiting_for_deadline() {
+    let worker = maintenance(
+        Arc::new(Capture::new()),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    worker.record_failure(subnet(1), 1);
+    worker.record_exposed([0x12; 16], [2; 16], subnet(1), 1);
+    worker.disabled.store(true, Ordering::Release);
+    let before_shutdown = tokio::time::Instant::now();
+    worker.shutdown().await;
+    assert_eq!(tokio::time::Instant::now(), before_shutdown);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_writer_deadline_warns_before_detaching() {
+    let (appender, entered, release) = BlockingCapture::new();
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    let worker = maintenance(
+        Arc::new(appender),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    worker.record_exposed([0x12; 16], [2; 16], subnet(1), 1);
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let waiter = tokio::task::spawn_blocking(move || {
+        entered.recv().expect("write started");
+        let _ = entered_tx.send(());
+    });
+    tokio::time::advance(Duration::from_secs(1)).await;
+    entered_rx.await.expect("writer entered");
+    let shutdown = tokio::spawn(async move { worker.shutdown().await });
+    tokio::time::advance(Duration::from_secs(2)).await;
+    shutdown.await.expect("shutdown task");
+    release.send(()).expect("release detached writer");
+    waiter.await.expect("writer waiter");
+    let logs =
+        String::from_utf8(capture.0.lock().expect("log capture").clone()).expect("UTF-8 logs");
+    assert!(logs.contains("summary_total"));
+    assert!(logs.contains("pending_exposures"));
+    assert!(logs.contains("failure_dropped"));
 }
 
 #[tokio::test]
@@ -211,6 +499,61 @@ async fn receiver_keeps_draining_while_blocking_audit_write_runs() {
     waiter.await.expect("append waiter");
     drain_waiter.await.expect("drain waiter");
     worker.shutdown().await;
+}
+
+struct FailingCapture {
+    failed: Arc<AtomicBool>,
+}
+impl AuditAppender for FailingCapture {
+    fn append_entry(&self, _: &AuditEntry) -> Result<(), std::io::Error> {
+        self.failed.store(true, Ordering::Release);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "test failure",
+        ))
+    }
+    fn checkpoint(&self, _: u64, _: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn failing_writer_disables_producers_and_joins_shutdown() {
+    let failed = Arc::new(AtomicBool::new(false));
+    let worker = maintenance(
+        Arc::new(FailingCapture {
+            failed: Arc::clone(&failed),
+        }),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    worker.record_failure(subnet(9), 1);
+    worker.shutdown().await;
+    assert!(failed.load(Ordering::Acquire));
+    assert!(worker.disabled.load(Ordering::Acquire));
+    assert!(worker.task.lock().await.is_none());
+}
+
+struct LateDropsCapture {
+    inner: Arc<Capture>,
+    failure_drops: Mutex<Option<Arc<std::sync::atomic::AtomicU64>>>,
+}
+impl AuditAppender for LateDropsCapture {
+    fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
+        self.inner.append_entry(entry)?;
+        if let Some(drops) = self
+            .failure_drops
+            .lock()
+            .expect("failure drop counter")
+            .as_ref()
+        {
+            drops.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+    fn checkpoint(&self, _: u64, _: &[u8; 32]) -> Result<(), std::io::Error> {
+        Ok(())
+    }
 }
 
 struct BlockingCapture {
@@ -254,7 +597,7 @@ impl AuditAppender for BlockingCapture {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn failures_aggregate_once_and_append_off_runtime_thread() {
     let appender = Arc::new(Capture::new());
     let append_thread = Arc::new(Mutex::new(None));
@@ -266,13 +609,20 @@ async fn failures_aggregate_once_and_append_off_runtime_thread() {
     for _ in 0..5 {
         worker.record_failure(subnet(7), 10);
     }
-    tokio::time::advance(Duration::from_secs(1)).await;
     worker.shutdown().await;
     let entries = appender.entries.lock().expect("entries").clone();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].event, "api_token_auth_failures");
-    let details: (String, String, u64, usize, [Option<Subnet>; 4], u64, u64) =
-        rmp_serde::from_slice(&entries[0].details_canonical_msgpack).expect("summary");
+    let details: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&entries[0].details_canonical_msgpack).expect("summary");
     assert_eq!(
         (details.0.as_str(), details.1.as_str(), details.2),
         ("rest", "invalid", 5)
@@ -299,7 +649,7 @@ async fn service_stop_cancels_and_joins_the_maintenance_worker() {
     assert!(worker.task.lock().await.is_none());
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn service_stop_drains_queued_exposure_and_failure_notices() {
     let appender = Arc::new(Capture::new());
     let service_stop = CancellationToken::new();
@@ -317,7 +667,7 @@ async fn service_stop_drains_queued_exposure_and_failure_notices() {
         .any(|entry| entry.event == "api_token_exposed"));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn exposed_event_contains_canonical_ids_but_no_peer_secret() {
     let appender = Arc::new(Capture::new());
     let worker = maintenance(
@@ -328,7 +678,6 @@ async fn exposed_event_contains_canonical_ids_but_no_peer_secret() {
     let id = [0x12; 16];
     let owner = [0x34; 16];
     worker.record_exposed(id, owner, subnet(4), 1);
-    tokio::time::advance(Duration::from_secs(1)).await;
     worker.shutdown().await;
     let entries = appender.entries.lock().expect("entries").clone();
     assert_eq!(entries.len(), 1);

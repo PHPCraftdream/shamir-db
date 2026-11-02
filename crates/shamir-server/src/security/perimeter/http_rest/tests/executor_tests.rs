@@ -1,9 +1,10 @@
 //! Behavioural regression tests for the concrete REST executor and scoped adapter.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use bytes::Bytes;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
@@ -13,12 +14,14 @@ use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::{doc, insert};
 use shamir_query_types::wire::CURRENT_QUERY_LANG_VERSION;
-use shamir_transport_http::{ExecStatus, RestExecutor};
+use shamir_transport_http::{
+    AuthHeader, Endpoint, ExecStatus, GateDecision, PeerInfo, RestExecutor, TokenGate,
+};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
 use super::super::executor::{HandleDenial, RestHandler, ScopedHandler};
-use super::super::gate::RestGateRails;
+use super::super::gate::{RestGate, RestGateRails};
 use crate::byte_budget::ByteBudget;
 use crate::config::TokensConfig;
 use crate::db_handler::ShamirDbHandler;
@@ -136,9 +139,11 @@ async fn executor_ping_returns_pong_and_malformed_bytes_are_400() {
         )
         .await;
     assert!(matches!(malformed.status, ExecStatus::BadRequest));
-    assert!(
-        matches!(response(&malformed), shamir_query_types::wire::DbResponse::Error { code, message } if code == "invalid_request" && message == "invalid_request")
-    );
+    assert!(matches!(
+        response(&malformed),
+        shamir_query_types::wire::DbResponse::Error { code, message }
+            if code == "invalid_request" && message == "invalid_request"
+    ));
 }
 
 #[tokio::test]
@@ -200,7 +205,8 @@ async fn executor_read_only_token_denies_ddl_with_forbidden() {
     assert!(matches!(outcome.status, ExecStatus::Forbidden));
     assert!(matches!(
         response(&outcome),
-        shamir_query_types::wire::DbResponse::Error { code, .. } if code == "token_read_only"
+        shamir_query_types::wire::DbResponse::Error { code, .. }
+            if code == "token_read_only"
     ));
 }
 
@@ -221,9 +227,11 @@ async fn executor_enforces_read_only_database_and_rest_transaction_scope() {
     };
     let denied = executor.execute(&grant, request(&write)).await;
     assert!(matches!(denied.status, ExecStatus::Forbidden));
-    assert!(
-        matches!(response(&denied), shamir_query_types::wire::DbResponse::Error { code, .. } if code == "token_read_only")
-    );
+    assert!(matches!(
+        response(&denied),
+        shamir_query_types::wire::DbResponse::Error { code, .. }
+            if code == "token_read_only"
+    ));
     let outside = shamir_query_types::wire::DbRequest::WaitForVisibility {
         query_version: 1,
         db: "outside".into(),
@@ -233,9 +241,11 @@ async fn executor_enforces_read_only_database_and_rest_transaction_scope() {
     };
     let denied = executor.execute(&grant, request(&outside)).await;
     assert!(matches!(denied.status, ExecStatus::Forbidden));
-    assert!(
-        matches!(response(&denied), shamir_query_types::wire::DbResponse::Error { code, .. } if code == "token_database_denied")
-    );
+    assert!(matches!(
+        response(&denied),
+        shamir_query_types::wire::DbResponse::Error { code, .. }
+            if code == "token_database_denied"
+    ));
     let tx = shamir_query_types::wire::DbRequest::TxBegin {
         query_version: 1,
         db: "outside".into(),
@@ -274,10 +284,12 @@ async fn executor_clock_failure_is_503_and_revocation_is_401() {
 
 #[tokio::test]
 async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
-    let database = Arc::new(ShamirDb::init_memory().await.expect("memory db"));
-    let mut scoped = ScopedHandler::new(Arc::new(ShamirDbHandler::new(database)));
-    let native_calls = Arc::new(AtomicUsize::new(0));
-    scoped.observe_native_calls(Arc::clone(&native_calls));
+    let denied_calls = Arc::new(AtomicUsize::new(0));
+    let denied_count = Arc::clone(&denied_calls);
+    let scoped = ScopedHandler::with_handler(Arc::new(move |_, _, _| {
+        denied_count.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { panic!("denied request reached native handler") })
+    }));
     let token = TokenMode::ReadOnly;
     let (_temp, _service, _executor, verified, _budget) =
         fixture(token, None, Arc::new(|| Some(NOW))).await;
@@ -304,11 +316,28 @@ async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
         denied,
         Err(HandleDenial::BadRequest("not_supported_over_rest"))
     );
-    assert_eq!(native_calls.load(Ordering::SeqCst), 0);
-    let allowed = scoped
+    assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
+
+    let native_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&native_calls);
+    let allowed_handler = ScopedHandler::with_handler(Arc::new(move |_, _, _| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            rmp_serde::to_vec_named(&shamir_query_types::wire::DbResponse::Pong)
+                .map_err(|error| error.to_string())
+        })
+    }));
+    let allowed = allowed_handler
         .handle(&session, shamir_query_types::wire::DbRequest::Ping, &conn)
         .await;
-    assert!(allowed.is_ok());
+    assert!(matches!(
+        allowed,
+        Ok(bytes)
+            if matches!(
+                rmp_serde::from_slice::<shamir_query_types::wire::DbResponse>(&bytes),
+                Ok(shamir_query_types::wire::DbResponse::Pong)
+            )
+    ));
     assert_eq!(native_calls.load(Ordering::SeqCst), 1);
 }
 
@@ -330,4 +359,127 @@ async fn executor_retains_byte_budget_hold_until_outcome_is_dropped() {
     assert!(budget.used() > 0);
     drop(outcome);
     assert_eq!(budget.used(), 0);
+}
+
+fn auth_metric_counts(rendered: &str) -> (u64, u64, u64, u64) {
+    for line in rendered
+        .lines()
+        .filter(|line| line.starts_with("shamir_token_auth_total{"))
+    {
+        assert!(
+            line.contains("channel=\"rest\""),
+            "unexpected auth label: {line}"
+        );
+        assert!(line.contains("result=\""), "missing auth result: {line}");
+    }
+    for line in rendered
+        .lines()
+        .filter(|line| line.starts_with("shamir_token_request_denied_total{"))
+    {
+        assert!(
+            line.contains("endpoint=\"rest\""),
+            "unexpected denial label: {line}"
+        );
+    }
+    let count = |metric: &str, label: &str| {
+        rendered
+            .lines()
+            .filter(|line| line.starts_with(metric) && line.contains(label))
+            .filter_map(|line| line.rsplit_once(' '))
+            .map(|(_, value)| value.parse::<u64>().expect("counter value"))
+            .sum()
+    };
+    (
+        count("shamir_token_auth_total{", "result=\"success\""),
+        count("shamir_token_auth_total{", "result=\"forbidden\""),
+        count("shamir_token_auth_total{", "result=\"unavailable\""),
+        count("shamir_token_request_denied_total{", "endpoint=\"rest\""),
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successful_auth_and_scope_denial_use_separate_metrics() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let _recorder_guard = metrics::set_default_local_recorder(&recorder);
+
+    let (_temp, service, executor, _verified, _budget) =
+        fixture(TokenMode::ReadWrite, None, Arc::new(|| Some(NOW))).await;
+    let denied_token = service
+        .create(NewToken {
+            owner_user_id: [7; 16],
+            owner_roles: vec!["reader".into()],
+            label: "metrics-test".into(),
+            ttl_secs: Some(60),
+            mode: TokenMode::ReadOnly,
+            channels: TokenChannels::Rest,
+            databases: None,
+        })
+        .await
+        .expect("create metrics token");
+    let clock_available = Arc::new(AtomicBool::new(true));
+    let gate_clock = Arc::clone(&clock_available);
+    let gate = RestGate::new(
+        Arc::clone(&service),
+        Arc::new(move || gate_clock.load(Ordering::SeqCst).then_some(NOW)),
+        RestGateRails {
+            plaintext_remote: false,
+            allow_plaintext_write: false,
+        },
+    );
+    let header = format!("Bearer {}", denied_token.token.as_str());
+    let peer = || PeerInfo {
+        addr: "127.0.0.1:7340".parse().expect("peer address"),
+        tls: false,
+        forwarded_for: Vec::new(),
+    };
+    let first = match gate
+        .authenticate(
+            AuthHeader::Single(header.as_bytes()),
+            Endpoint::Rest,
+            peer(),
+        )
+        .await
+    {
+        GateDecision::Allow(grant) => grant,
+        _ => panic!("gate rejected valid token"),
+    };
+    assert!(matches!(
+        executor
+            .execute(&first, request(&shamir_query_types::wire::DbRequest::Ping))
+            .await
+            .status,
+        ExecStatus::Ok
+    ));
+    assert_eq!(auth_metric_counts(&handle.render()), (1, 0, 0, 0));
+    let second = match gate
+        .authenticate(
+            AuthHeader::Single(header.as_bytes()),
+            Endpoint::Rest,
+            peer(),
+        )
+        .await
+    {
+        GateDecision::Allow(grant) => grant,
+        _ => panic!("gate rejected valid token"),
+    };
+    let mut batch = Batch::new();
+    batch.create_db("blocked", shamir_query_builder::ddl::create_db("blocked"));
+    let write = shamir_query_types::wire::DbRequest::Execute {
+        query_version: CURRENT_QUERY_LANG_VERSION,
+        db: "inside".into(),
+        batch: batch.build(),
+    };
+    assert!(matches!(
+        executor.execute(&second, request(&write)).await.status,
+        ExecStatus::Forbidden
+    ));
+    assert_eq!(auth_metric_counts(&handle.render()), (2, 0, 0, 1));
+    clock_available.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        gate.revalidate(&first),
+        GateDecision::Unavailable { .. }
+    ));
+    assert_eq!(auth_metric_counts(&handle.render()), (2, 0, 0, 1));
+    gate.shutdown().await;
 }

@@ -317,17 +317,26 @@ async fn rate_limited_failures_are_not_audited_and_admitted_failures_are_aggrega
         .filter(|entry| entry.event == "api_token_auth_failures")
         .collect();
     assert_eq!(failures.len(), 1);
+    let details = rmp_serde::from_slice::<(
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    )>(&failures[0].details_canonical_msgpack)
+    .expect("failure details_canonical_msgpack");
     assert_eq!(
-        rmp_serde::from_slice::<(String, String, u64, usize, [Option<Subnet>; 4], u64, u64)>(
-            &failures[0].details_canonical_msgpack
-        )
-        .expect("failure details_canonical_msgpack"),
+        details,
         (
             "rest".into(),
             "invalid".into(),
             2,
             1,
             [Some(Subnet::V4([10, 0, 1])), None, None, None],
+            0,
             0,
             0
         )
