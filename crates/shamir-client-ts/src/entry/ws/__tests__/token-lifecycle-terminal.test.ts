@@ -5,12 +5,13 @@ import { encode } from '../../../core/protocol/framing.js';
 
 class FakeSocket implements TokenSocket {
   private message: ((data: Uint8Array) => void) | undefined;
+  private readonly early: Uint8Array[] = [];
   private readonly closes: Array<(event: TokenSocketCloseEvent) => void> = [];
   async close(code = 1000): Promise<void> { for (const handler of this.closes) handler({ code, reason: '', wasClean: true }); }
   send(): void {}
-  onMessage(handler: (data: Uint8Array) => void): void { this.message = handler; }
+  onMessage(handler: (data: Uint8Array) => void): void { this.message = handler; for (const frame of this.early.splice(0)) handler(frame); }
   onClose(handler: (event: TokenSocketCloseEvent) => void): void { this.closes.push(handler); }
-  receive(frame: unknown): void { this.message?.(encode(frame)); }
+  receive(frame: unknown): void { const bytes = encode(frame); if (this.message) this.message(bytes); else this.early.push(bytes); }
 }
 
 describe('TokenWsLifecycle terminal subscribers', () => {

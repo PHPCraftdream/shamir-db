@@ -14,7 +14,7 @@ export const MAX_TOKEN_RESPONSE_BYTES = MAX_FRAME_SIZE_DEFAULT;
 const SAFE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Uint8Array); }
 function fail(code: TokenTransportErrorCode, status?: number): TokenTransportError { return new TokenTransportError(code, 'Token HTTP request failed', { ...(status === undefined ? {} : { status }) }); }
-function appError(value: unknown, status: number): Error | undefined {
+export function appError(value: unknown, status: number): Error | undefined {
   if (object(value) && value.kind === 'as_of_visibility_timeout') {
     if (value.code !== 'as_of_visibility_timeout' || typeof value.message !== 'string') throw fail('protocol_error', status);
     try {

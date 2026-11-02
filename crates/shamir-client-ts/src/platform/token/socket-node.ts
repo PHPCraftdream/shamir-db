@@ -21,7 +21,7 @@ function statusFailure(status: number): TokenTransportError {
   const code: TokenTransportErrorCode = status === 401 ? 'unauthorized' : status === 403 ? 'permission_denied' : status === 429 ? 'rate_limited' : status === 503 ? 'server_unavailable' : 'network_error';
   return failure(code, 'connect', status);
 }
-function tlsOptions(options: NodeTokenWsConnectOptions, secure: boolean): Partial<ClientOptions> {
+function tlsOptions(options: NodeTokenWsConnectOptions, secure: boolean): Partial<ClientOptions> & { ALPNProtocols?: string[] } {
   if (!secure) return {};
   const tls = options.tls;
   return { minVersion: 'TLSv1.3', ALPNProtocols: ['http/1.1'], rejectUnauthorized: tls?.allowInsecureTlsForDevelopment !== true,
@@ -48,7 +48,9 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
     let terminalEvent: TokenSocketCloseEvent | undefined;
     let closePromise: Promise<void> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const cleanupTerminal = (): void => { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); socket.removeListener('error', onSocketError); socket.removeListener('error', onSetupError); socket.removeListener('close', onSetupClose); socket.removeListener('unexpected-response', onUnexpectedResponse); queue.length = 0; queueBytes = 0; messageHandler = undefined; closeHandler = undefined; terminalEvent = undefined; socket.on('error', () => {}); };
+    const cleanupTerminal = (): void => { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); socket.removeListener('error', onSocketError); socket.removeListener('error', onSetupError); socket.removeListener('close', onSetupClose); socket.removeListener('unexpected-response', onUnexpectedResponse); queue.length = 0; queueBytes = 0; messageHandler = undefined; closeHandler = undefined; socket.removeListener('error', ignoreSocketError); socket.on('error', ignoreSocketError); };
+    const removeTerminalListeners = (): void => { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); socket.removeListener('error', onSocketError); socket.removeListener('error', ignoreSocketError); socket.on('error', ignoreSocketError); };
+    const ignoreSocketError = (): void => {};
     const fail = (error: Error): void => { if (settled) return; settled = true; cleanupSetup(); reject(error); };
     const cleanupSetup = (): void => { if (timer !== undefined) clearTimeout(timer); opts.signal.removeEventListener('abort', onAbort); if (!opened) { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); socket.removeListener('error', onSocketError); } socket.removeListener('open', onOpen); socket.removeListener('close', onSetupClose); socket.removeListener('unexpected-response', onUnexpectedResponse); };
     const notifyClose = (event: TokenSocketCloseEvent): void => {
@@ -76,7 +78,7 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
           let complete = false;
           const finish = (event: TokenSocketCloseEvent): void => {
             if (complete) return; complete = true; clearTimeout(grace); socket.removeListener('close', onGraceClose);
-            notifyClose(event); cleanupTerminal(); if (socket.readyState !== WS.CLOSED) socket.terminate(); done();
+            notifyClose(event); if (closeHandler) cleanupTerminal(); else removeTerminalListeners(); if (socket.readyState !== WS.CLOSED) socket.terminate(); done();
           };
           const onGraceClose = (receivedCode: number): void => finish({ code: receivedCode, reason: '', wasClean: receivedCode === 1000 });
           const grace = setTimeout(() => finish({ code, reason: '', wasClean: false }), CLOSE_GRACE_MS);
@@ -95,7 +97,7 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
       queue.push(bytes); queueBytes += bytes.byteLength;
     };
     const onClose = (code: number): void => { socket.removeListener('message', onMessage); notifyClose({ code, reason: '', wasClean: code === 1000 }); };
-    const onSocketError = (): void => { notifyClose({ code: 1006, reason: '', wasClean: false, error: failure('network_error', 'close') }); cleanupTerminal(); if (socket.readyState !== WS.CLOSED) socket.terminate(); };
+    const onSocketError = (): void => { notifyClose({ code: 1006, reason: '', wasClean: false, error: failure('network_error', 'close') }); if (closeHandler) cleanupTerminal(); else removeTerminalListeners(); if (socket.readyState !== WS.CLOSED) socket.terminate(); };
     const onOpen = (): void => {
       if (socket.protocol !== 'shamir-v1') { fail(failure('protocol_error')); socket.terminate(); return; }
       if (settled) return; settled = true; opened = true; socket.on('message', onMessage); socket.on('close', onClose); cleanupSetup(); resolve(adapter);

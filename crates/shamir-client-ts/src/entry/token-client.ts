@@ -34,7 +34,7 @@ const FIELDS: Record<string, string[]> = {
   call: ['call','params','repo'], batch: ['batch','bind'], for_each: ['for_each','over','bind_row'],
   list: ['list','repo','table','folder','parent'], access_tree: ['access_tree','depth','db'],
   describe_table: ['describe_table','repo'], get_table_schema: ['get_table_schema','repo'],
-  subscribe: ['subscribe'], unsubscribe: ['unsubscribe'],
+  subscribe: ['subscribe', 'deliver', 'initial', 'from_version'], unsubscribe: ['unsubscribe'],
 };
 const BATCH_FIELDS = new Set(['id','name','transactional','isolation','visibility_wait','durability','index_visibility','queries','return_all','return_only','limits','result_encoding']);
 function classify(op: Record<string, unknown>, allowSubscriptions: boolean): string {
@@ -57,7 +57,7 @@ function classify(op: Record<string, unknown>, allowSubscriptions: boolean): str
   if (!FIELDS[kind] || allKeys.some((key) => !metadata.has(key) && !FIELDS[kind]!.includes(key))) deny('token_request_denied');
   return kind;
 }
-function validateBatch(batch: unknown, allowSubscriptions: boolean): asserts batch is BatchRequest {
+export function validateBatch(batch: unknown, allowSubscriptions: boolean): asserts batch is BatchRequest {
   const seen = new WeakSet<object>();
   const walk = (value: unknown, nested: boolean, depth: number): void => {
     if (!isRecord(value) || !isRecord(value.queries) || !Object.prototype.hasOwnProperty.call(value, 'id') || depth > 32 || seen.has(value) || Object.keys(value).some((key) => !BATCH_FIELDS.has(key))) deny('token_request_denied');
@@ -70,6 +70,7 @@ function validateBatch(batch: unknown, allowSubscriptions: boolean): asserts bat
       if (nested && INTRO.has(kind)) deny('token_request_denied');
       if (kind === 'batch' || kind === 'for_each') walk(entry[kind], true, depth + 1);
     }
+    seen.delete(value);
   };
   walk(batch, false, 0);
 }

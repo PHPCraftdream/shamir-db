@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { decode } from '../../../core/protocol/framing.js';
+import { TokenTransportError } from '../../../core/protocol/token/errors.js';
 import { ApiToken } from '../../../entry/api-token.js';
+import { TokenWsLifecycle } from '../../../entry/ws/token-lifecycle.js';
 import { openBrowserTokenSocket } from '../socket-browser.js';
 import type { BrowserListener } from '../socket-browser.js';
 
@@ -10,11 +12,12 @@ const TOKEN = 'shk1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 class FakeSocket {
   readyState = 0; binaryType = ''; protocol = 'shamir-v1';
   readonly sent: Uint8Array[] = [];
+  throwOnSend = false;
   private readonly listeners = new Map<string, Set<BrowserListener>>();
   addEventListener(type: string, callback: BrowserListener, _options?: { once?: boolean }): void { const listeners = this.listeners.get(type) ?? new Set(); listeners.add(callback); this.listeners.set(type, listeners); }
   removeEventListener(type: string, callback: BrowserListener): void { this.listeners.get(type)?.delete(callback); }
   emit(type: string, event: Parameters<BrowserListener>[0] = { type }): void { for (const callback of this.listeners.get(type) ?? []) callback(event); }
-  send(data: Uint8Array): void { this.sent.push(data.slice()); }
+  send(data: Uint8Array): void { if (this.throwOnSend) throw new Error('send failed'); this.sent.push(data.slice()); }
   close(code = 1000): void { this.readyState = 3; this.emit('close', { code, reason: TOKEN, wasClean: true }); }
 }
 const options = (connectTimeoutMs = 1000, signal = new AbortController().signal): TokenSocketOptions => ({ signal, connectTimeoutMs });
@@ -53,6 +56,50 @@ describe('browser token socket adapter', () => {
     const closed = vi.fn(); adapter.onClose(closed);
     const first = adapter.close(); const second = adapter.close(); expect(first).toBe(second); socket.close(); await first;
     expect(closed).toHaveBeenCalledTimes(1);
+  });
+  it('fails authentication send before synchronous close settles setup', async () => {
+    const socket = new FakeSocket();
+    socket.throwOnSend = true;
+    const pending = openFake(socket);
+    socket.readyState = 1;
+    socket.emit('open');
+    await expect(pending).rejects.toMatchObject({ code: 'protocol_error' });
+  });
+  it('times out while waiting for the binding frame', async () => {
+    vi.useFakeTimers();
+    try {
+      const socket = new FakeSocket();
+      const pending = TokenWsLifecycle.connect(new URL('wss://example.test/'), ApiToken.from(TOKEN), undefined, 25, 1000, () => {
+        const adapter = openFake(socket, options(25));
+        socket.readyState = 1;
+        socket.emit('open');
+        return adapter;
+      }, true);
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'client_timeout' });
+      await vi.advanceTimersByTimeAsync(25);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it('preserves local lifecycle errors and maps connection rejection to authentication failure', async () => {
+    for (const code of ['invalid_request', 'client_aborted', 'client_timeout'] as const) {
+      const localError = new TokenTransportError(code, 'local connect failure');
+      await expect(TokenWsLifecycle.connect(new URL('wss://example.test/'), ApiToken.from(TOKEN), undefined, 0, 1000, () => { throw localError; }, true)).rejects.toBe(localError);
+    }
+    const serverError = new TokenTransportError('network_error', 'server rejected connection');
+    await expect(TokenWsLifecycle.connect(new URL('wss://example.test/'), ApiToken.from(TOKEN), undefined, 0, 1000, () => Promise.reject(serverError), true)).rejects.toMatchObject({ code: 'authentication_failed' });
+    const controller = new AbortController();
+    const socket = new FakeSocket();
+    const pending = TokenWsLifecycle.connect(new URL('wss://example.test/'), ApiToken.from(TOKEN), controller.signal, 0, 1000, () => {
+      const adapter = openFake(socket, options(1000, controller.signal));
+      socket.readyState = 1;
+      socket.emit('open');
+      return adapter;
+    }, true);
+    await Promise.resolve();
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: 'client_aborted' });
   });
   it('handles timeout and abort before opening', async () => {
     const socket = new FakeSocket(); await expect(openFake(socket, options(1))).rejects.toMatchObject({ code: 'client_timeout' });

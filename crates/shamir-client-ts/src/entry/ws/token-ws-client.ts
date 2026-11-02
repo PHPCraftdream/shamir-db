@@ -5,8 +5,9 @@ import type { TokenHttpRequest, TokenRequestOptions } from '../../core/protocol/
 import type { NodeTokenWsConnectOptions, BrowserTokenWsConnectOptions } from '../../core/types/connection.js';
 import type { TokenSocket, TokenPlatform, TokenSocketOptions } from '../../platform/token/types.js';
 import { TokenTransportError } from '../../core/protocol/token/errors.js';
+import { isBrowserLoopback } from '../../platform/token/socket-browser.js';
 import { TokenWsLifecycle, type TokenWsRequest } from './token-lifecycle.js';
-import { createTokenOperations, type TokenHttpClient } from '../token-client.js';
+import { createTokenOperations, validateBatch, type TokenHttpClient } from '../token-client.js';
 import { TokenHttpDb } from '../token-db.js';
 import type { TransactionOptions, TransactionResult } from '../../core/visibility/types.js';
 import type { IsolationLevel, TransactionInfo } from '../../core/types/write/batch.js';
@@ -15,6 +16,7 @@ import { TokenCursor } from './token-cursor.js';
 import { SubscriptionRouter } from '../../core/client/subscription-router.js';
 import type { SubscriptionEvent } from '../../core/client/subscription-router.js';
 import { Batch } from '../../core/builders/write/batch.js';
+import { unsubscribeOp } from '../../core/builders/stream/subscribe.js';
 import { Query } from '../../core/builders/read/query.js';
 import type { WireValue } from '../../core/types/write/write.js';
 import { ShamirDbError } from '../../core/support/errors.js';
@@ -23,15 +25,17 @@ import { normalizeVisibility, normalizeWait, position, validateTransactionVisibi
 
 export interface TokenWsSocketFactory { (url: URL, token: NodeTokenWsConnectOptions['token'], options: TokenSocketOptions): Promise<TokenSocket>; }
 type LocalSubscriptionEvent = SubscriptionEvent;
+const MAX_SUBSCRIPTIONS = 128;
+const terminalSubscriptionError = (): TokenTransportError => new TokenTransportError('connection_closed', 'Subscription closed');
 class TokenSubscription implements AsyncIterable<LocalSubscriptionEvent> {
-  private queue: LocalSubscriptionEvent[] = []; private waiters: Array<(result: LocalSubscriptionEvent | undefined) => void> = []; private done = false; private terminalError: Error | undefined; private unsubscribePromise: Promise<void> | undefined; private readonly lifecycleUnsubscribe: () => void;
-  constructor(readonly subId: number, private readonly router: SubscriptionRouter, private readonly lifecycle: TokenWsLifecycle, private readonly sendUnsubscribe: () => Promise<unknown>) { this.router.register(subId, (event) => this.push(event)); this.lifecycleUnsubscribe = this.lifecycle.onTerminal((error) => this.terminate(error)); }
-  private push(event: LocalSubscriptionEvent): void { if (this.done) return; if (event.kind === 'closed' || event.kind === 'slow_consumer') { this.terminate(event.kind === 'slow_consumer' ? new TokenTransportError('token_limit_reached', 'Subscription closed by server') : new TokenTransportError('connection_closed', 'Subscription closed by server')); return; } const waiter = this.waiters.shift(); if (waiter) waiter(event); else if (this.queue.length < 256) this.queue.push(event); else this.terminate(new TokenTransportError('token_limit_reached', 'Subscription queue limit exceeded')); }
-  next(): Promise<LocalSubscriptionEvent | undefined> { if (this.terminalError) return Promise.reject(this.terminalError); const event = this.queue.shift(); if (event) return Promise.resolve(event); if (this.done) return Promise.resolve(undefined); return new Promise((resolve) => this.waiters.push(resolve)); }
+  private queue: LocalSubscriptionEvent[] = []; private waiters: Array<(result: LocalSubscriptionEvent | undefined) => void> = []; private done = false; private unsubscribePromise: Promise<void> | undefined; private lifecycleUnsubscribe: () => void = () => undefined;
+  constructor(readonly subId: number, private readonly router: SubscriptionRouter, private readonly lifecycle: TokenWsLifecycle, private readonly sendUnsubscribe: () => Promise<unknown>) { this.router.register(subId, (event) => this.push(event)); this.lifecycleUnsubscribe = this.lifecycle.onTerminal(() => this.terminate()); }
+  private push(event: LocalSubscriptionEvent): void { if (this.done) return; if (event.kind === 'closed' || event.kind === 'slow_consumer') { this.terminate(); return; } const waiter = this.waiters.shift(); if (waiter) waiter(event); else if (this.queue.length < 256) this.queue.push(event); else this.terminate(); }
+  next(): Promise<LocalSubscriptionEvent | undefined> { const event = this.queue.shift(); if (event) return Promise.resolve(event); if (this.done) return Promise.resolve(undefined); return new Promise((resolve) => this.waiters.push(resolve)); }
   unsubscribe(): Promise<void> { if (this.unsubscribePromise) return this.unsubscribePromise; if (this.done) return Promise.resolve(); this.lifecycle.unregisterSubscription(this.subId); this.unsubscribePromise = (async () => { try { await this.sendUnsubscribe(); } finally { this.terminate(); } })(); return this.unsubscribePromise; }
-  terminate(error?: Error): void { if (this.done) return; this.terminalError = error; this.done = true; this.queue = []; this.router.unregister(this.subId); this.lifecycle.unregisterSubscription(this.subId); this.lifecycleUnsubscribe(); for (const waiter of this.waiters) waiter(undefined); this.waiters = []; }
-  private iterator: AsyncIterator<LocalSubscriptionEvent> | undefined;
-  [Symbol.asyncIterator](): AsyncIterator<LocalSubscriptionEvent> { if (!this.iterator) this.iterator = { next: async () => { const value = await this.next(); return value === undefined ? { done: true, value: undefined } : { done: false, value }; }, return: async () => { this.terminate(); return { done: true, value: undefined }; }, [Symbol.asyncIterator]() { return this; } }; return this.iterator; }
+  terminate(): void { if (this.done) return; this.done = true; this.queue = []; this.router.unregister(this.subId); this.lifecycle.unregisterSubscription(this.subId); this.lifecycleUnsubscribe(); for (const waiter of this.waiters) waiter(undefined); this.waiters = []; }
+  private iterator: AsyncIterableIterator<LocalSubscriptionEvent> | undefined;
+  [Symbol.asyncIterator](): AsyncIterableIterator<LocalSubscriptionEvent> { if (!this.iterator) this.iterator = { next: async () => { const value = await this.next(); return value === undefined ? { done: true, value: undefined } : { done: false, value }; }, return: async () => { this.terminate(); return { done: true, value: undefined }; }, [Symbol.asyncIterator]() { return this; } }; return this.iterator; }
 }
 class TokenTx {
   constructor(private readonly client: TokenWsClientImpl, private readonly dbName: string, private readonly txHandle: number) {}
@@ -54,7 +58,7 @@ export class TokenWsClientImpl {
   private base: TokenHttpClient;
   private readonly lifecycle: TokenWsLifecycle;
   private readonly platform: TokenPlatform;
-  private readonly lifecycleUnsubscribe: () => void;
+  private lifecycleUnsubscribe: () => void = () => undefined;
   readonly terminalController = new AbortController();
   private readonly transactionHandles = new Map<number, string>();
   readonly expiresAtNs: bigint;
@@ -69,7 +73,7 @@ export class TokenWsClientImpl {
   getDdlOpStatus(...args: Parameters<TokenHttpClient['getDdlOpStatus']>) { return this.base.getDdlOpStatus(...args); }
   db(name: string) { return new TokenWsDb(this, name); }
   private request(request: TokenWsRequest, options: TokenRequestOptions = {}) { return this.lifecycle.request(request, options); }
-  txBegin(db: string, repo: string, isolation?: IsolationLevel): Promise<{ tx_handle: number; snapshot_version: number | bigint; isolation: string }> {
+  txBegin(db: string, repo: string, isolation?: Exclude<IsolationLevel, 'pessimistic'>): Promise<{ tx_handle: number; snapshot_version: number | bigint; isolation: string }> {
     return this.request({ op: 'tx_begin', query_version: 4, db, repo, ...(isolation ? { isolation } : {}) }).then((r) => {
       if (r.kind !== 'tx_opened' || !Number.isSafeInteger(r.tx_handle) || Number(r.tx_handle) < 0 || !['snapshot','serializable'].includes(String(r.isolation))) throw new TokenTransportError('protocol_error', 'Malformed transaction open response');
       try { const opened = { tx_handle: r.tx_handle as number, snapshot_version: position(r.snapshot_version), isolation: r.isolation as string }; this.transactionHandles.set(opened.tx_handle, db); return opened; } catch { throw new TokenTransportError('protocol_error', 'Malformed transaction open response'); }
@@ -77,6 +81,7 @@ export class TokenWsClientImpl {
   }
   async txExecute(db: string, handle: number, batch: object): Promise<import('../../core/types/write/batch.js').BatchResponse> {
     if (this.terminalController.signal.aborted || !this.transactionHandles.has(handle)) throw new TokenTransportError('connection_closed', 'Token transaction is closed');
+    validateBatch(batch, true);
     const r = await this.request({ op: 'tx_execute', query_version: 4, db, tx_handle: handle, batch: batch as never });
     if (r.kind !== 'tx_batch' || !isRecord(r.response)) throw new TokenTransportError('protocol_error', 'Malformed transaction batch response');
     return validateTokenBatchResponse(r.response);
@@ -96,6 +101,7 @@ export class TokenWsClientImpl {
   txRollback(db: string, handle: number): Promise<void> { if (this.terminalController.signal.aborted || !this.transactionHandles.has(handle)) return Promise.reject(new TokenTransportError('connection_closed', 'Token transaction is closed')); return this.request({ op: 'tx_rollback', db, tx_handle: handle } as never).then((r) => { if (r.kind !== 'tx_rolled_back') throw new TokenTransportError('protocol_error', 'Malformed transaction rollback response'); this.transactionHandles.delete(handle); }); }
   cursor(db: string, query: ReadQuery | { build(): ReadQuery }, pageSize: number): TokenCursor { const cursor = new TokenCursor((request) => this.request(request as never), db, query, pageSize); cursor.attachTerminalSignal(this.lifecycle.terminalSignal); this.lifecycle.registerCursor(cursor); return cursor; }
   async runTransaction<T>(db: string, fn: (tx: TokenTx) => Promise<T>, opts?: TransactionOptions): Promise<TransactionResult<T>> {
+    if (opts?.isolation === 'pessimistic') throw new TokenTransportError('invalid_request', 'Pessimistic transactions are not supported over WebSocket');
     const opened = await this.txBegin(db, opts?.repo ?? 'main', opts?.isolation); let commitAttempted = false;
     const onTerminal = (): void => { this.terminalController.signal.removeEventListener('abort', onTerminal); };
     this.terminalController.signal.addEventListener('abort', onTerminal, { once: true });
@@ -105,23 +111,44 @@ export class TokenWsClientImpl {
   }
   async runLive(db: string, batch: Batch): Promise<{ response: import('../../core/types/write/batch.js').BatchResponse; subs: Record<string, TokenSubscription> }> {
     const response = await this.execute(db, batch.build()); const subs: Record<string, TokenSubscription> = {};
-    for (const [alias, result] of Object.entries(response.results)) { const value = result.value; if (isRecord(value) && typeof value.sub === 'number' && Number.isSafeInteger(value.sub)) { const id = value.sub; const sub = new TokenSubscription(id, this.router, this.lifecycle, () => this.execute(db, Batch.create().add('_unsub', { unsubscribe: id }).build())); subs[alias] = sub; this.lifecycle.registerSubscription(id, sub, (push) => this.router.route(push)); } }
+    const grants = Object.entries(response.results).flatMap(([alias, result]) => {
+      const value = result.value;
+      return isRecord(value) && typeof value.sub === 'number' && Number.isSafeInteger(value.sub) ? [{ alias, id: value.sub }] : [];
+    });
+    const created: TokenSubscription[] = [];
+    try {
+      for (const { alias, id } of grants) {
+        const sub = new TokenSubscription(id, this.router, this.lifecycle, () => this.execute(db, Batch.create().add('_unsub', unsubscribeOp(id)).build()));
+        created.push(sub);
+        this.lifecycle.registerSubscription(id, sub, (push) => this.router.route(push));
+        subs[alias] = sub;
+      }
+    } catch (error) {
+      for (const { id } of grants) this.lifecycle.unregisterSubscription(id);
+      for (const sub of created) sub.terminate();
+      await Promise.all(grants.map(({ id }) => this.execute(db, Batch.create().add('_unsub', unsubscribeOp(id)).build()).catch(() => undefined)));
+      throw error;
+    }
     return { response, subs };
   }
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    if (!this.terminalController.signal.aborted) {
-      for (const handle of [...this.transactionHandles.keys()]) {
-        const db = this.transactionHandles.get(handle);
-        if (db) await this.txRollback(db, handle).catch(() => undefined);
+    try {
+      if (!this.terminalController.signal.aborted) {
+        for (const handle of [...this.transactionHandles.keys()]) {
+          const db = this.transactionHandles.get(handle);
+          if (db) await this.txRollback(db, handle).catch(() => undefined);
+        }
+      }
+    } finally {
+      this.terminalController.abort();
+      try { await this.lifecycle.close(); } finally {
+        this.lifecycleUnsubscribe();
+        this.transactionHandles.clear();
+        await this.base.close();
       }
     }
-    this.transactionHandles.clear();
-    this.lifecycleUnsubscribe();
-    await this.lifecycle.close();
-    await this.base.close();
-    await this.platform.close();
   }
 }
 export class TokenWsDb extends TokenHttpDb {
@@ -130,21 +157,27 @@ export class TokenWsDb extends TokenHttpDb {
   tx<T>(fn: (tx: TokenTx) => Promise<T>, opts?: TransactionOptions): Promise<TransactionResult<T>> { return this.wsClient.runTransaction(this.name, fn, opts); }
   runLive(batch: Batch): ReturnType<TokenWsClientImpl['runLive']> { return this.wsClient.runLive(this.name, batch); }
 }
-export function createTokenWsClient<T extends NodeTokenWsConnectOptions | BrowserTokenWsConnectOptions>(options: T, platformFactory: (options: T) => TokenPlatform, socketFactory?: TokenWsSocketFactory): Promise<TokenWsClientImpl> {
+export async function createTokenWsClient<T extends NodeTokenWsConnectOptions | BrowserTokenWsConnectOptions>(options: T, platformFactory: (options: T) => TokenPlatform, socketFactory?: TokenWsSocketFactory): Promise<TokenWsClientImpl> {
   const rawUrl = options.url;
-  if (typeof rawUrl !== 'string' || rawUrl.trim() !== rawUrl || !/^wss?:\/\/[^/?#\\\\\s]+\/?$/i.test(rawUrl)) throw new TypeError('Invalid token WebSocket URL');
-  let parsed: URL; try { parsed = new URL(rawUrl); } catch { throw new TypeError('Invalid token WebSocket URL'); }
-  if ((parsed.protocol.toLowerCase() !== 'ws:' && parsed.protocol.toLowerCase() !== 'wss:') || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname !== '/' && parsed.pathname !== '')) throw new TypeError('Token WebSocket URL must be an origin root');
+  if (typeof rawUrl !== 'string' || rawUrl.trim() !== rawUrl || !/^wss?:\/\/[^/?#\\\\\s]+\/?$/i.test(rawUrl)) return Promise.reject(new TypeError('Invalid token WebSocket URL'));
+  let parsed: URL; try { parsed = new URL(rawUrl); } catch { return Promise.reject(new TypeError('Invalid token WebSocket URL')); }
+  if ((parsed.protocol.toLowerCase() !== 'ws:' && parsed.protocol.toLowerCase() !== 'wss:') || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash || (parsed.pathname !== '/' && parsed.pathname !== '')) return Promise.reject(new TypeError('Token WebSocket URL must be an origin root'));
   const secure = parsed.protocol.toLowerCase() === 'wss:';
   const normalizedOriginUrl = new URL(`${secure ? 'https' : 'http'}://${parsed.host}/`);
   const httpOptions = normalizeTokenHttpOptions({ auth: 'token', channel: 'http', url: normalizedOriginUrl.href, token: options.token, requestTimeoutMs: options.requestTimeoutMs, connectTimeoutMs: options.connectTimeoutMs, signal: options.signal });
   const wsUrl = new URL(`${secure ? 'wss' : 'ws'}://${parsed.host}/`);
   const platform = platformFactory(options);
+  if (platform.runtime === 'browser' && parsed.protocol.toLowerCase() === 'ws:' && !isBrowserLoopback(parsed.hostname)) {
+    return Promise.resolve(platform.close()).catch(() => undefined).then(() => Promise.reject(new TokenTransportError('invalid_request', 'Token WebSocket connection failed', { phase: 'connect' })));
+  }
   const socketOptions = (signal: AbortSignal, connectTimeoutMs: number): TokenSocketOptions => ({ ...('tls' in options && options.tls ? { tls: options.tls } : {}), ...('origin' in options && options.origin ? { origin: options.origin } : {}), signal, connectTimeoutMs });
   const open: TokenWsSocketFactory = socketFactory ? (url, token, opts) => socketFactory(url, token, opts) : (url, token, opts) => platform.openTokenSocket(url, token, opts);
   return TokenWsLifecycle.connect(wsUrl, options.token, options.signal, httpOptions.connectTimeoutMs, httpOptions.requestTimeoutMs, (url, token, signal, timeout) => open(url, token, socketOptions(signal, timeout)), platform.runtime === 'browser').then((lifecycle) => {
     const operations = createTokenOperations({ auth: 'token', channel: 'http', url: httpOptions.url.href, token: options.token, requestTimeoutMs: httpOptions.requestTimeoutMs, connectTimeoutMs: httpOptions.connectTimeoutMs, signal: options.signal }, new WsOperationsTransport(lifecycle, platform), true);
     return new TokenWsClientImpl(operations, lifecycle, platform);
+  }).catch(async (error: unknown) => {
+    try { await platform.close(); } catch { /* preserve the connection failure */ }
+    throw error;
   });
 }
 export type TokenWsEnvelope = ReturnType<typeof decodeTokenFrame>;

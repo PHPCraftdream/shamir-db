@@ -16,7 +16,7 @@ vi.mock('ws', async () => {
   terminate(): void { this.terminated = true; this.readyState = 3; this.emit('close', 1006, Buffer.alloc(0)); }
   open(protocol = 'shamir-v1'): void { this.protocol = protocol; this.readyState = 1; this.emit('open'); }
   }
-  return MockSocket;
+  return { default: MockSocket, WebSocket: MockSocket };
 });
 interface FakeWs { open(protocol?: string): void; close(code?: number): void; emit(event: string, ...args: unknown[]): boolean; readonly protocol: string; readonly sent: Uint8Array[]; readonly terminated: boolean; }
 
@@ -50,12 +50,34 @@ describe('Node token socket adapter', () => {
     await expect(pending).rejects.toMatchObject({ status, message: 'Token WebSocket connection failed', code: status === 401 ? 'unauthorized' : status === 403 ? 'permission_denied' : status === 429 ? 'rate_limited' : 'server_unavailable' });
     expect(response.destroy).toHaveBeenCalled();
   });
+  it('replays self-initiated close when registered afterward', async () => {
+    const { pending } = start();
+    const socket = mocks.last as FakeWs;
+    socket.open();
+    const adapter = await pending;
+    await adapter.close();
+    const closed = vi.fn();
+    adapter.onClose(closed);
+    expect(closed).toHaveBeenCalledWith({ code: 1000, reason: '', wasClean: true });
+  });
+  it('replays socket error close when registered afterward', async () => {
+    const { pending } = start();
+    const socket = mocks.last as FakeWs;
+    socket.open();
+    const adapter = await pending;
+    socket.emit('error', new Error('private peer detail'));
+    const closed = vi.fn();
+    adapter.onClose(closed);
+    expect(closed).toHaveBeenCalledWith(expect.objectContaining({ code: 1006, reason: '', error: expect.objectContaining({ code: 'network_error' }) }));
+    expect(() => socket.emit('error', new Error('late peer error'))).not.toThrow();
+  });
   it('buffers early messages within count and byte bounds and replays early close once', async () => {
     const { pending } = start(); const socket = mocks.last as FakeWs; socket?.open(); const adapter = await pending;
     socket?.emit('message', Buffer.from([1, 2]), true); const message = vi.fn(); adapter.onMessage(message); expect(message).toHaveBeenCalledWith(new Uint8Array([1, 2]));
     socket?.close(1000); const closed = vi.fn(); adapter.onClose(closed); expect(closed).toHaveBeenCalledWith({ code: 1000, reason: '', wasClean: true });
     expect(() => adapter.send(new Uint8Array())).toThrow();
   });
+
   it('bounds queued data and makes close idempotent', async () => {
     const { pending } = start(); const socket = mocks.last as FakeWs; socket.open(); const adapter = await pending;
     for (let i = 0; i < 65; i++) socket.emit('message', Buffer.of(i), true);

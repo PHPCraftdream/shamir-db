@@ -58,6 +58,7 @@ function failure(code: 'invalid_request' | 'client_aborted' | 'client_timeout' |
 }
 function asMessage(event: BrowserSocketEvent): event is BrowserMessageEvent { return 'data' in event; }
 function asClose(event: BrowserSocketEvent): event is BrowserCloseEvent { return 'code' in event && 'wasClean' in event; }
+export function isBrowserLoopback(hostname: string): boolean { return loopback(hostname); }
 
 export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSocketOptions, factory: BrowserWebSocketFactory = nativeSocket): Promise<TokenSocket> {
   if ((url.protocol !== 'ws:' && url.protocol !== 'wss:') || !validEndpoint(url) || (url.protocol === 'ws:' && !loopback(url.hostname))) return Promise.reject(failure('invalid_request'));
@@ -65,13 +66,14 @@ export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSoc
   const target = new URL(url.href); if (target.pathname === '/') target.pathname = '/shamir/v1/ws/browser';
   let socket: BrowserWebSocketLike;
   try { socket = factory(target.href, ['shamir-v1']); socket.binaryType = 'arraybuffer'; }
-  catch { return Promise.reject(failure('network_error')); }
+  catch (error) { return Promise.reject(error instanceof TokenTransportError ? error : failure('network_error')); }
 
   return new Promise((resolve, reject) => {
     let settled = false; let closed = false; let queueBytes = 0; let terminalEvent: TokenSocketCloseEvent | undefined; let closePromise: Promise<void> | undefined;
     const queue: Uint8Array[] = [];
     let messageHandler: ((data: Uint8Array) => void) | undefined; let closeHandler: ((event: TokenSocketCloseEvent) => void) | undefined;
-    const cleanupTerminal = (): void => { socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError); queue.length = 0; queueBytes = 0; messageHandler = undefined; closeHandler = undefined; terminalEvent = undefined; };
+    const cleanupTerminal = (): void => { socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError); queue.length = 0; queueBytes = 0; messageHandler = undefined; closeHandler = undefined; };
+    const removeTerminalListeners = (): void => { socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError); };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const cleanupSetup = (): void => { if (timer !== undefined) clearTimeout(timer); opts.signal.removeEventListener('abort', onAbort); socket.removeEventListener('open', onOpen); socket.removeEventListener('error', onError); socket.removeEventListener('close', onSetupClose); };
     const fail = (error: Error): void => { if (settled) return; settled = true; cleanupSetup(); reject(error); };
@@ -81,7 +83,7 @@ export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSoc
     };
     const onError = (): void => { fail(failure('network_error')); try { socket.close(); } catch { /* best effort */ } };
     const onSetupClose = (): void => fail(new TokenTransportError('authentication_failed', 'Token WebSocket authentication failed', { phase: 'connect' }));
-    const onAbort = (): void => { try { socket.close(); } catch { /* best effort */ } fail(failure('client_aborted')); };
+    const onAbort = (): void => { fail(failure('client_aborted')); try { socket.close(); } catch { /* best effort */ } };
     const onMessage = (event: BrowserSocketEvent): void => {
       if (!asMessage(event)) return;
       const data = event.data; const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data instanceof Uint8Array ? data : undefined;
@@ -105,7 +107,7 @@ export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSoc
         if (closed || socket.readyState === 3) { notifyClose({ code, reason: '', wasClean: code === 1000 }); return Promise.resolve(); }
         closePromise = new Promise<void>((done) => {
           let complete = false;
-          const finish = (event: TokenSocketCloseEvent): void => { if (complete) return; complete = true; clearTimeout(grace); socket.removeEventListener('close', onGraceClose); notifyClose(event); if (closed) cleanupTerminal(); done(); };
+          const finish = (event: TokenSocketCloseEvent): void => { if (complete) return; complete = true; clearTimeout(grace); socket.removeEventListener('close', onGraceClose); notifyClose(event); if (closeHandler) cleanupTerminal(); else removeTerminalListeners(); done(); };
           const onGraceClose = (event: BrowserSocketEvent): void => { if (asClose(event)) finish({ code: event.code, reason: '', wasClean: event.wasClean }); };
           const grace = setTimeout(() => finish({ code, reason: '', wasClean: false }), CLOSE_GRACE_MS);
           socket.addEventListener('close', onGraceClose, { once: true });
@@ -116,15 +118,15 @@ export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSoc
     };
     const onOpen = (): void => {
       if (settled) return;
-      if (socket.protocol !== 'shamir-v1') { try { socket.close(); } catch { /* best effort */ } fail(failure('protocol_error')); return; }
+      if (socket.protocol !== 'shamir-v1') { fail(failure('protocol_error')); try { socket.close(); } catch { /* best effort */ } return; }
       socket.addEventListener('message', onMessage); socket.addEventListener('close', onClose); socket.addEventListener('error', onSocketError);
       try { socket.send(encodeBrowserTokenFrame(tokenValueForTransport(token))); }
-      catch { socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError); try { socket.close(); } catch { /* best effort */ } fail(failure('protocol_error')); return; }
+      catch { fail(failure('protocol_error')); socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError); try { socket.close(); } catch { /* best effort */ } return; }
       settled = true; cleanupSetup(); resolve(adapter);
     };
     socket.addEventListener('open', onOpen, { once: true }); socket.addEventListener('error', onError, { once: true }); socket.addEventListener('close', onSetupClose, { once: true });
     opts.signal.addEventListener('abort', onAbort, { once: true });
-    if (opts.connectTimeoutMs > 0) timer = setTimeout(() => { try { socket.close(); } catch { /* best effort */ } fail(failure('client_timeout')); }, opts.connectTimeoutMs);
+    if (opts.connectTimeoutMs > 0) timer = setTimeout(() => { fail(failure('client_timeout')); try { socket.close(); } catch { /* best effort */ } }, opts.connectTimeoutMs);
     if (opts.signal.aborted) onAbort();
   });
 }
