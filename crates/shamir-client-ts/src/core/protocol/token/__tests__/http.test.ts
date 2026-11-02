@@ -12,14 +12,29 @@ import { Query } from '../../../builders/read/query.js';
 
 const token = ApiToken.from(`shk1.${'A'.repeat(22)}.${'A'.repeat(43)}`);
 function platform(status: number, value: unknown, contentType = 'application/msgpack'): TokenPlatform {
-  return { requestHttp: async () => ({ status, headers: { get: name => name === 'content-type' ? contentType : null }, body: encode(value) }), close: async () => {} };
+  return { runtime: 'node', requestHttp: async () => ({ status, headers: { get: name => name === 'content-type' ? contentType : null }, body: encode(value) }), openTokenSocket: async () => { throw new Error('unexpected socket open'); }, close: async () => {} };
 }
 const base = new URL('https://example.test/');
 
 describe('token HTTP protocol', () => {
+  it('rejects WebSocket-only cursor and transaction operations before making a request', async () => {
+    let calls = 0;
+    const p: TokenPlatform = { runtime: 'node', requestHttp: async () => { calls++; return { status: 200, headers: { get: () => 'application/msgpack' }, body: encode({ kind: 'pong' }) }; }, openTokenSocket: async () => { throw new Error('unexpected socket open'); }, close: async () => {} };
+    const transport = new TokenHttpTransport(base, token, p);
+    for (const request of [
+      { op: 'tx_begin', db: 'd', repo: 'main', query_version: 4 },
+      { op: 'tx_execute', db: 'd', tx_handle: 1, batch: Batch.create().build(), query_version: 4 },
+      { op: 'tx_commit', db: 'd', tx_handle: 1, query_version: 4 },
+      { op: 'tx_rollback', db: 'd', tx_handle: 1 },
+      { op: 'create_cursor', db: 'd', query: {}, page_size: 1 },
+      { op: 'fetch_next', cursor_id: 1 },
+      { op: 'cancel_cursor', cursor_id: 1 },
+    ] as const) await expect(transport.request(request as never)).rejects.toMatchObject({ code: 'not_supported_over_rest' });
+    expect(calls).toBe(0);
+  });
   it('maps uniform unauthorized without decoding body', async () => {
     for (const body of [new Uint8Array([0xc1]), new Uint8Array([0x81, 0xa1, 0x61])]) {
-      const p: TokenPlatform = { requestHttp: async () => ({ status: 401, headers: { get: () => 'application/msgpack' }, body }), close: async () => {} };
+      const p: TokenPlatform = { runtime: 'node', requestHttp: async () => ({ status: 401, headers: { get: () => 'application/msgpack' }, body }), openTokenSocket: async () => { throw new Error('unexpected socket open'); }, close: async () => {} };
       await expect(new TokenHttpTransport(base, token, p).request({ op: 'ping' })).rejects.toMatchObject({ code: 'unauthorized' });
     }
   });
@@ -41,7 +56,7 @@ describe('token HTTP protocol', () => {
     }
   });
   it('races timeout, explicit abort, and close against a platform that ignores abort', async () => {
-    const hanging: TokenPlatform = { requestHttp: () => new Promise(() => {}), close: async () => {} };
+    const hanging: TokenPlatform = { runtime: 'node', requestHttp: () => new Promise(() => {}), openTokenSocket: async () => { throw new Error('unexpected socket open'); }, close: async () => {} };
 
     const timed = new TokenHttpTransport(base, token, hanging);
     await expect(timed.request({ op: 'ping' }, { timeoutMs: 5 })).rejects.toMatchObject({ code: 'client_timeout' });
@@ -58,7 +73,7 @@ describe('token HTTP protocol', () => {
     await closeResult;
 
     let calls = 0;
-    const preabortedPlatform: TokenPlatform = { requestHttp: () => { calls++; return new Promise(() => {}); }, close: async () => {} };
+    const preabortedPlatform: TokenPlatform = { runtime: 'node', requestHttp: () => { calls++; return new Promise(() => {}); }, openTokenSocket: async () => { throw new Error('unexpected socket open'); }, close: async () => {} };
     const preabortedController = new AbortController();
     preabortedController.abort();
     const preaborted = new TokenHttpTransport(base, token, preabortedPlatform);

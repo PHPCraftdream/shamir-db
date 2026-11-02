@@ -62,4 +62,11 @@ export type TokenHttpRequest =
   | { op: 'ping' }
   | { op: 'execute'; db: string; batch: BatchRequest; query_version: 4 }
   | { op: 'wait_for_visibility'; db: string; repo: string; version: bigint; visibility_wait: VisibilityWait; query_version: 4 }
-  | { op: 'get_ddl_op_status'; db: string; repo: string; table: string; op_id: string };
+  | { op: 'get_ddl_op_status'; db: string; repo: string; table: string; op_id: string }
+  | { op: 'tx_begin'; db: string; repo: string; query_version: 4; isolation?: 'snapshot' | 'serializable' }
+  | { op: 'tx_execute'; db: string; tx_handle: number; batch: BatchRequest; query_version: 4 }
+  | { op: 'tx_commit'; db: string; tx_handle: number; query_version: 4; visibility_wait?: VisibilityWait }
+  | { op: 'tx_rollback'; db: string; tx_handle: number }
+  | { op: 'create_cursor'; db: string; query: object; page_size: number; query_version?: number }
+  | { op: 'fetch_next'; db?: string; cursor_id: number | bigint; page_size?: number }
+  | { op: 'cancel_cursor'; db?: string; cursor_id: number | bigint };
