@@ -1,9 +1,97 @@
 //! Tests for [`KdfParams`] validation (spec §3.7, §5.1.1).
 
+use crate::common::error::Error;
 use crate::common::kdf_params::{
     validate_client_kdf_safe, KdfParams, HARD_MAX_MEMORY_KB, HARD_MAX_TIME,
 };
 use crate::common::types::limits;
+
+#[test]
+fn client_limits_accept_each_minimum_boundary() {
+    let mut p = KdfParams::DEFAULT;
+    p.memory_kb = limits::KDF_MIN_MEMORY_KB;
+    p.validate_client_limits().unwrap();
+
+    p = KdfParams::DEFAULT;
+    p.time = limits::KDF_MIN_TIME;
+    p.validate_client_limits().unwrap();
+
+    p = KdfParams::DEFAULT;
+    p.parallelism = limits::KDF_MIN_PARALLELISM;
+    p.validate_client_limits().unwrap();
+}
+
+#[test]
+fn client_limits_accept_each_maximum_boundary() {
+    let mut p = KdfParams::DEFAULT;
+    p.memory_kb = limits::KDF_MAX_MEMORY_KB;
+    p.validate_client_limits().unwrap();
+
+    p = KdfParams::DEFAULT;
+    p.time = limits::KDF_MAX_TIME;
+    p.validate_client_limits().unwrap();
+
+    p = KdfParams::DEFAULT;
+    p.parallelism = limits::KDF_MAX_PARALLEL;
+    p.validate_client_limits().unwrap();
+}
+#[test]
+fn client_limits_reject_each_value_below_minimum() {
+    let mut p = KdfParams::DEFAULT;
+    p.memory_kb = limits::KDF_MIN_MEMORY_KB - 1;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+
+    p = KdfParams::DEFAULT;
+    p.time = limits::KDF_MIN_TIME - 1;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+
+    p = KdfParams::DEFAULT;
+    p.parallelism = limits::KDF_MIN_PARALLELISM - 1;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+}
+
+#[test]
+fn client_limits_reject_each_value_above_maximum() {
+    let mut p = KdfParams::DEFAULT;
+    p.memory_kb = limits::KDF_MAX_MEMORY_KB + 1;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+
+    p = KdfParams::DEFAULT;
+    p.time = limits::KDF_MAX_TIME + 1;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+
+    p = KdfParams::DEFAULT;
+    p.parallelism = limits::KDF_MAX_PARALLEL + 1;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+}
+
+#[test]
+fn client_limits_reject_unsupported_version() {
+    let mut p = KdfParams::DEFAULT;
+    p.argon2_version = 0x10;
+    assert!(matches!(
+        p.validate_client_limits(),
+        Err(Error::KdfParamsRejected)
+    ));
+}
 
 #[test]
 fn default_passes_client_limits() {

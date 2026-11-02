@@ -13,7 +13,7 @@
  *                server_query_version?]
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Socket, Platform, Argon2Params } from '../../support/platform.js';
 import { WsFramer, encode, decode } from '../framing.js';
 import { runHandshake } from '../protocol.js';
@@ -586,7 +586,7 @@ describe('runHandshake (unit, fake WsFramer + fake Platform)', () => {
       challengeBody: challengeFrame({ memoryKb: 262145 }),
       authOkBody: encode([new Uint8Array(32), new Uint8Array(32), new Uint8Array(64), new Uint8Array(32), BigInt(1)]),
     });
-    await expect(p).rejects.toThrow(/memory_kb 262145 exceeds limit/);
+    await expect(p).rejects.toThrow('kdf_params_rejected');
   });
 
   it('rejects when time exceeds 8', async () => {
@@ -594,7 +594,7 @@ describe('runHandshake (unit, fake WsFramer + fake Platform)', () => {
       challengeBody: challengeFrame({ time: 9 }),
       authOkBody: encode([new Uint8Array(32), new Uint8Array(32), new Uint8Array(64), new Uint8Array(32), BigInt(1)]),
     });
-    await expect(p).rejects.toThrow(/challenge time 9 exceeds limit/);
+    await expect(p).rejects.toThrow('kdf_params_rejected');
   });
 
   it('rejects when parallelism exceeds 8', async () => {
@@ -602,7 +602,7 @@ describe('runHandshake (unit, fake WsFramer + fake Platform)', () => {
       challengeBody: challengeFrame({ parallelism: 9 }),
       authOkBody: encode([new Uint8Array(32), new Uint8Array(32), new Uint8Array(64), new Uint8Array(32), BigInt(1)]),
     });
-    await expect(p).rejects.toThrow(/challenge parallelism 9 exceeds limit/);
+    await expect(p).rejects.toThrow('kdf_params_rejected');
   });
 
   it('rejects when argon2_version is not 0x13', async () => {
@@ -610,7 +610,44 @@ describe('runHandshake (unit, fake WsFramer + fake Platform)', () => {
       challengeBody: challengeFrame({ argon2Version: 0x10 }),
       authOkBody: encode([new Uint8Array(32), new Uint8Array(32), new Uint8Array(64), new Uint8Array(32), BigInt(1)]),
     });
-    await expect(p).rejects.toThrow(/argon2_version must be 0x13, got 16/);
+    await expect(p).rejects.toThrow('kdf_params_rejected');
+  });
+
+  it.each([
+    { memoryKb: 19455 }, { memoryKb: 262145 }, { time: 1 }, { time: 9 },
+    { parallelism: 0 }, { parallelism: 9 }, { argon2Version: 0x10 },
+  ])('rejects invalid challenge KDF params %# before Argon2/proof', async (override) => {
+    const socket = new FakeSocket();
+    const framer = new WsFramer(socket);
+    const platform = makeFakePlatform();
+    const argon2id = vi.fn(platform.argon2id);
+    platform.argon2id = argon2id;
+    socket.pushFrame(challengeFrame(override));
+    const handshake = runHandshake(platform, framer, USERNAME, PASSWORD);
+    await expect(handshake).rejects.toThrow('kdf_params_rejected');
+    expect(argon2id).not.toHaveBeenCalled();
+    expect(socket.sent).toHaveLength(1);
+  });
+
+  it('accepts inclusive KDF bounds without expensive Argon2', async () => {
+    for (const params of [
+      { memoryKb: 19456, time: 2, parallelism: 1, argon2Version: 0x13 },
+      { memoryKb: 262144, time: 8, parallelism: 8, argon2Version: 0x13 },
+    ]) {
+      const socket = new FakeSocket();
+      const framer = new WsFramer(socket);
+      const platform = makeFakePlatform();
+      const argon2id = vi.fn(platform.argon2id);
+      platform.argon2id = argon2id;
+      socket.pushFrame(challengeFrame(params));
+      socket.pushFrame(encode({ error: 'stop after proof' }));
+      const handshake = runHandshake(platform, framer, USERNAME, PASSWORD);
+      await expect(handshake).rejects.toThrow('authentication failed: stop after proof');
+      expect(argon2id).toHaveBeenCalledWith(expect.any(Uint8Array), SALT, {
+        memoryKb: params.memoryKb, time: params.time, parallelism: params.parallelism,
+      });
+      expect(socket.sent).toHaveLength(2);
+    }
   });
 
   it('rejects when salt length is not 16', async () => {

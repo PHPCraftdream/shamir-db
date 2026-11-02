@@ -166,9 +166,43 @@ fn gc_removes_stale_entries() {
 }
 
 #[test]
-fn subnet_of_v4_takes_24_bit_prefix() {
-    let s = subnet_of(IpAddr::V4(Ipv4Addr::new(10, 0, 1, 200)));
-    assert_eq!(s, Subnet::V4([10, 0, 1]));
+fn subnet_of_normalizes_mapped_ipv4_and_preserves_ipv6_families() {
+    let cases = [
+        (
+            "plain IPv4 address",
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 17)),
+            Subnet::V4([192, 0, 2]),
+        ),
+        (
+            "mapped IPv4 address",
+            IpAddr::V6("::ffff:192.0.2.254".parse().expect("valid mapped IPv4")),
+            Subnet::V4([192, 0, 2]),
+        ),
+        (
+            "mapped IPv4 /24 lower boundary",
+            IpAddr::V6("::ffff:198.51.100.0".parse().expect("valid mapped IPv4")),
+            Subnet::V4([198, 51, 100]),
+        ),
+        (
+            "mapped IPv4 /24 upper boundary",
+            IpAddr::V6("::ffff:198.51.100.255".parse().expect("valid mapped IPv4")),
+            Subnet::V4([198, 51, 100]),
+        ),
+        (
+            "IPv6 /64",
+            IpAddr::V6("2001:db8:abcd:1234:ffff::1".parse().expect("valid IPv6")),
+            Subnet::V6([0x20, 0x01, 0x0d, 0xb8, 0xab, 0xcd, 0x12, 0x34]),
+        ),
+        (
+            "IPv4-compatible IPv6 remains IPv6",
+            IpAddr::V6("::192.0.2.17".parse().expect("valid compatible IPv6")),
+            Subnet::V6([0, 0, 0, 0, 0, 0, 0, 0]),
+        ),
+    ];
+
+    for (case, ip, expected) in cases {
+        assert_eq!(subnet_of(ip), expected, "{case}");
+    }
 }
 
 #[test]

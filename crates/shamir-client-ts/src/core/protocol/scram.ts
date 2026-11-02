@@ -51,6 +51,17 @@ export interface KdfParams {
   argon2Version: number;
 }
 
+export function validateKdfParams(kdf: KdfParams): void {
+  if (
+    !Number.isInteger(kdf.memoryKb) || kdf.memoryKb < 19456 || kdf.memoryKb > 262144 ||
+    !Number.isInteger(kdf.time) || kdf.time < 2 || kdf.time > 8 ||
+    !Number.isInteger(kdf.parallelism) || kdf.parallelism < 1 || kdf.parallelism > 8 ||
+    !Number.isInteger(kdf.argon2Version) || kdf.argon2Version !== ARGON2_VERSION_13
+  ) {
+    throw new Error('kdf_params_rejected');
+  }
+}
+
 /** Inputs needed to rebuild the canonical `auth_message`. */
 export interface AuthMessageChallenge {
   serverNonce: Uint8Array;
@@ -270,6 +281,7 @@ export async function computeClientProof(
   kdfParams: KdfParams,
   authMessage: Uint8Array,
 ): Promise<ClientProofResult> {
+  validateKdfParams(kdfParams);
   const enc = new TextEncoder();
   const passwordBytes = enc.encode(password);
   const saltedPassword = await platform.argon2id(passwordBytes, salt, {

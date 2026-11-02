@@ -32,7 +32,10 @@ impl KdfParams {
     ///
     /// Returns [`Error::KdfParamsRejected`] if any limit is exceeded.
     pub fn validate_client_limits(&self) -> Result<()> {
-        if self.memory_kb > limits::KDF_MAX_MEMORY_KB
+        if self.memory_kb < limits::KDF_MIN_MEMORY_KB
+            || self.time < limits::KDF_MIN_TIME
+            || self.parallelism < limits::KDF_MIN_PARALLELISM
+            || self.memory_kb > limits::KDF_MAX_MEMORY_KB
             || self.time > limits::KDF_MAX_TIME
             || self.parallelism > limits::KDF_MAX_PARALLEL
             || self.argon2_version != limits::ARGON2_VERSION_V13
