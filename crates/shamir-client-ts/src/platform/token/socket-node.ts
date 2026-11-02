@@ -90,7 +90,7 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
     };
     const onMessage = (data: Buffer | ArrayBuffer | Buffer[], binary: boolean): void => {
       if (!binary) { void adapter.close(1003); return; }
-      const bytes = data instanceof Buffer ? new Uint8Array(data) : data instanceof ArrayBuffer ? new Uint8Array(data) : new Uint8Array(Buffer.concat(data));
+      const bytes = Array.isArray(data) ? new Uint8Array(Buffer.concat(data)) : new Uint8Array(data);
       if (bytes.byteLength > MAX_FRAME_BYTES) { void adapter.close(1009); return; }
       if (messageHandler) { messageHandler(bytes); return; }
       if (queue.length >= MAX_QUEUE_MESSAGES || queueBytes + bytes.byteLength > MAX_QUEUE_BYTES) { void adapter.close(1009); return; }
