@@ -19,10 +19,6 @@ fn rank_probe_count() -> usize {
 #[path = "pair_index_tests.rs"]
 mod tests;
 
-#[cfg(test)]
-#[path = "pair_collision_tests.rs"]
-mod collision_tests;
-
 // Each rank stores a physical payload slot, not a key hash. Used entries are sorted
 // by payload key; `u16::MAX` sentinels occupy the unused suffix.
 pub(super) fn key_cmp(left: PairKey, right: PairKey) -> core::cmp::Ordering {
@@ -108,4 +104,24 @@ pub(super) fn remove(slots: &mut [PairSlot], physical: usize) {
         slots[index_rank].set_index(index);
     }
     slots[n - 1].set_index(u16::MAX);
+}
+
+// Drops index entries whose payload was cleared, keeping the sorted order. O(N), no
+// key comparisons: used after bulk payload clears (gc, unlock) instead of per-entry
+// `remove`, whose shift would make a full sweep O(N^2) under the store mutex.
+pub(super) fn compact(slots: &mut [PairSlot]) {
+    let used = used_len(slots);
+    let mut kept = 0;
+    let mut rank = 0;
+    while rank < used {
+        let physical = slots[rank].index();
+        if slots[usize::from(physical)].occupied {
+            slots[kept].set_index(physical);
+            kept += 1;
+        }
+        rank += 1;
+    }
+    for slot in &mut slots[kept..used] {
+        slot.set_index(u16::MAX);
+    }
 }

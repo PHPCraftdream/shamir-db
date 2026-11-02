@@ -401,6 +401,8 @@ fn snapshot_caps_base_parent_and_global_with_active_first_and_highest_count() {
         }
     }
     let lock_key = global_fails[0].0;
+    // Strictly the lowest count and oldest: only lock priority can keep it.
+    global_fails[0].1 = failure(1, NOW - 2);
     let high_key = key4(16, 0, 0);
     global_fails.push((high_key, failure(1000, NOW - 1)));
     let global = seeded(global_fails, vec![(lock_key, active_lock())]);

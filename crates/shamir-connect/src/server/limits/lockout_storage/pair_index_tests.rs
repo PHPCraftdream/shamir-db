@@ -1,4 +1,7 @@
-use super::{insert, key_cmp, lookup, rank_probe_count, remove, reset_rank_probes, PairSlot};
+use super::{
+    compact, insert, key_cmp, lookup, rank_probe_count, remove, reset_rank_probes, used_len,
+    PairSlot,
+};
 use crate::server::lockout::{
     FailureOutcome, FailureState, InMemoryLockoutStore, LockoutStore, PairKey, Subnet,
     BACKOFF_RESET_NS,
@@ -177,4 +180,29 @@ fn shared_prefix_keys_are_collision_independent_and_comparator_is_total() {
     assert!(key_cmp(pairs[0], pairs[1]).is_lt());
     assert!(key_cmp(pairs[127], pairs[128]).is_lt());
     assert_eq!(key_cmp(pairs[42], pairs[42]), core::cmp::Ordering::Equal);
+}
+
+#[test]
+fn compact_after_bulk_clear_keeps_survivors_findable_in_linear_time() {
+    let mut slots = slots();
+    for i in 0..CAPACITY {
+        add(&mut slots, (i * 4_051) % CAPACITY, key(i));
+    }
+    for i in (0..CAPACITY).step_by(2) {
+        slots[(i * 4_051) % CAPACITY].clear_payload();
+    }
+    compact(&mut slots);
+    assert_eq!(used_len(&slots), CAPACITY / 2);
+    for i in 0..CAPACITY {
+        let expected = (i % 2 == 1).then_some((i * 4_051) % CAPACITY);
+        assert_eq!(lookup(&slots, key(i)), expected, "key {i}");
+    }
+    for i in (0..CAPACITY).step_by(2) {
+        slots[(i * 4_051) % CAPACITY].clear_payload();
+    }
+    for i in (1..CAPACITY).step_by(2) {
+        slots[(i * 4_051) % CAPACITY].clear_payload();
+    }
+    compact(&mut slots);
+    assert_eq!(used_len(&slots), 0);
 }

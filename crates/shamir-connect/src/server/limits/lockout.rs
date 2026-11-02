@@ -63,7 +63,9 @@ mod pair_slot;
 use pair_slot::PairSlot;
 #[path = "lockout_storage/pair_index.rs"]
 mod pair_index;
-use pair_index::{insert as insert_pair, lookup as lookup_pair, remove as remove_pair};
+use pair_index::{
+    compact as compact_pairs, insert as insert_pair, lookup as lookup_pair, remove as remove_pair,
+};
 
 /// Per-spec §5.2.5 backoff base: 100 ms × 2^N (capped).
 pub const BACKOFF_BASE_MS: u64 = 100;
@@ -440,7 +442,7 @@ fn source_base(subnet: Subnet) -> (u8, [u8; 6]) {
 
 fn pair_is_free(slot: &PairSlot, now: u64) -> bool {
     !slot.occupied
-        || (slot.failure.is_stale(now) && !slot.lockout.is_some_and(|lock| lock.is_active(now)))
+        || (slot.failure.is_stale(now) && slot.lockout.is_none_or(|lock| !lock.is_active(now)))
 }
 
 fn find_or_admit(
@@ -614,18 +616,23 @@ impl LockoutStore for InMemoryLockoutStore {
 
     fn admin_unlock_user(&self, username_hash: [u8; 16]) {
         let mut slots = self.slots.lock();
+        let mut cleared = false;
         let mut index = 0;
         while index < slots.len() {
             if slots[index].occupied && slots[index].key.1 == username_hash {
-                remove_pair(&mut slots, index);
                 slots[index].clear_payload();
+                cleared = true;
             }
             index += 1;
+        }
+        if cleared {
+            compact_pairs(&mut slots);
         }
     }
 
     fn gc(&self, now_ns: u64) {
         let mut slots = self.slots.lock();
+        let mut cleared = false;
         let mut index = 0;
         while index < slots.len() {
             if slots[index].occupied {
@@ -640,8 +647,8 @@ impl LockoutStore for InMemoryLockoutStore {
                         .lockout
                         .is_none_or(|lock| !lock.is_active(now_ns))
                 {
-                    remove_pair(&mut slots, index);
                     slots[index].clear_payload();
+                    cleared = true;
                 } else if slots[index]
                     .lockout
                     .is_some_and(|lock| !lock.is_active(now_ns))
@@ -650,6 +657,9 @@ impl LockoutStore for InMemoryLockoutStore {
                 }
             }
             index += 1;
+        }
+        if cleared {
+            compact_pairs(&mut slots);
         }
     }
 }
