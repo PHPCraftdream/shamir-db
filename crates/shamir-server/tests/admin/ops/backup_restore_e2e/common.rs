@@ -104,10 +104,11 @@ pub(crate) fn make_config(data_dir: PathBuf, port: u16) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: format!("127.0.0.1:{port}"),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

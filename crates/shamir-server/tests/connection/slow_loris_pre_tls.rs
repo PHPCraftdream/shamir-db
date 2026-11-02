@@ -52,10 +52,11 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
         listeners: vec![ListenerConfig {
             kind: ListenerKind::Tcp,
             addr: "127.0.0.1:0".into(),
-            profile: ProfileKind::TlsExporter,
+            profile: Some(ProfileKind::TlsExporter),
             path: None,
             kdf_override: None,
             browser_origin_allowlist: vec![],
+            http: Default::default(),
         }],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),

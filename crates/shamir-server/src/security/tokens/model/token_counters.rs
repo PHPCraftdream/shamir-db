@@ -1,3 +1,5 @@
+use shamir_connect::server::token::Endpoint;
+
 /// Cheap process-local service counters.
 #[derive(Debug, Default)]
 pub struct TokenCounters {
@@ -18,12 +20,12 @@ impl TokenCounters {
         self.revoked.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Number of successful verifications.
+    /// Number of successful token verifications (malformed headers rejected before verification are excluded).
     pub fn verified_ok(&self) -> u64 {
         self.verified_ok.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Number of failed verifications.
+    /// Number of failed token verifications (malformed headers rejected before verification are excluded).
     pub fn verified_failed(&self) -> u64 {
         self.verified_failed
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -37,6 +39,15 @@ impl TokenCounters {
     pub(crate) fn count_revoked(&self) {
         self.revoked
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn count_auth_result(&self, channel: Endpoint, result: &'static str) {
+        let channel = match channel {
+            Endpoint::Rest => "rest",
+            Endpoint::Ws => "ws",
+        };
+        metrics::counter!("shamir_token_auth_total", "channel" => channel, "result" => result)
+            .increment(1);
     }
 
     pub(crate) fn count_verified(&self, success: bool) {
