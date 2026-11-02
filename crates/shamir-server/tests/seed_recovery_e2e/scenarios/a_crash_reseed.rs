@@ -38,7 +38,8 @@ async fn seed_e2e_a_kill_resync_offline_seed_resume_converges_body() {
     let leader_dir = root.path().join("leader");
     let artifact_dir = root.path().join("seed-artifact");
     let home_dir = root.path().join("follower-home");
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
     let upstream = format!("tcp://{addr}");
 
     // -- Leader: schema + replicator + publication + mixed writes. --
