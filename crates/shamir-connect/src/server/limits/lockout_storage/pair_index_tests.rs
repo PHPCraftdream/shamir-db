@@ -14,7 +14,7 @@ fn key(i: usize) -> PairKey {
     let mut user = [0u8; 16];
     user[..8].copy_from_slice(&(i as u64).to_be_bytes());
     user[15] = (i as u8).wrapping_mul(37);
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         (Subnet::V4([10, (i >> 8) as u8, i as u8]), user)
     } else {
         let mut prefix = [0u8; 8];
