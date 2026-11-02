@@ -18,6 +18,7 @@ use super::proxy::ProxyGate;
 use super::validate_http_tls;
 
 type StartedHttp = (SocketAddr, JoinHandle<()>, Arc<RestGate>);
+type UsernameLookup = Arc<dyn Fn(&[u8; 16]) -> String + Send + Sync>;
 
 struct HttpAdmission {
     global: ConnLimiter,
@@ -69,8 +70,8 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
             .ok()
             .map(|value| value.as_u64())
     });
-    let username = Arc::clone(&env.user_dir);
-    let username_lookup: Arc<dyn Fn(&[u8; 16]) -> String + Send + Sync> = Arc::new(move |id| {
+    let username = Arc::clone(env.user_dir);
+    let username_lookup: UsernameLookup = Arc::new(move |id| {
         username
             .state_by_user_id(id)
             .map(|state| state.username)
