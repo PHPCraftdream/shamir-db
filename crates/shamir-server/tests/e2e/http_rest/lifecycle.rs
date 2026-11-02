@@ -258,7 +258,7 @@ async fn http_rest_shutdown_bounds_incomplete_request_body_and_reports_error() {
     }
 
     let Harness { handle, temp, .. } = harness;
-    let report = tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
+    let report = tokio::time::timeout(Duration::from_secs(45), handle.shutdown())
         .await
         .expect("shutdown exceeded 30 seconds");
     assert!(

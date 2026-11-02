@@ -211,13 +211,11 @@ impl ServerHandle {
                 }
             }
         }
-        quiesced &= drain_connections(
-            &self.conn_tasks,
-            CONN_DRAIN_TIMEOUT,
-            CONN_ABORT_TIMEOUT,
-            report,
-        )
-        .await;
+        // One drain budget for listeners and accepted connections together, so
+        // the stage stays inside the runtime shutdown deadline.
+        let remaining = listener_deadline.saturating_duration_since(tokio::time::Instant::now());
+        quiesced &=
+            drain_connections(&self.conn_tasks, remaining, CONN_ABORT_TIMEOUT, report).await;
         // Gates stop after transport and connection tasks drain, so the final
         // audit flush includes their notices.
         for gate in &self.http_gates {
