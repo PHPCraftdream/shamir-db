@@ -5,14 +5,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { ApiToken } from '../../../entry/api-token.js';
 import { createNodeTokenPlatform } from '../http-node.js';
 import { TokenHttpTransport } from '../../../core/protocol/token/http.js';
-import { decode, encode } from '../../../core/protocol/framing.js';
+import { encode } from '../../../core/protocol/framing.js';
 import { Query } from '../../../core/builders/read/query.js';
 import { Batch } from '../../../core/builders/write/batch.js';
 import type { NodeTokenHttpConnectOptions } from '../../../core/types/connection.js';
 
 const rawToken = 'shk1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const token = ApiToken.from(rawToken);
-type Reply = { status?: number; headers?: Record<string, string>; body?: Uint8Array; hang?: boolean; abort?: boolean };
 type Seen = { url: string; method?: string; authorization?: string; contentType?: string; body: Buffer };
 function startServer(handler: (request: IncomingMessage, response: ServerResponse, seen: Seen) => void) {
   const seen: Seen[] = [];
@@ -31,15 +30,12 @@ function startServer(handler: (request: IncomingMessage, response: ServerRespons
   });
   return { server, seen, ready };
 }
-const options = (port: number, extra: Partial<NodeTokenHttpConnectOptions> = {}): NodeTokenHttpConnectOptions => ({ auth: 'token', channel: 'http', url: `http://127.0.0.1:${port}`, token, ...extra });
-function msgpackReply(value: unknown, status = 200, headers: Record<string, string> = {}): Reply {
-  return { status, headers: { 'content-type': 'application/msgpack', ...headers }, body: encode(value) };
-}
+type Reply = { status?: number; headers?: Record<string, string>; body?: Uint8Array; hang?: boolean; abort?: boolean };
+
 function answer(reply: Reply) {
   return (_request: IncomingMessage, response: ServerResponse) => {
     response.writeHead(reply.status ?? 200, reply.headers);
     if (reply.hang) return;
-    if (reply.abort) { response.write(Buffer.from([0x81])); response.socket?.destroy(); return; }
     response.end(reply.body ?? encode({ kind: 'pong' }));
   };
 }

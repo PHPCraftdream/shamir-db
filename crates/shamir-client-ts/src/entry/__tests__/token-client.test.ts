@@ -15,12 +15,13 @@ afterEach(async () => { await Promise.all(clients.splice(0).map((client) => clie
 function harness(responses: unknown[] = []) {
   const requests: Array<{ url: URL; method: string; body?: unknown; headers: Readonly<Record<string,string>> }> = [];
   const platform: TokenPlatform = {
-    async requestHttp(url, _token, init) {
+    runtime: 'node',
+    openTokenSocket: async () => { throw new Error('unexpected socket open'); },
       requests.push({ url, method: init.method, ...(init.body ? { body: decode(init.body) } : {}), headers: init.headers });
       const value = responses.shift() ?? (init.method === 'GET' ? { kind: 'pong' } : batchResponse());
       const response: TokenHttpResponse = { status: 200, headers: { get: (name) => name.toLowerCase() === 'content-type' ? 'application/msgpack' : null }, body: encode(value) };
       return response;
-    }, async close() {},
+    }, async openTokenSocket() { throw new Error('unexpected socket open'); }, async close() {},
   };
   const options = { auth: 'token' as const, channel: 'http' as const, token, url: 'https://example.test', requestTimeoutMs: 1234 };
   const client = createTokenHttpClient(options, (got) => { expect(got.url).toBe('https://example.test/'); return platform; });

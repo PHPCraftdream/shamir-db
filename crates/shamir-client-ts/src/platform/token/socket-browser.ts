@@ -71,12 +71,13 @@ export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSoc
     let settled = false; let closed = false; let queueBytes = 0; let terminalEvent: TokenSocketCloseEvent | undefined; let closePromise: Promise<void> | undefined;
     const queue: Uint8Array[] = [];
     let messageHandler: ((data: Uint8Array) => void) | undefined; let closeHandler: ((event: TokenSocketCloseEvent) => void) | undefined;
+    const cleanupTerminal = (): void => { socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError); queue.length = 0; queueBytes = 0; messageHandler = undefined; closeHandler = undefined; terminalEvent = undefined; };
     let timer: ReturnType<typeof setTimeout> | undefined;
     const cleanupSetup = (): void => { if (timer !== undefined) clearTimeout(timer); opts.signal.removeEventListener('abort', onAbort); socket.removeEventListener('open', onOpen); socket.removeEventListener('error', onError); socket.removeEventListener('close', onSetupClose); };
     const fail = (error: Error): void => { if (settled) return; settled = true; cleanupSetup(); reject(error); };
     const notifyClose = (event: TokenSocketCloseEvent): void => {
       if (closed) return; closed = true; queue.length = 0; queueBytes = 0;
-      if (closeHandler) closeHandler(event); else terminalEvent = event;
+      if (closeHandler) { closeHandler(event); cleanupTerminal(); } else terminalEvent = event;
     };
     const onError = (): void => { fail(failure('network_error')); try { socket.close(); } catch { /* best effort */ } };
     const onSetupClose = (): void => fail(new TokenTransportError('authentication_failed', 'Token WebSocket authentication failed', { phase: 'connect' }));
@@ -92,20 +93,19 @@ export function openBrowserTokenSocket(url: URL, token: ApiToken, opts: TokenSoc
     };
     const onClose = (event: BrowserSocketEvent): void => {
       if (!asClose(event)) return;
-      socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); socket.removeEventListener('error', onSocketError);
       notifyClose({ code: event.code, reason: '', wasClean: event.wasClean });
     };
-    const onSocketError = (): void => { socket.removeEventListener('message', onMessage); socket.removeEventListener('close', onClose); notifyClose({ code: 1006, reason: '', wasClean: false, error: failure('network_error') }); try { if (socket.readyState !== 3) socket.close(); } catch { /* best effort */ } };
+    const onSocketError = (): void => { notifyClose({ code: 1006, reason: '', wasClean: false, error: failure('network_error') }); if (socket.readyState !== 3) { try { socket.close(); } catch { /* best effort */ } } };
     const adapter: TokenSocket = {
       send(data) { if (closed || socket.readyState !== 1) throw failure('connection_closed'); if (data.byteLength > MAX_FRAME_BYTES) throw failure('protocol_error'); socket.send(data); },
       onMessage(handler) { messageHandler = handler; while (queue.length > 0) { const item = queue.shift(); if (!item) continue; queueBytes -= item.byteLength; messageHandler(item); } },
-      onClose(handler) { closeHandler = handler; if (terminalEvent) { const event = terminalEvent; terminalEvent = undefined; handler(event); } },
+      onClose(handler) { closeHandler = handler; if (terminalEvent) { const event = terminalEvent; terminalEvent = undefined; handler(event); cleanupTerminal(); } },
       close(code = 1000, reason = '') {
         if (closePromise) return closePromise;
         if (closed || socket.readyState === 3) { notifyClose({ code, reason: '', wasClean: code === 1000 }); return Promise.resolve(); }
         closePromise = new Promise<void>((done) => {
           let complete = false;
-          const finish = (event: TokenSocketCloseEvent): void => { if (complete) return; complete = true; clearTimeout(grace); socket.removeEventListener('close', onGraceClose); notifyClose(event); done(); };
+          const finish = (event: TokenSocketCloseEvent): void => { if (complete) return; complete = true; clearTimeout(grace); socket.removeEventListener('close', onGraceClose); notifyClose(event); if (closed) cleanupTerminal(); done(); };
           const onGraceClose = (event: BrowserSocketEvent): void => { if (asClose(event)) finish({ code: event.code, reason: '', wasClean: event.wasClean }); };
           const grace = setTimeout(() => finish({ code, reason: '', wasClean: false }), CLOSE_GRACE_MS);
           socket.addEventListener('close', onGraceClose, { once: true });

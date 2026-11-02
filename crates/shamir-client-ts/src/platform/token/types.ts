@@ -25,6 +25,7 @@ export interface TokenSocket {
 export interface TokenSocketOptions { tls?: import('../../core/types/connection.js').TokenTlsOptions; origin?: string; signal: AbortSignal; connectTimeoutMs: number; }
 
 export interface TokenPlatform {
+  readonly runtime: 'node' | 'browser';
   requestHttp(url: URL, token: ApiToken, init: TokenHttpRequestInit): Promise<TokenHttpResponse>;
   openTokenSocket(url: URL, token: ApiToken, opts: TokenSocketOptions): Promise<TokenSocket>;
   close(): Promise<void>;

@@ -3,7 +3,7 @@ import * as https from 'node:https';
 import type { ClientRequest, IncomingMessage, RequestOptions } from 'node:http';
 import { tokenValueForTransport } from '../../entry/api-token.js';
 import type { NodeTokenHttpConnectOptions, NodeTokenWsConnectOptions } from '../../core/types/connection.js';
-import type { TokenHttpRequestInit, TokenHttpResponse } from './types.js';
+import type { TokenHttpRequestInit, TokenHttpResponse, TokenSocket } from './types.js';
 import { openNodeTokenSocket } from './socket-node.js';
 import { DEFAULT_TOKEN_CONNECT_TIMEOUT_MS, DEFAULT_TOKEN_REQUEST_TIMEOUT_MS, normalizeTokenHttpOptions } from '../../core/protocol/token/options.js';
 import { TokenTransportError, type TokenTransportErrorCode } from '../../core/protocol/token/errors.js';
@@ -32,15 +32,16 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions | N
   const httpAgent = new http.Agent({ keepAlive: true });
   const httpsAgent = new https.Agent(commonTls);
   let closed = false;
-  const pending = new Set<ClientRequest>();
+  let lifetimeAborted = false;  const pending = new Set<ClientRequest>();
   const activeFailures = new Map<ClientRequest, (error: TokenTransportError) => void>();
   const sockets = new Set<Promise<TokenSocket>>();
-  const onLifetimeAbort = (): void => { closed = true; for (const opening of sockets) void opening.then((socket) => socket.close(), () => {}); };
+  const onLifetimeAbort = (): void => { lifetimeAborted = true; for (const opening of sockets) void opening.then((socket) => socket.close(), () => {}); };
   options.signal?.addEventListener('abort', onLifetimeAbort, { once: true });
 
 
 
   return {
+    runtime: 'node',
     openTokenSocket(url, token, opts) {
       if (closed || normalized.signal?.aborted) return Promise.reject(failure('connection_closed', 'close'));
       const nodeOptions = { ...(options as NodeTokenWsConnectOptions), ...(opts.tls === undefined ? {} : { tls: opts.tls }), ...(opts.origin === undefined ? {} : { origin: opts.origin }) };
@@ -51,7 +52,7 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions | N
     },
     async requestHttp(url: URL, token, init: TokenHttpRequestInit): Promise<TokenHttpResponse> {
       if (closed) throw failure('connection_closed', 'close');
-      if (init.signal.aborted || normalized.signal?.aborted) throw failure('client_aborted');
+      if (init.signal.aborted || normalized.signal?.aborted || lifetimeAborted) throw failure('client_aborted');
       if (url.origin !== normalized.url.origin || (url.href !== normalized.pingUrl.href && url.href !== normalized.requestUrl.href)) throw failure('protocol_error');
       if (url.protocol !== 'http:' && url.protocol !== 'https:') throw failure('protocol_error');
       const secure = url.protocol === 'https:';
@@ -147,6 +148,7 @@ export function createNodeTokenPlatform(options: NodeTokenHttpConnectOptions | N
     async close(): Promise<void> {
       if (closed) return;
       closed = true;
+      lifetimeAborted = true;
       options.signal?.removeEventListener('abort', onLifetimeAbort);
       for (const request of pending) activeFailures.get(request)?.(failure('connection_closed', 'close'));
       pending.clear(); activeFailures.clear();

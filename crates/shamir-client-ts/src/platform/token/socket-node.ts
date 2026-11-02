@@ -48,11 +48,12 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
     let terminalEvent: TokenSocketCloseEvent | undefined;
     let closePromise: Promise<void> | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanupTerminal = (): void => { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); socket.removeListener('error', onSocketError); socket.removeListener('error', onSetupError); socket.removeListener('close', onSetupClose); socket.removeListener('unexpected-response', onUnexpectedResponse); queue.length = 0; queueBytes = 0; messageHandler = undefined; closeHandler = undefined; terminalEvent = undefined; socket.on('error', () => {}); };
     const fail = (error: Error): void => { if (settled) return; settled = true; cleanupSetup(); reject(error); };
     const cleanupSetup = (): void => { if (timer !== undefined) clearTimeout(timer); opts.signal.removeEventListener('abort', onAbort); if (!opened) { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); socket.removeListener('error', onSocketError); } socket.removeListener('open', onOpen); socket.removeListener('close', onSetupClose); socket.removeListener('unexpected-response', onUnexpectedResponse); };
     const notifyClose = (event: TokenSocketCloseEvent): void => {
       if (closed) return; closed = true; queue.length = 0; queueBytes = 0;
-      if (closeHandler) closeHandler(event); else terminalEvent = event;
+      if (closeHandler) { closeHandler(event); cleanupTerminal(); } else terminalEvent = event;
     };
     const onSetupError = (error: NodeJS.ErrnoException): void => {
       if (!opened) fail(failure(error.code?.startsWith('ERR_TLS_') || error.code?.startsWith('CERT_') || error.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' ? 'tls_configuration_error' : 'network_error'));
@@ -67,7 +68,7 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
     const adapter: TokenSocket = {
       send(data) { if (closed || socket.readyState !== WS.OPEN) throw failure('connection_closed', 'close'); if (data.byteLength > MAX_FRAME_BYTES) throw failure('protocol_error', 'close'); socket.send(data, { binary: true }); },
       onMessage(handler) { messageHandler = handler; while (queue.length > 0) { const data = queue.shift(); if (!data) continue; queueBytes -= data.byteLength; messageHandler(data); } },
-      onClose(handler) { closeHandler = handler; if (terminalEvent) { const event = terminalEvent; terminalEvent = undefined; handler(event); } },
+      onClose(handler) { closeHandler = handler; if (terminalEvent) { const event = terminalEvent; terminalEvent = undefined; handler(event); cleanupTerminal(); } },
       close(code = 1000, reason = '') {
         if (closePromise) return closePromise;
         if (closed || socket.readyState === WS.CLOSED) { notifyClose({ code, reason: '', wasClean: code === 1000 }); return Promise.resolve(); }
@@ -75,7 +76,7 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
           let complete = false;
           const finish = (event: TokenSocketCloseEvent): void => {
             if (complete) return; complete = true; clearTimeout(grace); socket.removeListener('close', onGraceClose);
-            notifyClose(event); if (socket.readyState !== WS.CLOSED) socket.terminate(); done();
+            notifyClose(event); cleanupTerminal(); if (socket.readyState !== WS.CLOSED) socket.terminate(); done();
           };
           const onGraceClose = (receivedCode: number): void => finish({ code: receivedCode, reason: '', wasClean: receivedCode === 1000 });
           const grace = setTimeout(() => finish({ code, reason: '', wasClean: false }), CLOSE_GRACE_MS);
@@ -93,8 +94,8 @@ export function openNodeTokenSocket(url: URL, token: ApiToken, options: NodeToke
       if (queue.length >= MAX_QUEUE_MESSAGES || queueBytes + bytes.byteLength > MAX_QUEUE_BYTES) { void adapter.close(1009); return; }
       queue.push(bytes); queueBytes += bytes.byteLength;
     };
-    const onClose = (code: number): void => notifyClose({ code, reason: '', wasClean: code === 1000 });
-    const onSocketError = (): void => { socket.removeListener('message', onMessage); socket.removeListener('close', onClose); if (socket.readyState !== WS.CLOSED) socket.terminate(); notifyClose({ code: 1006, reason: '', wasClean: false, error: failure('network_error', 'close') }); };
+    const onClose = (code: number): void => { socket.removeListener('message', onMessage); notifyClose({ code, reason: '', wasClean: code === 1000 }); };
+    const onSocketError = (): void => { notifyClose({ code: 1006, reason: '', wasClean: false, error: failure('network_error', 'close') }); cleanupTerminal(); if (socket.readyState !== WS.CLOSED) socket.terminate(); };
     const onOpen = (): void => {
       if (socket.protocol !== 'shamir-v1') { fail(failure('protocol_error')); socket.terminate(); return; }
       if (settled) return; settled = true; opened = true; socket.on('message', onMessage); socket.on('close', onClose); cleanupSetup(); resolve(adapter);

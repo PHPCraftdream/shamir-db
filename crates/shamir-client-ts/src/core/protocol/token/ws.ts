@@ -1,8 +1,8 @@
 import { decode, encode } from '../framing.js';
+import type { PushKind } from '../../types/stream/subscribe.js';
 import { TokenTransportError } from './errors.js';
-
 export interface TokenBinding { readonly sid: Uint8Array; readonly expiresAtNs: bigint; }
-export interface TokenPush { readonly push: string; readonly sub: number; readonly seq: number; readonly data?: Uint8Array; readonly gap_at?: number; }
+export interface TokenPush { readonly push: 'event' | 'ready' | 'gap' | 'slow_consumer' | 'closed'; readonly sub: number; readonly seq: number; readonly data?: Uint8Array; readonly gap_at?: number; }
 export interface TokenRequest {
   readonly op: string;
   readonly db?: string;
@@ -38,7 +38,7 @@ export function decodeTokenPush(frame: Record<string, unknown>): TokenPush | und
   if (typeof frame.push !== 'string' || !['event','ready','gap','slow_consumer','closed'].includes(frame.push) || !Number.isSafeInteger(frame.sub) || (frame.sub as number) < 0 || !Number.isSafeInteger(frame.seq) || (frame.seq as number) < 0) throw new TokenTransportError('protocol_error', 'Invalid push frame');
   if (frame.data !== undefined && !(frame.data instanceof Uint8Array)) throw new TokenTransportError('protocol_error', 'Invalid push frame');
   if (frame.gap_at !== undefined && (!Number.isSafeInteger(frame.gap_at) || (frame.gap_at as number) < 0)) throw new TokenTransportError('protocol_error', 'Invalid push frame');
-  return { push: frame.push, sub: frame.sub as number, seq: frame.seq as number, ...(frame.data ? { data: frame.data } : {}), ...(frame.gap_at === undefined ? {} : { gap_at: frame.gap_at as number }) };
+  return { push: frame.push as PushKind, sub: frame.sub as number, seq: frame.seq as number, ...(frame.data ? { data: frame.data } : {}), ...(frame.gap_at === undefined ? {} : { gap_at: frame.gap_at as number }) };
 }
 export function decodeTokenPayload(bytes: Uint8Array): unknown { try { return decode(bytes); } catch { throw new TokenTransportError('protocol_error', 'Invalid token payload'); } }
 export function encodeTokenPayload(value: unknown): Uint8Array { return encode(value); }

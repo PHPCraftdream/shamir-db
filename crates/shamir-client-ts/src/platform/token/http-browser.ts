@@ -53,6 +53,7 @@ export function createBrowserTokenPlatform(options: BrowserTokenHttpConnectOptio
   else options.signal?.addEventListener('abort', onLifetimeAbort, { once: true });
 
   return {
+    runtime: 'browser',
     openTokenSocket(url, token, opts) {
       if (closed || options.signal?.aborted) return Promise.reject(failure('connection_closed', 'close'));
       const opening = openBrowserTokenSocket(url, token, opts); sockets.add(opening);

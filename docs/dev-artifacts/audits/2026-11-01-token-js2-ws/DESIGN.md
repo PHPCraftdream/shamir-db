@@ -1,6 +1,7 @@
 # TOKEN-JS2 WebSocket implementation audit
 
 ## Progress
+
 - DONE: Read committed remediation brief, scoped specs/source, and existing drafts. No prohibited runtime, install, compiler, test, or cargo command was run.
 - DONE: Reworked `token-client.ts` shared token operation implementation to accept an injected minimal request transport; WS facade operations now dispatch over `TokenWsLifecycle` rather than HTTP.
 - DONE: Fixed lifecycle import extension, sid defensive copies, binding and request timeout/abort behavior, late-socket close, correlation, safe error mapping, early push routing hook, subscription cap, and terminal cleanup.
@@ -8,8 +9,18 @@
 - DONE: Expanded response validation for cursor and transaction variants in the shared token transport codec; added in-memory lifecycle/codec Vitest cases.
 - DONE: `git diff --check` clean; permitted `python -I scripts/ci/check_layout.py` reports `layout check: OK (0 baselined, 0 hint(s))`.
 
-## Deviations / limitations
-- The earlier layout violation remains: the worktree contains 8 `src/entry` sibling files from the prior draft. No entry siblings were added in this continuation; files were not moved/deleted.
+
+## Revision 1 progress (continuation)
+- DONE: Read the remediation and original transport briefs, audit's prior final report, `CLAUDE.md`, and both TypeScript configs. Current strict config enables `strict` and NodeNext; exact optional/no unchecked/no unused flags are not explicitly set.
+- Correction: `src/entry` currently has 7 direct entries (`api-token.ts`, `token-client.ts`, `token-db.ts`, `token-ddl-state.ts`, `token-response.ts`, `__tests__/`, `ws/`); the earlier note's 8-entry assertion was stale after the orchestrator move.
+- DONE: Added new `src/entry/ws/token-cursor.ts` subclass, wired it into WS DB, added lifecycle abort signal; implemented subscription as AsyncIterable wrapper with slow-consumer termination and overflow fail-closed; registered active tx handles and adjusted callback result branches. Server terminal close delegates rollback to the server; explicit close best-effort rollbacks tracked transactions before socket close.
+- Bounded chunk implementation status: TokenCursor subclass/wiring and terminal-focused tests are present; subscription is now AsyncIterable (not AsyncIterableIterator), reports slow_consumer/queue overflow as terminal error, and caches a stable iterator wrapper; transaction map tracks handles and close attempts rollback while live. Terminal notifications invalidate local transactions and rely on server rollback after disconnect. Node TokenSocket import fixed. These edits are uncompiled and require zero-trust review.
+- Bounded chunk status: TokenCursor implemented/wired with terminal abort guard and page/cancel validation; subscription iterator wrapper and slow-consumer/overflow behavior implemented; transaction tracking/cleanup paths edited; Node TokenSocket import fixed. Tests present: `drops buffered and in-flight records after terminal close`, `validates cursor page and cancellation response shapes`, `notifies local resources once on terminal close`, plus HTTP denial regression. None executed.
+- Layout checker was run using the sole allowed execution command: `python -I scripts/ci/check_layout.py` -> `layout check: OK (0 baselined, 0 hint(s))`. Manual folders: entry 7 direct entries; entry/ws 4 direct entries; entry/ws/__tests__ 2 files.
+- Strict read-through verification identified additional constructor-field typing concern in TokenCursor and client close bookkeeping; partial status stands. No more edits beyond this chunk; CI must typecheck.
+- DONE: Added malformed binding variants coverage and corrected the lifecycle test's moved import. Lifecycle response accepts protocol `error: string`, rejects malformed result/error shape and keeps close idempotent.
+- PARTIAL: No full strict TS read-through or complete coverage matrix in this continuation. CI typecheck and focused Vitest remain needed.
+- The prior final report says eight `src/entry` entries; that count is superseded below by the verified seven-entry count.
 - Do not claim this is fully validated or complete: tests/builds were not run by instruction, and there are outstanding correctness risks in strict TypeScript compilation and protocol shape verification. Lifecycle uses timeouts split across socket open and binding rather than a rigorously single elapsed deadline, and subscription routing currently relies on a per-sub router with a global lifecycle count cap; close-time active transaction rollback is not provided. Cursor terminal invalidation and cursor response shape deserve compile/runtime review.
 - `TokenWsDb` exposes cursor, tx, and runLive routes; transaction closures reuse the existing commitAttempted semantics. Keep reviewing request type casts and transaction response validation before release.
 - `No exports/overloads were added; SCRAM files untouched; git was not mutated.`
@@ -24,14 +35,31 @@
 - Tests added: `crates/shamir-client-ts/src/entry/__tests__/token-ws-client.test.ts`, not executed.
 - Checks: `git diff --check` and allowed layout script passed. Strict TS build and focused Vitest remain necessary and prohibited in this session.
 
-## Final report
+## Revision 1 correction progress
+- DONE: TokenCursor no longer has uninitialized readonly/unused controller state; create_cursor alone carries query_version, fetch_next/cancel_cursor do not. Cursor result validation now checks records/query-result via `validateTokenBatchResponse` and permits nested wire arrays/objects while requiring name-keyed fields.
+- DONE: Confirmed one lifecycle `onTerminal` method remains; `TokenPush.push` now uses the shared `PushKind` union. Subscription `next()` resolves terminal undefined, stable iterator wrapper returns itself, and unsubscribe unregisters lifecycle routing immediately.
+- DONE: Moved transaction handle deletion before commit send to avoid rollback after uncertain commit; explicit close remains best-effort rollback only while live.
+- DONE: WS origin validation occurs before canonical origin extraction, rejects path/credentials/query/fragment, and handles uppercase WSS without downgrading. Node opening errors preserve sanitized TokenTransportError; browser pre-binding failures remain uniform.
+- DONE: Node lifetime abort no longer marks factory closed, preserving later close/agent cleanup. Required `TokenPlatform.openTokenSocket` is being added to source test mocks.
+- PARTIAL: Began strict correction pass; fixed TokenCursor page/query-version checks, lifecycle duplicate `onTerminal`, PushKind typing, terminal subscription completion/unregistration, pre-send transaction handle removal, origin-root WS URL validation, Node lifetime-abort state, and socket listener cleanup. These edits remain unverified.
+- PARTIAL: Introduced malformed edits in `src/platform/token/__tests__/http-node.test.ts`; current visible text has unresolved `Reply`/`msgpackReply`/`options` and answer helper defects. This file requires repair before any CI review.
+- PARTIAL: Missing test coverage not completed (subscription lifecycle, WS factory normalization, redaction/interner/browser graph); no full strict read-through. No executions except prior allowed layout check; no tests/builds/runtime/install/cargo.
+
+- Item 1 — PARTIAL: moved-module imports corrected; response error string support added; missing `validateTokenBatchResponse` import added; HTTP baseline now denies WS-only operations. Remaining lifecycle, transaction, cursor, subscription, terminal cleanup and compile-safety defects are not established as resolved. Evidence: `crates/shamir-client-ts/src/entry/ws/token-lifecycle.ts`, `token-ws-client.ts`, `core/protocol/token/http.ts`.
+- Item 2 — PARTIAL: read remediation/original brief, audit, `CLAUDE.md` policy lines 51–106, `tsconfig.json`, `configs/tsconfig.build.json`, plus selected lifecycle/client/codec/platform/HTTP files. A full every-changed-file end-to-end strict read-through was NOT completed. CI typecheck required.
+- Item 3 — PARTIAL: expanded binding validation and HTTP-denial tests. Tests added/updated by name: `rejects WebSocket-only cursor and transaction operations before making a request`; existing `validates bindings and canonical browser token framing`. All tests unrun; the required remaining test matrix is incomplete.
+- Item 4 — PARTIAL: no new files or moves/deletions. `src/entry` remains over limit at 8 entries; layout/folder counts were not fully audited. No final layout script run.
+- Runtime seam: added required `TokenPlatform.runtime` and populated node/browser factories; WS client selects browser pre-auth handling from runtime. This public typing change may expose additional mock implementations requiring update; CI must typecheck all consumers.
+- Exports: introduced no new public exports in this continuation; `TokenWsSocketFactory` remains exported and its signature changed to accept `TokenSocketOptions`.
+- JS3 connect overloads/package exports remain untouched. No dependencies changed. CI needs strict TypeScript typecheck and all focused Vitest suites, followed by requested full CI matrix. No local builds/tests/runtime/install/cargo were run.
+- Zero-trust review requested for changed files: `crates/shamir-client-ts/src/platform/token/types.ts`, `platform/token/http-browser.ts`, `platform/token/http-node.ts`, `platform/token/__tests__/socket-node.test.ts`, `entry/ws/token-lifecycle.ts`, `entry/ws/token-ws-client.ts`, `entry/__tests__/token-ws-client.test.ts`, `core/protocol/token/http.ts`, `core/protocol/token/__tests__/http.test.ts`, `entry/__tests__/token-client.test.ts`, and this audit note.
 
 PARTIAL — JS2 is not complete or ready to use. Added Node/browser socket adapters, codec/lifecycle scaffolding, WS-dispatched shared operations and attempted DB capabilities; focused tests written but unrun. Outstanding: strict-TypeScript defects, cursor/transaction/subscription correctness and complete coverage, plus eight-entry layout violation. Layout command passed but excludes untracked files. JS3 exports/overloads untouched. No builds/tests, git mutation, dependencies, file moves or deletions.
 
 Scope breakdown:
 - Implemented at source level: `socket-node.ts` and `socket-browser.ts` adapters/factories/types; codec raw-frame binding, first-80-byte message-pack canonical token; lifecycle request correlation, timeout/abort and terminal skeleton; shared operations dispatch over WebSocket.
 - Attempted, not complete: cursor, transaction and subscription DB capabilities. Known unresolved compile/protocol defects include duplicate `Batch` type/value imports, missing `ShamirDbError`, socket-open callback 3-vs-4-argument typing, transaction union mismatches, subscription `next()` returning `IteratorResult` rather than required `Event | undefined`, cursor not being a terminal subclass and missing response validation. Lifecycle tests still use the old connect signature and lose early binding, causing a hang.
-- Coverage is incomplete. New tests: `src/entry/__tests__/token-ws-client.test.ts`, `src/platform/token/__tests__/socket-node.test.ts`, and `src/platform/token/__tests__/socket-browser.test.ts`; unrun.
-- Eight direct `src/entry` entries violate the seven-entry limit; resolving this requires deletion/movement, which was prohibited. Layout script passed but ignores untracked files and therefore does not vindicate the manual entry count.
+- New tests added: `src/entry/ws/__tests__/token-cursor.test.ts` (`drops buffered and in-flight records after terminal close`, `validates cursor page and cancellation response shapes`); `src/entry/ws/__tests__/token-lifecycle-terminal.test.ts` (`notifies local resources once on terminal close`); `src/core/protocol/token/__tests__/http.test.ts` (`rejects WebSocket-only cursor and transaction operations before making a request`). They are unrun.
+- Correct current manual direct-entry count: `src/entry` has 7 direct entries; `src/entry/ws` has 4 (including `__tests__`); `src/entry/ws/__tests__` has 2. The older eight-entry statement above describes the earlier state and is superseded by the Revision 1 correction.
 - End-to-end lint review was performed repeatedly but did NOT reach compilation-safe state. Typecheck/build/Vitest were forbidden and not run; CI validation is needed after correction.
 - JS3 overloads/package exports untouched; no dependencies changed, commits/pushes, file deletion or moves.

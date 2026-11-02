@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { encode } from '../../core/protocol/framing.js';
 import { decodeTokenBinding, encodeBrowserTokenFrame } from '../../core/protocol/token/ws.js';
 import { TokenTransportError } from '../../core/protocol/token/errors.js';
-import { TokenWsLifecycle } from '../token-lifecycle.js';
+import { TokenWsLifecycle } from '../ws/token-lifecycle.js';
 import type { TokenSocket, TokenSocketCloseEvent } from '../../platform/token/types.js';
 
 class MemorySocket implements TokenSocket {
@@ -19,7 +19,9 @@ describe('token websocket codec and lifecycle', () => {
   it('validates bindings and canonical browser token framing', () => {
     const token = `shk1.${'A'.repeat(22)}.${'A'.repeat(43)}`;
     expect(decodeTokenBinding(encode({ ok: true, sid, expires_at_ns: 12n })).expiresAtNs).toBe(12n);
-    expect(() => decodeTokenBinding(encode({ ok: true, sid: new Uint8Array(31), expires_at_ns: 12n }))).toThrow();
+    expect(() => decodeTokenBinding(encode({ ok: false, sid, expires_at_ns: 12n }))).toThrow();
+    expect(() => decodeTokenBinding(encode({ ok: true, sid: new Uint8Array(32), expires_at_ns: 0n }))).toThrow();
+    expect(() => decodeTokenBinding(encode({ ok: true, sid: new Uint8Array(32).fill(7), expires_at_ns: 12.5 }))).toThrow();
     expect(() => decodeTokenBinding(encode({ ok: true, sid, expires_at_ns: 12n, extra: true }))).toThrow();
     expect(encodeBrowserTokenFrame(token).byteLength).toBeLessThanOrEqual(256);
     expect(() => encodeBrowserTokenFrame('tkn_' + 'a'.repeat(67))).toThrow();

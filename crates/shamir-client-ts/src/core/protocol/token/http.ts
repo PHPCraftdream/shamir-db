@@ -78,9 +78,10 @@ export class TokenHttpTransport {
   async request(request: TokenHttpRequest, options: TokenRequestOptions = {}): Promise<TokenResponseMap> {
     if (!request || typeof request !== 'object') throw fail('token_request_denied');
     const op = (request as { op?: unknown }).op;
-    if (op !== 'ping' && op !== 'execute' && op !== 'wait_for_visibility' && op !== 'get_ddl_op_status' && op !== 'tx_begin' && op !== 'tx_execute' && op !== 'tx_commit' && op !== 'tx_rollback' && op !== 'create_cursor' && op !== 'fetch_next' && op !== 'cancel_cursor') {
+    if (op === 'tx_begin' || op === 'tx_execute' || op === 'tx_commit' || op === 'tx_rollback' || op === 'create_cursor' || op === 'fetch_next' || op === 'cancel_cursor') throw fail('not_supported_over_rest');
+    if (op !== 'ping' && op !== 'execute' && op !== 'wait_for_visibility' && op !== 'get_ddl_op_status') {
       if (['subscribe','unsubscribe'].includes(String(op))) throw fail('not_supported_over_rest');
-      throw fail(typeof op === 'string' && ['tx_begin','tx_execute','tx_commit','tx_rollback','create_cursor','fetch_next','cancel_cursor'].includes(op) ? 'not_supported_over_rest' : 'token_request_denied');
+      throw fail('token_request_denied');
     }
     if (this.closed) throw fail('connection_closed');
     const ping = request.op === 'ping';
