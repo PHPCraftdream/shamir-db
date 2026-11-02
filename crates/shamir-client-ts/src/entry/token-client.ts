@@ -18,7 +18,8 @@ export interface TokenHttpClient {
   executeWithTouch(db: string, batch: object): Promise<BatchResponse>;
   waitForVisibility(db: string, repo: string, version: bigint, wait: VisibilityWait): Promise<VisibilityState>;
   getDdlOpStatus(db: string, repo: string, table: string, opId: string): Promise<DdlOpStatus | null>;
-  db(name: string): TokenHttpDb; close(): Promise<void>;
+  db(name: string): TokenHttpDb;
+  close(): Promise<void>;
 }
 export type TokenPlatformFactory<T extends TokenHttpConnectOptions = TokenHttpConnectOptions> = (options: T) => TokenPlatform;
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Uint8Array); }
