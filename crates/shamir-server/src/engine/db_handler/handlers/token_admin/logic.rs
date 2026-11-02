@@ -420,17 +420,14 @@ async fn resolve_user(
         return Err(error("not_supported", "user directory is unavailable"));
     };
     let username = normalized.as_str().to_owned();
-    tokio::task::spawn_blocking(move || {
-        let id = directory
-            .user_id(&username)
-            .ok_or_else(|| error("not_found", "target user not found"))?;
-        let state = directory
-            .state_by_user_id(&id)
-            .ok_or_else(|| error("not_found", "target user not found"))?;
-        Ok((state, id))
+    let found = tokio::task::spawn_blocking(move || {
+        let id = directory.user_id(&username)?;
+        let state = directory.state_by_user_id(&id)?;
+        Some((state, id))
     })
     .await
-    .map_err(|_| error("internal", "user directory lookup failed"))?
+    .map_err(|_| error("internal", "user directory lookup failed"))?;
+    found.ok_or_else(|| error("not_found", "target user not found"))
 }
 async fn resolve_user_id(
     handler: &ShamirDbHandler,
@@ -443,13 +440,10 @@ async fn resolve_user_id(
     else {
         return Err(error("not_supported", "user directory is unavailable"));
     };
-    tokio::task::spawn_blocking(move || {
-        directory
-            .state_by_user_id(&user_id)
-            .ok_or_else(|| error("session_invalidated", "user no longer exists"))
-    })
-    .await
-    .map_err(|_| error("internal", "user directory lookup failed"))?
+    let state = tokio::task::spawn_blocking(move || directory.state_by_user_id(&user_id))
+        .await
+        .map_err(|_| error("internal", "user directory lookup failed"))?;
+    state.ok_or_else(|| error("session_invalidated", "user no longer exists"))
 }
 fn verify_hmac(
     session: &Session,
