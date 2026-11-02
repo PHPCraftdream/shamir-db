@@ -3,19 +3,21 @@
 use std::fs;
 use std::path::Path;
 
-use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, SeedInstallState};
-use shamir_db::engine::table::TableConfig;
+use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig, SeedInstallState, SeedTable};
 use shamir_db::storage::types::RecordKey;
 use shamir_db::{ShamirDb, SystemStoreConfig};
 use shamir_query_builder::doc;
-use shamir_types::codecs::interned::query_value_to_inner;
+use shamir_types::codecs::interned::{inner_value_to_query_value, query_value_to_inner};
+use shamir_types::types::record_id::RecordId;
 use tokio::runtime::{Builder, Runtime};
 
+use crate::replication_seed::codec::decode;
 use crate::replication_seed::error::invalid;
 use crate::replication_seed::exporter::export_open;
 use crate::replication_seed::install;
 use crate::replication_seed::install::installer::install_with;
 use crate::replication_seed::install::staging::{destination, open_image};
+use crate::replication_seed::{verify, Manifest};
 
 fn runtime() -> Runtime {
     Builder::new_current_thread().enable_all().build().unwrap()
@@ -54,6 +56,131 @@ async fn artifact(root: &Path) -> String {
     export_open(&source, "app", "main", root, 1024)
         .await
         .unwrap()
+}
+
+async fn artifact_with_source_id(root: &Path) -> (String, String, Vec<RecordId>) {
+    let source = ShamirDb::init_memory().await.unwrap();
+    source.create_db("app").await.expect("create_db");
+    source
+        .add_repo("app", RepoConfig::new("main", BoxRepoFactory::in_memory()))
+        .await
+        .unwrap();
+    source
+        .add_table("app", "main", "rows", false)
+        .await
+        .unwrap();
+    source
+        .add_table("app", "main", "empty", false)
+        .await
+        .unwrap();
+    let repo = source.get_db("app").unwrap().get_repo("main").unwrap();
+    let table = repo.get_table("rows").await.unwrap();
+    let rows = [
+        query_value_to_inner(
+            &doc! { "name" => "first" }.into(),
+            table.interner_for_test().get().await.unwrap(),
+        )
+        .unwrap(),
+        query_value_to_inner(
+            &doc! { "name" => "second" }.into(),
+            table.interner_for_test().get().await.unwrap(),
+        )
+        .unwrap(),
+    ];
+    let ids = table.insert_many(&rows).await.unwrap();
+    let hash = export_open(&source, "app", "main", root, 1024)
+        .await
+        .unwrap();
+    let record = source
+        .system_store()
+        .load_table_record("app", "main", "rows")
+        .await
+        .unwrap()
+        .unwrap();
+    let id = record["store_id"].as_str().unwrap().to_owned();
+    (hash, id, ids)
+}
+
+#[test]
+fn imported_seed_ids_are_node_local_persisted_and_digest_is_logical() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("artifact");
+    let second = dir.path().join("artifact-after-recreation");
+    let data = dir.path().join("data");
+    let rt = runtime();
+    let (hash, source_id, ids) = rt.block_on(artifact_with_source_id(&seed));
+    let manifest: Manifest = decode(&fs::read(seed.join("manifest.mpack")).unwrap()).unwrap();
+    assert_eq!(verify(&seed).unwrap(), hash);
+    rt.block_on(install(&data, "app", "main", &seed, &hash))
+        .unwrap();
+    drop(rt);
+    let rt = runtime();
+    let after_hash = rt.block_on(async {
+        let home = ShamirDb::init_seed(SystemStoreConfig::Fjall(data.join("shamir_db_meta.redb")))
+            .await
+            .unwrap();
+        let record = home
+            .system_store()
+            .load_table_record("app", "main", "rows")
+            .await
+            .unwrap()
+            .unwrap();
+        let imported_id = record["store_id"].as_str().unwrap().to_owned();
+        assert_ne!(source_id, imported_id);
+        let repo = home.get_db("app").unwrap().get_repo("main").unwrap();
+        let rows = repo.get_table("rows").await.unwrap();
+        assert_eq!(rows.counter_for_test().get().await.unwrap(), 2);
+        let values = rows.get_many(&ids).await.unwrap();
+        assert_eq!(values.len(), 2);
+        assert!(values.iter().all(Option::is_some));
+        let interner = repo.repo_interner().await.unwrap();
+        for (value, expected) in values.iter().zip(["first", "second"]) {
+            let decoded =
+                inner_value_to_query_value(value.as_ref().unwrap(), interner.get().await.unwrap())
+                    .unwrap();
+            assert_eq!(decoded, doc! { "name" => expected }.build());
+        }
+        home.rename_table("app", "main", "rows", "renamed")
+            .await
+            .unwrap();
+        let renamed = home
+            .system_store()
+            .load_table_record("app", "main", "renamed")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(renamed["store_id"].as_str(), Some(imported_id.as_str()));
+        home.rename_table("app", "main", "renamed", "rows")
+            .await
+            .unwrap();
+        let recreated = home
+            .system_store()
+            .load_table_record("app", "main", "rows")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(recreated["store_id"].as_str(), Some(imported_id.as_str()));
+        assert_ne!(recreated["store_id"].as_str(), Some(source_id.as_str()));
+        export_open(&home, "app", "main", &second, 1024)
+            .await
+            .unwrap()
+    });
+    drop(rt);
+    let after: Manifest = decode(&fs::read(second.join("manifest.mpack")).unwrap()).unwrap();
+    assert_eq!(after.schema_sha256, manifest.schema_sha256);
+    assert_eq!(
+        after
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect::<Vec<_>>(),
+        manifest
+            .tables
+            .iter()
+            .map(|table| table.name.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(verify(&second).unwrap(), after_hash);
 }
 
 #[test]
@@ -107,9 +234,17 @@ fn every_publication_boundary_cold_retry_converges_without_row_replay() {
                     if entry.file_name().to_string_lossy().contains("-attempt-") {
                         let image = open_image(&entry.path(), "main").await.unwrap();
                         if stop == 6 {
+                            let info = image.tx_info_store().await.unwrap();
+                            let configs = SeedTable::load_configs(&info).await.unwrap();
                             let permit = image.write_domain().admit().await.unwrap();
                             image
-                                .add_table_admitted(TableConfig::new("rows"), &permit)
+                                .add_table_admitted(
+                                    configs
+                                        .into_iter()
+                                        .find(|config| config.name == "rows")
+                                        .unwrap(),
+                                    &permit,
+                                )
                                 .await
                                 .unwrap();
                             drop(permit);

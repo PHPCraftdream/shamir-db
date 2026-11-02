@@ -641,6 +641,12 @@ async fn create_repo_via_execute_persists_to_catalogue() {
                 && t["table_name"] == "events"),
             "CreateRepo must persist the inline table catalogue"
         );
+        assert!(tables
+            .iter()
+            .find(|t| t["table_name"] == "events")
+            .unwrap()
+            .get("store_id")
+            .is_some());
     }
 
     // === Session 2: re-init over the SAME system store ===

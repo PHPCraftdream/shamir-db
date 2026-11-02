@@ -412,7 +412,11 @@ impl ShamirAdminExecutor {
 
         let mut config = RepoConfig::new(&op.create_repo, factory);
         for table_name in &op.tables {
-            config = config.add_table(TableConfig::new(table_name));
+            let table = TableConfig::new(table_name).with_new_store_id();
+            table
+                .validate_store_name()
+                .map_err(|error| err(error.to_string()))?;
+            config = config.add_table(table);
         }
 
         self.shamir

@@ -428,11 +428,18 @@ impl ShamirDb {
         // Capture the inline table list before `config` is moved into
         // `db.add_repo`, so the per-repo table catalogue can be persisted
         // alongside the repo record (I.2).
-        let inline_tables: Vec<(String, bool)> = config
+        let mut config = config;
+        for table in &mut config.tables {
+            if table.store_id.is_none() {
+                *table = table.clone().with_new_store_id();
+            }
+            table.validate_store_name()?;
+        }
+        let inline_tables = config
             .tables
             .iter()
-            .map(|t| (t.name.clone(), t.enable_indexes))
-            .collect();
+            .map(|t| (t.name.clone(), t.enable_indexes, t.store_id))
+            .collect::<Vec<_>>();
 
         // DbInstance recovers and certifies before registry insertion.
         // A `Some` override is resolved against the server-default policy
@@ -481,16 +488,23 @@ impl ShamirDb {
         // Persist the inline table catalogue so these tables are re-created
         // on the next open (I.2). Best-effort per table, matching the
         // repo-record persistence above.
-        for (table_name, enable_indexes) in &inline_tables {
+        for (table_name, enable_indexes, store_id) in &inline_tables {
             if let Err(e) = self
                 .system_store
-                .save_table(db_name, &repo_name, table_name, *enable_indexes, &meta)
+                .save_table(
+                    db_name,
+                    &repo_name,
+                    table_name,
+                    *enable_indexes,
+                    store_id.as_ref(),
+                    &meta,
+                )
                 .await
             {
                 // RV-DB-6540DC7B: failed inline catalogue persistence must not
                 // return success with a live repo that won't reload correctly.
                 db.remove_repo(&repo_name).await;
-                for (persisted_name, _) in &inline_tables {
+                for (persisted_name, _, _) in &inline_tables {
                     if let Err(cleanup_error) = self
                         .system_store
                         .remove_table(db_name, &repo_name, persisted_name)

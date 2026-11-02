@@ -1,9 +1,13 @@
-use crate::repo::repo_instance::RepoInstance;
+use crate::repo::instance::repo_instance::table_store::{new_table_store_id, table_store_names};
+use crate::repo::instance::repo_instance::RepoInstance;
 use crate::repo::repo_types::{BoxRepo, MemBufferRepoComposite};
 use crate::table::table_manager::table_token_for;
 use crate::table::TableConfig;
+use futures::StreamExt;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::storage_membuffer::MemBufferConfig;
+use shamir_storage::types::Repo;
+use shamir_tx::{IsolationLevel, Retention};
 use shamir_types::types::value::InnerValue;
 use std::sync::Arc;
 
@@ -28,6 +32,96 @@ fn create_membuffer_wrapped_instance() -> RepoInstance {
     };
     let repo = BoxRepo::MemBuffer(Arc::new(MemBufferRepoComposite { inner, config }));
     RepoInstance::new("mb_test".into(), repo, vec![TableConfig::new("items")])
+}
+
+#[tokio::test]
+async fn rename_membuffer_wrapped_table_flushes_copied_history() {
+    let instance = create_membuffer_wrapped_instance();
+    let source = instance.get_table("items").await.unwrap();
+    let values: Vec<_> = (0..300)
+        .map(|index| InnerValue::Str(format!("value-{index}")))
+        .collect();
+    let ids = source.insert_many(&values).await.unwrap();
+
+    assert!(instance
+        .rename_table_stores("items", "renamed")
+        .await
+        .unwrap());
+
+    let destination = instance.get_table("renamed").await.unwrap();
+    assert_eq!(
+        destination.get_many(&ids).await.unwrap(),
+        values.iter().cloned().map(Some).collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn generated_table_store_id_survives_lazy_open_and_legacy_config_stays_legacy() {
+    let id = new_table_store_id();
+    let repo = Arc::new(InMemoryRepo::new());
+    let instance = RepoInstance::new(
+        "identity_test".into(),
+        BoxRepo::InMemory(repo.clone()),
+        vec![
+            TableConfig::new("fresh").with_store_id(id),
+            TableConfig::new("legacy"),
+        ],
+    );
+    let fresh_names = table_store_names("fresh", Some(&id));
+    let legacy_names = table_store_names("legacy", None);
+    instance.get_table("fresh").await.unwrap();
+    instance.get_table("legacy").await.unwrap();
+    let stores = repo.stores_list().await.unwrap();
+    for expected in [
+        fresh_names.data.as_str(),
+        fresh_names.info.as_str(),
+        fresh_names.history.as_str(),
+        legacy_names.data.as_str(),
+        legacy_names.info.as_str(),
+        legacy_names.history.as_str(),
+    ] {
+        assert!(
+            stores.iter().any(|name| name == expected),
+            "missing {expected}"
+        );
+    }
+    for unsuffixed in ["__data__fresh", "__info__fresh", "__history__fresh"] {
+        assert!(!stores.iter().any(|name| name == unsuffixed));
+    }
+    assert_ne!(fresh_names.data, legacy_names.data);
+}
+
+#[tokio::test]
+async fn generated_table_store_id_survives_drop_and_recreate() {
+    let repo = Arc::new(InMemoryRepo::new());
+    let old_id = new_table_store_id();
+    let instance = RepoInstance::new(
+        "recreate_test".into(),
+        BoxRepo::InMemory(repo.clone()),
+        vec![TableConfig::new("items").with_store_id(old_id)],
+    );
+    let first = instance.get_table("items").await.unwrap();
+    let values = [InnerValue::Str("retained".into())];
+    let ids = first.insert_many(&values).await.unwrap();
+    assert_eq!(first.get(ids[0]).await.unwrap(), values[0]);
+    let old_names = table_store_names("items", Some(&old_id));
+
+    assert!(instance.remove_table_for_test("items"));
+    let new_id = new_table_store_id();
+    instance.add_table_for_test(TableConfig::new("items").with_store_id(new_id));
+    let recreated = instance.get_table("items").await.unwrap();
+    let new_names = table_store_names("items", Some(&new_id));
+    let stores = repo.stores_list().await.unwrap();
+    for old in [&old_names.data, &old_names.info, &old_names.history] {
+        assert!(stores.contains(old), "old store {old} should remain");
+    }
+    for new in [&new_names.data, &new_names.info, &new_names.history] {
+        assert!(stores.contains(new), "new store {new} should exist");
+    }
+    assert_ne!(old_names.data, new_names.data);
+    assert_ne!(old_names.info, new_names.info);
+    assert_ne!(old_names.history, new_names.history);
+    assert_eq!(recreated.get_many(&ids).await.unwrap(), vec![None]);
 }
 
 #[tokio::test]
@@ -414,7 +508,6 @@ async fn l14_mvcc_write_does_not_touch_data_store() {
     // The raw data_store should have zero entries — MVCC writes go to
     // history, not __data__.
     let mut stream = table.data_store().iter_stream(64);
-    use futures::StreamExt;
     let mut count = 0usize;
     while let Some(batch) = stream.next().await {
         count += batch.unwrap().len();
@@ -454,8 +547,6 @@ async fn l5_repeated_read_hits_cache() {
 /// deleted version.
 #[tokio::test]
 async fn l5_vacuum_does_not_resurrect_from_cache() {
-    use shamir_tx::Retention;
-
     let instance = create_membuffer_wrapped_instance();
     let table = instance.get_table("items").await.unwrap();
     let mvcc = table
@@ -570,8 +661,6 @@ async fn a13_remove_table_clears_per_table_mvcc_entry() {
 /// sees nothing — committed data silently vanishes.
 #[tokio::test]
 async fn a13_drop_then_recreate_write_visible_through_new_table() {
-    use shamir_tx::IsolationLevel;
-
     let instance = create_test_instance();
     instance.add_table_for_test(TableConfig::new("t"));
 
