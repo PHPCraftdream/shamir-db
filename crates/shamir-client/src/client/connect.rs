@@ -442,6 +442,11 @@ impl Client {
             server_nonce,
         };
 
+        challenge
+            .kdf_params
+            .validate_client_limits()
+            .map_err(|error| ClientError::handshake_with(error.to_string(), error))?;
+
         // Step 3: derive proof (Argon2id ~50ms-2s — spawn_blocking so
         // it doesn't stall the tokio worker thread).
         // Wrap the working copy in `Zeroizing` so it is wiped on EVERY exit
@@ -559,6 +564,11 @@ impl Client {
             },
             server_nonce,
         };
+
+        challenge
+            .kdf_params
+            .validate_client_limits()
+            .map_err(|error| ClientError::handshake_with(error.to_string(), error))?;
 
         // Step 3: derive proof (Argon2id — spawn_blocking, see `connect`).
         let mut password_buf = Zeroizing::new(opts.password.to_vec());

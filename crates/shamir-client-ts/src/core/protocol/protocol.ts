@@ -11,20 +11,13 @@ import { WsFramer, encode, decode } from './framing.js';
 import {
   buildAuthMessage,
   computeClientProof,
+  validateKdfParams,
   verifyServerSignature,
-  ARGON2_VERSION_13,
   TRANSPORT_KIND_WS,
   BINDING_MODE_TLS_NO_EXPORT,
   SUPPORTED_VERSION,
   type KdfParams,
 } from './scram.js';
-
-/** Pre-validation bounds for KDF params from the server challenge. */
-const KDF_LIMITS = {
-  maxMemoryKb: 262144,
-  maxTime: 8,
-  maxParallelism: 8,
-};
 
 /**
  * rmp_serde (the Rust msgpack library) serialises structs as **arrays**
@@ -139,20 +132,7 @@ export async function runHandshake(
     parallelism: chArr[CH_PARALLELISM] as number,
     argon2Version: chArr[CH_ARGON2_VERSION] as number,
   };
-  if (kdf.memoryKb > KDF_LIMITS.maxMemoryKb) {
-    throw new Error(`challenge memory_kb ${kdf.memoryKb} exceeds limit`);
-  }
-  if (kdf.time > KDF_LIMITS.maxTime) {
-    throw new Error(`challenge time ${kdf.time} exceeds limit`);
-  }
-  if (kdf.parallelism > KDF_LIMITS.maxParallelism) {
-    throw new Error(`challenge parallelism ${kdf.parallelism} exceeds limit`);
-  }
-  if (kdf.argon2Version !== ARGON2_VERSION_13) {
-    throw new Error(
-      `challenge argon2_version must be 0x13, got ${kdf.argon2Version}`,
-    );
-  }
+  validateKdfParams(kdf);
   if (salt.length !== 16) throw new Error('challenge salt must be 16 bytes');
   if (serverNonce.length !== 32) {
     throw new Error('challenge server_nonce must be 32 bytes');
