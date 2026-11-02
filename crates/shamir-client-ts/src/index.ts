@@ -1,4 +1,10 @@
 import { ShamirClient } from './core/client/client.js';
+import { loginNode as login } from './login/node/node.js';
+export { login };
+export { LoginError } from './login/errors.js';
+export type { LoginErrorCode } from './login/errors.js';
+export type { LoginOptions, LoginResult, LoginMetadata, LoginScope } from './login/types.js';
+
 import { NodePlatform } from './platform/node.js';
 import type { ConnectOptions, ConnectLocalOptions, ResumeOptions, NodeConnectOptions, NodeTokenConnectOptions } from './core/types/connection.js';
 import { connectTokenNode } from './platform/connect/node-connect.js';
