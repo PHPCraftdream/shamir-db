@@ -38,6 +38,7 @@ fn config_with_short_timeout(temp: &TempDir, timeout_ms: u64) -> Config {
     Config {
         durability: Default::default(),
         transactions: Default::default(),
+        tokens: Default::default(),
         data_dir: data_dir.clone(),
         logging: LoggingConfig {
             level: "warn".into(),
@@ -89,6 +90,7 @@ async fn silent_client_after_tls_is_dropped_within_timeout() {
     let cfg = config_with_short_timeout(&temp, 300);
     let launcher = ServerLauncher {
         config: cfg,
+        node_mode: Default::default(),
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(b"hunter2".to_vec()),

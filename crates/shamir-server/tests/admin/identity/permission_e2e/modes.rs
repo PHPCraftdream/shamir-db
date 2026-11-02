@@ -18,7 +18,11 @@ async fn permission_deny_allow_by_mode() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");
 
@@ -174,7 +178,11 @@ async fn permission_group_grant() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = match launcher.launch().await {
         Ok(h) => h,
         Err(e) => panic!("launcher boot failed: {e}"),
@@ -436,7 +444,11 @@ async fn permission_open_default_allows_any_user() {
         password: Zeroizing::new(admin_pw.clone()),
     };
 
-    let launcher = ServerLauncher { config, bootstrap };
+    let launcher = ServerLauncher {
+        config,
+        bootstrap,
+        node_mode: Default::default(),
+    };
     let handle = launcher.launch().await.expect("launcher boot");
     let server_addr = handle.first_tls_exporter_addr().expect("bound address");
 

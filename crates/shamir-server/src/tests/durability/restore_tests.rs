@@ -318,15 +318,15 @@ fn preexisting_temp_dir_name_collision_still_reports_already_exists() {
     // `{parent}/{data_dir_name}.restore_tmp_{stamp}` where `stamp` is a
     // second-granularity UTC `YYYYMMDD_HHMMSS` timestamp taken INSIDE
     // `restore()` itself -- there is no hook to read it back directly, so
-    // pre-create a collision directory at EVERY name `restore()`'s internal
-    // call could possibly produce: `now` and `now + 1s`. `restore()`'s own
-    // read happens strictly after this one, so it lands in one of exactly
-    // these two seconds -- never earlier, never more than one second later.
+    // pre-create a collision directory at every name `restore()`'s internal
+    // call can produce within a generous window after this read: a loaded CI
+    // runner can delay `restore()` well past one second. Its own read happens
+    // strictly after this one, so it never lands earlier.
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    for secs in [now_secs, now_secs + 1] {
+    for secs in now_secs..=now_secs + 120 {
         let stamp = crate::backup::utc_timestamp_at(secs);
         let temp_dir = root.path().join(format!("data_dir.restore_tmp_{stamp}"));
         fs::create_dir_all(&temp_dir).unwrap();

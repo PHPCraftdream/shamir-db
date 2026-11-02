@@ -200,6 +200,11 @@ enum Subcmd {
         #[command(subcommand)]
         action: ServiceAction,
     },
+    /// Manage API tokens in a stopped data directory.
+    Token {
+        #[command(subcommand)]
+        action: shamir_server::tokens::cli::TokenAction,
+    },
 
     /// Verify and optionally repair table integrity. **Offline only** — the
     /// server for this `data_dir` must be stopped first (opens the data
@@ -423,6 +428,10 @@ async fn run_async(cli: Cli) -> anyhow::Result<u8> {
                     shamir_server::service::status()?;
                 }
             }
+            return Ok(0);
+        }
+        Some(Subcmd::Token { action }) => {
+            shamir_server::tokens::cli::run(&config, action).await?;
             return Ok(0);
         }
         Some(Subcmd::Doctor {
