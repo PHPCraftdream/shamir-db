@@ -38,7 +38,8 @@ async fn seed_e2e_b_second_crash_reseeds_and_equal_horizon_continues_body() {
     let seed2 = root.path().join("seed-2");
     let home1 = root.path().join("home-1");
     let home2 = root.path().join("home-2");
-    let addr = child::free_addr();
+    let port_lease = child::free_addr();
+    let addr = port_lease.addr;
     let upstream = format!("tcp://{addr}");
 
     // -- Leader v1: writes, unclean kill, WAL repair, explicit gap, export. --
