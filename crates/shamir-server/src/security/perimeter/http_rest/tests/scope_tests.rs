@@ -295,6 +295,27 @@ fn top_level_admin_requests_are_denied_using_typed_variants() {
             node_id: "n".into(),
             capabilities: None,
         }),
+        DbRequest::CreateApiToken {
+            label: "t".into(),
+            ttl_secs: None,
+            mode: None,
+            channels: None,
+            databases: None,
+            for_user: None,
+            hmac: None,
+        },
+        DbRequest::ListApiTokens {
+            for_user: None,
+            hmac: None,
+        },
+        DbRequest::RevokeApiToken {
+            id: "t".into(),
+            hmac: None,
+        },
+        DbRequest::RevokeUserTokens {
+            user: None,
+            hmac: None,
+        },
     ];
     for request in requests {
         assert_eq!(
