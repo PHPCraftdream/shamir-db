@@ -3413,6 +3413,7 @@ dependencies = [
  "aes-gcm",
  "arc-swap",
  "argon2",
+ "base64",
  "bench-scale-tool",
  "dashmap",
  "ed25519-dalek",
@@ -3821,6 +3822,24 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "shamir-transport-http"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rustls",
+ "shamir-transport-tcp",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -4350,6 +4369,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

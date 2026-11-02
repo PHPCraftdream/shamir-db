@@ -10,7 +10,9 @@
 
 use crate::common::time::{ns, UnixNanos};
 use crate::common::types::{limits, BindingMode, TransportKind};
+use crate::server::auth::token::verify::Verified;
 use crate::server::state::admission::{Admission, AdmitReject, Sid, ACTIVE_WINDOW_NS};
+use crate::server::state::origin::SessionOrigin;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use smallvec::SmallVec;
@@ -114,6 +116,7 @@ impl core::fmt::Debug for Session {
             .field("transport_kind", &self.transport_kind)
             .field("binding_mode", &self.binding_mode)
             .field("channel_binding_at_auth", &"<REDACTED:32>")
+            .field("origin", &self.origin)
             .field("pending_changepw_challenge", &"<ArcSwapOption>")
             .finish()
     }
@@ -161,6 +164,8 @@ pub struct Session {
     /// stolen-ticket replay; see `resume.rs`'s `process_resume` for the full
     /// reasoning and the follow-up task tracking a correct fix).
     pub channel_binding_at_auth: [u8; 32],
+    /// Authentication origin; token origins are server-only and never enter the wire protocol.
+    pub origin: SessionOrigin,
     /// In-flight changePassword challenge state.
     ///
     /// Lock-free: `ArcSwapOption` over `Arc<PendingChangePwChallenge>`.
@@ -244,12 +249,38 @@ impl Session {
             transport_kind,
             binding_mode,
             channel_binding_at_auth,
+            origin: SessionOrigin::Scram,
             pending_changepw_challenge: ArcSwapOption::const_empty(),
             post_auth_bucket: PostAuthBucket {
                 micro_tokens: AtomicU64::new(PostAuthBucket::capacity()),
                 last_refill_at_ns: AtomicU64::new(now_ns),
             },
         }
+    }
+
+    /// Construct a token session using the verified owner's role snapshot. Fixed SCRAM-only fields are filler and never exposed.
+    pub fn for_token(
+        verified: &Verified,
+        username: String,
+        now_ns: u64,
+        session_id: [u8; 32],
+    ) -> Self {
+        let record = verified.state.record();
+        let owner = record.owner_user_id;
+        let mut session = Self::new(
+            owner,
+            username,
+            SessionPermissions::new(false, false, record.roles.clone()),
+            TransportKind::WebSocket,
+            BindingMode::None,
+            [0; 32],
+            now_ns,
+        );
+        session.session_id = session_id;
+        session.origin = SessionOrigin::Token(crate::server::state::origin::TokenOrigin {
+            state: Arc::clone(&verified.state),
+        });
+        session
     }
 
     /// Derive the per-session HMAC key from `session_id`. Delegates to
