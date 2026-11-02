@@ -442,6 +442,10 @@ pub enum DbResponse {
         ///   bad enum value (e.g. `durability: "syncedd"`); the offending
         ///   field is named in the message.
         /// - Destructive-op HMAC gate: `hmac_required`, `hmac_mismatch`.
+        /// - API-token administration: `token_label_exists`, `token_limit_reached`,
+        ///   `token_ttl_invalid`, `token_not_found`, `token_browser_session`,
+        ///   `token_request_denied`, `token_self_service_disabled`,
+        ///   `session_invalidated`, `invalid_username`, `not_found`, `internal`.
         /// - Batch / planner: `limits`, `validation`, `query`, `timeout`,
         ///   `lock_timeout`, `nesting_too_deep`, `unknown_db`, `not_supported`,
         ///   `user_exists`.

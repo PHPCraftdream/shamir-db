@@ -302,14 +302,56 @@ fn admin_hmac_v2_fixture_matches_all_op_tags_and_tags_f1dc8e9a() {
         .try_into()
         .expect("32-byte session id");
     let key = derive_session_hmac_key(&session);
-    assert_eq!(fixture.vectors.len(), 31);
+    assert_eq!(fixture.vectors.len(), 35);
     let mut seen = BTreeSet::new();
     for v in &fixture.vectors {
         let tag: u16 = u16::from_str_radix(&v.op_tag, 16).expect("op tag hex");
-        assert!((1..=31).contains(&tag), "unexpected tag {}", v.op_tag);
+        assert!((1..=35).contains(&tag), "unexpected tag {}", v.op_tag);
         assert!(seen.insert(tag), "duplicate op tag {}", v.op_tag);
         let db = opt_string(&v.fields, "db").unwrap_or_default();
         let canonical = match v.op.as_str() {
+            "create_api_token" => canonical_db_request(&DbRequest::CreateApiToken {
+                label: string(&v.fields, "label"),
+                ttl_secs: opt_u64(&v.fields, "ttl_secs"),
+                mode: opt_string(&v.fields, "mode").map(|value| match value.as_str() {
+                    "read_only" => crate::wire::ApiTokenMode::ReadOnly,
+                    "read_write" => crate::wire::ApiTokenMode::ReadWrite,
+                    other => panic!("unknown token mode {other}"),
+                }),
+                channels: opt_string(&v.fields, "channels").map(|value| match value.as_str() {
+                    "rest" => crate::wire::ApiTokenChannels::Rest,
+                    "ws" => crate::wire::ApiTokenChannels::Ws,
+                    "both" => crate::wire::ApiTokenChannels::Both,
+                    other => panic!("unknown token channels {other}"),
+                }),
+                databases: v
+                    .fields
+                    .get("databases")
+                    .filter(|value| !value.is_null())
+                    .map(|_| strings(&v.fields, "databases")),
+                for_user: opt_string(&v.fields, "for_user"),
+                hmac: None,
+            })
+            .map_err(|error| format!("canonical encoding failed: {error:?}"))
+            .expect("create_api_token canonical encoding"),
+            "list_api_tokens" => canonical_db_request(&DbRequest::ListApiTokens {
+                for_user: opt_string(&v.fields, "for_user"),
+                hmac: None,
+            })
+            .map_err(|error| format!("canonical encoding failed: {error:?}"))
+            .expect("list_api_tokens canonical encoding"),
+            "revoke_api_token" => canonical_db_request(&DbRequest::RevokeApiToken {
+                id: string(&v.fields, "id"),
+                hmac: None,
+            })
+            .map_err(|error| format!("canonical encoding failed: {error:?}"))
+            .expect("revoke_api_token canonical encoding"),
+            "revoke_user_tokens" => canonical_db_request(&DbRequest::RevokeUserTokens {
+                user: opt_string(&v.fields, "user"),
+                hmac: None,
+            })
+            .map_err(|error| format!("canonical encoding failed: {error:?}"))
+            .expect("revoke_user_tokens canonical encoding"),
             "set_superuser" => canonical_db_request(&DbRequest::SetSuperuser {
                 user: string(&v.fields, "user"),
                 on: boolean(&v.fields, "on"),
@@ -366,5 +408,5 @@ fn admin_hmac_v2_fixture_matches_all_op_tags_and_tags_f1dc8e9a() {
             v.op_tag
         );
     }
-    assert_eq!(seen, (1u16..=31).collect());
+    assert_eq!(seen, (1u16..=35).collect());
 }

@@ -52,6 +52,16 @@ async fn self_create_defaults_once_lists_no_secret_and_revoke_invalidates_bearer
             .await,
         DbResponse::ApiTokenRevoked
     ));
+    let retained = f
+        .service
+        .list(f.other.user_id)
+        .await
+        .expect("list retained token");
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].revoked_at_ns, Some(NOW));
+    assert!(retained[0]
+        .revoked_at_ns
+        .is_some_and(|revoked_at| revoked_at >= retained[0].created_at_ns));
     assert!(f
         .service
         .verify(bearer.as_bytes(), Endpoint::Rest, NOW)
@@ -80,6 +90,7 @@ async fn self_create_enforces_labels_ttl_default_maximum_and_per_user_limit() {
     else {
         panic!("created")
     };
+    assert!(created_at_ns >= NOW);
     assert_eq!(mode, shamir_query_types::wire::ApiTokenMode::ReadOnly);
     assert_eq!(channels, shamir_query_types::wire::ApiTokenChannels::Both);
     assert_eq!(

@@ -3,7 +3,7 @@
 use super::common::{Fixture, NOW, OTHER, OWNER};
 use crate::boot::config::TokensConfig;
 use crate::engine::db_handler::handlers::token_admin::finalize_created;
-use crate::security::tokens::{CreatedToken, NewToken};
+use crate::security::tokens::{CreatedToken, NewToken, TokenAuditContext};
 use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::token::{TokenChannels, TokenId, TokenMode};
 use shamir_query_types::wire::DbResponse;
@@ -14,15 +14,18 @@ async fn create_for(f: &Fixture, label: &str) -> CreatedToken {
         .state_by_user_id(&f.other.user_id)
         .expect("target state");
     f.service
-        .create(NewToken {
-            owner_user_id: state.user_id,
-            owner_roles: state.roles.clone(),
-            label: label.into(),
-            ttl_secs: None,
-            mode: TokenMode::ReadOnly,
-            channels: TokenChannels::Both,
-            databases: None,
-        })
+        .create_with_context(
+            NewToken {
+                owner_user_id: state.user_id,
+                owner_roles: state.roles.clone(),
+                label: label.into(),
+                ttl_secs: None,
+                mode: TokenMode::ReadOnly,
+                channels: TokenChannels::Both,
+                databases: None,
+            },
+            TokenAuditContext::default(),
+        )
         .await
         .expect("token create")
 }
@@ -34,7 +37,10 @@ async fn assert_revoked(f: &Fixture, id: [u8; 16]) {
         .await
         .expect("lookup")
         .expect("retained record");
-    assert!(retained.revoked_at_ns.is_some());
+    assert_eq!(retained.revoked_at_ns, Some(NOW));
+    assert!(retained
+        .revoked_at_ns
+        .is_some_and(|revoked_at| revoked_at >= retained.created_at_ns));
     assert!(f
         .service
         .mirror()

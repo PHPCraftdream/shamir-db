@@ -1,12 +1,12 @@
 //! Token administration implementation and authorization helpers.
 
+use super::audit_context::audit_context;
 use crate::db_handler::config::NodeMode;
 use crate::db_handler::handler::ShamirDbHandler;
 use crate::security::tokens::{CreatedToken, NewToken, TokenCreateError, TokenView};
 use crate::security::user_directory::UserDirectoryState;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::BindingMode;
 use shamir_connect::common::username::NormalizedUsername;
 use shamir_connect::server::admin::UserDirectory;
@@ -124,15 +124,18 @@ async fn create(
         return error("session_invalidated", "session is no longer valid");
     }
     let created = match service
-        .create(NewToken {
-            owner_user_id: owner_id,
-            owner_roles: owner_state.roles.clone(),
-            label: label.clone(),
-            ttl_secs: *ttl_secs,
-            mode: api_token_mode(*mode),
-            channels: api_token_channels(*channels),
-            databases: databases.clone(),
-        })
+        .create_with_context(
+            NewToken {
+                owner_user_id: owner_id,
+                owner_roles: owner_state.roles.clone(),
+                label: label.clone(),
+                ttl_secs: *ttl_secs,
+                mode: api_token_mode(*mode),
+                channels: api_token_channels(*channels),
+                databases: databases.clone(),
+            },
+            audit_context(session),
+        )
         .await
     {
         Ok(created) => created,
@@ -149,11 +152,11 @@ pub(in crate::engine::db_handler) async fn finalize_created(
 ) -> DbResponse {
     let service = match handler.token_service.as_ref() {
         Some(service) => service,
-        None => return rollback_invalidated(handler, created).await,
+        None => return rollback_invalidated(handler, session, created).await,
     };
     match recheck_created(handler, session, owner_snapshot, &created).await {
         Ok(true) => created_response(created, &owner_snapshot.username),
-        Ok(false) | Err(()) => rollback_invalidated_with(service, created).await,
+        Ok(false) | Err(()) => rollback_invalidated_with(service, session, created).await,
     }
 }
 /// Recheck caller validity and target owner identity, role, and token floor after issuance.
@@ -184,24 +187,29 @@ pub(crate) async fn recheck_created(
         && created.record_view.owner_user_id == owner_snapshot.user_id
         && created.record_view.created_at_ns > fresh_owner.tickets_invalid_before_ns)
 }
-async fn rollback_invalidated(handler: &ShamirDbHandler, created: CreatedToken) -> DbResponse {
+async fn rollback_invalidated(
+    handler: &ShamirDbHandler,
+    session: &Session,
+    created: CreatedToken,
+) -> DbResponse {
     let Some(service) = handler.token_service.as_ref() else {
         return error(
             "internal",
             "created token rollback failed after session invalidation",
         );
     };
-    rollback_invalidated_with(service, created).await
+    rollback_invalidated_with(service, session, created).await
 }
 async fn rollback_invalidated_with(
     service: &crate::security::tokens::TokenService,
+    session: &Session,
     created: CreatedToken,
 ) -> DbResponse {
-    let at = UnixNanos::try_now()
-        .map(|now| now.as_u64())
-        .unwrap_or_else(|_| created.record_view.created_at_ns.saturating_add(1));
+    let at = service
+        .now_ns()
+        .unwrap_or_else(|| created.record_view.created_at_ns.saturating_add(1));
     if service
-        .revoke(TokenId(created.record_view.id), at)
+        .revoke_with_context(TokenId(created.record_view.id), at, audit_context(session))
         .await
         .is_err()
     {
@@ -301,8 +309,11 @@ async fn revoke(
             return r;
         }
     }
-    match UnixNanos::try_now() {
-        Ok(now) => match service.revoke(TokenId(id), now.as_u64()).await {
+    match service.now_ns() {
+        Some(now) => match service
+            .revoke_with_context(TokenId(id), now, audit_context(session))
+            .await
+        {
             Ok(_) => DbResponse::ApiTokenRevoked,
             Err(TokenCreateError::NotFound) => error("token_not_found", "token not found"),
             Err(TokenCreateError::ReadOnlyNode) => error(
@@ -311,7 +322,7 @@ async fn revoke(
             ),
             Err(_) => error("internal", "token revocation failed"),
         },
-        Err(_) => error("internal", "clock unavailable"),
+        None => error("internal", "clock unavailable"),
     }
 }
 async fn revoke_user(
@@ -355,8 +366,11 @@ async fn revoke_user(
     } else {
         session.user_id
     };
-    match UnixNanos::try_now() {
-        Ok(now) => match service.revoke_user(owner, now.as_u64()).await {
+    match service.now_ns() {
+        Some(now) => match service
+            .revoke_user_with_context(owner, now, audit_context(session))
+            .await
+        {
             Ok(count) => DbResponse::ApiUserTokensRevoked {
                 count: count as u64,
             },
@@ -366,7 +380,7 @@ async fn revoke_user(
             ),
             Err(_) => error("internal", "token revocation failed"),
         },
-        Err(_) => error("internal", "clock unavailable"),
+        None => error("internal", "clock unavailable"),
     }
 }
 async fn authorized_target(

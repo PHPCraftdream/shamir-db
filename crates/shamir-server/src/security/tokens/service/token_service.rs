@@ -1,7 +1,7 @@
+use super::audit_context::TokenAuditContext;
 use super::gc::GcService;
-use super::generator::TokenGenerator;
 use super::new_token::NewToken;
-use super::options::TokenServiceOptions;
+use super::options::{TokenGenerator, TokenServiceOptions};
 use super::session_canceller::{NoopCanceller, SessionCanceller};
 use crate::security::tokens::{
     CreatedToken, TokenCounters, TokenCreateError, TokenStore, TokenStoreError, TokenView,
@@ -115,6 +115,10 @@ impl TokenService {
     pub(crate) fn store_for_tests(&self) -> &TokenStore {
         &self.store
     }
+    /// Current service clock timestamp used by issuance and revocation decisions.
+    pub fn now_ns(&self) -> Option<u64> {
+        (self.clock)()
+    }
     pub fn sessions(&self) -> &Arc<TokenSessionStore> {
         &self.sessions
     }
@@ -148,6 +152,15 @@ impl TokenService {
 
     /// Create, durably persist, and publish one token.
     pub async fn create(&self, input: NewToken) -> Result<CreatedToken, TokenCreateError> {
+        self.create_with_context(input, TokenAuditContext::service_default())
+            .await
+    }
+    /// Create, durably persist, and publish one token with explicit audit context.
+    pub async fn create_with_context(
+        &self,
+        input: NewToken,
+        audit_context: TokenAuditContext,
+    ) -> Result<CreatedToken, TokenCreateError> {
         if self.read_only_node {
             return Err(TokenCreateError::ReadOnlyNode);
         }
@@ -261,10 +274,10 @@ impl TokenService {
                 .map_err(TokenCreateError::Store)?;
             if let Err(error) = audit.append(
                 "api_token_created",
-                "token",
+                audit_context.transport.as_str(),
+                audit_context.actor_username.as_str(),
                 "",
-                "",
-                [0; 8],
+                audit_context.session_id_prefix,
                 "ok",
                 details,
                 now,
@@ -284,9 +297,24 @@ impl TokenService {
 
     /// Cancel/close this token's active sessions after durable revocation publishes.
     pub async fn revoke(&self, id: TokenId, now_ns: u64) -> Result<bool, TokenCreateError> {
-        self.revoke_inner(id, now_ns).await
+        self.revoke_with_context(id, now_ns, TokenAuditContext::service_default())
+            .await
     }
-    async fn revoke_inner(&self, id: TokenId, now_ns: u64) -> Result<bool, TokenCreateError> {
+    /// Revoke a token with explicit audit context.
+    pub async fn revoke_with_context(
+        &self,
+        id: TokenId,
+        now_ns: u64,
+        audit_context: TokenAuditContext,
+    ) -> Result<bool, TokenCreateError> {
+        self.revoke_inner(id, now_ns, audit_context).await
+    }
+    async fn revoke_inner(
+        &self,
+        id: TokenId,
+        now_ns: u64,
+        audit_context: TokenAuditContext,
+    ) -> Result<bool, TokenCreateError> {
         if self.read_only_node {
             return Err(TokenCreateError::ReadOnlyNode);
         }
@@ -329,10 +357,10 @@ impl TokenService {
                             .map_err(TokenStoreError::Encoding)?;
                         if let Err(error) = audit.append(
                             "api_token_revoked",
-                            "token",
+                            audit_context.transport.as_str(),
+                            audit_context.actor_username.as_str(),
                             "",
-                            "",
-                            [0; 8],
+                            audit_context.session_id_prefix,
                             "ok",
                             details,
                             now_ns,
@@ -378,10 +406,10 @@ impl TokenService {
                 .map_err(TokenStoreError::Encoding)?;
             if let Err(error) = audit.append(
                 "api_token_revoked",
-                "token",
+                audit_context.transport.as_str(),
+                audit_context.actor_username.as_str(),
                 "",
-                "",
-                [0; 8],
+                audit_context.session_id_prefix,
                 "ok",
                 details,
                 now_ns,
@@ -399,6 +427,16 @@ impl TokenService {
         &self,
         owner: [u8; 16],
         now_ns: u64,
+    ) -> Result<usize, TokenCreateError> {
+        self.revoke_user_with_context(owner, now_ns, TokenAuditContext::service_default())
+            .await
+    }
+    /// Revoke all tokens belonging to one owner with explicit audit context.
+    pub async fn revoke_user_with_context(
+        &self,
+        owner: [u8; 16],
+        now_ns: u64,
+        audit_context: TokenAuditContext,
     ) -> Result<usize, TokenCreateError> {
         if self.read_only_node {
             return Err(TokenCreateError::ReadOnlyNode);
@@ -452,10 +490,10 @@ impl TokenService {
                     .map_err(TokenStoreError::Encoding)?;
             if let Err(error) = audit.append(
                 "api_token_user_revoked",
-                "token",
+                audit_context.transport.as_str(),
+                audit_context.actor_username.as_str(),
                 "",
-                "",
-                [0; 8],
+                audit_context.session_id_prefix,
                 "ok",
                 details,
                 now_ns,
