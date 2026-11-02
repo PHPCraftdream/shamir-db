@@ -61,6 +61,9 @@ use std::sync::Arc;
 #[path = "lockout_storage/pair_slot.rs"]
 mod pair_slot;
 use pair_slot::PairSlot;
+#[path = "lockout_storage/pair_index.rs"]
+mod pair_index;
+use pair_index::{insert as insert_pair, lookup as lookup_pair, remove as remove_pair};
 
 /// Per-spec §5.2.5 backoff base: 100 ms × 2^N (capped).
 pub const BACKOFF_BASE_MS: u64 = 100;
@@ -261,11 +264,10 @@ pub const LOCKOUT_BASE_QUOTA: usize = 64;
 pub const LOCKOUT_PARENT_QUOTA: usize = 512;
 /// In-memory lockout store backed by a fixed, bounded pair table.
 pub struct InMemoryLockoutStore {
-    // VERIFIED BAD PROOF handling runs after Argon2 has been bounded by the semaphore.
-    // This table is touched once per prechallenge lock check, never per-record or
-    // per-request data-path operation. The bounded 8,192-slot scan allocates and
-    // awaits nothing; cross-slot atomic quotas and deterministic eviction cannot
-    // be provided by independent lock-free slots.
+    // This lock is acquired on every handshake, including the pre-challenge
+    // lock check. Its critical section is bounded and allocation-free; quota
+    // scans occur only on new-pair admission, and the single mutex is needed
+    // to coordinate cross-slot quota decisions.
     slots: Mutex<Box<[PairSlot]>>,
     /// Optional metric: total locked-out events ever observed.
     total_lockouts: AtomicU64,
@@ -411,10 +413,7 @@ impl InMemoryLockoutStore {
             .filter(|(_, failure)| !failure.is_stale(now))
             .copied()
         {
-            if let Some(index) = slots
-                .iter()
-                .position(|slot| slot.occupied && slot.key == key)
-            {
+            if let Some(index) = lookup_pair(slots, key) {
                 if (failure.count, failure.last_fail_at_ns)
                     > (
                         slots[index].failure.count,
@@ -439,6 +438,11 @@ fn source_base(subnet: Subnet) -> (u8, [u8; 6]) {
     }
 }
 
+fn pair_is_free(slot: &PairSlot, now: u64) -> bool {
+    !slot.occupied
+        || (slot.failure.is_stale(now) && !slot.lockout.is_some_and(|lock| lock.is_active(now)))
+}
+
 fn find_or_admit(
     slots: &mut [PairSlot],
     key: PairKey,
@@ -447,10 +451,7 @@ fn find_or_admit(
     now: u64,
     evict: bool,
 ) -> Option<usize> {
-    if let Some(index) = slots
-        .iter()
-        .position(|slot| slot.occupied && slot.key == key)
-    {
+    if let Some(index) = lookup_pair(slots, key) {
         if (failure.count, failure.last_fail_at_ns)
             > (
                 slots[index].failure.count,
@@ -478,7 +479,7 @@ fn find_or_admit(
     let mut parent_count = 0;
     let mut free = None;
     for (index, slot) in slots.iter().enumerate() {
-        if !slot.occupied {
+        if pair_is_free(slot, now) {
             if free.is_none() {
                 free = Some(index);
             }
@@ -490,22 +491,31 @@ fn find_or_admit(
     let exhausted_base = base_count >= LOCKOUT_BASE_QUOTA;
     let exhausted_parent = parent_count >= LOCKOUT_PARENT_QUOTA;
     let mut candidate: Option<(usize, u32, u64)> = None;
-    for (index, slot) in slots.iter().enumerate().filter(|(_, slot)| slot.occupied) {
+    for (index, slot) in slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| !pair_is_free(slot, now))
+    {
         if (exhausted_base && slot.key.0 != base)
             || (exhausted_parent && source_base(slot.key.0) != parent)
         {
             continue;
         }
+        let effective_count = if slot.failure.is_stale(now) {
+            0
+        } else {
+            slot.failure.count
+        };
         if slot.lockout.is_some_and(|lock| lock.is_active(now))
-            || slot.failure.count >= LOCKOUT_THRESHOLD
+            || effective_count >= LOCKOUT_THRESHOLD
         {
             continue;
         }
         if candidate.is_none_or(|(_, count, oldest)| {
-            slot.failure.count < count
-                || (slot.failure.count == count && slot.failure.last_fail_at_ns < oldest)
+            effective_count < count
+                || (effective_count == count && slot.failure.last_fail_at_ns < oldest)
         }) {
-            candidate = Some((index, slot.failure.count, slot.failure.last_fail_at_ns));
+            candidate = Some((index, effective_count, slot.failure.last_fail_at_ns));
         }
     }
     let chosen = if exhausted_base || exhausted_parent {
@@ -522,16 +532,18 @@ fn find_or_admit(
         None
     };
     let index = chosen?;
-    slots[index] = PairSlot::new(key, failure, lockout);
+    if slots[index].occupied {
+        remove_pair(slots, index);
+    }
+    slots[index].replace_payload(key, failure, lockout);
+    insert_pair(slots, index);
     Some(index)
 }
 
 impl LockoutStore for InMemoryLockoutStore {
     fn register_failure(&self, key: PairKey, now_ns: u64) -> FailureOutcome {
         let mut slots = self.slots.lock();
-        let position = slots
-            .iter()
-            .position(|slot| slot.occupied && slot.key == key);
+        let position = lookup_pair(&slots, key);
         let (index, count) = if let Some(index) = position {
             let slot = &mut slots[index];
             slot.failure.count = if slot.failure.is_stale(now_ns) {
@@ -572,20 +584,16 @@ impl LockoutStore for InMemoryLockoutStore {
 
     fn reset_on_success(&self, key: PairKey) {
         let mut slots = self.slots.lock();
-        if let Some(slot) = slots
-            .iter_mut()
-            .find(|slot| slot.occupied && slot.key == key)
-        {
-            *slot = PairSlot::default();
+        if let Some(index) = lookup_pair(&slots, key) {
+            remove_pair(&mut slots, index);
+            slots[index].clear_payload();
         }
     }
 
     fn is_locked_out(&self, key: PairKey, now_ns: u64) -> bool {
         let mut slots = self.slots.lock();
-        if let Some(slot) = slots
-            .iter_mut()
-            .find(|slot| slot.occupied && slot.key == key)
-        {
+        if let Some(index) = lookup_pair(&slots, key) {
+            let slot = &mut slots[index];
             if slot.lockout.is_some_and(|lock| lock.is_active(now_ns)) {
                 return true;
             }
@@ -597,38 +605,51 @@ impl LockoutStore for InMemoryLockoutStore {
     }
 
     fn current_backoff_ms(&self, key: PairKey, now_ns: u64) -> u64 {
-        self.slots
-            .lock()
-            .iter()
-            .find(|slot| slot.occupied && slot.key == key)
+        let slots = self.slots.lock();
+        lookup_pair(&slots, key)
+            .map(|index| &slots[index])
             .filter(|slot| slot.failure.count != 0 && !slot.failure.is_stale(now_ns))
             .map_or(0, |slot| slot.failure.backoff_ms())
     }
 
     fn admin_unlock_user(&self, username_hash: [u8; 16]) {
-        for slot in self
-            .slots
-            .lock()
-            .iter_mut()
-            .filter(|slot| slot.occupied && slot.key.1 == username_hash)
-        {
-            *slot = PairSlot::default();
+        let mut slots = self.slots.lock();
+        let mut index = 0;
+        while index < slots.len() {
+            if slots[index].occupied && slots[index].key.1 == username_hash {
+                remove_pair(&mut slots, index);
+                slots[index].clear_payload();
+            }
+            index += 1;
         }
     }
 
     fn gc(&self, now_ns: u64) {
-        for slot in self.slots.lock().iter_mut().filter(|slot| slot.occupied) {
-            if slot.failure.is_stale(now_ns) {
-                slot.failure = FailureState {
-                    count: 0,
-                    last_fail_at_ns: 0,
-                };
+        let mut slots = self.slots.lock();
+        let mut index = 0;
+        while index < slots.len() {
+            if slots[index].occupied {
+                if slots[index].failure.is_stale(now_ns) {
+                    slots[index].failure = FailureState {
+                        count: 0,
+                        last_fail_at_ns: 0,
+                    };
+                }
+                if slots[index].failure.count == 0
+                    && slots[index]
+                        .lockout
+                        .is_none_or(|lock| !lock.is_active(now_ns))
+                {
+                    remove_pair(&mut slots, index);
+                    slots[index].clear_payload();
+                } else if slots[index]
+                    .lockout
+                    .is_some_and(|lock| !lock.is_active(now_ns))
+                {
+                    slots[index].lockout = None;
+                }
             }
-            if slot.failure.count == 0 && slot.lockout.is_none_or(|lock| !lock.is_active(now_ns)) {
-                *slot = PairSlot::default();
-            } else if slot.lockout.is_some_and(|lock| !lock.is_active(now_ns)) {
-                slot.lockout = None;
-            }
+            index += 1;
         }
     }
 }

@@ -7,11 +7,19 @@ pub(super) struct PairSlot {
     pub(super) failure: FailureState,
     pub(super) lockout: Option<LockoutState>,
     pub(super) occupied: bool,
-    // Explicit reserved bytes keep every charged slot exactly 128 bytes.
+    _index: u16,
     _padding: [u8; 48],
 }
 
 impl PairSlot {
+    pub(super) fn set_index(&mut self, index: u16) {
+        self._index = index;
+    }
+
+    pub(super) fn index(&self) -> u16 {
+        self._index
+    }
+
     pub(super) fn new(key: PairKey, failure: FailureState, lockout: Option<LockoutState>) -> Self {
         Self {
             key,
@@ -20,6 +28,23 @@ impl PairSlot {
             occupied: true,
             ..Self::default()
         }
+    }
+
+    pub(super) fn clear_payload(&mut self) {
+        let index = self._index;
+        *self = Self::default();
+        self._index = index;
+    }
+
+    pub(super) fn replace_payload(
+        &mut self,
+        key: PairKey,
+        failure: FailureState,
+        lockout: Option<LockoutState>,
+    ) {
+        let index = self._index;
+        *self = Self::new(key, failure, lockout);
+        self._index = index;
     }
 }
 
@@ -33,6 +58,7 @@ impl Default for PairSlot {
             },
             lockout: None,
             occupied: false,
+            _index: u16::MAX,
             _padding: [0; 48],
         }
     }

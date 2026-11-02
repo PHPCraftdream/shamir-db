@@ -168,20 +168,191 @@ fn active_pairs_are_never_evicted_and_all_active_drops_accounting_only() {
 }
 
 #[test]
+fn stale_high_count_pair_is_replaced_at_full_base_and_parent_quotas() {
+    let fresh_base = key4(1, 1, 1);
+    let stale_base = key4(1, 1, 0);
+    let new_base = key4(1, 1, 64);
+    let mut base_failures = (0..LOCKOUT_BASE_QUOTA as u8)
+        .map(|user| {
+            (
+                key4(1, 1, user),
+                failure(
+                    if user == 0 {
+                        10
+                    } else if user == 1 {
+                        1
+                    } else {
+                        2
+                    },
+                    if user == 0 {
+                        NOW
+                    } else if user == 1 {
+                        NOW + 1
+                    } else {
+                        NOW + BACKOFF_RESET_NS - 1
+                    },
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    base_failures[0].1 = failure(10, NOW);
+    let base_store = seeded(base_failures, vec![]);
+    assert_eq!(
+        base_store.register_failure(new_base, NOW + BACKOFF_RESET_NS),
+        FailureOutcome::Backoff { delay_ms: 100 }
+    );
+    let base_pairs = recorded(&base_store);
+    assert!(base_pairs
+        .iter()
+        .any(|(key, state)| *key == new_base && state.count == 1));
+    assert!(base_pairs
+        .iter()
+        .any(|(key, state)| *key == fresh_base && state.count == 1));
+    assert!(!base_pairs.iter().any(|(key, _)| *key == stale_base));
+    assert_eq!(base_pairs.len(), 64);
+
+    let stale_parent = key4(1, 0, 0);
+    let fresh_parent = key4(1, 0, 1);
+    let new_parent = key4(1, 8, 0);
+    let mut parent_failures = Vec::new();
+    for base in 0..8 {
+        for user in 0..64 {
+            let (count, at) = if base == 0 && user == 0 {
+                (10, NOW)
+            } else if base == 0 && user == 1 {
+                (1, NOW + 1)
+            } else {
+                (2, NOW + BACKOFF_RESET_NS - 1)
+            };
+            parent_failures.push((key4(1, base, user), failure(count, at)));
+        }
+    }
+    let parent_store = seeded(parent_failures, vec![]);
+    assert_eq!(
+        parent_store.register_failure(new_parent, NOW + BACKOFF_RESET_NS),
+        FailureOutcome::Backoff { delay_ms: 100 }
+    );
+    let parent_pairs = recorded(&parent_store);
+    assert!(parent_pairs
+        .iter()
+        .any(|(key, state)| *key == new_parent && state.count == 1));
+    assert!(parent_pairs
+        .iter()
+        .any(|(key, state)| *key == fresh_parent && state.count == 1));
+    assert!(!parent_pairs.iter().any(|(key, _)| *key == stale_parent));
+    assert_eq!(parent_pairs.len(), LOCKOUT_PARENT_QUOTA);
+}
+
+#[test]
+fn expired_pair_lock_releases_quota_without_gc() {
+    let expired_key = key4(1, 1, 0);
+    let fresh_key = key4(1, 1, 1);
+    let expired_lock = LockoutState {
+        triggered_at_ns: NOW,
+        duration_ns: crate::common::time::ns::HOUR,
+    };
+    let mut failures = (0..LOCKOUT_BASE_QUOTA as u8)
+        .map(|user| (key4(1, 1, user), failure(2, NOW)))
+        .collect::<Vec<_>>();
+    failures[0].1 = failure(50, NOW);
+    let mut locks = (0..LOCKOUT_BASE_QUOTA as u8)
+        .map(|user| (key4(1, 1, user), active_lock()))
+        .collect::<Vec<_>>();
+    locks[0] = (expired_key, expired_lock);
+    let store = seeded(failures, locks);
+    let new_key = key4(1, 1, 64);
+    let aged_now = NOW + crate::common::time::ns::HOUR;
+
+    assert_eq!(
+        store.register_failure(new_key, aged_now),
+        FailureOutcome::Backoff { delay_ms: 100 }
+    );
+    let pairs = recorded(&store);
+    assert!(pairs
+        .iter()
+        .any(|(key, state)| *key == new_key && state.count == 1));
+    assert!(pairs
+        .iter()
+        .any(|(key, state)| *key == fresh_key && state.count == 2));
+    assert!(!pairs.iter().any(|(key, _)| *key == expired_key));
+    assert_eq!(pairs.len(), LOCKOUT_BASE_QUOTA);
+}
+
+#[test]
+fn expired_pair_lock_releases_parent_quota_without_gc_for_both_families() {
+    for family in [4, 6] {
+        let mut failures = Vec::new();
+        let mut locks = Vec::new();
+        for base in 0..8 {
+            for user in 0..64 {
+                let pair = key(family, 1, base, user);
+                failures.push((
+                    pair,
+                    failure(if base == 0 && user == 0 { 50 } else { 2 }, NOW),
+                ));
+                locks.push((pair, active_lock()));
+            }
+        }
+        let expired_key = key(family, 1, 0, 0);
+        locks[0] = (
+            expired_key,
+            LockoutState {
+                triggered_at_ns: NOW,
+                duration_ns: ns::HOUR,
+            },
+        );
+        let store = seeded(failures, locks);
+        let new_key = key(family, 1, 8, 0);
+        let aged_now = NOW + ns::HOUR;
+
+        assert_eq!(
+            store.register_failure(new_key, aged_now),
+            FailureOutcome::Backoff { delay_ms: 100 }
+        );
+        let pairs = recorded(&store);
+        assert_eq!(pairs.len(), 512);
+        assert!(pairs
+            .iter()
+            .any(|(pair, state)| *pair == new_key && state.count == 1));
+        assert!(!pairs.iter().any(|(pair, _)| *pair == expired_key));
+        assert_eq!(store.active_lockout_count(), 511);
+        assert!(store.is_locked_out(key(family, 1, 0, 1), aged_now));
+    }
+}
+
+#[test]
+fn stale_pair_slot_is_reused_when_global_table_has_room() {
+    let stale_key = key4(1, 1, 0);
+    let new_key = key4(1, 1, 1);
+    let store = seeded(vec![(stale_key, failure(10, NOW))], vec![]);
+
+    assert_eq!(
+        store.register_failure(new_key, NOW + BACKOFF_RESET_NS),
+        FailureOutcome::Backoff { delay_ms: 100 }
+    );
+    let pairs = recorded(&store);
+    assert_eq!(pairs.len(), 1);
+    assert!(pairs
+        .iter()
+        .any(|(key, state)| *key == new_key && state.count == 1));
+    assert!(!pairs.iter().any(|(key, _)| *key == stale_key));
+}
+
+#[test]
 fn quota_eviction_uses_lowest_count_before_oldest_and_oldest_ties() {
     let fails = (0..64)
         .map(|u| {
             (
                 key4(1, 1, u),
-                failure(if u == 7 { 2 } else { 1 }, NOW - u as u64),
+                failure(if u == 63 { 2 } else { 1 }, NOW - u as u64),
             )
         })
         .collect();
     let store = seeded(fails, vec![]);
     store.register_failure(key4(1, 1, 64), NOW);
     let pairs = recorded(&store);
-    assert!(!pairs.iter().any(|(k, _)| *k == key4(1, 1, 63)));
-    assert!(pairs.iter().any(|(k, _)| *k == key4(1, 1, 7)));
+    assert!(!pairs.iter().any(|(k, _)| *k == key4(1, 1, 62)));
+    assert!(pairs.iter().any(|(k, _)| *k == key4(1, 1, 63)));
 }
 
 #[test]
@@ -230,10 +401,13 @@ fn snapshot_caps_base_parent_and_global_with_active_first_and_highest_count() {
         }
     }
     let lock_key = global_fails[0].0;
+    let high_key = key4(16, 0, 0);
+    global_fails.push((high_key, failure(1000, NOW - 1)));
     let global = seeded(global_fails, vec![(lock_key, active_lock())]);
     assert_eq!(recorded(&global).len(), LOCKOUT_PAIR_CAPACITY);
     assert_eq!(global.active_lockout_count(), 1);
     assert!(global.is_locked_out(lock_key, NOW));
+    assert!(recorded(&global).iter().any(|(k, _)| *k == high_key));
 
     let mut overflow_fails = Vec::new();
     for p in 0..16 {
@@ -244,11 +418,14 @@ fn snapshot_caps_base_parent_and_global_with_active_first_and_highest_count() {
             ));
         }
     }
+    let lock_key = key4(0, 0, 0);
+    overflow_fails[0].1 = failure(1, NOW - 1);
     let high_key = key4(16, 0, 0);
     overflow_fails.push((high_key, failure(999, NOW - 1)));
-    let overflow = seeded(overflow_fails, vec![]);
+    let overflow = seeded(overflow_fails, vec![(lock_key, active_lock())]);
     let overflow_pairs = recorded(&overflow);
     assert_eq!(overflow_pairs.len(), LOCKOUT_PAIR_CAPACITY);
+    assert!(overflow_pairs.iter().any(|(k, _)| *k == lock_key));
     assert!(overflow_pairs.iter().any(|(k, _)| *k == high_key));
     let source_parent_counts = (0..16)
         .map(|parent| {
@@ -266,7 +443,7 @@ fn snapshot_caps_base_parent_and_global_with_active_first_and_highest_count() {
     let same_base_failures = (0..70)
         .map(|u| (key4(1, 1, u), failure(1, NOW - 1)))
         .collect();
-    let lock_keys = (0..64).map(|u| key4(1, 1, u)).collect::<Vec<_>>();
+    let lock_keys = (6..70).map(|u| key4(1, 1, u)).collect::<Vec<_>>();
     let mixed = seeded(
         same_base_failures,
         lock_keys.iter().map(|k| (*k, active_lock())).collect(),
@@ -296,6 +473,16 @@ fn lock_only_pair_is_retained_and_stale_failures_gc_without_expiring_hour_lock()
         FailureOutcome::Backoff { delay_ms: 100 }
     );
     assert_eq!(store.failure_pair_count(), 1);
+
+    let store = InMemoryLockoutStore::new();
+    assert_eq!(
+        store.register_failure(stale, NOW),
+        FailureOutcome::Backoff { delay_ms: 100 }
+    );
+    assert_eq!(store.failure_pair_count(), 1);
+    store.gc(NOW + BACKOFF_RESET_NS);
+    assert_eq!(store.failure_pair_count(), 0);
+    assert!(!recorded(&store).iter().any(|(key, _)| *key == stale));
 
     let lock_only = seeded(vec![], vec![(lock_key, active_lock())]);
     assert_eq!(lock_only.current_backoff_ms(lock_key, NOW), 0);
@@ -445,6 +632,69 @@ fn concurrent_inserts_obey_strict_base_and_parent_quotas() {
         many.register_failure(key(family, 2, 0, 0), NOW);
         assert_eq!(many.failure_pair_count(), LOCKOUT_PARENT_QUOTA + 1);
     }
+}
+
+#[test]
+fn indexed_lookup_survives_reset_unlock_gc_and_slot_reuse() {
+    let store = InMemoryLockoutStore::new();
+    let v4_keys = (0..2)
+        .flat_map(|base| (0..64).map(move |user| key4(1, base, user)))
+        .collect::<Vec<_>>();
+    let v6_key = key6(1, 0, 200);
+    for key in v4_keys.iter().copied().chain([v6_key]) {
+        store.register_failure(key, NOW);
+        store.register_failure(key, NOW);
+    }
+    assert_eq!(store.failure_pair_count(), 129);
+
+    let reset_key = key4(1, 0, 0);
+    store.reset_on_success(reset_key);
+    assert_eq!(store.current_backoff_ms(reset_key, NOW), 0);
+    assert_eq!(store.current_backoff_ms(key4(1, 0, 2), NOW), 200);
+    assert_eq!(store.failure_pair_count(), 128);
+
+    store.admin_unlock_user([1; 16]);
+    assert_eq!(store.current_backoff_ms(key4(1, 0, 1), NOW), 0);
+    assert_eq!(store.current_backoff_ms(key4(1, 1, 1), NOW), 0);
+    assert_eq!(store.current_backoff_ms(key4(1, 0, 2), NOW), 200);
+    assert_eq!(store.current_backoff_ms(v6_key, NOW), 200);
+    assert_eq!(store.failure_pair_count(), 126);
+
+    for key in [reset_key, key4(1, 0, 1), key4(1, 1, 1)] {
+        assert_eq!(
+            store.register_failure(key, NOW),
+            FailureOutcome::Backoff { delay_ms: 100 }
+        );
+        assert_eq!(store.current_backoff_ms(key, NOW), 100);
+    }
+    assert_eq!(store.current_backoff_ms(key4(1, 0, 2), NOW), 200);
+    assert_eq!(store.failure_pair_count(), 129);
+
+    let boundary = NOW + BACKOFF_RESET_NS;
+    let survivor = key4(1, 0, 2);
+    assert_eq!(
+        store.register_failure(survivor, boundary - 1),
+        FailureOutcome::Backoff { delay_ms: 400 }
+    );
+    store.gc(boundary);
+    assert_eq!(store.failure_pair_count(), 1);
+    assert_eq!(store.current_backoff_ms(survivor, boundary), 400);
+    for key in v4_keys.iter().copied().chain([v6_key]) {
+        if key != survivor {
+            assert_eq!(store.current_backoff_ms(key, boundary), 0);
+        }
+    }
+
+    for key in [reset_key, key4(1, 0, 1), v6_key] {
+        assert_eq!(
+            store.register_failure(key, boundary),
+            FailureOutcome::Backoff { delay_ms: 100 }
+        );
+        assert_eq!(store.current_backoff_ms(key, boundary), 100);
+    }
+    assert_eq!(store.failure_pair_count(), 4);
+    assert_eq!(store.current_backoff_ms(survivor, boundary), 400);
+    assert_eq!(store.current_backoff_ms(key4(1, 0, 3), boundary), 0);
 }
 
 #[test]
