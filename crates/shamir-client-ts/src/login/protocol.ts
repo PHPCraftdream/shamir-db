@@ -4,7 +4,7 @@ import type { LoginScope } from './types.js';
 import { validateKdfParams } from '../core/protocol/scram.js';
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder('utf-8', { fatal: true });
+const decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 const DOMAIN = encoder.encode('SHAMIR-HTTP-LOGIN-v1');
 const DATABASE_SYNTAX = /^[A-Za-z0-9_-]+$/;
 
@@ -86,24 +86,38 @@ export function canonicalUser(value: string): string {
   });
   // Normalize contiguous halfwidth kana together so dakuten/handakuten compose.
   const mappedWidth = widthMapped.replace(/[\uFF61-\uFF9F]+/gu, (run) => run.normalize('NFKC'));
-  const mapped = mappedWidth.toLowerCase().normalize('NFC');
+  // RFC 8265 order: the class check follows width mapping and precedes case mapping and NFC.
+  checkIdentifierClass(mappedWidth);
+  // Per code point, so the context-sensitive final-sigma rule never applies.
+  const mapped = Array.from(mappedWidth, (character) => character.toLowerCase()).join('').normalize('NFC');
   const bytes = validText(mapped, 1, 255);
-  if (/\p{Cc}|\p{Cf}|\p{Co}|\p{Cs}|\p{Cn}|\p{Z}|\p{Noncharacter_Code_Point}|[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/u.test(mapped)) {
-    return invalidRequest();
-  }
+  checkIdentifierClass(mapped);
+  return decoder.decode(bytes);
+}
 
-  // Partial UsernameCaseMapped compatibility, not full PRECIS: runtime Unicode tables are not pinned, and this conservative subset rejects RTL ranges because bidi rules are unsupported. Some valid RTL identifiers are therefore rejected.
-  for (const character of mapped) {
+const IDENTIFIER_LETTER_DIGIT = /^[\p{Ll}\p{Lu}\p{Lo}\p{Lm}\p{Mn}\p{Mc}\p{Nd}]$/u;
+// Conjoining jamo, RFC 5892 exceptions, right-to-left scripts (bidi rule unsupported) and ignorables.
+const IDENTIFIER_FORBIDDEN =
+  /[\u1100-\u11FF\uA960-\uA97F\uD7B0-\uD7FF\u302E\u302F\u3031-\u3035\u303B\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]|\p{Default_Ignorable_Code_Point}/u;
+
+// Partial UsernameCaseMapped compatibility, not full PRECIS: the runtime Unicode tables are not pinned
+// and right-to-left names are rejected instead of following the bidi rule. Both fail safe.
+function checkIdentifierClass(text: string): void {
+  for (const character of text) {
     const codePoint = character.codePointAt(0)!;
     if (codePoint < 0x80) {
       if (codePoint < 0x21 || codePoint > 0x7e) return invalidRequest();
       continue;
     }
-    if (/\p{P}|\p{S}|\p{Default_Ignorable_Code_Point}/u.test(character) ||
-        character.normalize('NFKC') !== character ||
-        !/[\p{L}\p{M}\p{N}]/u.test(character)) return invalidRequest();
+    if (codePoint === 0x3007) continue;
+    if (
+      !IDENTIFIER_LETTER_DIGIT.test(character) ||
+      character.normalize('NFKC') !== character ||
+      IDENTIFIER_FORBIDDEN.test(character)
+    ) {
+      return invalidRequest();
+    }
   }
-  return decoder.decode(bytes);
 }
 
 function byteCompare(left: string, right: string): number {

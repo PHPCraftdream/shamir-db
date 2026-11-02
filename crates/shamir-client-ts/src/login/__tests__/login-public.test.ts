@@ -52,7 +52,7 @@ function loginHttp(): LoginHttp {
     const stored = sha(clientKey);
     const signature = hmac(stored, t);
     const proof = Buffer.alloc(32); for (let i = 0; i < 32; i++) proof[i] = clientKey[i]! ^ signature[i]!;
-    expect(decodeRecord(body).client_proof).toEqual(proof);
+    expect(Buffer.from(decodeRecord(body).client_proof as Uint8Array).equals(proof)).toBe(true);
     const serverKey = hmac(salted, Buffer.from('Server Key'));
     const created = BigInt(Date.now() - 1000) * 1_000_000n;
     return { status: 200, contentType: 'application/msgpack', retryAfter: null, body: encRecord({ protocol_version: 1, server_signature: hmac(serverKey, t), token: secret, id: bytes(16, 0), label: 'http-login', owner: 'alice', mode: 'read_only', channels: 'both', databases: null, created_at_ns: created, expires_at_ns: created + 60_000_000_000n }) };
@@ -86,7 +86,7 @@ describe('public login token handoff', () => {
     await expect(wsClient.ping()).resolves.toEqual({ kind: 'pong' });
     expect(browserFactory).toHaveBeenCalledWith(expect.objectContaining({ channel: 'ws', token: result.token, url: 'ws://127.0.0.1' }));
     expect(wsPlatform.requests).toHaveLength(0); expect(wsSocket.sent).toHaveLength(2); expect(decodeTokenFrame(wsSocket.sent[0]!)).toEqual({ token: secret }); await wsClient.close();
-    const publicJson = JSON.stringify(result); expect(publicJson).not.toContain(secret); expect(String(result)).not.toContain(secret); expect(inspect(result)).not.toContain(secret);
+    const publicJson = JSON.stringify(result, (_key: string, value: unknown): unknown => (typeof value === 'bigint' ? value.toString() : value)); expect(publicJson).not.toContain(secret); expect(String(result)).not.toContain(secret); expect(inspect(result)).not.toContain(secret);
   });
 
   it('uses Node public login continuation over HTTP and WS without sending a token frame', async () => {
@@ -129,7 +129,7 @@ describe('public login token handoff', () => {
       await expect(db.run(query)).rejects.toMatchObject({ code: 'token_expired' });
       await expect(db.execute(built)).rejects.toMatchObject({ code: 'token_expired' });
       await expect(query.ex()).rejects.toMatchObject({ code: 'token_expired' });
-      await expect(batch.ex()).rejects.toMatchObject({ code: 'token_expired' });
+      await expect(batch.run()).rejects.toMatchObject({ code: 'token_expired' });
       expect(fake.requests).toHaveLength(0);
     } finally {
       clock.mockRestore();

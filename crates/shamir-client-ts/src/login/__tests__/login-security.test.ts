@@ -64,7 +64,7 @@ function harness(options: { reply?: Fields; argon?: () => Promise<Uint8Array>; s
     const serverKey = mac(salted, enc.encode('Server Key'));
     const clientSignature = mac(sha(clientKey), t);
     const proof = Buffer.alloc(32); for (let i = 0; i < 32; i++) proof[i] = clientKey[i] ^ clientSignature[i];
-    expect(request.client_proof).toEqual(proof);
+    expect(Buffer.from(request.client_proof as Uint8Array).equals(proof)).toBe(true);
     const now = BigInt(Date.now()) * 1_000_000n;
     const token = `shk1.${'A'.repeat(22)}.${'A'.repeat(43)}`;
     const success = { protocol_version: 1, server_signature: mac(serverKey, t), token, id: bytes(16, 0), label: scope.label,

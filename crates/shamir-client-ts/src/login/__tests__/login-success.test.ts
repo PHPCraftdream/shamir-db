@@ -137,7 +137,7 @@ describe('public Node login success contract', () => {
       expect(result.token).toBeInstanceOf(ApiToken);
       const tokenValue = 'shk1.' + 'A'.repeat(22) + '.' + 'A'.repeat(43);
       expect(result.token.toString()).toBe('[REDACTED]');
-      expect(JSON.stringify(result)).not.toContain(tokenValue);
+      expect(JSON.stringify(result, (_key: string, value: unknown): unknown => (typeof value === 'bigint' ? value.toString() : value))).not.toContain(tokenValue);
       expect(inspect(result)).not.toContain(tokenValue);
       expect(result.metadata).toMatchObject({ label: 'http-login', owner: 'alice', mode: 'read_only', channels: 'rest', databases: null });
       expect(result.metadata.id).toEqual(bytes(16, 0));

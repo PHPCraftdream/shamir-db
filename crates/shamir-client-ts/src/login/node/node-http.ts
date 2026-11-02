@@ -1,5 +1,7 @@
 import { request as nodeRequest } from 'node:http';
 import { request as tlsRequest } from 'node:https';
+import type { RequestOptions as HttpsRequestOptions } from 'node:https';
+import type { ConnectionOptions } from 'node:tls';
 import type { IncomingMessage, RequestOptions } from 'node:http';
 import type { LoginHttp } from '../core.js';
 import { LoginError } from '../errors.js';
@@ -118,11 +120,12 @@ export const nodeLoginHttp: LoginHttp = {
 
       try {
         if (url.protocol === 'https:') {
-          req = tlsRequest(url, {
+          const tlsOptions: HttpsRequestOptions & Pick<ConnectionOptions, 'ALPNProtocols'> = {
             ...options,
             minVersion: 'TLSv1.3',
             ALPNProtocols: ['http/1.1'],
-          }, onResponse);
+          };
+          req = tlsRequest(url, tlsOptions, onResponse);
         } else if (url.protocol === 'http:') {
           req = nodeRequest(url, options, onResponse);
         } else {

@@ -142,7 +142,9 @@ async function awaitGuarded<T>(promise: Promise<T>, signal: AbortSignal, parent?
     signal.addEventListener('abort', onAbort, { once: true });
     remove = () => signal.removeEventListener('abort', onAbort);
   });
-  try { return await Promise.race([promise, stop]); } finally { remove(); }
+  try { return await Promise.race([promise, stop]); }
+  catch (error) { if (signal.aborted) aborted(signal, parent); throw error; }
+  finally { remove(); }
 }
 
 async function awaitSecret(promise: Promise<Uint8Array>, signal: AbortSignal, parent?: AbortSignal): Promise<Uint8Array> {
@@ -209,7 +211,7 @@ function statusError(r: { status: number; body: Uint8Array; retryAfter: string |
     };
     if (!Object.hasOwn(allowed, b.error)) throw err('protocol_error', status);
     code = allowed[b.error];
-  } else if (status === 404) { exactError('not_found'); code = 'unsupported_server'; }
+  } else if (status === 404) code = 'unsupported_server';
   else if (status === 405) { exactError('method_not_allowed'); code = 'http_method_not_allowed'; }
   else if (status === 408) { exactError('request_timeout'); code = 'http_timeout'; }
   else if (status === 413) { exactError('request_too_large'); code = 'http_body_too_large'; }
