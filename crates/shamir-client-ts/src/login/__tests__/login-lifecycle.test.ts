@@ -39,7 +39,9 @@ const readAnd = (req: IncomingMessage, action: () => void, res: ServerResponse) 
   void read(req).then(action).catch(() => { if (!res.destroyed) res.destroy(); });
 };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('Node login lifecycle HTTP', () => {
   it('maps malformed begin and finish responses without leaking secrets', async () => {

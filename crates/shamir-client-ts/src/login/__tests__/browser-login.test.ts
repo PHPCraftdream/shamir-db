@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 import { ApiToken } from '../../entry/api-token.js';
 import { loginBrowser } from '../browser/browser.js';
 import { browserLoginHttp } from '../browser/browser-http.js';
@@ -19,8 +20,10 @@ function response(status = 200, chunks: Uint8Array[] = [], headers: Record<strin
   } }, body }, reader, body };
 }
 
-let fetchStub: ReturnType<typeof vi.fn> | undefined;
-beforeEach(() => vi.useFakeTimers());
+let fetchStub: Mock<any[], any> = vi.fn();
+beforeEach(() => {
+  vi.useFakeTimers();
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -34,7 +37,7 @@ describe('browser HTTP transport', () => {
     vi.stubGlobal('fetch', fetchStub);
     const result = await browserLoginHttp.request(new URL('https://example.test/login'), bytes(2, 1), new AbortController().signal, 0);
     expect(fetchStub).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchStub.mock.calls[0];
+    const [url, init] = fetchStub.mock.calls[0]!;
     expect(url).toBe('https://example.test/login');
     expect(init).toMatchObject({ method: 'POST', credentials: 'omit', redirect: 'error', headers: {
       'Content-Type': 'application/msgpack', Accept: 'application/msgpack',
