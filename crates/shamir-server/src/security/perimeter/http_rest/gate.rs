@@ -2,12 +2,15 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use shamir_connect::server::lockout::subnet_of;
-use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateDecision, RateLimiter};
-use shamir_connect::server::token::{Endpoint as TokenEndpoint, Verified, VerifyFailure};
+use shamir_connect::server::rate_limit::RateDecision;
+use shamir_connect::server::token::{
+    Endpoint as TokenEndpoint, TokenMode, Verified, VerifyFailure,
+};
 use shamir_transport_http::{
     AuthHeader, Endpoint as HttpEndpoint, GateDecision, PeerInfo, TokenGate,
 };
 
+use super::maintenance::RestMaintenance;
 use crate::security::tokens::TokenService;
 
 /// Listener policy rails needed during REST token authentication.
@@ -24,29 +27,52 @@ pub struct RestGate {
     service: Arc<TokenService>,
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     rails: RestGateRails,
-    failures: Arc<InMemoryRateLimiter>,
+    maintenance: RestMaintenance,
 }
 
 impl RestGate {
+    /// Stop and join the maintenance worker. If this future is cancelled while
+    /// awaiting, the worker may continue until its shutdown signal is observed.
+    pub async fn shutdown(&self) {
+        self.maintenance.shutdown().await;
+    }
+
     /// Construct using shared service and a current Unix-nanosecond clock.
+    ///
+    /// # Panics
+    ///
+    /// Panics unless called from within a Tokio runtime; the owned maintenance
+    /// worker is spawned on the current runtime.
     pub fn new(
         service: Arc<TokenService>,
         clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
         rails: RestGateRails,
     ) -> Self {
-        let now = clock().unwrap_or_default();
+        let maintenance = RestMaintenance::new(
+            service.audit_writer(),
+            Arc::clone(&clock),
+            service.maintenance_shutdown(),
+        );
+        metrics::describe_counter!(
+            "shamir_token_auth_total",
+            metrics::Unit::Count,
+            "REST token authentication outcomes by fixed channel and result labels"
+        );
+        for result in [
+            "success",
+            "invalid",
+            "forbidden",
+            "rate_limited",
+            "unavailable",
+        ] {
+            metrics::counter!("shamir_token_auth_total", "channel" => "rest", "result" => result)
+                .increment(0);
+        }
         Self {
             service,
             clock,
             rails,
-            failures: Arc::new(InMemoryRateLimiter::new(now)),
-        }
-    }
-
-    fn subnet(ip: IpAddr) -> String {
-        match subnet_of(ip) {
-            shamir_connect::server::lockout::Subnet::V4(value) => format!("v4:{value:?}"),
-            shamir_connect::server::lockout::Subnet::V6(value) => format!("v6:{value:?}"),
+            maintenance,
         }
     }
 
@@ -70,20 +96,24 @@ impl RestGate {
     }
 
     fn failed(&self, ip: IpAddr, now: u64) -> GateDecision<Verified> {
-        let decision = self.failures.check(subnet_of(ip), now);
-        self.service.audit_auth_failure(&Self::subnet(ip), now);
-        metrics::counter!("shamir_token_auth_total", "channel" => "rest", "result" => "invalid")
-            .increment(1);
-        tracing::warn!(
-            channel = "rest",
-            result = "invalid",
-            "token authentication failed"
-        );
+        let decision = self.maintenance.failures().check(subnet_of(ip), now);
+        if matches!(decision, RateDecision::Allowed) {
+            self.maintenance.record_failure(subnet_of(ip), now);
+            self.service.counters().count_auth_result("invalid");
+            tracing::trace!(
+                channel = "rest",
+                result = "invalid",
+                "token authentication failed"
+            );
+        }
         match decision {
             RateDecision::Allowed => GateDecision::Unauthorized,
-            RateDecision::RateLimited { retry_after_secs } => GateDecision::RateLimited {
-                retry_after_secs: u64::from(retry_after_secs.max(1)),
-            },
+            RateDecision::RateLimited { retry_after_secs } => {
+                self.service.counters().count_auth_result("rate_limited");
+                GateDecision::RateLimited {
+                    retry_after_secs: u64::from(retry_after_secs.max(1)),
+                }
+            }
         }
     }
 }
@@ -98,12 +128,14 @@ impl TokenGate for RestGate {
         peer: PeerInfo,
     ) -> GateDecision<Self::Grant> {
         let Some(now) = (self.clock)() else {
+            self.service.counters().count_auth_result("unavailable");
             return GateDecision::Unavailable {
                 retry_after_secs: 1,
             };
         };
         let Some(token) = Self::bearer(auth) else {
             if matches!(auth, AuthHeader::Missing) {
+                self.service.counters().count_auth_result("invalid");
                 return GateDecision::Unauthorized;
             }
             return self.failed(peer.addr.ip(), now);
@@ -112,16 +144,22 @@ impl TokenGate for RestGate {
             Ok(grant) => {
                 if self.rails.plaintext_remote
                     && !self.rails.allow_plaintext_write
-                    && grant.state.record().mode
-                        == shamir_connect::server::token::TokenMode::ReadWrite
+                    && grant.state.record().mode == TokenMode::ReadWrite
                 {
+                    self.service.counters().count_auth_result("forbidden");
+                    self.maintenance.record_exposed(
+                        grant.state.record().id,
+                        grant.state.record().owner_user_id,
+                        subnet_of(peer.addr.ip()),
+                        now,
+                    );
                     return GateDecision::Forbidden("token_plaintext_write_denied".into());
                 }
-                metrics::counter!("shamir_token_auth_total", "channel" => "rest", "result" => "success")
-                    .increment(1);
+                self.service.counters().count_auth_result("success");
                 GateDecision::Allow(grant)
             }
             Err(VerifyFailure::ChannelDenied) => {
+                self.service.counters().count_auth_result("forbidden");
                 GateDecision::Forbidden("token_channel_denied".into())
             }
             Err(
@@ -135,5 +173,19 @@ impl TokenGate for RestGate {
 
     fn still_valid(&self, grant: &Self::Grant) -> bool {
         (self.clock)().is_some_and(|now| self.service.still_valid(grant, now))
+    }
+
+    fn revalidate(&self, grant: &Self::Grant) -> GateDecision<()> {
+        let Some(now) = (self.clock)() else {
+            self.service.counters().count_auth_result("unavailable");
+            return GateDecision::Unavailable {
+                retry_after_secs: 1,
+            };
+        };
+        if self.service.still_valid(grant, now) {
+            GateDecision::Allow(())
+        } else {
+            GateDecision::Unauthorized
+        }
     }
 }

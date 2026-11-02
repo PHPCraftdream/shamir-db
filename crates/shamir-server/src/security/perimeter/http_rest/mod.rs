@@ -3,6 +3,7 @@
 mod bucket;
 mod executor;
 mod gate;
+mod maintenance;
 mod scope;
 #[cfg(test)]
 mod tests;

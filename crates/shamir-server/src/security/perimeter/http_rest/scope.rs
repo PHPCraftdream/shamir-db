@@ -54,6 +54,23 @@ pub(crate) fn classify_request(
         | DbRequest::ChangePasswordChallenge { .. }
         | DbRequest::ChangePasswordVerify(_) => None,
     };
+    if matches!(
+        request,
+        DbRequest::TxBegin { .. }
+            | DbRequest::TxExecute { .. }
+            | DbRequest::TxCommit { .. }
+            | DbRequest::TxRollback { .. }
+            | DbRequest::CreateCursor { .. }
+            | DbRequest::FetchNext { .. }
+            | DbRequest::CancelCursor { .. }
+    ) {
+        return Decision::NotSupported("not_supported_over_rest");
+    }
+    if let DbRequest::Execute { batch, .. } = request {
+        if mode == TokenMode::ReadOnly && batch_has_write(batch) {
+            return Decision::Denied("token_read_only");
+        }
+    }
     if let (Some(allow), Some(db)) = (databases, db) {
         if !allow.iter().any(|allowed| allowed == db) {
             return Decision::Denied("token_database_denied");
@@ -65,10 +82,7 @@ pub(crate) fn classify_request(
             Decision::Allowed(AllowedOperation::WaitForVisibility)
         }
         DbRequest::GetDdlOpStatus { .. } => Decision::Allowed(AllowedOperation::GetDdlOpStatus),
-        DbRequest::Execute { batch, .. } => match classify_batch(batch, mode, databases) {
-            Decision::Allowed(_) => Decision::Allowed(AllowedOperation::Execute),
-            denial => denial,
-        },
+        DbRequest::Execute { batch, .. } => classify_batch(batch, databases),
         DbRequest::TxBegin { .. }
         | DbRequest::TxExecute { .. }
         | DbRequest::TxCommit { .. }
@@ -85,9 +99,12 @@ pub(crate) fn classify_request(
     }
 }
 
+fn batch_has_write(batch: &shamir_query_types::batch::BatchRequest) -> bool {
+    batch.queries.values().any(|entry| entry.op.is_write())
+}
+
 fn classify_batch(
     batch: &shamir_query_types::batch::BatchRequest,
-    mode: TokenMode,
     databases: Option<&[String]>,
 ) -> Decision {
     for visit in BatchTreeVisitor::new(&batch.queries) {
@@ -99,11 +116,7 @@ fn classify_batch(
             | BatchOp::Update(_)
             | BatchOp::Set(_)
             | BatchOp::Delete(_)
-            | BatchOp::Call(_) => {
-                if mode == TokenMode::ReadOnly {
-                    return Decision::Denied("token_read_only");
-                }
-            }
+            | BatchOp::Call(_) => {}
             BatchOp::Batch(_) | BatchOp::ForEach(_) => {}
             BatchOp::List(op) => {
                 if top && databases.is_some() && matches!(op, ListOp::Databases | ListOp::Users) {

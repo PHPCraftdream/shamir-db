@@ -60,6 +60,14 @@ pub trait TokenGate: Send + Sync + 'static {
     ) -> impl Future<Output = GateDecision<Self::Grant>> + Send + 'a;
     /// Reports whether an earlier grant remains valid.
     fn still_valid(&self, grant: &Self::Grant) -> bool;
+    /// Revalidates a retained grant with an explicit failure classification.
+    fn revalidate(&self, grant: &Self::Grant) -> GateDecision<()> {
+        if self.still_valid(grant) {
+            GateDecision::Allow(())
+        } else {
+            GateDecision::Unauthorized
+        }
+    }
 }
 
 /// REST execution result.

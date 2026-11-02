@@ -245,19 +245,47 @@ where
         Ok(Ok(())) => {}
     }
     let reservation = reservation.take();
-    if !context.gate.still_valid(&grant) {
-        let mut r = response(
-            StatusCode::UNAUTHORIZED,
-            unauthorized_body(),
-            context.peer.tls,
-            context.cfg.hsts,
-            true,
-        );
-        r.headers_mut().insert(
-            header::WWW_AUTHENTICATE,
-            http::HeaderValue::from_static("Bearer"),
-        );
-        return Ok(r);
+    match context.gate.revalidate(&grant) {
+        GateDecision::Allow(()) => {}
+        GateDecision::Unauthorized => {
+            let mut r = response(
+                StatusCode::UNAUTHORIZED,
+                unauthorized_body(),
+                context.peer.tls,
+                context.cfg.hsts,
+                true,
+            );
+            r.headers_mut().insert(
+                header::WWW_AUTHENTICATE,
+                http::HeaderValue::from_static("Bearer"),
+            );
+            return Ok(r);
+        }
+        GateDecision::Unavailable { retry_after_secs } => {
+            return Ok(retry(
+                StatusCode::SERVICE_UNAVAILABLE,
+                retry_after_secs.max(1),
+                context.peer.tls,
+                context.cfg.hsts,
+            ));
+        }
+        GateDecision::RateLimited { retry_after_secs } => {
+            return Ok(retry(
+                StatusCode::TOO_MANY_REQUESTS,
+                retry_after_secs.max(1),
+                context.peer.tls,
+                context.cfg.hsts,
+            ));
+        }
+        GateDecision::Forbidden(code) => {
+            return Ok(response(
+                StatusCode::FORBIDDEN,
+                (context.cfg.forbidden_body)(&code),
+                context.peer.tls,
+                context.cfg.hsts,
+                true,
+            ));
+        }
     }
     let payload = if path.ends_with("/ping") {
         context.cfg.ping_body.clone()
@@ -310,6 +338,10 @@ where
             header::WWW_AUTHENTICATE,
             http::HeaderValue::from_static("Bearer"),
         );
+    }
+    if matches!(outcome.status, crate::gate::ExecStatus::Unavailable) {
+        r.headers_mut()
+            .insert(header::CONNECTION, http::HeaderValue::from_static("close"));
     }
     if matches!(
         outcome.status,

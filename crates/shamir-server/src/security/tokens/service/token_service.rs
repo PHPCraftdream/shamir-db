@@ -49,6 +49,14 @@ impl std::fmt::Debug for TokenService {
     }
 }
 impl TokenService {
+    pub(crate) fn audit_writer(&self) -> Arc<AuditChainWriter> {
+        Arc::clone(&self.audit)
+    }
+
+    pub(crate) fn maintenance_shutdown(&self) -> CancellationToken {
+        self.gc_shutdown.clone()
+    }
+
     /// Open storage, validate its full scan, load live records into the mirror, and run GC.
     pub async fn open(options: TokenServiceOptions) -> Result<Self, TokenStoreError> {
         let TokenServiceOptions {
@@ -128,24 +136,6 @@ impl TokenService {
     pub fn counters(&self) -> &Arc<TokenCounters> {
         &self.counters
     }
-    /// Append a failed token-authentication audit event without peer-controlled data.
-    pub fn audit_auth_failure(&self, ip_subnet: &str, now_ns: u64) {
-        let mut details = Vec::with_capacity(8);
-        details.extend_from_slice(b"rest");
-        if let Err(error) = self.audit.append(
-            "api_token_auth_failed",
-            "token",
-            "",
-            ip_subnet,
-            [0; 8],
-            "invalid",
-            details,
-            now_ns,
-        ) {
-            tracing::warn!(error = ?error, "token auth failure audit append failed");
-        }
-    }
-
     /// Current count of ACTIVE persisted tokens as of this timestamp.
     pub async fn active_count(&self, now_ns: u64) -> Result<u64, TokenStoreError> {
         let store = self.store.clone();

@@ -10,7 +10,7 @@ use shamir_transport_http::{ExecOutcome, ExecStatus, RestExecutor};
 use crate::db_handler::ShamirDbHandler;
 use crate::security::tokens::TokenService;
 
-use super::bucket::BucketCache;
+use super::bucket::{BucketCache, BucketError};
 use super::scope::{classify_request, Decision};
 use super::RestGateRails;
 
@@ -27,7 +27,7 @@ impl ScopedHandler {
         Self { handler }
     }
 
-    pub(crate) fn classify(
+    fn classify(
         &self,
         request: &DbRequest,
         mode: shamir_connect::server::token::TokenMode,
@@ -36,14 +36,33 @@ impl ScopedHandler {
         classify_request(request, mode, databases)
     }
 
-    pub(crate) async fn handle(
+    pub(super) async fn handle(
         &self,
         session: &Session,
         request: DbRequest,
         conn: &ConnectionServices,
-    ) -> Result<Vec<u8>, String> {
-        self.handler.handle_decoded(session, request, conn).await
+    ) -> Result<Vec<u8>, HandleDenial> {
+        let shamir_connect::server::SessionOrigin::Token(origin) = &session.origin else {
+            return Err(HandleDenial::Forbidden("token_request_denied"));
+        };
+        let (mode, _, databases) = origin.scope();
+        match classify_request(&request, mode, databases) {
+            Decision::Allowed(_) => tracing::trace!("rest request admitted"),
+            Decision::Denied(code) => return Err(HandleDenial::Forbidden(code)),
+            Decision::NotSupported(code) => return Err(HandleDenial::BadRequest(code)),
+        }
+        self.handler
+            .handle_decoded(session, request, conn)
+            .await
+            .map_err(|_| HandleDenial::ApplicationError)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HandleDenial {
+    Forbidden(&'static str),
+    BadRequest(&'static str),
+    ApplicationError,
 }
 
 /// Concrete REST executor over the native database handler.
@@ -52,8 +71,6 @@ pub struct RestHandler {
     handler: ScopedHandler,
     clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
     username: Arc<OwnerName>,
-    plaintext_remote: bool,
-    allow_plaintext_write: bool,
     buckets: BucketCache,
 }
 
@@ -67,13 +84,16 @@ impl RestHandler {
         rails: RestGateRails,
     ) -> (super::RestGate, Self) {
         let gate = super::RestGate::new(Arc::clone(&service), Arc::clone(&clock), rails);
+        metrics::describe_histogram!(
+            "shamir_token_request_duration_seconds",
+            metrics::Unit::Seconds,
+            "REST token request execution duration"
+        );
         let executor = Self {
             service,
             handler: ScopedHandler::new(handler),
             clock,
             username,
-            plaintext_remote: rails.plaintext_remote,
-            allow_plaintext_write: rails.allow_plaintext_write,
             buckets: BucketCache::default(),
         };
         (gate, executor)
@@ -120,12 +140,6 @@ impl RestExecutor<Verified> for RestHandler {
             Err(_) => return Self::error("invalid_request", ExecStatus::BadRequest),
         };
         let record = grant.state.record();
-        if self.plaintext_remote
-            && !self.allow_plaintext_write
-            && record.mode == shamir_connect::server::token::TokenMode::ReadWrite
-        {
-            return Self::error("token_plaintext_write_denied", ExecStatus::Forbidden);
-        }
         let operation =
             match self
                 .handler
@@ -136,15 +150,19 @@ impl RestExecutor<Verified> for RestHandler {
                 Decision::Allowed(operation) => operation,
             };
         tracing::trace!(operation = operation.label(), "rest request admitted");
-        let (session_id, session) =
+        let (_, session) =
             match self
                 .buckets
                 .session_for(grant, (self.username)(&record.owner_user_id), now_ns)
             {
                 Ok(pair) => pair,
-                Err(retry) => return Self::rate_limited(retry),
+                Err(BucketError::RateLimited(retry)) => return Self::rate_limited(retry),
+                Err(BucketError::Unavailable) => {
+                    return Self::error("server_busy", ExecStatus::Unavailable)
+                }
             };
-        let conn = ConnectionServices::without_push(u64::from(session_id[0]));
+        // REST creates no subscription and disables push; conn_id is unused by this request path.
+        let conn = ConnectionServices::without_push(0);
         let Some(execution_now_ns) = (self.clock)() else {
             return Self::error("server_busy", ExecStatus::Unavailable);
         };
@@ -162,7 +180,9 @@ impl RestExecutor<Verified> for RestHandler {
                 retry_after_secs: None,
                 hold: hold.map(|guard| Box::new(guard) as Box<dyn Send + Sync>),
             },
-            Err(_) => Self::error("application_error", ExecStatus::Ok),
+            Err(HandleDenial::Forbidden(code)) => Self::error(code, ExecStatus::Forbidden),
+            Err(HandleDenial::BadRequest(code)) => Self::error(code, ExecStatus::BadRequest),
+            Err(HandleDenial::ApplicationError) => Self::error("application_error", ExecStatus::Ok),
         }
     }
 }
