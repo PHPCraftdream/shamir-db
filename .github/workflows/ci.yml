@@ -656,7 +656,7 @@ jobs:
 
   # Dependency admission gate (RFC 3923 cooldown, fail-closed; policy:
   # /cooldown.toml, DEC-3 Q4). Fails the PR when it admits a registry version
-  # younger than 30 days (present in the head Cargo.lock, absent from the
+  # younger than 7 days (present in the head Cargo.lock, absent from the
   # protected base) without an exact, unexpired entry in
   # /cooldown-exceptions.toml, and fails on any unused or expired entry. The
   # `--locked` flags above keep the other jobs on the committed Cargo.lock;
@@ -664,7 +664,7 @@ jobs:
   # no toolchain: crates.io publication times and the RustSec advisory database
   # are read over the network and any failure to read them fails the job.
   cooldown:
-    name: dependency cooldown (30d)
+    name: dependency cooldown (7d)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: plan

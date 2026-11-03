@@ -20,11 +20,20 @@ export const ORIGIN = 'https://localhost';
 export const SERVICE_USER = `token_svc_${process.pid}`;
 export const SERVICE_PASSWORD = 'token service password';
 
+export interface TokenFixtureOptions {
+  loginTtl?: number;
+  loginEnabled?: boolean;
+  loginAllowReadWrite?: boolean;
+  loginAuthorityAllowlist?: readonly string[];
+}
+
 export interface TokenServer {
   dir: string;
   ipc: string;
   http: number;
   https: number;
+  /** WebSocket SCRAM listener (TLS, no exporter): the session type `changePassword` supports. */
+  scramWs: number;
   child: ChildProcess;
   logs: () => string;
   stop: () => Promise<void>;
@@ -36,7 +45,7 @@ function ipcAddress(dir: string): string {
     : path.join(dir, 'token.sock');
 }
 
-function writeConfig(dir: string, ipc: string): string {
+function writeConfig(dir: string, ipc: string, options: TokenFixtureOptions = {}): string {
   const cert = path.join(dir, 'cert.pem').replace(/\\/g, '/');
   const key = path.join(dir, 'key.pem').replace(/\\/g, '/');
   const cfg = `data_dir: ${dir.replace(/\\/g, '/')}
@@ -66,7 +75,8 @@ listeners: [
         body_timeout_ms: 30000
         request_timeout_ms: 60000
         login: {
-            enabled: true
+            enabled: ${options.loginEnabled ?? true}
+            authority_allowlist: [${(options.loginAuthorityAllowlist ?? []).join(', ')}]
         }
         host_authority_allowlist: [localhost]
         browser_origin_allowlist: [${ORIGIN}]
@@ -79,7 +89,18 @@ listeners: [
         head_timeout_ms: 5000
         body_timeout_ms: 30000
         request_timeout_ms: 60000
+        login: {
+            enabled: ${options.loginEnabled ?? true}
+            authority_allowlist: [${(options.loginAuthorityAllowlist ?? []).join(', ')}]
+        }
         host_authority_allowlist: [localhost]
+        browser_origin_allowlist: [${ORIGIN}]
+    }
+    {
+        kind: ws
+        addr: ${HOST}:0
+        path: /shamir/v1/browser
+        profile: tls_no_export
         browser_origin_allowlist: [${ORIGIN}]
     }
 ]
@@ -103,6 +124,10 @@ security: {
         idle_timeout_secs: 60
     }
 }
+tokens: {
+    login_ttl: ${options.loginTtl ?? 86400}
+    login_allow_read_write: ${options.loginAllowReadWrite ?? false}
+}
 audit: {
     max_file_size_mb: 0
     retention_days: 0
@@ -116,26 +141,30 @@ observability: {
   return configPath;
 }
 
-function readBoundListeners(logs: string, ipc: string): { http: number; https: number } | undefined {
+function readBoundListeners(logs: string, ipc: string): { http: number; https: number; scramWs: number } | undefined {
   const lines = logs.replace(/\x1b\[[0-9;]*m/g, '').split('\n');
   const complete = lines.slice(0, -1).filter((line) => /listener bound/i.test(line));
   const ipcBound = complete.some((line) => /kind=unix/i.test(line) && line.includes(ipc));
   const httpAddresses: string[] = [];
+  const wsAddresses: string[] = [];
   for (const line of complete) {
-    if (!/kind="http"/i.test(line)) continue;
     const addressMatch = /local_addr=([^\s,]+)/.exec(line);
-    if (addressMatch) httpAddresses.push(addressMatch[1]!.replace(/^"|"$/g, ''));
+    if (!addressMatch) continue;
+    const address = addressMatch[1]!.replace(/^"|"$/g, '');
+    if (/kind="http"/i.test(line)) httpAddresses.push(address);
+    else if (/kind="?ws"?/i.test(line)) wsAddresses.push(address);
   }
-  if (!ipcBound || httpAddresses.length < 2) return undefined;
+  if (!ipcBound || httpAddresses.length < 2 || wsAddresses.length < 1) return undefined;
   const first = httpAddresses[0]!;
   const second = httpAddresses[1]!;
   const httpPort = /:(\d+)$/.exec(first)?.[1];
   const httpsPort = /:(\d+)$/.exec(second)?.[1];
-  if (!httpPort || !httpsPort || httpPort === httpsPort) return undefined;
-  return { http: Number(httpPort), https: Number(httpsPort) };
+  const wsPort = /:(\d+)$/.exec(wsAddresses[0]!)?.[1];
+  if (!httpPort || !httpsPort || !wsPort || httpPort === httpsPort) return undefined;
+  return { http: Number(httpPort), https: Number(httpsPort), scramWs: Number(wsPort) };
 }
 
-export async function startTokenServer(): Promise<TokenServer> {
+export async function startTokenServer(options: TokenFixtureOptions = {}): Promise<TokenServer> {
   assertServerBinaryFresh();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shamir-token-e2e-'));
   const ipc = ipcAddress(dir);
@@ -143,16 +172,16 @@ export async function startTokenServer(): Promise<TokenServer> {
   let logs = '';
   try {
     if (!generateSelfSignedCert(dir)) throw new Error('openssl unavailable for token e2e TLS listener');
-    const configPath = writeConfig(dir, ipc);
+    const configPath = writeConfig(dir, ipc, options);
     child = spawn(SERVER_BIN, ['--config', configPath, '--bootstrap-password', ADMIN_PASSWORD], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout?.on('data', (chunk: Buffer) => { logs += chunk.toString(); });
     child.stderr?.on('data', (chunk: Buffer) => { logs += chunk.toString(); });
     const proc = child;
-    const ports = await new Promise<{ http: number; https: number }>((resolve, reject) => {
+    const ports = await new Promise<{ http: number; https: number; scramWs: number }>((resolve, reject) => {
       let settled = false;
-      const finish = (error?: Error, value?: { http: number; https: number }): void => {
+      const finish = (error?: Error, value?: { http: number; https: number; scramWs: number }): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -219,8 +248,8 @@ async function stop(child: ChildProcess, dir: string): Promise<void> {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-export async function setupTokenFixture(): Promise<{ server: TokenServer; scram: ShamirClient; admin: ShamirClient; db: string }> {
-  const server = await startTokenServer();
+export async function setupTokenFixture(options: TokenFixtureOptions = {}): Promise<{ server: TokenServer; scram: ShamirClient; admin: ShamirClient; db: string }> {
+  const server = await startTokenServer(options);
   let scram: ShamirClient | undefined;
   try {
     scram = await connectLocal({
