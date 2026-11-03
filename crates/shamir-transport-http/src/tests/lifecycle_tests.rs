@@ -403,7 +403,9 @@ async fn configured_connection_drain_aborts_stragglers_at_its_deadline() {
     ));
     let mut client = TcpStream::connect(addr).await.expect("connect");
     client.write_all(b"POST /shamir/v1/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/msgpack\r\nContent-Length: 0\r\n\r\n").await.expect("request");
-    entered.notified().await;
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("executor entered");
     tokio::time::pause();
     let started = tokio::time::Instant::now();
     shutdown.cancel();
@@ -414,9 +416,10 @@ async fn configured_connection_drain_aborts_stragglers_at_its_deadline() {
         .expect("serve result");
     assert!(started.elapsed() <= Duration::from_secs(3));
     let mut response = Vec::new();
-    client
-        .read_to_end(&mut response)
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
         .await
+        .expect("close deadline")
         .expect("connection closes");
 }
 

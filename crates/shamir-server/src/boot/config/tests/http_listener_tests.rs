@@ -164,6 +164,10 @@ fn http_server_config_mapping_uses_limits_and_messagepack_bodies() {
         config.limits.write_timeout,
         std::time::Duration::from_millis(200)
     );
+    assert_eq!(
+        config.limits.connection_drain_timeout,
+        Some(std::time::Duration::from_secs(5))
+    );
     assert!(!config.hsts);
     assert!(config.tls.is_none());
     assert_eq!(config.ping_body, ping);
