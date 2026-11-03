@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { decode as decodeWire, encode as encodeWire } from '@msgpack/msgpack';
+import { LoginError } from '../errors.js';
 import { performLogin, type LoginCrypto, type LoginHttp } from '../core.js';
 
 type Fields = Record<string, unknown>;
@@ -110,11 +111,26 @@ describe('performLogin security invariants (injected, no network)', () => {
     expect(f.getFinishes()).toBe(0);
   });
 
-  it('accepts security class 2 over external TLS with the hardened expected KDF', async () => {
+  it('accepts security class 2 over external TLS with exact KDF', async () => {
     const f = harness({ reply: challenge({ security: 2 }) });
     await expect(performLogin({ ...opts('https://example.com/'), externalTls: true,
       expectedKdf: { memoryKb: 19456, time: 2, parallelism: 1 } }, f.crypto, f.http, f.connect)).resolves.toBeDefined();
     expect(f.getFinishes()).toBe(1);
+  });
+
+  it('copies CA bytes before awaiting begin', async () => {
+    const ca = bytes(2, 1);
+    const f = harness({ reply: challenge({ security: 1 }) });
+    const seen: (string | Uint8Array | undefined)[] = [];
+    const http: LoginHttp = { request: async (url, body, signal, timeout, passedCa) => {
+      seen.push(passedCa);
+      return f.http.request(url, body, signal, timeout, passedCa);
+    } };
+    const pending = performLogin({ ...opts('https://example.com/'), ca }, f.crypto, http, f.connect);
+    ca.fill(8);
+    await pending;
+    expect(seen).toHaveLength(2);
+    expect(seen.every(value => value instanceof Uint8Array && value[0] === 1)).toBe(true);
   });
 
   it('accepts non-shortest uint64 integer fields in the challenge', async () => {
@@ -180,6 +196,54 @@ describe('performLogin security invariants (injected, no network)', () => {
     expect(f.getFinishes()).toBe(1);
   });
 
+  it.each([
+    ['rest', 'http', true], ['rest', 'ws', false], ['ws', 'http', false], ['ws', 'ws', true],
+    ['both', 'http', true], ['both', 'ws', true],
+  ] as const)('enforces %s channel for %s continuation before connecting', async (channels, channel, allowed) => {
+    const f = harness();
+    let calls = 0;
+    const connector = async () => { calls++; return {} as never; };
+    const result = await performLogin({ ...opts(), scope: { label: 'scope', mode: 'read_only', channels, databases: null } },
+      f.crypto, f.http, connector);
+    if (allowed) await expect(result.connect({ channel })).resolves.toBeDefined();
+    else await expect(result.connect({ channel })).rejects.toMatchObject({ code: 'token_channel_denied' });
+    expect(calls).toBe(allowed ? 1 : 0);
+  });
+
+  it('keeps overall timeout distinct when transport rejects client_aborted on internal abort', async () => {
+    vi.useFakeTimers();
+    try {
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const f = harness();
+      const http: LoginHttp = { request: (_url, _body, signal) => new Promise((_resolve, reject) => {
+        entered();
+        signal.addEventListener('abort', () => reject(new LoginError('client_aborted')), { once: true });
+      }) };
+      const pending = performLogin({ ...opts(), timeoutMs: 10 }, f.crypto, http, f.connect);
+      await started;
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'client_timeout' });
+      await vi.advanceTimersByTimeAsync(10);
+      await rejection;
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('preserves caller abort as client_aborted', async () => {
+    let entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const controller = new AbortController();
+    const f = harness();
+    const http: LoginHttp = { request: (_url, _body, signal) => new Promise((_resolve, reject) => {
+      entered();
+      signal.addEventListener('abort', () => reject(new LoginError('client_aborted')), { once: true });
+    }) };
+    const pending = performLogin({ ...opts(), signal: controller.signal }, f.crypto, http, f.connect);
+    await started;
+    const rejection = expect(pending).rejects.toMatchObject({ code: 'client_aborted' });
+    controller.abort();
+    await rejection;
+  });
+
   it('zeros all retained crypto buffers on successful proof verification', async () => {
     const f = harness();
     await performLogin({ ...opts(), scope: { label: 'scope', databases: ['alpha'], mode: 'read_only', channels: 'rest' } }, f.crypto, f.http, f.connect);
@@ -198,7 +262,7 @@ describe('performLogin security invariants (injected, no network)', () => {
       }
       return response;
     } };
-    await expect(performLogin(opts(), f.crypto, http, f.connect)).rejects.toMatchObject({ code: 'authentication_failed' });
+    await expect(performLogin(opts(), f.crypto, http, f.connect)).rejects.toMatchObject({ code: 'server_signature_mismatch', status: 200 });
     expect(f.getFinishes()).toBe(1);
     expect(f.tracked.length).toBeGreaterThan(4);
     for (const secret of f.tracked) expect([...secret].every(x => x === 0)).toBe(true);
@@ -247,8 +311,159 @@ describe('performLogin security invariants (injected, no network)', () => {
       expect([...password].every(x => x === 0)).toBe(true);
       expect([...late].every(x => x === 0)).toBe(true);
       expect(f.getFinishes()).toBe(0);
-    } finally {
-      fillSpy.mockRestore();
+    } finally { fillSpy.mockRestore(); }
+  });
+
+  it('timeout returns promptly during KDF but retains password until late KDF result is wiped', async () => {
+    vi.useFakeTimers();
+    try {
+      let release!: (value: Uint8Array) => void;
+      let entered!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const controller = new AbortController();
+      const f = harness({ argon: () => { entered(); return new Promise(resolve => { release = resolve; }); } });
+      const pending = performLogin({ ...opts(), timeoutMs: 10, signal: controller.signal }, f.crypto, f.http, f.connect);
+      await started;
+      const password = f.tracked[0];
+      expect([...password].some(x => x !== 0)).toBe(true);
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'client_timeout' });
+      await vi.advanceTimersByTimeAsync(10);
+      controller.abort();
+      await rejection;
+      expect([...password].some(x => x !== 0)).toBe(true);
+      const late = bytes(32, 6);
+      const originalFill = late.fill.bind(late);
+      let wipedResolve!: () => void;
+      const wiped = new Promise<void>(resolve => { wipedResolve = resolve; });
+      const fillSpy = vi.spyOn(late, 'fill').mockImplementation((value, start, end) => {
+        const result = originalFill(value, start, end);
+        if (value === 0) wipedResolve();
+        return result;
+      });
+      try {
+        release(late);
+        await wiped;
+        expect([...password].every(x => x === 0)).toBe(true);
+        expect([...late].every(x => x === 0)).toBe(true);
+        expect(f.getFinishes()).toBe(0);
+      } finally { fillSpy.mockRestore(); }
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('forwards a copied CA bundle through a gated begin request', async () => {
+    let entered!: () => void;
+    let release!: (value: Awaited<ReturnType<LoginHttp['request']>>) => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const ca = bytes(3, 4);
+    const f = harness({ reply: challenge({ security: 1 }) });
+    const seen: (string | Uint8Array | undefined)[] = [];
+    const http: LoginHttp = { request: async (url, body, signal, timeout, passedCa) => {
+      seen.push(passedCa);
+      const response = await f.http.request(url, body, signal, timeout, passedCa);
+      if (url.pathname.endsWith('/begin')) { entered(); return new Promise(resolve => { release = resolve; }); }
+      return response;
+    } };
+    const pending = performLogin({ ...opts('https://example.com/'), ca }, f.crypto, http, f.connect);
+    await started;
+    ca.fill(9);
+    release({ status: 200, contentType: 'application/msgpack', retryAfter: null, body: encode(challenge({ security: 1 })) });
+    await pending;
+    expect(seen).toHaveLength(2);
+    expect(seen.every(value => value instanceof Uint8Array && value.every(x => x === 4))).toBe(true);
+  });
+
+  it.each([
+    { name: 'empty string', ca: '' }, { name: 'zero bytes', ca: bytes(0, 0) }, { name: 'false', ca: false },
+    { name: 'null', ca: null }, { name: 'number', ca: 7 },
+  ])('rejects invalid CA option: $name before HTTP', async ({ ca }) => {
+    const f = harness();
+    await expect(performLogin({ ...opts('https://example.com/'), ca: ca as never }, f.crypto, f.http, f.connect))
+      .rejects.toMatchObject({ code: 'invalid_request' });
+    expect(f.beginScope).toHaveLength(0);
+  });
+
+  it('rejects unknown insecure options before HTTP', async () => {
+    for (const extra of [{ insecure: true }, { allowInsecure: true },
+      { rejectUnauthorized: false, allowInsecureTlsForDevelopment: true }]) {
+      const f = harness();
+      await expect(performLogin({ ...opts(), ...extra } as never, f.crypto, f.http, f.connect))
+        .rejects.toMatchObject({ code: 'invalid_request' });
+      expect(f.beginScope).toHaveLength(0);
     }
+  });
+
+  it.each(['begin', 'finish'] as const)('distinguishes timeout and caller abort during %s', async phase => {
+    for (const reason of ['timeout', 'caller'] as const) {
+      vi.useFakeTimers();
+      try {
+        let entered!: () => void;
+        const started = new Promise<void>(resolve => { entered = resolve; });
+        const controller = new AbortController();
+        const f = harness();
+        const http: LoginHttp = { request: (url, body, signal, timeout, ca) => {
+          if (url.pathname.endsWith(`/${phase}`)) return new Promise((_resolve, reject) => {
+            entered(); signal.addEventListener('abort', () => reject(new LoginError('client_aborted')), { once: true });
+          });
+          return f.http.request(url, body, signal, timeout, ca);
+        } };
+        const pending = performLogin({ ...opts(), timeoutMs: 20, signal: reason === 'caller' ? controller.signal : undefined }, f.crypto, http, f.connect);
+        await started;
+        const expected = expect(pending).rejects.toMatchObject({ code: reason === 'caller' ? 'client_aborted' : 'client_timeout' });
+        if (reason === 'caller') controller.abort(); else await vi.advanceTimersByTimeAsync(20);
+        await expected;
+      } finally { vi.useRealTimers(); }
+    }
+  });
+
+  it('wipes retained begin, finish, and error response bodies', async () => {
+    for (const failing of [false, true]) {
+      const f = harness();
+      const bodies: Uint8Array[] = [];
+      const http: LoginHttp = { async request(url, body, signal, timeout, ca) {
+        const response = await f.http.request(url, body, signal, timeout, ca);
+        if (failing && url.pathname.endsWith('/finish')) {
+          const errorBody = encode({ error: 'authentication_failed' });
+          bodies.push(errorBody);
+          return { ...response, status: 401, body: errorBody };
+        }
+        bodies.push(response.body);
+        return response;
+      } };
+      if (failing) await expect(performLogin(opts(), f.crypto, http, f.connect)).rejects.toMatchObject({ code: 'authentication_failed' });
+      else await performLogin(opts(), f.crypto, http, f.connect);
+      expect(bodies).toHaveLength(2);
+      for (const body of bodies) expect([...body].every(x => x === 0)).toBe(true);
+    }
+  });
+
+  it.each(['begin', 'finish'] as const)('wipes a late %s response after abort', async phase => {
+    let entered!: () => void;
+    let release!: (value: Awaited<ReturnType<LoginHttp['request']>>) => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const controller = new AbortController();
+    const f = harness();
+    const lateBody = encode(challenge());
+    const originalFill = lateBody.fill.bind(lateBody);
+    let wipedResolve!: () => void;
+    const wiped = new Promise<void>(resolve => { wipedResolve = resolve; });
+    const fillSpy = vi.spyOn(lateBody, 'fill').mockImplementation((value, start, end) => {
+      const result = originalFill(value, start, end);
+      if (value === 0) wipedResolve();
+      return result;
+    });
+    const http: LoginHttp = { request: (url, body, signal, timeout, ca) => {
+      if (url.pathname.endsWith(`/${phase}`)) return new Promise(resolve => { entered(); release = resolve; });
+      return f.http.request(url, body, signal, timeout, ca);
+    } };
+    try {
+      const pending = performLogin({ ...opts(), signal: controller.signal }, f.crypto, http, f.connect);
+      await started;
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'client_aborted' });
+      controller.abort();
+      await rejection;
+      release({ status: 200, contentType: 'application/msgpack', retryAfter: null, body: lateBody });
+      await wiped;
+      expect([...lateBody].every(x => x === 0)).toBe(true);
+    } finally { fillSpy.mockRestore(); }
   });
 });

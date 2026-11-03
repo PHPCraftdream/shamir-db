@@ -20,6 +20,8 @@ export interface LoginOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   connectTimeoutMs?: number;
+  /** Node.js CA bundle for TLS verification; never disables certificate verification. */
+  ca?: string | Uint8Array;
   requestTimeoutMs?: number;
   ttl?: never;
 }

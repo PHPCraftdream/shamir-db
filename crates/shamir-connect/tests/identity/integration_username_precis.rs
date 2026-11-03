@@ -14,6 +14,107 @@
 
 use shamir_connect::common::username::NormalizedUsername;
 
+#[derive(serde::Deserialize)]
+struct UsernameVector {
+    name: String,
+    input: String,
+    normalized: Option<String>,
+    reason: Option<String>,
+    #[serde(default)]
+    ts_fail_closed: bool,
+    #[serde(default)]
+    ts_reason: Option<String>,
+}
+
+#[test]
+fn shared_username_precis_vectors_match_rust() {
+    // The shared fixture is JSON, but its scalar strings and booleans are also valid TOML.
+    // Use the existing test-only TOML dependency rather than adding a JSON dependency.
+    let fixture = include_str!("../../../shamir-query-types/test-vectors/username_precis.json")
+        .replace("\r\n", "\n");
+    let metadata = fixture
+        .lines()
+        .find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix("\"unicode_version\": ")
+                .map(|value| value.trim_end_matches(',').trim_matches('\"'))
+        })
+        .expect("fixture unicode_version metadata");
+    assert_eq!(metadata, "15.1");
+
+    let mut vectors = Vec::new();
+    for block in fixture.split("    {\n").skip(1) {
+        let object = block
+            .split_once("\n    }")
+            .expect("fixture vector object terminator")
+            .0;
+        let mut toml_fields = String::new();
+        for line in object.lines() {
+            let line = line.trim().trim_end_matches(',');
+            if line.is_empty() {
+                continue;
+            }
+            let (key, value) = line
+                .split_once(": ")
+                .expect("fixture vector field separator");
+            let key = key
+                .strip_prefix('\"')
+                .and_then(|key| key.strip_suffix('\"'))
+                .expect("quoted fixture field name");
+            assert!(
+                matches!(
+                    key,
+                    "name" | "input" | "normalized" | "reason" | "ts_fail_closed" | "ts_reason"
+                ),
+                "unexpected fixture field: {key}"
+            );
+            toml_fields.push_str(key);
+            toml_fields.push_str(" = ");
+            toml_fields.push_str(value);
+            toml_fields.push('\n');
+        }
+        vectors.push(
+            toml::from_str::<UsernameVector>(&toml_fields)
+                .expect("parse username vector using TOML scalar syntax"),
+        );
+    }
+    assert_eq!(vectors.len(), 29, "fixture vector count");
+    for vector in vectors {
+        assert_eq!(
+            vector.ts_fail_closed,
+            vector.ts_reason.is_some(),
+            "{} TS divergence metadata",
+            vector.name
+        );
+        match (vector.normalized, vector.reason) {
+            (Some(expected), None) => {
+                let actual = NormalizedUsername::from_raw(&vector.input).unwrap_or_else(|error| {
+                    panic!("{} unexpectedly rejected: {error}", vector.name)
+                });
+                assert_eq!(actual.as_str(), expected, "{}", vector.name);
+            }
+            (None, Some(reason)) => {
+                let error = NormalizedUsername::from_raw(&vector.input)
+                    .expect_err(&format!("{} unexpectedly accepted", vector.name));
+                let actual_class = match error {
+                    shamir_connect::common::error::Error::InvalidUsername(
+                        "> 255 bytes after PRECIS",
+                    ) => "length",
+                    shamir_connect::common::error::Error::InvalidUsername(
+                        "PRECIS UsernameCaseMapped rejected input",
+                    ) => "precis",
+                    other => panic!(
+                        "{} unexpected InvalidUsername variant: {other:?}",
+                        vector.name
+                    ),
+                };
+                assert_eq!(actual_class, reason, "{}", vector.name);
+            }
+            _ => panic!("{} must have exactly one expected outcome", vector.name),
+        }
+    }
+}
+
 /// RFC 8265 §3.3 — width mapping converts full-width to half-width.
 #[test]
 fn full_width_ascii_folded_to_half_width() {
