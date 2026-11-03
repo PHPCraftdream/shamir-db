@@ -1,7 +1,10 @@
 //! Tests for TableManager::insert_tx (Stage 4.D.6.a) and
 //! execute_insert_tx (Stage 4.D.6.c.1).
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use shamir_query_builder::{filter, write};
 use shamir_storage::storage_in_memory::InMemoryStore;
@@ -14,6 +17,65 @@ use shamir_types::types::value::InnerValue;
 
 use crate::query::filter::eval_context::FilterContext;
 use crate::table::TableManager;
+
+struct FailSecondVectorPlan {
+    descriptor: shamir_index::descriptor::IndexDescriptor,
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl shamir_index::backend::IndexBackend for FailSecondVectorPlan {
+    fn descriptor(&self) -> &shamir_index::descriptor::IndexDescriptor {
+        &self.descriptor
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    async fn lookup(
+        &self,
+        _query: shamir_index::backend::IndexQuery,
+    ) -> Result<shamir_index::backend::IndexResult, shamir_index::backend::IndexError> {
+        Err(shamir_index::backend::IndexError::Backend(
+            "not used".into(),
+        ))
+    }
+
+    async fn rebuild(
+        &self,
+        _source: Arc<dyn Store>,
+    ) -> Result<(), shamir_index::backend::IndexError> {
+        Ok(())
+    }
+
+    async fn drop_all(&self) -> Result<(), shamir_index::backend::IndexError> {
+        Ok(())
+    }
+
+    async fn plan_insert_tx(
+        &self,
+        _rid: RecordId,
+        _rec: &(dyn shamir_types::record_view::RecordRef + Sync + '_),
+        _tx_id: Option<TxId>,
+    ) -> Result<Vec<shamir_index::write_ops::IndexWriteOp>, shamir_index::backend::IndexError> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            Ok(Vec::new())
+        } else {
+            Err(shamir_index::backend::IndexError::Backend(
+                "injected second-row planner failure".into(),
+            ))
+        }
+    }
+
+    async fn staged_vector(
+        &self,
+        _rid: RecordId,
+        _rec: &(dyn shamir_types::record_view::RecordRef + Sync + '_),
+    ) -> Option<Vec<f32>> {
+        Some(vec![1.0, 2.0])
+    }
+}
 
 async fn make_table() -> TableManager {
     let data: Arc<dyn Store> = Arc::new(InMemoryStore::new());
@@ -138,7 +200,6 @@ async fn update_tx_some_on_missing_id_acts_as_insert() {
         .unwrap();
     assert!(!existed, "missing id → existed=false");
 
-    // counter_delta = 1 since this acts as insert.
     let token = tbl.table_token();
     assert_eq!(*tx.counter_deltas.get(&token).unwrap(), 1);
 }
@@ -161,7 +222,6 @@ async fn delete_tx_some_stages_remove() {
     let removed = tbl.delete_tx(rid, Some(&mut tx)).await.unwrap();
     assert!(removed);
 
-    // Main store still has the record (staged remove not applied).
     let _ = tbl.get(rid).await.unwrap();
 
     let token = tbl.table_token();
@@ -201,9 +261,6 @@ async fn execute_insert_tx_stages_all_records() {
     let tbl = make_table().await;
     let mut tx = TxContext::new(TxId::new(40), 0, u64::MAX, IsolationLevel::Snapshot);
 
-    // W2d: execute_insert_tx now goes through the lens-driven path
-    // (insert_tx_many_bytes → RecordView). Records must be maps (the
-    // production shape); bare scalars are not valid top-level records.
     let op = write::insert("t")
         .rows([
             mpack!({ "name": "v1" }),
@@ -354,11 +411,7 @@ async fn execute_delete_tx_stages_via_delete_tx() {
     assert!(result.records.is_empty());
 
     let token = tbl.table_token();
-    assert_eq!(
-        *tx.counter_deltas.get(&token).unwrap(),
-        -1,
-        "delete must decrement counter by 1"
-    );
+    assert_eq!(*tx.counter_deltas.get(&token).unwrap(), -1);
 }
 
 #[tokio::test]
@@ -480,14 +533,11 @@ async fn w2d_dec_big_invariant_index_key_parity() {
     m.insert(price_k, InnerValue::Str("123.45".into())); // Dec → Str on the wire
     m.insert(score_k, InnerValue::F64(99.5));
     let inner = InnerValue::Map(m);
-
     // Encode to storage bytes (the W2d encoder is byte-identical to
     // to_bytes∘query_value_to_inner_with).
     let bytes = inner.to_bytes().unwrap();
-
     // Build the lens over the same bytes.
     let view = shamir_types::record_view::RecordView::new(&bytes).unwrap();
-
     // extract_index_leaves drives materialize_at under the hood — this is
     // what insert_tx_many_bytes uses. Both must agree on the leaf value.
     let def = shamir_index::base_index::index_info_item::IndexInfoItem::new(vec![price_id]);
@@ -512,6 +562,47 @@ async fn w2d_dec_big_invariant_index_key_parity() {
         InnerValue::Str(s) => assert_eq!(s, "123.45"),
         other => panic!("expected Str for decimal-as-string, got {:?}", other),
     }
+}
+
+/// `insert_tx_many` must retain vectors staged for earlier rows if a later
+/// row's index planner fails.
+#[tokio::test]
+async fn insert_tx_many_vector_planner_error_preserves_prior_staging() {
+    let tbl = make_table().await;
+    let descriptor = shamir_index::descriptor::IndexDescriptor::new(
+        1,
+        "failing_vector",
+        1,
+        smallvec::smallvec![],
+        shamir_index::kind::IndexKind::Vector(Box::new(shamir_index::kind::VectorConfig {
+            dim: 2,
+            metric: shamir_index::kind::VectorMetric::L2,
+            backend: shamir_index::kind::VectorBackendRef::InProcessHnsw {
+                ef_construct: 16,
+                m: 4,
+            },
+            quantization: None,
+        })),
+    );
+    let backend = Arc::new(FailSecondVectorPlan {
+        descriptor,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    tbl.index2_registry().insert(backend).await.unwrap();
+    let mut tx = TxContext::new(TxId::new(70), 0, u64::MAX, IsolationLevel::Snapshot);
+
+    let result = tbl
+        .insert_tx_many(&[InnerValue::Null, InnerValue::Null], &mut tx)
+        .await;
+    assert!(matches!(
+        result,
+        Err(shamir_storage::error::DbError::Internal(message))
+            if message.contains("injected second-row planner failure")
+    ));
+
+    let token = tbl.table_token();
+    assert_eq!(tx.staged_vectors_for(token).unwrap().len(), 1);
+    assert!(tx.write_set.contains_key(&token));
 }
 
 /// RV-FUNCLIB-5FA455F7: inside one tx, `insert_tx_many`'s batch-local

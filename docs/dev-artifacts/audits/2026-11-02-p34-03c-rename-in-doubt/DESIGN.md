@@ -564,3 +564,138 @@ Layout observations are from file-tool listing only: the unauthorized unmounted 
 11. **PARTIAL — acceptance-11 gates.** Parent observed `cargo fmt -p shamir-engine`, `cargo fmt -p shamir-engine -- --check`, and `python -I scripts/ci/check_layout.py` pass at 00:33–00:34 CET; this child did not run them. The checker does not scan the unauthorized untracked file. Parent reports file/folder counts within limits (including `index_admission/` at four entries). Compilation, clippy, tests, and CI were not run. The audit contains duplicated revision-2 progress/design sections from a prior append-edit error; they remain under the no-delete instruction. Full import-target/source-integrity review and CI remain outstanding.
 
 PARTIAL: S1–S5 and regression tests are written in shamir-engine. Formatting and layout checks passed; compilation, clippy, tests and CI were not run. The accidental unmounted write_domain_core.rs and duplicated audit sections remain under the no-delete rule. In-doubt reconciliation and M1–M7 remain deferred to 03d. All child work has completed; nothing was committed or pushed.
+
+## Phase 0 (03d)
+
+- **OBSERVED:** `TxContext.write_set` is keyed by table token and contains `StagingStore` (`crates/shamir-tx/src/tx/tx_context.rs:140-147`). `ensure_table_staging` constructs it with the supplied base store (`tx_context.rs:890-902`); the existing `StagingStore::base()` accessor returns `&Arc<dyn Store>` (`crates/shamir-tx/src/tx/staging_store.rs:122-127`). Engine staging supplies the table data-store Arc (`crates/shamir-engine/src/table/table_manager/transactions/tx_support.rs:164-168`; `tx_insert.rs:367,582`). `TableManager::data_store()` exposes that Arc crate-locally (`table/table_manager/accessors/table_accessors.rs:136-138`).
+- **OBSERVED:** `table_by_token` resolves the live registered table (`repo/instance/repo_instance/catalog.rs:121-142`). Removing a table removes its token registration and table cell (`repo/instance/repo_instance/catalog/repo_membership_impl.rs:320-345`); adding the same name registers its deterministic token again (`:298-304`). Before this change `prelock` used `table_by_token_if_live` and absence skipped the freeze/barrier check (`tx/preparation/pre_commit/prelock.rs:263-289`; `catalog.rs:168-192`).
+- **OBSERVED:** `TxError::MigrationFrozen` is an existing error and is mapped to `DbError::MigrationFrozen` (`tx/commit/pipeline/phase/commit/entry.rs:335-336,429`). Rename copies stores then retires the old registration; old physical stores remain orphaned by design (`repo/instance/repo_instance/catalog.rs:271-280,516-551`).
+- **INFERRED runtime:** Pointer equality between the staged base Arc and current `TableManager::data_store()` verifies incarnation because normal staging captures that exact data-store Arc. It rejects both unregistered tokens and a replaced store under the same token. This is source-derived reasoning, not a test result.
+- **Correction:** Revision-2 documents M5 for successful rename and DROP TABLE (`DESIGN.md:41,291`); both are covered by the check. The corresponding original 03c docs defer M5, so current revision-2/03d scope takes precedence.
+
+## Design (03d)
+
+Prelock validates each `write_set` token after its existing barrier acquisition: resolve current manager with `table_by_token`; missing registration returns `TxError::MigrationFrozen` (table name from `TxContext.table_tokens`, with token fallback); otherwise compare `StagingStore::base()` with current data-store Arc via `Arc::ptr_eq`. A different incarnation rejects. Existing touched-token/sidecar union, dormant `table_by_token_if_live` barrier probe, and lock sequence are retained. No visibility was widened.
+
+## Result (03d)
+
+`prelock.rs` identity validation is at the file end; it runs after barrier acquisition and before commit-time rederivation/materialization. Tests: `m5_tests.rs` includes `staged_tx_is_rejected_after_successful_rename`, `staged_tx_is_rejected_after_drop_and_recreate`, `staged_tx_for_current_incarnation_commits`, and `staged_tx_for_dropped_table_is_rejected`. These were written, not run; CI must compile and execute them.
+
+Progress: Item 1 DONE — M5 identity check and regression tests written. No commands, compilation, or tests run.
+
+## Phase 0 (03d) — implementation-source evidence and corrected boundary
+
+Evidence below distinguishes **OBSERVED source** from **INFERRED runtime**; nothing here is an executed test result.
+
+- **OBSERVED:** The live implementation now prelocks the union of data, index, counter, and staged-vector token sources before validation (`crates/shamir-engine/src/tx/preparation/pre_commit/prelock.rs`; existing 03c-1 work documented above). M5 adds an identity check for each data `write_set`: missing current registration or a staging-base `Arc` that differs from `TableManager::data_store()` rejects the commit. The exact current files and methods are `prelock.rs`, `TxContext::write_set` (`crates/shamir-tx/src/tx/tx_context.rs:140-147`), `StagingStore::base` (`crates/shamir-tx/src/tx/staging_store.rs:122-127`), and table staging (`crates/shamir-engine/src/table/table_manager/transactions/tx_support.rs:164-168`). See the preceding M5 note for the line-specific evidence.
+- **OBSERVED:** Current source names are `RenamePersistOutcome::{Committed, NotCommitted(DbError), InDoubt(DbError)}` (`crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_outcome.rs:5-14`), `RenameInDoubt { from, to, freeze }`, and `RenameFenceEntry::{Source, InFlight { from, to }, Destination { from }}` (`.../catalog/rename_in_doubt.rs:3-18`). Fence APIs are `check_table_rename_fence`, `check_rename_pair`, `has_rename_in_doubt`, `take_rename_fence`, `raise_rename_fence`, and `clear_rename_fence` (`.../catalog/rename_fence.rs:7-110`).
+- **OBSERVED:** `RenameFreeze::begin` obtains the migration-freeze guard then detaches source; visibility wait samples `version_allocation_high_water_mark`, awaits that target, matches `Visible`/`ReopenRequired`, and maps its elapsed timeout to `Conflict` (`.../catalog/rename_freeze.rs:21-55`). Production wait is bounded at 30 seconds; unit-test build uses 200ms (`:8-11`). `RenameAttempt` owns permit reference, pair, source, optional freeze and phase; abort before persist reattaches/releases, while persisting-phase drop or explicit `into_doubt` transfers the retained freeze into the fence (`.../catalog/rename_attempt.rs:13-121`).
+- **OBSERVED:** Catalogue `rename_table_row_outcome` validates/prepares, writes destination and deletes source in one implicit transaction, then performs `flush_system_repo_durable`; a transaction error or failed final flush invokes `resolve_table_rename` (`crates/shamir-db/src/shamir_db/system_store/catalogue/ops.rs:271-432`). That resolver checks destination identity/provenance and source absence and flushes before returning `Committed`; inability to establish these facts returns `InDoubt` (`catalogue/rename_resolution.rs:10-81`). The boot/recovery path completes an interrupted catalogue half through `complete_table_rename_row_outcome` (`catalogue/rename_recovery.rs:10-189`); repo registration/retirement is in `crates/shamir-engine/src/repo/instance/repo_instance/catalog.rs:271-431`.
+- **OBSERVED boundary correction:** The earlier 03c M1 wording described `WalDurability` being converted to `Ok` and a later flush error as an unresolved loss window. Current `ops.rs:399-432` explicitly reconciles transaction errors and the post-transaction durability flush through `resolve_table_rename`; it does not treat the initial transaction result alone as proof. The engine-side three-state result still distinguishes knowledge states. These are code-path observations, not proof of storage/runtime behavior.
+- **INFERRED runtime:** exact `Arc` identity detects old staging incarnation; the mirror guards both logical names while unresolved, and a successful retry of the exact pair takes ownership of the same frozen source. Expected effects are supported by written tests only, not executed here.
+- **Observed source-history caveat (operator report):** catalogue source was accidentally overwritten by a worker and methods were reconstructed while preserving intended behavior. Thorough diff review is still required; this report does not certify equivalence. No command-policy violation was observed/reported by the children (they report running no commands). The unauthorized `ENGINE_SAFETY_CORE_STATUS.txt` and `M5-03d.md` worker-created files remain; no deletion was made.
+
+## Design (03d) — current implementation and remaining qualification
+
+- Outcome and reconciliation: the storage layer returns three typed states; the engine rolls back only a fresh attempt known `NotCommitted`, commits/retire on `Committed`, and holds the source fence for `InDoubt`. If an exact-pair retry says `NotCommitted`, it retains the fence; it does not reattach on that retry. Cancellation before persist restores source; cancellation during persist fences it. A new/non-exact pair is refused while a pair fence conflicts.
+- Fence/mirror: source entry owns retained freeze; destination entry maps back to source; `InFlight` marks a pair while an exact retry is operating. `check_rename_pair` only allows the matching pair; other DDL touching either name is rejected. Repo rename checks `has_rename_in_doubt` (`crates/shamir-db/src/shamir_db/shamir_db/db/db_management.rs:641`).
+- Catalogue boundary: ordinary attempt validates old identity and stages destination-with-provenance plus source delete in one implicit transaction, then durable flush. Ambiguous transaction/flush outcomes are reconciled by reading catalogue identity and requiring destination provenance/source absence, followed by another durability flush. Open recovery likewise validates source/destination identities and completes the missing half. An unresolved outcome remains fenced; no runtime durability guarantee is asserted.
+- M5: commit prelock now compares each data staging base with the live data-store Arc, refusing absent or replaced registration. Sidecar/vector token admission remains the union path; vector staging is part of that union before commit.
+- Explicitly NOT claimed: the newly added durability-tail fault seam requested in the brief was not found in the inspected source; do not infer a deterministic injected final-flush fault test. Likewise no test execution or runtime verification is claimed.
+
+- **OBSERVED:** `store.rs:119-145` contains `arm_durability_tail_faults`; the CAS next-number gate is active. `flush_system_repo_durable` at `store.rs:436` calls that seam once. This is the source seam for deterministic final-flush fault injection; no test execution or runtime outcome is claimed.
+- **CORRECTION:** The prior line 604 statement that the durability-tail fault seam was not found is incorrect and superseded by the source locations above.
+
+
+| # | Situation | Current implementation / residual status |
+|---|---|---|
+| M1 | Catalogue transaction may commit but durability result is ambiguous or flush fails | Outcome is reconciled from durable catalogue identity/provenance and flushed again; unresolved result remains fenced. Source only, unexecuted. |
+| M2 | Another operation takes destination while M1 unresolved | Name mirror fences both endpoints; non-exact rename/DDL conflicts while pair is present. |
+| M3 | Future cancelled during persist | `RenameAttempt::drop` fences and retains freeze once persisting; cancellation earlier restores source. Written cancellation tests, unexecuted. |
+| M4 | Repo rename during M1 | Repo-management guard rejects while `has_rename_in_doubt`; written code, no runtime verification. |
+| M5 | Transaction staged through pre-rename clone | Data staging identity check rejects missing/replaced registration. Four named tests below; written, unexecuted. |
+| M6 | Wire code of in-doubt error | Existing public error mapping remains the relevant boundary; implementation is written but runtime/wire tests unverified. |
+| M7 | Stale-handle `RecordCounter` metric write | **Unchanged, explicit non-goal.** A stale handle may still affect orphaned metric storage; no claim of fencing this path. |
+| M8 | Visibility target cannot settle | Production bounded wait is 30s; timeout returns conflict before catalogue persist and pre-persist cleanup restores source. This is an availability cost/bounded wait, not an unbounded hang; timeout behavior unexecuted. |
+
+### Visibility widening inventory
+
+- Existing `catalog::rename_in_doubt` module changed from private to `pub(super)` so parent `RepoInstance` can name `RenameFenceEntry` in its field (`catalog.rs:23`; `repo_instance.rs:70`).
+- New public `RenamePersistOutcome` enum is re-exported through `catalog.rs` and `repo/mod.rs`; new public checks `check_table_rename_fence`, `check_rename_pair`, and `has_rename_in_doubt` are present (`rename_fence.rs:9,18,33`). These are additions, not widening of an existing public method.
+- No other existing public method visibility widening was observed in the reviewed code. A new public test-util arm seam is also present; it is test-only instrumentation. This inventory is based on observed source, not a repository-wide automated visibility audit.
+
+## Result (03d) — interim
+
+Statuses are implementation-written, not runtime-verified; all items remain **PARTIAL pending CI**. No item is represented as fully DONE.
+
+1. **PARTIAL — M5 identity guard and four tests written:** `staged_tx_is_rejected_after_successful_rename`, `staged_tx_is_rejected_after_drop_and_recreate`, `staged_tx_for_current_incarnation_commits`, `staged_tx_for_dropped_table_is_rejected` (`crates/shamir-engine/src/repo/tests/rename/m5_tests.rs`).
+2. **PARTIAL — typed outcome/reconciliation written:** `RenamePersistOutcome`; catalogue ordinary and recovery outcome paths described above. No executed tests.
+3. **PARTIAL — fence/mirror written:** exact pair, source/destination entries, in-flight retry marker; behavior tests include `in_doubt_rename_fences_both_names_until_same_pair_commits`, `fenced_retry_not_committed_remains_fenced_until_commit`.
+4. **PARTIAL — pair guards/vector union written:** guards and touched-token vector staging are implemented, but vector failure-statement coverage and wire test coverage have gaps; no runtime claims.
+5. **PARTIAL — real Fjall restart test written, unexecuted:** `in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation` (`crates/shamir-db/src/shamir_db/shamir_db/tests/catalogue/rename_restart_tests.rs`).
+
+Additional source test names observed: `successful_rename_rejects_stale_clone_crud_and_ddl`, `failed_rename_reattaches_and_unfreezes_source`, `writer_is_drained_before_successful_rename`, `rename_flushes_live_record_counter`, `visibility_wait_times_out_before_persist_and_restores_source`, `cancelled_persisting_rename_keeps_source_fenced`, `cancelled_visibility_wait_reattaches_and_unfreezes_source`. They are written, not claimed executed. M7 remains unchanged/non-goal; M8 incurs up to 30 seconds bounded availability wait.
+
+**Validation report:** parent observed permitted `cargo fmt -p shamir-engine` success and `python -I scripts/ci/check_layout.py` success. The initial formatting check found a parser defect, since fixed. No `cargo check`, clippy, build, test, npm, tsc, vitest, or git-mutation command was run. No runtime test result is claimed. Status remains PARTIAL pending CI; a final mandatory status message is still to be appended later.
+
+## 03d report errata and progress
+
+- **OBSERVED:** `crates/shamir-db/src/shamir_db/system_store/store.rs:119-145` contains `arm_durability_tail_faults`; the CAS next-number gate is active. `flush_system_repo_durable` at `store.rs:436` calls that seam once. This is the source seam for deterministic final-flush fault injection; no runtime outcome is claimed. This corrects and supersedes the prior line 604 statement that the seam was not found.
+- **M5 boundary correction:** named data staging carries table tokens and is covered by staging-incarnation validation. Unnamed raw `Store::commit` remains supported and skips that strict table-token check; existing raw commit cases are in `crates/shamir-engine/src/repo/tests/commit_tests.rs:39-61,154-181`. Do not generalize M5 validation to unnamed raw commits.
+- **Vector regression written:** `crates/shamir-engine/src/table/tests/write/transaction/insert_tx_tests.rs::insert_tx_many_vector_planner_error_preserves_prior_staging` uses a fake backend that errors on the second vector-plan call; asserts the prior vector survives and the write-set token is present. Not run.
+- **Wire regression written:** `crates/shamir-db/src/shamir_db/shamir_db/tests/catalogue/rename_in_doubt_tests.rs::wire_rename_table_reports_in_doubt_conflict_code_and_message`. Not run.
+- New unfenced helpers marked `pub(super)` are newly introduced visibility, not widening of existing helpers. The unused recovery wrapper was removed and the legacy rename `cfg(test)` item retained. Copyright broad comments removed during edits remain a scope/parity-cleanup item, not a completed item.
+
+Progress: source corrections **DONE**; vector and wire regressions **PARTIAL — written, not run**; all runtime validation remains pending CI. Parent reports `cargo fmt` and `cargo fmt --check` passed and layout check OK; this editor ran no commands. Copyright comment parity cleanup remains pending. No test success is inferred from tests being written.
+
+
+## FINAL mandatory report (03d, appended at completion)
+
+This section reflects the **current source state only**; it appends to, and does not replace, any prior section. Every status below is implementation-written: **all runtime validation is PARTIAL pending CI, which has not executed.** OBSERVED = read from source; INFERRED = source-derived reasoning; no runtime correctness claim is made anywhere in this report.
+
+### Per-item final status (all runtime PARTIAL pending CI)
+
+1. **DONE (written) — M5 staging-incarnation guard.** `prelock.rs` identity validation comparing each data staging base with the live data-store Arc; tests `staged_tx_is_rejected_after_successful_rename`, `staged_tx_is_rejected_after_drop_and_recreate`, `staged_tx_for_current_incarnation_commits`, `staged_tx_for_dropped_table_is_rejected` (`crates/shamir-engine/src/repo/tests/rename/m5_tests.rs`). Written, not executed.
+2. **DONE (written) — typed outcome and reconciliation.** `RenamePersistOutcome::{Committed, NotCommitted, InDoubt}` (`crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_outcome.rs`); catalogue ordinary + recovery outcome paths and `resolve_table_rename` failure-path reconciliation in `crates/shamir-db/src/shamir_db/system_store/catalogue/{ops.rs,rename_resolution.rs,rename_recovery.rs}`. Written, not executed.
+3. **DONE (written) — rename fence and mirror.** `RenameInDoubt` / `RenameFenceEntry::{Source, InFlight, Destination}` (`rename_in_doubt.rs`); fence APIs in `rename_fence.rs`; behavior tests `in_doubt_rename_fences_both_names_until_same_pair_commits`, `fenced_retry_not_committed_remains_fenced_until_commit`, `fenced_retry_cancel_keeps_both_names_fenced` (`crates/shamir-engine/src/repo/tests/rename/freeze_tests.rs`, `cancel_tests.rs`). Written, not executed.
+4. **DONE (written) — guards/wire/vector regressions.** Cancellation/pre-persist guards plus new tests: `wire_rename_table_reports_in_doubt_conflict_code_and_message` (`crates/shamir-db/src/shamir_db/shamir_db/tests/catalogue/rename_in_doubt_tests.rs`); create/drop fence coverage via the m5 create/drop-recreate tests above; named-vector regression `insert_tx_many_vector_planner_error_preserves_prior_staging` using the `FailSecondVectorPlan` fake backend (`crates/shamir-engine/src/table/tests/write/transaction/insert_tx_tests.rs`); `cancelled_preparing_rename_aborts_fresh_and_restores_source` (`freeze_tests.rs`). Written, not executed.
+5. **DONE (written) — real-storage restart test.** `in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation` (`crates/shamir-db/src/shamir_db/shamir_db/tests/catalogue/rename_restart_tests.rs`). Written, not executed.
+
+Despite the per-item DONE (written) above, **every item is runtime-PARTIAL**: no compile, clippy, build, test, npm, tsc or vitest command has validated this tree.
+
+### Failure-mode M1–M8 correction
+
+- **M1 (CORRECTION): reconcile is implemented (written).** The catalogue path reconciles an ambiguous transaction/durability-tail outcome by re-reading destination identity/provenance and source absence, flushing again, and fencing on unresolved facts (`ops.rs`, `rename_resolution.rs`, `rename_recovery.rs`). The old 03c wording describing an unresolved M1 loss window is superseded; engine-side three-state knowledge distinction remains. Source observation, not a durability proof.
+- **M7: unchanged, explicit non-goal.** Stale-handle `RecordCounter` metric writes into orphaned storage remain out of scope; no fencing claimed.
+- **M8: bounded availability, 30 s (written, unexecuted).** Production visibility wait is bounded at 30 seconds; timeout returns a conflict before catalogue persist and pre-persist cleanup restores the source. This is a bounded-wait availability cost, not an unbounded hang; timeout behavior unexecuted.
+- M2/M3/M4/M5/M6: fence mirror, `RenameAttempt` drop-phase fencing, repo-rename `has_rename_in_doubt` guard, staging identity check, and wire code regression are written as described above; all unexecuted.
+
+### Success/read-count contract
+
+The success path contract is unchanged (OBSERVED source): `resolve_table_rename` runs only on failure paths (transaction error or failed final durability flush); the ordinary successful path performs the same single durable flush as before, with no extra catalogue reads added to the success path.
+
+### Visibility-widening catalogue (OBSERVED)
+
+- Existing module `catalog::rename_in_doubt` changed private → `pub(super)` so `RepoInstance` can name `RenameFenceEntry` in its field.
+- New unfenced helpers in `rename_fence.rs` (`take_rename_fence`, `raise_rename_fence`, `clear_rename_fence`) are `pub(super)` — newly introduced visibility, not widening of existing items.
+- New public APIs (additions, not widening): `RenamePersistOutcome` re-exported through `catalog.rs` and `repo/mod.rs`; `check_table_rename_fence`, `check_rename_pair`, `has_rename_in_doubt` (`pub fn`, `rename_fence.rs:9,18,33`).
+- New public test-util arm seam (`arm_durability_tail_faults`, `crates/shamir-db/src/shamir_db/system_store/store.rs:122`, called once from `flush_system_repo_durable` at `:436`) — test-only instrumentation.
+
+### Residuals (non-blocking, recorded)
+
+- **Unauthorized worker files still present** under the no-delete policy: `ENGINE_SAFETY_CORE_STATUS.txt` (repo root) and `docs/dev-artifacts/audits/2026-11-02-p34-03c-rename-in-doubt/M5-03d.md`. No deletion was made; the orchestrator decides their disposition.
+- **Parity cosmetics pending:** some concise replacement docs replaced original verbose comments and the F-68 log was removed. These are cosmetic parity residuals only; no runtime behavior change is claimed by this report. Not blocking compile, but cleanup remains outstanding.
+
+### Command ledger (parent-permitted, OBSERVED as reported by parent)
+
+Permitted commands observed run by the parent: `cargo fmt -p shamir-engine` and `cargo fmt -p shamir-db` (runs and `--check` passes; the final combined check was still pending at report time) and `python -I scripts/ci/check_layout.py` OK twice. **No** `cargo check`, clippy, build, test, npm, tsc, or vitest command was run; no dependency, manifest, or lock file was changed; no git tree/index mutation occurred (no reset/checkout/clean/stash/restore/rm); no deletion or reversion of any file. No file content outside documentation was written by this append.
+
+### OBSERVED vs INFERRED summary
+
+Everything above marked OBSERVED is read from current source. INFERRED items (Arc-identity incarnation detection semantics, fenced-pair retry ownership, restart single-incarnation behavior) are supported by written tests only. **No runtime correctness, durability, or availability claim is made; compilation and all tests remain unverified.**
+
+### What CI must run
+
+1. **Fast tier, affected crates:** `cargo check`/`clippy`/`test` for `shamir-tx`, `shamir-db`, `shamir-engine`, `shamir-index` (vector backend), and the wire-level server crate hosting rename DDL (`shamir-server`), plus format/layout checks.
+2. **Full matrix:** the complete workspace test suite, including the real-Fjall restart and recovery paths, since rename touches the catalogue durability tail and repo registration lifecycle.
+3. **Specifically recommended:** validate the fenced-pair semantics tests as a group — `in_doubt_rename_fences_both_names_until_same_pair_commits`, `fenced_retry_not_committed_remains_fenced_until_commit`, `fenced_retry_cancel_keeps_both_names_fenced`, `cancelled_persisting_rename_keeps_source_fenced`, `cancelled_preparing_rename_aborts_fresh_and_restores_source`, `in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation`, the m5 staging-incarnation quartet, `wire_rename_table_reports_in_doubt_conflict_code_and_message`, and `insert_tx_many_vector_planner_error_preserves_prior_staging` — before accepting the rename-in-doubt design, since these encode the M1–M6 corrections and none has ever been executed.

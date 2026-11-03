@@ -16,6 +16,7 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.check_table_rename_fence(&config.name)?;
         self.add_table(config, permit);
         Ok(())
     }
@@ -29,6 +30,7 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.check_table_rename_fence(table_name)?;
         Ok(self.remove_table(table_name, permit))
     }
 }

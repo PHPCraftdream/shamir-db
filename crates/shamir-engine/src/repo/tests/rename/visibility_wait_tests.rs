@@ -1,5 +1,5 @@
 use crate::index::write_barrier_flags::MIGRATION_FREEZE;
-use crate::repo::{BoxRepo, RepoInstance};
+use crate::repo::{BoxRepo, RenamePersistOutcome, RepoInstance};
 use crate::table::{TableConfig, TableManager};
 use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
@@ -27,7 +27,7 @@ async fn visibility_wait_times_out_before_persist_and_restores_source() {
     let called = Arc::clone(&persist_called);
     let rename = repo.rename_table_stores_with("a", "b", move |_| async move {
         called.store(true, Ordering::Release);
-        Ok(())
+        RenamePersistOutcome::Committed
     });
     let error = rename.await.unwrap_err();
     assert!(
@@ -52,11 +52,11 @@ async fn visibility_wait_times_out_before_persist_and_restores_source() {
         receipt.visibility,
         shamir_query_types::batch::VisibilityState::Pending { .. }
     ));
+    drop(version);
     assert_eq!(source.get(id).await.unwrap(), InnerValue::Null);
     source.ensure_attached().unwrap();
     source
         .create_index("after_timeout", &["name"])
         .await
         .unwrap();
-    drop(version);
 }

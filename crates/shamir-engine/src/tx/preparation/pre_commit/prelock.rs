@@ -5,6 +5,7 @@ use shamir_tx::{IndexFamily, IndexWriteOp, TxContext};
 use shamir_types::core::interner::InternerKey;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
+use std::sync::Arc;
 
 use super::base_index::rederive_base_index_ops_post_stage;
 use super::claims::{fire_post_prelock_pre_materialize_test_hook, PreLockResult};
@@ -346,6 +347,11 @@ pub(in crate::tx) async fn pre_commit_prelock(
             uwl_guards.push(guard);
         }
     }
+
+    // M5: validate before materialization, after acquiring any writer barrier.
+    // A missing token must reject rather than skip; pointer identity rejects a
+    // stale staging store even when DROP + CREATE reused the same name/token.
+    validate_staging_table_identities(tx, repo).await?;
 
     // P0-2 (#958): base_index (regular + unique) ops-plan re-derivation for
     // the `IndexManager` family. A tx that staged before a base_index index
@@ -790,6 +796,34 @@ pub(in crate::tx) async fn pre_commit_prelock(
         uwl_guards,
         drain_guards,
     })
+}
+
+async fn validate_staging_table_identities(
+    tx: &TxContext,
+    repo: &RepoInstance,
+) -> Result<(), TxError> {
+    for (token, staging) in &tx.write_set {
+        // Named table staging is created through TableManager and records the
+        // table name in `table_tokens`; enforce incarnation identity there.
+        // Unnamed direct `write_set` staging is the supported low-level commit
+        // API and has no catalogue identity to validate. Do not infer one from
+        // the token: those commits may target independent raw stores.
+        if !tx.table_tokens.contains_key(token) {
+            continue;
+        }
+        let Some(current) = repo.table_by_token(*token).await? else {
+            return Err(TxError::MigrationFrozen {
+                table: tx.table_tokens[token].clone(),
+            });
+        };
+        let same_incarnation = Arc::ptr_eq(staging.base(), current.data_store());
+        if !same_incarnation {
+            return Err(TxError::MigrationFrozen {
+                table: tx.table_tokens[token].clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn touched_table_tokens(tx: &TxContext) -> Vec<u64> {

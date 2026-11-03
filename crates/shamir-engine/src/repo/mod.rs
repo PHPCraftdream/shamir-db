@@ -31,6 +31,7 @@ pub use fk_reverse_cache::{
 pub use instance::repo_instance;
 pub use journal::bounded_journal_read::BoundedJournalRead;
 pub use repo_config::RepoConfig;
+pub use repo_instance::catalog::RenamePersistOutcome;
 pub use repo_instance::RepoInstance;
 pub use repo_types::{BoxRepo, BoxRepoFactory, RepoFactory};
 pub use seed_install::{SeedImageWriter, SeedInstallState, SeedReceipt, SeedTable};

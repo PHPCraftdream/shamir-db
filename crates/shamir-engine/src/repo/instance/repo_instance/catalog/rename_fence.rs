@@ -1,0 +1,140 @@
+use super::rename_in_doubt::{RenameFenceEntry, RenameInDoubt};
+use super::RepoInstance;
+use shamir_storage::error::{DbError, DbResult};
+use std::hash::BuildHasher;
+use std::sync::atomic::Ordering;
+
+impl RepoInstance {
+    /// Reject access to a name in an unresolved rename pair.
+    pub fn check_table_rename_fence(&self, name: &str) -> DbResult<()> {
+        if self.rename_fence_len.load(Ordering::Acquire) == 0 {
+            return Ok(());
+        }
+        let pair = fence_pair(&self.rename_fence, name);
+        pair.map_or(Ok(()), |(from, to)| Err(rename_conflict(&from, &to)))
+    }
+
+    /// Check source and destination before a rename, allowing a retry of its exact pair.
+    pub fn check_rename_pair(&self, from: &str, to: &str) -> DbResult<()> {
+        if self.rename_fence_len.load(Ordering::Acquire) == 0 {
+            return Ok(());
+        }
+        for name in [from, to] {
+            if let Some((source, destination)) = fence_pair(&self.rename_fence, name) {
+                if source != from || destination != to {
+                    return Err(rename_conflict(&source, &destination));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether this repository has an unresolved rename.
+    pub fn has_rename_in_doubt(&self) -> bool {
+        self.rename_fence_len.load(Ordering::Acquire) != 0
+    }
+
+    pub(super) fn take_rename_fence(&self, from: &str, to: &str) -> Option<RenameInDoubt> {
+        self.check_rename_pair(from, to).ok()?;
+        self.rename_fence
+            .update_sync(from, |_, entry| match entry {
+                RenameFenceEntry::Source(pair) if pair.from == from && pair.to == to => {
+                    let old = std::mem::replace(
+                        entry,
+                        RenameFenceEntry::InFlight {
+                            from: from.into(),
+                            to: to.into(),
+                        },
+                    );
+                    match old {
+                        RenameFenceEntry::Source(pair) => Some(pair),
+                        _ => unreachable!("entry replaced while exclusively updated"),
+                    }
+                }
+                _ => None,
+            })
+            .flatten()
+    }
+
+    pub(super) fn raise_rename_fence(&self, pair: RenameInDoubt) {
+        let from = pair.from.clone();
+        let to = pair.to.clone();
+        let mut pair = Some(pair);
+        let updated = self
+            .rename_fence
+            .update_sync(&from, |_, entry| match entry {
+                RenameFenceEntry::InFlight {
+                    from: old_from,
+                    to: old_to,
+                } if old_from == &from && old_to == &to => {
+                    *entry = RenameFenceEntry::Source(
+                        pair.take().expect("pair retained until installed"),
+                    );
+                    true
+                }
+                _ => false,
+            })
+            .unwrap_or(false);
+        if updated {
+            debug_assert!(pair.is_none());
+            return;
+        }
+        let source = pair.take().expect("pair retained until inserted");
+        // The write permit and pair checks make a destination collision impossible; never ignore it.
+        match self.rename_fence.entry_sync(to.clone()) {
+            scc::hash_map::Entry::Occupied(occupied) => {
+                assert!(
+                    matches!(
+                        occupied.get(),
+                        RenameFenceEntry::Destination { from: old_from } if old_from == &from
+                    ),
+                    "rename destination name unexpectedly occupied"
+                );
+            }
+            scc::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert_entry(RenameFenceEntry::Destination { from: from.clone() });
+            }
+        }
+        match self.rename_fence.entry_sync(from.clone()) {
+            scc::hash_map::Entry::Occupied(_) => {
+                panic!("rename source name unexpectedly occupied outside retry");
+            }
+            scc::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert_entry(RenameFenceEntry::Source(source));
+            }
+        }
+        self.rename_fence_len.fetch_add(1, Ordering::Release);
+    }
+
+    pub(super) fn clear_rename_fence(&self, from: &str, to: &str) {
+        let source = self.rename_fence.remove_sync(from);
+        let destination = self.rename_fence.remove_sync(to);
+        let decrement = source.as_ref().is_some_and(|(_, entry)| {
+            matches!(entry,
+                RenameFenceEntry::Source(pair) if pair.from == from && pair.to == to
+            ) || matches!(entry, RenameFenceEntry::InFlight { from: source, to: destination }
+            if source == from && destination == to)
+        });
+        if decrement {
+            self.rename_fence_len.fetch_sub(1, Ordering::AcqRel);
+        }
+        drop((source, destination));
+    }
+}
+
+fn fence_pair(
+    fence: &scc::HashMap<String, RenameFenceEntry, impl BuildHasher>,
+    name: &str,
+) -> Option<(String, String)> {
+    fence
+        .read_sync(name, |_, entry| match entry {
+            RenameFenceEntry::Source(pair) => Some((pair.from.clone(), pair.to.clone())),
+            RenameFenceEntry::Destination { from } => Some((from.clone(), name.to_string())),
+            RenameFenceEntry::InFlight { from, to } => Some((from.clone(), to.clone())),
+        })
+        .flatten()
+}
+
+fn rename_conflict(from: &str, to: &str) -> DbError {
+    DbError::Conflict(format!("rename in doubt: '{from}' to '{to}'"))
+}

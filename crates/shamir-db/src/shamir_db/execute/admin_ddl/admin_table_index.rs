@@ -46,6 +46,14 @@ impl ShamirAdminExecutor {
             .map_err(err_access)?;
 
         let _control = self.shamir.lock_replication_control().await;
+        if let Some(repo) = self
+            .shamir
+            .get_db(&self.db_name)
+            .and_then(|db| db.get_repo(&op.repo))
+        {
+            repo.check_table_rename_fence(&op.create_table)
+                .map_err(|e| err_code(e.code(), e.to_string()))?;
+        }
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
             if db.has_table(&op.repo, &op.create_table) {
@@ -134,6 +142,14 @@ impl ShamirAdminExecutor {
             .map_err(err_access)?;
 
         let _control = self.shamir.lock_replication_control().await;
+        if let Some(repo) = self
+            .shamir
+            .get_db(&self.db_name)
+            .and_then(|db| db.get_repo(&op.repo))
+        {
+            repo.check_table_rename_fence(&op.drop_table)
+                .map_err(|e| err_code(e.code(), e.to_string()))?;
+        }
         // if_exists early-exit: missing db or missing table → no-op.
         if op.if_exists {
             let exists = self
@@ -252,11 +268,6 @@ impl ShamirAdminExecutor {
             unreachable!("handle_rename_table called with non-RenameTable op");
         };
 
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
         let err_code = |code: &str, msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
@@ -291,7 +302,11 @@ impl ShamirAdminExecutor {
                 &_control,
             )
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(|e| BatchError::QueryError {
+                alias: String::new(),
+                message: e.to_string(),
+                code: e.code().map(str::to_owned),
+            })?;
         Ok(admin_result(mpack!({
             "renamed_table": @(QueryValue::Str(op.rename_table.clone())),
             "to": @(QueryValue::Str(op.to.clone())),
