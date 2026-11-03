@@ -211,7 +211,9 @@ impl ShamirDb {
         let mut bytes = 0usize;
         let mut records = 0usize;
         for name in repo.list_table_names() {
-            let table = repo.get_table(&name).await?;
+            // Seed catalogue walks only read a quiesced repo, so an in-doubt
+            // fenced source name must still resolve.
+            let table = repo.get_table_unfenced(&name).await?;
             let stream = table
                 .mvcc_snapshot_stream(1, version)
                 .ok_or_else(|| DbError::Storage("seed catalogue requires MVCC".into()))?;
@@ -264,7 +266,9 @@ impl ShamirDb {
         }
         let repo = self.system_store.system_repo()?;
         for name in repo.list_table_names() {
-            repo.get_table(&name).await?;
+            // Seed catalogue flush walks only read a quiesced repo, so an
+            // in-doubt fenced source name must still resolve.
+            repo.get_table_unfenced(&name).await?;
         }
         repo.flush_buffers().await?;
         repo.flush_all_history().await?;

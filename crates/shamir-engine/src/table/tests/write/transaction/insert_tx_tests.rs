@@ -200,6 +200,7 @@ async fn update_tx_some_on_missing_id_acts_as_insert() {
         .unwrap();
     assert!(!existed, "missing id → existed=false");
 
+    // counter_delta = 1 since this acts as insert.
     let token = tbl.table_token();
     assert_eq!(*tx.counter_deltas.get(&token).unwrap(), 1);
 }
@@ -224,6 +225,7 @@ async fn delete_tx_some_stages_remove() {
 
     let _ = tbl.get(rid).await.unwrap();
 
+    // Main store still has the record (staged remove not applied).
     let token = tbl.table_token();
     assert_eq!(*tx.counter_deltas.get(&token).unwrap(), -1);
 }
@@ -261,6 +263,9 @@ async fn execute_insert_tx_stages_all_records() {
     let tbl = make_table().await;
     let mut tx = TxContext::new(TxId::new(40), 0, u64::MAX, IsolationLevel::Snapshot);
 
+    // W2d: execute_insert_tx now goes through the lens-driven path
+    // (insert_tx_many_bytes → RecordView). Records must be maps (the
+    // production shape); bare scalars are not valid top-level records.
     let op = write::insert("t")
         .rows([
             mpack!({ "name": "v1" }),
@@ -411,7 +416,11 @@ async fn execute_delete_tx_stages_via_delete_tx() {
     assert!(result.records.is_empty());
 
     let token = tbl.table_token();
-    assert_eq!(*tx.counter_deltas.get(&token).unwrap(), -1);
+    assert_eq!(
+        *tx.counter_deltas.get(&token).unwrap(),
+        -1,
+        "delete must decrement counter by 1"
+    );
 }
 
 #[tokio::test]

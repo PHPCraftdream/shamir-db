@@ -56,6 +56,9 @@ impl RepoInstance {
             .flatten()
     }
 
+    /// Panicking here is forbidden: the fence can be raised from `Drop`
+    /// (via the in-doubt transfer path), so invariant violations must be
+    /// logged, not asserted.
     pub(super) fn raise_rename_fence(&self, pair: RenameInDoubt) {
         let from = pair.from.clone();
         let to = pair.to.clone();
@@ -87,13 +90,24 @@ impl RepoInstance {
         // The write permit and pair checks make a destination collision impossible; never ignore it.
         match self.rename_fence.entry_sync(to.clone()) {
             scc::hash_map::Entry::Occupied(occupied) => {
-                assert!(
+                // Release-build fallback: the write permit and pair checks
+                // make a destination collision impossible; log and continue
+                // rather than panicking from `Drop`.
+                debug_assert!(
                     matches!(
                         occupied.get(),
                         RenameFenceEntry::Destination { from: old_from } if old_from == &from
                     ),
                     "rename destination name unexpectedly occupied"
                 );
+                if !matches!(
+                    occupied.get(),
+                    RenameFenceEntry::Destination { from: old_from } if old_from == &from
+                ) {
+                    log::error!(
+                        "rename fence invariant violated: destination name '{to}' occupied by a foreign entry while raising '{from}' to '{to}'"
+                    );
+                }
             }
             scc::hash_map::Entry::Vacant(vacant) => {
                 vacant.insert_entry(RenameFenceEntry::Destination { from: from.clone() });
@@ -101,7 +115,13 @@ impl RepoInstance {
         }
         match self.rename_fence.entry_sync(from.clone()) {
             scc::hash_map::Entry::Occupied(_) => {
-                panic!("rename source name unexpectedly occupied outside retry");
+                debug_assert!(
+                    false,
+                    "rename source name unexpectedly occupied outside retry"
+                );
+                log::error!(
+                    "rename fence invariant violated: source name '{from}' already present outside retry while raising '{from}' to '{to}'"
+                );
             }
             scc::hash_map::Entry::Vacant(vacant) => {
                 vacant.insert_entry(RenameFenceEntry::Source(Box::new(source)));

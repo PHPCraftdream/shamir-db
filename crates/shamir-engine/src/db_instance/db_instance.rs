@@ -120,6 +120,29 @@ impl DbInstance {
         repo_manager.get_table(table_name).await
     }
 
+    /// Get a table from a specific repository, bypassing the rename name fence.
+    ///
+    /// Same raw trusted handle as [`DbInstance::get_table`] — it deliberately
+    /// bypasses the rename name fence for read-only declaration walks (FK
+    /// reverse-cache scan, shutdown flush, seed walks) that must not fail on
+    /// a source name left fenced by a rename in doubt.
+    pub async fn get_table_unfenced(
+        &self,
+        repo_name: &str,
+        table_name: &str,
+    ) -> DbResult<TableManager> {
+        // Clone the `RepoInstance` out and DROP the DashMap shard guard
+        // BEFORE the delegated `.await` — same guard-across-await hazard
+        // (and fix) as `get_table` above.
+        let repo_manager = self
+            .repos
+            .get(repo_name)
+            .map(|r| r.clone())
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+
+        repo_manager.get_table_unfenced(table_name).await
+    }
+
     /// List all repository names
     pub fn list_repos(&self) -> Vec<String> {
         self.repos.iter().map(|r| r.key().clone()).collect()

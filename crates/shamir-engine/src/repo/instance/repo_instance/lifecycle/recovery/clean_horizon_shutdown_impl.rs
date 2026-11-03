@@ -217,7 +217,9 @@ impl RepoInstance {
         }
 
         for table_name in self.list_table_names() {
-            let table = match self.get_table(&table_name).await {
+            // Shutdown flush only reads/flushes a stable frozen source, so it
+            // must not fail on a fenced in-doubt name.
+            let table = match self.get_table_unfenced(&table_name).await {
                 Ok(t) => t,
                 Err(e) => {
                     log::warn!(
