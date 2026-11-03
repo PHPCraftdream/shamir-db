@@ -39,8 +39,8 @@ fn canonical_authority_normalizes_valid_host_forms_and_rejects_injection() {
 
 #[test]
 fn browser_origin_validation_precedes_host_validation() {
-    let origins = vec!["https://app.example".to_owned()];
-    let hosts = vec!["localhost".to_owned()];
+    let origins = ["https://app.example".to_owned()];
+    let hosts = ["localhost".to_owned()];
 
     for value in [None, Some("null"), Some("not an origin")] {
         let mut headers = good_headers();
@@ -83,8 +83,8 @@ fn browser_origin_validation_precedes_host_validation() {
 
 #[test]
 fn browser_host_validation_and_normalization() {
-    let origins = vec!["https://app.example".to_owned()];
-    let hosts = vec!["localhost".to_owned()];
+    let origins = ["https://app.example".to_owned()];
+    let hosts = ["localhost".to_owned()];
     for value in [None, Some("bad host"), Some("evil.example")] {
         let mut headers = good_browser_headers();
         if let Some(value) = value {

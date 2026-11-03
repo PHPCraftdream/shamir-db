@@ -318,7 +318,7 @@ pub(super) async fn exercise_native_session(harness: &Harness) {
     for value in 0..3 {
         let mut seed = Batch::new();
         seed.insert(
-            &format!("seed{value}"),
+            format!("seed{value}"),
             shamir_query_builder::write::insert("items")
                 .rows([shamir_query_builder::doc! { "n" => value }]),
         );

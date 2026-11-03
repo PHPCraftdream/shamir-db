@@ -149,7 +149,7 @@ async fn exact_msgpack_shape_rejects_bad_keys_types_lengths_and_trailing_data() 
     assert!(read_one(frame(2, true, 0, &repeated)).await.is_err());
     let missing = [0x80];
     assert!(read_one(frame(2, true, 0, &missing)).await.is_err());
-    let non_string = vec![0x81, 0xa5, b't', b'o', b'k', b'e', b'n', 0xc0];
+    let non_string = [0x81, 0xa5, b't', b'o', b'k', b'e', b'n', 0xc0];
     assert!(read_one(frame(2, true, 0, &non_string)).await.is_err());
 
     let mut unknown_key = vec![0x81, 0xa5];
