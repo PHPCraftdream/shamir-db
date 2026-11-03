@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use zeroize::Zeroizing;
@@ -325,11 +326,26 @@ async fn rest_and_websocket_revoke_race_is_deterministic() {
     let _ = send_ws_ping(&mut socket, sid, 2).await;
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
-        let message = tokio::time::timeout_at(deadline, socket.next())
+        // The server may reset the TCP connection right after the 4011 close; on Windows that
+        // surfaces as an I/O error instead of the close frame. Both mean "closed, no success".
+        let message = match tokio::time::timeout_at(deadline, socket.next())
             .await
             .expect("revoked websocket close timeout")
-            .expect("websocket stream")
-            .expect("websocket close result");
+        {
+            None | Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed)) => break,
+            Some(Err(WsError::Io(error)))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::BrokenPipe
+                ) =>
+            {
+                break
+            }
+            Some(Err(error)) => panic!("websocket close result: {error:?}"),
+            Some(Ok(message)) => message,
+        };
         match message {
             Message::Close(Some(frame)) => {
                 assert_eq!(u16::from(frame.code), 4011);
