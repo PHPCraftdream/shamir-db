@@ -8,8 +8,10 @@ use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+use self::rename_freeze::RenameFreeze;
 use super::RepoInstance;
 
+mod rename_freeze;
 mod repo_membership_impl;
 pub(crate) mod visibility_impl;
 
@@ -344,9 +346,16 @@ impl RepoInstance {
                     "rename destination incarnation changed".into(),
                 ));
             }
+            let freeze = if source_matches {
+                let source = self.get_table_admitted(from, &permit).await?;
+                Some(RenameFreeze::begin(source, &permit).await?)
+            } else {
+                None
+            };
             persist(config).await?;
-            if source_matches {
+            if let Some(freeze) = freeze {
                 self.remove_table(from, &permit);
+                freeze.retire();
             }
             return Ok(false);
         }
@@ -355,9 +364,12 @@ impl RepoInstance {
                 "rename source registration is missing".into(),
             ));
         }
+        let source = self.get_table_admitted(from, &permit).await?;
+        let freeze = RenameFreeze::begin(source, &permit).await?;
         persist(config.clone()).await?;
         self.remove_table(from, &permit);
         self.add_table(config, &permit);
+        freeze.retire();
         Ok(true)
     }
 
@@ -376,8 +388,17 @@ impl RepoInstance {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
+        if !self.configs.contains_key(from) {
+            return Ok(false);
+        }
+        if self.configs.contains_key(to) {
+            return Err(DbError::Validation(format!("Table '{to}' already exists")));
+        }
+        let source = self.get_table_admitted(from, &permit).await?;
+        let freeze = RenameFreeze::begin(source, &permit).await?;
+        freeze.await_visible(self, from).await?;
         let Some(config) = self
-            .prepare_table_rename_admitted(from, to, &permit)
+            .prepare_table_rename_admitted(from, to, &permit, &freeze)
             .await?
         else {
             return Ok(false);
@@ -385,6 +406,7 @@ impl RepoInstance {
         let register = persist(config.clone()).await?;
         self.commit_table_rename_admitted(from, config, register, &permit)
             .await?;
+        freeze.retire();
         Ok(true)
     }
 
@@ -400,11 +422,24 @@ impl RepoInstance {
         // timestamped entry/exit — NOT a behavior change, logging only.
         let rts_started = std::time::Instant::now();
         log::debug!("rename_table_stores: enter from={from} to={to}");
-        let Some(new_config) = self.prepare_table_rename_admitted(from, to, permit).await? else {
+        if !self.configs.contains_key(from) {
+            return Ok(false);
+        }
+        if self.configs.contains_key(to) {
+            return Err(DbError::Validation(format!("Table '{to}' already exists")));
+        }
+        let source = self.get_table_admitted(from, permit).await?;
+        let freeze = RenameFreeze::begin(source, permit).await?;
+        freeze.await_visible(self, from).await?;
+        let Some(new_config) = self
+            .prepare_table_rename_admitted(from, to, permit, &freeze)
+            .await?
+        else {
             return Ok(false);
         };
         self.commit_table_rename_admitted(from, new_config, true, permit)
             .await?;
+        freeze.retire();
         log::debug!(
             "rename_table_stores: exit from={from} to={to} elapsed={:?}",
             rts_started.elapsed()
@@ -417,6 +452,7 @@ impl RepoInstance {
         from: &str,
         to: &str,
         permit: &crate::repo::changelog_store::write_domain::RepoWritePermit,
+        freeze: &RenameFreeze,
     ) -> DbResult<Option<TableConfig>> {
         self.write_domain.debug_check_permit(permit);
         let Some(config) = self.configs.get(from).map(|entry| entry.value().clone()) else {
@@ -456,6 +492,7 @@ impl RepoInstance {
                 drain_started.elapsed()
             );
         }
+        freeze.source().counter().persist_admitted(permit).await?;
         self.copy_table_stores_for_rename(from, to, config)
             .await
             .map(Some)

@@ -7,7 +7,7 @@ use futures::poll;
 use shamir_query_types::batch::BatchError;
 use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
-use shamir_tx::IsolationLevel;
+use shamir_tx::{IndexWriteOp, IsolationLevel};
 use shamir_types::core::interner::{InternerKey, TouchInd};
 use shamir_types::types::common::new_map_wc;
 use shamir_types::types::value::InnerValue;
@@ -75,6 +75,87 @@ async fn r6_freeze_waits_for_parked_fast_committer_and_observes_row() {
     assert_eq!(table.get(rid).await.unwrap(), value);
     drop(guard);
     assert!(!table.needs_write_barrier());
+}
+
+/// Retiring disarms only this guard's Drop; the claimed migration bit remains set.
+#[tokio::test]
+async fn retire_keeps_freeze_bit_after_drop() {
+    let (_, table, _) = fixture().await;
+    let flags = table.index_manager_ref().write_barrier_flags();
+    table.begin_migration_freeze().await.unwrap().retire();
+    assert!(flags.is_set(MIGRATION_FREEZE));
+}
+
+/// Dropping an unretired guard releases its migration bit.
+#[tokio::test]
+async fn dropped_freeze_guard_clears_bit() {
+    let (_, table, _) = fixture().await;
+    let flags = table.index_manager_ref().write_barrier_flags();
+    drop(table.begin_migration_freeze().await.unwrap());
+    assert!(!flags.is_set(MIGRATION_FREEZE));
+}
+
+#[tokio::test]
+async fn sidecar_index_only_commit_rejected_while_frozen() {
+    let (repo, table, _) = fixture().await;
+    let token = table.table_token();
+    let (mut tx, _snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    let key = bytes::Bytes::from_static(b"frozen-sidecar-posting");
+    tx.index_write_set.push((
+        token,
+        IndexWriteOp::SetPosting {
+            key: key.clone(),
+            value: bytes::Bytes::from_static(b"posting-value"),
+            provenance: Default::default(),
+        },
+    ));
+    assert!(tx.write_set.is_empty());
+
+    let freeze = table.begin_migration_freeze().await.unwrap();
+    let error = repo.commit_tx(tx).await.unwrap_err();
+    assert!(matches!(&error, CommitError::MigrationFrozen { table } if table == "source"));
+    drop(freeze);
+    assert!(matches!(
+        table.info_store().get(key.into()).await,
+        Err(DbError::NotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn sidecar_counter_only_commit_rejected_while_frozen() {
+    let (repo, table, _) = fixture().await;
+    let token = table.table_token();
+    let before = table.count().await.unwrap();
+    let (mut tx, _snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tx.bump_counter(token, 1);
+    assert!(tx.write_set.is_empty());
+
+    let freeze = table.begin_migration_freeze().await.unwrap();
+    let error = repo.commit_tx(tx).await.unwrap_err();
+    assert!(matches!(&error, CommitError::MigrationFrozen { table } if table == "source"));
+    drop(freeze);
+    assert_eq!(table.count().await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn sidecar_index_only_commit_applies_when_not_frozen() {
+    let (repo, table, _) = fixture().await;
+    let token = table.table_token();
+    let key = bytes::Bytes::from_static(b"unfrozen-sidecar-posting");
+    let value = bytes::Bytes::from_static(b"posting-value");
+    let (mut tx, _snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
+    tx.index_write_set.push((
+        token,
+        IndexWriteOp::SetPosting {
+            key: key.clone(),
+            value: value.clone(),
+            provenance: Default::default(),
+        },
+    ));
+    assert!(tx.write_set.is_empty());
+
+    repo.commit_tx(tx).await.unwrap();
+    assert_eq!(table.info_store().get(key.into()).await.unwrap(), value);
 }
 
 /// R7: unconditional set would admit two owners; dropping the second would
