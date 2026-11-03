@@ -19,6 +19,27 @@ fn state() -> AdmissionState {
 }
 
 #[tokio::test]
+async fn denied_slot_does_not_refund_admission_budget() {
+    let state = state();
+    let source = v4(10, 1, 2, 3);
+    let mut permits = Vec::new();
+    for _ in 0..16 {
+        permits.push(state.admit_slot_for_test(source).await.expect("slot"));
+    }
+    assert!(matches!(
+        state.admit(source).await,
+        Err(AdmissionError::SourceSlots)
+    ));
+    drop(permits);
+    for _ in 0..9 {
+        assert!(state.admit(source).await.is_ok());
+    }
+    assert!(matches!(
+        state.admit(source).await,
+        Err(AdmissionError::RateLimited { .. })
+    ));
+}
+#[tokio::test]
 async fn base_prefix_caps_at_sixteen_live_slots() {
     let state = state();
     let source = v4(10, 1, 2, 3);

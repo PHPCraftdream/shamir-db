@@ -1,6 +1,7 @@
 //! Application implementation of the transport's HTTP-login hook.
 
 use super::admission::{AdmissionError, InputPermit, LoginHeadPolicy};
+use super::metrics::{record_result, LoginResult};
 use super::service::{begin, finish, LoginServiceContext};
 use super::wire::{response, LoginResponse};
 use bytes::Bytes;
@@ -12,6 +13,9 @@ use std::sync::{
 };
 use std::time::Duration;
 use tracing::Instrument;
+
+/// Upper bound of the login worker drain at shutdown (see `worker_drain_budget`).
+const WORKER_DRAIN_CAP: Duration = Duration::from_secs(7);
 
 /// Tracks detached route workers independently of the listener's lifetime.
 struct InFlight {
@@ -29,6 +33,24 @@ impl Drop for InFlightGuard {
     }
 }
 
+fn route_result(route: &[u8]) -> &'static str {
+    if route.ends_with(b"begin") {
+        "begin"
+    } else {
+        "finish"
+    }
+}
+
+fn result_for_status(status: u16) -> LoginResult {
+    match status {
+        403 => LoginResult::PolicyDenied,
+        429 => LoginResult::RateLimited,
+        503 => LoginResult::ServerBusy,
+        400 | 404 | 405 | 413 | 415 => LoginResult::InvalidRequest,
+        _ => LoginResult::AuthenticationFailed,
+    }
+}
+
 /// Listener-specific HTTP login route service.
 pub struct HttpLoginRoutes {
     enabled: bool,
@@ -39,6 +61,24 @@ pub struct HttpLoginRoutes {
 }
 
 impl HttpLoginRoutes {
+    /// Describe the browser Origin policy without exposing configured origins.
+    pub(crate) fn describe_origin_policy(count: usize) -> String {
+        if count == 0 {
+            "HTTP login Origin policy: requests without Origin are allowed; requests with Origin are denied until an allowlist is configured".to_string()
+        } else {
+            format!(
+                "HTTP login Origin policy configured (configured_origins={count}; origins omitted)"
+            )
+        }
+    }
+
+    /// Bound worker draining by the HTTP transport request deadline, capped at 7 seconds:
+    /// the server's outer listener deadline is 10 seconds and the audit consumer needs
+    /// 2 seconds after the workers, so a longer drain would only be preempted by an abort.
+    pub(crate) fn worker_drain_budget(request_timeout_ms: u64) -> Duration {
+        Duration::from_millis(request_timeout_ms).min(WORKER_DRAIN_CAP)
+    }
+
     /// Create a listener service from shared dependencies and validated policy.
     pub fn new(enabled: bool, context: Arc<LoginServiceContext>, policy: LoginHeadPolicy) -> Self {
         Self {
@@ -126,14 +166,27 @@ impl LoginRoutes for HttpLoginRoutes {
         peer: PeerInfo,
     ) -> Result<Self::Permit, TransportResponse> {
         if self.stopping.load(Ordering::Acquire) {
+            record_result(route_result(route), LoginResult::ServerBusy);
             return Err(Self::error(503, "server_busy", Some(1)));
         }
         if let Err((status, code)) = self.validate_head(&head) {
+            record_result(route_result(route), result_for_status(status));
             return Err(Self::error(status, code, None));
         }
         let source = match self.policy.resolve(&head, &peer) {
             Ok(source) => source,
-            Err(error) => return Err(Self::error(error.status, error.code, None)),
+            Err(error) => {
+                record_result(
+                    route_result(route),
+                    match error.code {
+                        "authority_forbidden" | "origin_forbidden" | "proxy_forbidden" => {
+                            LoginResult::PolicyDenied
+                        }
+                        _ => LoginResult::InvalidRequest,
+                    },
+                );
+                return Err(Self::error(error.status, error.code, None));
+            }
         };
         let limit = if route.ends_with(b"begin") { 4096 } else { 256 };
         if let Some(length) = head.header_values(b"content-length").next() {
@@ -142,20 +195,26 @@ impl LoginRoutes for HttpLoginRoutes {
                 .and_then(|v| v.parse::<usize>().ok())
                 .is_none_or(|n| n > limit)
             {
+                record_result(route_result(route), LoginResult::InvalidRequest);
                 return Err(Self::error(413, "request_too_large", None));
             }
         }
-        self.context
-            .admission
-            .admit(source)
-            .await
-            .map_err(|error| match error {
+        self.context.admission.admit(source).await.map_err(|error| {
+            let result = match error {
+                AdmissionError::RateLimited { .. } | AdmissionError::SourceSlots => {
+                    LoginResult::RateLimited
+                }
+                AdmissionError::ServerBusy => LoginResult::ServerBusy,
+            };
+            record_result(route_result(route), result);
+            match error {
                 AdmissionError::RateLimited {
                     retry_after_seconds,
                 } => Self::error(429, "rate_limited", Some(retry_after_seconds)),
                 AdmissionError::SourceSlots => Self::error(429, "rate_limited", Some(1)),
                 AdmissionError::ServerBusy => Self::error(503, "server_busy", Some(1)),
-            })
+            }
+        })
     }
 
     async fn handle(&self, route: Bytes, permit: Self::Permit, body: Bytes) -> TransportResponse {

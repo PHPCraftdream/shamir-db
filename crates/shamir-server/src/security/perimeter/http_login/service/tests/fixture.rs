@@ -24,6 +24,7 @@ pub(super) struct Fixture {
     pub(super) _temp: TempDir,
     pub(super) context: LoginServiceContext,
     pub(super) lockout: Arc<InMemoryLockoutStore>,
+    pub(super) test_clock: Arc<TestClock>,
 }
 
 struct Owners;
@@ -51,12 +52,58 @@ impl LoginClock for FixedClock {
     }
 }
 
-impl Fixture {
-    pub(super) async fn new() -> Self {
-        Self::with_token_audit(|_| Arc::new(NoopAppender)).await
+pub(super) struct TestClock(std::sync::Mutex<Instant>);
+impl TestClock {
+    pub(super) fn advance(&self, duration: std::time::Duration) {
+        let mut now = self.0.lock().expect("test clock lock");
+        *now += duration;
     }
 
+    fn now(&self) -> Instant {
+        *self.0.lock().expect("test clock lock")
+    }
+}
+impl LoginClock for TestClock {
+    fn now(&self) -> Instant {
+        self.now()
+    }
+}
+
+impl Fixture {
+    pub(super) async fn new() -> Self {
+        Self::with_options(TokensConfig::default(), false).await
+    }
+
+    pub(super) async fn new_with_lockout(lockout: Arc<InMemoryLockoutStore>) -> Self {
+        let mut fixture = Self::new().await;
+        fixture.context.lockout = Arc::clone(&lockout);
+        fixture.lockout = lockout;
+        fixture
+    }
+
+    pub(super) async fn new_read_only() -> Self {
+        Self::with_options(TokensConfig::default(), true).await
+    }
+
+    pub(super) async fn with_config(config: TokensConfig) -> Self {
+        Self::with_options(config, false).await
+    }
+
+    async fn with_options(config: TokensConfig, read_only_node: bool) -> Self {
+        Self::with_token_audit_and_options(config, read_only_node, |_| Arc::new(NoopAppender)).await
+    }
     pub(super) async fn with_token_audit<F>(make_appender: F) -> Self
+    where
+        F: FnOnce(Arc<FjallUserDirectory>) -> Arc<dyn AuditAppender>,
+    {
+        Self::with_token_audit_and_options(TokensConfig::default(), false, make_appender).await
+    }
+
+    async fn with_token_audit_and_options<F>(
+        config: TokensConfig,
+        read_only_node: bool,
+        make_appender: F,
+    ) -> Self
     where
         F: FnOnce(Arc<FjallUserDirectory>) -> Arc<dyn AuditAppender>,
     {
@@ -92,14 +139,15 @@ impl Fixture {
                 owners: Arc::new(Owners),
                 sessions,
                 audit,
-                config: TokensConfig::default(),
-                read_only_node: false,
+                config: config.clone(),
+                read_only_node,
                 clock: Arc::new(|| Some(90_000_000_000)),
             })
             .await
             .expect("token service"),
         );
         let lockout = Arc::new(InMemoryLockoutStore::new());
+        let test_clock = Arc::new(TestClock(std::sync::Mutex::new(Instant::now())));
         let context = LoginServiceContext::new(super::super::LoginServiceOptions {
             users,
             tokens,
@@ -117,10 +165,10 @@ impl Fixture {
             hardening: false,
             security_class: 0,
             listener_id: [3; 16],
-            pending: Arc::new(PendingStore::new(Arc::new(FixedClock))),
-            admission: Arc::new(AdmissionState::system()),
-            token_config: TokensConfig::default(),
-            read_only: false,
+            pending: Arc::new(PendingStore::new(test_clock.clone())),
+            admission: Arc::new(AdmissionState::new(Arc::new(FixedClock))),
+            token_config: config,
+            read_only: read_only_node,
             unix_clock: Arc::new(|| Some(90_000_000_000)),
             audit: None,
         })
@@ -129,6 +177,7 @@ impl Fixture {
             _temp: temp,
             context,
             lockout,
+            test_clock,
         }
     }
 }

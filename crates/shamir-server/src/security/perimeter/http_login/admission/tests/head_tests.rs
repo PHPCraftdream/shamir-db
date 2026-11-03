@@ -24,6 +24,41 @@ fn peer(addr: &str, forwarded: &[&str], tls: bool) -> PeerInfo {
 }
 
 #[test]
+fn class_zero_non_loopback_peer_is_rejected_but_mapped_loopback_is_allowed() {
+    let policy = LoginHeadPolicy::new(
+        0,
+        vec!["example.test".into()],
+        vec![],
+        vec![],
+        "127.0.0.1:443".parse().unwrap(),
+    )
+    .unwrap();
+    let headers = head(&[("host", "example.test")]);
+    let request = LoginHead::new(b"POST", b"/", &headers);
+    assert_eq!(
+        policy
+            .resolve(&request, &peer("192.0.2.4:88", &[], false))
+            .unwrap_err()
+            .status,
+        403
+    );
+    assert!(policy
+        .resolve(&request, &peer("[::ffff:127.0.0.1]:88", &[], false))
+        .is_ok());
+}
+#[test]
+fn class_zero_rejects_non_loopback_bind_at_construction() {
+    assert!(LoginHeadPolicy::new(
+        0,
+        vec!["example.test".into()],
+        vec![],
+        vec![],
+        "192.0.2.10:8080".parse().unwrap(),
+    )
+    .is_err());
+}
+
+#[test]
 fn host_and_origin_validation() {
     let policy = LoginHeadPolicy::new(
         1,

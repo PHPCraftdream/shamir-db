@@ -1,7 +1,7 @@
 use super::fixture::Fixture;
 use crate::http_login::admission::Source;
 use crate::http_login::pending::{PendingEntry, PendingId};
-use crate::http_login::service::finish;
+use crate::http_login::service::{begin as login_begin, finish};
 use crate::http_login::wire::response as wire_response;
 use axum::http::StatusCode;
 use shamir_connect::common::crypto::{hmac_sha256, sha256, StoredKey};
@@ -10,7 +10,7 @@ use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::http_login::{
     build_server_signature, build_transcript, HttpLoginTranscriptInput,
 };
-use shamir_connect::server::lockout::LockoutStore;
+use shamir_connect::server::lockout::{InMemoryLockoutStore, LockoutStore};
 use shamir_connect::server::token::parse_token;
 use shamir_connect::server::user_record::UserRecord;
 use std::net::{IpAddr, Ipv4Addr};
@@ -170,6 +170,21 @@ async fn finish_tracing_redacts_credentials_and_secrets() {
         )
         .await;
         assert_eq!(valid_response.status(), StatusCode::OK);
+        let begin_request = BeginBody {
+            protocol_version: 1,
+            user: USER,
+            client_nonce: serde_bytes::Bytes::new(&[6; 32]),
+            binding_mode: 3,
+            token: BeginScope {
+                label: "http-login",
+                mode: "read_only",
+                channels: "rest",
+                databases: None,
+            },
+        };
+        let begin_body = rmp_serde::to_vec_named(&begin_request).expect("begin body");
+        let begin_response = login_begin(&fixture.context, source(), &begin_body).await;
+        assert_eq!(begin_response.status(), StatusCode::OK);
         let decoded: SuccessBody =
             rmp_serde::from_slice(valid_response.body()).expect("decode response fields");
         let issued_token = decoded.token;
@@ -377,6 +392,376 @@ async fn hardened_mismatched_default_begin_finish_records_failure() {
     assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn finish_expired_after_sixty_one_seconds_rejects_without_failure() {
+    let fixture = Fixture::new().await;
+    let id = [17; 32];
+    let transcript = pending(&fixture, id, source(), false).await;
+    fixture
+        .test_clock
+        .advance(std::time::Duration::from_secs(61));
+
+    let response = finish(
+        &fixture.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(fixture.context.pending.count().await, 0);
+    assert_eq!(fixture.lockout.failure_pair_count(), 0);
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn last_failure_equal_to_begin_time_does_not_reject_valid_proof() {
+    let fixture = Fixture::new().await;
+    let id = [18; 32];
+    let transcript = pending(&fixture, id, source(), false).await;
+    let pair = fixture.context.pair_key(USER, source().address());
+    fixture.lockout.register_failure(pair, 1);
+    assert_eq!(
+        fixture.lockout.pair_status(pair, 1).last_fail_at_ns,
+        Some(1)
+    );
+
+    let response = finish(
+        &fixture.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(fixture.lockout.failure_pair_count(), 0);
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn replicator_privilege_added_after_begin_denies_valid_proof() {
+    let fixture = Fixture::new().await;
+    let id = [19; 32];
+    let transcript = pending(&fixture, id, source(), false).await;
+    assert!(fixture
+        .context
+        .users
+        .set_replicator(USER, true, 2)
+        .expect("mark replicator"));
+
+    let response = finish(
+        &fixture.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.body(),
+        wire_response(403, "login_account_denied", None)
+            .expect("canonical policy response")
+            .body()
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 0);
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn finish_rechecks_read_write_policy_after_valid_proof() {
+    let fixture = Fixture::new().await;
+    let id = [20; 32];
+    let salt = [4; 16];
+    let params = KdfParams {
+        memory_kb: 19_456,
+        time: 2,
+        parallelism: 1,
+        argon2_version: 0x13,
+    };
+    let user_id = UserDirectory::insert(
+        fixture.context.users.as_ref(),
+        USER.to_owned(),
+        UserRecord {
+            salt,
+            stored_key: StoredKey(sha256(&CLIENT_KEY)),
+            server_key: Zeroizing::new(SERVER_KEY),
+            kdf_params: params,
+            tickets_invalid_before_ns: 0,
+        },
+    )
+    .expect("insert user");
+    let scope_bytes = [0, 1, b'x', 1, 0, 0xff];
+    let transcript = build_transcript(&HttpLoginTranscriptInput {
+        protocol_version: 1,
+        binding_mode: 3,
+        security: fixture.context.security_class,
+        listener_id: &fixture.context.listener_id,
+        handshake_id: &id,
+        user: USER,
+        client_nonce: &[1; 32],
+        server_nonce: &[2; 32],
+        salt: &salt,
+        memory_kb: params.memory_kb,
+        time: params.time,
+        parallelism: params.parallelism,
+        argon2_version: params.argon2_version,
+        scope_bytes: &scope_bytes,
+    })
+    .expect("read-write transcript");
+    fixture
+        .context
+        .pending
+        .insert(
+            PendingId(id),
+            PendingEntry {
+                transcript: Zeroizing::new(transcript.clone()),
+                user_id: Some(user_id),
+                stored_key: Zeroizing::new(sha256(&CLIENT_KEY)),
+                server_key: Zeroizing::new(SERVER_KEY),
+                tickets_invalid_before_ns: 0,
+                begin_time_ns: 1,
+                eligible: true,
+                listener_id: fixture.context.listener_id,
+                security_class: fixture.context.security_class,
+                source: source(),
+            },
+        )
+        .await
+        .expect("insert pending entry");
+
+    let response = finish(
+        &fixture.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.body(),
+        wire_response(403, "login_write_forbidden", None)
+            .expect("response")
+            .body()
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 0);
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn finish_rechecks_replica_policy_after_valid_proof() {
+    let replica = Fixture::new_read_only().await;
+    let id = [21; 32];
+    let transcript = pending(&replica, id, source(), false).await;
+
+    let response = finish(
+        &replica.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.body(),
+        wire_response(403, "login_read_only_replica", None)
+            .expect("response")
+            .body()
+    );
+    assert_eq!(replica.lockout.failure_pair_count(), 0);
+    assert_eq!(replica.context.tokens.mirror_entry_count_hint(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn token_limit_denial_preserves_existing_token_and_does_not_count_failure() {
+    let fixture = Fixture::with_config(crate::config::TokensConfig {
+        max_per_user: 1,
+        ..Default::default()
+    })
+    .await;
+    let id = [22; 32];
+    let transcript = pending(&fixture, id, source(), false).await;
+    let existing = fixture
+        .context
+        .tokens
+        .create(crate::security::tokens::NewToken {
+            owner_user_id: fixture
+                .context
+                .users
+                .user_id(USER)
+                .expect("pending test user"),
+            owner_roles: Vec::new(),
+            label: "occupied".to_owned(),
+            ttl_secs: Some(300),
+            mode: shamir_connect::server::token::TokenMode::ReadOnly,
+            channels: shamir_connect::server::token::TokenChannels::Rest,
+            databases: None,
+        })
+        .await
+        .expect("fill same user's token cap");
+
+    let response = finish(
+        &fixture.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.body(),
+        wire_response(403, "token_limit_reached", None)
+            .expect("response")
+            .body()
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 0);
+    assert_eq!(
+        fixture
+            .context
+            .tokens
+            .active_count(90_000_000_000)
+            .await
+            .expect("active count"),
+        1
+    );
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 1);
+    assert_ne!(existing.record_view.id, [0; 16]);
+}
+
+#[derive(serde::Deserialize)]
+struct RetryBody {
+    error: String,
+    retry_after: u32,
+}
+
+#[tokio::test(start_paused = true)]
+async fn begin_retry_after_after_bad_finish_matches_for_known_unknown_ineligible() {
+    let mut observed = Vec::new();
+    for user in ["alice", "nobody", "ineligible"] {
+        let mut fixture = Fixture::new().await;
+        if user == "ineligible" {
+            fixture.context.hardening = true;
+            fixture.context.default_kdf.memory_kb = 19_457;
+            let params = KdfParams {
+                memory_kb: 19_456,
+                time: 2,
+                parallelism: 1,
+                argon2_version: 0x13,
+            };
+            UserDirectory::insert(
+                fixture.context.users.as_ref(),
+                user.to_owned(),
+                UserRecord {
+                    salt: [4; 16],
+                    stored_key: StoredKey(sha256(&CLIENT_KEY)),
+                    server_key: Zeroizing::new(SERVER_KEY),
+                    kdf_params: params,
+                    tickets_invalid_before_ns: 0,
+                },
+            )
+            .expect("insert mismatched KDF account");
+        }
+        let request = BeginBody {
+            protocol_version: 1,
+            user,
+            client_nonce: serde_bytes::Bytes::new(&[3; 32]),
+            binding_mode: 3,
+            token: BeginScope {
+                label: "http-login",
+                mode: "read_only",
+                channels: "rest",
+                databases: None,
+            },
+        };
+        let body = rmp_serde::to_vec_named(&request).expect("serialize begin");
+        let begun = login_begin(&fixture.context, source(), &body).await;
+        assert_eq!(begun.status(), StatusCode::OK);
+        let challenge: ChallengeId = rmp_serde::from_slice(begun.body()).expect("challenge");
+        let id: [u8; 32] = challenge
+            .handshake_id
+            .as_ref()
+            .try_into()
+            .expect("handshake ID");
+        let pair = fixture.context.pair_key(user, source().address());
+        assert_eq!(
+            finish(&fixture.context, source(), &finish_body(id, [0; 32]))
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            fixture
+                .lockout
+                .pair_status(pair, 90_000_000_000)
+                .last_fail_at_ns,
+            Some(90_000_000_000)
+        );
+        let again = login_begin(&fixture.context, source(), &body).await;
+        assert_eq!(again.status(), StatusCode::TOO_MANY_REQUESTS);
+        let decoded: RetryBody = rmp_serde::from_slice(again.body()).expect("retry body");
+        assert_eq!(decoded.error, "rate_limited");
+        assert_eq!(again.retry_after(), Some(decoded.retry_after));
+        observed.push(decoded.retry_after);
+        assert_eq!(fixture.lockout.failure_pair_count(), 1);
+        assert_eq!(fixture.context.pending.count().await, 0);
+    }
+    assert_eq!(observed.len(), 3);
+    assert!(observed.iter().all(|value| *value == observed[0]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn native_failed_pair_is_shared_with_http_begin_and_admin_unlock_clears_it() {
+    let lockout = Arc::new(InMemoryLockoutStore::new());
+    let fixture = Fixture::new_with_lockout(Arc::clone(&lockout)).await;
+    let native_pair = fixture.context.pair_key("alice", source().address());
+    lockout.register_failure(native_pair, 90_000_000_000);
+
+    let begin = crate::http_login::service::begin(&fixture.context, source(), &{
+        let body = BeginBody {
+            protocol_version: 1,
+            user: "alice",
+            client_nonce: serde_bytes::Bytes::new(&[8; 32]),
+            binding_mode: 3,
+            token: BeginScope {
+                label: "http-login",
+                mode: "read_only",
+                channels: "rest",
+                databases: None,
+            },
+        };
+        rmp_serde::to_vec_named(&body).expect("begin body")
+    })
+    .await;
+    assert_eq!(begin.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(lockout.current_backoff_ms(native_pair, 90_000_000_000) > 0);
+
+    let username_hash = shamir_connect::server::lockout::username_hash(
+        &fixture.context.secrets.lockout_secret,
+        b"alice",
+    );
+    lockout.admin_unlock_user(username_hash);
+    let retry = {
+        let body = BeginBody {
+            protocol_version: 1,
+            user: "alice",
+            client_nonce: serde_bytes::Bytes::new(&[9; 32]),
+            binding_mode: 3,
+            token: BeginScope {
+                label: "http-login",
+                mode: "read_only",
+                channels: "rest",
+                databases: None,
+            },
+        };
+        crate::http_login::service::begin(
+            &fixture.context,
+            source(),
+            &rmp_serde::to_vec_named(&body).expect("begin body"),
+        )
+        .await
+    };
+    assert_eq!(retry.status(), StatusCode::OK);
+    assert_eq!(lockout.failure_pair_count(), 0);
+}
 #[tokio::test(start_paused = true)]
 async fn finish_issues_token_and_returns_server_signature() {
     let fixture = Fixture::new().await;

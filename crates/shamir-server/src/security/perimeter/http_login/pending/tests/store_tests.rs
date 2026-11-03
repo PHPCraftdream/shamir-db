@@ -73,6 +73,63 @@ fn entry_v6(key: PendingId, source: Source) -> PendingEntry {
 }
 
 #[tokio::test]
+async fn pending_id_debug_is_redacted_and_live_collision_is_atomic() {
+    let (_, store) = fixture();
+    let key = id(44);
+    let first = entry(key, [10, 2, 3, 4]);
+    assert_eq!(format!("{key:?}"), "PendingId(<redacted>)");
+    store.insert(key, first).await.unwrap();
+
+    let collision = store.insert(key, entry(key, [10, 2, 3, 5])).await;
+    assert_eq!(collision, Err(PendingError::Collision));
+    assert_eq!(store.count().await, 1);
+    assert!(store.contains_id(key).await);
+    let mut claim = store
+        .claim(key, source([10, 2, 3, 4]), [3; 16], 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        claim.take().map(|value| value.source),
+        Some(source([10, 2, 3, 4]))
+    );
+    drop(claim);
+}
+
+#[tokio::test]
+async fn claimed_entries_release_capacity_for_repeated_identifier_reuse() {
+    let (_, store) = fixture();
+    let key = id(700);
+    for _ in 0..1_025 {
+        store.insert(key, entry(key, [10, 2, 3, 4])).await.unwrap();
+        let claim = store
+            .claim(key, source([10, 2, 3, 4]), [3; 16], 1)
+            .await
+            .unwrap();
+        drop(claim);
+    }
+    assert_eq!(store.count().await, 0);
+}
+
+#[tokio::test]
+async fn ordered_expiry_keeps_future_entries_and_removes_elapsed_entries() {
+    let (clock, store) = fixture();
+    store
+        .insert(id(51), entry(id(51), [10, 2, 3, 4]))
+        .await
+        .unwrap();
+    clock.seconds.store(30, Ordering::SeqCst);
+    store
+        .insert(id(52), entry(id(52), [10, 2, 4, 4]))
+        .await
+        .unwrap();
+    clock.seconds.store(60, Ordering::SeqCst);
+
+    assert_eq!(store.count().await, 1);
+    assert!(!store.contains_id(id(51)).await);
+    assert!(store.contains_id(id(52)).await);
+}
+
+#[tokio::test]
 async fn transcript_payload_accounting_and_ttl_claim_lifecycle() {
     let item = entry(id(1), [10, 2, 3, 4]);
     assert_eq!(item.transcript.len(), 173);

@@ -188,6 +188,21 @@ impl LoginBudgetTable {
         std::mem::size_of::<Slot>() + 24
     }
     #[cfg(test)]
+    pub(super) fn resident_pin_count(&self, source: Source) -> [usize; 3] {
+        let (tiers, count) = distinct_tiers(source);
+        let mut counts = [0; 3];
+        for (index, key) in tiers.into_iter().take(count).enumerate() {
+            if let Some(slot) = self
+                .slots
+                .iter()
+                .find(|slot| slot.bucket.is_some_and(|bucket| bucket.key == key))
+            {
+                counts[index] = slot.pins.load(Ordering::Acquire);
+            }
+        }
+        counts
+    }
+    #[cfg(test)]
     pub(super) fn reset_slot_visits(&self) {
         self.slot_visits.set(0);
     }

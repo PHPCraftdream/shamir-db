@@ -14,7 +14,6 @@ pub struct LoginHeadPolicy {
     authorities: Vec<String>,
     origins: Vec<String>,
     trusted: Vec<Cidr>,
-    bound: SocketAddr,
 }
 
 /// Request-head validation failure.
@@ -42,6 +41,9 @@ impl LoginHeadPolicy {
         bound: SocketAddr,
     ) -> Result<Self, HeadError> {
         if security > 2 {
+            return Err(invalid());
+        }
+        if security == 0 && !bound.ip().is_loopback() {
             return Err(invalid());
         }
         let authorities = if authorities.is_empty() && bound.ip().is_loopback() {
@@ -82,7 +84,6 @@ impl LoginHeadPolicy {
             authorities,
             origins,
             trusted,
-            bound,
         })
     }
 
@@ -147,7 +148,6 @@ impl LoginHeadPolicy {
             }
             _ => return Err(invalid()),
         };
-        let _ = self.bound;
         Ok(Source::from_ip(effective))
     }
 }
