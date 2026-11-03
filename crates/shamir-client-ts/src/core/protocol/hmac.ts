@@ -6,7 +6,7 @@ import type { DropDbOp, DropRepoOp, DropTableOp, DropIndexOp, StartMigrationOp, 
 const utf8 = new TextEncoder();
 const KEY_DOMAIN = utf8.encode('shamir-db hmac key v1\0');
 const PREFIX = utf8.encode('shamir-db hmac canonical v2\0');
-const TAGS = { drop_db:1, drop_repo:2, drop_table:3, drop_index:4, drop_user:5, start_migration:6, commit_migration:7, rollback_migration:8, grant_role:9, revoke_role:10, chmod:11, chown:12, chgrp:13, create_user:14, set_retention:15, purge_history:16, create_group:17, drop_group:18, rename_group:19, add_group_member:20, remove_group_member:21, create_function:22, set_superuser:23, set_replicator:24, create_scram_user:25, drop_function:26, drop_validator:27, create_validator:28, drop_replication_profile:29, drop_publication:30, drop_subscription:31 } as const;
+const TAGS = { drop_db:1, drop_repo:2, drop_table:3, drop_index:4, drop_user:5, start_migration:6, commit_migration:7, rollback_migration:8, grant_role:9, revoke_role:10, chmod:11, chown:12, chgrp:13, create_user:14, set_retention:15, purge_history:16, create_group:17, drop_group:18, rename_group:19, add_group_member:20, remove_group_member:21, create_function:22, set_superuser:23, set_replicator:24, create_scram_user:25, drop_function:26, drop_validator:27, create_validator:28, drop_replication_profile:29, drop_publication:30, drop_subscription:31, create_api_token:32, list_api_tokens:33, revoke_api_token:34, revoke_user_tokens:35 } as const;
 function concatBytes(chunks:Uint8Array[]):Uint8Array { const out=new Uint8Array(chunks.reduce((n,c)=>n+c.length,0));let i=0;for(const c of chunks){out.set(c,i);i+=c.length;}return out; }
 function hexEncode(bytes:Uint8Array):string { return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join(''); }
 export function deriveSessionHmacKey(platform:Platform,sessionId:Uint8Array):Uint8Array{return platform.sha256(concatBytes([KEY_DOMAIN,sessionId]));}
@@ -15,7 +15,7 @@ export function signCanonical(platform:Platform,sessionId:Uint8Array,canonical:U
 /** Canonical DTO shape: unsigned (no required tag) and `cascade` as a plain flag. */
 type CanonOf<T> = T extends unknown ? Omit<T, 'hmac' | 'cascade'> & { hmac?: string; cascade?: boolean } : never;
 type BatchCanonicalOp = CanonOf<DropDbOp|DropRepoOp|DropTableOp|DropIndexOp|DropUserOp|StartMigrationOp|CommitMigrationOp|RollbackMigrationOp|GrantRoleOp|RevokeRoleOp|ChmodOp|ChownOp|ChgrpOp|CreateUserOp|SetRetentionOp|PurgeHistoryOp|CreateGroupOp|DropGroupOp|RenameGroupOp|AddGroupMemberOp|RemoveGroupMemberOp|CreateFunctionOp|DropFunctionOp|DropValidatorOp|CreateValidatorOp|{drop_replication_profile:string;hmac?:string}|{drop_publication:string;hmac?:string}|{drop_subscription:string;hmac?:string}>;
-export type DbCanonicalOp={op:'create_scram_user';name:string;password?:string;roles?:string[];hmac?:string}|(Omit<SetSuperuserOp,'hmac'>&{hmac?:string})|(Omit<SetReplicatorOp,'hmac'>&{hmac?:string});
+export type DbCanonicalOp={op:'create_scram_user';name:string;password?:string;roles?:string[];hmac?:string}|(Omit<SetSuperuserOp,'hmac'>&{hmac?:string})|(Omit<SetReplicatorOp,'hmac'>&{hmac?:string})|{op:'create_api_token';label:string;ttl_secs?:number|bigint|null;mode?:'read_only'|'read_write'|null;channels?:'rest'|'ws'|'both'|null;databases?:string[]|null;for_user?:string|null;hmac?:string}|{op:'list_api_tokens';for_user?:string|null;hmac?:string}|{op:'revoke_api_token';id:string;hmac?:string}|{op:'revoke_user_tokens';user?:string|null;hmac?:string};
 class Encoder {
   private readonly chunks:Uint8Array[]=[PREFIX]; constructor(tag:number){this.raw(new Uint8Array([tag>>8,tag&255]));}
   private raw(bytes:Uint8Array){this.chunks.push(bytes);} u8(n:number){this.raw(new Uint8Array([n]));} u16(n:number){if(!Number.isInteger(n)||n<0||n>0xffff)throw new RangeError('u16 out of range');this.raw(new Uint8Array([n>>8,n&255]));}
@@ -64,7 +64,14 @@ export function canonicalBatchOp(db:string,op:BatchCanonicalOp):Uint8Array {
 }
 /** Canonical bytes for HMAC-bearing top-level DbRequest operations. */
 export function canonicalDbRequest(op:DbCanonicalOp):Uint8Array {
- if(op.op==='create_scram_user'){const e=new Encoder(TAGS.create_scram_user);e.str(op.name);e.list(op.roles??[]);return e.finish();}
- if(op.op==='set_superuser'){const e=new Encoder(TAGS.set_superuser);e.str(op.user);e.bool(op.on);return e.finish();}
- const e=new Encoder(TAGS.set_replicator);e.str(op.user);e.bool(op.on);return e.finish();
+ switch(op.op){
+ case'create_scram_user':{const e=new Encoder(TAGS.create_scram_user);e.str(op.name);e.list(op.roles??[]);return e.finish();}
+ case'set_superuser':{const e=new Encoder(TAGS.set_superuser);e.str(op.user);e.bool(op.on);return e.finish();}
+ case'set_replicator':{const e=new Encoder(TAGS.set_replicator);e.str(op.user);e.bool(op.on);return e.finish();}
+ case'create_api_token':{const e=new Encoder(TAGS.create_api_token);e.str(op.label);e.opt(op.ttl_secs,v=>e.u64(v));e.opt(op.mode,v=>e.u8(v==='read_only'?0:1));e.opt(op.channels,v=>e.u8(v==='rest'?0:v==='ws'?1:2));e.opt(op.databases,v=>e.list(v));e.opt(op.for_user,v=>e.str(v));return e.finish();}
+ case'list_api_tokens':{const e=new Encoder(TAGS.list_api_tokens);e.opt(op.for_user,v=>e.str(v));return e.finish();}
+ case'revoke_api_token':{const e=new Encoder(TAGS.revoke_api_token);e.str(op.id);return e.finish();}
+ case'revoke_user_tokens':{const e=new Encoder(TAGS.revoke_user_tokens);e.opt(op.user,v=>e.str(v));return e.finish();}
+ default:{const exhaustive:never=op;throw new TypeError(`unsupported canonical operation: ${String(exhaustive)}`);}
+ }
 }

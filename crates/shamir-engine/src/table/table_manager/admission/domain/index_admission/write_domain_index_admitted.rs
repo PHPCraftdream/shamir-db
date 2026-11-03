@@ -19,6 +19,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let index_type = op.index_type.as_deref().unwrap_or("btree");
         if index_type == "btree" {
             let paths: Vec<String> = op.fields.iter().map(|segs| segs.join(".")).collect();
