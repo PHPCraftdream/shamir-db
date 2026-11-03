@@ -59,7 +59,6 @@ impl ConsumedCounterStore for CountingCounterStore {
 #[derive(Default)]
 struct CountingLockoutStore {
     gc_calls: AtomicUsize,
-    inner: InMemoryLockoutStore,
 }
 
 impl LockoutStore for CountingLockoutStore {
@@ -67,8 +66,12 @@ impl LockoutStore for CountingLockoutStore {
         FailureOutcome::Backoff { delay_ms: 0 }
     }
     fn reset_on_success(&self, _key: PairKey) {}
-    fn pair_status(&self, _key: PairKey, now_ns: u64) -> PairStatus {
-        self.inner.pair_status(_key, now_ns)
+    fn pair_status(&self, _key: PairKey, _now_ns: u64) -> PairStatus {
+        PairStatus {
+            locked_until_ns: None,
+            backoff_until_ns: None,
+            last_fail_at_ns: None,
+        }
     }
     fn is_locked_out(&self, _key: PairKey, _now_ns: u64) -> bool {
         false

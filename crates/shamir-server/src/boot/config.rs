@@ -83,12 +83,14 @@ mod http_listener;
 mod http_mapping;
 mod http_validation;
 mod limits;
+mod login_listener;
 #[cfg(test)]
 mod tests;
 mod tokens;
 
 pub use http_listener::HttpListenerSettings;
 pub use http_mapping::to_http_server_config;
+pub use login_listener::LoginListenerSettings;
 
 pub use limits::{CursorLimitsConfig, QueryLimitsConfig, TxLimitsConfig};
 pub use tokens::TokensConfig;
@@ -174,6 +176,10 @@ impl Default for ObservabilityConfig {
     }
 }
 
+fn default_login_enumeration_hardening() -> bool {
+    true
+}
+
 fn default_observability_addr() -> String {
     "127.0.0.1:9090".to_string()
 }
@@ -232,6 +238,9 @@ pub struct SecurityConfig {
     /// second. Default 10. Must be in `1..=100_000`.
     #[serde(default = "default_auth_init_rate_per_second")]
     pub auth_init_rate_per_second: u32,
+    /// Enables KDF tuple equality for HTTP login enumeration hardening.
+    #[serde(default = "default_login_enumeration_hardening")]
+    pub login_enumeration_hardening: bool,
     /// Opt into the experimental online storage-migration API
     /// (`StartMigration`/`CommitMigration`/`RollbackMigration`/
     /// `MigrationStatus`). DISABLED BY DEFAULT — this feature has several
@@ -255,6 +264,7 @@ impl Default for SecurityConfig {
             cursors: Default::default(),
             auth_init_rate_per_second: default_auth_init_rate_per_second(),
             enable_experimental_migration_api: false,
+            login_enumeration_hardening: default_login_enumeration_hardening(),
         }
     }
 }
@@ -624,8 +634,22 @@ impl Config {
             ));
         }
 
+        let mut listener_ids = Vec::new();
         for (idx, l) in self.listeners.iter().enumerate() {
             validate_listener(idx, l, self.security.connection.auth_init_timeout_ms)?;
+            if l.kind == ListenerKind::Http && l.http.login.enabled {
+                if let Some(id) = &l.http.login.listener_id {
+                    let decoded = login_listener::parse_listener_id(id).map_err(|message| {
+                        ConfigError::Validation(format!(
+                            "listeners[{idx}].login.listener_id: {message}"
+                        ))
+                    })?;
+                    if listener_ids.contains(&decoded) {
+                        return Err(ConfigError::Validation(format!("listeners[{idx}].login.listener_id duplicates another enabled listener")));
+                    }
+                    listener_ids.push(decoded);
+                }
+            }
             if let Some(kdf) = &l.kdf_override {
                 validate_kdf(kdf).map_err(|m| {
                     ConfigError::Validation(format!("listeners[{idx}].kdf_override: {m}"))

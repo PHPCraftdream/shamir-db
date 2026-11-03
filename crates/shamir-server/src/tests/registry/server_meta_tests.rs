@@ -20,6 +20,34 @@ fn tmp_store() -> (TempDir, ServerMetaStore) {
 }
 
 #[test]
+fn http_login_listener_id_is_stable_across_reopen_and_address_scoped() {
+    let dir = TempDir::new().expect("tempdir");
+    let path = dir.path().join("server_meta");
+    let first = ServerMetaStore::open_or_init(&path).expect("open");
+    let id = first.http_login_listener_id("127.0.0.1:7340").expect("id");
+    drop(first);
+    let reopened = ServerMetaStore::open_or_init(&path).expect("reopen");
+    assert_eq!(
+        reopened.http_login_listener_id("127.0.0.1:7340").unwrap(),
+        id
+    );
+    assert_ne!(
+        reopened.http_login_listener_id("127.0.0.1:7341").unwrap(),
+        id
+    );
+}
+
+#[test]
+fn http_login_listener_id_rejects_malformed_persisted_length() {
+    let (_dir, store) = tmp_store();
+    store.set_http_login_listener_id_for_test("broken", &[1, 2, 3]);
+    assert!(matches!(
+        store.http_login_listener_id("broken"),
+        Err(crate::server_meta::MetaError::Encoding(_))
+    ));
+}
+
+#[test]
 fn fresh_store_returns_false_none_not_panic() {
     let (_dir, store) = tmp_store();
 

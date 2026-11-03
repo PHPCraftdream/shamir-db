@@ -130,6 +130,7 @@ fn make_test_config(temp: &TempDir) -> Config {
         // 10/s auth_init bucket would close some before the challenge.
         security: SecurityConfig {
             auth_init_rate_per_second: 1000,
+            login_enumeration_hardening: true,
             ..Default::default()
         },
         audit: Default::default(),

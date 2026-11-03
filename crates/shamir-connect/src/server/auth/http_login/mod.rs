@@ -5,7 +5,7 @@ mod scope_bytes;
 mod transcript;
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "tests/mod.rs"]
 mod tests;
 
 pub use proof::{build_server_signature, verify_http_login_proof};

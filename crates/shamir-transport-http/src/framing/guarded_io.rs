@@ -1,3 +1,4 @@
+use super::canned_login::canned_error_body;
 use super::scanner::{Framing, Scanner, Verdict};
 use std::future::Future;
 use std::io;
@@ -31,6 +32,8 @@ pub(crate) struct GuardedIo<T> {
     tls: bool,
     hsts: bool,
     response_head: Vec<u8>,
+    login_errors: bool,
+    write_timeout_override_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     response_started: bool,
     response_remaining: Option<u64>,
     response_interim: bool,
@@ -73,6 +76,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
             tls,
             hsts,
             response_head: Vec::new(),
+            login_errors: false,
+            write_timeout_override_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             response_started: false,
             response_remaining: None,
             response_interim: false,
@@ -90,6 +95,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
             response_bytes_started: false,
             request_active: false,
         }
+    }
+    pub(crate) fn with_login_errors(mut self, enabled: bool) -> Self {
+        self.login_errors = enabled;
+        self
+    }
+    pub(crate) fn with_write_timeout_override(
+        mut self,
+        value: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.write_timeout_override_ms = value;
+        self
+    }
+    fn effective_write_timeout(&self) -> Option<std::time::Duration> {
+        let override_ms = self
+            .write_timeout_override_ms
+            .load(std::sync::atomic::Ordering::Acquire);
+        if override_ms != 0 {
+            return Some(std::time::Duration::from_millis(override_ms));
+        }
+        self.write_timeout
     }
     pub(crate) fn with_timeouts(
         mut self,
@@ -150,14 +175,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         self.request_active = false;
         self.head_deadline = None;
         self.write_deadline = None;
-        self.canned_deadline = self
-            .write_timeout
-            .map(|duration| Box::pin(tokio::time::sleep(duration)));
+        let canned_timeout = if self.login_errors
+            && self
+                .write_timeout_override_ms
+                .load(std::sync::atomic::Ordering::Acquire)
+                == 0
+        {
+            Some(std::time::Duration::from_secs(5))
+        } else {
+            self.effective_write_timeout()
+        };
+        self.canned_deadline =
+            canned_timeout.map(|duration| Box::pin(tokio::time::sleep(duration)));
         if self.canned.is_some() {
             return;
         }
         let (reason, phrase) = match status {
             431 => ("431", "Request Header Fields Too Large"),
+            413 => ("413", "Payload Too Large"),
             408 => ("408", "Request Timeout"),
             _ => ("400", "Bad Request"),
         };
@@ -166,7 +201,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         } else {
             ""
         };
-        self.canned=Some(format!("HTTP/1.1 {reason} {phrase}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Type: application/msgpack\r\n{hsts}Connection: close\r\nContent-Length: 0\r\n\r\n").into_bytes());
+        let body: &[u8] = if self.login_errors {
+            canned_error_body(status)
+        } else {
+            b""
+        };
+        let pragma = if self.login_errors {
+            "Pragma: no-cache\r\n"
+        } else {
+            ""
+        };
+        let mut canned = format!("HTTP/1.1 {reason} {phrase}\r\nCache-Control: no-store\r\n{pragma}X-Content-Type-Options: nosniff\r\nContent-Type: application/msgpack\r\n{hsts}Connection: close\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        canned.extend_from_slice(body);
+        self.canned = Some(canned);
         self.canned_offset = 0;
         self.state = State::Closed;
         self.head.clear();
@@ -562,7 +609,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for GuardedIo<T> {
         }
         if self.write_deadline.is_none() {
             self.write_deadline = self
-                .write_timeout
+                .effective_write_timeout()
                 .map(|duration| Box::pin(tokio::time::sleep(duration)));
         }
         if self.poll_deadlines(cx, false).is_err() {
@@ -613,7 +660,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for GuardedIo<T> {
         }
         if self.response_started && self.write_deadline.is_none() {
             self.write_deadline = self
-                .write_timeout
+                .effective_write_timeout()
                 .map(|duration| Box::pin(tokio::time::sleep(duration)));
         }
         let reading_head = self.state == State::Head && !self.response_active;
