@@ -36,7 +36,7 @@ fn proof_uses_scram_schedule_and_rejects_invalid_controls() {
     assert!(!verify_http_login_proof(&proof, &stored, b""));
 
     let server_signature = build_server_signature(&server_key, transcript);
-    let client_recomputed = hmac_sha256(&server_key, transcript);
+    let client_recomputed = hmac_sha256(&server_key[..], transcript);
     assert_eq!(server_signature, client_recomputed);
     let wrong_server_key = [0x99; 32];
     assert_ne!(
