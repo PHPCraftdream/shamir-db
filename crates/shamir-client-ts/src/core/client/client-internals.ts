@@ -3,7 +3,7 @@ import type { BatchResponse } from '../types/write/batch.js';
 import type { WireValue } from '../types/write/write.js';
 import type { HmacSigner } from '../types/access/admin.js';
 import type { KdfParams } from '../protocol/scram.js';
-import { ShamirTimeoutError } from '../support/errors.js';
+import { ShamirTimeoutError, ShamirDbError } from '../support/errors.js';
 import {
   buildAuthMessageCp,
   computeClientProof,
@@ -18,12 +18,158 @@ import {
 import { listUsers } from '../builders/ddl/index.js';
 import { InternerCacheRegistry } from '../support/field-map.js';
 import type { InternerDelta } from '../support/field-map.js';
+import { createApiToken, listApiTokens, revokeApiToken, revokeUserTokens } from '../builders/admin/token-admin.js';
+import type { ApiTokenAdmin, ApiTokenInfo, ApiTokenMode, ApiTokenChannels, CreatedApiToken } from '../types/access/token-admin.js';
+import { ApiToken } from '../../entry/api-token.js';
+import type { DdlOpStatus } from '../types/write/batch.js';
 import {
   collectFieldNames,
   encodeRecordIdMsgpack,
   qvHasFnMarker,
   deinternResponse,
 } from '../support/interner-ops.js';
+
+export function apiTokenAdmin(
+  sendDbRequest: (req: object) => Promise<Record<string, unknown>>,
+  hmacTagHex: (canonical: Uint8Array) => string,
+): ApiTokenAdmin {
+  const signer = { hmacTagHex };
+  return {
+    async create(spec) {
+      let response: Record<string, unknown> | undefined;
+      try {
+        response = await sendDbRequest(createApiToken(signer, spec));
+        return validateCreatedApiToken(response);
+      } finally {
+        response = undefined;
+      }
+    },
+    async list(opts) {
+      let response: Record<string, unknown> | undefined;
+      try {
+        response = await sendDbRequest(listApiTokens(signer, opts));
+        return validateListedApiTokens(response);
+      } finally {
+        response = undefined;
+      }
+    },
+    async revoke(id) {
+      let response: Record<string, unknown> | undefined;
+      try {
+        response = await sendDbRequest(revokeApiToken(signer, id));
+        validateRevokedApiToken(response);
+      } finally {
+        response = undefined;
+      }
+    },
+    async revokeUser(opts) {
+      let response: Record<string, unknown> | undefined;
+      try {
+        response = await sendDbRequest(revokeUserTokens(signer, opts));
+        return validateRevokedUserTokens(response);
+      } finally {
+        response = undefined;
+      }
+    },
+  };
+}
+
+function validateListedApiTokens(response: Record<string, unknown>): ApiTokenInfo[] {
+  if (response.kind !== 'api_tokens_listed') throw new Error(`unexpected DbResponse kind for list_api_tokens: ${String(response.kind)}`);
+  if (!Array.isArray(response.tokens)) throw new Error('malformed api_tokens_listed response');
+  const rows: unknown[] = response.tokens;
+  return rows.map(validateApiTokenInfo);
+}
+
+function validateRevokedApiToken(response: Record<string, unknown>): void {
+  if (response.kind !== 'api_token_revoked') throw new Error(`unexpected DbResponse kind for revoke_api_token: ${String(response.kind)}`);
+}
+
+function validateRevokedUserTokens(response: Record<string, unknown>): bigint {
+  if (response.kind !== 'api_user_tokens_revoked') throw new Error(`unexpected DbResponse kind for revoke_user_tokens: ${String(response.kind)}`);
+  return readUnsigned(response.count);
+}
+
+function readUnsigned(value: unknown): bigint {
+  let result: bigint;
+  if (typeof value === 'bigint') result = value;
+  else if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) result = BigInt(value);
+  else throw new Error('malformed api token response');
+  if (result < 0n || result > 0xffffffffffffffffn) throw new Error('malformed api token response');
+  return result;
+}
+
+function isMode(value: unknown): value is ApiTokenMode {
+  return value === 'read_only' || value === 'read_write';
+}
+function isChannels(value: unknown): value is ApiTokenChannels {
+  return value === 'rest' || value === 'ws' || value === 'both';
+}
+function readDatabases(value: unknown): string[] | null {
+  if (value === null) return null;
+  if (Array.isArray(value) && value.every(item => typeof item === 'string')) return [...value];
+  throw new Error('malformed api token response');
+}
+function validateApiTokenInfo(value: unknown): ApiTokenInfo {
+  if (value === null || typeof value !== 'object') throw new Error('malformed api token response');
+  const row = value as Record<string, unknown>;
+  if (typeof row.id !== 'string' || row.id.length !== 22 || typeof row.label !== 'string' || typeof row.owner !== 'string' || !isMode(row.mode) || !isChannels(row.channels)) throw new Error('malformed api token response');
+  const revoked = row.revoked_at_ns === undefined || row.revoked_at_ns === null ? null : readUnsigned(row.revoked_at_ns);
+  return {
+    id: row.id,
+    label: row.label,
+    owner: row.owner,
+    mode: row.mode,
+    channels: row.channels,
+    databases: readDatabases(row.databases),
+    created_at_ns: readUnsigned(row.created_at_ns),
+    expires_at_ns: readUnsigned(row.expires_at_ns),
+    revoked_at_ns: revoked,
+  };
+}
+function validateCreatedApiToken(response: Record<string, unknown>): CreatedApiToken {
+  try {
+    if (response.kind !== 'api_token_created' || typeof response.token !== 'string') throw new Error();
+    const rawToken = response.token;
+    if (typeof response.id !== 'string' || response.id.length !== 22 || rawToken.slice(5, 27) !== response.id) throw new Error();
+    if (typeof response.label !== 'string' || typeof response.owner !== 'string' || !isMode(response.mode) || !isChannels(response.channels)) throw new Error();
+    const token = ApiToken.from(rawToken);
+    const id = response.id;
+    const label = response.label;
+    const owner = response.owner;
+    const mode = response.mode;
+    const channels = response.channels;
+    const databases = readDatabases(response.databases);
+    const createdAt = readUnsigned(response.created_at_ns);
+    const expiresAt = readUnsigned(response.expires_at_ns);
+    return { id, token, label, owner, mode, channels, databases, created_at_ns: createdAt, expires_at_ns: expiresAt };
+  } catch {
+    throw new Error('malformed api_token_created response');
+  }
+}
+
+export async function getDdlOpStatus(
+  db: string,
+  repo: string,
+  table: string,
+  opId: string,
+  sendDbRequest: (req: object) => Promise<Record<string, unknown>>,
+): Promise<DdlOpStatus | null> {
+  const r = await sendDbRequest({
+    op: 'get_ddl_op_status',
+    db,
+    repo,
+    table,
+    op_id: opId,
+  });
+  if (r.kind === 'ddl_op_status') {
+    return (r.status as DdlOpStatus | null) ?? null;
+  }
+  if (r.kind === 'error') {
+    throw new ShamirDbError(r.code as string, r.message as string);
+  }
+  throw new Error(`unexpected DbResponse kind for getDdlOpStatus: ${r.kind as string}`);
+}
 
 /** Result of {@link ShamirClient.txBegin} (`DbResponse::TxOpened`). */
 export interface TxOpened {

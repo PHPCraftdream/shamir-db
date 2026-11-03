@@ -140,6 +140,10 @@ pub fn table_token_for(name: &str) -> u64 {
 /// }
 /// ```
 pub struct TableManager {
+    /// Shared lifecycle marker set while this manager's stores are detached
+    /// after a successful table rename. DDL checks it only after acquiring
+    /// repository admission; CRUD and commit paths intentionally do not read it.
+    pub(super) detached: Arc<std::sync::atomic::AtomicBool>,
     pub(super) name: String,
     pub(super) token: u64,
     pub(super) table: Arc<Table>,
@@ -524,6 +528,7 @@ impl Clone for TableManager {
             ddl_admission: Arc::clone(&self.ddl_admission),
             // S5c-X — the SAME per-repo domain is shared across clones.
             write_domain: Arc::clone(&self.write_domain),
+            detached: Arc::clone(&self.detached),
             // F-48 — shared across clones (Arc<AtomicUsize> inside).
             writer_drain: self.writer_drain.clone(),
             // #1003 — shared across clones (Arc<Mutex<BTreeMap<..>>> inside),
@@ -699,6 +704,7 @@ impl TableManager {
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             // S5c-X — tests constructing directly get a private domain.
             write_domain: domain,
+            detached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writer_drain: super::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: super::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),

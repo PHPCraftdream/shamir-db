@@ -109,6 +109,19 @@ export type {
 } from './schema/ddl.js';
 
 export type {
+  ApiTokenMode,
+  ApiTokenChannels,
+  CreateApiTokenSpec,
+  CreateApiTokenOp,
+  ListApiTokensOp,
+  RevokeApiTokenOp,
+  RevokeUserTokensOp,
+  CreatedApiToken,
+  ApiTokenInfo,
+  ApiTokenAdmin,
+} from './access/token-admin.js';
+
+export type {
   ResourceRef,  GroupRef,
   Resource,
   Action,

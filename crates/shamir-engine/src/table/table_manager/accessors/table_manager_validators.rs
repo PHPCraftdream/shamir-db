@@ -52,6 +52,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> shamir_storage::error::DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let _guard = self.bindings_lock.lock().await;
         let mut bindings = (**self.validator_bindings.load()).clone();
         if let Some(pos) = bindings
@@ -87,6 +88,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> shamir_storage::error::DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let _guard = self.bindings_lock.lock().await;
         let mut bindings = (**self.validator_bindings.load()).clone();
         let before = bindings.len();

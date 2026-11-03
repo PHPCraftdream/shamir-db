@@ -38,6 +38,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         ddl_op_log::write_op_status(&self.info_store, status).await
     }
 
@@ -54,6 +55,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let (_barrier, _uwl_guard) = self
             .begin_write_barrier_admitted(
                 crate::index::write_barrier_flags::REGULAR_INDEX_CREATE,
@@ -131,6 +133,7 @@ impl TableManager {
     /// exactly like the previous facade `if let Some(mvcc) = ...` branch).
     pub async fn seed_current_versions_admitted(&self, permit: &RepoWritePermit) -> DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let Some(mvcc) = self.mvcc_store() else {
             return Ok(false);
         };
@@ -163,6 +166,7 @@ impl TableManager {
         resolver: &shamir_funclib::scalar_resolver::ScalarResolver,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let registry = self.index2_registry();
         let readers = registry.reader_gate().begin_drop();
         readers.wait_for_drain().await;
@@ -252,7 +256,9 @@ impl TableManager {
         dst_permit: &RepoWritePermit,
     ) -> DbResult<Arc<MigrationCoordinator>> {
         self.write_domain.debug_check_permit(src_permit);
+        self.ensure_attached()?;
         dst.write_domain.debug_check_permit(dst_permit);
+        dst.ensure_attached()?;
         let shadow = Arc::new(MigrationShadowLog::new(
             migration_id,
             Arc::clone(&self.info_store),
@@ -290,7 +296,9 @@ impl TableManager {
         dst_permit: &RepoWritePermit,
     ) -> DbResult<Arc<MigrationCoordinator>> {
         self.write_domain.debug_check_permit(src_permit);
+        self.ensure_attached()?;
         dst.write_domain.debug_check_permit(dst_permit);
+        dst.ensure_attached()?;
         let shadow = Arc::new(
             MigrationShadowLog::recover(state.id.clone(), Arc::clone(&self.info_store)).await?,
         );

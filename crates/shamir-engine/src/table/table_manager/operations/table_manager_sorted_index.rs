@@ -67,6 +67,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let interner = self.interner.get().await?;
         let name_interned = interner
             .touch_ind(index_name)
@@ -369,6 +370,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<bool> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let interner = self.interner.get().await?;
         let Some(name_interned) = interner.get_ind(index_name) else {
             return Ok(false);

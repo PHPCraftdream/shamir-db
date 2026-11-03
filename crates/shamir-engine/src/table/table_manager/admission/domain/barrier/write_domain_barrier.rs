@@ -37,10 +37,12 @@ impl TableManager {
     /// `bindings_lock`/`persist_lock`. The leader write/commit paths never
     /// call this — only DDL and registry-flush paths pay admission.
     pub(in crate::table) async fn admit(&self) -> DbResult<RepoWritePermit> {
-        self.write_domain
-            .admit()
-            .await
-            .map_err(|e| DbError::Internal(format!("repository write admission failed: {e}")))
+        let permit =
+            self.write_domain.admit().await.map_err(|e| {
+                DbError::Internal(format!("repository write admission failed: {e}"))
+            })?;
+        self.ensure_attached()?;
+        Ok(permit)
     }
     /// S5c-X — admitted twin of [`begin_write_barrier`](Self::begin_write_barrier):
     /// the caller ALREADY holds repo admission (`permit`); this verifies the
@@ -101,6 +103,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<(WriteBarrierGuard, tokio::sync::OwnedMutexGuard<()>)> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         let (guard, lock) = self.begin_write_barrier_admitted_impl(bit).await;
         Ok((guard, lock))
     }
@@ -225,6 +228,7 @@ impl TableManager {
             ddl_admission: Arc::new(tokio::sync::Mutex::new(())),
             // S5c-X — shared per-repo write-admission domain.
             write_domain: Arc::clone(&write_domain),
+            detached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             writer_drain: crate::table::writer_drain_barrier::WriterDrainBarrier::new(),
             in_flight_creates: crate::table::in_flight_create_guard::InFlightCreateSet::new(),
             index2_registry: Arc::new(crate::index2::IndexRegistry::new()),
