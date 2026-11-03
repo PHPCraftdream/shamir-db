@@ -201,6 +201,8 @@ During shutdown, login workers receive `min(request_timeout_ms, 7s)` and the aud
 
 These names/defaults and profile constraints are defined by `crates/shamir-server/src/boot/config/login_listener.rs`, `http_listener.rs`, `boot/config.rs`, `boot/config/tokens.rs`, and enforced by `engine/server/server_launcher/http/launcher.rs`.
 
+For full listener setup, token administration, browser constraints, limits and troubleshooting, see the [token API operator guide](./token-api.md).
+
 ## 2. Конфиг: `.ktav`
 
 Конфиг — файл в формате Ktav ≥ 0.6: без кавычек и запятых, комментарии —

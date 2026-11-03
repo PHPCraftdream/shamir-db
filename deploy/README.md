@@ -159,6 +159,7 @@ out of the box.
 
 ## See also
 
+* [Token API operator guide](../docs/guide-docs/guide/token-api.md) — listener setup and token administration.
 * `docs/dev-artifacts/ops/CAPACITY_PLANNING.md` — sizing reference: per-unit RAM,
   CPU costs, disk growth rates, recommended VM sizes.
 * `docs/dev-artifacts/roadmap/PRODUCTION_HARDENING_ROADMAP.md` — what's still
