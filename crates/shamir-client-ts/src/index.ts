@@ -81,7 +81,10 @@ export {
   isRetryableCode,
   isVersionConflict,
   RETRYABLE_ERROR_CODES,
+  TOKEN_ADMIN_ERROR_CODES,
+  isTokenAdminError,
 } from './core/support/errors.js';
+export type { TokenAdminErrorCode } from './core/support/errors.js';
 export type {
   TxOpened,
   ScramUserCreated,

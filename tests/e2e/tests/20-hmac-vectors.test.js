@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const hmac = require('../helpers/hmac');
-const { ddl } = require('@shamir/client');
+const { ddl, createApiToken } = require('@shamir/client');
 const vectorsPath = path.resolve(__dirname, '../../../crates/shamir-query-types/test-vectors/admin_hmac_v2.json');
 const vectors = JSON.parse(fs.readFileSync(vectorsPath, 'utf8'));
 
@@ -36,5 +36,20 @@ module.exports = async function ({ test, assertEq }) {
       { cascade: vector.fields.cascade === 1, if_exists: vector.fields.if_exists === 1 },
     );
     assertEq(tsBuiltOp.hmac, vector.tag_hex, 'TS builder canonicalization and helper signing match fixture tag');
+
+    const tokenVector = vectors.vectors.find((v) => v.op === 'create_api_token');
+    assert(tokenVector, 'create_api_token fixture vector exists');
+    const tokenOp = createApiToken(
+      { hmacTagHex: (bytes) => hmac.sign(clientForVector, Buffer.from(bytes)) },
+      {
+        label: tokenVector.fields.label,
+        ttl_secs: BigInt(tokenVector.fields.ttl_secs),
+        mode: tokenVector.fields.mode,
+        channels: tokenVector.fields.channels,
+        databases: [...tokenVector.fields.databases],
+        for_user: tokenVector.fields.for_user,
+      },
+    );
+    assertEq(tokenOp.hmac, tokenVector.tag_hex, 'createApiToken signs vector 0020 with the helper signer');
   });
 };

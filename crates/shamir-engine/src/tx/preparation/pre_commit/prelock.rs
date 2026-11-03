@@ -219,6 +219,12 @@ pub(in crate::tx) async fn pre_commit_prelock(
     // `TableManager::backfill_index2_backend`'s doc comment for the full
     // accounting.
     //
+    // Sidecar mutations are real table touches too: postings, counter deltas,
+    // staged vectors, and staged vector deletes are materialized independently
+    // of `write_set`. Include their tokens so freeze/drain gates cover even
+    // sidecar-only transactions (including future producers that violate the
+    // usual staging invariant).
+    //
     // `table_by_token_if_live` (NOT `table_by_token`) resolves the table
     // WITHOUT forcing lazy instantiation: a table that was `add_table`d but
     // never actually accessed via `get_table` stays dormant. This matters —
@@ -244,12 +250,12 @@ pub(in crate::tx) async fn pre_commit_prelock(
     // with no further check, so a DDL raising the barrier AFTER this read (and
     // calling `drain_writers()`) sees zero in-flight writers, incorrectly.
     // Fixed by entering the writer-drain set (`enter_writer_drain`) BEFORE
-    // reading the flag, for every table in `tx.write_set` — the cross-atomic
-    // happens-before edge to the DDL's drain load is carried by the single
-    // SeqCst total order over the `active` counter + `flag` (F-56; see
-    // `writer_drain_barrier`'s memory-model doc — NOT a flag coherence chain,
-    // which Release/Acquire cannot span across two independent atomics). If
-    // the flag is `true`
+    // reading the flag, for every table returned by `touched_table_tokens`
+    // (write_set and all mutation sidecars) — the cross-atomic happens-before
+    // edge to the DDL's drain load is carried by the single SeqCst total order
+    // over the `active` counter + `flag` (F-56; see `writer_drain_barrier`'s
+    // memory-model doc — NOT a flag coherence chain, which Release/Acquire
+    // cannot span across two independent atomics). If the flag is `true`
     // (slow path: this table gets a uwl_guard), drop the drain guard BEFORE
     // the lock acquisition — the lock alone provides exclusion, and staying
     // in the drain set while blocking on the lock (held by a DDL that is
@@ -260,8 +266,8 @@ pub(in crate::tx) async fn pre_commit_prelock(
     // `uwl_guards` after the data/index writes have completed.
     let mut unique_tokens: Vec<u64> = tx.unique_guards.iter().map(|g| g.table_token).collect();
     let mut drain_guards: Vec<crate::table::writer_drain_barrier::WriterDrainGuard> = Vec::new();
-    for table_id in tx.write_set.keys() {
-        if let Some(tbl) = repo.table_by_token_if_live(*table_id).await {
+    for table_id in touched_table_tokens(tx) {
+        if let Some(tbl) = repo.table_by_token_if_live(table_id).await {
             // F-48b/F-56: bump the drain counter BEFORE reading the flag so the
             // cross-atomic SeqCst happens-before edge reaches the DDL's drain
             // load. Mirrors `table_manager_crud.rs`'s writer methods.
@@ -273,7 +279,7 @@ pub(in crate::tx) async fn pre_commit_prelock(
                 // for the deadlock rationale. The lock serializes this table;
                 // the drain counter must not.
                 drop(drain_guard);
-                unique_tokens.push(*table_id);
+                unique_tokens.push(table_id);
             } else {
                 // Fast path: keep the drain guard alive until Phase 5c
                 // materialize. A DDL that raises the barrier AFTER this read
@@ -780,9 +786,45 @@ pub(in crate::tx) async fn pre_commit_prelock(
         uwl_guards.len(),
         drain_guards.len()
     );
-
     Ok(PreLockResult {
         uwl_guards,
         drain_guards,
     })
+}
+
+fn touched_table_tokens(tx: &TxContext) -> Vec<u64> {
+    let mut tokens: Vec<u64> = tx.write_set.keys().copied().collect();
+
+    let mut previous_index_token = None;
+    for (token, _) in &tx.index_write_set {
+        if previous_index_token != Some(*token) {
+            if !tx.write_set.contains_key(token) {
+                tokens.push(*token);
+            }
+            previous_index_token = Some(*token);
+        }
+    }
+
+    tokens.extend(
+        tx.counter_deltas
+            .keys()
+            .filter(|token| !tx.write_set.contains_key(*token))
+            .copied(),
+    );
+    tokens.extend(
+        tx.staged_vectors
+            .keys()
+            .filter(|token| !tx.write_set.contains_key(*token))
+            .copied(),
+    );
+    tokens.extend(
+        tx.staged_vector_deletes
+            .keys()
+            .filter(|token| !tx.write_set.contains_key(*token))
+            .copied(),
+    );
+
+    tokens.sort_unstable();
+    tokens.dedup();
+    tokens
 }

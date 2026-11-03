@@ -38,6 +38,7 @@ impl TableManager {
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);
+        self.ensure_attached()?;
         buffer_config::save(&self.info_store, cfg).await?;
         self.table.data_store().apply_buffer_config(cfg).await?;
         self.info_store.apply_buffer_config(cfg).await?;
