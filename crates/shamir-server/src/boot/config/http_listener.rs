@@ -3,6 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use serde::Deserialize;
 
 use crate::boot::config::{ConfigError, ListenerConfig, ListenerKind};
+use crate::http_ws::browser::policy::canonical_authority as canonical_ws_authority;
 
 use super::login_listener::{canonical_authority, parse_listener_id};
 
@@ -42,6 +43,9 @@ pub struct HttpListenerSettings {
     /// CIDR list of proxies trusted for REST forwarded-address rate limits.
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    /// Trusted browser Host authorities; entries must use canonical form.
+    #[serde(default)]
+    pub host_authority_allowlist: Vec<String>,
 }
 
 impl Default for HttpListenerSettings {
@@ -58,6 +62,7 @@ impl Default for HttpListenerSettings {
             login: super::login_listener::LoginListenerSettings::default(),
             allow_self_signed: false,
             trusted_proxies: Vec::new(),
+            host_authority_allowlist: Vec::new(),
         }
     }
 }
@@ -141,6 +146,14 @@ impl HttpListenerSettings {
                 "plaintext opt-in flags are only valid when tls is false".into(),
             ));
         }
+        for authority in &self.host_authority_allowlist {
+            let canonical = canonical_ws_authority(authority, tls);
+            if canonical.as_deref() != Some(authority.as_str()) {
+                return Err(invalid(format!(
+                    "host_authority_allowlist entry `{authority}` is not canonical for this listener scheme"
+                )));
+            }
+        }
         if self.login.enabled {
             let invalid_login =
                 |message: &str| ConfigError::Validation(format!("listeners[{idx}]: {message}"));
@@ -218,6 +231,12 @@ impl HttpListenerSettings {
         if let Some(id) = &self.login.listener_id {
             parse_listener_id(id)
                 .map_err(|message| invalid(format!("login.listener_id {message}")))?;
+        }
+        if !listener.browser_origin_allowlist.is_empty() {
+            shamir_transport_ws::BrowserOriginPolicy::try_allow(
+                listener.browser_origin_allowlist.iter().cloned(),
+            )
+            .map_err(|error| invalid(format!("invalid browser_origin_allowlist: {error}")))?;
         }
         for proxy in &self.trusted_proxies {
             let (address, prefix) = proxy

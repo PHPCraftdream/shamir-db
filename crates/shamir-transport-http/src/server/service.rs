@@ -2,6 +2,7 @@ use super::body::response_body;
 use super::response::{canned, response, response_held};
 use crate::config::{Endpoint, HttpServerConfig};
 use crate::gate::{AuthHeader, GateDecision, PeerInfo, RestExecutor, TokenGate};
+use crate::server::routes::ws::{WsRoute, WsUpgrade};
 use crate::server::routes::LoginRoutes;
 use bytes::Bytes;
 use http::{header, HeaderMap, Method, Request, Response, StatusCode};
@@ -9,23 +10,34 @@ use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::Incoming;
 use std::sync::Arc;
 
-pub(crate) struct Context<G, E, L: LoginRoutes = super::routes::NoLogin> {
+type UpgradeSlot<S> =
+    tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(S, hyper::upgrade::OnUpgrade)>>>;
+
+pub(crate) struct Context<G, E, W = super::accept::NoWs, L = super::routes::NoLogin>
+where
+    G: TokenGate,
+    W: WsUpgrade<G::Grant>,
+    L: LoginRoutes,
+{
     pub cfg: Arc<HttpServerConfig>,
     pub gate: Arc<G>,
     pub exec: Arc<E>,
     pub peer: PeerInfo,
     pub holds: tokio::sync::mpsc::Sender<Box<dyn Send + Sync>>,
+    pub ws: Arc<W>,
+    pub upgrade: UpgradeSlot<W::Session>,
     pub login: Arc<L>,
     pub write_timeout_override: Arc<std::sync::atomic::AtomicU64>,
 }
 
-pub(crate) async fn handle<G, E, L>(
+pub(crate) async fn handle<G, E, W, L>(
     request: Request<Incoming>,
-    context: Arc<Context<G, E, L>>,
+    context: Arc<Context<G, E, W, L>>,
 ) -> Result<Response<BoxBody<Bytes, std::convert::Infallible>>, std::convert::Infallible>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
+    W: WsUpgrade<G::Grant>,
     L: LoginRoutes,
 {
     if request.version() != http::Version::HTTP_11 {
@@ -50,6 +62,14 @@ where
             context.write_timeout_override.clone(),
         )
         .await);
+    }
+    let ws_route = match path.as_str() {
+        "/shamir/v1/ws" if context.cfg.endpoints.ws => Some(WsRoute::Native),
+        "/shamir/v1/ws/browser" if context.cfg.endpoints.ws => Some(WsRoute::Browser),
+        _ => None,
+    };
+    if let Some(route) = ws_route {
+        return super::routes::ws::handler::handle_ws(request, context, route).await;
     }
     let endpoint = if path == "/shamir/v1/ws" {
         Endpoint::Ws
@@ -137,14 +157,6 @@ where
             http::HeaderValue::from_static(if method == Method::GET { "GET" } else { "POST" }),
         );
         return Ok(r);
-    }
-    // T6a: authorize before handing this request to hyper::upgrade.
-    if path.ends_with("/ws") {
-        return Ok(canned(
-            StatusCode::NOT_FOUND,
-            context.peer.tls,
-            context.cfg.hsts,
-        ));
     }
     if path.ends_with("/request")
         && !request
@@ -371,6 +383,7 @@ where
     }
     Ok(r)
 }
+
 #[derive(Debug)]
 enum BodyError {
     TooLarge,
@@ -392,10 +405,10 @@ pub(crate) fn exec_status(s: crate::gate::ExecStatus) -> StatusCode {
         crate::gate::ExecStatus::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     }
 }
-fn unauthorized_body() -> Bytes {
+pub(crate) fn unauthorized_body() -> Bytes {
     Bytes::from_static(b"\x81\xa5error\xacunauthorized")
 }
-fn auth_header(headers: &HeaderMap) -> AuthHeader<'_> {
+pub(crate) fn auth_header(headers: &HeaderMap) -> AuthHeader<'_> {
     let mut values = headers.get_all(header::AUTHORIZATION).iter();
     match (values.next(), values.next()) {
         (None, _) => AuthHeader::Missing,
@@ -403,7 +416,7 @@ fn auth_header(headers: &HeaderMap) -> AuthHeader<'_> {
         _ => AuthHeader::Multiple,
     }
 }
-fn retry(
+pub(crate) fn retry(
     status: StatusCode,
     seconds: u64,
     tls: bool,

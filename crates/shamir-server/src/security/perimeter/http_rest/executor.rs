@@ -5,7 +5,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_connect::server::session::Session;
-use shamir_connect::server::token::Verified;
+use shamir_connect::server::token::{Endpoint as TokenEndpoint, Verified};
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_transport_http::{ExecOutcome, ExecStatus, RestExecutor};
 
@@ -46,17 +46,18 @@ impl ScopedHandler {
         Self { handler }
     }
 
-    pub(super) async fn handle(
+    pub(crate) async fn handle(
         &self,
         session: &Session,
         request: DbRequest,
+        endpoint: TokenEndpoint,
         conn: &ConnectionServices,
     ) -> Result<Vec<u8>, HandleDenial> {
         let shamir_connect::server::SessionOrigin::Token(origin) = &session.origin else {
             return Err(HandleDenial::Forbidden("token_request_denied"));
         };
         let (mode, _, databases) = origin.scope();
-        let decision = classify_request(&request, mode, databases);
+        let decision = classify_request(&request, mode, databases, endpoint);
         match decision {
             Decision::Allowed(_) => {}
             Decision::Denied(code) => return Err(HandleDenial::Forbidden(code)),
@@ -68,8 +69,9 @@ impl ScopedHandler {
     }
 }
 
+/// Result code for typed scoped-handler rejections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum HandleDenial {
+pub(crate) enum HandleDenial {
     Forbidden(&'static str),
     BadRequest(&'static str),
     ApplicationError,
@@ -162,8 +164,13 @@ impl RestExecutor<Verified> for RestHandler {
             Err(_) => return Self::error("invalid_request", ExecStatus::BadRequest),
         };
         let record = grant.state.record();
-        let prepared = classify_request(&request, record.mode, record.databases.as_deref());
-        let operation = match prepared {
+        let decision = classify_request(
+            &request,
+            record.mode,
+            record.databases.as_deref(),
+            TokenEndpoint::Rest,
+        );
+        let operation = match decision {
             Decision::Denied(code) => {
                 metrics::counter!("shamir_token_request_denied_total", "endpoint" => "rest")
                     .increment(1);
@@ -192,7 +199,9 @@ impl RestExecutor<Verified> for RestHandler {
         if !self.service.still_valid(grant, execution_now_ns) {
             return Self::error("unauthorized", ExecStatus::Unauthorized);
         }
-        let handler = self.handler.handle(&session, request, &conn);
+        let handler = self
+            .handler
+            .handle(&session, request, TokenEndpoint::Rest, &conn);
         let (result, hold) = crate::byte_budget::run_with_handoff(handler).await;
         metrics::histogram!("shamir_token_request_duration_seconds", "endpoint" => "rest")
             .record(started.elapsed().as_secs_f64());

@@ -19,5 +19,8 @@ pub use gate::{
     AuthHeader, ConnAdmission, ExecOutcome, ExecStatus, GateDecision, PeerInfo, RestExecutor,
     TokenGate,
 };
-pub use server::accept::{serve, serve_with_login, ServeError};
-pub use server::routes::{LoginHead, LoginResponse, LoginRoutes, NoLogin};
+pub use server::accept::{serve, serve_with_login, serve_with_routes, serve_with_ws, ServeError};
+pub use server::routes::ws::{
+    HeadOk, UpgradeHead, UpgradedIo, WsAdmission, WsReject, WsRoute, WsUpgrade,
+};
+pub use server::routes::{LoginHead, LoginResponse, LoginRoutes, NoLogin, RouteServices};

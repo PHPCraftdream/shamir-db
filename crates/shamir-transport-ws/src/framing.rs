@@ -89,6 +89,25 @@ where
     ws_send_sink(stream, payload).await
 }
 
+/// Send a raw payload as one WebSocket BINARY message without an inner prefix.
+/// The size cap and sink error behavior match [`ws_send_sink`].
+///
+/// Cancellation is terminal: if cancelled while sending, the sink may have
+/// partially progressed and must not be reused.
+pub async fn ws_send_sink_raw<W>(sink: &mut W, payload: &[u8]) -> Result<(), WsFrameError>
+where
+    W: Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    if payload.len() > MAX_WS_FRAME_SIZE {
+        return Err(WsFrameError::TooLarge {
+            actual: payload.len(),
+            max: MAX_WS_FRAME_SIZE,
+        });
+    }
+    sink.send(Message::Binary(payload.to_vec().into())).await?;
+    Ok(())
+}
+
 /// Receive one frame, returning the payload as an owned Vec.
 ///
 /// For high-throughput callers prefer [`ws_recv_into`] which writes into
@@ -200,9 +219,11 @@ pub async fn ws_recv_into_stream<R>(
 where
     R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    ws_recv_into_stream_inner(stream, max_frame_size, buf, None).await
+    ws_recv_into_stream_inner(stream, max_frame_size, buf, None, true).await
 }
 
+/// Receive one frame from any `Stream<Item = Result<Message, …>>` into a
+/// caller-supplied buffer (zero-allocation steady state), observing heartbeat Pongs.
 pub async fn ws_recv_into_stream_observing<R>(
     stream: &mut R,
     max_frame_size: usize,
@@ -212,7 +233,24 @@ pub async fn ws_recv_into_stream_observing<R>(
 where
     R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
-    ws_recv_into_stream_inner(stream, max_frame_size, buf, Some(heartbeat)).await
+    ws_recv_into_stream_inner(stream, max_frame_size, buf, Some(heartbeat), true).await
+}
+
+/// Receive one unprefixed raw binary message, observing matched heartbeat Pongs.
+///
+/// Cancellation after consuming partial control traffic is not restart-safe;
+/// only terminal cancellation is supported. Callers that perform periodic
+/// cancellation checks must pin and retain this read future across those checks.
+pub async fn ws_recv_raw_into_stream_observing<R>(
+    stream: &mut R,
+    max_frame_size: usize,
+    buf: &mut Vec<u8>,
+    heartbeat: &HeartbeatState,
+) -> Result<(), WsFrameError>
+where
+    R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    ws_recv_into_stream_inner(stream, max_frame_size, buf, Some(heartbeat), false).await
 }
 
 async fn ws_recv_into_stream_inner<R>(
@@ -220,6 +258,7 @@ async fn ws_recv_into_stream_inner<R>(
     max_frame_size: usize,
     buf: &mut Vec<u8>,
     heartbeat: Option<&HeartbeatState>,
+    prefixed: bool,
 ) -> Result<(), WsFrameError>
 where
     R: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
@@ -236,29 +275,40 @@ where
         };
         match msg {
             Message::Binary(bytes) => {
-                if bytes.len() < 4 {
-                    return Err(WsFrameError::LengthMismatch {
-                        declared: 0,
-                        actual: bytes.len(),
-                    });
+                if prefixed {
+                    if bytes.len() < 4 {
+                        return Err(WsFrameError::LengthMismatch {
+                            declared: 0,
+                            actual: bytes.len(),
+                        });
+                    }
+                    let declared =
+                        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+                    let body = &bytes[4..];
+                    if declared != body.len() {
+                        return Err(WsFrameError::LengthMismatch {
+                            declared,
+                            actual: body.len(),
+                        });
+                    }
+                    if declared > max_frame_size {
+                        return Err(WsFrameError::TooLarge {
+                            actual: declared,
+                            max: max_frame_size,
+                        });
+                    }
+                    buf.clear();
+                    buf.extend_from_slice(body);
+                } else {
+                    if bytes.len() > max_frame_size {
+                        return Err(WsFrameError::TooLarge {
+                            actual: bytes.len(),
+                            max: max_frame_size,
+                        });
+                    }
+                    buf.clear();
+                    buf.extend_from_slice(&bytes);
                 }
-                let declared =
-                    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-                let body = &bytes[4..];
-                if declared != body.len() {
-                    return Err(WsFrameError::LengthMismatch {
-                        declared,
-                        actual: body.len(),
-                    });
-                }
-                if declared > max_frame_size {
-                    return Err(WsFrameError::TooLarge {
-                        actual: declared,
-                        max: max_frame_size,
-                    });
-                }
-                buf.clear();
-                buf.extend_from_slice(body);
                 return Ok(());
             }
             Message::Close(_) => return Err(WsFrameError::PeerClose),

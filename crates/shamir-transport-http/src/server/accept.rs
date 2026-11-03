@@ -1,10 +1,14 @@
+use super::routes::ws::{
+    HeadOk, UpgradeHead, UpgradedIo, WsAdmission, WsReject, WsRoute, WsUpgrade,
+};
 use super::service::{handle, peer, Context};
-use crate::server::routes::{LoginRoutes, NoLogin};
+use crate::server::routes::{LoginRoutes, NoLogin, RouteServices};
 use crate::{
     config::HttpServerConfig,
     framing::guarded_io::GuardedIo,
     gate::{ConnAdmission, RestExecutor, TokenGate},
 };
+use http::StatusCode;
 use hyper::{server::conn::http1, service::service_fn};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{io, sync::Arc, time::Duration};
@@ -48,7 +52,7 @@ pub fn tls13_config(
     Ok(Arc::new(tls))
 }
 
-/// Serves HTTP/1.1 connections with the disabled login hook.
+/// Serves HTTP/1.1 connections with disabled login and WebSocket hooks.
 pub async fn serve<G, E, A>(
     listener: TcpListener,
     cfg: Arc<HttpServerConfig>,
@@ -62,14 +66,17 @@ where
     E: RestExecutor<G::Grant>,
     A: ConnAdmission,
 {
-    serve_with_login(
+    serve_inner(
         listener,
         cfg,
         gate,
         exec,
         admission,
-        Arc::new(NoLogin),
         shutdown,
+        RouteServices {
+            login: Arc::new(NoLogin),
+            ws: Arc::new(NoWs),
+        },
     )
     .await
 }
@@ -90,23 +97,123 @@ where
     A: ConnAdmission,
     L: LoginRoutes,
 {
-    serve_inner(listener, cfg, gate, exec, admission, login, shutdown).await
+    serve_inner(
+        listener,
+        cfg,
+        gate,
+        exec,
+        admission,
+        shutdown,
+        RouteServices {
+            login,
+            ws: Arc::new(NoWs),
+        },
+    )
+    .await
 }
 
-async fn serve_inner<G, E, A, L>(
+/// Serves HTTP/1.1 connections and tracked WebSocket sessions until shutdown.
+pub async fn serve_with_ws<G, E, A, W>(
     listener: TcpListener,
     cfg: Arc<HttpServerConfig>,
     gate: Arc<G>,
     exec: Arc<E>,
     admission: Arc<A>,
-    login: Arc<L>,
     shutdown: CancellationToken,
+    ws: Arc<W>,
+) -> Result<(), ServeError>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    A: ConnAdmission,
+    W: WsUpgrade<G::Grant>,
+{
+    serve_inner(
+        listener,
+        cfg,
+        gate,
+        exec,
+        admission,
+        shutdown,
+        RouteServices {
+            login: Arc::new(NoLogin),
+            ws,
+        },
+    )
+    .await
+}
+
+/// Serves HTTP/1.1 connections with login and WebSocket routes together.
+pub async fn serve_with_routes<G, E, A, L, W>(
+    listener: TcpListener,
+    cfg: Arc<HttpServerConfig>,
+    gate: Arc<G>,
+    exec: Arc<E>,
+    admission: Arc<A>,
+    shutdown: CancellationToken,
+    routes: RouteServices<L, W>,
 ) -> Result<(), ServeError>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
     A: ConnAdmission,
     L: LoginRoutes,
+    W: WsUpgrade<G::Grant>,
+{
+    serve_inner(listener, cfg, gate, exec, admission, shutdown, routes).await
+}
+
+pub(crate) struct NoWs;
+
+impl<G: Send + 'static> WsUpgrade<G> for NoWs {
+    type HeadState = ();
+    type Session = ();
+
+    fn check_head(
+        &self,
+        _route: WsRoute,
+        _head: UpgradeHead<'_>,
+        _peer: crate::gate::PeerInfo,
+    ) -> Result<HeadOk<Self::HeadState>, WsReject> {
+        Err(WsReject {
+            status: StatusCode::NOT_FOUND,
+            retry_after: None,
+            close: false,
+        })
+    }
+
+    fn admit(
+        &self,
+        _route: WsRoute,
+        _head: HeadOk<Self::HeadState>,
+        _grant: Option<G>,
+        _peer: crate::gate::PeerInfo,
+    ) -> Result<WsAdmission<Self::Session>, WsReject> {
+        Err(WsReject {
+            status: StatusCode::NOT_FOUND,
+            retry_after: None,
+            close: false,
+        })
+    }
+
+    async fn run(&self, _session: Self::Session, _io: UpgradedIo, _shutdown: CancellationToken) {}
+}
+
+async fn serve_inner<G, E, A, L, W>(
+    listener: TcpListener,
+    cfg: Arc<HttpServerConfig>,
+    gate: Arc<G>,
+    exec: Arc<E>,
+    admission: Arc<A>,
+    shutdown: CancellationToken,
+    routes: RouteServices<L, W>,
+) -> Result<(), ServeError>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    A: ConnAdmission,
+    L: LoginRoutes,
+    W: WsUpgrade<G::Grant>,
 {
     let tls_config = cfg
         .tls
@@ -144,8 +251,9 @@ where
                 let cfg = cfg.clone();
                 let gate = gate.clone();
                 let exec = exec.clone();
+                let ws = routes.ws.clone();
+                let login = routes.login.clone();
                 let token = shutdown.clone();
-                let login = login.clone();
                 let tls_config = tls_config.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
@@ -154,6 +262,7 @@ where
                     }
                     let (hold_tx, hold_rx) = tokio::sync::mpsc::channel::<Box<dyn Send + Sync>>(1);
                     let tls = tls_config.is_some();
+                    let peer_info = peer(addr, tls, &http::HeaderMap::new());
                     let stream: BoxedIo = if let Some(tls_cfg) = tls_config {
                         let accepted = tokio::time::timeout(
                             cfg.limits.head_timeout,
@@ -182,16 +291,20 @@ where
                         cfg.limits.write_timeout,
                     );
                     let io = TokioIo::new(guarded);
-                    let context = Arc::new(Context {
+                    let (upgrade_tx, mut upgrade_rx) = tokio::sync::oneshot::channel();
+                    let ws_run = ws.clone();
+                    let service_context = Arc::new(Context {
                         cfg: cfg.clone(),
                         gate,
                         exec,
-                        peer: peer(addr, tls, &http::HeaderMap::new()),
+                        peer: peer_info,
                         holds: hold_tx,
-                        login: login.clone(),
-                        write_timeout_override: write_timeout_override.clone(),
+                        ws,
+                        upgrade: tokio::sync::Mutex::new(Some(upgrade_tx)),
+                        login,
+                        write_timeout_override,
                     });
-                    let service = service_fn(move |request| handle(request, context.clone()));
+                    let service = service_fn(move |request| handle(request, service_context.clone()));
                     let mut builder = http1::Builder::new();
                     builder
                         .keep_alive(true)
@@ -199,46 +312,53 @@ where
                         .max_headers(cfg.limits.max_headers)
                         .timer(TokioTimer::new())
                         .header_read_timeout(cfg.limits.head_timeout);
-                    let mut connection = Box::pin(builder.serve_connection(io, service));
-                    let result = tokio::select! {
+                    let mut connection = Box::pin(builder.serve_connection(io, service).with_upgrades());
+                    let connection_result = tokio::select! {
                         _ = token.cancelled() => {
                             connection.as_mut().graceful_shutdown();
                             tokio::time::timeout(cfg.limits.request_timeout, &mut connection).await.ok()
                         }
                         result = &mut connection => Some(result),
                     };
-                    if let Some(outcome) = result {
+                    if let Ok((session, on_upgrade)) = upgrade_rx.try_recv() {
+                        match on_upgrade.await {
+                            Ok(upgraded) => {
+                                let child = token.child_token();
+                                ws_run.run(session, UpgradedIo::new(upgraded), child).await;
+                                return;
+                            }
+                            Err(error) => tracing::debug!(%error, "HTTP upgrade handoff failed"),
+                        }
+                    }
+                    if let Some(outcome) = connection_result {
                         let connection = *std::pin::Pin::into_inner(connection);
-                        let mut guarded = connection.into_parts().io.into_inner();
-                        if let (Err(failure), false) = (&outcome, token.is_cancelled()) {
-                            let timed_out = failure.is_timeout();
-                            let drain = tokio::time::timeout(
+                        if let Some(parts) = connection.into_parts() {
+                            let mut guarded = parts.io.into_inner();
+                            if let (Err(failure), false) = (&outcome, token.is_cancelled()) {
+                                let timed_out = failure.is_timeout();
+                                let drain = tokio::time::timeout(
+                                    cfg.limits.write_timeout,
+                                    guarded.finish_rejection(timed_out),
+                                )
+                                .await;
+                                if let Err(error) = drain.unwrap_or_else(|_| {
+                                    Err(io::Error::new(
+                                        io::ErrorKind::TimedOut,
+                                        "canned response drain deadline expired",
+                                    ))
+                                }) {
+                                    tracing::debug!(%error, "HTTP rejection response drain stopped");
+                                }
+                            }
+                            let _ = tokio::time::timeout(
                                 cfg.limits.write_timeout,
-                                guarded.finish_rejection(timed_out),
+                                tokio::io::AsyncWriteExt::shutdown(&mut guarded),
                             )
                             .await;
-                            if let Err(error) = drain.unwrap_or_else(|_| {
-                                Err(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "canned response drain deadline expired",
-                                ))
-                            }) {
-                                tracing::debug!(%error, "HTTP rejection response drain stopped");
+                            tokio::select! {
+                                _ = token.cancelled() => {}
+                                _ = tokio::time::timeout(LINGER_DEADLINE, guarded.discard_inbound(LINGER_DISCARD_LIMIT)) => {}
                             }
-                        }
-                        let _ = tokio::time::timeout(
-                            cfg.limits.write_timeout,
-                            tokio::io::AsyncWriteExt::shutdown(&mut guarded),
-                        )
-                        .await;
-                        // Linger: keep reading so a peer that still writes is not reset
-                        // before it has read the final response.
-                        tokio::select! {
-                            _ = token.cancelled() => {}
-                            _ = tokio::time::timeout(
-                                LINGER_DEADLINE,
-                                guarded.discard_inbound(LINGER_DISCARD_LIMIT),
-                            ) => {}
                         }
                     }
                 });

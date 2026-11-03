@@ -99,6 +99,13 @@ pub fn close_reason(code: u16) -> &'static str {
         1002 => "protocol error",
         1003 => "unsupported data",
         1009 => "message too large",
+        1013 => "server_busy",
+        4000 => "authentication_failed",
+        4010 => "token_sid_mismatch",
+        4011 => "token_revoked",
+        4012 => "token_expired",
+        4013 => "token_channel_denied",
+        4014 => "token_plaintext_write_denied",
         4003 => "heartbeat_timeout",
         _ => "",
     }
@@ -117,6 +124,10 @@ impl CloseIntent {
         if let Some((code, _)) = error.ws_close_code() {
             self.0.store(code, Ordering::Relaxed);
         }
+    }
+    /// Record an explicit WebSocket close code.
+    pub fn set_code(&self, code: u16) {
+        self.0.store(code, Ordering::Relaxed);
     }
     /// Take and clear the pending WebSocket close code, if any.
     pub fn take(&self) -> Option<u16> {

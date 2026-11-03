@@ -42,6 +42,17 @@ impl Harness {
         Self::launch_inner(addr, settings, false).await
     }
 
+    pub async fn launch_with_hook<F>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        hook: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut Config),
+    {
+        Self::launch_inner_with_hook(addr, settings, false, hook).await
+    }
+
     /// Starts HTTP REST and native TLS-exporter TCP listeners on the same database.
     pub async fn launch_with_native_seed() -> Self {
         Self::launch_with_native_seed_settings(
@@ -52,6 +63,17 @@ impl Harness {
             },
         )
         .await
+    }
+
+    pub(crate) async fn launch_with_native_seed_hook<F>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        hook: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut Config),
+    {
+        Self::launch_inner_with_hook(addr, settings, true, hook).await
     }
 
     /// Starts HTTP REST and native TLS-exporter TCP listeners with the specified HTTP settings.
@@ -67,17 +89,19 @@ impl Harness {
         settings: shamir_server::config::HttpListenerSettings,
         native: bool,
     ) -> Self {
-        Self::launch_with_hooks(
-            addr,
-            settings,
-            native,
-            |_| {},
-            |data_dir| {
-                let (owner, roles) = seed_owner(data_dir);
-                (owner, roles)
-            },
-        )
-        .await
+        Self::launch_inner_with_hook(addr, settings, native, |_| {}).await
+    }
+
+    async fn launch_inner_with_hook<F>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        native: bool,
+        hook: F,
+    ) -> Self
+    where
+        F: FnOnce(&mut Config),
+    {
+        Self::launch_with_hooks(addr, settings, native, hook, seed_owner).await
     }
 
     /// Starts the shared HTTP harness with test-specific config and user seeding.
@@ -145,20 +169,51 @@ impl Harness {
         }
     }
 
-    pub async fn token(&self, label: &str, mode: TokenMode) -> String {
+    pub async fn token_with_ttl(&self, label: &str, mode: TokenMode, ttl_secs: u64) -> String {
+        self.token_with_options(label, mode, ttl_secs, TokenChannels::Both, None)
+            .await
+            .token
+            .to_string()
+    }
+
+    pub async fn token_with_channels(
+        &self,
+        label: &str,
+        mode: TokenMode,
+        channels: TokenChannels,
+    ) -> String {
+        self.token_with_options(label, mode, 3600, channels, None)
+            .await
+            .token
+            .to_string()
+    }
+
+    pub async fn token_with_options(
+        &self,
+        label: &str,
+        mode: TokenMode,
+        ttl_secs: u64,
+        channels: TokenChannels,
+        databases: Option<Vec<String>>,
+    ) -> shamir_server::tokens::CreatedToken {
         self.handle
             .token_service
             .create(NewToken {
                 owner_user_id: self.owner,
                 owner_roles: self.owner_roles.clone(),
                 label: label.into(),
-                ttl_secs: Some(3600),
+                ttl_secs: Some(ttl_secs),
                 mode,
-                channels: TokenChannels::Both,
-                databases: None,
+                channels,
+                databases,
             })
             .await
             .expect("create token")
+    }
+
+    pub async fn token(&self, label: &str, mode: TokenMode) -> String {
+        self.token_with_options(label, mode, 3600, TokenChannels::Both, None)
+            .await
             .token
             .to_string()
     }
@@ -195,14 +250,15 @@ pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
     (owner, owner_roles)
 }
 
-/// Opens `db://default` (other r-x) and `default/main` (other --x): a token
-/// session is `Actor::User` (TOKEN_API section 6), and boot creates both
-/// System-owned at `0o700`, which hides even tables the token owner created.
+/// The database's `0o757` mode grants other principals read, write, and execute,
+/// allowing interactive transaction commit (which authorizes Write on the database).
+/// The store's `0o711` mode grants traversal. Both resources are System-owned at
+/// `0o700` by default, which hides even tables the token owner created.
 pub(crate) async fn grant_default_main_access(client: &shamir_client::Client) {
     let key = derive_session_hmac_key(&client.session_id());
     let mut batch = Batch::new();
     for (alias, resource, mode) in [
-        ("chmod_db", ddl::res::database("default"), 0o755),
+        ("chmod_db", ddl::res::database("default"), 0o757),
         ("chmod_store", ddl::res::store("default", "main"), 0o711),
     ] {
         let unsigned = BatchOp::Chmod(ChmodOp {

@@ -1,6 +1,6 @@
 use crate::security::perimeter::http_rest::AllowedOperation;
 use shamir_collections::new_map;
-use shamir_connect::server::token::TokenMode;
+use shamir_connect::server::token::{Endpoint, TokenMode};
 use shamir_query_builder::batch::{Batch, IntoBatchOp, Subscribe};
 use shamir_query_builder::ddl::list::list_tables;
 use shamir_query_builder::ddl::{access_tree, describe_table, get_table_schema, list_databases};
@@ -12,13 +12,13 @@ use shamir_types::types::value::QueryValue;
 
 use super::super::scope::{classify_request, Decision};
 
-fn batch_with(op: impl shamir_query_builder::batch::IntoBatchOp) -> BatchRequest {
+fn batch_with(op: impl IntoBatchOp) -> BatchRequest {
     let mut batch = Batch::new();
     batch.op("q", op);
     batch.build()
 }
 
-fn execute(op: impl shamir_query_builder::batch::IntoBatchOp, db: &str) -> DbRequest {
+fn execute(op: impl IntoBatchOp, db: &str) -> DbRequest {
     DbRequest::Execute {
         query_version: 1,
         db: db.into(),
@@ -46,7 +46,7 @@ fn rest_request_allowlist_and_rest_only_transaction_class_are_distinct() {
         execute(shamir_query_builder::query::Query::from("t"), "db"),
     ] {
         assert!(matches!(
-            classify_request(&request, TokenMode::ReadOnly, None),
+            classify_request(&request, TokenMode::ReadOnly, None, Endpoint::Rest),
             Decision::Allowed(_)
         ));
     }
@@ -60,7 +60,8 @@ fn rest_request_allowlist_and_rest_only_transaction_class_are_distinct() {
         classify_request(
             &tx_outside_scope,
             TokenMode::ReadOnly,
-            Some(&["inside".into()])
+            Some(&["inside".into()]),
+            Endpoint::Rest
         ),
         Decision::NotSupported("not_supported_over_rest")
     );
@@ -114,11 +115,11 @@ fn readonly_denies_each_data_write_class_and_readwrite_admits_it() {
     ];
     for write in &writes {
         assert_eq!(
-            classify_request(write, TokenMode::ReadOnly, None),
+            classify_request(write, TokenMode::ReadOnly, None, Endpoint::Rest),
             Decision::Denied("token_read_only")
         );
         assert_eq!(
-            classify_request(write, TokenMode::ReadWrite, None),
+            classify_request(write, TokenMode::ReadWrite, None, Endpoint::Rest),
             Decision::Allowed(AllowedOperation::Execute)
         );
     }
@@ -142,11 +143,11 @@ fn nested_write_in_zero_iteration_for_each_is_read_only_denied() {
         batch: nested,
     };
     assert_eq!(
-        classify_request(&request, TokenMode::ReadOnly, None),
+        classify_request(&request, TokenMode::ReadOnly, None, Endpoint::Rest),
         Decision::Denied("token_read_only")
     );
     assert_eq!(
-        classify_request(&request, TokenMode::ReadWrite, None),
+        classify_request(&request, TokenMode::ReadWrite, None, Endpoint::Rest),
         Decision::Allowed(AllowedOperation::Execute)
     );
 }
@@ -169,11 +170,16 @@ fn database_allowlist_applies_to_requests_and_access_tree() {
         visibility_wait: shamir_query_types::batch::VisibilityWait::Strict,
     };
     assert_eq!(
-        classify_request(&outside, TokenMode::ReadOnly, Some(&allowed)),
+        classify_request(
+            &outside,
+            TokenMode::ReadOnly,
+            Some(&allowed),
+            Endpoint::Rest
+        ),
         Decision::Denied("token_database_denied")
     );
     assert_eq!(
-        classify_request(&inside, TokenMode::ReadOnly, Some(&allowed)),
+        classify_request(&inside, TokenMode::ReadOnly, Some(&allowed), Endpoint::Rest),
         Decision::Allowed(AllowedOperation::WaitForVisibility)
     );
     for db in [Some("one".to_owned()), Some("two".to_owned()), None] {
@@ -188,13 +194,13 @@ fn database_allowlist_applies_to_requests_and_access_tree() {
             Decision::Denied("token_database_denied")
         };
         assert_eq!(
-            classify_request(&access, TokenMode::ReadOnly, Some(&allowed)),
+            classify_request(&access, TokenMode::ReadOnly, Some(&allowed), Endpoint::Rest),
             expected
         );
     }
     let list = execute(list_databases(), "one");
     assert_eq!(
-        classify_request(&list, TokenMode::ReadOnly, Some(&allowed)),
+        classify_request(&list, TokenMode::ReadOnly, Some(&allowed), Endpoint::Rest),
         Decision::Denied("token_database_denied")
     );
 }
@@ -215,7 +221,7 @@ fn top_level_introspection_is_allowed_and_nested_introspection_denied() {
             batch: batch.clone(),
         };
         assert_eq!(
-            classify_request(&request, TokenMode::ReadOnly, None),
+            classify_request(&request, TokenMode::ReadOnly, None, Endpoint::Rest),
             Decision::Allowed(AllowedOperation::Execute)
         );
         let nested = batch_with(BatchOp::Batch(shamir_query_types::batch::SubBatchOp {
@@ -228,7 +234,7 @@ fn top_level_introspection_is_allowed_and_nested_introspection_denied() {
             batch: nested,
         };
         assert_eq!(
-            classify_request(&request, TokenMode::ReadOnly, None),
+            classify_request(&request, TokenMode::ReadOnly, None, Endpoint::Rest),
             Decision::Denied("token_request_denied")
         );
     }
@@ -243,7 +249,7 @@ fn top_level_introspection_is_allowed_and_nested_introspection_denied() {
         batch: nested_for_each,
     };
     assert_eq!(
-        classify_request(&request, TokenMode::ReadWrite, None),
+        classify_request(&request, TokenMode::ReadWrite, None, Endpoint::Rest),
         Decision::Denied("token_request_denied")
     );
 }
@@ -252,11 +258,11 @@ fn top_level_introspection_is_allowed_and_nested_introspection_denied() {
 fn ddl_representative_is_denied_for_both_token_modes() {
     let ddl = execute(shamir_query_builder::ddl::create_db("x").build(), "db");
     assert_eq!(
-        classify_request(&ddl, TokenMode::ReadOnly, None),
+        classify_request(&ddl, TokenMode::ReadOnly, None, Endpoint::Rest),
         Decision::Denied("token_read_only")
     );
     assert_eq!(
-        classify_request(&ddl, TokenMode::ReadWrite, None),
+        classify_request(&ddl, TokenMode::ReadWrite, None, Endpoint::Rest),
         Decision::Denied("token_request_denied")
     );
 }
@@ -318,7 +324,7 @@ fn top_level_admin_requests_are_denied_using_typed_variants() {
     ];
     for request in requests {
         assert_eq!(
-            classify_request(&request, TokenMode::ReadOnly, None),
+            classify_request(&request, TokenMode::ReadOnly, None, Endpoint::Rest),
             Decision::Denied("token_request_denied")
         );
     }
@@ -340,7 +346,7 @@ fn subscribe_and_unsubscribe_are_not_supported_over_rest() {
     ];
     for request in requests {
         assert_eq!(
-            classify_request(&request, TokenMode::ReadWrite, None),
+            classify_request(&request, TokenMode::ReadWrite, None, Endpoint::Rest),
             Decision::NotSupported("not_supported_over_rest")
         );
     }
@@ -387,7 +393,12 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
     ];
     for request in requests {
         assert_eq!(
-            classify_request(&request, TokenMode::ReadOnly, Some(&["inside".into()])),
+            classify_request(
+                &request,
+                TokenMode::ReadOnly,
+                Some(&["inside".into()]),
+                Endpoint::Rest
+            ),
             Decision::NotSupported("not_supported_over_rest")
         );
     }

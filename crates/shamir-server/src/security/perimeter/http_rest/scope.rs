@@ -1,4 +1,4 @@
-use shamir_connect::server::token::TokenMode;
+use shamir_connect::server::token::{Endpoint, TokenMode};
 use shamir_query_types::admin::ListOp;
 use shamir_query_types::batch::{BatchOp, BatchTreeVisitor};
 use shamir_query_types::wire::DbRequest;
@@ -30,10 +30,12 @@ pub(crate) enum Decision {
     NotSupported(&'static str),
 }
 
+/// Channel-aware endpoint classification keeps REST policy unchanged.
 pub(crate) fn classify_request(
     request: &DbRequest,
     mode: TokenMode,
     databases: Option<&[String]>,
+    endpoint: Endpoint,
 ) -> Decision {
     let db = match request {
         DbRequest::Execute { db, .. }
@@ -58,20 +60,32 @@ pub(crate) fn classify_request(
         | DbRequest::RevokeApiToken { .. }
         | DbRequest::RevokeUserTokens { .. } => None,
     };
-    if matches!(
-        request,
-        DbRequest::TxBegin { .. }
-            | DbRequest::TxExecute { .. }
-            | DbRequest::TxCommit { .. }
-            | DbRequest::TxRollback { .. }
-            | DbRequest::CreateCursor { .. }
-            | DbRequest::FetchNext { .. }
-            | DbRequest::CancelCursor { .. }
-    ) {
+    if endpoint == Endpoint::Rest
+        && matches!(
+            request,
+            DbRequest::TxBegin { .. }
+                | DbRequest::TxExecute { .. }
+                | DbRequest::TxCommit { .. }
+                | DbRequest::TxRollback { .. }
+                | DbRequest::CreateCursor { .. }
+                | DbRequest::FetchNext { .. }
+                | DbRequest::CancelCursor { .. }
+        )
+    {
         return Decision::NotSupported("not_supported_over_rest");
     }
     if let DbRequest::Execute { batch, .. } = request {
         if mode == TokenMode::ReadOnly && batch_has_write(batch) {
+            return Decision::Denied("token_read_only");
+        }
+    }
+    if endpoint == Endpoint::Ws {
+        if let DbRequest::TxExecute { batch, .. } = request {
+            if mode == TokenMode::ReadOnly && batch_has_write(batch) {
+                return Decision::Denied("token_read_only");
+            }
+        }
+        if matches!(request, DbRequest::TxCommit { .. }) && mode == TokenMode::ReadOnly {
             return Decision::Denied("token_read_only");
         }
     }
@@ -86,7 +100,20 @@ pub(crate) fn classify_request(
             Decision::Allowed(AllowedOperation::WaitForVisibility)
         }
         DbRequest::GetDdlOpStatus { .. } => Decision::Allowed(AllowedOperation::GetDdlOpStatus),
-        DbRequest::Execute { batch, .. } => classify_batch(batch, databases),
+        DbRequest::Execute { batch, .. } => classify_batch(batch, databases, endpoint),
+        DbRequest::TxExecute { batch, .. } if endpoint == Endpoint::Ws => {
+            classify_batch(batch, databases, endpoint)
+        }
+        DbRequest::TxBegin { .. }
+        | DbRequest::TxCommit { .. }
+        | DbRequest::TxRollback { .. }
+        | DbRequest::CreateCursor { .. }
+        | DbRequest::FetchNext { .. }
+        | DbRequest::CancelCursor { .. }
+            if endpoint == Endpoint::Ws =>
+        {
+            Decision::Allowed(AllowedOperation::Execute)
+        }
         DbRequest::TxBegin { .. }
         | DbRequest::TxExecute { .. }
         | DbRequest::TxCommit { .. }
@@ -114,6 +141,7 @@ fn batch_has_write(batch: &shamir_query_types::batch::BatchRequest) -> bool {
 fn classify_batch(
     batch: &shamir_query_types::batch::BatchRequest,
     databases: Option<&[String]>,
+    endpoint: Endpoint,
 ) -> Decision {
     for visit in BatchTreeVisitor::new(&batch.queries) {
         let top = visit.depth == 0;
@@ -155,7 +183,9 @@ fn classify_batch(
                 }
             }
             BatchOp::Subscribe(_) | BatchOp::Unsubscribe(_) => {
-                return Decision::NotSupported("not_supported_over_rest")
+                if endpoint == Endpoint::Rest {
+                    return Decision::NotSupported("not_supported_over_rest");
+                }
             }
             BatchOp::CreateDb(_)
             | BatchOp::DropDb(_)

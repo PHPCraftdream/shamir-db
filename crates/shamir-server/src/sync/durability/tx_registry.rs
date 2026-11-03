@@ -304,6 +304,15 @@ impl TxRegistry {
         Some(arc)
     }
 
+    /// Remove the transaction owned by `sid` during session teardown.
+    ///
+    /// The session-index guard is dropped before removing the handle. The
+    /// caller drops the returned `Arc` to trigger RAII rollback.
+    pub fn remove_for_session(&self, sid: &[u8; 32]) -> Option<Arc<InteractiveTx>> {
+        let handle = *self.by_session.get(sid)?.value();
+        self.remove(handle)
+    }
+
     /// Handles whose tx is past its absolute deadline or idle past `idle_ttl`
     /// as of `now`. The background sweep removes each (drop = RAII abort).
     pub fn expired_handles(&self, now: Instant, idle_ttl: Duration) -> Vec<u64> {

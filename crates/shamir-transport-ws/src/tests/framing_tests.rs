@@ -11,6 +11,191 @@ use tokio_tungstenite::WebSocketStream;
 
 use crate::framing::ws_send_sink_prereserved;
 
+use crate::framing::{
+    ws_recv_into_stream_observing, ws_recv_raw_into_stream_observing, ws_send_sink_raw,
+};
+
+#[tokio::test]
+async fn raw_roundtrip_text_control_flood_and_prefixed_compatibility() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    let payload = b"raw-msgpack";
+    ws_send_sink_raw(&mut client, payload).await.unwrap();
+    let mut received = Vec::new();
+    ws_recv_raw_into_stream_observing(
+        &mut server,
+        1024,
+        &mut received,
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(received, payload);
+
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    ws_send_sink_raw(&mut client, b"").await.unwrap();
+    let mut received = vec![1];
+    ws_recv_raw_into_stream_observing(
+        &mut server,
+        1024,
+        &mut received,
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap();
+    assert!(received.is_empty());
+
+    let error = ws_send_sink_raw(&mut client, &vec![0; crate::framing::MAX_WS_FRAME_SIZE + 1])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, crate::WsFrameError::TooLarge { .. }));
+
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    client
+        .send(Message::Binary(vec![0; 1025].into()))
+        .await
+        .unwrap();
+    let error = ws_recv_raw_into_stream_observing(
+        &mut server,
+        1024,
+        &mut Vec::new(),
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::WsFrameError::TooLarge {
+            actual: 1025,
+            max: 1024
+        }
+    ));
+
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    client.send(Message::Text("no".into())).await.unwrap();
+    let error = ws_recv_raw_into_stream_observing(
+        &mut server,
+        1024,
+        &mut Vec::new(),
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, crate::WsFrameError::NonBinaryMessage(_)));
+
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    for _ in 0..65 {
+        client.send(Message::Ping(Vec::new().into())).await.unwrap();
+    }
+    let error = ws_recv_raw_into_stream_observing(
+        &mut server,
+        1024,
+        &mut Vec::new(),
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, crate::WsFrameError::ControlFlood { .. }));
+
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    client
+        .send(Message::Binary(
+            [4u32.to_be_bytes().as_slice(), b"keep"].concat().into(),
+        ))
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    ws_recv_into_stream_observing(
+        &mut server,
+        1024,
+        &mut received,
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(received, b"keep");
+}
+
+#[tokio::test]
+async fn raw_send_is_unprefixed_and_recv_preserves_message_payload() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    let payload = b"external-msgpack-payload";
+    client
+        .send(Message::Binary(payload.to_vec().into()))
+        .await
+        .unwrap();
+    let mut received = Vec::new();
+    ws_recv_raw_into_stream_observing(
+        &mut server,
+        1024,
+        &mut received,
+        &crate::HeartbeatState::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(received, payload);
+
+    ws_send_sink_raw(&mut server, payload).await.unwrap();
+    assert_eq!(
+        client.next().await.unwrap().unwrap(),
+        Message::Binary(payload.to_vec().into())
+    );
+}
+
+#[tokio::test]
+async fn rv_transport_ws_b8ed1366_raw_heartbeat_pong_does_not_consume_control_budget() {
+    let (server_io, client_io) = duplex(64 * 1024);
+    let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
+    let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+    let state = crate::HeartbeatState::default();
+    let (ping, _) = state.next_ping();
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    let sender = tokio::spawn(async move {
+        for _ in 0..64 {
+            client.send(Message::Ping(vec![1].into())).await.unwrap();
+        }
+        client
+            .send(Message::Pong(ping.to_vec().into()))
+            .await
+            .unwrap();
+        client
+            .send(Message::Binary(vec![0, 0, 0, 0].into()))
+            .await
+            .unwrap();
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => break,
+                incoming = client.next() => match incoming {
+                    Some(Ok(_)) => continue,
+                    Some(Err(error)) => panic!("peer WS drain failed: {error}"),
+                    None => break,
+                }
+            }
+        }
+    });
+    let result =
+        ws_recv_raw_into_stream_observing(&mut server, 1024, &mut Vec::new(), &state).await;
+    assert!(
+        result.is_ok(),
+        "64 controls plus one matched Pong should fit budget: {result:?}"
+    );
+    let _ = stop_tx.send(());
+    sender.await.unwrap();
+}
+
 struct PointerSink(Option<*const u8>);
 
 #[tokio::test]

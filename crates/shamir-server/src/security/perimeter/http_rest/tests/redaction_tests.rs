@@ -22,7 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use super::super::gate::{RestGate, RestGateRails};
+use super::super::gate::{BrowserVerdict, RestGate, RestGateRails};
 use crate::config::TokensConfig;
 use crate::security::tokens::{NewToken, TokenService, TokenServiceOptions};
 
@@ -442,5 +442,94 @@ async fn rest_authentication_tracing_redacts_credentials_and_secrets() {
             "token secret leaked to trace"
         );
     }
+    f.gate.shutdown().await;
+}
+
+#[tokio::test]
+async fn ws_native_and_browser_traces_redact_credentials_and_frame_bytes() {
+    let f = fixture().await;
+    let valid = f
+        .service
+        .create(NewToken {
+            owner_user_id: [7; 16],
+            owner_roles: vec!["reader".into()],
+            label: "ws-redaction".into(),
+            ttl_secs: Some(60),
+            mode: TokenMode::ReadOnly,
+            channels: TokenChannels::Both,
+            databases: None,
+        })
+        .await
+        .expect("create WS token")
+        .token
+        .as_str()
+        .to_owned();
+    let mut wrong = valid.as_bytes().to_vec();
+    wrong[28] = if wrong[28] == b'a' { b'b' } else { b'a' };
+    let wrong = String::from_utf8(wrong).expect("token ASCII");
+    let frame = b"frame-secret-bytes";
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .without_time()
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+    for candidate in [&valid, &wrong] {
+        let header = format!("Bearer {candidate}");
+        let decision = f
+            .gate
+            .authenticate(
+                AuthHeader::Single(header.as_bytes()),
+                Endpoint::Ws,
+                PeerInfo {
+                    addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7340),
+                    tls: false,
+                    forwarded_for: Vec::new(),
+                },
+            )
+            .await;
+        if candidate == &valid {
+            assert!(matches!(decision, GateDecision::Allow(_)));
+        } else {
+            assert!(matches!(decision, GateDecision::Unauthorized));
+        }
+        let browser = f.gate.verify_browser(
+            candidate.as_bytes(),
+            PeerInfo {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7341),
+                tls: false,
+                forwarded_for: Vec::new(),
+            },
+        );
+        if candidate == &valid {
+            assert!(matches!(browser, BrowserVerdict::Verified(_)));
+        } else {
+            assert!(matches!(browser, BrowserVerdict::Failed));
+        }
+    }
+    assert!(matches!(
+        f.gate.verify_browser(
+            frame,
+            PeerInfo {
+                addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7342),
+                tls: false,
+                forwarded_for: Vec::new(),
+            },
+        ),
+        super::super::gate::BrowserVerdict::Failed
+    ));
+    let logs =
+        String::from_utf8(capture.0.lock().expect("capture lock").clone()).expect("UTF-8 logs");
+    assert!(
+        logs.contains("token authentication failed"),
+        "expected fixed failure trace"
+    );
+    for secret in [&valid, &wrong] {
+        assert!(!logs.contains(secret), "WS credential leaked to trace");
+        assert!(!logs.contains(&secret[secret.rfind('.').expect("secret segment") + 1..]));
+    }
+    assert!(!logs.contains(std::str::from_utf8(frame).expect("frame bytes")));
     f.gate.shutdown().await;
 }

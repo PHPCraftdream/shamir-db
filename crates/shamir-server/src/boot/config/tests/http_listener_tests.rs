@@ -36,6 +36,7 @@ fn http_listener_defaults_apply() {
     assert!(!defaults.allow_plaintext_write);
     assert!(!defaults.allow_self_signed);
     assert!(defaults.trusted_proxies.is_empty());
+    assert!(defaults.host_authority_allowlist.is_empty());
     assert!(!defaults.external_tls);
     assert!(!defaults.login.enabled);
     assert!(defaults.login.authority_allowlist.is_empty());
@@ -77,6 +78,7 @@ fn full_flat_ktav_http_listener_parses_numeric_settings() {
     assert_eq!(parsed.http.request_timeout_ms, 1000);
     assert!(parsed.http.allow_self_signed);
     assert_eq!(parsed.http.trusted_proxies, vec!["10.0.0.0/8"]);
+    assert!(parsed.http.host_authority_allowlist.is_empty());
 }
 
 #[test]
@@ -118,6 +120,7 @@ fn http_server_config_mapping_uses_limits_and_messagepack_bodies() {
         allow_plaintext_write: false,
         allow_self_signed: false,
         trusted_proxies: Vec::new(),
+        host_authority_allowlist: Vec::new(),
         external_tls: false,
         login: Default::default(),
     };
@@ -514,6 +517,10 @@ fn non_http_kinds_reject_http_only_keys_via_config_validation() {
                 trusted_proxies: vec!["127.0.0.1/32".into()],
                 ..HttpListenerSettings::default()
             },
+            HttpListenerSettings {
+                host_authority_allowlist: vec!["example.com".into()],
+                ..HttpListenerSettings::default()
+            },
         ] {
             parsed.http = http;
             let error = super::super::validate_listener(0, &parsed, 5000).unwrap_err();
@@ -529,6 +536,57 @@ fn non_http_kinds_reject_http_only_keys_via_config_validation() {
         };
         assert!(config.validate().is_ok());
     }
+}
+
+#[test]
+fn canonical_host_authorities_validate_by_listener_scheme() {
+    let listener = listener(ListenerKind::Http, "127.0.0.1:7340", None);
+    let valid = [
+        (true, "example.com"),
+        (true, "example.com:8443"),
+        (true, "[2001:db8::1]"),
+        (true, "[2001:db8::1]:8443"),
+        (false, "example.com"),
+        (false, "example.com:8080"),
+        (false, "[2001:db8::1]:8080"),
+    ];
+    for (tls, authority) in valid {
+        let settings = HttpListenerSettings {
+            tls: Some(tls),
+            host_authority_allowlist: vec![authority.into()],
+            ..HttpListenerSettings::default()
+        };
+        assert!(settings.validate(0, &listener, 5000).is_ok(), "{authority}");
+    }
+    let invalid = [
+        (true, "Example.com"),
+        (true, "example.com:443"),
+        (false, "example.com:80"),
+        (true, "2001:db8::1"),
+        (true, "[2001:db8::1]:0443"),
+        (true, "user@example.com"),
+        (true, "example.com/path"),
+        (true, "example.com "),
+    ];
+    for (tls, authority) in invalid {
+        let settings = HttpListenerSettings {
+            tls: Some(tls),
+            host_authority_allowlist: vec![authority.into()],
+            ..HttpListenerSettings::default()
+        };
+        assert!(
+            settings.validate(0, &listener, 5000).is_err(),
+            "{authority}"
+        );
+    }
+}
+
+#[test]
+fn http_origin_allowlist_rejects_malformed_entries() {
+    let mut listener = listener(ListenerKind::Http, "127.0.0.1:7340", None);
+    listener.http.tls = Some(true);
+    listener.browser_origin_allowlist = vec!["not-an-origin".into()];
+    assert!(listener.http.validate(0, &listener, 5000).is_err());
 }
 
 #[test]
