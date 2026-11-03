@@ -173,3 +173,27 @@ async fn malformed_head_gets_complete_canned_response() {
     assert!(text.contains("Connection: close\r\n"));
     assert!(text.ends_with("Content-Length: 0\r\n\r\n"));
 }
+
+#[tokio::test]
+async fn release_holds_drops_pending_login_hold_immediately() {
+    struct Hold(Arc<AtomicUsize>);
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (hold_tx, hold_rx) = tokio::sync::mpsc::channel(1);
+    hold_tx
+        .send(Box::new(Hold(Arc::clone(&drops))) as Box<dyn Send + Sync>)
+        .await
+        .expect("queue hold");
+    let (_client, server) = duplex(1);
+    let mut guarded =
+        super::super::guarded_io::GuardedIo::new(server, 8192, 64, false, false, hold_rx);
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    guarded.release_holds();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(guarded);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}

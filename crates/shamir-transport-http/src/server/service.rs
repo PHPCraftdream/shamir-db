@@ -63,12 +63,12 @@ where
         )
         .await;
         if let Some(hold) = response.extensions_mut().remove::<Arc<dyn Send + Sync>>() {
-            let (parts, body) = response.into_parts();
+            // try_send: a failure means the connection is already dead; dropping the
+            // hold Box here releases the login slot immediately.
             let _ = context
                 .holds
-                .send(Box::new(hold) as Box<dyn Send + Sync>)
-                .await;
-            return Ok(Response::from_parts(parts, body));
+                .try_send(Box::new(hold) as Box<dyn Send + Sync>);
+            return Ok(response);
         }
         return Ok(response);
     }

@@ -321,8 +321,9 @@ impl ServerLauncher {
             shutdown_token.clone(),
         ));
 
-        // The metrics recorder is installed later in boot, so pair-slot deltas
-        // seen before then are lost; republish the absolute occupancy.
+        // The metrics recorder is installed later in boot, so pair-slot
+        // updates published before then are lost; republish the absolute
+        // occupancy.
         {
             let lockout = lockout.clone();
             let token = shutdown_token.clone();

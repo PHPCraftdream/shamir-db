@@ -345,6 +345,9 @@ where
                         let connection = *std::pin::Pin::into_inner(connection);
                         if let Some(parts) = connection.into_parts() {
                             let mut guarded = parts.io.into_inner();
+                            // A dead connection must not hold the login slot for up to the
+                            // linger deadline; drop any pending or active hold now.
+                            guarded.release_holds();
                             if let (Err(failure), false) = (&outcome, token.is_cancelled()) {
                                 let timed_out = failure.is_timeout();
                                 let drain = tokio::time::timeout(
