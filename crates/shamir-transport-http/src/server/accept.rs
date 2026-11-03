@@ -365,17 +365,37 @@ where
             }
         }
     }
-    let deadline = tokio::time::Instant::now() + cfg.limits.request_timeout;
+    let drain_timeout = cfg
+        .limits
+        .connection_drain_timeout
+        .unwrap_or(cfg.limits.request_timeout);
+    let deadline = tokio::time::Instant::now() + drain_timeout;
+    let mut timed_out = false;
     while !tasks.is_empty() {
         if tokio::time::timeout_at(deadline, tasks.join_next())
             .await
             .is_err()
         {
+            let stragglers = tasks.len();
+            tracing::warn!(
+                stragglers,
+                ?drain_timeout,
+                "HTTP connection drain timed out; aborting stragglers"
+            );
+            timed_out = true;
             break;
         }
     }
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
+    if timed_out {
+        tasks.abort_all();
+    }
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result {
+            if !error.is_cancelled() {
+                tracing::warn!(%error, "HTTP connection task failed during drain");
+            }
+        }
+    }
     Ok(())
 }
 

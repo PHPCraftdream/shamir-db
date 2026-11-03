@@ -12,6 +12,7 @@ describe('createCursor', () => {
     const req = createCursor('app', Query.from('users'), 50);
     expect(req).toEqual({
       op: 'create_cursor',
+      query_version: 4,
       db: 'app',
       query: { from: 'users' },
       page_size: 50,
@@ -22,6 +23,7 @@ describe('createCursor', () => {
     const req = createCursor('app', { from: 'users' }, 25);
     expect(req).toEqual({
       op: 'create_cursor',
+      query_version: 4,
       db: 'app',
       query: { from: 'users' },
       page_size: 25,
@@ -73,6 +75,7 @@ describe('Batch static cursor helpers', () => {
     const req = Batch.createCursor('app', Query.from('users'), 50);
     expect(req).toEqual({
       op: 'create_cursor',
+      query_version: 4,
       db: 'app',
       query: { from: 'users' },
       page_size: 50,

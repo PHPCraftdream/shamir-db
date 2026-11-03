@@ -678,25 +678,27 @@ async fn run_flusher(
                         owner,
                         subnet,
                         now_ns,
-                    }) => match rmp_serde::to_vec_named(&(channel_label(channel), id, owner)) {
-                        Ok(details) => batch.push(AuditWrite {
-                            event: "api_token_exposed",
-                            outcome: "plaintext_denied",
-                            resource: format_subnet(subnet),
-                            details,
-                            now_ns,
-                            exposure_id: Some((channel, id)),
-                        }),
-                        Err(_) => {
-                            disabled = true;
-                            disabled_shared.store(true, Ordering::Release);
-                            tracing::warn!(
-                                token_id = ?id,
-                                "REST token exposure audit serialization failed"
-                            );
-                            break;
+                    }) => {
+                        let index = endpoint_index(channel);
+                        if let Some(details) = serialize_exposure(
+                            channel,
+                            id,
+                            &mut summaries[index].exposure_dropped,
+                            || {
+                                rmp_serde::to_vec_named(&(channel_label(channel), id, owner))
+                                    .map_err(|_| ())
+                            },
+                        ) {
+                            batch.push(AuditWrite {
+                                event: "api_token_exposed",
+                                outcome: "plaintext_denied",
+                                resource: format_subnet(subnet),
+                                details,
+                                now_ns,
+                                exposure_id: Some((channel, id)),
+                            });
                         }
-                    },
+                    }
                     Some(AuditNotice::Failure { .. }) => {}
                     None => break,
                 }
@@ -751,6 +753,25 @@ async fn run_flusher(
         }
     }
 }
+fn serialize_exposure<F>(
+    channel: Endpoint,
+    id: [u8; 16],
+    drops: &mut u64,
+    serialize: F,
+) -> Option<Vec<u8>>
+where
+    F: FnOnce() -> Result<Vec<u8>, ()>,
+{
+    match serialize() {
+        Ok(details) => Some(details),
+        Err(()) => {
+            *drops = drops.saturating_add(1);
+            tracing::warn!(token_id = ?id, channel = channel_label(channel), "REST token exposure audit serialization failed");
+            None
+        }
+    }
+}
+
 fn endpoint_index(endpoint: Endpoint) -> usize {
     match endpoint {
         Endpoint::Rest => 0,

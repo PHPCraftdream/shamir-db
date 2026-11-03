@@ -69,6 +69,7 @@ struct Hook {
     done: CancellationToken,
     rejected: bool,
     run_cancelled: CancellationToken,
+    ignore_shutdown: bool,
 }
 impl WsUpgrade<()> for Hook {
     type HeadState = ();
@@ -112,9 +113,12 @@ impl WsUpgrade<()> for Hook {
     }
     async fn run(&self, _: (), mut io: UpgradedIo, shutdown: CancellationToken) {
         self.active.fetch_add(1, Ordering::AcqRel);
+        if self.ignore_shutdown {
+            self.done.cancel();
+        }
         let mut buf = [0_u8; 4];
         tokio::select! {
-            _ = shutdown.cancelled() => { self.run_cancelled.cancel(); }
+            _ = shutdown.cancelled(), if !self.ignore_shutdown => { self.run_cancelled.cancel(); }
             result = io.read_exact(&mut buf) => { let _ = result; }
         }
         self.active.fetch_sub(1, Ordering::AcqRel);
@@ -167,6 +171,7 @@ fn hook(
     done: CancellationToken,
     rejected: bool,
     run_cancelled: CancellationToken,
+    ignore_shutdown: bool,
 ) -> Arc<Hook> {
     Arc::new(Hook {
         active,
@@ -174,6 +179,7 @@ fn hook(
         done,
         rejected,
         run_cancelled,
+        ignore_shutdown,
     })
 }
 
@@ -198,6 +204,7 @@ async fn ws_route_returns_hook_headers_and_holds_permit_through_session() {
             done.clone(),
             false,
             run_cancelled.clone(),
+            false,
         ),
     ));
     let mut client = TcpStream::connect(addr).await.expect("connect");
@@ -274,6 +281,7 @@ async fn non_get_ws_request_is_rejected_before_hook() {
             CancellationToken::new(),
             false,
             CancellationToken::new(),
+            false,
         ),
     ));
     let mut client = TcpStream::connect(addr).await.expect("connect");
@@ -312,6 +320,7 @@ async fn hook_rejection_returns_status_and_retry_after() {
             CancellationToken::new(),
             true,
             CancellationToken::new(),
+            false,
         ),
     ));
     let mut client = TcpStream::connect(addr).await.expect("connect");
@@ -327,6 +336,61 @@ async fn hook_rejection_returns_status_and_retry_after() {
         .expect("server task deadline")
         .expect("server task")
         .expect("server result");
+}
+
+async fn run_connection_drain_test(drain_timeout: Option<Duration>, request_timeout: Duration) {
+    let (listener, addr) = listener().await;
+    let permits = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let shutdown = CancellationToken::new();
+    let run_cancelled = CancellationToken::new();
+    let done = CancellationToken::new();
+    let mut cfg = (*config()).clone();
+    cfg.limits.connection_drain_timeout = drain_timeout;
+    cfg.limits.request_timeout = request_timeout;
+    let server = tokio::spawn(serve_with_ws(
+        listener,
+        Arc::new(cfg),
+        Arc::new(Gate),
+        Arc::new(Executor),
+        Arc::new(Admission(permits.clone())),
+        shutdown.clone(),
+        hook(
+            active.clone(),
+            Arc::new(AtomicUsize::new(0)),
+            done.clone(),
+            false,
+            run_cancelled,
+            true,
+        ),
+    ));
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    client.write_all(b"GET /shamir/v1/ws HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer test\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").await.expect("write request");
+    assert!(read_response(&mut client)
+        .await
+        .starts_with(b"HTTP/1.1 101"));
+    tokio::time::timeout(Duration::from_secs(2), done.cancelled())
+        .await
+        .expect("session entered run hook");
+    assert_eq!(permits.load(Ordering::Acquire), 1);
+    tokio::time::pause();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(3), server)
+        .await
+        .expect("drain deadline bounds server")
+        .expect("server task")
+        .expect("server result");
+    assert_eq!(permits.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+async fn configured_connection_drain_aborts_unresponsive_upgraded_session() {
+    run_connection_drain_test(Some(Duration::from_secs(2)), Duration::from_secs(120)).await;
+}
+
+#[tokio::test]
+async fn fallback_connection_drain_aborts_unresponsive_upgraded_session() {
+    run_connection_drain_test(None, Duration::from_secs(2)).await;
 }
 
 #[tokio::test]
@@ -347,6 +411,7 @@ async fn shutdown_cancels_run_token_for_upgraded_session() {
             CancellationToken::new(),
             false,
             run_cancelled.clone(),
+            false,
         ),
     ));
     let mut client = TcpStream::connect(addr).await.expect("connect");

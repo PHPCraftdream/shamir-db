@@ -153,6 +153,39 @@ identity запрещает даже первый контакт; отключе
 `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`,
 `crates/shamir-server/src/backup.rs:3-32`.
 
+## API token listener operations
+
+Bearer APIs and HTTP password login are served by the configured HTTP listener. See [the TypeScript token guide](../../../crates/shamir-client-ts/docs/TOKENS.md) for client usage. The examples there assume an HTTPS endpoint at `https://db.example.test`, port 443, with the UI served same-origin (or through a same-origin reverse proxy); token requests do not provide CORS headers.
+
+A minimal illustrative example of **one `listeners[]` entry** for that deployment is:
+
+```ktav
+{
+    kind: http
+    addr: 0.0.0.0:443
+    tls: true
+    host_authority_allowlist: [db.example.test]
+    browser_origin_allowlist: [https://db.example.test]
+    trusted_proxies: []
+    external_tls: false
+    max_request_body_bytes: 16777216
+    body_timeout_ms: 30000
+    request_timeout_ms: 120000
+    login: {
+        enabled: true
+        authority_allowlist: [db.example.test]
+        ## Optional explicit stable identity; if omitted, generated identity is persisted in server metadata.
+        listener_id: 0123456789abcdef0123456789abcdef
+    }
+}
+```
+
+A `kind: http` listener requires `tls: true` or `tls: false`; this example uses direct TLS termination and assumes a valid TLS 1.3 certificate. Login configuration contains only `enabled`, `authority_allowlist`, and optional `listener_id`; `external_tls` is a flattened listener-level field. `login.authority_allowlist` defaults to loopback aliases; the example sets the exact HTTPS authority. A supplied listener ID must be stable and exactly 32 lowercase hex characters. `browser_origin_allowlist` is listener-level, separate from `login`. For TLS termination at a proxy, configure `external_tls: true` with trusted proxies and protect the backend; do not copy the direct-TLS values unchanged. Keep remote plaintext login disabled. Login BEGIN input is capped at 4096 bytes and FINISH at 256 bytes (not a 4 KiB cap on both messages).
+
+Review these actual listener keys and policies: `host_authority_allowlist` is the exact browser Host authority allowlist; `browser_origin_allowlist` is the exact allowed Origin list, not a wildcard/default-open setting; `max_request_body_bytes` defaults to 16 MiB, body/request timeout defaults are 30 s/120 s, and head timeout inherits `security.connection.auth_init_timeout_ms` (typically 5 s). Adjust limits to workload without broadening the listener unintentionally. The HTTP listener's token body cap and login's separate BEGIN 4096-byte / FINISH 256-byte limits are distinct.
+
+The token policy defaults relevant to these examples are `tokens.max_per_user: 20`, `tokens.max_sockets_per_token: 8`, `tokens.max_sockets_per_owner: 32`, `tokens.session_max_age_hours: 24`, `tokens.default_ttl_days: 30`, `tokens.max_ttl_days: 365`, `tokens.login_ttl: 86400`, and `tokens.login_allow_read_write: false`. The CLI can issue read-write tokens explicitly; HTTP login requires the global opt-in for read-write. Review the example config and deployment policy before enabling login or issuing broad scopes. The final T8 operator manual should expand this concise cross-reference.
+
 ## 2. Конфиг: `.ktav`
 
 Конфиг — файл в формате Ktav ≥ 0.6: без кавычек и запятых, комментарии —
