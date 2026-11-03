@@ -142,3 +142,7 @@ Implemented all four T8 documentation deliverables across the operator guide/ope
 Checks: python -I scripts/ci/check_layout.py passed; no local compilation or tests ran. Examples were source-checked, not executed.
 PARTIAL verification: every changed file was reread, but a continuous 40-minute review was not established. Code/spec divergences and runtime-proof gaps are recorded in docs/dev-artifacts/audits/2026-11-03-token-t8/DESIGN.md.
 No production code, manifests, lockfiles, or git index/commits changed.
+
+## Review corrections (orchestrator)
+
+An independent read of the guide against the code corrected: the scoped-token list rule (denied only when `databases` is non-null), the claim of transport metrics (none exist in `shamir-transport-http`), the scope of the `external_tls` validation (only with `login.enabled`), the missing `token_self_service_disabled` code and the full WebSocket close-code list (1000, 1003, 1009, 1011, 1013, 4000, 4003, 4010-4014), the missing T7 and AUTH1 evidence gaps in `KNOWN_LIMITATIONS.md`, duplicated comments in `deploy/server.example.ktav`, and the stale cross-reference in `07-operations.md`. Paths in earlier sections of this file that do not exist in the tree (`boot/listeners.rs`, `cli/args.rs`, `boot/launcher.rs`, `ops/admin.rs`, `security/tokens/scope.rs`) are superseded by the paths cited in the guide itself; the kick reference is `TOKEN_API.md:90`, not `TRANSPORT_WS.md:90`.

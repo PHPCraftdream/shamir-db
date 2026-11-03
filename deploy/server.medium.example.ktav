@@ -90,7 +90,7 @@ listeners: [
     ##     addr: 127.0.0.1:7340
     ##     tls: false
     ##     max_request_body_bytes: 8388608
-    ##     ## body8MiB -> shared128MiB if largest HTTP cap
+    ##     ## 8 MiB body cap -> 128 MiB shared budget if it is the largest HTTP cap
     ##     head_timeout_ms: 5000
     ##     body_timeout_ms: 30000
     ##     request_timeout_ms: 120000
@@ -105,7 +105,7 @@ listeners: [
     ##     addr: 127.0.0.1:7341
     ##     tls: true
     ##     max_request_body_bytes: 8388608
-    ##     ## body8MiB -> shared128MiB if largest HTTP cap
+    ##     ## 8 MiB body cap -> 128 MiB shared budget if it is the largest HTTP cap
     ##     head_timeout_ms: 5000
     ##     body_timeout_ms: 30000
     ##     request_timeout_ms: 120000
