@@ -1,4 +1,5 @@
 use super::service::{handle, peer, Context};
+use crate::server::routes::{LoginRoutes, NoLogin};
 use crate::{
     config::HttpServerConfig,
     framing::guarded_io::GuardedIo,
@@ -47,7 +48,7 @@ pub fn tls13_config(
     Ok(Arc::new(tls))
 }
 
-/// Serves HTTP/1.1 connections and gracefully drains tracked tasks on cancellation.
+/// Serves HTTP/1.1 connections with the disabled login hook.
 pub async fn serve<G, E, A>(
     listener: TcpListener,
     cfg: Arc<HttpServerConfig>,
@@ -60,6 +61,52 @@ where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
     A: ConnAdmission,
+{
+    serve_with_login(
+        listener,
+        cfg,
+        gate,
+        exec,
+        admission,
+        Arc::new(NoLogin),
+        shutdown,
+    )
+    .await
+}
+
+/// Serves HTTP/1.1 connections with an application-provided login hook.
+pub async fn serve_with_login<G, E, A, L>(
+    listener: TcpListener,
+    cfg: Arc<HttpServerConfig>,
+    gate: Arc<G>,
+    exec: Arc<E>,
+    admission: Arc<A>,
+    login: Arc<L>,
+    shutdown: CancellationToken,
+) -> Result<(), ServeError>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    A: ConnAdmission,
+    L: LoginRoutes,
+{
+    serve_inner(listener, cfg, gate, exec, admission, login, shutdown).await
+}
+
+async fn serve_inner<G, E, A, L>(
+    listener: TcpListener,
+    cfg: Arc<HttpServerConfig>,
+    gate: Arc<G>,
+    exec: Arc<E>,
+    admission: Arc<A>,
+    login: Arc<L>,
+    shutdown: CancellationToken,
+) -> Result<(), ServeError>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    A: ConnAdmission,
+    L: LoginRoutes,
 {
     let tls_config = cfg
         .tls
@@ -98,6 +145,7 @@ where
                 let gate = gate.clone();
                 let exec = exec.clone();
                 let token = shutdown.clone();
+                let login = login.clone();
                 let tls_config = tls_config.clone();
                 tasks.spawn(async move {
                     let _permit = permit;
@@ -117,6 +165,7 @@ where
                     } else {
                         Box::new(stream)
                     };
+                    let write_timeout_override = Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let guarded = GuardedIo::new(
                         stream,
                         cfg.limits.max_head_bytes,
@@ -125,6 +174,8 @@ where
                         cfg.hsts,
                         hold_rx,
                     )
+                    .with_login_errors(login.enabled())
+                    .with_write_timeout_override(write_timeout_override.clone())
                     .with_timeouts(
                         cfg.limits.head_timeout,
                         cfg.limits.request_timeout,
@@ -137,6 +188,8 @@ where
                         exec,
                         peer: peer(addr, tls, &http::HeaderMap::new()),
                         holds: hold_tx,
+                        login: login.clone(),
+                        write_timeout_override: write_timeout_override.clone(),
                     });
                     let service = service_fn(move |request| handle(request, context.clone()));
                     let mut builder = http1::Builder::new();

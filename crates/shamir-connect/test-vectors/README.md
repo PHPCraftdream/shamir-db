@@ -43,6 +43,7 @@ tls_exporter) so they chain end-to-end: auth_message → Argon2id → SCRAM proo
 | File | Category | What it pins |
 |---|---|---|
 | `auth_message_default.{json,toml}` | auth_message | 148-byte canonical auth_message (spec §16 inline example) |
+| `http_login_transcript_v1.{json,toml}` | HTTP login transcript | Message-layout fixture, hand-derived; same layout as the TS `buildLoginTranscript` pin |
 | `changepw_message.toml` | password change | Complete message bytes and inputs |
 | `bootstrap_message.toml` | bootstrap | Complete message bytes and inputs |
 | `kdf_canonical_string_default.{json,toml}` | kdf_canonical_string | 13-byte BE serialization of KdfParams |

@@ -49,7 +49,7 @@ use super::accept_loops::{
     accept_loop_ws_native, WsAcceptParams,
 };
 use super::helpers::{browser_origin_policy_from, build_ctx, kdf_from_config, AcceptPath};
-use super::http::start_http_listener;
+use super::http::{start_http_listener, LoginResources};
 
 /// Everything a listener needs to build its per-connection context, borrowed
 /// from the launcher's locals.
@@ -71,6 +71,7 @@ pub(super) struct ListenerEnv<'a> {
     pub(super) token_service: &'a Arc<TokenService>,
     pub(super) handler_concrete: &'a Arc<ShamirDbHandler>,
     pub(super) conn_tasks: &'a ConnTasks,
+    pub(super) read_only: bool,
 }
 
 /// What [`spawn_listeners`] produced, in listener order.
@@ -182,6 +183,12 @@ pub(super) async fn spawn_listeners(
     ));
     let mut http_gates = Vec::new();
 
+    let login_resources = config
+        .listeners
+        .iter()
+        .any(|listener| listener.kind == ListenerKind::Http && listener.http.login.enabled)
+        .then(LoginResources::new);
+
     let result = async {
         for l in &config.listeners {
             if l.kind == ListenerKind::Http {
@@ -191,6 +198,7 @@ pub(super) async fn spawn_listeners(
                     &conn_limiter,
                     &per_ip_limiter,
                     Arc::clone(&body_budget),
+                    login_resources.as_ref(),
                     shutdown_token,
                 )
                 .await?;

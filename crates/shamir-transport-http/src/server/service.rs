@@ -2,27 +2,31 @@ use super::body::response_body;
 use super::response::{canned, response, response_held};
 use crate::config::{Endpoint, HttpServerConfig};
 use crate::gate::{AuthHeader, GateDecision, PeerInfo, RestExecutor, TokenGate};
+use crate::server::routes::LoginRoutes;
 use bytes::Bytes;
 use http::{header, HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::Incoming;
 use std::sync::Arc;
 
-pub(crate) struct Context<G, E> {
+pub(crate) struct Context<G, E, L: LoginRoutes = super::routes::NoLogin> {
     pub cfg: Arc<HttpServerConfig>,
     pub gate: Arc<G>,
     pub exec: Arc<E>,
     pub peer: PeerInfo,
     pub holds: tokio::sync::mpsc::Sender<Box<dyn Send + Sync>>,
+    pub login: Arc<L>,
+    pub write_timeout_override: Arc<std::sync::atomic::AtomicU64>,
 }
 
-pub(crate) async fn handle<G, E>(
+pub(crate) async fn handle<G, E, L>(
     request: Request<Incoming>,
-    context: Arc<Context<G, E>>,
+    context: Arc<Context<G, E, L>>,
 ) -> Result<Response<BoxBody<Bytes, std::convert::Infallible>>, std::convert::Infallible>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
+    L: LoginRoutes,
 {
     if request.version() != http::Version::HTTP_11 {
         return Ok(canned(
@@ -34,6 +38,19 @@ where
     let started = tokio::time::Instant::now();
     let deadline = started + context.cfg.limits.request_timeout;
     let path = request.uri().path().to_owned();
+    if path == "/shamir/v1/auth/begin" || path == "/shamir/v1/auth/finish" {
+        let request_peer = peer(context.peer.addr, context.peer.tls, request.headers());
+        return Ok(super::routes::handle_login(
+            request,
+            context.login.clone(),
+            request_peer,
+            context.cfg.hsts,
+            started,
+            context.cfg.limits.request_timeout,
+            context.write_timeout_override.clone(),
+        )
+        .await);
+    }
     let endpoint = if path == "/shamir/v1/ws" {
         Endpoint::Ws
     } else {

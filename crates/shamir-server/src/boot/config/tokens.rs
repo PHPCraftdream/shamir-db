@@ -25,6 +25,12 @@ pub struct TokensConfig {
     /// Maximum concurrent sockets per owner.
     #[serde(default = "max_sockets_per_owner")]
     pub max_sockets_per_owner: usize,
+    /// Maximum login-issued token lifetime in seconds.
+    #[serde(default = "default_login_ttl")]
+    pub login_ttl: u32,
+    /// Permit HTTP password login to issue read-write tokens.
+    #[serde(default)]
+    pub login_allow_read_write: bool,
 }
 
 impl Default for TokensConfig {
@@ -37,6 +43,8 @@ impl Default for TokensConfig {
             session_max_age_hours: session_max_age_hours(),
             max_sockets_per_token: max_sockets_per_token(),
             max_sockets_per_owner: max_sockets_per_owner(),
+            login_ttl: default_login_ttl(),
+            login_allow_read_write: false,
         }
     }
 }
@@ -44,6 +52,9 @@ impl Default for TokensConfig {
 impl TokensConfig {
     /// Validate token lifetime and concurrent-use caps.
     pub fn validate(&self) -> Result<(), String> {
+        if !(1..=86_400).contains(&self.login_ttl) {
+            return Err("login_ttl must be in 1..=86400 seconds".into());
+        }
         if self.default_ttl_days == 0 || self.max_ttl_days == 0 {
             return Err("default_ttl_days and max_ttl_days must be positive".into());
         }
@@ -71,6 +82,10 @@ impl TokensConfig {
         }
         Ok(())
     }
+}
+
+fn default_login_ttl() -> u32 {
+    86_400
 }
 
 fn default_ttl_days() -> u64 {

@@ -13,7 +13,7 @@ mod ops;
 mod state;
 
 pub use auth::token;
-pub use auth::{bootstrap, changepw, handshake};
+pub use auth::{bootstrap, changepw, handshake, http_login};
 #[cfg(feature = "durable-fjall")]
 pub use infra::durable_counters;
 pub use infra::{audit_chain, config, conn_services, dispatch};

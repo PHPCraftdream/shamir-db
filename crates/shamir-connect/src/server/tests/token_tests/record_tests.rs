@@ -125,13 +125,13 @@ fn shape_boundaries_are_structural_and_use_utf8_byte_lengths() {
     assert!(r.validate_shape().is_err());
     r.label = "x".into();
     assert!(r.validate_shape().is_ok()); // one-byte label
-    r.label = "x".repeat(64);
+    r.label = "x".repeat(128);
     assert!(r.validate_shape().is_ok());
     r.label.push('x');
     assert!(r.validate_shape().is_err());
-    r.label = "é".repeat(32); // 64 UTF-8 bytes
+    r.label = "é".repeat(64);
     assert!(r.validate_shape().is_ok());
-    r.label.push('é'); // 66 UTF-8 bytes
+    r.label.push('é');
     assert!(r.validate_shape().is_err());
 
     r = sample();
@@ -149,13 +149,13 @@ fn shape_boundaries_are_structural_and_use_utf8_byte_lengths() {
     assert!(r.validate_shape().is_err());
     r.databases = Some(vec![String::new()]);
     assert!(r.validate_shape().is_err());
-    r.databases = Some(vec!["d".repeat(128)]);
+    r.databases = Some(vec!["d".repeat(255)]);
     assert!(r.validate_shape().is_ok());
-    r.databases = Some(vec!["d".repeat(129)]);
+    r.databases = Some(vec!["d".repeat(256)]);
     assert!(r.validate_shape().is_err());
-    r.databases = Some(vec!["é".repeat(64)]); // 128 UTF-8 bytes
+    r.databases = Some(vec!["é".repeat(127) + "x"]);
     assert!(r.validate_shape().is_ok());
-    r.databases = Some(vec!["é".repeat(65)]); // 130 UTF-8 bytes
+    r.databases = Some(vec!["é".repeat(128)]);
     assert!(r.validate_shape().is_err());
 
     r = sample();

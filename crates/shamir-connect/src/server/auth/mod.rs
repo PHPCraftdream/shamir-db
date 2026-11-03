@@ -4,4 +4,5 @@ pub mod bootstrap;
 pub mod changepw;
 /// SCRAM-Argon2id handshake.
 pub mod handshake;
+pub mod http_login;
 pub mod token;
