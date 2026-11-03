@@ -18,7 +18,10 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use zeroize::Zeroizing;
 
+// Each worker's post-revoke request counts as one authentication failure and the listener
+// failure limiter admits only 2 per second per subnet while warming up.
 const WORKERS: usize = 2;
+const _: () = assert!(WORKERS <= 2);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -299,7 +302,7 @@ async fn rest_and_websocket_revoke_race_is_deterministic() {
         .await
         .expect("in-flight REST readiness timeout");
     admin
-        .revoke_api_token(&created.id)
+        .revoke_api_token(&token_id(&token).to_b64())
         .await
         .expect("durable token revoke");
     revoked.store(true, Ordering::Release);
