@@ -111,29 +111,6 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
             &write_timeout_override,
         );
     }
-    let head = LoginHead::new(
-        request.method().as_str().as_bytes(),
-        route.as_ref(),
-        request.headers(),
-    );
-    let admission = tokio::time::timeout_at(
-        total_deadline,
-        routes.admit_head(route.as_ref(), head, peer),
-    )
-    .await;
-    let permit = match admission {
-        Err(_) => {
-            return finish_reply(
-                error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
-                tls,
-                hsts,
-                &write_timeout_override,
-            )
-        }
-        Ok(Err(reply)) => return finish_reply(reply, tls, hsts, &write_timeout_override),
-        Ok(Ok(permit)) => permit,
-    };
-    let admitted = tokio::time::Instant::now();
     let protocol_limit = if route.ends_with(b"/begin") {
         4096
     } else {
@@ -162,6 +139,29 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
         },
         None => None,
     };
+    let head = LoginHead::new(
+        request.method().as_str().as_bytes(),
+        route.as_ref(),
+        request.headers(),
+    );
+    let admission = tokio::time::timeout_at(
+        total_deadline,
+        routes.admit_head(route.as_ref(), head, peer),
+    )
+    .await;
+    let permit = match admission {
+        Err(_) => {
+            return finish_reply(
+                error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+                tls,
+                hsts,
+                &write_timeout_override,
+            )
+        }
+        Ok(Err(reply)) => return finish_reply(reply, tls, hsts, &write_timeout_override),
+        Ok(Ok(permit)) => permit,
+    };
+    let admitted = tokio::time::Instant::now();
     let deadline = (admitted + Duration::from_secs(3)).min(total_deadline);
     let mut body = request.into_body();
     let mut collected = Vec::with_capacity(declared.unwrap_or(0).min(limit));
@@ -247,7 +247,7 @@ pub(super) fn login_response(
     hsts: bool,
 ) -> Response<BoxBody<Bytes, Infallible>> {
     let mut output = Response::new(
-        Full::new(reply.body())
+        Full::new(reply.body().clone())
             .map_err(|never| match never {})
             .boxed(),
     );

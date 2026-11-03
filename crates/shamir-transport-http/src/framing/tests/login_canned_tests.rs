@@ -61,10 +61,15 @@ async fn shared_write_timeout_expires_stalled_canned_rejection() {
         .with_login_errors(true)
         .with_write_timeout_override(override_ms.clone());
     let mut request = [0; 64];
+    let started = tokio::time::Instant::now();
     let task = tokio::spawn(async move { guarded.read(&mut request).await });
     client.write_all(b"GET / HTTP/1.0\r\n\r\n").await.unwrap();
-    tokio::time::advance(std::time::Duration::from_millis(5)).await;
-    assert!(task.await.unwrap().is_err());
+    let error = task
+        .await
+        .unwrap()
+        .expect_err("stalled canned write must hit the override deadline");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
     let mut output = Vec::new();
     tokio::time::timeout(
         std::time::Duration::from_secs(15),

@@ -35,7 +35,7 @@ Each file follows this schema:
 
 ## Files
 
-All vectors share ONE coherent fixed scenario (username "alice", fixed
+All vectors share ONE coherent fixed scenario (username `"alice"`, fixed
 nonces/salt, `KdfParams::DEFAULT`, transport_kind=tcp, binding_mode=
 tls_exporter) so they chain end-to-end: auth_message → Argon2id → SCRAM proofs
 → identity_sig → rotation.
@@ -43,11 +43,11 @@ tls_exporter) so they chain end-to-end: auth_message → Argon2id → SCRAM proo
 | File | Category | What it pins |
 |---|---|---|
 | `auth_message_default.{json,toml}` | auth_message | 148-byte canonical auth_message (spec §16 inline example) |
-| `http_login_transcript_v1.{json,toml}` | HTTP login transcript | Message-layout fixture, hand-derived; TS client consumes the JSON |
+| `http_login_transcript_v1.{json,toml}` | HTTP login transcript | Message-layout fixture, hand-derived; same layout as the TS `buildLoginTranscript` pin |
 | `changepw_message.toml` | password change | Complete message bytes and inputs |
 | `bootstrap_message.toml` | bootstrap | Complete message bytes and inputs |
 | `kdf_canonical_string_default.{json,toml}` | kdf_canonical_string | 13-byte BE serialization of KdfParams |
-| `argon2id_default.{json,toml}` | Argon2id | 32-byte salted_password for "hello world!1" + fixed salt + DEFAULT params |
+| `argon2id_default.{json,toml}` | Argon2id | 32-byte salted_password for `"hello world!1"` + fixed salt + DEFAULT params |
 | `scram_flow_default.{json,toml}` | SCRAM chain | client_key / server_key / stored_key / client_proof / server_signature over the pinned auth_message |
 | `identity_sig_default.{json,toml}` | identity_sig | Ed25519 (fixed seed) identity_input + 64-byte signature |
 | `fake_blob_default.{json,toml}` | fake_blob | 80-byte HKDF blob (salt‖stored_key‖server_key) for a fixed unknown user |

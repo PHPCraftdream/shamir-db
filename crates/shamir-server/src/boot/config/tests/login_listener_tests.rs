@@ -37,10 +37,30 @@ fn login_defaults_and_nested_unknown_keys() {
     assert!(config.security.login_enumeration_hardening);
     assert_eq!(TokensConfig::default().login_ttl, 86_400);
     assert!(!TokensConfig::default().login_allow_read_write);
-    assert!(ktav::from_str::<ListenerConfig>(
-        "{ kind: http, addr: 127.0.0.1:1, tls: false, login: { enabled: false, typo: true } }"
+    let parsed: ListenerConfig = ktav::from_str(
+        "{ kind: http, addr: 127.0.0.1:1, tls: false, external_tls: true, login: { enabled: true, authority_allowlist: [localhost:1], listener_id: 00112233445566778899aabbccddeeff } }",
     )
-    .is_err());
+    .expect("nested login block parses through flattened HTTP settings");
+    assert!(parsed.http.external_tls);
+    assert!(parsed.http.login.enabled);
+    assert_eq!(parsed.http.login.authority_allowlist, vec!["localhost:1"]);
+    assert_eq!(
+        parsed.http.login.listener_id.as_deref(),
+        Some("00112233445566778899aabbccddeeff")
+    );
+    let error = ktav::from_str::<ListenerConfig>(
+        "{ kind: http, addr: 127.0.0.1:1, tls: false, login: { enabled: false, typo: true } }",
+    )
+    .expect_err("unknown nested login key");
+    assert!(error.to_string().contains("typo"), "{error}");
+}
+
+#[test]
+fn malformed_listener_id_is_rejected_when_login_is_disabled() {
+    let mut value = listener("127.0.0.1:7340", false);
+    value.http.login.listener_id = Some("not-a-valid-listener-id".into());
+    let error = config_with(vec![value]).validate().unwrap_err();
+    assert!(error.to_string().contains("login.listener_id"), "{error}");
 }
 
 #[test]

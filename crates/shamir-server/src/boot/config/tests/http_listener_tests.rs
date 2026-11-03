@@ -40,7 +40,6 @@ fn http_listener_defaults_apply() {
     assert!(!defaults.login.enabled);
     assert!(defaults.login.authority_allowlist.is_empty());
     assert_eq!(defaults.login.listener_id, None);
-    assert!(!defaults.login.enabled);
 }
 
 #[test]

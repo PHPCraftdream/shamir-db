@@ -28,13 +28,25 @@ impl LoginResponse {
         }
     }
 
-    pub(crate) fn status(&self) -> StatusCode {
+    /// Response status.
+    pub fn status(&self) -> StatusCode {
         self.status
     }
-    pub(crate) fn body(&self) -> Bytes {
-        self.body.clone()
+    /// Exact MessagePack body bytes.
+    pub fn body(&self) -> &Bytes {
+        &self.body
     }
-    pub(crate) fn retry_after(&self) -> Option<u32> {
+    /// Retry-After seconds, when set.
+    pub fn retry_after(&self) -> Option<u32> {
         self.retry_after
+    }
+}
+
+impl core::fmt::Debug for LoginResponse {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("LoginResponse")
+            .field("status", &self.status)
+            .field("body_len", &self.body.len())
+            .finish()
     }
 }

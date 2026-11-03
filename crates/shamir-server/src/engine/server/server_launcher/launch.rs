@@ -621,6 +621,7 @@ impl ServerLauncher {
                 token_service: &token_service,
                 handler_concrete: &handler_concrete,
                 conn_tasks: &conn_tasks,
+                read_only: node_mode == crate::db_handler::NodeMode::ReadOnly,
             },
             &shutdown_token,
         )

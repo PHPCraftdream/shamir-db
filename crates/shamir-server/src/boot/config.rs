@@ -645,7 +645,9 @@ impl Config {
                         ))
                     })?;
                     if listener_ids.contains(&decoded) {
-                        return Err(ConfigError::Validation(format!("listeners[{idx}].login.listener_id duplicates another enabled listener")));
+                        return Err(ConfigError::Validation(format!(
+                            "listeners[{idx}].login.listener_id duplicates another enabled listener"
+                        )));
                     }
                     listener_ids.push(decoded);
                 }

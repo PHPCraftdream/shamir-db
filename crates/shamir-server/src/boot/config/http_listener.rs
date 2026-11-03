@@ -101,12 +101,22 @@ impl HttpListenerSettings {
         }
         let head_timeout_ms = self.head_timeout_ms.unwrap_or(auth_init_timeout_ms);
         if head_timeout_ms == 0 || self.body_timeout_ms == 0 || self.request_timeout_ms == 0 {
-            return Err(invalid(format!("HTTP head/body/request timeout must be greater than zero (effective head_timeout_ms={head_timeout_ms} ms from {}, body_timeout_ms={} ms, request_timeout_ms={} ms)", if self.head_timeout_ms.is_some() { "listener override" } else { "security.connection.auth_init_timeout_ms inheritance" }, self.body_timeout_ms, self.request_timeout_ms)));
+            return Err(invalid(format!(
+                "HTTP head/body/request timeout must be greater than zero (effective head_timeout_ms={head_timeout_ms} ms from {}, body_timeout_ms={} ms, request_timeout_ms={} ms)",
+                if self.head_timeout_ms.is_some() { "listener override" } else { "security.connection.auth_init_timeout_ms inheritance" },
+                self.body_timeout_ms,
+                self.request_timeout_ms,
+            )));
         }
         if self.body_timeout_ms > self.request_timeout_ms
             || head_timeout_ms > self.request_timeout_ms
         {
-            return Err(invalid(format!("HTTP timeout limits invalid: effective head_timeout_ms={head_timeout_ms} ms (from {}), body_timeout_ms={} ms, request_timeout_ms={} ms; head and body must not exceed request", if self.head_timeout_ms.is_some() { "listeners[].head_timeout_ms" } else { "security.connection.auth_init_timeout_ms inheritance" }, self.body_timeout_ms, self.request_timeout_ms)));
+            return Err(invalid(format!(
+                "HTTP timeout limits invalid: effective head_timeout_ms={head_timeout_ms} ms (from {}), body_timeout_ms={} ms, request_timeout_ms={} ms; head and body must not exceed request",
+                if self.head_timeout_ms.is_some() { "listeners[].head_timeout_ms" } else { "security.connection.auth_init_timeout_ms inheritance" },
+                self.body_timeout_ms,
+                self.request_timeout_ms,
+            )));
         }
         if listener.profile.is_some() {
             return Err(invalid("profile must be absent for kind=http".into()));
@@ -204,10 +214,10 @@ impl HttpListenerSettings {
                 }
                 canonical.push(value);
             }
-            if let Some(id) = &self.login.listener_id {
-                parse_listener_id(id)
-                    .map_err(|message| invalid_login(&format!("login.listener_id {message}")))?;
-            }
+        }
+        if let Some(id) = &self.login.listener_id {
+            parse_listener_id(id)
+                .map_err(|message| invalid(format!("login.listener_id {message}")))?;
         }
         for proxy in &self.trusted_proxies {
             let (address, prefix) = proxy

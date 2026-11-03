@@ -8,7 +8,8 @@ pub struct LoginHead<'a> {
 }
 
 impl<'a> LoginHead<'a> {
-    pub(crate) fn new(method: &'a [u8], path: &'a [u8], headers: &'a HeaderMap) -> Self {
+    /// Builds a head view for a parsed request and its headers.
+    pub fn new(method: &'a [u8], path: &'a [u8], headers: &'a HeaderMap) -> Self {
         Self {
             method,
             path,
