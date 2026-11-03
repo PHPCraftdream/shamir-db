@@ -2,6 +2,8 @@
 
 Pure-TypeScript client for **S.H.A.M.I.R. Database** — one shared platform-agnostic core with thin Node.js and Browser adapters over WebSocket + MessagePack + SCRAM-Argon2id authentication. No native bindings required.
 
+For bearer-token connections, token administration limitations, and password login, see [Tokens and token-based connections](./TOKENS.md). Tokens are issued with fixed mode/channel/database scope; `connect` does not widen it. Node IPC `connectLocal` is not available in the browser entry.
+
 ---
 
 ## Install

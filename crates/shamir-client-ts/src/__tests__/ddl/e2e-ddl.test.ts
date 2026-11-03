@@ -436,12 +436,8 @@ describe.skipIf(!SERVER_AVAILABLE)(
         { id: 'm1', val: 'hello' },
       ]);
 
-      // Create a second repo with in_memory engine to migrate to
-      br(await Batch.create('mk-dst-repo')
-        .add('r', ddl.createRepo('dst_repo', { engine: 'in_memory' }))
-        .execute(client!, db));
-
-      // start migration (HMAC) — use in_memory engine (the only supported one)
+      // start migration (HMAC) — the server creates and publishes the dst repo
+      // itself (a pre-existing name is rejected); in_memory is the only engine.
       const startResp = br(await Batch.create('start-mig')
         .add('m', ddl.startMigration(
           client!,
@@ -483,13 +479,9 @@ describe.skipIf(!SERVER_AVAILABLE)(
         { id: 'c3', val: 'charlie' },
       ]);
 
-      // Destination repo (in_memory is the only supported engine).
-      br(await Batch.create('mk-dst-repo-c')
-        .add('r', ddl.createRepo('dst_repo_c', { engine: 'in_memory' }))
-        .execute(client!, db));
-
-      // start migration (HMAC) — server runs snapshot+drain+cutover_ready
-      // synchronously, so phase is "cutover_ready" on return.
+      // start migration (HMAC) — the server creates and publishes the dst repo
+      // itself (in_memory is the only engine), then runs snapshot+drain+
+      // cutover_ready synchronously, so phase is "cutover_ready" on return.
       const startResp = br(await Batch.create('start-mig-c')
         .add('m', ddl.startMigration(
           client!,

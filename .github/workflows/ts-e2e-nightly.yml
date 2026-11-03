@@ -63,28 +63,32 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-      # Produce the release binary `e2e-harness.ts`'s `serverBinPath()` falls
-      # back to at `<repo>/target/release/shamir-server`. No workflow in this
-      # repo sets `CARGO_TARGET_DIR` (grep-confirmed), so the default
-      # `target/` dir is used and the harness's fallback path resolves the
-      # binary with no `SHAMIR_SERVER_BIN` override needed. `--locked` matches
-      # ci.yml's test/integration pinning discipline (no silent lockfile
-      # drift); a no-op when Cargo.lock is current.
-      - name: Build shamir-server (release)
+      - name: Build shamir-server release binary
         run: cargo build --release --locked -p shamir-server
+      # Export an explicit, verified release-binary path: the TS suites self-skip
+      # when the server is missing, so a successful build must never silently
+      # turn this lane into a skip-only run.
+      - name: Verify shamir-server release binary
+        shell: bash
+        run: |
+          test -x "$GITHUB_WORKSPACE/target/release/shamir-server"
+          echo "SHAMIR_SERVER_BIN=$GITHUB_WORKSPACE/target/release/shamir-server" >> "$GITHUB_ENV"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: '22'
           cache: npm
           cache-dependency-path: crates/shamir-client-ts/package-lock.json
-      # `SERVER_AVAILABLE` is now true (the binary exists at
-      # target/release/shamir-server), so the full `e2e-*.test.ts` suite
-      # executes instead of self-skipping. `npm test` = `vitest run`; a
-      # non-zero exit (any failed test) fails the job.
-      - name: TS client e2e (vitest)
-        run: npm ci && npm test
+      - name: Install TypeScript client dependencies
+        run: npm ci
         working-directory: crates/shamir-client-ts
-
+      - name: TS client typecheck
+        run: npm run typecheck
+        working-directory: crates/shamir-client-ts
+      # `SERVER_AVAILABLE` is now true via the explicit SHAMIR_SERVER_BIN above;
+      # a non-zero exit (any failed test) fails the job.
+      - name: TS client e2e (vitest)
+        run: npm test
+        working-directory: crates/shamir-client-ts
   # ── Node napi e2e (native binding, tests/e2e/) ────────────────────────────
   #
   # WHY WINDOWS, NOT UBUNTU: napi-rs IS cross-platform in principle

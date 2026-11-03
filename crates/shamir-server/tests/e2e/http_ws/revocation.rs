@@ -1,4 +1,4 @@
-use super::super::http_rest::common::{grant_default_main_access, Harness, ADMIN_PASSWORD};
+use super::super::http_rest::common::{Harness, ADMIN_PASSWORD};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use shamir_client::ConnectOptions;
@@ -271,7 +271,6 @@ async fn prepare(harness: &Harness) {
         .execute("default", batch.build())
         .await
         .expect("create items table");
-    grant_default_main_access(&admin).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

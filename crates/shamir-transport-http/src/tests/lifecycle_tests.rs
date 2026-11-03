@@ -379,11 +379,56 @@ async fn allowed_expect_continue_body_stall_times_out_after_interim_response() {
     server.await.expect("serve task").expect("serve result");
 }
 
+#[tokio::test]
+async fn configured_connection_drain_aborts_stragglers_at_its_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let entered = Arc::new(Notify::new());
+    let (_release_tx, release_rx) = oneshot::channel();
+    let executor = Arc::new(BlockingExecutor {
+        entered: entered.clone(),
+        release: tokio::sync::Mutex::new(Some(release_rx)),
+    });
+    let mut cfg = (*config()).clone();
+    cfg.limits.request_timeout = Duration::from_secs(120);
+    cfg.limits.connection_drain_timeout = Some(Duration::from_secs(2));
+    let shutdown = CancellationToken::new();
+    let task = tokio::spawn(serve(
+        listener,
+        Arc::new(cfg),
+        Arc::new(LifecycleGate),
+        executor,
+        Arc::new(Admission),
+        shutdown.clone(),
+    ));
+    let mut client = TcpStream::connect(addr).await.expect("connect");
+    client.write_all(b"POST /shamir/v1/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/msgpack\r\nContent-Length: 0\r\n\r\n").await.expect("request");
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("executor entered");
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .expect("configured drain deadline bounds serve")
+        .expect("serve task")
+        .expect("serve result");
+    assert!(started.elapsed() <= Duration::from_secs(3));
+    let mut response = Vec::new();
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut response))
+        .await
+        .expect("close deadline")
+        .expect("connection closes");
+}
+
 #[tokio::test(start_paused = true)]
 async fn idle_keep_alive_connection_ends_with_shutdown_grace() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("address");
     let mut cfg = (*config()).clone();
+    cfg.limits.connection_drain_timeout = None;
     cfg.limits.request_timeout = Duration::from_secs(2);
     let shutdown = CancellationToken::new();
     let task = tokio::spawn(serve(

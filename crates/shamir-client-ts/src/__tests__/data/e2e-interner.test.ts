@@ -15,7 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
 import type { ShamirClient } from '../../index.js';
-import { ddl, write } from '../../index.js';
+import { Batch, Query, ddl, write } from '../../index.js';
 import {
   SERVER_BIN,
   SERVER_AVAILABLE,
@@ -150,12 +150,9 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
       // A subsequent execute should attach interner_epochs (verified indirectly:
       // if the server responds with an interner_delta the epoch will advance or stay).
-      await client!.execute(db, {
-        id: 'read1',
-        queries: {
-          q: { from: 'items', repo: 'main' },
-        },
-      });
+      await Batch.create('read1')
+        .add('q', Query.from('items'))
+        .execute(client!, db);
 
       // Cache epoch must not regress.
       expect(fm.epoch()).toBeGreaterThanOrEqual(epochBefore);

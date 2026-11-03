@@ -13,7 +13,8 @@ use tokio::sync::{oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    BucketCache, FailureLimiter, FailureSummary, RestMaintenance, FLUSH_LIMIT, NOTICE_CAPACITY,
+    serialize_exposure, BucketCache, FailureLimiter, FailureSummary, RestMaintenance, FLUSH_LIMIT,
+    NOTICE_CAPACITY,
 };
 
 struct Capture {
@@ -66,6 +67,57 @@ fn maintenance(
         stop,
         Arc::new(BucketCache::default()),
     )
+}
+
+struct FailingSerialize;
+impl serde::Serialize for FailingSerialize {
+    fn serialize<S>(&self, _: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom("injected serialization failure"))
+    }
+}
+
+#[test]
+fn exposure_serialization_failure_counts_once_per_endpoint_without_success_payload() {
+    for channel in [Endpoint::Rest, Endpoint::Ws] {
+        let mut summary = FailureSummary::new(channel);
+        let failed = serialize_exposure(channel, [0xA5; 16], &mut summary.exposure_dropped, || {
+            rmp_serde::to_vec_named(&FailingSerialize).map_err(|_| ())
+        });
+        assert!(failed.is_none());
+        assert_eq!(summary.exposure_dropped, 1);
+        let successful =
+            serialize_exposure(channel, [0xA5; 16], &mut summary.exposure_dropped, || {
+                rmp_serde::to_vec_named(&(super::channel_label(channel), [0xA5; 16], [0xB6; 16]))
+                    .map_err(|_| ())
+            });
+        let successful = successful.expect("successful exposure serialization");
+        let decoded: (String, [u8; 16], [u8; 16]) =
+            rmp_serde::from_slice(&successful).expect("decode exposure payload");
+        assert_eq!(
+            decoded,
+            (
+                super::channel_label(channel).to_owned(),
+                [0xA5; 16],
+                [0xB6; 16]
+            )
+        );
+        assert_eq!(summary.exposure_dropped, 1);
+        let details: (
+            String,
+            String,
+            u64,
+            usize,
+            [Option<Subnet>; 4],
+            u64,
+            u64,
+            u64,
+        ) = rmp_serde::from_slice(&summary.details().expect("summary details"))
+            .expect("decode summary");
+        assert_eq!(details.7, 1);
+    }
 }
 
 #[test]

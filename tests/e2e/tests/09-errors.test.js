@@ -14,7 +14,7 @@
 'use strict';
 
 const { ShamirDbError, isRetryableCode } = require('shamir-client');
-const { Query, filter } = require('@shamir/client');
+const { Query, filter, ddl } = require('@shamir/client');
 
 module.exports = async function ({ client, test, assertThrows, assert }) {
   test('unknown_db surfaces as ShamirDbError with code and retryable=false', async () => {
@@ -78,12 +78,10 @@ module.exports = async function ({ client, test, assertThrows, assert }) {
     const resp = await client.execute('default', {
       id: 'ok-read',
       queries: {
-        dbs: Query.from('__databases')
-          .where(filter.eq('name', 'default'))
-          .build(),
+        dbs: ddl.listDatabases(),
       },
     });
-    const recs = resp.results.dbs.records;
-    assert(recs.length >= 1, 'expected at least the default database');
+    const names = resp.results.dbs.records[0].databases;
+    assert(names.includes('default'), 'expected at least the default database');
   });
 };
