@@ -17,6 +17,7 @@
  * PLATFORM-AGNOSTIC.
  */
 
+import { CURRENT_QUERY_LANG_VERSION } from '../../protocol/scram.js';
 import type { ReadQuery } from '../../types/read/query.js';
 import type {
   CreateCursorRequest,
@@ -52,6 +53,7 @@ export function createCursor(
 ): CreateCursorRequest {
   return {
     op: 'create_cursor',
+    query_version: CURRENT_QUERY_LANG_VERSION,
     db,
     query: resolveReadQuery(query),
     page_size: pageSize,

@@ -117,8 +117,11 @@ pub struct ResumeInit {
 /// Client → server OPTIONAL resume preamble (RV-CLIENT-DE75ADDD): asks the
 /// server to prove its pinned Ed25519 identity BEFORE the bearer ticket is
 /// disclosed. Distinguished from `ResumeInit` / `AuthInit` by its 1-field
-/// positional msgpack shape.
+/// positional msgpack shape. `deny_unknown_fields`: a MAP-encoded `auth_init` /
+/// `resume_init` (the TS client sends named maps) must not decode as this
+/// preamble just because it carries a `client_nonce` key.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResumeProofInit {
     #[serde(with = "serde_bytes")]
     pub client_nonce: Vec<u8>,
