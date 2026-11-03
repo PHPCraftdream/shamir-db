@@ -84,6 +84,8 @@ describe.skipIf(!SERVER_AVAILABLE)('token admin e2e', () => {
     expect(await scram!.apiTokens.revokeUser({ user: SERVICE_USER })).toBe(2n);
 
     for (const revoked of [second, third]) {
+      // Listener failure limiter: 2 auth failures per second per subnet during the 60 s warm-up.
+      await new Promise((resolve) => setTimeout(resolve, 1100));
       const revokedClient = await connect({
         auth: 'token',
         token: revoked.token,
