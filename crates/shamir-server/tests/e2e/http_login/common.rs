@@ -32,9 +32,7 @@ pub(super) async fn launch() -> Harness {
         true,
         |_| {},
         |path| {
-            let admin = crate::http_rest::common::seed_owner(path);
             seed_user(path);
-            admin
         },
     )
     .await

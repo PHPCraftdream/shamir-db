@@ -29,7 +29,6 @@ async fn http_login_success_and_rejections() {
         .execute("default", create.build())
         .await
         .expect("create table");
-    crate::http_rest::common::grant_default_main_access(&client).await;
     let resource = ddl::res::table("default", "main", "login_items");
     let unsigned = BatchOp::Chmod(ChmodOp {
         chmod: resource.clone(),

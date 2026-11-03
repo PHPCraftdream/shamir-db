@@ -9,7 +9,7 @@ use tokio::time::Duration;
 use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use super::common::{grant_default_main_access, request, Harness, ADMIN_PASSWORD};
+use super::common::{request, Harness, ADMIN_PASSWORD};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_rest_tls_listener_serves_authenticated_ping() {
@@ -147,7 +147,6 @@ async fn http_rest_allowed_owner_read_and_shutdown_restart_preserve_data() {
         .execute("default", create.build())
         .await
         .expect("create table");
-    grant_default_main_access(&client).await;
     let mut insert = Batch::new();
     insert.insert(
         "ins",
@@ -227,7 +226,7 @@ async fn http_rest_allowed_owner_read_and_shutdown_restart_preserve_data() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn http_rest_shutdown_bounds_incomplete_request_body_and_reports_error() {
+async fn http_rest_shutdown_bounds_incomplete_request_body_without_listener_timeout() {
     let harness = Harness::launch().await;
     let token = harness.token("shutdown-drain", TokenMode::ReadOnly).await;
     let mut stream = TcpStream::connect(harness.addr())
@@ -261,14 +260,8 @@ async fn http_rest_shutdown_bounds_incomplete_request_body_and_reports_error() {
     let Harness { handle, temp, .. } = harness;
     let report = tokio::time::timeout(Duration::from_secs(45), handle.shutdown())
         .await
-        .expect("shutdown exceeded 30 seconds");
-    assert!(
-        report
-            .errors()
-            .iter()
-            .any(|error| error == "HTTP listener drain exceeded 10s; aborted"),
-        "{report:?}"
-    );
+        .expect("shutdown exceeded 45 seconds");
+    assert!(report.errors().is_empty(), "{report:?}");
     let probe_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let mut probe = [0u8; 1];
     match tokio::time::timeout_at(probe_deadline, stream.read(&mut probe)).await {
