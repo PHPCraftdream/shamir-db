@@ -7,7 +7,7 @@ use crate::batch::{
 use crate::read::ReadQuery;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
-use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode, ApiTokenView};
+use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode, ApiTokenView, CreatedApiToken};
 
 fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
     let bytes = rmp_serde::to_vec_named(v).unwrap();
@@ -71,17 +71,32 @@ fn api_token_request_wire_roundtrips_and_missing_options_are_none() {
 
 #[test]
 fn api_token_response_secret_is_once_and_list_is_secret_free() {
-    let created = DbResponse::ApiTokenCreated {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Legacy {
+        ApiTokenCreated {
+            id: String,
+            token: crate::auth::SecretString,
+            label: String,
+            owner: String,
+            mode: ApiTokenMode,
+            channels: ApiTokenChannels,
+            databases: Option<Vec<String>>,
+            created_at_ns: u64,
+            expires_at_ns: u64,
+        },
+    }
+    let created = DbResponse::ApiTokenCreated(CreatedApiToken {
         id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
         token: crate::auth::SecretString::from("shk1.secret".to_owned()),
         label: "automation".into(),
         owner: "svc-account".into(),
         mode: ApiTokenMode::ReadOnly,
         channels: ApiTokenChannels::Both,
-        databases: None,
+        databases: Some(vec!["db".into()]),
         created_at_ns: 1,
         expires_at_ns: 2,
-    };
+    });
     let bytes = rmp_serde::to_vec_named(&created).unwrap();
     assert_eq!(
         bytes
@@ -91,6 +106,32 @@ fn api_token_response_secret_is_once_and_list_is_secret_free() {
         1
     );
     assert!(!format!("{created:?}").contains("shk1.secret"));
+    let legacy = Legacy::ApiTokenCreated {
+        id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        token: crate::auth::SecretString::from("shk1.secret".to_owned()),
+        label: "automation".into(),
+        owner: "svc-account".into(),
+        mode: ApiTokenMode::ReadOnly,
+        channels: ApiTokenChannels::Both,
+        databases: Some(vec!["db".into()]),
+        created_at_ns: 1,
+        expires_at_ns: 2,
+    };
+    let legacy_bytes = rmp_serde::to_vec_named(&legacy).unwrap();
+    assert_eq!(bytes, legacy_bytes);
+    let decoded: DbResponse = rmp_serde::from_slice(&legacy_bytes).unwrap();
+    let DbResponse::ApiTokenCreated(decoded) = decoded else {
+        panic!("created response roundtrip")
+    };
+    assert_eq!(decoded.id, "AAAAAAAAAAAAAAAAAAAAAA");
+    assert_eq!(decoded.token.reveal(), "shk1.secret");
+    assert_eq!(decoded.label, "automation");
+    assert_eq!(decoded.owner, "svc-account");
+    assert_eq!(decoded.mode, ApiTokenMode::ReadOnly);
+    assert_eq!(decoded.channels, ApiTokenChannels::Both);
+    assert_eq!(decoded.databases, Some(vec!["db".into()]));
+    assert_eq!(decoded.created_at_ns, 1);
+    assert_eq!(decoded.expires_at_ns, 2);
     let row = ApiTokenView {
         id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
         label: "automation".into(),
@@ -154,7 +195,7 @@ fn api_token_admin_wire_requests_and_responses_roundtrip() {
         assert!(rmp_serde::from_slice::<DbRequest>(&bytes).is_err());
     }
     let responses = [
-        DbResponse::ApiTokenCreated {
+        DbResponse::ApiTokenCreated(CreatedApiToken {
             id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
             token: crate::auth::SecretString::from("secret".to_owned()),
             label: "x".into(),
@@ -164,7 +205,7 @@ fn api_token_admin_wire_requests_and_responses_roundtrip() {
             databases: None,
             created_at_ns: 1,
             expires_at_ns: 2,
-        },
+        }),
         DbResponse::ApiTokensListed {
             tokens: vec![ApiTokenView {
                 id: "AAAAAAAAAAAAAAAAAAAAAA".into(),

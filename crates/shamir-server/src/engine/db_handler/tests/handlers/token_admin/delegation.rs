@@ -145,12 +145,7 @@ async fn superuser_delegated_create_requires_valid_confirmation_hmac() {
     );
     Fixture::sign(&f.admin, &mut request);
     let (owner, label, secret) = match f.call(&f.admin, &request).await {
-        DbResponse::ApiTokenCreated {
-            owner,
-            label,
-            token,
-            ..
-        } => (owner, label, token),
+        DbResponse::ApiTokenCreated(created) => (created.owner, created.label, created.token),
         response => panic!("delegated create: {response:?}"),
     };
     assert_eq!(owner, OTHER);
