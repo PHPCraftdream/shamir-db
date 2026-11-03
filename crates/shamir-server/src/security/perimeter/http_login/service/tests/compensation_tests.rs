@@ -9,7 +9,6 @@ use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditEntry};
 use shamir_connect::server::http_login::{build_transcript, HttpLoginTranscriptInput};
-use shamir_connect::server::lockout::LockoutStore;
 use shamir_connect::server::token::TokenId;
 use shamir_connect::server::user_record::UserRecord;
 use std::net::{IpAddr, Ipv4Addr};
