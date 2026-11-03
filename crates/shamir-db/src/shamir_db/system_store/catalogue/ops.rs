@@ -1,9 +1,10 @@
+use crate::{DbError, DbResult};
 use shamir_types::access::ResourceMeta;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::access::Actor;
-use crate::{DbError, DbResult};
+use crate::engine::repo::RenamePersistOutcome;
 
 use super::super::store::{qv_map1, qv_map2, TABLE_DATABASES, TABLE_REPOSITORIES, TABLE_TABLES};
 use super::super::SystemStore;
@@ -248,8 +249,7 @@ impl SystemStore {
         Ok(())
     }
 
-    /// Atomically re-key a table catalogue row in one implicit transaction.
-    /// Rename provenance is local catalogue metadata, not a seed/schema field.
+    #[cfg(test)]
     pub(crate) async fn rename_table_row(
         &self,
         key: TableRenameKey<'_>,
@@ -257,85 +257,110 @@ impl SystemStore {
         destination_store_id: &shamir_types::types::record_id::RecordId,
         expected_source: &QueryValue,
     ) -> DbResult<()> {
+        match self
+            .rename_table_row_outcome(key, source_store_id, destination_store_id, expected_source)
+            .await
+        {
+            RenamePersistOutcome::Committed => Ok(()),
+            RenamePersistOutcome::NotCommitted(error) | RenamePersistOutcome::InDoubt(error) => {
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) async fn rename_table_row_outcome(
+        &self,
+        key: TableRenameKey<'_>,
+        source_store_id: Option<&shamir_types::types::record_id::RecordId>,
+        destination_store_id: &shamir_types::types::record_id::RecordId,
+        expected_source: &QueryValue,
+    ) -> RenamePersistOutcome {
         let TableRenameKey {
             db_name,
             repo_name,
             from,
             to,
         } = key;
-        self.catalogue_write_fault_gate()?;
-        if let Some(id) = source_store_id {
-            id.to_string()
-                .parse::<shamir_types::types::record_id::RecordId>()
-                .map_err(|error| {
-                    DbError::Internal(format!("invalid source table store_id: {error}"))
-                })?;
+        if let Err(error) = self.catalogue_write_fault_gate() {
+            return RenamePersistOutcome::NotCommitted(error);
         }
-        destination_store_id
+        if let Some(id) = source_store_id {
+            if let Err(error) = id
+                .to_string()
+                .parse::<shamir_types::types::record_id::RecordId>()
+            {
+                return RenamePersistOutcome::NotCommitted(DbError::Internal(format!(
+                    "invalid source table store_id: {error}"
+                )));
+            }
+        }
+        if let Err(error) = destination_store_id
             .to_string()
             .parse::<shamir_types::types::record_id::RecordId>()
-            .map_err(|error| {
-                DbError::Internal(format!("invalid destination table store_id: {error}"))
-            })?;
-        let table = self.table(TABLE_TABLES).await?;
+        {
+            return RenamePersistOutcome::NotCommitted(DbError::Internal(format!(
+                "invalid destination table store_id: {error}"
+            )));
+        }
+        let table = match self.table(TABLE_TABLES).await {
+            Ok(table) => table,
+            Err(error) => return RenamePersistOutcome::NotCommitted(error),
+        };
         let source_fields = match expected_source {
             QueryValue::Map(fields) => fields,
-            _ => return Err(DbError::Internal("table catalogue row is not a map".into())),
+            _ => {
+                return RenamePersistOutcome::NotCommitted(DbError::Internal(
+                    "table catalogue row is not a map".into(),
+                ))
+            }
         };
-        let expected_name = source_fields.get("table_name").and_then(QueryValue::as_str);
-        let expected_db = source_fields.get("db_name").and_then(QueryValue::as_str);
-        let expected_repo = source_fields.get("repo_name").and_then(QueryValue::as_str);
-        if expected_name != Some(from)
-            || expected_db != Some(db_name)
-            || expected_repo != Some(repo_name)
+        if source_fields.get("table_name").and_then(QueryValue::as_str) != Some(from)
+            || source_fields.get("db_name").and_then(QueryValue::as_str) != Some(db_name)
+            || source_fields.get("repo_name").and_then(QueryValue::as_str) != Some(repo_name)
         {
-            return Err(DbError::Validation(
+            return RenamePersistOutcome::NotCommitted(DbError::Validation(
                 "rename source catalogue identity changed".into(),
             ));
         }
-        let current = self
-            .load_table_record(db_name, repo_name, from)
-            .await?
-            .ok_or_else(|| {
-                DbError::NotFound(format!(
+        let current = match self.load_table_record(db_name, repo_name, from).await {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                return RenamePersistOutcome::NotCommitted(DbError::NotFound(format!(
                     "table catalogue record for '{db_name}/{repo_name}/{from}' not found"
-                ))
-            })?;
-        let current_id = current.get("store_id").and_then(QueryValue::as_str);
-        let expected_id = source_store_id.map(ToString::to_string);
-        if current_id != expected_id.as_deref() {
-            return Err(DbError::Validation(
+                )))
+            }
+            Err(error) => return RenamePersistOutcome::NotCommitted(error),
+        };
+        if current.get("store_id").and_then(QueryValue::as_str)
+            != source_store_id.map(ToString::to_string).as_deref()
+        {
+            return RenamePersistOutcome::NotCommitted(DbError::Validation(
                 "rename source table incarnation changed".into(),
             ));
         }
-        let destination = current;
-        let QueryValue::Map(fields) = destination else {
-            return Err(DbError::Internal("table catalogue row is not a map".into()));
+        let QueryValue::Map(mut fields) = current else {
+            return RenamePersistOutcome::NotCommitted(DbError::Internal(
+                "table catalogue row is not a map".into(),
+            ));
         };
-        let mut destination = QueryValue::Map(fields);
-        if let QueryValue::Map(fields) = &mut destination {
-            fields.insert("table_name".into(), QueryValue::Str(to.to_string()));
+        fields.insert("table_name".into(), QueryValue::Str(to.into()));
+        fields.insert(
+            "store_id".into(),
+            QueryValue::Str(destination_store_id.to_string()),
+        );
+        fields.insert("rename_from".into(), QueryValue::Str(from.into()));
+        if let Some(id) = source_store_id {
             fields.insert(
-                "store_id".into(),
-                QueryValue::Str(destination_store_id.to_string()),
+                "rename_from_store_id".into(),
+                QueryValue::Str(id.to_string()),
             );
-            fields.insert("rename_from".into(), QueryValue::Str(from.to_string()));
-            match source_store_id {
-                Some(id) => {
-                    fields.insert(
-                        "rename_from_store_id".into(),
-                        QueryValue::Str(id.to_string()),
-                    );
-                }
-                None => {
-                    fields.shift_remove("rename_from_store_id");
-                }
-            }
+        } else {
+            fields.shift_remove("rename_from_store_id");
         }
         let destination_op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_TABLES),
             key: table_catalogue_key(db_name, repo_name, to),
-            value: destination,
+            value: QueryValue::Map(fields),
         };
         let source_op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_TABLES),
@@ -358,35 +383,53 @@ impl SystemStore {
             select: None,
             expected_version: None,
         };
-        self.persist_table_interner(&table, Some(&destination_op.value))
-            .await?;
-        let repo = self.system_repo()?;
+        if let Err(error) = self
+            .persist_table_interner(&table, Some(&destination_op.value))
+            .await
+        {
+            return RenamePersistOutcome::NotCommitted(error);
+        }
+        let repo = match self.system_repo() {
+            Ok(repo) => repo,
+            Err(error) => return RenamePersistOutcome::NotCommitted(error),
+        };
         let owned_table = table.clone();
         let owned_destination_op = destination_op.clone();
         let owned_source_op = source_op.clone();
-        repo.run_implicit_batch_tx(Actor::System, "rename_table", move |tx| {
-            let table = owned_table.clone();
-            let destination_op = owned_destination_op.clone();
-            let source_op = owned_source_op.clone();
-            Box::pin(async move {
-                table
-                    .execute_set_tx(&destination_op, tx, None, &Actor::System)
-                    .await?;
-                let refs = crate::types::common::new_map();
-                let ctx = table.info_store_read_view().filter_context(&refs).await?;
-                table
-                    .execute_delete_tx(&source_op, &ctx, tx, None, &Actor::System)
-                    .await?;
-                Ok(crate::query::write::WriteResult {
-                    affected: 1,
-                    records: Vec::new(),
-                    execution_time_us: 0,
+        let tx_result = repo
+            .run_implicit_batch_tx(Actor::System, "rename_table", move |tx| {
+                let table = owned_table.clone();
+                let destination_op = owned_destination_op.clone();
+                let source_op = owned_source_op.clone();
+                Box::pin(async move {
+                    table
+                        .execute_set_tx(&destination_op, tx, None, &Actor::System)
+                        .await?;
+                    let refs = crate::types::common::new_map();
+                    let ctx = table.info_store_read_view().filter_context(&refs).await?;
+                    table
+                        .execute_delete_tx(&source_op, &ctx, tx, None, &Actor::System)
+                        .await?;
+                    Ok(crate::query::write::WriteResult {
+                        affected: 1,
+                        records: Vec::new(),
+                        execution_time_us: 0,
+                    })
                 })
             })
-        })
-        .await
-        .map_err(|error| DbError::Internal(error.to_string()))?;
-        self.flush_system_repo_durable(&table).await
+            .await;
+        if tx_result.is_err() {
+            return self
+                .resolve_table_rename(key, source_store_id, destination_store_id)
+                .await;
+        }
+        match self.flush_system_repo_durable(&table).await {
+            Ok(()) => RenamePersistOutcome::Committed,
+            Err(_) => {
+                self.resolve_table_rename(key, source_store_id, destination_store_id)
+                    .await
+            }
+        }
     }
 
     /// Remove one table's catalogue entry.

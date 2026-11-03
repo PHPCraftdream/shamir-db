@@ -18,7 +18,7 @@ use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::DbResult;
 
 use shamir_types::types::common::{new_dash_map_wc, TDashMap, THasher};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -63,6 +63,16 @@ pub struct RepoInstance {
     /// token is a pure function of the name, so this is just a
     /// pre-computed inverse of that function.
     token_names: Arc<scc::HashMap<u64, String, THasher>>,
+    /// In-doubt rename entries indexed by both involved names.
+    rename_fence: Arc<
+        scc::HashMap<
+            String,
+            super::repo_instance::catalog::rename_in_doubt::RenameFenceEntry,
+            THasher,
+        >,
+    >,
+    /// O(1) count of owned source fence entries.
+    rename_fence_len: Arc<AtomicUsize>,
     /// Atomic tx telemetry counters.
     tx_metrics: Arc<shamir_tx::TxMetrics>,
     /// Counts owned inline and detached commits for explicit shutdown waiting.
@@ -184,6 +194,8 @@ impl Clone for RepoInstance {
             repo_wal: Arc::clone(&self.repo_wal),
             per_table_mvcc: Arc::clone(&self.per_table_mvcc),
             token_names: Arc::clone(&self.token_names),
+            rename_fence: Arc::clone(&self.rename_fence),
+            rename_fence_len: Arc::clone(&self.rename_fence_len),
             tx_metrics: Arc::clone(&self.tx_metrics),
             commit_tail: Arc::clone(&self.commit_tail),
             group_commit: Arc::clone(&self.group_commit),
@@ -265,6 +277,8 @@ impl RepoInstance {
                 THasher::default(),
             )),
             token_names: Arc::new(token_names),
+            rename_fence: Arc::new(scc::HashMap::with_hasher(THasher::default())),
+            rename_fence_len: Arc::new(AtomicUsize::new(0)),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
             worker_lifecycle: Some(Arc::new(ForegroundLifecycle::new())),
             receipt_worker: Arc::new(OnceCell::new()),

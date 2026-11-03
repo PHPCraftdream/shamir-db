@@ -74,6 +74,7 @@ pub struct SystemStore {
     /// gated catalogue write fail (see `catalogue_write_fault_gate`); armed by
     /// catalogue fault-injection tests.
     catalogue_write_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    durability_tail_faults: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     table_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
@@ -85,7 +86,6 @@ pub struct SystemStore {
     pub(super) group_names: Arc<ArcSwapOption<super::group_names::GroupNames>>,
     // DDL-only rebuild lock; group-catalogue writes are rare.
     pub(super) group_names_rebuild: Arc<tokio::sync::Mutex<()>>,
-    /// Test-only count of function-catalogue reads.
     #[cfg(test)]
     function_catalogue_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Test-only count of settings-catalogue reads.
@@ -117,6 +117,33 @@ pub(super) fn qv_map2(k1: &str, v1: QueryValue, k2: &str, v2: QueryValue) -> Que
 }
 
 impl SystemStore {
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub fn arm_durability_tail_faults(&self, n: usize) {
+        self.durability_tail_faults
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn durability_tail_fault_gate(&self) -> DbResult<()> {
+        let mut remaining = self
+            .durability_tail_faults
+            .load(std::sync::atomic::Ordering::SeqCst);
+        while remaining != 0 {
+            match self.durability_tail_faults.compare_exchange(
+                remaining,
+                remaining - 1,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            ) {
+                Ok(_) => {
+                    return Err(DbError::Storage("injected durability-tail failure".into()));
+                }
+                Err(actual) => remaining = actual,
+            }
+        }
+        Ok(())
+    }
+
     /// Initialize system store with the given config.
     pub async fn init(config: SystemStoreConfig) -> DbResult<Self> {
         Self::init_with_durability(config, DurabilityPolicy::default()).await
@@ -162,6 +189,7 @@ impl SystemStore {
         let store = Self {
             db,
             catalogue_write_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            durability_tail_faults: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
             table_catalogue_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -406,6 +434,7 @@ impl SystemStore {
     /// has one implementation. sync_wal runs FIRST so the armed-flush fault
     /// tests exercise exactly the final `flush()` line.
     pub(crate) async fn flush_system_repo_durable(&self, table: &TableManager) -> DbResult<()> {
+        self.durability_tail_fault_gate()?;
         self.system_repo()?.sync_wal().await?;
         table.data_store_read_view().flush().await
     }
