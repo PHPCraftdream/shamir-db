@@ -7,6 +7,7 @@ use crate::batch::{
 use crate::read::ReadQuery;
 use crate::wire::cursor_id::CursorId;
 use crate::wire::db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode, ApiTokenView, CreatedApiToken};
 
 fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
     let bytes = rmp_serde::to_vec_named(v).unwrap();
@@ -16,6 +17,216 @@ fn to_qv<T: serde::Serialize>(v: &T) -> QueryValue {
 fn from_qv<T: serde::de::DeserializeOwned>(qv: QueryValue) -> T {
     let bytes = rmp_serde::to_vec_named(&qv).unwrap();
     rmp_serde::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn api_token_request_wire_roundtrips_and_missing_options_are_none() {
+    let req = DbRequest::CreateApiToken {
+        label: "automation".into(),
+        ttl_secs: Some(3600),
+        mode: Some(ApiTokenMode::ReadWrite),
+        channels: Some(ApiTokenChannels::Rest),
+        databases: Some(vec!["app".into()]),
+        for_user: Some("svc-account".into()),
+        hmac: Some("abcd".into()),
+    };
+    let bytes = rmp_serde::to_vec_named(&req).unwrap();
+    let back: DbRequest = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(
+        matches!(back, DbRequest::CreateApiToken { label, mode: Some(ApiTokenMode::ReadWrite), channels: Some(ApiTokenChannels::Rest), for_user: Some(for_user), .. } if label == "automation" && for_user == "svc-account")
+    );
+    let golden_req = DbRequest::CreateApiToken {
+        label: "abc".into(),
+        ttl_secs: None,
+        mode: None,
+        channels: None,
+        databases: None,
+        for_user: None,
+        hmac: None,
+    };
+    let golden = vec![
+        0x88, 0xa2, b'o', b'p', 0xb0, b'c', b'r', b'e', b'a', b't', b'e', b'_', b'a', b'p', b'i',
+        b'_', b't', b'o', b'k', b'e', b'n', 0xa5, b'l', b'a', b'b', b'e', b'l', 0xa3, b'a', b'b',
+        b'c', 0xa8, b't', b't', b'l', b'_', b's', b'e', b'c', b's', 0xc0, 0xa4, b'm', b'o', b'd',
+        b'e', 0xc0, 0xa8, b'c', b'h', b'a', b'n', b'n', b'e', b'l', b's', 0xc0, 0xa9, b'd', b'a',
+        b't', b'a', b'b', b'a', b's', b'e', b's', 0xc0, 0xa8, b'f', b'o', b'r', b'_', b'u', b's',
+        b'e', b'r', 0xc0, 0xa4, b'h', b'm', b'a', b'c', 0xc0,
+    ];
+    assert_eq!(rmp_serde::to_vec_named(&golden_req).unwrap(), golden);
+    let golden_decoded: DbRequest = rmp_serde::from_slice(&golden).unwrap();
+    assert!(
+        matches!(golden_decoded, DbRequest::CreateApiToken { label, ttl_secs: None, .. } if label == "abc")
+    );
+    let minimal =
+        rmp_serde::to_vec_named(&shamir_types::mpack!({ "op": "list_api_tokens" })).unwrap();
+    let decoded: DbRequest = rmp_serde::from_slice(&minimal).unwrap();
+    assert!(matches!(
+        decoded,
+        DbRequest::ListApiTokens {
+            for_user: None,
+            hmac: None
+        }
+    ));
+}
+
+#[test]
+fn api_token_response_secret_is_once_and_list_is_secret_free() {
+    #[derive(serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum Legacy {
+        ApiTokenCreated {
+            id: String,
+            token: crate::auth::SecretString,
+            label: String,
+            owner: String,
+            mode: ApiTokenMode,
+            channels: ApiTokenChannels,
+            databases: Option<Vec<String>>,
+            created_at_ns: u64,
+            expires_at_ns: u64,
+        },
+    }
+    let created = DbResponse::ApiTokenCreated(CreatedApiToken {
+        id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        token: crate::auth::SecretString::from("shk1.secret".to_owned()),
+        label: "automation".into(),
+        owner: "svc-account".into(),
+        mode: ApiTokenMode::ReadOnly,
+        channels: ApiTokenChannels::Both,
+        databases: Some(vec!["db".into()]),
+        created_at_ns: 1,
+        expires_at_ns: 2,
+    });
+    let bytes = rmp_serde::to_vec_named(&created).unwrap();
+    assert_eq!(
+        bytes
+            .windows(b"shk1.secret".len())
+            .filter(|part| *part == b"shk1.secret")
+            .count(),
+        1
+    );
+    assert!(!format!("{created:?}").contains("shk1.secret"));
+    let legacy = Legacy::ApiTokenCreated {
+        id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        token: crate::auth::SecretString::from("shk1.secret".to_owned()),
+        label: "automation".into(),
+        owner: "svc-account".into(),
+        mode: ApiTokenMode::ReadOnly,
+        channels: ApiTokenChannels::Both,
+        databases: Some(vec!["db".into()]),
+        created_at_ns: 1,
+        expires_at_ns: 2,
+    };
+    let legacy_bytes = rmp_serde::to_vec_named(&legacy).unwrap();
+    assert_eq!(bytes, legacy_bytes);
+    let decoded: DbResponse = rmp_serde::from_slice(&legacy_bytes).unwrap();
+    let DbResponse::ApiTokenCreated(decoded) = decoded else {
+        panic!("created response roundtrip")
+    };
+    assert_eq!(decoded.id, "AAAAAAAAAAAAAAAAAAAAAA");
+    assert_eq!(decoded.token.reveal(), "shk1.secret");
+    assert_eq!(decoded.label, "automation");
+    assert_eq!(decoded.owner, "svc-account");
+    assert_eq!(decoded.mode, ApiTokenMode::ReadOnly);
+    assert_eq!(decoded.channels, ApiTokenChannels::Both);
+    assert_eq!(decoded.databases, Some(vec!["db".into()]));
+    assert_eq!(decoded.created_at_ns, 1);
+    assert_eq!(decoded.expires_at_ns, 2);
+    let row = ApiTokenView {
+        id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+        label: "automation".into(),
+        owner: "svc-account".into(),
+        mode: ApiTokenMode::ReadOnly,
+        channels: ApiTokenChannels::Both,
+        databases: None,
+        created_at_ns: 1,
+        expires_at_ns: 2,
+        revoked_at_ns: None,
+    };
+    let listed = DbResponse::ApiTokensListed { tokens: vec![row] };
+    let bytes = rmp_serde::to_vec_named(&listed).unwrap();
+    assert!(!bytes.windows(6).any(|part| part == b"secret"));
+    assert!(!bytes.windows(3).any(|part| part == b"mac"));
+    assert!(!bytes.windows(4).any(|part| part == b"hash"));
+    let decoded: DbResponse = rmp_serde::from_slice(&bytes).unwrap();
+    assert!(matches!(decoded, DbResponse::ApiTokensListed { tokens } if tokens.len() == 1));
+}
+#[test]
+fn api_token_admin_wire_requests_and_responses_roundtrip() {
+    let requests = [
+        DbRequest::ListApiTokens {
+            for_user: Some("svc".into()),
+            hmac: None,
+        },
+        DbRequest::RevokeApiToken {
+            id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            hmac: None,
+        },
+        DbRequest::RevokeUserTokens {
+            user: Some("svc".into()),
+            hmac: None,
+        },
+    ];
+    for request in requests {
+        let bytes = rmp_serde::to_vec_named(&request).unwrap();
+        let decoded: DbRequest = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(rmp_serde::to_vec_named(&decoded).unwrap(), bytes);
+    }
+    let omitted: DbRequest = rmp_serde::from_slice(
+        &rmp_serde::to_vec_named(&mpack!({"op":"create_api_token", "label":"x"})).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        omitted,
+        DbRequest::CreateApiToken {
+            ttl_secs: None,
+            mode: None,
+            channels: None,
+            databases: None,
+            for_user: None,
+            ..
+        }
+    ));
+    for invalid in [
+        mpack!({"op":"create_api_token", "label":"x", "mode":"invalid"}),
+        mpack!({"op":"create_api_token", "label":"x", "channels":"invalid"}),
+    ] {
+        let bytes = rmp_serde::to_vec_named(&invalid).unwrap();
+        assert!(rmp_serde::from_slice::<DbRequest>(&bytes).is_err());
+    }
+    let responses = [
+        DbResponse::ApiTokenCreated(CreatedApiToken {
+            id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            token: crate::auth::SecretString::from("secret".to_owned()),
+            label: "x".into(),
+            owner: "u".into(),
+            mode: ApiTokenMode::ReadOnly,
+            channels: ApiTokenChannels::Both,
+            databases: None,
+            created_at_ns: 1,
+            expires_at_ns: 2,
+        }),
+        DbResponse::ApiTokensListed {
+            tokens: vec![ApiTokenView {
+                id: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+                label: "x".into(),
+                owner: "u".into(),
+                mode: ApiTokenMode::ReadOnly,
+                channels: ApiTokenChannels::Both,
+                databases: None,
+                created_at_ns: 1,
+                expires_at_ns: 2,
+                revoked_at_ns: None,
+            }],
+        },
+        DbResponse::ApiTokenRevoked,
+        DbResponse::ApiUserTokensRevoked { count: 1 },
+    ];
+    for response in responses {
+        let bytes = rmp_serde::to_vec_named(&response).unwrap();
+        let decoded: DbResponse = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(rmp_serde::to_vec_named(&decoded).unwrap(), bytes);
+    }
 }
 
 #[test]

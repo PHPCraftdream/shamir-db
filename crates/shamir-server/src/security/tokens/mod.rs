@@ -9,5 +9,7 @@ mod tests;
 
 pub use model::{CreatedToken, TokenCounters, TokenCreateError, TokenView};
 pub use owners::DirectoryOwnerFloors;
-pub use service::{NewToken, SessionCanceller, TokenService, TokenServiceOptions};
+pub use service::{
+    NewToken, SessionCanceller, TokenAuditContext, TokenService, TokenServiceOptions,
+};
 pub use store::{TokenStore, TokenStoreError};

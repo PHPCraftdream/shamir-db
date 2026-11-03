@@ -441,6 +441,38 @@ impl ServerLauncher {
         }
         let byte_budget = ByteBudget::new(inflight_cap);
 
+        let token_key = Zeroizing::new(
+            *meta
+                .token_key()
+                .map_err(|e| BootError::ServerMeta(e.to_string()))?
+                .as_bytes(),
+        );
+        let token_ws_cancel_registry = Arc::new(TokenWsCancelRegistry::default());
+        let pre_auth_admission = Arc::new(PreAuthAdmission::default());
+        let token_service = Arc::new(
+            crate::security::tokens::TokenService::open(
+                crate::security::tokens::TokenServiceOptions {
+                    data_dir: config.data_dir.clone(),
+                    token_key,
+                    owners: Arc::new(crate::security::tokens::DirectoryOwnerFloors::new(
+                        user_dir.clone(),
+                    )),
+                    sessions: Arc::new(shamir_connect::server::TokenSessionStore::new()),
+                    audit: audit_writer.clone(),
+                    config: config.tokens.clone(),
+                    read_only_node: node_mode == crate::db_handler::NodeMode::ReadOnly,
+                    clock: Arc::new(|| {
+                        shamir_connect::common::time::UnixNanos::try_now()
+                            .ok()
+                            .map(|v| v.as_u64())
+                    }),
+                },
+            )
+            .await
+            .map_err(|e| BootError::TokenService(e.to_string()))?
+            .with_canceller(token_ws_cancel_registry.clone()),
+        );
+
         let handler_concrete: Arc<ShamirDbHandler> = Arc::new(
             ShamirDbHandler::with_admin(
                 shamir.clone(),
@@ -466,7 +498,8 @@ impl ServerLauncher {
             })
             .with_byte_budget(byte_budget.clone())
             .with_session_store(session_store.clone())
-            .with_node_mode(node_mode),
+            .with_node_mode(node_mode)
+            .with_token_service(token_service.clone(), config.tokens.allow_self_service),
         );
         let tx_registry_for_reaper = handler_concrete.tx_registry();
         let cursor_registry_for_reaper = handler_concrete.cursor_registry();
@@ -570,38 +603,6 @@ impl ServerLauncher {
         //       loop. They share the root `shutdown_token` created at the top
         //       of `launch()` — `shutdown()` cancels it once and every accept
         //       loop observes the cancel on its next `select!` poll.
-        let token_key = Zeroizing::new(
-            *meta
-                .token_key()
-                .map_err(|e| BootError::ServerMeta(e.to_string()))?
-                .as_bytes(),
-        );
-        let token_ws_cancel_registry = Arc::new(TokenWsCancelRegistry::default());
-        let pre_auth_admission = Arc::new(PreAuthAdmission::default());
-        let token_service = Arc::new(
-            crate::security::tokens::TokenService::open(
-                crate::security::tokens::TokenServiceOptions {
-                    data_dir: config.data_dir.clone(),
-                    token_key,
-                    owners: Arc::new(crate::security::tokens::DirectoryOwnerFloors::new(
-                        user_dir.clone(),
-                    )),
-                    sessions: Arc::new(shamir_connect::server::TokenSessionStore::new()),
-                    audit: audit_writer.clone(),
-                    config: config.tokens.clone(),
-                    read_only_node: node_mode == crate::db_handler::NodeMode::ReadOnly,
-                    clock: Arc::new(|| {
-                        shamir_connect::common::time::UnixNanos::try_now()
-                            .ok()
-                            .map(|v| v.as_u64())
-                    }),
-                },
-            )
-            .await
-            .map_err(|e| BootError::TokenService(e.to_string()))?
-            .with_canceller(token_ws_cancel_registry.clone()),
-        );
-
         let SpawnedListeners {
             bound_addrs,
             bound_ipc_paths,

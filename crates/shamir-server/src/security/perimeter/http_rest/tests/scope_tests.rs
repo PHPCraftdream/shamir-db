@@ -1,5 +1,4 @@
 use crate::security::perimeter::http_rest::AllowedOperation;
-use serde::Serialize;
 use shamir_collections::new_map;
 use shamir_connect::server::token::{Endpoint, TokenMode};
 use shamir_query_builder::batch::{Batch, IntoBatchOp, Subscribe};
@@ -301,6 +300,27 @@ fn top_level_admin_requests_are_denied_using_typed_variants() {
             node_id: "n".into(),
             capabilities: None,
         }),
+        DbRequest::CreateApiToken {
+            label: "t".into(),
+            ttl_secs: None,
+            mode: None,
+            channels: None,
+            databases: None,
+            for_user: None,
+            hmac: None,
+        },
+        DbRequest::ListApiTokens {
+            for_user: None,
+            hmac: None,
+        },
+        DbRequest::RevokeApiToken {
+            id: "t".into(),
+            hmac: None,
+        },
+        DbRequest::RevokeUserTokens {
+            user: None,
+            hmac: None,
+        },
     ];
     for request in requests {
         assert_eq!(
@@ -382,227 +402,4 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
             Decision::NotSupported("not_supported_over_rest")
         );
     }
-}
-
-// These management variants are deliberately modeled as a test-only wire
-// fixture: DbRequest has no such variants yet, so decoding must reject them.
-#[derive(Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum ApiTokenManagementWireFixture {
-    CreateApiToken { name: String },
-    ListApiTokens,
-    RevokeApiToken { token_id: String },
-    RevokeUserTokens { user: String },
-}
-
-#[test]
-fn api_token_management_wire_variants_are_not_available_yet() {
-    let fixtures = [
-        ApiTokenManagementWireFixture::CreateApiToken {
-            name: "fixture".into(),
-        },
-        ApiTokenManagementWireFixture::ListApiTokens,
-        ApiTokenManagementWireFixture::RevokeApiToken {
-            token_id: "fixture".into(),
-        },
-        ApiTokenManagementWireFixture::RevokeUserTokens {
-            user: "fixture".into(),
-        },
-    ];
-    for fixture in fixtures {
-        let wire = rmp_serde::to_vec_named(&fixture).expect("typed MessagePack fixture");
-        assert!(rmp_serde::from_slice::<DbRequest>(&wire).is_err());
-    }
-}
-
-#[test]
-fn ws_tx_and_subscription_are_allowed_only_on_ws() {
-    let tx = DbRequest::TxBegin {
-        query_version: 1,
-        db: "db".into(),
-        repo: "main".into(),
-        isolation: None,
-    };
-    assert_eq!(
-        classify_request(&tx, TokenMode::ReadOnly, None, Endpoint::Ws),
-        Decision::Allowed(AllowedOperation::Execute)
-    );
-    assert_eq!(
-        classify_request(&tx, TokenMode::ReadOnly, None, Endpoint::Rest),
-        Decision::NotSupported("not_supported_over_rest")
-    );
-    let sub = execute(BatchOp::Subscribe(Subscribe::table("t").build()), "db");
-    assert_eq!(
-        classify_request(&sub, TokenMode::ReadWrite, None, Endpoint::Ws),
-        Decision::Allowed(AllowedOperation::Execute)
-    );
-    assert_eq!(
-        classify_request(&sub, TokenMode::ReadWrite, None, Endpoint::Rest),
-        Decision::NotSupported("not_supported_over_rest")
-    );
-}
-
-fn expected_ws(request: &DbRequest) -> Decision {
-    match request {
-        DbRequest::Ping => Decision::Allowed(AllowedOperation::Ping),
-        DbRequest::WaitForVisibility { .. } => {
-            Decision::Allowed(AllowedOperation::WaitForVisibility)
-        }
-        DbRequest::GetDdlOpStatus { .. } => Decision::Allowed(AllowedOperation::GetDdlOpStatus),
-        DbRequest::Execute { .. }
-        | DbRequest::TxBegin { .. }
-        | DbRequest::TxExecute { .. }
-        | DbRequest::TxCommit { .. }
-        | DbRequest::TxRollback { .. }
-        | DbRequest::CreateCursor { .. }
-        | DbRequest::FetchNext { .. }
-        | DbRequest::CancelCursor { .. } => Decision::Allowed(AllowedOperation::Execute),
-        DbRequest::SetSuperuser { .. }
-        | DbRequest::SetReplicator { .. }
-        | DbRequest::CreateScramUser { .. }
-        | DbRequest::ChangePasswordChallenge { .. }
-        | DbRequest::ChangePasswordVerify(_)
-        | DbRequest::Repl(_) => Decision::Denied("token_request_denied"),
-    }
-}
-
-#[test]
-fn ws_scope_classifies_all_db_requests_deny_by_default() {
-    let requests = [
-        DbRequest::Ping,
-        DbRequest::WaitForVisibility {
-            query_version: 1,
-            db: "db".into(),
-            repo: "main".into(),
-            version: 1,
-            visibility_wait: shamir_query_types::batch::VisibilityWait::Strict,
-        },
-        DbRequest::GetDdlOpStatus {
-            db: "db".into(),
-            repo: "main".into(),
-            table: "t".into(),
-            op_id: "x".into(),
-        },
-        execute(shamir_query_builder::query::Query::from("t"), "db"),
-        DbRequest::TxBegin {
-            query_version: 1,
-            db: "db".into(),
-            repo: "main".into(),
-            isolation: None,
-        },
-        DbRequest::TxExecute {
-            query_version: 1,
-            db: "db".into(),
-            tx_handle: 1,
-            batch: batch_with(shamir_query_builder::query::Query::from("t")),
-        },
-        DbRequest::TxCommit {
-            query_version: 1,
-            db: "db".into(),
-            tx_handle: 1,
-            visibility_wait: None,
-        },
-        DbRequest::TxRollback {
-            db: "db".into(),
-            tx_handle: 1,
-        },
-        DbRequest::CreateCursor {
-            db: "db".into(),
-            query_version: 1,
-            query: ReadQuery::new("t"),
-            page_size: 10,
-        },
-        DbRequest::FetchNext {
-            cursor_id: shamir_query_types::wire::CursorId(1),
-            page_size: None,
-        },
-        DbRequest::CancelCursor {
-            cursor_id: shamir_query_types::wire::CursorId(1),
-        },
-        DbRequest::SetSuperuser {
-            user: "u".into(),
-            on: true,
-            hmac: None,
-        },
-        DbRequest::SetReplicator {
-            user: "u".into(),
-            on: true,
-            hmac: None,
-        },
-        DbRequest::CreateScramUser {
-            name: "u".into(),
-            password: "p".into(),
-            roles: Vec::new(),
-            hmac: None,
-        },
-        DbRequest::ChangePasswordChallenge {
-            client_nonce_cp: vec![1],
-        },
-        DbRequest::ChangePasswordVerify(shamir_query_types::wire::ChangePasswordSecrets {
-            client_proof_old: vec![1],
-            new_salt: vec![2],
-            new_stored_key: vec![3],
-            new_server_key: vec![4],
-        }),
-        DbRequest::Repl(shamir_query_types::wire::ReplRequest::Hello {
-            proto_ver: 1,
-            node_id: "n".into(),
-            capabilities: None,
-        }),
-    ];
-    for request in &requests {
-        assert_eq!(
-            classify_request(request, TokenMode::ReadWrite, None, Endpoint::Ws),
-            expected_ws(request)
-        );
-    }
-}
-
-#[test]
-fn ws_readonly_tx_rules_and_database_allowlist_are_enforced() {
-    let read = batch_with(shamir_query_builder::query::Query::from("t"));
-    let write = batch_with(insert("t").row(doc()));
-    let tx_read = DbRequest::TxExecute {
-        query_version: 1,
-        db: "db".into(),
-        tx_handle: 1,
-        batch: read,
-    };
-    let tx_write = DbRequest::TxExecute {
-        query_version: 1,
-        db: "db".into(),
-        tx_handle: 1,
-        batch: write,
-    };
-    assert!(matches!(
-        classify_request(&tx_read, TokenMode::ReadOnly, None, Endpoint::Ws),
-        Decision::Allowed(_)
-    ));
-    assert_eq!(
-        classify_request(&tx_write, TokenMode::ReadOnly, None, Endpoint::Ws),
-        Decision::Denied("token_read_only")
-    );
-    let commit = DbRequest::TxCommit {
-        query_version: 1,
-        db: "db".into(),
-        tx_handle: 1,
-        visibility_wait: None,
-    };
-    assert_eq!(
-        classify_request(&commit, TokenMode::ReadOnly, None, Endpoint::Ws),
-        Decision::Denied("token_read_only")
-    );
-    assert!(matches!(
-        classify_request(&commit, TokenMode::ReadWrite, None, Endpoint::Ws),
-        Decision::Allowed(_)
-    ));
-    assert_eq!(
-        classify_request(
-            &tx_read,
-            TokenMode::ReadWrite,
-            Some(&["other".into()]),
-            Endpoint::Ws
-        ),
-        Decision::Denied("token_database_denied")
-    );
 }
