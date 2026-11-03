@@ -24,6 +24,8 @@ pub use options::{
 };
 
 #[cfg(test)]
+pub(crate) use api::admin_request_tag_for_test as admin_request_tag;
+#[cfg(test)]
 pub(crate) use api::encode_named_into;
 pub(crate) use api::should_advertise_interner_epochs;
 #[cfg(test)]

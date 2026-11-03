@@ -10,7 +10,7 @@ const vectors = JSON.parse(fs.readFileSync(vectorsPath, 'utf8'));
 
 module.exports = async function ({ test, assertEq }) {
   test('rv_query_types_f1dc8e9a verifies all HMAC known-answer vectors and TS builder', () => {
-    assertEq(vectors.vectors.length, 31, 'fixture contains all 31 operations');
+    assertEq(vectors.vectors.length, 35, 'fixture contains all 35 operations');
     assert(/^[0-9a-f]{64}$/.test(vectors.session_id_hex), 'session id is valid 32-byte hex');
     const sessionId = Buffer.from(vectors.session_id_hex, 'hex');
     assertEq(sessionId.length, 32, 'session id length');

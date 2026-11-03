@@ -52,7 +52,11 @@ pub(crate) fn classify_request(
         | DbRequest::SetReplicator { .. }
         | DbRequest::Repl(_)
         | DbRequest::ChangePasswordChallenge { .. }
-        | DbRequest::ChangePasswordVerify(_) => None,
+        | DbRequest::ChangePasswordVerify(_)
+        | DbRequest::CreateApiToken { .. }
+        | DbRequest::ListApiTokens { .. }
+        | DbRequest::RevokeApiToken { .. }
+        | DbRequest::RevokeUserTokens { .. } => None,
     };
     if matches!(
         request,
@@ -95,7 +99,11 @@ pub(crate) fn classify_request(
         | DbRequest::SetReplicator { .. }
         | DbRequest::Repl(_)
         | DbRequest::ChangePasswordChallenge { .. }
-        | DbRequest::ChangePasswordVerify(_) => Decision::Denied("token_request_denied"),
+        | DbRequest::ChangePasswordVerify(_)
+        | DbRequest::CreateApiToken { .. }
+        | DbRequest::ListApiTokens { .. }
+        | DbRequest::RevokeApiToken { .. }
+        | DbRequest::RevokeUserTokens { .. } => Decision::Denied("token_request_denied"),
     }
 }
 

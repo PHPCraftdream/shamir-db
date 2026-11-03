@@ -72,6 +72,10 @@ def fields(vector):
         "drop_function": lambda: s("name") + b("if_exists"), "drop_validator": lambda: s("name") + b("if_exists"),
         "create_validator": lambda: s("name") + b("replace") + optional(f["source"], lambda x: hashlib.sha256(x.encode()).digest()) + optional(f["wasm"], lambda x: hashlib.sha256(x.encode()).digest()),
         "drop_replication_profile": lambda: s("name"), "drop_publication": lambda: s("name"), "drop_subscription": lambda: s("name"),
+        "create_api_token": lambda: s("label") + optional(int(f["ttl_secs"]) if f.get("ttl_secs") is not None else None, u64) + optional({"read_only": 0, "read_write": 1}[f["mode"]] if f.get("mode") is not None else None, lambda x: bytes([x])) + optional({"rest": 0, "ws": 1, "both": 2}[f["channels"]] if f.get("channels") is not None else None, lambda x: bytes([x])) + optional(f.get("databases"), strings) + optional(f.get("for_user"), string),
+        "list_api_tokens": lambda: optional(f.get("for_user"), string),
+        "revoke_api_token": lambda: s("id"),
+        "revoke_user_tokens": lambda: optional(f.get("user"), string),
     }
     return schema[op]()
 
