@@ -186,6 +186,8 @@ Review these actual listener keys and policies: `host_authority_allowlist` is th
 
 The token policy defaults relevant to these examples are `tokens.max_per_user: 20`, `tokens.max_sockets_per_token: 8`, `tokens.max_sockets_per_owner: 32`, `tokens.session_max_age_hours: 24`, `tokens.default_ttl_days: 30`, `tokens.max_ttl_days: 365`, `tokens.login_ttl: 86400`, and `tokens.login_allow_read_write: false`. The CLI can issue read-write tokens explicitly; HTTP login requires the global opt-in for read-write. Review the example config and deployment policy before enabling login or issuing broad scopes. The final T8 operator manual should expand this concise cross-reference.
 
+For full listener setup, token administration, browser constraints, limits and troubleshooting, see the [token API operator guide](./token-api.md).
+
 ## 2. Конфиг: `.ktav`
 
 Конфиг — файл в формате Ktav ≥ 0.6: без кавычек и запятых, комментарии —

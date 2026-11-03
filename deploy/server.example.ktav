@@ -61,6 +61,7 @@ argon2_concurrent_max: 6
 ##   * 7331  tcp+tls_exporter   → native binding_mode 0x01
 ##   * 7332  ws+tls_exporter    → wss:///shamir/v1 native (binding_mode 0x01)
 ##   * 7333  ws+tls_no_export   → wss:///shamir/v1/browser (binding_mode 0x02)
+
 listeners: [
     {
         kind: tcp
@@ -87,6 +88,8 @@ listeners: [
     ## HTTP listener exposes REST plus /shamir/v1/ws and /shamir/v1/ws/browser.
     ## Browser route requires Origin; empty Host allowlist rejects browser requests (400),
     ## so the browser route is disabled until explicit canonical authorities are configured.
+    ##     ## Empty host_authority_allowlist rejects browser requests (400).
+    ##     ## Authorities are canonical: lowercase host, bracketed IPv6, no default port.
     ## Authorities must be lowercase and omit scheme-default ports (80 ws, 443 wss).
     ## Wildcard Origin entries (for example https://*.example.com) never match on kind: http;
     ## Origin checks here use exact matching. Origin policy does not affect REST routes.
@@ -103,6 +106,7 @@ listeners: [
     ##     allow_plaintext_remote: false
     ##     allow_plaintext_write: false
     ##     allow_self_signed: false
+    ##     ## Each request body is limited to max_request_body_bytes; shared budget is 16× the largest HTTP cap (default 256 MiB).
     ##     ## browser_origin_allowlist is required for external_tls login; WebSocket also uses it.
     ##     max_request_body_bytes: 16777216
     ##     head_timeout_ms: 5000
@@ -110,17 +114,37 @@ listeners: [
     ##     request_timeout_ms: 120000
     ##     trusted_proxies: []
     ##     browser_origin_allowlist: [https://app.example.com]
-    ##     ## Empty host_authority_allowlist rejects browser requests (400).
-    ##     ## Authorities are canonical: lowercase host, bracketed IPv6, no default port.
     ##     host_authority_allowlist: [app.example.com]
     ##     external_tls: false
-    ##     login: { enabled: false, authority_allowlist: [], listener_id: null }
+    ##     login: {
+    ##         enabled: false
+    ##         authority_allowlist: []
+    ##     }
     ##     ## To enable login, select TLS or the constrained external_tls profile and set explicit policy.
     ##     ## Each enabled HTTP listener gets its persisted listener identity from server_meta unless listener_id is supplied.
     ##     ## Startup publishes a count-only KDF-ineligible account gauge and WARN; it never logs account identifiers.
     ##     ## Pending challenges are volatile and discarded on restart.
-    ##     ## Worker wait uses request_timeout_ms (capped at 7s) plus 2s for audit, inside the listener's 10s deadline.
+    ##     ## Login drain timing: the 5s connection drain precedes the 7s worker wait plus 2s audit allowance; the outer 10s deadline may cut it short.
     ##     ## Late audit events are best-effort and are not guaranteed to drain.
+    ## }
+    ## Loopback direct TLS with HTTP password login; provide the top-level TLS cert/key below.
+    ## {
+    ##     kind: http
+    ##     addr: 127.0.0.1:7341
+    ##     tls: true
+    ##     allow_self_signed: false
+    ##     ## Each request body is limited to max_request_body_bytes; shared budget is 16× the largest HTTP cap (default 256 MiB).
+    ##     max_request_body_bytes: 16777216
+    ##     head_timeout_ms: 5000
+    ##     body_timeout_ms: 30000
+    ##     request_timeout_ms: 120000
+    ##     trusted_proxies: []
+    ##     browser_origin_allowlist: [https://app.example.com]
+    ##     host_authority_allowlist: [app.example.com]
+    ##     login: {
+    ##         enabled: true
+    ##         authority_allowlist: [localhost:7341]
+    ##     }
     ## }
 ]
 
@@ -133,6 +157,14 @@ tokens: {
     ## Login token lifetime is seconds (1..=86400); read-write login tokens are opt-in.
     login_ttl: 86400
     login_allow_read_write: false
+    ## Optional policy overrides; uncomment individual keys as needed.
+    ## default_ttl_days: 30
+    ## max_ttl_days: 365
+    ## max_per_user: 20
+    ## allow_self_service: true
+    ## session_max_age_hours: 24
+    ## max_sockets_per_token: 8
+    ## max_sockets_per_owner: 32
 }
 
 security: {
