@@ -47,7 +47,7 @@ impl RepoInstance {
                         },
                     );
                     match old {
-                        RenameFenceEntry::Source(pair) => Some(pair),
+                        RenameFenceEntry::Source(pair) => Some(*pair),
                         _ => unreachable!("entry replaced while exclusively updated"),
                     }
                 }
@@ -66,12 +66,13 @@ impl RepoInstance {
                 RenameFenceEntry::InFlight {
                     from: old_from,
                     to: old_to,
-                } if old_from == &from && old_to == &to => {
-                    *entry = RenameFenceEntry::Source(
-                        pair.take().expect("pair retained until installed"),
-                    );
-                    true
-                }
+                } if old_from == &from && old_to == &to => match pair.take() {
+                    Some(retained) => {
+                        *entry = RenameFenceEntry::Source(Box::new(retained));
+                        true
+                    }
+                    None => false,
+                },
                 _ => false,
             })
             .unwrap_or(false);
@@ -79,7 +80,10 @@ impl RepoInstance {
             debug_assert!(pair.is_none());
             return;
         }
-        let source = pair.take().expect("pair retained until inserted");
+        let Some(source) = pair.take() else {
+            log::error!("rename fence pair missing before insertion for '{from}' to '{to}'");
+            return;
+        };
         // The write permit and pair checks make a destination collision impossible; never ignore it.
         match self.rename_fence.entry_sync(to.clone()) {
             scc::hash_map::Entry::Occupied(occupied) => {
@@ -100,7 +104,7 @@ impl RepoInstance {
                 panic!("rename source name unexpectedly occupied outside retry");
             }
             scc::hash_map::Entry::Vacant(vacant) => {
-                vacant.insert_entry(RenameFenceEntry::Source(source));
+                vacant.insert_entry(RenameFenceEntry::Source(Box::new(source)));
             }
         }
         self.rename_fence_len.fetch_add(1, Ordering::Release);

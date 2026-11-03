@@ -3,6 +3,7 @@ use super::rename_in_doubt::RenameInDoubt;
 use super::RepoInstance;
 use crate::repo::RepoWritePermit;
 use crate::table::TableManager;
+use shamir_storage::error::{DbError, DbResult};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AttemptPhase {
@@ -62,8 +63,10 @@ impl<'p> RenameAttempt<'p> {
         &self.source
     }
 
-    pub(crate) fn freeze(&self) -> &RenameFreeze {
-        self.freeze.as_ref().expect("rename freeze is installed")
+    pub(crate) fn freeze(&self) -> DbResult<&RenameFreeze> {
+        self.freeze
+            .as_ref()
+            .ok_or_else(|| DbError::Internal("rename freeze is not installed".into()))
     }
 
     pub(crate) fn mark_persisting(&mut self) {

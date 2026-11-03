@@ -412,7 +412,7 @@ impl RepoInstance {
             }
         }
         let fenced = attempt.was_fenced();
-        if let Err(error) = attempt.freeze().await_visible(self, from).await {
+        if let Err(error) = attempt.freeze()?.await_visible(self, from).await {
             attempt.abort();
             return Err(if fenced {
                 rename_in_doubt_error(from, to, error)
@@ -421,7 +421,7 @@ impl RepoInstance {
             });
         }
         let config = match self
-            .prepare_table_rename_admitted(from, to, &permit, attempt.freeze())
+            .prepare_table_rename_admitted(from, to, &permit, attempt.freeze()?)
             .await
         {
             Ok(Some(config)) => config,
