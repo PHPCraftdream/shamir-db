@@ -629,6 +629,7 @@ impl ServerLauncher {
                 pre_auth_admission: &pre_auth_admission,
                 handler_concrete: &handler_concrete,
                 conn_tasks: &conn_tasks,
+                read_only: node_mode == crate::db_handler::NodeMode::ReadOnly,
             },
             &shutdown_token,
         )

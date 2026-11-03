@@ -2,6 +2,7 @@ use super::hook::{UpgradeHead, WsReject, WsRoute, WsUpgrade};
 use crate::config::Endpoint;
 use crate::gate::{GateDecision, RestExecutor, TokenGate};
 use crate::server::response::{canned, response};
+use crate::server::routes::LoginRoutes;
 use crate::server::service::{auth_header, peer, retry, unauthorized_body, Context};
 use bytes::Bytes;
 use http::{header, Method, Request, Response, StatusCode};
@@ -10,15 +11,16 @@ use hyper::body::Incoming;
 use std::sync::Arc;
 
 /// Handles a WebSocket route before the ordinary REST bearer path.
-pub(crate) async fn handle_ws<G, E, W>(
+pub(crate) async fn handle_ws<G, E, W, L>(
     mut request: Request<Incoming>,
-    context: Arc<Context<G, E, W>>,
+    context: Arc<Context<G, E, W, L>>,
     route: WsRoute,
 ) -> Result<Response<BoxBody<Bytes, std::convert::Infallible>>, std::convert::Infallible>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
     W: WsUpgrade<G::Grant>,
+    L: LoginRoutes,
 {
     if request.method() != Method::GET {
         let mut response = canned(

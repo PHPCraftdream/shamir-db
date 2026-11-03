@@ -16,10 +16,10 @@ fn listener(kind: ListenerKind, addr: &str, profile: Option<ProfileKind>) -> Lis
 
 fn base_config() -> Config {
     let source = r#"
-        data_dir: /tmp/shamir-config-validation
+        data_dir: data
         kdf_defaults: { memory_kb: 19456, time: 2, parallelism: 1, argon2_version: 19 }
         listeners: [{ kind: tcp, addr: 127.0.0.1:7340, profile: tls_exporter }]
-        tls: { cert_path: /tmp/cert.pem, key_path: /tmp/key.pem }
+        tls: { cert_path: cert.pem, key_path: key.pem }
     "#;
     ktav::from_str(source).expect("base config parses")
 }
@@ -37,6 +37,10 @@ fn http_listener_defaults_apply() {
     assert!(!defaults.allow_self_signed);
     assert!(defaults.trusted_proxies.is_empty());
     assert!(defaults.host_authority_allowlist.is_empty());
+    assert!(!defaults.external_tls);
+    assert!(!defaults.login.enabled);
+    assert!(defaults.login.authority_allowlist.is_empty());
+    assert_eq!(defaults.login.listener_id, None);
 }
 
 #[test]
@@ -117,6 +121,8 @@ fn http_server_config_mapping_uses_limits_and_messagepack_bodies() {
         allow_self_signed: false,
         trusted_proxies: Vec::new(),
         host_authority_allowlist: Vec::new(),
+        external_tls: false,
+        login: Default::default(),
     };
     let forbidden = std::sync::Arc::new(|code: &str| {
         bytes::Bytes::from(

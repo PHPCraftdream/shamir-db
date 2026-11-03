@@ -72,6 +72,41 @@ Two forbidden local compilation attempts occurred despite the prohibition. First
 
 No commits or pushes were performed by the parent. No manifest, lockfile, or dependency changes, moves, or deletions were made. The final read-through is complete; acceptance remains PARTIAL for the CI and coverage gaps above.
 
-## Current response summary
+## Revision 2: merge with AUTH1
 
-PARTIAL: REVIEW-2 N1–N10 source changes and additional coverage are present in shamir-server and shamir-transport-http; DESIGN.md is one current report. Formatting, layout, and whitespace checks pass; compilation/runtime and remaining coverage require CI. Two prohibited child compilation attempts were terminated without a successful build or test result. No commits, pushes, manifest/lock changes, moves, or deletions were performed.
+- Transport `Context<G, E, W, L>` carries both login and WebSocket hooks, plus the login write-timeout override and tracked upgrade handoff. `serve`, `serve_with_login`, `serve_with_ws`, and combined `serve_with_routes` preserve the convenience signatures; the combined route bundle is passed as the seventh argument. Dispatch checks login paths before WebSocket routes and REST. The accept loop uses Hyper upgrades within its tracked connection task, retaining admission permits through the WS session and skipping HTTP rejection linger after an upgrade.
+- Progress: `crates/shamir-transport-http/src/server/service.rs` now initializes request timing/path state before login, WS, then REST routing; Context generic defaults include the no-op WS/login services.
+- Progress: `crates/shamir-transport-http/src/server/mod.rs` preserves existing module visibility and keeps `routes` public for external WebSocket hooks.
+- Progress: `crates/shamir-server/src/lib.rs` exports `http_login`, `http_rest`, and `http_ws` together.
+- Progress: `crates/shamir-server/src/security/mod.rs` re-exports the login, REST, and WebSocket perimeter APIs.
+- Progress: `crates/shamir-server/tests/e2e/http_rest/common.rs` combines configurable harness seeding/startup with the hook wrappers; database mode is 0o757 for commit Write authorization, store remains 0o711. Full file re-read; tests not run.
+- Progress: `crates/shamir-transport-http/src/server/service.rs` restores the original REST body budget reservation branches and explicit GET method matches while retaining login-first WS dispatch. `crates/shamir-transport-http/src/server/accept.rs` uses `WsAdmission` for the no-op admission signature. Full source re-read; no tests run.
+- Progress: `crates/shamir-transport-http/src/server/accept.rs` combines login and WS route services, preserves convenience serving entry points, and runs upgraded sessions within tracked connection tasks; source re-read, no tests run.
+- Progress: `crates/shamir-transport-http/src/server/routes/mod.rs` retains the private login module and exposes the WS route module alongside login re-exports.
+- Progress: `crates/shamir-transport-http/src/server/routes/route_services.rs` defines the public login/WS `Arc` service bundle used by the combined serving entry point.
+- Progress: `crates/shamir-transport-http/src/server/routes/ws/handler.rs` carries the combined Context generic bounds for WS route dispatch.
+- Progress: `crates/shamir-transport-http/src/server/tests/login_routing_tests.rs` restores both original login/REST routing tests and exercises combined public serving on loopback for login 200, WS 426 before bearer auth, and REST 401; no tests run.
+- Progress: `crates/shamir-transport-http/src/lib.rs` re-exports serving entry points, `RouteServices`, and login/WS hook types.
+- Progress: `crates/shamir-server/src/boot/config/http_listener.rs` keeps the login canonical-authority helper and aliases the WS Option helper; host validation uses the latter and generic origin validation follows login policy checks.
+- Progress: `crates/shamir-server/src/boot/config/tests/http_listener_tests.rs` retains host and login defaults and both settings in the explicit mapping literal.
+- Progress: `crates/shamir-server/src/engine/server/server_launcher/http/launcher.rs` uses one combined serve call in each login/no-login branch and retains bounded login/audit drains and WS setup.
+- Progress: `deploy/server.example.ktav` retains both HTTP WebSocket and login example policy comments and keys.
+
+## Revision 2 review record
+
+Parent-reported verification: all 12 conflicted files are marker-free. Scoped `cargo fmt -p shamir-server -p shamir-transport-http -- --check` and `git diff --check` exited 0 at 08:06; the layout command exited 1 with seven reported directories. The parent attributes layout output to the checker consuming duplicate paths from unmerged index stages: `check_layout.py`'s `git_tracked_files` does not deduplicate the `git ls-files` output, and the later scan counts each path. No checker or index changes were made. Parent-observed physical touched directories have at most seven entries; largest touched source file is 606 lines and `route_services.rs` is 11 lines. This session ran no cargo check/clippy/build/test, rustc, or npm commands and performed no git mutation, manifest, or dependency edits. `NoWs` is crate-visible for default Context use and tests; routes remains public for WS hook access and login module remains private. No final acceptance report is recorded here while parent review continues.
+
+- Progress: `crates/shamir-server/src/engine/server/server_launcher/http/launcher.rs` removed one duplicate tunables import; full source re-read, no other launcher edits in this correction.
+
+### Revision 2 final status
+
+- **Part A — source resolved:** all 12 conflict files are marker-free, with AUTH1 login and T6 WebSocket implementation retained. The touched source inventory is: `crates/shamir-server/src/boot/config/http_listener.rs`, `crates/shamir-server/src/boot/config/tests/http_listener_tests.rs`, `crates/shamir-server/src/engine/server/server_launcher/http/launcher.rs`, `crates/shamir-server/src/lib.rs`, `crates/shamir-server/src/security/mod.rs`, `crates/shamir-server/tests/e2e/http_rest/common.rs`, `crates/shamir-transport-http/src/lib.rs`, `crates/shamir-transport-http/src/server/accept.rs`, `crates/shamir-transport-http/src/server/mod.rs`, `crates/shamir-transport-http/src/server/routes/mod.rs`, `crates/shamir-transport-http/src/server/routes/route_services.rs`, `crates/shamir-transport-http/src/server/routes/ws/handler.rs`, `crates/shamir-transport-http/src/server/service.rs`, `crates/shamir-transport-http/src/server/tests/login_routing_tests.rs`, and `deploy/server.example.ktav`. Key source references: combined `Context` and route dispatch in transport service around lines 16 and 53; combined accept entry around line 147 and tracked upgrade handling around line 315; launcher combined route calls around lines 412 and 440, with login drain/cancel around lines 425–438; harness chmod around line 262; combined-route regression around line 242; WS authority alias/host validation in config around lines 6 and 149.
+- **Part B — source resolved:** the test harness grants database mode `0o757` and keeps store mode `0o711`; server policy was not changed.
+- **Part C — source review complete, pending CI:** parent reports full lint-aware read-through. Scoped formatting and `--check`, plus `git diff --check`, exited 0 at 08:10:27 CET. Layout remains PARTIAL: checker reports seven duplicate-stage directory counts while the parent observed physical touched directories at or below seven entries and source files at or below 606 lines. The new `route_services.rs` is 11 lines. The orchestrator must resolve the index (including that new file) and rerun layout. Compilation, clippy, tests, and behavioral CI remain pending; AC1–AC12 remain PARTIAL. This session ran no compile/test/rustc/npm command and made no git, manifest, or dependency changes. The index remains unmerged (UU/AA) and was not modified.
+
+### Final response
+
+Resolved source conflicts in all 12 files, retaining AUTH1 and WS; added RouteServices and combined-route coverage, and changed the native harness database mode to 0o757. Changes cover shamir-server, shamir-transport-http, deploy/server.example.ktav, and DESIGN.md.
+Re-read every touched file. Scoped cargo fmt/--check and git diff --check pass; no compilation or tests were run.
+Layout check remains PARTIAL: unmerged index stages are counted repeatedly; physical touched folders have at most 7 entries and sources at most 606 lines.
+Remaining: orchestrator marks resolutions (including new route_services.rs), reruns layout, and runs CI. Merge/index left untouched; no children remain running.

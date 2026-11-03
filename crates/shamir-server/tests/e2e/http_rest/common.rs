@@ -101,11 +101,26 @@ impl Harness {
     where
         F: FnOnce(&mut Config),
     {
+        Self::launch_with_hooks(addr, settings, native, hook, seed_owner).await
+    }
+
+    /// Starts the shared HTTP harness with test-specific config and user seeding.
+    pub async fn launch_with_hooks<C, S>(
+        addr: &str,
+        settings: shamir_server::config::HttpListenerSettings,
+        native: bool,
+        configure: C,
+        seed: S,
+    ) -> Self
+    where
+        C: FnOnce(&mut Config),
+        S: FnOnce(&std::path::Path) -> ([u8; 16], Vec<String>),
+    {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let data_dir = temp.path().to_path_buf();
-        let (owner, owner_roles) = seed_owner(&data_dir);
+        let (owner, owner_roles) = seed(&data_dir);
         let mut config = config_for_with(&data_dir, addr, settings);
-        hook(&mut config);
+        configure(&mut config);
         if native {
             config.listeners.push(ListenerConfig {
                 kind: ListenerKind::Tcp,
@@ -235,14 +250,15 @@ pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
     (owner, owner_roles)
 }
 
-/// Opens `db://default` (other r-x) and `default/main` (other --x): a token
-/// session is `Actor::User` (TOKEN_API section 6), and boot creates both
-/// System-owned at `0o700`, which hides even tables the token owner created.
+/// The database's `0o757` mode grants other principals read, write, and execute,
+/// allowing interactive transaction commit (which authorizes Write on the database).
+/// The store's `0o711` mode grants traversal. Both resources are System-owned at
+/// `0o700` by default, which hides even tables the token owner created.
 pub(crate) async fn grant_default_main_access(client: &shamir_client::Client) {
     let key = derive_session_hmac_key(&client.session_id());
     let mut batch = Batch::new();
     for (alias, resource, mode) in [
-        ("chmod_db", ddl::res::database("default"), 0o755),
+        ("chmod_db", ddl::res::database("default"), 0o757),
         ("chmod_store", ddl::res::store("default", "main"), 0o711),
     ] {
         let unsigned = BatchOp::Chmod(ChmodOp {

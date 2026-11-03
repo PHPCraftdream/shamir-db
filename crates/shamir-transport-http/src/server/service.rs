@@ -3,6 +3,7 @@ use super::response::{canned, response, response_held};
 use crate::config::{Endpoint, HttpServerConfig};
 use crate::gate::{AuthHeader, GateDecision, PeerInfo, RestExecutor, TokenGate};
 use crate::server::routes::ws::{WsRoute, WsUpgrade};
+use crate::server::routes::LoginRoutes;
 use bytes::Bytes;
 use http::{header, HeaderMap, Method, Request, Response, StatusCode};
 use http_body_util::{combinators::BoxBody, BodyExt};
@@ -12,10 +13,11 @@ use std::sync::Arc;
 type UpgradeSlot<S> =
     tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(S, hyper::upgrade::OnUpgrade)>>>;
 
-pub(crate) struct Context<G, E, W>
+pub(crate) struct Context<G, E, W = super::accept::NoWs, L = super::routes::NoLogin>
 where
     G: TokenGate,
     W: WsUpgrade<G::Grant>,
+    L: LoginRoutes,
 {
     pub cfg: Arc<HttpServerConfig>,
     pub gate: Arc<G>,
@@ -24,16 +26,19 @@ where
     pub holds: tokio::sync::mpsc::Sender<Box<dyn Send + Sync>>,
     pub ws: Arc<W>,
     pub upgrade: UpgradeSlot<W::Session>,
+    pub login: Arc<L>,
+    pub write_timeout_override: Arc<std::sync::atomic::AtomicU64>,
 }
 
-pub(crate) async fn handle<G, E, W>(
+pub(crate) async fn handle<G, E, W, L>(
     request: Request<Incoming>,
-    context: Arc<Context<G, E, W>>,
+    context: Arc<Context<G, E, W, L>>,
 ) -> Result<Response<BoxBody<Bytes, std::convert::Infallible>>, std::convert::Infallible>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
     W: WsUpgrade<G::Grant>,
+    L: LoginRoutes,
 {
     if request.version() != http::Version::HTTP_11 {
         return Ok(canned(
@@ -42,7 +47,23 @@ where
             context.cfg.hsts,
         ));
     }
-    let ws_route = match request.uri().path() {
+    let started = tokio::time::Instant::now();
+    let deadline = started + context.cfg.limits.request_timeout;
+    let path = request.uri().path().to_owned();
+    if path == "/shamir/v1/auth/begin" || path == "/shamir/v1/auth/finish" {
+        let request_peer = peer(context.peer.addr, context.peer.tls, request.headers());
+        return Ok(super::routes::handle_login(
+            request,
+            context.login.clone(),
+            request_peer,
+            context.cfg.hsts,
+            started,
+            context.cfg.limits.request_timeout,
+            context.write_timeout_override.clone(),
+        )
+        .await);
+    }
+    let ws_route = match path.as_str() {
         "/shamir/v1/ws" if context.cfg.endpoints.ws => Some(WsRoute::Native),
         "/shamir/v1/ws/browser" if context.cfg.endpoints.ws => Some(WsRoute::Browser),
         _ => None,
@@ -50,9 +71,6 @@ where
     if let Some(route) = ws_route {
         return super::routes::ws::handler::handle_ws(request, context, route).await;
     }
-    let started = tokio::time::Instant::now();
-    let deadline = started + context.cfg.limits.request_timeout;
-    let path = request.uri().path().to_owned();
     let endpoint = if path == "/shamir/v1/ws" {
         Endpoint::Ws
     } else {
@@ -365,6 +383,7 @@ where
     }
     Ok(r)
 }
+
 #[derive(Debug)]
 enum BodyError {
     TooLarge,

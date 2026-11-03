@@ -2,6 +2,7 @@
 
 /// Shared response-byte budget and reservations.
 pub mod byte_budget;
+pub mod http_login;
 /// REST bearer-token authentication and execution.
 pub mod http_rest;
 /// HTTP WebSocket channel security and admission.

@@ -72,6 +72,7 @@ fn make_config(temp: &TempDir, max_conns: usize) -> Config {
             tx: Default::default(),
             cursors: Default::default(),
             auth_init_rate_per_second: 1000,
+            login_enumeration_hardening: true,
             enable_experimental_migration_api: false,
         },
         audit: Default::default(),

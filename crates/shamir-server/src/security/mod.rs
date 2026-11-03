@@ -9,4 +9,4 @@ pub mod service;
 pub mod tokens;
 pub mod user_directory;
 
-pub use perimeter::{byte_budget, http_rest, http_ws, tls};
+pub use perimeter::{byte_budget, http_login, http_rest, http_ws, tls};

@@ -63,6 +63,7 @@ const KEY_LOCKOUT_SNAPSHOT: &str = "lockout_snapshot";
 const KEY_TOKEN_KEY: &str = "token_key";
 /// Periodic dump of `InMemoryRateLimiter` token buckets.
 const KEY_RATELIMIT_SNAPSHOT: &str = "ratelimit_snapshot";
+const LOGIN_LISTENER_ID_PREFIX: &str = "http_login_listener_id:";
 
 // ---------------------------------------------------------------------------
 // Persisted blobs (one per logical chunk)
@@ -458,6 +459,36 @@ impl ServerMetaStore {
         self.meta
             .remove(KEY_TOKEN_KEY.as_bytes())
             .expect("remove token_key test fixture");
+    }
+
+    /// Set a listener-ID row for strict-length regression tests.
+    #[cfg(test)]
+    pub(crate) fn set_http_login_listener_id_for_test(&self, addr: &str, bytes: &[u8]) {
+        let key = format!("{LOGIN_LISTENER_ID_PREFIX}{addr}");
+        self.meta
+            .insert(key.as_bytes(), bytes)
+            .expect("set listener ID test fixture");
+    }
+
+    /// Get or durably create the random identity for one configured HTTP login listener.
+    pub fn http_login_listener_id(&self, addr: &str) -> Result<[u8; 16], MetaError> {
+        let _guard = self.write_lock.lock();
+        let key = format!("{LOGIN_LISTENER_ID_PREFIX}{addr}");
+        if let Some(value) = self.meta.get(key.as_bytes())? {
+            if value.len() != 16 {
+                return Err(MetaError::Encoding(format!(
+                    "{key} must contain exactly 16 bytes"
+                )));
+            }
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&value);
+            return Ok(id);
+        }
+        let mut id = [0u8; 16];
+        try_random_bytes(&mut id)?;
+        self.meta.insert(key.as_bytes(), id.as_slice())?;
+        self.persist()?;
+        Ok(id)
     }
 
     /// Return the persistent v1 API-token MAC key as a zeroizing copy.

@@ -91,6 +91,9 @@ listeners: [
     ## Wildcard Origin entries (for example https://*.example.com) never match on kind: http;
     ## Origin checks here use exact matching. Origin policy does not affect REST routes.
     ## Browser ws:// is available only on loopback plaintext listeners.
+    ## HTTP REST listener. Password login is disabled unless login.enabled is true.
+    ## Login is loopback plaintext or direct TLS; external_tls describes a trusted
+    ## TLS-terminating proxy with a loopback backend and HTTPS-only Origins.
     ## {
     ##     kind: http
     ##     addr: 127.0.0.1:7340
@@ -100,7 +103,7 @@ listeners: [
     ##     allow_plaintext_remote: false
     ##     allow_plaintext_write: false
     ##     allow_self_signed: false
-    ##     ## browser_origin_allowlist is WebSocket-only; REST does not use it.
+    ##     ## browser_origin_allowlist is required for external_tls login; WebSocket also uses it.
     ##     max_request_body_bytes: 16777216
     ##     head_timeout_ms: 5000
     ##     body_timeout_ms: 30000
@@ -110,6 +113,12 @@ listeners: [
     ##     ## Empty host_authority_allowlist rejects browser requests (400).
     ##     ## Authorities are canonical: lowercase host, bracketed IPv6, no default port.
     ##     host_authority_allowlist: [app.example.com]
+    ##     external_tls: false
+    ##     login: { enabled: false, authority_allowlist: [], listener_id: null }
+    ##     ## To enable login, select TLS or the constrained external_tls profile and set explicit policy.
+    ##     ## Each enabled HTTP listener gets its persisted listener identity from server_meta unless listener_id is supplied.
+    ##     ## Startup publishes a count-only KDF-ineligible account gauge and WARN; it never logs account identifiers.
+    ##     ## Login's bounded pending challenges and audit queue drain with the listener task on shutdown.
     ## }
 ]
 
@@ -118,7 +127,15 @@ tls: {
     key_path:  /var/lib/shamir-db/key.pem
 }
 
+tokens: {
+    ## Login token lifetime is seconds (1..=86400); read-write login tokens are opt-in.
+    login_ttl: 86400
+    login_allow_read_write: false
+}
+
 security: {
+    ## HTTP login hardening requires the stored KDF tuple to equal kdf_defaults.
+    login_enumeration_hardening: true
     connection: {
         ## Slow-loris timeout for `auth_init`. Real clients send within
         ## ~50 ms; 5000 ms is comfortably above network jitter.

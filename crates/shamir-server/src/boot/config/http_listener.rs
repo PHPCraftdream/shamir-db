@@ -1,9 +1,11 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 use serde::Deserialize;
 
 use crate::boot::config::{ConfigError, ListenerConfig, ListenerKind};
-use crate::http_ws::browser::policy::canonical_authority;
+use crate::http_ws::browser::policy::canonical_authority as canonical_ws_authority;
+
+use super::login_listener::{canonical_authority, parse_listener_id};
 
 /// HTTP listener policy and transport limits.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -29,6 +31,12 @@ pub struct HttpListenerSettings {
     /// Allows read-write tokens on remote plaintext.
     #[serde(default)]
     pub allow_plaintext_write: bool,
+    /// The public edge terminates TLS before forwarding to this loopback listener.
+    #[serde(default)]
+    pub external_tls: bool,
+    /// Password login configuration.
+    #[serde(default)]
+    pub login: super::login_listener::LoginListenerSettings,
     /// Opts into remote self-signed certificate use. Runtime refusal and SPKI pin printing are wired in T3b-3.
     #[serde(default)]
     pub allow_self_signed: bool,
@@ -50,6 +58,8 @@ impl Default for HttpListenerSettings {
             tls: None,
             allow_plaintext_remote: false,
             allow_plaintext_write: false,
+            external_tls: false,
+            login: super::login_listener::LoginListenerSettings::default(),
             allow_self_signed: false,
             trusted_proxies: Vec::new(),
             host_authority_allowlist: Vec::new(),
@@ -58,6 +68,19 @@ impl Default for HttpListenerSettings {
 }
 
 impl HttpListenerSettings {
+    fn validate_https_origin(value: &str) -> Result<(), String> {
+        let authority = value
+            .strip_prefix("https://")
+            .ok_or_else(|| "origin must use https".to_string())?;
+        if authority.is_empty() || authority.contains(['/', '?', '#', '@']) {
+            return Err("origin must contain only scheme and authority".into());
+        }
+        if canonical_authority(authority, true)? != authority {
+            return Err("origin authority is not canonical".into());
+        }
+        Ok(())
+    }
+
     /// Validates HTTP policy, required TLS selection, and listener limits.
     pub fn validate(
         &self,
@@ -124,12 +147,90 @@ impl HttpListenerSettings {
             ));
         }
         for authority in &self.host_authority_allowlist {
-            let canonical = canonical_authority(authority, tls);
+            let canonical = canonical_ws_authority(authority, tls);
             if canonical.as_deref() != Some(authority.as_str()) {
                 return Err(invalid(format!(
                     "host_authority_allowlist entry `{authority}` is not canonical for this listener scheme"
                 )));
             }
+        }
+        if self.login.enabled {
+            let invalid_login =
+                |message: &str| ConfigError::Validation(format!("listeners[{idx}]: {message}"));
+            if tls && self.external_tls {
+                return Err(invalid_login(
+                    "external_tls is invalid when the listener uses TLS",
+                ));
+            }
+            if !tls && self.allow_plaintext_remote {
+                return Err(invalid_login(
+                    "login cannot be enabled with allow_plaintext_remote",
+                ));
+            }
+            if head_timeout_ms > 5_000 {
+                return Err(invalid_login(
+                    "login effective head timeout must be at most 5000 ms",
+                ));
+            }
+            if listener.kdf_override.is_some() {
+                return Err(invalid_login(
+                    "kdf_override is forbidden on login listeners",
+                ));
+            }
+            if !tls && !self.external_tls && !addr.ip().is_loopback() {
+                return Err(invalid_login(
+                    "direct plaintext login requires a loopback bind",
+                ));
+            }
+            if self.external_tls {
+                if !addr.ip().is_loopback() || self.trusted_proxies.is_empty() {
+                    return Err(invalid_login(
+                        "external_tls requires loopback bind and non-empty trusted_proxies",
+                    ));
+                }
+                if self.login.authority_allowlist.is_empty() {
+                    return Err(invalid_login(
+                        "external_tls requires explicit non-empty authority_allowlist",
+                    ));
+                }
+                let mut origins: Vec<&str> = Vec::new();
+                for origin in &listener.browser_origin_allowlist {
+                    Self::validate_https_origin(origin).map_err(|_| {
+                        invalid_login("external_tls requires canonical HTTPS origins")
+                    })?;
+                    if origins.contains(&origin.as_str()) {
+                        return Err(invalid_login(
+                            "browser_origin_allowlist contains duplicates",
+                        ));
+                    }
+                    origins.push(origin.as_str());
+                }
+                if origins.is_empty() {
+                    return Err(invalid_login(
+                        "external_tls requires canonical HTTPS origins",
+                    ));
+                }
+            } else if tls && !addr.ip().is_loopback() && self.login.authority_allowlist.is_empty() {
+                return Err(invalid_login(
+                    "direct non-loopback TLS login requires explicit authority_allowlist",
+                ));
+            }
+            let mut canonical = Vec::new();
+            for authority in &self.login.authority_allowlist {
+                let value = canonical_authority(authority, tls || self.external_tls).map_err(
+                    |message| invalid_login(&format!("invalid login authority: {message}")),
+                )?;
+                if canonical.contains(&value) {
+                    return Err(invalid_login(
+                        "login authority_allowlist contains canonical duplicates",
+                    ));
+                }
+                canonical.push(value);
+            }
+        }
+        if let Some(id) = &self.login.listener_id {
+            parse_listener_id(id)
+                .map_err(|message| invalid(format!("login.listener_id {message}")))?;
         }
         if !listener.browser_origin_allowlist.is_empty() {
             shamir_transport_ws::BrowserOriginPolicy::try_allow(
@@ -141,7 +242,7 @@ impl HttpListenerSettings {
             let (address, prefix) = proxy
                 .split_once('/')
                 .ok_or_else(|| invalid(format!("trusted_proxies entry `{proxy}` must be CIDR")))?;
-            let ip: std::net::IpAddr = address.parse().map_err(|error| {
+            let ip: IpAddr = address.parse().map_err(|error| {
                 invalid(format!(
                     "trusted_proxies entry `{proxy}` has invalid address: {error}"
                 ))

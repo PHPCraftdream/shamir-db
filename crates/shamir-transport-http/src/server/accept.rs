@@ -1,5 +1,8 @@
-use super::routes::ws::{HeadOk, UpgradeHead, UpgradedIo, WsReject, WsRoute, WsUpgrade};
+use super::routes::ws::{
+    HeadOk, UpgradeHead, UpgradedIo, WsAdmission, WsReject, WsRoute, WsUpgrade,
+};
 use super::service::{handle, peer, Context};
+use crate::server::routes::{LoginRoutes, NoLogin, RouteServices};
 use crate::{
     config::HttpServerConfig,
     framing::guarded_io::GuardedIo,
@@ -49,7 +52,7 @@ pub fn tls13_config(
     Ok(Arc::new(tls))
 }
 
-/// Serves HTTP/1.1 connections and gracefully drains tracked tasks on cancellation.
+/// Serves HTTP/1.1 connections with disabled login and WebSocket hooks.
 pub async fn serve<G, E, A>(
     listener: TcpListener,
     cfg: Arc<HttpServerConfig>,
@@ -70,7 +73,41 @@ where
         exec,
         admission,
         shutdown,
-        Arc::new(NoWs),
+        RouteServices {
+            login: Arc::new(NoLogin),
+            ws: Arc::new(NoWs),
+        },
+    )
+    .await
+}
+
+/// Serves HTTP/1.1 connections with an application-provided login hook.
+pub async fn serve_with_login<G, E, A, L>(
+    listener: TcpListener,
+    cfg: Arc<HttpServerConfig>,
+    gate: Arc<G>,
+    exec: Arc<E>,
+    admission: Arc<A>,
+    login: Arc<L>,
+    shutdown: CancellationToken,
+) -> Result<(), ServeError>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    A: ConnAdmission,
+    L: LoginRoutes,
+{
+    serve_inner(
+        listener,
+        cfg,
+        gate,
+        exec,
+        admission,
+        shutdown,
+        RouteServices {
+            login,
+            ws: Arc::new(NoWs),
+        },
     )
     .await
 }
@@ -91,14 +128,47 @@ where
     A: ConnAdmission,
     W: WsUpgrade<G::Grant>,
 {
-    serve_inner(listener, cfg, gate, exec, admission, shutdown, ws).await
+    serve_inner(
+        listener,
+        cfg,
+        gate,
+        exec,
+        admission,
+        shutdown,
+        RouteServices {
+            login: Arc::new(NoLogin),
+            ws,
+        },
+    )
+    .await
 }
 
-struct NoWs;
+/// Serves HTTP/1.1 connections with login and WebSocket routes together.
+pub async fn serve_with_routes<G, E, A, L, W>(
+    listener: TcpListener,
+    cfg: Arc<HttpServerConfig>,
+    gate: Arc<G>,
+    exec: Arc<E>,
+    admission: Arc<A>,
+    shutdown: CancellationToken,
+    routes: RouteServices<L, W>,
+) -> Result<(), ServeError>
+where
+    G: TokenGate,
+    E: RestExecutor<G::Grant>,
+    A: ConnAdmission,
+    L: LoginRoutes,
+    W: WsUpgrade<G::Grant>,
+{
+    serve_inner(listener, cfg, gate, exec, admission, shutdown, routes).await
+}
+
+pub(crate) struct NoWs;
 
 impl<G: Send + 'static> WsUpgrade<G> for NoWs {
     type HeadState = ();
     type Session = ();
+
     fn check_head(
         &self,
         _route: WsRoute,
@@ -111,35 +181,38 @@ impl<G: Send + 'static> WsUpgrade<G> for NoWs {
             close: false,
         })
     }
+
     fn admit(
         &self,
         _route: WsRoute,
         _head: HeadOk<Self::HeadState>,
         _grant: Option<G>,
         _peer: crate::gate::PeerInfo,
-    ) -> Result<(Self::Session, Vec<(http::HeaderName, http::HeaderValue)>), WsReject> {
+    ) -> Result<WsAdmission<Self::Session>, WsReject> {
         Err(WsReject {
             status: StatusCode::NOT_FOUND,
             retry_after: None,
             close: false,
         })
     }
+
     async fn run(&self, _session: Self::Session, _io: UpgradedIo, _shutdown: CancellationToken) {}
 }
 
-async fn serve_inner<G, E, A, W>(
+async fn serve_inner<G, E, A, L, W>(
     listener: TcpListener,
     cfg: Arc<HttpServerConfig>,
     gate: Arc<G>,
     exec: Arc<E>,
     admission: Arc<A>,
     shutdown: CancellationToken,
-    ws: Arc<W>,
+    routes: RouteServices<L, W>,
 ) -> Result<(), ServeError>
 where
     G: TokenGate,
     E: RestExecutor<G::Grant>,
     A: ConnAdmission,
+    L: LoginRoutes,
     W: WsUpgrade<G::Grant>,
 {
     let tls_config = cfg
@@ -178,7 +251,8 @@ where
                 let cfg = cfg.clone();
                 let gate = gate.clone();
                 let exec = exec.clone();
-                let ws = ws.clone();
+                let ws = routes.ws.clone();
+                let login = routes.login.clone();
                 let token = shutdown.clone();
                 let tls_config = tls_config.clone();
                 tasks.spawn(async move {
@@ -200,6 +274,7 @@ where
                     } else {
                         Box::new(stream)
                     };
+                    let write_timeout_override = Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let guarded = GuardedIo::new(
                         stream,
                         cfg.limits.max_head_bytes,
@@ -208,6 +283,8 @@ where
                         cfg.hsts,
                         hold_rx,
                     )
+                    .with_login_errors(login.enabled())
+                    .with_write_timeout_override(write_timeout_override.clone())
                     .with_timeouts(
                         cfg.limits.head_timeout,
                         cfg.limits.request_timeout,
@@ -224,6 +301,8 @@ where
                         holds: hold_tx,
                         ws,
                         upgrade: tokio::sync::Mutex::new(Some(upgrade_tx)),
+                        login,
+                        write_timeout_override,
                     });
                     let service = service_fn(move |request| handle(request, service_context.clone()));
                     let mut builder = http1::Builder::new();
@@ -276,7 +355,6 @@ where
                                 tokio::io::AsyncWriteExt::shutdown(&mut guarded),
                             )
                             .await;
-                            // Linger: keep reading so a peer that still writes is not reset before it has read the final response.
                             tokio::select! {
                                 _ = token.cancelled() => {}
                                 _ = tokio::time::timeout(LINGER_DEADLINE, guarded.discard_inbound(LINGER_DISCARD_LIMIT)) => {}
