@@ -199,7 +199,6 @@ async fn rv_transport_ws_b8ed1366_raw_heartbeat_pong_does_not_consume_control_bu
 struct PointerSink(Option<*const u8>);
 
 #[tokio::test]
-#[tokio::test]
 async fn rv_transport_ws_b8ed1366_heartbeat_pong_does_not_consume_control_budget() {
     let (server_io, client_io) = duplex(64 * 1024);
     let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;

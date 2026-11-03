@@ -2,29 +2,7 @@
 
 use serde::Serialize;
 
-use shamir_connect::server::session::Session;
-use shamir_connect::server::token::Verified;
-
 const NS_PER_HOUR: u64 = 3_600_000_000_000;
-
-/// Build a token session, absolute deadline, and fresh nonzero session id.
-pub(crate) fn new_binding(
-    grant: &Verified,
-    username: String,
-    opened_at_ns: u64,
-    session_max_age_hours: u64,
-) -> Result<(Session, u64, Vec<u8>), ()> {
-    let sid = generate_sid()?;
-    let deadline = session_deadline(
-        opened_at_ns,
-        grant.state.record().expires_at_ns(),
-        session_max_age_hours,
-    );
-    let session = Session::for_token(grant, username, opened_at_ns, sid);
-    let binding = encode_binding(&sid, deadline)?;
-    Ok((session, deadline, binding))
-}
-
 /// Compute the earlier token/session expiry, saturating overflow to token expiry.
 pub(crate) fn session_deadline(opened_at_ns: u64, token_expiry_ns: u64, hours: u64) -> u64 {
     hours

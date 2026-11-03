@@ -68,6 +68,17 @@ async fn rv_transport_ws_b0f1151c_shutdown_sends_close_1000() {
     }
 }
 
+#[test]
+fn close_reason_covers_token_ws_codes() {
+    assert_eq!(close_reason(1013), "server_busy");
+    assert_eq!(close_reason(4000), "authentication_failed");
+    assert_eq!(close_reason(4010), "token_sid_mismatch");
+    assert_eq!(close_reason(4011), "token_revoked");
+    assert_eq!(close_reason(4012), "token_expired");
+    assert_eq!(close_reason(4013), "token_channel_denied");
+    assert_eq!(close_reason(4014), "token_plaintext_write_denied");
+}
+
 /// RV-TRANSPORT-WS-B7D06174: owned prereserved data is sent without rebuilding.
 #[tokio::test]
 async fn rv_transport_ws_b7d06174_prereserved_writer_sends_buffer_verbatim() {

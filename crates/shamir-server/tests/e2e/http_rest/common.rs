@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 use tokio::time::Duration;
 use zeroize::Zeroizing;
 
-pub(super) const ADMIN_PASSWORD: &[u8] = b"http-rest-admin-password";
+pub(crate) const ADMIN_PASSWORD: &[u8] = b"http-rest-admin-password";
 
 pub struct Harness {
     pub handle: ServerHandle,
@@ -155,8 +155,10 @@ impl Harness {
     }
 
     pub async fn token_with_ttl(&self, label: &str, mode: TokenMode, ttl_secs: u64) -> String {
-        self.token_with_options(label, mode, ttl_secs, TokenChannels::Both)
+        self.token_with_options(label, mode, ttl_secs, TokenChannels::Both, None)
             .await
+            .token
+            .to_string()
     }
 
     pub async fn token_with_channels(
@@ -165,16 +167,20 @@ impl Harness {
         mode: TokenMode,
         channels: TokenChannels,
     ) -> String {
-        self.token_with_options(label, mode, 3600, channels).await
+        self.token_with_options(label, mode, 3600, channels, None)
+            .await
+            .token
+            .to_string()
     }
 
-    async fn token_with_options(
+    pub async fn token_with_options(
         &self,
         label: &str,
         mode: TokenMode,
         ttl_secs: u64,
         channels: TokenChannels,
-    ) -> String {
+        databases: Option<Vec<String>>,
+    ) -> shamir_server::tokens::CreatedToken {
         self.handle
             .token_service
             .create(NewToken {
@@ -184,28 +190,15 @@ impl Harness {
                 ttl_secs: Some(ttl_secs),
                 mode,
                 channels,
-                databases: None,
+                databases,
             })
             .await
             .expect("create token")
-            .token
-            .to_string()
     }
 
     pub async fn token(&self, label: &str, mode: TokenMode) -> String {
-        self.handle
-            .token_service
-            .create(NewToken {
-                owner_user_id: self.owner,
-                owner_roles: self.owner_roles.clone(),
-                label: label.into(),
-                ttl_secs: Some(3600),
-                mode,
-                channels: TokenChannels::Both,
-                databases: None,
-            })
+        self.token_with_options(label, mode, 3600, TokenChannels::Both, None)
             .await
-            .expect("create token")
             .token
             .to_string()
     }
@@ -245,7 +238,7 @@ pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
 /// Opens `db://default` (other r-x) and `default/main` (other --x): a token
 /// session is `Actor::User` (TOKEN_API section 6), and boot creates both
 /// System-owned at `0o700`, which hides even tables the token owner created.
-pub(super) async fn grant_default_main_access(client: &shamir_client::Client) {
+pub(crate) async fn grant_default_main_access(client: &shamir_client::Client) {
     let key = derive_session_hmac_key(&client.session_id());
     let mut batch = Batch::new();
     for (alias, resource, mode) in [

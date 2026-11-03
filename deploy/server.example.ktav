@@ -85,8 +85,11 @@ listeners: [
         ]
     }
     ## HTTP listener exposes REST plus /shamir/v1/ws and /shamir/v1/ws/browser.
-    ## Browser route requires Origin; empty Host allowlist rejects requests with HTTP 400.
+    ## Browser route requires Origin; empty Host allowlist rejects browser requests (400),
+    ## so the browser route is disabled until explicit canonical authorities are configured.
     ## Authorities must be lowercase and omit scheme-default ports (80 ws, 443 wss).
+    ## Wildcard Origin entries (for example https://*.example.com) never match on kind: http;
+    ## Origin checks here use exact matching. Origin policy does not affect REST routes.
     ## Browser ws:// is available only on loopback plaintext listeners.
     ## {
     ##     kind: http
@@ -105,6 +108,7 @@ listeners: [
     ##     trusted_proxies: []
     ##     browser_origin_allowlist: [https://app.example.com]
     ##     ## Empty host_authority_allowlist rejects browser requests (400).
+    ##     ## Authorities are canonical: lowercase host, bracketed IPv6, no default port.
     ##     host_authority_allowlist: [app.example.com]
     ## }
 ]

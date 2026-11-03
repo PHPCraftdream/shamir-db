@@ -56,19 +56,19 @@ pub(crate) fn classify_request(
         | DbRequest::ChangePasswordChallenge { .. }
         | DbRequest::ChangePasswordVerify(_) => None,
     };
-    if matches!(
-        request,
-        DbRequest::TxBegin { .. }
-            | DbRequest::TxExecute { .. }
-            | DbRequest::TxCommit { .. }
-            | DbRequest::TxRollback { .. }
-            | DbRequest::CreateCursor { .. }
-            | DbRequest::FetchNext { .. }
-            | DbRequest::CancelCursor { .. }
-    ) {
-        if endpoint == Endpoint::Rest {
-            return Decision::NotSupported("not_supported_over_rest");
-        }
+    if endpoint == Endpoint::Rest
+        && matches!(
+            request,
+            DbRequest::TxBegin { .. }
+                | DbRequest::TxExecute { .. }
+                | DbRequest::TxCommit { .. }
+                | DbRequest::TxRollback { .. }
+                | DbRequest::CreateCursor { .. }
+                | DbRequest::FetchNext { .. }
+                | DbRequest::CancelCursor { .. }
+        )
+    {
+        return Decision::NotSupported("not_supported_over_rest");
     }
     if let DbRequest::Execute { batch, .. } = request {
         if mode == TokenMode::ReadOnly && batch_has_write(batch) {

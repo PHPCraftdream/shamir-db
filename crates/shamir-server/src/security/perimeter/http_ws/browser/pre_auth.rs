@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use dashmap::{mapref::entry::Entry, DashMap};
+use dashmap::DashMap;
 use shamir_collections::THasher;
 use shamir_connect::server::lockout::{subnet_of, Subnet};
 
@@ -33,19 +33,33 @@ impl PreAuthAdmission {
     ) -> Option<PreAuthPermit> {
         reserve(&self.global, GLOBAL_LIMIT)?;
         let subnet = subnet_of(address);
-        let counter = match self.subnet_counts.entry(subnet) {
-            Entry::Occupied(entry) => Arc::clone(entry.get()),
-            Entry::Vacant(entry) => Arc::clone(entry.insert(Arc::new(AtomicUsize::new(0)))),
+        let counter = {
+            let entry = self
+                .subnet_counts
+                .entry(subnet)
+                .or_insert_with(|| Arc::new(AtomicUsize::new(0)));
+            if reserve(entry.value(), SUBNET_LIMIT).is_none() {
+                drop(entry);
+                self.global.fetch_sub(1, Ordering::AcqRel);
+                return None;
+            }
+            Arc::clone(entry.value())
         };
-        if reserve(&counter, SUBNET_LIMIT).is_none() {
-            self.global.fetch_sub(1, Ordering::AcqRel);
-            return None;
-        }
         Some(PreAuthPermit {
             admission: Arc::clone(self),
             subnet,
             counter,
         })
+    }
+    /// Returns current global and subnet reservations for deterministic tests.
+    #[cfg(test)]
+    pub(crate) fn in_use(&self, address: std::net::IpAddr) -> (usize, usize) {
+        let subnet = subnet_of(address);
+        let subnet_count = self
+            .subnet_counts
+            .get(&subnet)
+            .map_or(0, |counter| counter.load(Ordering::Acquire));
+        (self.global.load(Ordering::Acquire), subnet_count)
     }
 }
 

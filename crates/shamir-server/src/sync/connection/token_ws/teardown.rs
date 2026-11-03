@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::engine::db_handler::ShamirDbHandler;
 use crate::engine::subscriptions::SubscriptionRegistry;
+use crate::http_ws::cancel_registry::TokenWsRegistration;
 use crate::security::tokens::TokenService;
 
 /// RAII cleanup shared with in-flight dispatches so it runs after their final exit.
@@ -13,6 +14,7 @@ pub(crate) struct TokenSessionTeardown {
     handler: Arc<ShamirDbHandler>,
     sid: [u8; 32],
     registry: Arc<SubscriptionRegistry>,
+    registration: Option<TokenWsRegistration>,
     active_metric: AtomicBool,
 }
 
@@ -23,12 +25,14 @@ impl TokenSessionTeardown {
         handler: Arc<ShamirDbHandler>,
         sid: [u8; 32],
         registry: Arc<SubscriptionRegistry>,
+        registration: TokenWsRegistration,
     ) -> Self {
         Self {
             service,
             handler,
             sid,
             registry,
+            registration: Some(registration),
             active_metric: AtomicBool::new(false),
         }
     }
@@ -39,8 +43,9 @@ impl TokenSessionTeardown {
         self.active_metric.store(true, Ordering::Release);
     }
 
-    fn cleanup(&self) {
+    fn cleanup(&mut self) {
         self.registry.close_all();
+        drop(self.registration.take());
         self.service.sessions().remove(&self.sid);
         drop(self.handler.tx_registry().remove_for_session(&self.sid));
         drop(

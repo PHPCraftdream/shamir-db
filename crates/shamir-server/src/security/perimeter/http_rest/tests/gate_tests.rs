@@ -7,9 +7,7 @@ use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
 use shamir_connect::server::lockout::Subnet;
-use shamir_connect::server::token::{
-    Endpoint as TokenEndpoint, OwnerFloors, TokenChannels, TokenMode,
-};
+use shamir_connect::server::token::{OwnerFloors, TokenChannels, TokenMode};
 use shamir_connect::server::TokenSessionStore;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -154,6 +152,7 @@ async fn shut(f: &Fixture) {
     f.gate.shutdown().await;
 }
 
+#[tokio::test]
 async fn native_ws_auth_accepts_ws_token_and_rejects_rest_channel() {
     let f = fixture().await;
     let ws = token(&f, TokenMode::ReadOnly, TokenChannels::Ws).await;
@@ -177,6 +176,55 @@ async fn native_ws_auth_accepts_ws_token_and_rejects_rest_channel() {
         .await;
     assert!(matches!(decision, GateDecision::Forbidden(code) if code == "token_channel_denied"));
     shut(&f).await;
+}
+
+#[tokio::test]
+async fn native_ws_plaintext_read_write_is_denied_and_read_only_allowed() {
+    let f = fixture().await;
+    let gate = RestGate::new(
+        f.service.clone(),
+        Arc::new(|| Some(NOW)),
+        RestGateRails {
+            plaintext_remote: true,
+            allow_plaintext_write: false,
+        },
+    );
+    let rw = token(&f, TokenMode::ReadWrite, TokenChannels::Ws).await;
+    assert!(matches!(
+        gate.authenticate(
+            AuthHeader::Single(format!("Bearer {rw}").as_bytes()),
+            HttpEndpoint::Ws,
+            peer_for(1),
+        )
+        .await,
+        GateDecision::Forbidden(code) if code == "token_plaintext_write_denied"
+    ));
+    let ro = token(&f, TokenMode::ReadOnly, TokenChannels::Ws).await;
+    assert!(matches!(
+        gate.authenticate(
+            AuthHeader::Single(format!("Bearer {ro}").as_bytes()),
+            HttpEndpoint::Ws,
+            peer_for(2),
+        )
+        .await,
+        GateDecision::Allow(_)
+    ));
+    gate.shutdown().await;
+    shut(&f).await;
+    let entries = f.audit.entries.lock().expect("audit entries").clone();
+    let exposed: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event == "api_token_exposed")
+        .collect();
+    assert_eq!(exposed.len(), 1);
+    let details = rmp_serde::from_slice::<(String, [u8; 16], [u8; 16])>(
+        &exposed[0].details_canonical_msgpack,
+    )
+    .expect("WS exposure details");
+    let id = shamir_connect::server::token::parse_token(rw.as_bytes())
+        .expect("token id")
+        .id;
+    assert_eq!(details, ("ws".into(), id.0, [7; 16]));
 }
 
 #[tokio::test]
@@ -221,6 +269,7 @@ async fn browser_verification_reports_channel_and_plaintext_rails() {
     plain.shutdown().await;
     shut(&f).await;
 }
+
 #[tokio::test]
 async fn gate_accepts_valid_read_only_and_read_write_tokens() {
     let f = fixture().await;

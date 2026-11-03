@@ -50,9 +50,6 @@ pub(crate) struct GuardedIo<T> {
     request_active: bool,
 }
 impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
-    pub(crate) fn into_inner(self) -> T {
-        self.inner
-    }
     pub(crate) fn new(
         inner: T,
         max_bytes: usize,

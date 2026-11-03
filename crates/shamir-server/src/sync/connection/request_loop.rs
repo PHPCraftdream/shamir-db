@@ -213,7 +213,6 @@ async fn run_request_loop<R, W>(
     let heartbeat_interval = ctx.ws_ping_interval;
     let heartbeat_timeout = ctx.ws_pong_timeout;
     let mut writer_handle = scope.spawn(async move {
-        let mut rx = rx;
         let mut writer = writer;
         run_writer_task(
             &mut writer,

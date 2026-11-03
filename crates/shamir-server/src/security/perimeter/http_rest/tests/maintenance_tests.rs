@@ -285,7 +285,6 @@ async fn failures_produce_one_bounded_summary_and_account_overflow_and_drops() {
         u64,
         u64,
     ) = rmp_serde::from_slice(&summaries[0].details_canonical_msgpack).expect("first summary");
-    assert_eq!((first.0.as_str(), first.1.as_str()), ("rest", "invalid"));
     assert_eq!((first.2, first.3, first.5, first.6), (320, 256, 0, 64));
     let second: (
         String,
@@ -297,7 +296,6 @@ async fn failures_produce_one_bounded_summary_and_account_overflow_and_drops() {
         u64,
         u64,
     ) = rmp_serde::from_slice(&summaries[1].details_canonical_msgpack).expect("second summary");
-    assert_eq!((second.0.as_str(), second.1.as_str()), ("rest", "invalid"));
     assert_eq!((second.2, second.3, second.5, second.6), (1, 1, 0, 0));
 }
 
@@ -331,10 +329,6 @@ async fn exposure_notice_channel_full_counts_drops_in_separate_summary_field() {
         u64,
         u64,
     ) = rmp_serde::from_slice(&summary.details_canonical_msgpack).expect("summary details");
-    assert_eq!(
-        (details.0.as_str(), details.1.as_str()),
-        ("rest", "invalid")
-    );
     assert_eq!(details.5, 0);
     assert_eq!(details.7, 1);
 }
@@ -627,10 +621,6 @@ async fn failures_aggregate_once_and_append_off_runtime_thread() {
     let entries = appender.entries.lock().expect("entries").clone();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].event, "api_token_auth_failures");
-    let summary = entries
-        .iter()
-        .find(|entry| entry.event == "api_token_auth_failures")
-        .expect("failure summary");
     let details: (
         String,
         String,
@@ -640,7 +630,7 @@ async fn failures_aggregate_once_and_append_off_runtime_thread() {
         u64,
         u64,
         u64,
-    ) = rmp_serde::from_slice(&summary.details_canonical_msgpack).expect("summary");
+    ) = rmp_serde::from_slice(&entries[0].details_canonical_msgpack).expect("summary");
     assert_eq!(
         (details.0.as_str(), details.1.as_str(), details.2),
         ("rest", "invalid", 5)
@@ -686,6 +676,60 @@ async fn service_stop_drains_queued_exposure_and_failure_notices() {
 }
 
 #[tokio::test]
+async fn ws_exposure_audit_summary_carries_ws_channel() {
+    let appender = Arc::new(Capture::new());
+    let worker = maintenance(
+        appender.clone(),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    let id = [0x12; 16];
+    let owner = [0x34; 16];
+    worker.record_exposed(Endpoint::Ws, id, owner, subnet(4), 1);
+    worker.shutdown().await;
+    let entries = appender.entries.lock().expect("entries").clone();
+    let entry = entries
+        .iter()
+        .find(|entry| entry.event == "api_token_exposed")
+        .expect("WS exposure");
+    let details: (String, [u8; 16], [u8; 16]) =
+        rmp_serde::from_slice(&entry.details_canonical_msgpack).expect("WS exposure details");
+    assert_eq!(details, ("ws".into(), id, owner));
+}
+
+#[tokio::test]
+async fn ws_failure_audit_summary_carries_ws_channel() {
+    let appender = Arc::new(Capture::new());
+    let worker = maintenance(
+        appender.clone(),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    worker.record_failure(Endpoint::Ws, subnet(4), 1);
+    worker.shutdown().await;
+    let entries = appender.entries.lock().expect("entries").clone();
+    let failures: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event == "api_token_auth_failures")
+        .collect();
+    assert_eq!(failures.len(), 1);
+    let details: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&failures[0].details_canonical_msgpack).expect("WS failure summary");
+    assert_eq!(details.0, "ws");
+    assert_eq!(details.1, "invalid");
+    assert_eq!((details.2, details.3), (1, 1));
+    assert!(details.4.contains(&Some(subnet(4))));
+}
+
+#[tokio::test]
 async fn exposed_event_contains_canonical_ids_but_no_peer_secret() {
     let appender = Arc::new(Capture::new());
     let worker = maintenance(
@@ -701,7 +745,7 @@ async fn exposed_event_contains_canonical_ids_but_no_peer_secret() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].event, "api_token_exposed");
     assert_eq!(entries[0].user, "");
-    let details: ([u8; 16], [u8; 16]) =
+    let details: (String, [u8; 16], [u8; 16]) =
         rmp_serde::from_slice(&entries[0].details_canonical_msgpack).expect("details");
-    assert_eq!(details, (id, owner));
+    assert_eq!(details, ("rest".into(), id, owner));
 }

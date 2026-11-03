@@ -100,7 +100,7 @@ impl Drop for TokenWsRegistration {
                 let entry = occupied.get_mut();
                 entry.connections = entry.connections.saturating_sub(1);
                 if entry.connections == 0 {
-                    occupied.remove_entry();
+                    let _removed = occupied.remove_entry();
                     #[cfg(test)]
                     self.registry
                         .entry_count

@@ -8,7 +8,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
-use shamir_connect::server::token::{OwnerFloors, TokenChannels, TokenMode, Verified};
+use shamir_connect::server::token::{Endpoint, OwnerFloors, TokenChannels, TokenMode, Verified};
 use shamir_connect::server::TokenSessionStore;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
@@ -89,11 +89,7 @@ async fn fixture(
         .await
         .expect("create token");
     let verified = service
-        .verify(
-            created.token.as_bytes(),
-            shamir_connect::server::token::Endpoint::Rest,
-            NOW,
-        )
+        .verify(created.token.as_bytes(), Endpoint::Rest, NOW)
         .expect("verify token");
     let database = Arc::new(ShamirDb::init_memory().await.expect("memory db"));
     database.create_db("inside").await.expect("create database");
@@ -310,7 +306,7 @@ async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
                 repo: "missing".into(),
                 isolation: None,
             },
-            shamir_connect::server::token::Endpoint::Rest,
+            Endpoint::Rest,
             &conn,
         )
         .await;
@@ -333,7 +329,7 @@ async fn scoped_handler_cannot_call_native_handler_for_denied_scope() {
         .handle(
             &session,
             shamir_query_types::wire::DbRequest::Ping,
-            shamir_connect::server::token::Endpoint::Rest,
+            Endpoint::Rest,
             &conn,
         )
         .await;

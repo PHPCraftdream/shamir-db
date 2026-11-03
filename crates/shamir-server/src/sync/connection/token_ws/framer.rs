@@ -1,14 +1,15 @@
 //! Raw-msgpack WebSocket frame reader and writer for token sessions.
 
 use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use shamir_transport_ws::framing::{
     ws_recv_raw_into_stream_observing, ws_send_sink_raw, HeartbeatState, WsFrameError,
     MAX_WS_FRAME_SIZE,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_tungstenite::tungstenite::error::CapacityError;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error, Message};
 use tokio_tungstenite::WebSocketStream;
 
 use crate::framer::{FrameReader, FrameWriter, FramerError};
@@ -26,11 +27,6 @@ pub(crate) struct TokenWsFrameWriter<S> {
 }
 
 impl<S> TokenWsFrameReader<S> {
-    /// Build a reader with independent heartbeat state.
-    pub(crate) fn new(stream: SplitStream<WebSocketStream<S>>) -> Self {
-        Self::with_heartbeat(stream, HeartbeatState::default())
-    }
-
     /// Build a reader sharing heartbeat state with the writer half.
     pub(crate) fn with_heartbeat(
         stream: SplitStream<WebSocketStream<S>>,
@@ -41,11 +37,6 @@ impl<S> TokenWsFrameReader<S> {
 }
 
 impl<S> TokenWsFrameWriter<S> {
-    /// Build a writer with independent heartbeat state.
-    pub(crate) fn new(stream: SplitSink<WebSocketStream<S>, Message>) -> Self {
-        Self::with_heartbeat(stream, HeartbeatState::default())
-    }
-
     /// Build a writer sharing heartbeat state with the reader half.
     pub(crate) fn with_heartbeat(
         stream: SplitSink<WebSocketStream<S>, Message>,
@@ -139,18 +130,13 @@ fn map_ws_err(error: WsFrameError) -> FramerError {
         WsFrameError::LengthMismatch { .. } => FramerError::Decode("length mismatch".into()),
         WsFrameError::ControlFlood { .. } => FramerError::Decode("control flood".into()),
         WsFrameError::Io(error) => match error {
-            tokio_tungstenite::tungstenite::Error::Capacity(
-                tokio_tungstenite::tungstenite::error::CapacityError::MessageTooLong {
-                    size,
-                    max_size,
-                },
-            ) => FramerError::TooLarge {
-                actual: size,
-                max: max_size,
-            },
-            tokio_tungstenite::tungstenite::Error::Protocol(_) => {
-                FramerError::Decode(error.to_string())
+            Error::Capacity(CapacityError::MessageTooLong { size, max_size }) => {
+                FramerError::TooLarge {
+                    actual: size,
+                    max: max_size,
+                }
             }
+            Error::Protocol(_) => FramerError::Decode(error.to_string()),
             other => FramerError::Io(other.to_string()),
         },
     }

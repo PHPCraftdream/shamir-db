@@ -107,7 +107,6 @@ impl RestHandler {
             metrics::Unit::Count,
             "REST token requests denied by endpoint scope policy"
         );
-        metrics::counter!("shamir_token_request_denied_total", "endpoint" => "ws").increment(0);
         metrics::counter!("shamir_token_request_denied_total", "endpoint" => "rest").increment(0);
         metrics::describe_histogram!(
             "shamir_token_request_duration_seconds",

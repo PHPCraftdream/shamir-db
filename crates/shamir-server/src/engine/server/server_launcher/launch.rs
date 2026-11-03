@@ -31,6 +31,7 @@ use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
 };
 use crate::http_ws::cancel_registry::TokenWsCancelRegistry;
+use crate::http_ws::PreAuthAdmission;
 use crate::ports::DirectoryPorts;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server::boot_error::BootError;
@@ -576,6 +577,7 @@ impl ServerLauncher {
                 .as_bytes(),
         );
         let token_ws_cancel_registry = Arc::new(TokenWsCancelRegistry::default());
+        let pre_auth_admission = Arc::new(PreAuthAdmission::default());
         let token_service = Arc::new(
             crate::security::tokens::TokenService::open(
                 crate::security::tokens::TokenServiceOptions {
@@ -623,6 +625,7 @@ impl ServerLauncher {
                 meta: &meta,
                 token_service: &token_service,
                 token_ws_cancel_registry: &token_ws_cancel_registry,
+                pre_auth_admission: &pre_auth_admission,
                 handler_concrete: &handler_concrete,
                 conn_tasks: &conn_tasks,
             },

@@ -11,10 +11,12 @@ use shamir_transport_http::{serve_with_ws, BodyBudget, ConnAdmission, EndpointSe
 
 use crate::boot::config::{to_http_server_config, ListenerConfig, ListenerKind};
 use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
-use crate::http_ws::{PreAuthAdmission, WsUpgradeService};
+use crate::http_rest::{RestGate, RestGateRails, RestHandler};
+use crate::http_ws::WsUpgradeService;
 use crate::server::boot_error::BootError;
 use shamir_connect::server::token_session::TokenSocketCaps;
-use shamir_tunables::instance_defaults::{WS_PING_INTERVAL, WS_PONG_TIMEOUT};
+use shamir_transport_http::PeerInfo;
+use shamir_tunables::instance_defaults::{CONN_MAX_IN_FLIGHT, WS_PING_INTERVAL, WS_PONG_TIMEOUT};
 
 use super::super::listeners::ListenerEnv;
 use super::proxy::ProxyGate;
@@ -96,7 +98,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
         Arc::clone(env.token_service),
         Arc::clone(env.handler_concrete),
         gate_clock,
-        username_lookup,
+        Arc::clone(&username_lookup),
         rails,
     );
     let gate = Arc::new(gate);
@@ -150,12 +152,23 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
     });
     let task_gate = proxy_gate;
     let task_shutdown = shutdown.child_token();
+    for result in [
+        "success",
+        "invalid",
+        "forbidden",
+        "rate_limited",
+        "unavailable",
+    ] {
+        metrics::counter!("shamir_token_auth_total", "channel" => "ws", "result" => result)
+            .increment(0);
+    }
+    metrics::counter!("shamir_token_request_denied_total", "endpoint" => "ws").increment(0);
     let ws_service = Arc::new(WsUpgradeService {
         gate: Arc::clone(&gate),
         service: Arc::clone(env.token_service),
         handler: Arc::clone(env.handler_concrete),
         registry: Arc::clone(env.token_ws_cancel_registry),
-        pre_auth: Arc::new(PreAuthAdmission::default()),
+        pre_auth: Arc::clone(env.pre_auth_admission),
         tls: settings.tls == Some(true),
         browser_available: settings.tls == Some(true) || address.ip().is_loopback(),
         origins: listener_config.browser_origin_allowlist.clone(),
@@ -168,14 +181,14 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
         session_max_age_hours: env.config.tokens.session_max_age_hours,
         ping_interval: WS_PING_INTERVAL,
         pong_timeout: WS_PONG_TIMEOUT,
-        max_in_flight: 8,
+        max_in_flight: CONN_MAX_IN_FLIGHT,
         resolve_peer: Arc::new({
             let trusted = settings
                 .trusted_proxies
                 .iter()
                 .filter_map(|item| super::proxy::parse_cidr(item))
                 .collect::<Vec<_>>();
-            move |peer| super::proxy::resolve_peer(peer, &trusted)
+            move |peer: &PeerInfo| super::proxy::resolve_peer(peer, &trusted)
         }),
     });
     let span = tracing::Span::current();

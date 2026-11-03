@@ -86,17 +86,15 @@ impl RestGate {
             metrics::Unit::Count,
             "Token authentication outcomes by fixed channel and result labels"
         );
-        for endpoint in [TokenEndpoint::Rest, TokenEndpoint::Ws] {
-            let channel = endpoint_label(endpoint);
-            for result in [
-                "success",
-                "invalid",
-                "forbidden",
-                "rate_limited",
-                "unavailable",
-            ] {
-                metrics::counter!("shamir_token_auth_total", "channel" => channel, "result" => result).increment(0);
-            }
+        for result in [
+            "success",
+            "invalid",
+            "forbidden",
+            "rate_limited",
+            "unavailable",
+        ] {
+            metrics::counter!("shamir_token_auth_total", "channel" => "rest", "result" => result)
+                .increment(0);
         }
         Self {
             service,

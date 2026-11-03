@@ -1,7 +1,5 @@
-use super::{
-    routes::ws::{HeadOk, UpgradeHead, UpgradedIo, WsReject, WsRoute, WsUpgrade},
-    service::{handle, peer, Context},
-};
+use super::routes::ws::{HeadOk, UpgradeHead, UpgradedIo, WsReject, WsRoute, WsUpgrade};
+use super::service::{handle, peer, Context};
 use crate::{
     config::HttpServerConfig,
     framing::guarded_io::GuardedIo,
@@ -21,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
-pub(crate) type BoxedIo = Box<dyn IoStream>;
+type BoxedIo = Box<dyn IoStream>;
 
 /// Inbound bytes discarded after a connection ends before the socket is closed.
 const LINGER_DISCARD_LIMIT: usize = 64 * 1024;
@@ -239,8 +237,7 @@ where
                     let connection_result = tokio::select! {
                         _ = token.cancelled() => {
                             connection.as_mut().graceful_shutdown();
-                            let _ = tokio::time::timeout(cfg.limits.request_timeout, &mut connection).await;
-                            None
+                            tokio::time::timeout(cfg.limits.request_timeout, &mut connection).await.ok()
                         }
                         result = &mut connection => Some(result),
                     };
@@ -254,9 +251,6 @@ where
                             Err(error) => tracing::debug!(%error, "HTTP upgrade handoff failed"),
                         }
                     }
-                    if connection_result.is_none() {
-                        return;
-                    }
                     if let Some(outcome) = connection_result {
                         let connection = *std::pin::Pin::into_inner(connection);
                         if let Some(parts) = connection.into_parts() {
@@ -269,13 +263,20 @@ where
                                 )
                                 .await;
                                 if let Err(error) = drain.unwrap_or_else(|_| {
-                                    Err(io::Error::new(io::ErrorKind::TimedOut, "canned response drain deadline expired"))
+                                    Err(io::Error::new(
+                                        io::ErrorKind::TimedOut,
+                                        "canned response drain deadline expired",
+                                    ))
                                 }) {
                                     tracing::debug!(%error, "HTTP rejection response drain stopped");
                                 }
                             }
-                            let result = tokio::time::timeout(cfg.limits.write_timeout, tokio::io::AsyncWriteExt::shutdown(&mut guarded)).await;
-                            let _ = result;
+                            let _ = tokio::time::timeout(
+                                cfg.limits.write_timeout,
+                                tokio::io::AsyncWriteExt::shutdown(&mut guarded),
+                            )
+                            .await;
+                            // Linger: keep reading so a peer that still writes is not reset before it has read the final response.
                             tokio::select! {
                                 _ = token.cancelled() => {}
                                 _ = tokio::time::timeout(LINGER_DEADLINE, guarded.discard_inbound(LINGER_DISCARD_LIMIT)) => {}
@@ -288,13 +289,12 @@ where
     }
     let deadline = tokio::time::Instant::now() + cfg.limits.request_timeout;
     while !tasks.is_empty() {
-        let Some(result) = tokio::time::timeout_at(deadline, tasks.join_next())
+        if tokio::time::timeout_at(deadline, tasks.join_next())
             .await
-            .ok()
-        else {
+            .is_err()
+        {
             break;
-        };
-        let _ = result;
+        }
     }
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}

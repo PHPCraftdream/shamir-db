@@ -14,20 +14,25 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_tungstenite::WebSocketStream;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
+use super::{TokenSessionTeardown, TokenWsCloseGuard, TokenWsFrameReader, TokenWsFrameWriter};
+use crate::byte_budget;
+use crate::engine::db_handler::ShamirDbHandler;
+use crate::engine::subscriptions::SubscriptionRegistry;
+use crate::framer::{CloseIntent, FrameReader, FrameWriter};
+use crate::http_rest::{HandleDenial, ScopedHandler};
+use crate::http_ws::cancel_registry::TokenWsRegistration;
 use crate::sync::connection::request_loop::WriterMsg;
 use crate::sync::connection::session::writer_task::run_writer_task;
 use crate::sync::connection::support::push_sink::MpscPushSink;
-use crate::sync::connection::token_ws::{TokenSessionTeardown, TokenWsFrameReader, TokenWsFrameWriter};
-use crate::engine::db_handler::ShamirDbHandler;
-use crate::engine::subscriptions::SubscriptionRegistry;
-use crate::sync::framer::{CloseIntent, FrameReader, FrameWriter};
-use crate::security::perimeter::http_rest::{HandleDenial, ScopedHandler};
-use crate::security::perimeter::byte_budget;
 use crate::tokens::TokenService;
-use shamir_transport_http::server::routes::ws::UpgradedIo;
+use shamir_transport_http::UpgradedIo;
+use shamir_transport_ws::framing::MAX_WS_FRAME_SIZE;
 
-/// Dependencies and limits for one authenticated token WebSocket.
+const TOKEN_WS_REVALIDATE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Context shared with the token WebSocket request loop.
 pub(crate) struct TokenLoopContext {
     pub(crate) service: Arc<TokenService>,
     pub(crate) handler: Arc<ShamirDbHandler>,
@@ -39,13 +44,14 @@ pub(crate) struct TokenLoopContext {
     pub(crate) max_in_flight: usize,
     pub(crate) ping_interval: Duration,
     pub(crate) pong_timeout: Duration,
+    pub(crate) registration: TokenWsRegistration,
 }
 
 #[derive(Serialize)]
-struct ErrorReply<'a> {
+pub(super) struct ErrorReply<'a> {
     #[serde(rename = "rid", skip_serializing_if = "Option::is_none")]
-    rid: Option<u32>,
-    error: &'a str,
+    pub(super) rid: Option<u32>,
+    pub(super) error: &'a str,
 }
 
 #[derive(Serialize)]
@@ -56,7 +62,7 @@ struct SuccessReply<'a> {
     res: &'a [u8],
 }
 
-fn encode_prereserved<T: Serialize>(value: &T) -> Option<Vec<u8>> {
+pub(super) fn encode_prereserved<T: Serialize>(value: &T) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(256);
     bytes.extend_from_slice(&[0; 4]);
     rmp_serde::encode::write_named(&mut bytes, value).ok()?;
@@ -67,6 +73,12 @@ fn encode_prereserved<T: Serialize>(value: &T) -> Option<Vec<u8>> {
 
 fn error_message(rid: Option<u32>, code: &'static str) -> Option<WriterMsg> {
     encode_prereserved(&ErrorReply { rid, error: code }).map(|bytes| WriterMsg::Reply(bytes, None))
+}
+
+async fn send_internal_error(sender: &mpsc::Sender<WriterMsg>, rid: Option<u32>) {
+    if let Some(message) = error_message(rid, "internal_error") {
+        let _ = sender.send(message).await;
+    }
 }
 
 fn denied_body(code: &'static str) -> Option<Vec<u8>> {
@@ -114,21 +126,28 @@ impl Drop for CloseSubscriptions {
 /// Run the token request loop over an upgraded WebSocket stream.
 pub(crate) async fn run_token_loop(ctx: TokenLoopContext, stream: WebSocketStream<UpgradedIo>) {
     let heartbeat = shamir_transport_ws::HeartbeatState::default();
-    let (reader, writer) = stream.split();
-    run_token_halves(
-        ctx,
-        TokenWsFrameReader::with_heartbeat(reader, heartbeat.clone()),
-        TokenWsFrameWriter::with_heartbeat(writer, heartbeat),
-    )
-    .await;
+    let (writer, reader) = stream.split();
+    let close_requested = CancellationToken::new();
+    let cleanup_complete = CancellationToken::new();
+    let writer = TokenWsCloseGuard::new(
+        TokenWsFrameWriter::with_heartbeat(writer, heartbeat.clone()),
+        close_requested.clone(),
+        cleanup_complete.clone(),
+    );
+    let reader = TokenWsFrameReader::with_heartbeat(reader, heartbeat);
+    run_token_halves(ctx, reader, writer, close_requested, cleanup_complete).await;
 }
 
-async fn run_token_halves<R, W>(ctx: TokenLoopContext, mut reader: R, writer: W)
-where
+async fn run_token_halves<R, W>(
+    ctx: TokenLoopContext,
+    mut reader: R,
+    writer: W,
+    close_requested: CancellationToken,
+    cleanup_complete: CancellationToken,
+) where
     R: FrameReader + 'static,
     W: FrameWriter + 'static,
 {
-    let grant = Arc::new(ctx.grant);
     let capacity = ctx.max_in_flight.max(1);
     let semaphore = Arc::new(Semaphore::new(capacity));
     let (sender, mut receiver) = mpsc::channel::<WriterMsg>(capacity);
@@ -144,34 +163,38 @@ where
     let shutdown = ctx.shutdown.clone();
     let dispatch_cancel = CancellationToken::new();
     let writer_close = close.clone();
-    let heartbeat = writer.heartbeat_state();
-    let ping_interval = ctx.ping_interval;
-    let pong_timeout = ctx.pong_timeout;
-    let writer_task = tokio::spawn(async move {
-        let mut writer = writer;
-        run_writer_task(
-            &mut writer,
-            &mut receiver,
-            heartbeat,
-            ping_interval,
-            pong_timeout,
-            writer_close,
-        )
-        .await;
-    });
-    let mut writer_task = WriterTaskGuard(Some(writer_task));
     let cleanup = Arc::new(TokenSessionTeardown::new(
         Arc::clone(&ctx.service),
         Arc::clone(&ctx.handler),
         ctx.session.session_id,
         Arc::clone(&subscriptions),
+        ctx.registration,
     ));
     cleanup.activate_metric();
+    let heartbeat = writer.heartbeat_state();
+    let ping_interval = ctx.ping_interval;
+    let pong_timeout = ctx.pong_timeout;
+    let writer_task = tokio::spawn(
+        async move {
+            let mut writer = writer;
+            run_writer_task(
+                &mut writer,
+                &mut receiver,
+                heartbeat,
+                ping_interval,
+                pong_timeout,
+                writer_close,
+            )
+            .await;
+        }
+        .instrument(tracing::Span::current()),
+    );
+    let mut writer_task = WriterTaskGuard(Some(writer_task));
     let scoped_handler = Arc::new(ScopedHandler::new(Arc::clone(&ctx.handler)));
     let mut dispatches = JoinSet::new();
     let deadline = tokio::time::Instant::now()
         + Duration::from_nanos(ctx.expires_at_ns.saturating_sub(unix_now_ns()));
-    let mut revalidation = tokio::time::interval(Duration::from_secs(1));
+    let mut revalidation = tokio::time::interval(TOKEN_WS_REVALIDATE_INTERVAL);
     revalidation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let mut writer_done = false;
@@ -187,6 +210,7 @@ where
         reader.set_reader_parked(true);
         let permit = tokio::select! {
             biased;
+            _ = close_requested.cancelled() => break 'connection,
             _ = shutdown.cancelled() => { close.set_code(1000); break 'connection; }
             _ = dispatch_cancel.cancelled() => break 'connection,
             _ = ctx.cancel.cancelled() => { close.set_code(4011); break 'connection; }
@@ -210,11 +234,12 @@ where
         reader.set_reader_parked(false);
         let mut frame = Vec::new();
         let read_result = {
-            let read = reader.read_frame_into(16 * 1024 * 1024, &mut frame);
+            let read = reader.read_frame_into(MAX_WS_FRAME_SIZE, &mut frame);
             tokio::pin!(read);
             loop {
                 tokio::select! {
                     biased;
+                    _ = close_requested.cancelled() => break 'connection,
                     _ = shutdown.cancelled() => { close.set_code(1000); break 'connection; }
                     _ = dispatch_cancel.cancelled() => break 'connection,
                     _ = ctx.cancel.cancelled() => { close.set_code(4011); break 'connection; }
@@ -248,17 +273,29 @@ where
                 let Some(message) = error_message(None, "invalid_envelope") else {
                     break 'connection;
                 };
-                if sender.send(message).await.is_err() {
-                    break 'connection;
+                let send = sender.send(message);
+                tokio::pin!(send);
+                tokio::select! {
+                    biased;
+                    _ = close_requested.cancelled() => break 'connection,
+                    _ = shutdown.cancelled() => { close.set_code(1000); break 'connection; }
+                    _ = ctx.cancel.cancelled() => { close.set_code(4011); break 'connection; }
+                    _ = tokio::time::sleep_until(deadline) => { close.set_code(4012); break 'connection; }
+                    _ = dispatch_cancel.cancelled() => break 'connection,
+                    _ = writer_task.0.as_mut().expect("writer task active") => {
+                        writer_task.0.take();
+                        writer_done = true;
+                        break 'connection;
+                    }
+                    result = &mut send => if result.is_err() { break 'connection; },
                 }
                 drop(permit);
                 continue;
             }
         };
-        if envelope
+        if !envelope
             .session_id_array()
-            .map(|sid| sid != &ctx.session.session_id)
-            .unwrap_or(true)
+            .is_ok_and(|sid| sid == &ctx.session.session_id)
         {
             close.set_code(4010);
             drop(permit);
@@ -266,7 +303,6 @@ where
         }
         let request_id = envelope.request_id;
         let request_bytes = envelope.req.to_vec();
-        drop(envelope);
         let service = Arc::clone(&ctx.service);
         let grant = Arc::clone(&ctx.grant);
         let session = Arc::clone(&ctx.session);
@@ -277,109 +313,112 @@ where
         let close_dispatch = close.clone();
         let cleanup_lifetime = Arc::clone(&cleanup);
         let deadline_ns = ctx.expires_at_ns;
-        dispatches.spawn(async move {
-            let _cleanup_lifetime = cleanup_lifetime;
-            let _permit = permit;
-            let now = unix_now_ns();
-            if now >= deadline_ns || !service.still_valid(&grant, now) {
-                let code = if now >= deadline_ns { 4012 } else { 4011 };
-                close_dispatch.set_code(code);
-                cancel.cancel();
-                return;
-            }
-            if session.check_post_auth_rate_limit(now).is_some() {
-                let Some(message) = error_message(request_id, "rate_limited") else {
+        dispatches.spawn(
+            async move {
+                let _cleanup_lifetime = cleanup_lifetime;
+                let _permit = permit;
+                let now = unix_now_ns();
+                if now >= deadline_ns || !service.still_valid(&grant, now) {
+                    let code = if now >= deadline_ns { 4012 } else { 4011 };
+                    close_dispatch.set_code(code);
+                    cancel.cancel();
                     return;
-                };
-                let _ = sender.send(message).await;
-                return;
-            }
-            if shamir_query_types::validate_request_alias_caps(&request_bytes).is_err() {
-                let Some(message) = error_message(request_id, "invalid_request") else {
+                }
+                if session.check_post_auth_rate_limit(now).is_some() {
+                    let Some(message) = error_message(request_id, "rate_limited") else {
+                        return;
+                    };
+                    let _ = sender.send(message).await;
                     return;
-                };
-                let _ = sender.send(message).await;
-                return;
-            }
-            let request: DbRequest = match rmp_serde::from_slice(&request_bytes) {
-                Ok(request) => request,
-                Err(_) => {
+                }
+                if shamir_query_types::validate_request_alias_caps(&request_bytes).is_err() {
                     let Some(message) = error_message(request_id, "invalid_request") else {
                         return;
                     };
                     let _ = sender.send(message).await;
                     return;
                 }
-            };
-            let now = unix_now_ns();
-            if now >= deadline_ns || !service.still_valid(&grant, now) {
-                let code = if now >= deadline_ns { 4012 } else { 4011 };
-                close_dispatch.set_code(code);
-                cancel.cancel();
-                return;
-            }
-            let (result, budget) = byte_budget::run_with_handoff(scoped.handle(
-                &session,
-                request,
-                Endpoint::Ws,
-                &connection,
-            ))
-            .await;
-            match result {
-                Ok(response) => {
-                    let response_bytes = match byte_budget::take_stashed_serialized_response() {
-                        Some(bytes) => bytes,
-                        None => response,
-                    };
-                    let message = match encode_prereserved(&SuccessReply {
-                        rid: request_id,
-                        res: &response_bytes,
-                    }) {
-                        Some(bytes) => WriterMsg::Reply(bytes, budget),
-                        None => return,
-                    };
-                    let _ = sender.send(message).await;
-                }
-                Err(HandleDenial::Forbidden(code)) => {
-                    let Some(response) = denied_body(code).and_then(|res| {
-                        encode_prereserved(&SuccessReply {
-                            rid: request_id,
-                            res: &res,
-                        })
-                    }) else {
-                        return;
-                    };
-                    if sender.send(WriterMsg::Reply(response, None)).await.is_err() {
+                let request: DbRequest = match rmp_serde::from_slice(&request_bytes) {
+                    Ok(request) => request,
+                    Err(_) => {
+                        let Some(message) = error_message(request_id, "invalid_request") else {
+                            return;
+                        };
+                        let _ = sender.send(message).await;
                         return;
                     }
-                }
-                Err(HandleDenial::BadRequest(_)) => {
-                    let Some(message) = error_message(request_id, "invalid_request") else {
-                        return;
-                    };
-                    let _ = sender.send(message).await;
+                };
+                let now = unix_now_ns();
+                if now >= deadline_ns || !service.still_valid(&grant, now) {
+                    let code = if now >= deadline_ns { 4012 } else { 4011 };
+                    close_dispatch.set_code(code);
+                    cancel.cancel();
                     return;
                 }
-                Err(HandleDenial::ApplicationError) => {
-                    let Some(message) = error_message(request_id, "internal_error") else {
-                        return;
-                    };
-                    let _ = sender.send(message).await;
-                    return;
+                let started = tokio::time::Instant::now();
+                let (result, budget) = byte_budget::run_with_handoff(scoped.handle(
+                    &session,
+                    request,
+                    Endpoint::Ws,
+                    &connection,
+                ))
+                .await;
+                metrics::histogram!("shamir_token_request_duration_seconds", "endpoint" => "ws")
+                    .record(started.elapsed().as_secs_f64());
+                match result {
+                    Ok(response) => {
+                        let response_bytes = response;
+                        let Some(bytes) = encode_prereserved(&SuccessReply {
+                            rid: request_id,
+                            res: &response_bytes,
+                        }) else {
+                            return send_internal_error(&sender, request_id).await;
+                        };
+                        let message = WriterMsg::Reply(bytes, budget);
+                        let _ = sender.send(message).await;
+                    }
+                    Err(HandleDenial::Forbidden(code)) => {
+                        metrics::counter!("shamir_token_request_denied_total", "endpoint" => "ws")
+                            .increment(1);
+                        let Some(response) = denied_body(code).and_then(|res| {
+                            encode_prereserved(&SuccessReply {
+                                rid: request_id,
+                                res: &res,
+                            })
+                        }) else {
+                            return send_internal_error(&sender, request_id).await;
+                        };
+                        let _ = sender.send(WriterMsg::Reply(response, None)).await;
+                    }
+                    Err(HandleDenial::BadRequest(_)) => {
+                        let Some(message) = error_message(request_id, "invalid_request") else {
+                            return;
+                        };
+                        let _ = sender.send(message).await;
+                    }
+                    Err(HandleDenial::ApplicationError) => {
+                        let Some(message) = error_message(request_id, "application_error") else {
+                            return;
+                        };
+                        let _ = sender.send(message).await;
+                    }
                 }
             }
-        });
+            .instrument(tracing::Span::current()),
+        );
     }
 
-    subscriptions.close_all();
+    dispatch_cancel.cancel();
     dispatches.abort_all();
     while dispatches.join_next().await.is_some() {}
+    subscriptions.close_all();
+    drop(cleanup);
+    cleanup_complete.cancel();
     drop(connection);
     drop(sender);
     if !writer_done {
         writer_task.finish().await;
     }
-    drop(cleanup);
 }
 
 fn unix_now_ns() -> u64 {

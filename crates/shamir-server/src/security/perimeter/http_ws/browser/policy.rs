@@ -1,4 +1,4 @@
-//! Browser WebSocket origin, authority, and pre-authentication policy.
+use std::net::Ipv6Addr;
 
 /// Returns true only when the raw Origin has a valid serialized HTTP(S) tuple origin.
 pub(crate) fn valid_origin(value: &[u8]) -> Option<String> {
@@ -40,57 +40,54 @@ pub(crate) fn canonical_authority(value: &str, tls: bool) -> Option<String> {
     if value.is_empty()
         || value
             .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
         || value.contains(['@', '/', '?', '#', '%'])
     {
         return None;
     }
-
     let (host, port) = if let Some(rest) = value.strip_prefix('[') {
-        let end = rest.find(']')?;
-        let host = &rest[..end];
-        let suffix = &rest[end + 1..];
-        let address = host.parse::<std::net::Ipv6Addr>().ok()?;
-        if address.to_string() != host.to_ascii_lowercase() {
-            return None;
-        }
-        let port = if suffix.is_empty() {
-            None
-        } else {
-            Some(suffix.strip_prefix(':')?.parse::<u16>().ok()?)
-        };
-        (format!("[{host}]"), port)
+        let (literal, suffix) = rest.split_once(']')?;
+        let address = literal.parse::<Ipv6Addr>().ok()?;
+        (format!("[{address}]"), parse_port(suffix)?)
     } else {
-        if value.matches(':').count() > 1 {
-            return None;
-        }
-        let (host, port) = match value.rsplit_once(':') {
-            Some((host, port)) => (host, Some(port.parse::<u16>().ok()?)),
-            None => (value, None),
+        let (host, suffix) = match value.find(':') {
+            Some(at) => value.split_at(at),
+            None => (value, ""),
         };
-        if host.is_empty()
-            || host.starts_with('.')
-            || host.ends_with('.')
-            || host.split('.').any(|label| {
-                label.is_empty()
-                    || label.starts_with('-')
-                    || label.ends_with('-')
-                    || !label
-                        .bytes()
-                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            })
-            || host != host.to_ascii_lowercase()
-        {
+        let host = host.to_ascii_lowercase();
+        let label_ok = |label: &str| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        };
+        if host.len() > 253 || !host.split('.').all(label_ok) {
             return None;
         }
-        (host.to_string(), port)
+        (host, parse_port(suffix)?)
     };
-
-    if port == Some(if tls { 443 } else { 80 }) {
-        return None;
-    }
-    Some(match port {
+    let default = if tls { 443 } else { 80 };
+    Some(match port.filter(|port| *port != default) {
         Some(port) => format!("{host}:{port}"),
         None => host,
     })
+}
+
+/// `""` -> no port; `":N"` with 1 <= N <= 65535 -> `Some(N)`; anything else invalid.
+fn parse_port(suffix: &str) -> Option<Option<u16>> {
+    if suffix.is_empty() {
+        return Some(None);
+    }
+    let digits = suffix.strip_prefix(':')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .map(Some)
 }

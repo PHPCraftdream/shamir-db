@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use serde::Deserialize;
 
 use crate::boot::config::{ConfigError, ListenerConfig, ListenerKind};
-use crate::security::perimeter::http_ws::browser_policy::canonical_authority;
+use crate::http_ws::browser::policy::canonical_authority;
 
 /// HTTP listener policy and transport limits.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

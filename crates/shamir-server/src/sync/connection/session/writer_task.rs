@@ -49,12 +49,20 @@ pub(crate) async fn run_writer_task<W: FrameWriter>(
             message = rx.recv() => match message {
                 None => break,
                 Some(WriterMsg::Reply(bytes, budget_guard)) => {
+                    // DEFECT C fix: break immediately on write failure so
+                    // the reader's select! wakes instead of hanging.
+                    // RI-15: retain the budget guard across the write; it
+                    // drops here on either success or error, releasing
+                    // reserved bytes in the writer task.
                     let failed = writer.write_frame_prereserved(bytes).await.is_err();
                     drop(budget_guard);
                     if failed { break; }
                 }
                 Some(WriterMsg::Push(bytes)) => if writer.write_frame_prereserved(bytes).await.is_err() { break; },
                 Some(WriterMsg::ReplyAndClose(bytes, budget_guard)) => {
+                    // Write error is ignored; the connection is closing.
+                    // RI-15: release the budget guard after the attempted
+                    // write, whether it succeeds or fails.
                     let _ = writer.write_frame_prereserved(bytes).await;
                     drop(budget_guard);
                     break;

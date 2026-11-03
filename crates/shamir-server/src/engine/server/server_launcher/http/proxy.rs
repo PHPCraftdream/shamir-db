@@ -33,7 +33,7 @@ impl ProxyGate {
         Ok(Self { inner, trusted })
     }
 
-    pub(super) fn resolved_peer(&self, peer: &PeerInfo) -> SocketAddr {
+    fn resolved_peer(&self, peer: &PeerInfo) -> SocketAddr {
         resolve_peer(peer, &self.trusted)
     }
 }

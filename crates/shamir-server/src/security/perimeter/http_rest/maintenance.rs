@@ -101,6 +101,7 @@ impl FailureLimiter {
         if let Some(mut entry) = self.entries.get_mut(&subnet) {
             return Self::debit(entry.value_mut(), now_ns, limit);
         }
+        // Reserve before inserting; concurrent new keys cannot exceed the hard cap.
         let reserved = self.reserve()
             || (self.claim_evict_scan(now_ns) && self.evict_oldest_idle(now_ns) && self.reserve());
         if !reserved {
@@ -216,6 +217,7 @@ struct FailureAggregate {
     count: u64,
     last_ns: u64,
 }
+/// Summary tuple: channel, result, total, tracked distinct, subnet samples, dropped, untracked, exposure-dropped.
 struct FailureSummary {
     channel: Endpoint,
     total: u64,
@@ -390,7 +392,7 @@ impl RestMaintenance {
     ) {
         if self.disabled.load(Ordering::Acquire) {
             self.exposure_drops.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(token_id = ?id, "{} token exposure audit unavailable", channel_label(channel));
+            tracing::warn!(token_id = ?id, "REST token exposure audit unavailable");
             return;
         }
         if self
@@ -405,7 +407,7 @@ impl RestMaintenance {
             .is_err()
         {
             self.exposure_drops.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(token_id = ?id, "{} token exposure audit channel full or closed", channel_label(channel));
+            tracing::warn!(token_id = ?id, "REST token exposure audit channel full or closed");
         }
     }
     pub(super) async fn shutdown(&self) {
@@ -459,15 +461,42 @@ async fn run_flusher(
     let mut failure_closed = false;
     let mut exposure_closed = false;
     let mut stopping = false;
+    // At the two-second shutdown limit, detach an in-flight blocking batch rather than delay shutdown.
     let deadline = tokio::time::sleep(Duration::from_secs(365 * 24 * 60 * 60));
     tokio::pin!(deadline);
     let mut flush_requested = false;
     let mut final_drops_taken = false;
     loop {
         tokio::select! {
-            _ = stop.cancelled(), if !stopping => { stopping = true; receiver.close(); exposure_receiver.close(); deadline.as_mut().reset(tokio::time::Instant::now() + SHUTDOWN_DRAIN); }
-            _ = service_stop.cancelled(), if !stopping => { stopping = true; receiver.close(); exposure_receiver.close(); deadline.as_mut().reset(tokio::time::Instant::now() + SHUTDOWN_DRAIN); }
-            _ = &mut deadline, if stopping => { if writer.is_some() || summaries.iter().any(|summary| !summary.is_empty()) || !exposed.is_empty() { tracing::warn!(pending_exposures = exposed.len(), "token audit shutdown drain deadline expired"); } drop(writer.take()); break; }
+            _ = stop.cancelled(), if !stopping => {
+                stopping = true;
+                receiver.close();
+                exposure_receiver.close();
+                deadline.as_mut().reset(tokio::time::Instant::now() + SHUTDOWN_DRAIN);
+            }
+            _ = service_stop.cancelled(), if !stopping => {
+                stopping = true;
+                receiver.close();
+                exposure_receiver.close();
+                deadline.as_mut().reset(tokio::time::Instant::now() + SHUTDOWN_DRAIN);
+            }
+            _ = &mut deadline, if stopping => {
+                if writer.is_some()
+                    || summaries.iter().any(|summary| !summary.is_empty())
+                    || !exposed.is_empty()
+                {
+                    let summary_total = summaries[0].total.saturating_add(summaries[1].total);
+                    tracing::warn!(
+                        summary_total,
+                        pending_exposures = exposed.len(),
+                        failure_dropped = summaries[0].dropped.saturating_add(summaries[1].dropped),
+                        exposure_dropped = summaries[0].exposure_dropped.saturating_add(summaries[1].exposure_dropped),
+                        "REST token audit shutdown drain deadline expired"
+                    );
+                }
+                drop(writer.take());
+                break;
+            }
             notice = receiver.recv(), if !failure_closed => match notice {
                 Some(AuditNotice::Failure { channel, subnet, now_ns }) => {
                     let index = endpoint_index(channel);
@@ -475,18 +504,49 @@ async fn run_flusher(
                 }
                 Some(AuditNotice::Exposed { id, .. }) => {
                     exposure_overflow = exposure_overflow.saturating_add(1);
-                    tracing::warn!(token_id = ?id, "token exposure audit arrived on failure channel");
+                    tracing::warn!(token_id = ?id, "REST token exposure audit arrived on failure channel");
                 }
                 None => failure_closed = true,
             },
             notice = exposure_receiver.recv(), if !exposure_closed => match notice {
-                Some(notice @ AuditNotice::Exposed { .. }) if exposed.len() < NOTICE_CAPACITY && !disabled => exposed.push_back(notice),
-                Some(AuditNotice::Exposed { id, .. }) => { exposure_overflow = exposure_overflow.saturating_add(1); tracing::warn!(token_id = ?id, "token exposure audit not persisted"); }
-                Some(AuditNotice::Failure { .. }) => {}, None => exposure_closed = true,
+                Some(notice @ AuditNotice::Exposed { .. })
+                    if exposed.len() < NOTICE_CAPACITY && !disabled =>
+                {
+                    exposed.push_back(notice);
+                }
+                Some(AuditNotice::Exposed { id, .. }) => {
+                    exposure_overflow = exposure_overflow.saturating_add(1);
+                    tracing::warn!(token_id = ?id, "REST token exposure audit not persisted");
+                }
+                Some(AuditNotice::Failure { .. }) => {}
+                None => exposure_closed = true,
             },
-            result = async { writer.as_mut().expect("writer exists").await }, if writer.is_some() => { writer = None; if !matches!(result, Ok(true)) { disabled = true; disabled_shared.store(true, Ordering::Release); tracing::warn!("token audit persistence disabled"); for notice in exposed.drain(..) { if let AuditNotice::Exposed { id, .. } = notice { exposure_overflow = exposure_overflow.saturating_add(1); tracing::warn!(token_id = ?id, "token exposure audit not persisted"); } } } if stopping { flush_requested = true; } }
-            _ = interval.tick(), if writer.is_none() && !disabled => flush_requested = true,
-            _ = gc_interval.tick() => { if let Some(now_ns) = clock() { failures.gc(now_ns); buckets.sweep(now_ns); } }
+            result = async { writer.as_mut().expect("writer exists").await }, if writer.is_some() => {
+                writer = None;
+                if !matches!(result, Ok(true)) {
+                    disabled = true;
+                    disabled_shared.store(true, Ordering::Release);
+                    tracing::warn!("REST token audit persistence disabled");
+                    for notice in exposed.drain(..) {
+                        if let AuditNotice::Exposed { id, .. } = notice {
+                            exposure_overflow = exposure_overflow.saturating_add(1);
+                            tracing::warn!(token_id = ?id, "REST token exposure audit not persisted");
+                        }
+                    }
+                }
+                if stopping {
+                    flush_requested = true;
+                }
+            }
+            _ = interval.tick(), if writer.is_none() && !disabled => {
+                flush_requested = true;
+            }
+            _ = gc_interval.tick() => {
+                if let Some(now_ns) = clock() {
+                    failures.gc(now_ns);
+                    buckets.sweep(now_ns);
+                }
+            }
         }
         if disabled_shared.load(Ordering::Acquire) {
             disabled = true;
@@ -571,7 +631,7 @@ async fn run_flusher(
                         Err(()) => {
                             disabled = true;
                             disabled_shared.store(true, Ordering::Release);
-                            tracing::warn!("token audit serialization disabled");
+                            tracing::warn!("REST token audit serialization disabled");
                         }
                     }
                 }
@@ -579,12 +639,12 @@ async fn run_flusher(
             while batch.len() < FLUSH_LIMIT {
                 match exposed.pop_front() {
                     Some(AuditNotice::Exposed {
-                        channel: Endpoint::Rest,
+                        channel,
                         id,
                         owner,
                         subnet,
                         now_ns,
-                    }) => match rmp_serde::to_vec_named(&(id, owner)) {
+                    }) => match rmp_serde::to_vec_named(&(channel_label(channel), id, owner)) {
                         Ok(details) => batch.push(AuditWrite {
                             event: "api_token_exposed",
                             outcome: "plaintext_denied",
@@ -596,33 +656,11 @@ async fn run_flusher(
                         Err(_) => {
                             disabled = true;
                             disabled_shared.store(true, Ordering::Release);
-                            tracing::warn!(token_id = ?id, "token exposure audit serialization failed");
+                            tracing::warn!(token_id = ?id, "REST token exposure audit serialization failed");
                             break;
                         }
                     },
-                    Some(AuditNotice::Exposed {
-                        channel: Endpoint::Ws,
-                        id,
-                        owner,
-                        subnet,
-                        now_ns,
-                    }) => match rmp_serde::to_vec_named(&("ws", id, owner)) {
-                        Ok(details) => batch.push(AuditWrite {
-                            event: "api_token_exposed",
-                            outcome: "plaintext_denied",
-                            resource: format_subnet(subnet),
-                            details,
-                            now_ns,
-                            exposure_id: Some(id),
-                        }),
-                        Err(_) => {
-                            disabled = true;
-                            disabled_shared.store(true, Ordering::Release);
-                            tracing::warn!(token_id = ?id, "token exposure audit serialization failed");
-                            break;
-                        }
-                    },
-                    Some(_) => {}
+                    Some(AuditNotice::Failure { .. }) => {}
                     None => break,
                 }
             }
@@ -647,12 +685,12 @@ async fn run_flusher(
                         {
                             if let Some(id) = write.exposure_id {
                                 task_exposure_drops.fetch_add(1, Ordering::Relaxed);
-                                tracing::warn!(token_id = ?id, "token exposure audit append failed");
+                                tracing::warn!(token_id = ?id, "REST token exposure audit append failed");
                             }
                             for pending in writes {
                                 if let Some(id) = pending.exposure_id {
                                     task_exposure_drops.fetch_add(1, Ordering::Relaxed);
-                                    tracing::warn!(token_id = ?id, "token exposure audit not persisted");
+                                    tracing::warn!(token_id = ?id, "REST token exposure audit not persisted");
                                 }
                             }
                             return false;

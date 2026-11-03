@@ -53,7 +53,7 @@ impl TokenState {
     pub fn record(&self) -> &TokenRecord {
         &self.record
     }
-    /// Whether a revocation has been published (Acquire).
+    /// Returns whether revocation has been published.
     pub fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire) != 0
     }

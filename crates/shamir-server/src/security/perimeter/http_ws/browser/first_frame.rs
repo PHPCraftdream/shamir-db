@@ -2,8 +2,6 @@
 
 use std::time::Duration;
 
-use serde::de::{MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::{timeout_at, Instant};
 
@@ -27,7 +25,7 @@ pub(crate) async fn read_browser_token<R: AsyncRead + Unpin>(reader: &mut R) -> 
             return Err(());
         }
         if opcode & 0x08 != 0 {
-            if first & 0x80 == 0 || short_len >= 126 || opcode < 0x8 || opcode > 0xA {
+            if first & 0x80 == 0 || short_len >= 126 || !(0x8..=0xA).contains(&opcode) {
                 return Err(());
             }
             controls += 1;
@@ -70,11 +68,11 @@ pub(crate) async fn read_browser_token<R: AsyncRead + Unpin>(reader: &mut R) -> 
         for (i, byte) in payload.iter_mut().enumerate() {
             *byte ^= mask[i % 4];
         }
-        let token: StrictToken = rmp_serde::from_slice(&payload).map_err(|_| ())?;
-        if token.0.len() != 71 || !token.0.is_ascii() {
+        let token = decode_token_map(&payload).ok_or(())?;
+        if token.len() != 71 || !token.is_ascii() {
             return Err(());
         }
-        return Ok(token.0);
+        return Ok(token);
     }
 }
 
@@ -90,30 +88,38 @@ async fn read_exact<R: AsyncRead + Unpin>(
         .map_err(|_| ())
 }
 
-struct StrictToken(String);
-
-impl<'de> Deserialize<'de> for StrictToken {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct TokenVisitor;
-        impl<'de> Visitor<'de> for TokenVisitor {
-            type Value = StrictToken;
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("a one-entry token map")
-            }
-            fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
-                let key: String = map
-                    .next_key()?
-                    .ok_or_else(|| serde::de::Error::custom("missing token"))?;
-                if key != "token" {
-                    return Err(serde::de::Error::custom("unknown map key"));
-                }
-                let token = map.next_value::<String>()?;
-                if map.next_key::<String>()?.is_some() {
-                    return Err(serde::de::Error::custom("extra map key"));
-                }
-                Ok(StrictToken(token))
-            }
-        }
-        deserializer.deserialize_map(TokenVisitor)
+/// Decodes exactly a one-entry map `{"token": <str>}` with no trailing bytes.
+fn decode_token_map(payload: &[u8]) -> Option<String> {
+    let rest = payload.strip_prefix(&[0x81])?;
+    let (key, rest) = read_str(rest)?;
+    if key != b"token" {
+        return None;
     }
+    let (value, rest) = read_str(rest)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(value).ok().map(str::to_owned)
+}
+
+/// Reads one MessagePack string; binary and non-string values are rejected.
+fn read_str(input: &[u8]) -> Option<(&[u8], &[u8])> {
+    let (&marker, rest) = input.split_first()?;
+    let (len, rest) = match marker {
+        0xa0..=0xbf => (usize::from(marker & 0x1f), rest),
+        0xd9 => {
+            let (&len, rest) = rest.split_first()?;
+            (usize::from(len), rest)
+        }
+        0xda => {
+            let (len, rest) = rest.split_first_chunk::<2>()?;
+            (usize::from(u16::from_be_bytes(*len)), rest)
+        }
+        0xdb => {
+            let (len, rest) = rest.split_first_chunk::<4>()?;
+            (usize::try_from(u32::from_be_bytes(*len)).ok()?, rest)
+        }
+        _ => return None,
+    };
+    (rest.len() >= len).then(|| rest.split_at(len))
 }
