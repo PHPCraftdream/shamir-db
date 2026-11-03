@@ -327,6 +327,7 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
   optionsCheck(o);
   const ca = o.ca === undefined ? undefined : typeof o.ca === 'string' ? o.ca : new Uint8Array(o.ca);
   const url = parseUrl(o.url);
+  if (ca !== undefined && url.protocol !== 'https:') throw err('invalid_request');
   const scope = scopeFor(o);
   const user = canonicalUser(o.username);
   const sec = expectedSecurity(url, o.externalTls === true);
