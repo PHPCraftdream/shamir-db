@@ -14,6 +14,7 @@ mod handshake;
 mod request_loop;
 mod session;
 mod support;
+pub(crate) mod token_ws;
 // `pub(crate)` so the in-crate adapter test (`src/tests/user_state_lookup_tests`)
 // can name `RedbUserStateLookup`; production use stays internal to this module.
 pub(crate) use support::user_state_lookup;
