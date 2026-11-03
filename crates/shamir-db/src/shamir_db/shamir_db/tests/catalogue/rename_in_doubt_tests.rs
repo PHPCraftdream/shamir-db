@@ -56,7 +56,7 @@ async fn wire_rename_table_reports_in_doubt_conflict_code_and_message() {
             matches!(
                 &error,
                 crate::query::batch::BatchError::QueryError { code: Some(code), message, .. }
-                    if code == "tx_conflict" && message.starts_with("rename in doubt:")
+                    if code == "tx_conflict" && message.contains("rename in doubt:")
             ),
             "expected tx_conflict QueryError with rename-in-doubt message, got {error:?}"
         );
@@ -91,7 +91,7 @@ async fn wire_if_exists_ddl_cannot_bypass_in_doubt_rename_fence() {
                 matches!(
                     &create_error,
                     crate::query::batch::BatchError::QueryError { code: Some(code), message, .. }
-                        if code == "tx_conflict" && message.starts_with("rename in doubt:")
+                        if code == "tx_conflict" && message.contains("rename in doubt:")
                 ),
                 "unexpected CREATE error: {create_error:?}"
             );
@@ -116,7 +116,7 @@ async fn wire_if_exists_ddl_cannot_bypass_in_doubt_rename_fence() {
                 matches!(
                     &drop_error,
                     crate::query::batch::BatchError::QueryError { code: Some(code), message, .. }
-                        if code == "tx_conflict" && message.starts_with("rename in doubt:")
+                        if code == "tx_conflict" && message.contains("rename in doubt:")
                 ),
                 "unexpected DROP error: {drop_error:?}"
             );

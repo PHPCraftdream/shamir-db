@@ -183,6 +183,11 @@ impl ShamirDb {
         table_name: &str,
         control: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
     ) -> DbResult<bool> {
+        // 0. A fenced (in-doubt) name must be refused before any validator side effect.
+        if let Some(repo) = self.get_db(db_name).and_then(|db| db.get_repo(repo_name)) {
+            repo.check_table_rename_fence(table_name)?;
+        }
+
         // 1. Clean validator bound_in references.
         let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
         let affected = self.validators.unbind_all_for_table(&table_ref);

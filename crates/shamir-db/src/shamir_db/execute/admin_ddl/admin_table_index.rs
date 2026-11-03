@@ -52,7 +52,11 @@ impl ShamirAdminExecutor {
             .and_then(|db| db.get_repo(&op.repo))
         {
             repo.check_table_rename_fence(&op.create_table)
-                .map_err(|e| err_code(e.code(), e.to_string()))?;
+                .map_err(|e| BatchError::QueryError {
+                    alias: String::new(),
+                    message: e.to_string(),
+                    code: e.code().map(str::to_owned),
+                })?;
         }
         // Check existence for if_not_exists / duplicate guard.
         if let Some(db) = self.shamir.get_db(&self.db_name) {
@@ -148,7 +152,11 @@ impl ShamirAdminExecutor {
             .and_then(|db| db.get_repo(&op.repo))
         {
             repo.check_table_rename_fence(&op.drop_table)
-                .map_err(|e| err_code(e.code(), e.to_string()))?;
+                .map_err(|e| BatchError::QueryError {
+                    alias: String::new(),
+                    message: e.to_string(),
+                    code: e.code().map(str::to_owned),
+                })?;
         }
         // if_exists early-exit: missing db or missing table → no-op.
         if op.if_exists {
