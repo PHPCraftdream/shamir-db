@@ -169,7 +169,7 @@ filter = "package(shamir-server) and test(/(boot::server_tests::launcher_|durabi
 test-group = "fsync-heavy"
 
 [[profile.default.overrides]]
-filter = "package(shamir-server) and binary(e2e) and test(/^http_rest::/)"
+filter = "package(shamir-server) and binary(e2e) and test(/^(http_rest|token_matrix)::/)"
 test-group = "http-rest-e2e"
 
 [[profile.ci.overrides]]
@@ -185,7 +185,7 @@ filter = "package(shamir-server) and test(/(boot::server_tests::launcher_|durabi
 test-group = "fsync-heavy"
 
 [[profile.ci.overrides]]
-filter = "package(shamir-server) and binary(e2e) and test(/^http_rest::/)"
+filter = "package(shamir-server) and binary(e2e) and test(/^(http_rest|token_matrix)::/)"
 test-group = "http-rest-e2e"
 
 # ============================================================================

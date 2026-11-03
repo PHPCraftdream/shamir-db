@@ -48,5 +48,7 @@ mod slow_loris;
 mod slow_loris_pre_tls;
 #[path = "transport/subscriptions_e2e/mod.rs"]
 mod subscriptions_e2e;
+#[path = "token_matrix/mod.rs"]
+mod token_matrix;
 #[path = "core/version_cas_e2e.rs"]
 mod version_cas_e2e;
