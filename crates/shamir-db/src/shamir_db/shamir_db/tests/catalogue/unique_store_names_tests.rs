@@ -1,5 +1,5 @@
 use crate::access::{Actor, ResourceMeta};
-use crate::engine::repo::{BoxRepoFactory, RepoConfig};
+use crate::engine::repo::{BoxRepoFactory, RenamePersistOutcome, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::shamir_db::system_store::TableRenameKey;
 use crate::shamir_db::{ShamirDb, SystemStoreConfig};
@@ -208,15 +208,24 @@ async fn durability_tail_failure_retry_reconciles_registration_and_is_idempotent
                     destination.store_id.as_ref().unwrap(),
                     &source_record,
                 )
-                .await?;
-            Err(crate::DbError::Storage(
+                .await
+                .expect("catalogue persist must succeed before simulated tail failure");
+            RenamePersistOutcome::InDoubt(crate::DbError::Storage(
                 "injected durability-tail failure".into(),
             ))
         })
         .await;
-    assert!(persist_error.is_err());
-    assert!(repo.has_table("a"));
-    assert!(!repo.has_table("b"));
+    assert!(matches!(
+        persist_error,
+        Err(crate::DbError::Conflict(message)) if message.starts_with("rename in doubt:")
+    ));
+    let dbi = db.get_db("retry").unwrap();
+    assert!(dbi.get_table("main", "a").await.is_err());
+    assert!(dbi.get_table("main", "b").await.is_err());
+    assert!(matches!(
+        source.insert(&InnerValue::Str("stale-write".into())).await,
+        Err(crate::DbError::MigrationFrozen { table }) if table == "a"
+    ));
     assert_rows(&source, &expected).await;
     assert!(db
         .system_store()
@@ -272,7 +281,9 @@ async fn precommit_persist_failure_retry_uses_fresh_destination_id() {
     assert!(repo
         .rename_table_stores_with("a", "b", move |destination| async move {
             *failed_id_capture.lock().unwrap() = destination.store_id;
-            Err(crate::DbError::Storage("injected precommit failure".into()))
+            RenamePersistOutcome::NotCommitted(crate::DbError::Storage(
+                "injected precommit failure".into(),
+            ))
         })
         .await
         .is_err());
