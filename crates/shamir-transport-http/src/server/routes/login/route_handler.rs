@@ -227,11 +227,14 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
     }
     match tokio::time::timeout_at(
         total_deadline,
-        routes.handle(route, Arc::clone(&permit), Bytes::from(collected)),
+        routes.handle(route.clone(), Arc::clone(&permit), Bytes::from(collected)),
     )
     .await
     {
-        Ok(reply) => finish_reply(reply, tls, hsts, &write_timeout_override),
+        Ok(reply) => attach_hold(
+            finish_reply(reply, tls, hsts, &write_timeout_override),
+            Arc::clone(&permit),
+        ),
         Err(_) => {
             report_refusal(StatusCode::REQUEST_TIMEOUT);
             let response = finish_reply(

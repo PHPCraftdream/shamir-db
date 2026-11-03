@@ -3,6 +3,7 @@ use super::super::{LoginHead, LoginResponse, LoginRoutes, NoLogin};
 use crate::gate::PeerInfo;
 use bytes::Bytes;
 use http::{header, HeaderMap, StatusCode};
+use http_body_util::BodyExt;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;

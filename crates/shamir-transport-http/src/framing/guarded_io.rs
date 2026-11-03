@@ -17,6 +17,9 @@ enum State {
 }
 
 /// Validates a whole request head before exposing it, then limits reads to its body envelope.
+/// Receives the route and status of a refusal made by the framing layer.
+pub(crate) type RefusalHook = std::sync::Arc<dyn Fn(&[u8], u16) + Send + Sync>;
+
 pub(crate) struct GuardedIo<T> {
     inner: T,
     head: Vec<u8>,
@@ -34,7 +37,7 @@ pub(crate) struct GuardedIo<T> {
     hsts: bool,
     response_head: Vec<u8>,
     login_errors: bool,
-    refusal_hook: Option<std::sync::Arc<dyn Fn(&[u8], u16) + Send + Sync>>,
+    refusal_hook: Option<RefusalHook>,
     request_route: Vec<u8>,
     refusal_reported: bool,
     write_timeout_override_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -107,10 +110,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         self.login_errors = enabled;
         self
     }
-    pub(crate) fn with_refusal_hook(
-        mut self,
-        hook: std::sync::Arc<dyn Fn(&[u8], u16) + Send + Sync>,
-    ) -> Self {
+    pub(crate) fn with_refusal_hook(mut self, hook: RefusalHook) -> Self {
         self.refusal_hook = Some(hook);
         self
     }
@@ -196,11 +196,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         }
         self.refusal_reported = true;
         if let Some(hook) = &self.refusal_hook {
-            hook(&self.request_route, status);
+            // The scanner holds the (possibly partial) target until a verdict stores it.
+            let route = if self.request_route.is_empty() {
+                self.scanner.path().to_vec()
+            } else {
+                self.request_route.clone()
+            };
+            hook(&route, status);
         }
     }
     fn reject(&mut self, status: u16) {
-        if self.state == State::Head {
+        if self.state == State::Head && !self.response_active {
             self.report_refusal(status);
         }
         // The hook reports only whole-request-head refusals; body-phase rejections
@@ -591,9 +597,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
                         let max_bytes = self.max_bytes;
                         let max_headers = self.max_headers;
                         let verdict = self.scanner.feed(&temp[..n], max_bytes, max_headers);
-                        if self.request_route.is_empty() {
-                            self.request_route = self.scanner.path().to_vec();
-                        }
                         match verdict {
                             Verdict::NeedMore => continue,
                             Verdict::BadRequest => {

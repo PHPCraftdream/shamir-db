@@ -1,12 +1,12 @@
 use crate::framing::scanner::{Scanner, Verdict};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn response_hold_lives_until_write_flush() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
     struct Hold(Arc<AtomicUsize>);
     impl Drop for Hold {
         fn drop(&mut self) {
@@ -27,6 +27,7 @@ async fn response_hold_lives_until_write_flush() {
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata")
             .await?;
         guarded.flush().await?;
+        guarded.shutdown().await?;
         Ok::<_, std::io::Error>(guarded)
     });
     tokio::task::yield_now().await;
@@ -48,10 +49,6 @@ async fn response_hold_lives_until_write_flush() {
 
 #[tokio::test]
 async fn dropping_stalled_response_connection_releases_held_slot() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
     struct Hold(Arc<AtomicUsize>);
     impl Drop for Hold {
         fn drop(&mut self) {
@@ -128,10 +125,6 @@ fn sticky_scanner_verdict_cannot_be_rewritten() {
 
 #[tokio::test]
 async fn login_framing_refusal_calls_hook_once() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     let (mut client, server) = duplex(1024);
@@ -145,7 +138,7 @@ async fn login_framing_refusal_calls_hook_once() {
         }));
     let task = tokio::spawn(async move {
         let mut head = [0; 8];
-        guarded.read(&mut head).await.unwrap();
+        let _ = guarded.read(&mut head).await.unwrap();
     });
     client
         .write_all(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nLong: 123456789012345678901234567890\r\n\r\n")
