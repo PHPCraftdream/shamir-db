@@ -1,8 +1,8 @@
 use crate::common::time::ns;
 use crate::server::lockout::{
     FailureOutcome, FailureState, InMemoryLockoutStore, LockoutSnapshot, LockoutState,
-    LockoutStore, PairKey, Subnet, BACKOFF_RESET_NS, LOCKOUT_BASE_QUOTA, LOCKOUT_PAIR_CAPACITY,
-    LOCKOUT_PARENT_QUOTA,
+    LockoutStore, PairDropReason, PairKey, PairStoreObserver, Subnet, BACKOFF_RESET_NS,
+    LOCKOUT_BASE_QUOTA, LOCKOUT_PAIR_CAPACITY, LOCKOUT_PARENT_QUOTA,
 };
 use std::sync::{Arc, Barrier};
 
@@ -697,6 +697,67 @@ fn indexed_lookup_survives_reset_unlock_gc_and_slot_reuse() {
     assert_eq!(store.failure_pair_count(), 4);
     assert_eq!(store.current_backoff_ms(survivor, boundary), 400);
     assert_eq!(store.current_backoff_ms(key4(1, 0, 3), boundary), 0);
+}
+
+#[test]
+fn observer_reports_admission_drop_reasons_and_occupancy_mutations() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Arc::clone(&events);
+    let observer: Arc<PairStoreObserver> = Arc::new(move |delta, reason| {
+        capture.lock().unwrap().push((delta, reason));
+    });
+
+    let saturated = seeded(
+        (0..64)
+            .map(|user| (key4(1, 1, user), failure(1, NOW)))
+            .collect(),
+        (0..64)
+            .map(|user| (key4(1, 1, user), active_lock()))
+            .collect(),
+    )
+    .with_observer(Arc::clone(&observer));
+    assert_eq!(
+        saturated.register_failure(key4(1, 1, 64), NOW),
+        FailureOutcome::Backoff { delay_ms: 0 }
+    );
+
+    let full = seeded(
+        Vec::new(),
+        (0..16)
+            .flat_map(|parent| {
+                (0..512).map(move |i| (key4(parent, (i / 64) as u8, (i % 64) as u8), active_lock()))
+            })
+            .collect(),
+    )
+    .with_observer(Arc::clone(&observer));
+    assert_eq!(
+        full.register_failure(key4(16, 0, 0), NOW),
+        FailureOutcome::Backoff { delay_ms: 0 }
+    );
+
+    let live = InMemoryLockoutStore::new().with_observer(observer);
+    let pair = key4(2, 2, 3);
+    live.register_failure(pair, NOW);
+    live.admin_unlock_user(pair.1);
+    let events = events.lock().unwrap();
+    assert!(events.contains(&(0, Some(PairDropReason::PairQuota))));
+    assert!(events.contains(&(0, Some(PairDropReason::TableFull))));
+    assert!(events.contains(&(1, None)));
+    assert!(events.contains(&(-1, None)));
+}
+
+#[test]
+fn observer_initial_count_includes_restored_lockout_only_slots() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Arc::clone(&events);
+    let observer: Arc<PairStoreObserver> = Arc::new(move |delta, reason| {
+        capture.lock().unwrap().push((delta, reason));
+    });
+    let pair = key4(3, 1, 7);
+    let store = seeded(Vec::new(), vec![(pair, active_lock())]).with_observer(observer);
+
+    store.admin_unlock_user(pair.1);
+    assert_eq!(*events.lock().unwrap(), vec![(1, None), (-1, None)]);
 }
 
 #[test]

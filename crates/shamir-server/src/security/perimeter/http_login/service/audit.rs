@@ -8,14 +8,25 @@ use tokio::sync::mpsc;
 use tokio::time::{Instant, MissedTickBehavior};
 use tracing::{Instrument, Span};
 
-const CAPACITY: usize = 1_024;
+/// Process-wide logical event limit; per-listener channel slots are reserved on demand.
+const PROCESS_CAPACITY: usize = 1_024;
 const MAX_EVENT_BYTES: usize = 1_024;
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(2);
+
+static PROCESS_AUDIT_SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::OnceLock::new();
+
+fn process_audit_slots() -> Arc<tokio::sync::Semaphore> {
+    Arc::clone(
+        PROCESS_AUDIT_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(PROCESS_CAPACITY))),
+    )
+}
 
 /// Privacy-safe bounded login audit event.
 #[derive(Clone)]
 pub struct LoginAudit {
-    sender: mpsc::Sender<AuditEvent>,
+    sender: mpsc::Sender<(AuditEvent, tokio::sync::OwnedSemaphorePermit)>,
+    budget: Arc<tokio::sync::Semaphore>,
     failures: Arc<[AtomicU64; 3]>,
 }
 
@@ -44,28 +55,61 @@ impl LoginAudit {
         shutdown: tokio_util::sync::CancellationToken,
         writer: Arc<shamir_connect::server::audit_chain::AuditChainWriter>,
     ) -> (Self, tokio::task::JoinHandle<()>) {
-        let (sender, receiver) = mpsc::channel(CAPACITY);
+        Self::start_inner(shutdown, writer, process_audit_slots())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn start_with_budget(
+        shutdown: tokio_util::sync::CancellationToken,
+        writer: Arc<shamir_connect::server::audit_chain::AuditChainWriter>,
+        budget: Arc<tokio::sync::Semaphore>,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
+        Self::start_inner(shutdown, writer, budget)
+    }
+
+    fn start_inner(
+        shutdown: tokio_util::sync::CancellationToken,
+        writer: Arc<shamir_connect::server::audit_chain::AuditChainWriter>,
+        budget: Arc<tokio::sync::Semaphore>,
+    ) -> (Self, tokio::task::JoinHandle<()>) {
         let failures = Arc::new([AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)]);
+        let (sender, receiver) = mpsc::channel(PROCESS_CAPACITY);
         let worker_failures = Arc::clone(&failures);
+        let worker_budget = Arc::clone(&budget);
         let task = tokio::spawn(
-            run_worker(receiver, worker_failures, writer, shutdown).instrument(Span::current()),
+            run_worker(receiver, worker_failures, worker_budget, writer, shutdown)
+                .instrument(Span::current()),
         );
-        (Self { sender, failures }, task)
+        (
+            Self {
+                sender,
+                budget,
+                failures,
+            },
+            task,
+        )
+    }
+
+    fn enqueue(&self, event: AuditEvent) {
+        let Ok(permit) = Arc::clone(&self.budget).try_acquire_owned() else {
+            metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+            return;
+        };
+        if self.sender.try_send((event, permit)).is_err() {
+            metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+        }
     }
 
     /// Enqueue a privacy-safe token-id event without waiting for capacity.
     pub fn issued(&self, id: [u8; 16]) {
-        if self.sender.try_send(AuditEvent::Issued(id)).is_err() {
-            metrics::counter!("shamir_login_http_audit_dropped").increment(1);
-        }
+        self.enqueue(AuditEvent::Issued(id));
     }
 
     /// Count a failure in one of the three fixed aggregate classes.
     pub(crate) fn failure(&self, result: LoginResult) {
         let index = match result {
-            LoginResult::AuthenticationFailed
-            | LoginResult::RateLimited
-            | LoginResult::ServerBusy => Some(0),
+            LoginResult::AuthenticationFailed => Some(0),
+            LoginResult::RateLimited | LoginResult::ServerBusy => None,
             LoginResult::PolicyDenied => Some(1),
             LoginResult::InvalidRequest => Some(2),
             LoginResult::Challenge | LoginResult::Issued => None,
@@ -77,35 +121,24 @@ impl LoginAudit {
 
     /// Record a failed compensation without retaining identity or token material.
     pub(crate) fn compensation_failed(&self, token_id: [u8; 16]) {
-        if self
-            .sender
-            .try_send(AuditEvent::CompensationFailed(token_id))
-            .is_err()
-        {
-            metrics::counter!("shamir_login_http_audit_dropped").increment(1);
-        }
+        self.enqueue(AuditEvent::CompensationFailed(token_id));
     }
 
     /// Enqueue one minute's aggregate failure counters without waiting.
     pub fn failures(&self, minute: u64, authentication: u32, policy: u32, invalid: u32) {
-        if self
-            .sender
-            .try_send(AuditEvent::Failures {
-                minute,
-                authentication,
-                policy,
-                invalid,
-            })
-            .is_err()
-        {
-            metrics::counter!("shamir_login_http_audit_dropped").increment(1);
-        }
+        self.enqueue(AuditEvent::Failures {
+            minute,
+            authentication,
+            policy,
+            invalid,
+        });
     }
 }
 
 async fn run_worker(
-    mut receiver: mpsc::Receiver<AuditEvent>,
+    mut receiver: mpsc::Receiver<(AuditEvent, tokio::sync::OwnedSemaphorePermit)>,
     worker_failures: Arc<[AtomicU64; 3]>,
+    budget: Arc<tokio::sync::Semaphore>,
     writer: Arc<shamir_connect::server::audit_chain::AuditChainWriter>,
     shutdown: tokio_util::sync::CancellationToken,
 ) {
@@ -133,13 +166,13 @@ async fn run_worker(
                     None
                 }
                 _ = interval.tick() => {
-                    flush_failures(&worker_failures, &writer).await;
+                    flush_failures(&worker_failures, &writer, &budget).await;
                     None
                 }
                 event = receiver.recv() => event,
             }
         };
-        let Some(event) = event else {
+        let Some((event, _permit)) = event else {
             if deadline.is_none() && receiver.is_closed() {
                 break;
             }
@@ -147,13 +180,15 @@ async fn run_worker(
         };
         if deadline.is_some_and(|until| Instant::now() >= until) {
             metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+            drop(_permit);
             break;
         }
-        let (name, details) = match event {
+        let (name, outcome, details) = match event {
             AuditEvent::Issued(id) => match rmp_serde::to_vec(&serde_bytes::Bytes::new(&id)) {
-                Ok(details) => ("http_login_issued", details),
+                Ok(details) => ("http_login_issued", "ok", details),
                 Err(_) => {
                     metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+                    drop(_permit);
                     continue;
                 }
             },
@@ -163,17 +198,19 @@ async fn run_worker(
                 policy,
                 invalid,
             } => match rmp_serde::to_vec(&(minute, authentication, policy, invalid)) {
-                Ok(details) => ("http_login_failures", details),
+                Ok(details) => ("http_login_failures", "ok", details),
                 Err(_) => {
                     metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+                    drop(_permit);
                     continue;
                 }
             },
             AuditEvent::CompensationFailed(id) => {
                 match rmp_serde::to_vec(&serde_bytes::Bytes::new(&id)) {
-                    Ok(details) => ("http_login_compensation_failed", details),
+                    Ok(details) => ("http_login_compensation_failed", "critical", details),
                     Err(_) => {
                         metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+                        drop(_permit);
                         continue;
                     }
                 }
@@ -181,36 +218,47 @@ async fn run_worker(
         };
         let Some(now) = unix_now() else {
             metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+            drop(_permit);
             continue;
         };
         if details.len() > MAX_EVENT_BYTES {
             metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+            drop(_permit);
             continue;
         }
         if deadline.is_some_and(|until| Instant::now() >= until) {
             metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+            drop(_permit);
             break;
         }
         let writer = Arc::clone(&writer);
         let span = Span::current();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         let result = tokio::task::spawn_blocking(move || {
+            let _permit = _permit;
             let _entered = span.enter();
-            writer.append(name, "token", "", "", [0; 8], "ok", details, now)
+            tracing::dispatcher::with_default(&dispatcher, || {
+                writer.append(name, "token", "", "", [0; 8], outcome, details, now)
+            })
         })
         .await;
         if !matches!(result, Ok(Ok(_))) {
-            tracing::warn!("HTTP login audit append failed");
+            if outcome == "critical" {
+                tracing::error!("HTTP login compensation audit append failed");
+            } else {
+                tracing::warn!("HTTP login audit append failed");
+            }
         }
     }
     if deadline.is_some_and(|until| Instant::now() >= until) {
         let authentication = worker_failures[0].swap(0, Ordering::AcqRel);
         let policy = worker_failures[1].swap(0, Ordering::AcqRel);
         let invalid = worker_failures[2].swap(0, Ordering::AcqRel);
-        if authentication + policy + invalid > 0 {
+        if authentication != 0 || policy != 0 || invalid != 0 {
             metrics::counter!("shamir_login_http_audit_dropped").increment(1);
         }
     } else {
-        flush_failures(&worker_failures, &writer).await;
+        flush_failures(&worker_failures, &writer, &budget).await;
     }
     let remaining = receiver.len();
     if remaining != 0 {
@@ -221,6 +269,7 @@ async fn run_worker(
 async fn flush_failures(
     counts: &Arc<[AtomicU64; 3]>,
     writer: &Arc<shamir_connect::server::audit_chain::AuditChainWriter>,
+    budget: &Arc<tokio::sync::Semaphore>,
 ) {
     let authentication = counts[0].swap(0, Ordering::AcqRel);
     let policy = counts[1].swap(0, Ordering::AcqRel);
@@ -228,6 +277,10 @@ async fn flush_failures(
     if authentication == 0 && policy == 0 && invalid == 0 {
         return;
     }
+    let Ok(_permit) = Arc::clone(budget).try_acquire_owned() else {
+        metrics::counter!("shamir_login_http_audit_dropped").increment(1);
+        return;
+    };
     let Some(now) = unix_now() else {
         metrics::counter!("shamir_login_http_audit_dropped").increment(1);
         return;
@@ -246,18 +299,22 @@ async fn flush_failures(
     };
     let writer = Arc::clone(writer);
     let span = Span::current();
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
     let result = tokio::task::spawn_blocking(move || {
+        let _permit = _permit;
         let _entered = span.enter();
-        writer.append(
-            "http_login_failures",
-            "token",
-            "",
-            "",
-            [0; 8],
-            "ok",
-            details,
-            now,
-        )
+        tracing::dispatcher::with_default(&dispatcher, || {
+            writer.append(
+                "http_login_failures",
+                "token",
+                "",
+                "",
+                [0; 8],
+                "ok",
+                details,
+                now,
+            )
+        })
     })
     .await;
     if !matches!(result, Ok(Ok(_))) {

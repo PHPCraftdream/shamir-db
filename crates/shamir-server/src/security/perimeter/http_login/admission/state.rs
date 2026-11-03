@@ -123,7 +123,10 @@ impl AdmissionState {
             }
             Ok(super::DebitOutcome::Charged) => {}
         }
-        admit_slot(&mut state.slots, source)
+        let mut permit = admit_slot(&mut state.slots, source)?;
+        permit._arrival_pin = Some(state.arrival.pin(source));
+        permit._credit_pin = Some(state.credit.pin(source));
+        Ok(permit)
     }
 }
 
@@ -166,6 +169,8 @@ fn admit_slot(slots: &mut [Slot], source: Source) -> Result<InputPermit, Admissi
     Ok(InputPermit {
         marker: slot.marker.clone(),
         source,
+        _arrival_pin: None,
+        _credit_pin: None,
     })
 }
 
@@ -173,6 +178,8 @@ fn admit_slot(slots: &mut [Slot], source: Source) -> Result<InputPermit, Admissi
 pub struct InputPermit {
     marker: Arc<AtomicBool>,
     source: Source,
+    _arrival_pin: Option<BudgetPin>,
+    _credit_pin: Option<BudgetPin>,
 }
 
 impl InputPermit {

@@ -49,7 +49,7 @@ use axum::{
     routing::get,
     Router,
 };
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use metrics_process::Collector;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -314,7 +314,22 @@ pub async fn spawn_with_byte_budget(
     //    spawn multiple servers in the same process pass
     //    `install_recorder = false` for the second+ instance.
     let prom_handle = if install_recorder {
-        match PrometheusBuilder::new().install_recorder() {
+        let buckets = &[
+            0.05, 0.055, 0.06, 0.065, 0.07, 0.075, 0.1, 0.25, 0.5, 1.0, 5.0, 120.0,
+        ];
+        let builder = PrometheusBuilder::new()
+            .set_buckets_for_metric(
+                Matcher::Full("shamir_login_http_begin_duration_seconds".into()),
+                buckets,
+            )
+            .map_err(|error| ObservabilityError::RecorderInstall(error.to_string()))?;
+        let builder = builder
+            .set_buckets_for_metric(
+                Matcher::Full("shamir_login_http_finish_duration_seconds".into()),
+                buckets,
+            )
+            .map_err(|error| ObservabilityError::RecorderInstall(error.to_string()))?;
+        match builder.install_recorder() {
             Ok(h) => Some(h),
             Err(e) => return Err(ObservabilityError::RecorderInstall(e.to_string())),
         }

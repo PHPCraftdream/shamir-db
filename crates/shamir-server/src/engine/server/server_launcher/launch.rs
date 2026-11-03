@@ -9,7 +9,9 @@ use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::durable_counters::FjallConsumedCounters;
-use shamir_connect::server::lockout::{InMemoryLockoutStore, LockoutSnapshotSink};
+use shamir_connect::server::lockout::{
+    InMemoryLockoutStore, LockoutSnapshotSink, PairDropReason, PairStoreObserver,
+};
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
@@ -271,7 +273,22 @@ impl ServerLauncher {
         // the trade-off rationale (≤60s loss window vs fsync-per-failure).
         let lockout_sink: Arc<dyn LockoutSnapshotSink> =
             Arc::new(MetaLockoutSink::new(meta.clone()));
-        let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink(lockout_sink));
+        let lockout_observer: Arc<PairStoreObserver> = Arc::new(|delta, reason| {
+            metrics::gauge!("shamir_login_http_pair_slots").increment(delta as f64);
+            match reason {
+                Some(PairDropReason::PairQuota) => {
+                    metrics::counter!("shamir_login_http_accounting_dropped", "reason" => "pair_quota").increment(1);
+                }
+                Some(PairDropReason::TableFull) => {
+                    metrics::counter!("shamir_login_http_accounting_dropped", "reason" => "pair_table_full").increment(1);
+                }
+                None => {}
+            }
+        });
+        let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink_and_observer(
+            lockout_sink,
+            Some(lockout_observer),
+        ));
         let now_ns = boot_now_ns()?;
         // Rate-limit buckets are persisted by the SAME periodic task as
         // lockout (one 60s tick writes both). On boot the depleted-bucket
