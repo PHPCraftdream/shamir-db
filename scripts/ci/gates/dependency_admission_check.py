@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Dependency admission gate: the 30-day cooldown with auditable exceptions.
+"""Dependency admission gate: the dependency cooldown (7 days) with auditable exceptions.
 
 A registry package version may enter a committed Cargo.lock only if it was
 published at least `global-min-publish-age` (cooldown.toml) before admission.
@@ -12,7 +12,7 @@ A too-young version is admitted only through an entry in
 cooldown-exceptions.toml that names the exact package, source, version and
 checksum, the registry publication time, the RUSTSEC advisories it fixes (or the
 primary entry it is a lockstep companion of), the approver and an expiry equal
-to the 30-day maturity date. Exceptions waive publication age only.
+to the maturity date (publication + the configured minimum age). Exceptions waive publication age only.
 
 Stdlib only (Python 3.11+, tomllib). Usage:
 
