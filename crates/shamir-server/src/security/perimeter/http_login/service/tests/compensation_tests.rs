@@ -14,7 +14,6 @@ use shamir_connect::server::user_record::UserRecord;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::instrument::WithSubscriber;
 use zeroize::Zeroizing;
 
 const USER: &str = "compensation-user";
@@ -45,16 +44,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CompensationTraceCapture {
 }
 
 struct BlockingRedactionAppender {
-    dispatch: tracing::Dispatch,
     test_thread: std::thread::ThreadId,
 }
 impl AuditAppender for BlockingRedactionAppender {
     fn append_entry(&self, entry: &AuditEntry) -> Result<(), std::io::Error> {
         assert_ne!(std::thread::current().id(), self.test_thread);
         if entry.event == "api_token_created" {
-            tracing::dispatcher::with_default(&self.dispatch, || {
-                tracing::info!(event = "api_token_created", "blocking redaction sentinel")
-            });
+            tracing::info!(event = "api_token_created", "blocking redaction sentinel");
         }
         Ok(())
     }
@@ -171,14 +167,10 @@ async fn begin_finish_redaction_captures_blocking_audit_control() {
         .with_writer(capture.clone())
         .finish();
     let dispatch = tracing::Dispatch::new(subscriber);
-    let appender_dispatch = dispatch.clone();
-    let fixture = Fixture::with_token_audit(move |_| {
-        Arc::new(BlockingRedactionAppender {
-            dispatch: appender_dispatch.clone(),
-            test_thread,
-        })
-    })
-    .await;
+    let _default_guard = tracing::dispatcher::set_default(&dispatch);
+    let fixture =
+        Fixture::with_token_audit(move |_| Arc::new(BlockingRedactionAppender { test_thread }))
+            .await;
     let params = KdfParams {
         memory_kb: 19_456,
         time: 2,
@@ -253,12 +245,13 @@ async fn begin_finish_redaction_captures_blocking_audit_control() {
             token_secret,
         )
     }
-    .with_subscriber(dispatch)
     .await;
     let logs =
         String::from_utf8(capture.0.lock().expect("capture lock").clone()).expect("UTF-8 logs");
     assert!(logs.contains(REDACTION_SENTINEL));
     assert!(logs.contains("BEGIN redaction oracle"));
+    assert!(logs.contains("api_token_created"));
+    drop(_default_guard);
     let (id, proof, client_nonce, server_nonce, token, token_secret) = captured;
     let secrets = [
         USER.to_owned(),

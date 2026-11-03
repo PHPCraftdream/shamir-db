@@ -1,5 +1,80 @@
 use crate::framing::scanner::{Scanner, Verdict};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+
+#[tokio::test]
+async fn response_hold_lives_until_write_flush() {
+    struct Hold(Arc<AtomicUsize>);
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (hold_tx, hold_rx) = tokio::sync::mpsc::channel(1);
+    hold_tx
+        .send(Box::new(Hold(Arc::clone(&drops))) as Box<dyn Send + Sync>)
+        .await
+        .expect("queue hold");
+    let (mut client, server) = duplex(1);
+    let mut guarded =
+        super::super::guarded_io::GuardedIo::new(server, 8192, 64, false, false, hold_rx);
+    let writer = tokio::spawn(async move {
+        guarded
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata")
+            .await?;
+        guarded.flush().await?;
+        guarded.shutdown().await?;
+        Ok::<_, std::io::Error>(guarded)
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    let mut wire = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        client.read_to_end(&mut wire),
+    )
+    .await
+    .expect("drain deadline")
+    .expect("read response");
+    let guarded = writer.await.expect("writer task").expect("write and flush");
+    assert!(wire.ends_with(b"data"));
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(guarded);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dropping_stalled_response_connection_releases_held_slot() {
+    struct Hold(Arc<AtomicUsize>);
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let (hold_tx, hold_rx) = tokio::sync::mpsc::channel(1);
+    hold_tx
+        .send(Box::new(Hold(Arc::clone(&drops))) as Box<dyn Send + Sync>)
+        .await
+        .expect("queue hold");
+    let (_client, server) = duplex(1);
+    let guarded = super::super::guarded_io::GuardedIo::new(server, 8192, 64, false, false, hold_rx);
+    let writer = tokio::spawn(async move {
+        let mut guarded = guarded;
+        let _ = guarded
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\ndata")
+            .await;
+    });
+    tokio::task::yield_now().await;
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    writer.abort();
+    let _ = writer.await;
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
 
 #[test]
 fn every_split_rejects_http10_http2_bare_cr_and_invalid_head() {
@@ -46,6 +121,31 @@ fn sticky_scanner_verdict_cannot_be_rewritten() {
         scanner.feed(b"GET / HTTP/1.1\r\n\r\n", 8192, 64),
         Verdict::BadRequest
     );
+}
+
+#[tokio::test]
+async fn login_framing_refusal_calls_hook_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    let (mut client, server) = duplex(1024);
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let mut guarded = super::super::guarded_io::GuardedIo::new(server, 32, 64, false, false, rx)
+        .with_login_errors(true)
+        .with_refusal_hook(Arc::new(move |route, status| {
+            assert_eq!(route, b"/shamir/v1/auth/begin");
+            assert_eq!(status, 431);
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let task = tokio::spawn(async move {
+        let mut head = [0; 8];
+        let _ = guarded.read(&mut head).await.unwrap();
+    });
+    client
+        .write_all(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nLong: 123456789012345678901234567890\r\n\r\n")
+        .await
+        .unwrap();
+    task.await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

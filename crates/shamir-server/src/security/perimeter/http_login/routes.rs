@@ -217,15 +217,19 @@ impl LoginRoutes for HttpLoginRoutes {
         })
     }
 
-    async fn handle(&self, route: Bytes, permit: Self::Permit, body: Bytes) -> TransportResponse {
+    async fn handle(
+        &self,
+        route: Bytes,
+        permit: Arc<Self::Permit>,
+        body: Bytes,
+    ) -> TransportResponse {
         // Register before checking stopping. SeqCst order ensures a racing
         // shutdown either observes this worker or this request observes stop.
         self.in_flight.count.fetch_add(1, Ordering::SeqCst);
         let guard = InFlightGuard(Arc::clone(&self.in_flight));
         if self.stopping.load(Ordering::SeqCst) {
             drop(guard);
-            drop(permit);
-            return Self::error(503, "server_busy", Some(1));
+            return Self::error(503, "server_busy", Some(1)).with_hold(permit);
         }
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let context = Arc::clone(&self.context);
@@ -237,9 +241,9 @@ impl LoginRoutes for HttpLoginRoutes {
             } else {
                 finish(&context, source, &body).await
             };
-            let reply = Self::reply(value);
-            drop(permit);
-            // A missing receiver means the peer disconnected; the response outcome is uncertain.
+            let reply = Self::reply(value).with_hold(permit);
+            // The transport takes ownership and releases this reservation only
+            // after response writing completes or the connection is dropped.
             let _ = sender.send(reply);
         };
         // Detached intentionally: listener abort must not cancel token
@@ -251,6 +255,17 @@ impl LoginRoutes for HttpLoginRoutes {
             Ok(reply) => reply,
             Err(_) => Self::error(503, "server_busy", Some(1)),
         }
+    }
+
+    fn refused(&self, route: &[u8], status: axum::http::StatusCode) {
+        let result = match status.as_u16() {
+            403 => LoginResult::PolicyDenied,
+            429 => LoginResult::RateLimited,
+            503 => LoginResult::ServerBusy,
+            400 | 404 | 405 | 408 | 413 | 415 | 431 => LoginResult::InvalidRequest,
+            _ => LoginResult::AuthenticationFailed,
+        };
+        record_result(route_result(route), result);
     }
 
     fn body_limit(&self, route: &[u8]) -> usize {

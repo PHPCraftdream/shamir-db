@@ -73,6 +73,42 @@ fn entry_v6(key: PendingId, source: Source) -> PendingEntry {
 }
 
 #[tokio::test]
+async fn reclaim_released_work_is_proportional_to_release_count_at_capacity() {
+    let (_, store) = fixture();
+    let mut claims = Vec::with_capacity(1_024);
+    for number in 0..1_024u16 {
+        let key = id(number);
+        let address = [10, (number / 16) as u8, (number % 16) as u8, 1];
+        store.insert(key, entry(key, address)).await.unwrap();
+        claims.push(store.claim(key, source(address), [3; 16], 1).await.unwrap());
+    }
+    for claim in claims.drain(..512) {
+        drop(claim);
+    }
+    store.reset_reclaim_visits().await;
+    let extra = id(2_000);
+    store
+        .insert(extra, entry(extra, [11, 2, 3, 4]))
+        .await
+        .unwrap();
+    assert_eq!(store.count().await, 513);
+    assert_eq!(store.reclaim_visits().await, 512);
+    for claim in claims.drain(..) {
+        drop(claim);
+    }
+    store.reset_reclaim_visits().await;
+    let reused = id(2_001);
+    store
+        .insert(reused, entry(reused, [11, 2, 4, 4]))
+        .await
+        .unwrap();
+    assert_eq!(store.count().await, 2);
+    assert_eq!(store.reclaim_visits().await, 512);
+    assert!(store.contains_id(extra).await);
+    assert!(store.contains_id(reused).await);
+}
+
+#[tokio::test]
 async fn pending_id_debug_is_redacted_and_live_collision_is_atomic() {
     let (_, store) = fixture();
     let key = id(44);

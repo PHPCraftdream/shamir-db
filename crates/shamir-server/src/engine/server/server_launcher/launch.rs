@@ -273,8 +273,8 @@ impl ServerLauncher {
         // the trade-off rationale (≤60s loss window vs fsync-per-failure).
         let lockout_sink: Arc<dyn LockoutSnapshotSink> =
             Arc::new(MetaLockoutSink::new(meta.clone()));
-        let lockout_observer: Arc<PairStoreObserver> = Arc::new(|delta, reason| {
-            metrics::gauge!("shamir_login_http_pair_slots").increment(delta as f64);
+        let lockout_observer: Arc<PairStoreObserver> = Arc::new(|occupied, reason| {
+            metrics::gauge!("shamir_login_http_pair_slots").set(occupied as f64);
             match reason {
                 Some(PairDropReason::PairQuota) => {
                     metrics::counter!("shamir_login_http_accounting_dropped", "reason" => "pair_quota").increment(1);
