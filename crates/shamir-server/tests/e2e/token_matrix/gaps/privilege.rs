@@ -201,15 +201,17 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
         "one fixture for each current admin BatchOp arm"
     );
 
-    let request_labels: std::collections::HashSet<_> =
-        cases.iter().map(|(_, label)| *label).collect();
-    let batch_labels: std::collections::HashSet<_> =
-        batches.iter().map(|(_, label)| *label).collect();
+    let mut request_labels: Vec<&str> = cases.iter().map(|(_, label)| *label).collect();
+    request_labels.sort_unstable();
+    request_labels.dedup();
     assert_eq!(
         request_labels.len(),
         cases.len(),
         "request labels are unique"
     );
+    let mut batch_labels: Vec<&str> = batches.iter().map(|(_, label)| *label).collect();
+    batch_labels.sort_unstable();
+    batch_labels.dedup();
     assert_eq!(batch_labels.len(), batches.len(), "batch labels are unique");
 
     for token in [&superuser_token, &replicator_token] {
