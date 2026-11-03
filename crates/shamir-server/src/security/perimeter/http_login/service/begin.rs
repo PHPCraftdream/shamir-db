@@ -246,7 +246,7 @@ async fn load_snapshot(
     secrets: Arc<ServerSecrets>,
     span: tracing::Span,
 ) -> Result<VerifierSnapshot, ()> {
-    let result = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || -> Result<VerifierSnapshot, ()> {
         let _entered = span.enter();
         let real = users.lookup_by_name(username.as_str());
         let user_id = users.user_id(username.as_str());
@@ -257,8 +257,7 @@ async fn load_snapshot(
         Ok((real, user_id, floor, fake))
     })
     .await
-    .map_err(|_| ())?;
-    result
+    .unwrap_or(Err(()))
 }
 
 async fn unique_id(pending: &PendingStore) -> Option<[u8; 32]> {

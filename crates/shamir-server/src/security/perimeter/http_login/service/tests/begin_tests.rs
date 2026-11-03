@@ -33,9 +33,10 @@ async fn malformed_begin_is_padded_and_has_no_side_effects() {
     assert_eq!(fixture.context.pending.count().await, 0);
     assert_eq!(fixture.lockout.failure_pair_count(), 0);
     assert_eq!(
-        fixture
-            .lockout
-            .current_backoff_ms(([0; 16], [0; 16]), 90_000_000_000),
+        fixture.lockout.current_backoff_ms(
+            fixture.context.pair_key("alice", source().address()),
+            90_000_000_000
+        ),
         0
     );
     assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
@@ -85,9 +86,10 @@ async fn begin_policy_denials_are_padded_and_have_no_side_effects() {
         assert_eq!(fixture.context.pending.count().await, 0);
         assert_eq!(fixture.lockout.failure_pair_count(), 0);
         assert_eq!(
-            fixture
-                .lockout
-                .current_backoff_ms(([0; 16], [0; 16]), 90_000_000_000),
+            fixture.lockout.current_backoff_ms(
+                fixture.context.pair_key("alice", source().address()),
+                90_000_000_000
+            ),
             0
         );
         assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);

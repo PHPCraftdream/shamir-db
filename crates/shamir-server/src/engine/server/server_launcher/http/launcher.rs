@@ -248,7 +248,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
         };
         let pending = Arc::clone(&resources.pending);
         let login_admission = Arc::clone(&resources.admission);
-        let audit_shutdown = shutdown.child_token();
+        let audit_shutdown = CancellationToken::new();
         let (audit, audit_task) =
             LoginAudit::start(audit_shutdown.clone(), Arc::clone(env.audit_writer));
         let options = LoginServiceOptions {
@@ -364,6 +364,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
             let config = Arc::new(config);
             let executor = Arc::new(executor);
             let result = if let Some((routes, audit_task, audit_shutdown)) = routes {
+                let _audit_stop = audit_shutdown.clone().drop_guard();
                 let result = serve_with_login(
                     listener,
                     config,
@@ -374,7 +375,9 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
                     task_shutdown.clone(),
                 )
                 .await;
-                routes.shutdown().await;
+                if !routes.shutdown(std::time::Duration::from_secs(5)).await {
+                    tracing::warn!("HTTP login worker drain timed out; workers remain detached");
+                }
                 audit_shutdown.cancel();
                 let mut audit_task = audit_task;
                 if tokio::time::timeout(std::time::Duration::from_secs(2), &mut audit_task)

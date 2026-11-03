@@ -53,6 +53,13 @@ impl LoginClock for FixedClock {
 
 impl Fixture {
     pub(super) async fn new() -> Self {
+        Self::with_token_audit(|_| Arc::new(NoopAppender)).await
+    }
+
+    pub(super) async fn with_token_audit<F>(make_appender: F) -> Self
+    where
+        F: FnOnce(Arc<FjallUserDirectory>) -> Arc<dyn AuditAppender>,
+    {
         let temp = TempDir::new().expect("temporary fixture directory");
         let users =
             Arc::new(FjallUserDirectory::open(temp.path().join("users")).expect("user directory"));
@@ -75,7 +82,7 @@ impl Fixture {
             .expect("seed login user");
         let audit = Arc::new(AuditChainWriter::new(
             AuditChain::new([8; 32]),
-            Arc::new(NoopAppender),
+            make_appender(Arc::clone(&users)),
         ));
         let sessions = Arc::new(TokenSessionStore::new());
         let tokens = Arc::new(

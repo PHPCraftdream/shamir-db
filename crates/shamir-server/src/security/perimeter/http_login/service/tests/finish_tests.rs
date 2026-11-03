@@ -2,6 +2,7 @@ use super::fixture::Fixture;
 use crate::http_login::admission::Source;
 use crate::http_login::pending::{PendingEntry, PendingId};
 use crate::http_login::service::finish;
+use crate::http_login::wire::response as wire_response;
 use axum::http::StatusCode;
 use shamir_connect::common::crypto::{hmac_sha256, sha256, StoredKey};
 use shamir_connect::common::kdf_params::KdfParams;
@@ -209,6 +210,171 @@ async fn finish_tracing_redacts_credentials_and_secrets() {
     for secret in secrets {
         assert!(!logs.contains(&secret), "login secret leaked to trace");
     }
+}
+
+#[derive(serde::Serialize)]
+struct BeginBody<'a> {
+    protocol_version: u8,
+    user: &'a str,
+    client_nonce: &'a serde_bytes::Bytes,
+    binding_mode: u8,
+    token: BeginScope<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct BeginScope<'a> {
+    label: &'a str,
+    mode: &'a str,
+    channels: &'a str,
+    databases: Option<Vec<&'a str>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ChallengeId {
+    handshake_id: serde_bytes::ByteBuf,
+}
+
+#[tokio::test(start_paused = true)]
+async fn mathematically_valid_proof_for_ineligible_entry_never_issues() {
+    let fixture = Fixture::new().await;
+    let id = [16; 32];
+    let transcript = pending(&fixture, id, source(), false).await;
+    let pair = fixture.context.pair_key(USER, source().address());
+    let mut entry = fixture
+        .context
+        .pending
+        .claim(
+            PendingId(id),
+            source(),
+            fixture.context.listener_id,
+            fixture.context.security_class,
+        )
+        .await
+        .expect("pending claim")
+        .take()
+        .expect("pending entry");
+    entry.eligible = false;
+    fixture
+        .context
+        .pending
+        .insert(PendingId(id), entry)
+        .await
+        .expect("restore ineligible entry");
+    let response = finish(
+        &fixture.context,
+        source(),
+        &finish_body(id, proof(&transcript)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.body(),
+        wire_response(401, "authentication_failed", None)
+            .expect("canonical unauthorized response")
+            .body()
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 1);
+    let status = fixture.lockout.pair_status(pair, 90_000_000_000);
+    assert_eq!(status.last_fail_at_ns, Some(90_000_000_000));
+    assert_eq!(
+        fixture.lockout.current_backoff_ms(pair, 90_000_000_000),
+        100
+    );
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
+    assert_eq!(fixture.context.pending.count().await, 0);
+    assert_eq!(
+        finish(
+            &fixture.context,
+            source(),
+            &finish_body(id, proof(&transcript))
+        )
+        .await
+        .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 1);
+    assert_eq!(
+        fixture
+            .lockout
+            .pair_status(pair, 90_000_000_000)
+            .last_fail_at_ns,
+        Some(90_000_000_000)
+    );
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn hardened_mismatched_default_begin_finish_records_failure() {
+    let mut fixture = Fixture::new().await;
+    fixture.context.hardening = true;
+    fixture.context.default_kdf.memory_kb = 19_457;
+    let request = BeginBody {
+        protocol_version: 1,
+        user: "alice",
+        client_nonce: serde_bytes::Bytes::new(&[3; 32]),
+        binding_mode: 3,
+        token: BeginScope {
+            label: "http-login",
+            mode: "read_only",
+            channels: "rest",
+            databases: None,
+        },
+    };
+    let begin_body = rmp_serde::to_vec_named(&request).expect("serialize begin request");
+    let begun = crate::http_login::service::begin(&fixture.context, source(), &begin_body).await;
+    assert_eq!(begun.status(), StatusCode::OK);
+    let challenge: ChallengeId = rmp_serde::from_slice(begun.body()).expect("challenge ID");
+    let id: [u8; 32] = challenge
+        .handshake_id
+        .as_ref()
+        .try_into()
+        .expect("32-byte handshake ID");
+    assert_eq!(fixture.context.pending.count().await, 1);
+
+    let pair = fixture.context.pair_key("alice", source().address());
+    let response = finish(&fixture.context, source(), &finish_body(id, [0; 32])).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        response.body(),
+        wire_response(401, "authentication_failed", None)
+            .expect("canonical unauthorized response")
+            .body()
+    );
+    assert_eq!(
+        fixture.lockout.current_backoff_ms(pair, 90_000_000_000),
+        100
+    );
+    assert_eq!(
+        fixture
+            .lockout
+            .pair_status(pair, 90_000_000_000)
+            .last_fail_at_ns,
+        Some(90_000_000_000)
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 1);
+    assert_eq!(fixture.context.pending.count().await, 0);
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
+
+    assert_eq!(
+        finish(&fixture.context, source(), &finish_body(id, [0; 32]))
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(fixture.lockout.failure_pair_count(), 1);
+    assert_eq!(
+        fixture.lockout.current_backoff_ms(pair, 90_000_000_000),
+        100
+    );
+    assert_eq!(
+        fixture
+            .lockout
+            .pair_status(pair, 90_000_000_000)
+            .last_fail_at_ns,
+        Some(90_000_000_000)
+    );
+    assert_eq!(fixture.context.pending.count().await, 0);
+    assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
 }
 
 #[tokio::test(start_paused = true)]

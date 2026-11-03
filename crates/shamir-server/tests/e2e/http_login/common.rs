@@ -224,6 +224,7 @@ pub async fn login(
         return Err((status, headers, body));
     }
     let challenge: LoginChallenge = rmp_serde::from_slice(&body).expect("decode login challenge");
+    assert_eq!(challenge.security, 0);
     assert_eq!(
         (
             challenge.protocol_version,

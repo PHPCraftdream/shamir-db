@@ -174,13 +174,13 @@ async fn finish_inner(context: &LoginServiceContext, source: Source, body: &[u8]
         Err(error) => return map_create_error(error),
     };
     if !claim.is_live() {
-        return compensate(context, created, now).await;
+        return compensate(context, created).await;
     }
     if created.record_view.created_at_ns <= before.floor {
-        return compensate(context, created, now).await;
+        return compensate(context, created).await;
     }
     let Some(after) = snapshot(context, user_id, &username).await else {
-        return compensate(context, created, now).await;
+        return compensate(context, created).await;
     };
     if !claim.is_live()
         || !constant_time_eq(&after.stored_key[..], &before.stored_key[..])
@@ -189,7 +189,7 @@ async fn finish_inner(context: &LoginServiceContext, source: Source, body: &[u8]
         || after.privileged
         || !after.eligible
     {
-        return compensate(context, created, now).await;
+        return compensate(context, created).await;
     }
     let signature = build_server_signature(&entry.server_key, &entry.transcript);
     match success(&Success {
@@ -207,7 +207,7 @@ async fn finish_inner(context: &LoginServiceContext, source: Source, body: &[u8]
             }
             LoginResponse::new(StatusCode::OK, body)
         }
-        Err(_) => compensate(context, created, now).await,
+        Err(_) => compensate(context, created).await,
     }
 }
 
@@ -259,13 +259,16 @@ async fn snapshot(
 async fn compensate(
     context: &LoginServiceContext,
     created: crate::security::tokens::CreatedToken,
-    now: u64,
 ) -> LoginResponse {
+    let revoke_at = (context.unix_clock)()
+        .unwrap_or(created.record_view.created_at_ns)
+        .max(created.record_view.created_at_ns);
     match context
         .tokens
-        .revoke(TokenId(created.record_view.id), now)
+        .revoke(TokenId(created.record_view.id), revoke_at)
         .await
     {
+        // Ok(false) means already revoked or absent from the mirror at the mutation gate; no secret is returned in either case.
         Ok(_) => failed(),
         Err(_) => {
             if let Some(audit) = &context.audit {

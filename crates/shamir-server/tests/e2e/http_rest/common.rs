@@ -14,7 +14,7 @@ use tokio::net::TcpStream;
 use tokio::time::Duration;
 use zeroize::Zeroizing;
 
-pub(super) const ADMIN_PASSWORD: &[u8] = b"http-rest-admin-password";
+pub(crate) const ADMIN_PASSWORD: &[u8] = b"http-rest-admin-password";
 
 pub struct Harness {
     pub handle: ServerHandle,

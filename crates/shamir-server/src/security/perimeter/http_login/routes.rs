@@ -7,17 +7,34 @@ use bytes::Bytes;
 use shamir_transport_http::gate::PeerInfo;
 use shamir_transport_http::{LoginHead, LoginResponse as TransportResponse, LoginRoutes};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::time::Duration;
 use tracing::Instrument;
+
+/// Tracks detached route workers independently of the listener's lifetime.
+struct InFlight {
+    count: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+struct InFlightGuard(Arc<InFlight>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
 
 /// Listener-specific HTTP login route service.
 pub struct HttpLoginRoutes {
     enabled: bool,
     context: Arc<LoginServiceContext>,
     policy: LoginHeadPolicy,
-    tasks: tokio::sync::Mutex<tokio::task::JoinSet<()>>,
+    in_flight: Arc<InFlight>,
     stopping: AtomicBool,
 }
 
@@ -28,16 +45,31 @@ impl HttpLoginRoutes {
             enabled,
             context,
             policy,
-            tasks: tokio::sync::Mutex::new(tokio::task::JoinSet::new()),
+            in_flight: Arc::new(InFlight {
+                count: AtomicUsize::new(0),
+                idle: tokio::sync::Notify::new(),
+            }),
             stopping: AtomicBool::new(false),
         }
     }
 
-    /// Drain in-flight login work without cancelling critical storage operations.
-    pub async fn shutdown(&self) {
-        self.stopping.store(true, Ordering::Release);
-        let mut tasks = self.tasks.lock().await;
-        while tasks.join_next().await.is_some() {}
+    /// Waits at most `budget` for detached login work to finish.
+    /// Returns `false` when work continues detached; cancelling this wait does not cancel workers.
+    /// cancel-safe: yes — cancellation stops waiting, not detached workers.
+    pub async fn shutdown(&self, budget: Duration) -> bool {
+        self.stopping.store(true, Ordering::SeqCst);
+        let idle = async {
+            loop {
+                let notified = self.in_flight.idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.in_flight.count.load(Ordering::SeqCst) == 0 {
+                    return;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(budget, idle).await.is_ok()
     }
 
     fn error(status: u16, code: &str, retry: Option<u32>) -> TransportResponse {
@@ -127,9 +159,19 @@ impl LoginRoutes for HttpLoginRoutes {
     }
 
     async fn handle(&self, route: Bytes, permit: Self::Permit, body: Bytes) -> TransportResponse {
+        // Register before checking stopping. SeqCst order ensures a racing
+        // shutdown either observes this worker or this request observes stop.
+        self.in_flight.count.fetch_add(1, Ordering::SeqCst);
+        let guard = InFlightGuard(Arc::clone(&self.in_flight));
+        if self.stopping.load(Ordering::SeqCst) {
+            drop(guard);
+            drop(permit);
+            return Self::error(503, "server_busy", Some(1));
+        }
         let (sender, receiver) = tokio::sync::oneshot::channel();
         let context = Arc::clone(&self.context);
         let future = async move {
+            let _guard = guard;
             let source = permit.source();
             let value = if route.ends_with(b"begin") {
                 begin(&context, source, &body).await
@@ -138,14 +180,14 @@ impl LoginRoutes for HttpLoginRoutes {
             };
             let reply = Self::reply(value);
             drop(permit);
-            // A missing receiver means the peer disconnected; response delivery is uncertain.
+            // A missing receiver means the peer disconnected; the response outcome is uncertain.
             let _ = sender.send(reply);
         };
-        {
-            let mut tasks = self.tasks.lock().await;
-            while tasks.try_join_next().is_some() {}
-            tasks.spawn(future.instrument(tracing::Span::current()));
-        }
+        // Detached intentionally: listener abort must not cancel token
+        // issuance between create and its verification/compensation. A false
+        // shutdown result leaves outstanding workers running detached, and
+        // cancelling the shutdown wait does not cancel them.
+        tokio::spawn(future.instrument(tracing::Span::current()));
         match receiver.await {
             Ok(reply) => reply,
             Err(_) => Self::error(503, "server_busy", Some(1)),
@@ -167,6 +209,7 @@ impl core::fmt::Debug for HttpLoginRoutes {
             .field("enabled", &self.enabled)
             .field("context", &"<redacted>")
             .field("policy", &"<redacted>")
+            .field("stopping", &self.stopping.load(Ordering::Relaxed))
             .finish()
     }
 }

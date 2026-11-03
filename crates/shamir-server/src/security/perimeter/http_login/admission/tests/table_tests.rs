@@ -17,6 +17,23 @@ fn v6(child: u16) -> Source {
 }
 
 #[test]
+fn full_table_eviction_scan_has_linear_slot_visit_bound() {
+    let mut table = LoginBudgetTable::new(Duration::from_secs(60));
+    let now = Instant::now();
+    for i in 0u32..2048 {
+        let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new((i >> 8) as u8, i as u8, 7, 9)));
+        assert_eq!(table.debit(source, now), Ok(DebitOutcome::Charged));
+    }
+    assert_eq!(table.occupied_slots(), 4096);
+    let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new(8, 0, 7, 9)));
+    table.reset_slot_visits();
+    assert_eq!(table.debit(source, now), Ok(DebitOutcome::Charged));
+    let visits = table.slot_visits();
+    assert!(visits > 0);
+    assert!(visits <= 20 * 4096);
+}
+
+#[test]
 fn source_debits_distinct_tiers_and_enforces_prefix_capacity() {
     let mut table = LoginBudgetTable::new(Duration::from_secs(1));
     let source = v4(17);

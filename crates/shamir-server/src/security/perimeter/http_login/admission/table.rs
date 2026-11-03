@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,6 +14,7 @@ const SCALE: u64 = 1_000_000;
 struct Bucket {
     key: PrefixKey,
     parent: PrefixKey,
+    parent_slot: u16,
     tokens: u64,
     updated: Instant,
     touched: u64,
@@ -26,6 +29,8 @@ pub struct LoginBudgetTable {
     slots: Box<[Slot]>,
     period_ns: u128,
     tick: u64,
+    #[cfg(test)]
+    slot_visits: Cell<usize>,
 }
 
 /// Reason a new source could not obtain a resident bucket.
@@ -82,6 +87,8 @@ impl LoginBudgetTable {
             slots,
             period_ns: period.as_nanos().max(1),
             tick: 0,
+            #[cfg(test)]
+            slot_visits: Cell::new(0),
         }
     }
     /// Atomically debits the distinct source tiers at the supplied instant.
@@ -110,7 +117,17 @@ impl LoginBudgetTable {
                 continue;
             }
             let parent = if key == root { key } else { root };
-            match self.obtain(key, parent, now, &indices) {
+            match self.obtain(
+                key,
+                parent,
+                now,
+                &indices,
+                if key == root {
+                    None
+                } else {
+                    Some(indices[count - 1])
+                },
+            ) {
                 Some(idx) => indices[n] = idx,
                 None => return Ok(DebitOutcome::Dropped(BudgetDropReason::NoEvictableBucket)),
             }
@@ -170,14 +187,34 @@ impl LoginBudgetTable {
     pub(super) fn bucket_size() -> usize {
         std::mem::size_of::<Slot>() + 24
     }
+    #[cfg(test)]
+    pub(super) fn reset_slot_visits(&self) {
+        self.slot_visits.set(0);
+    }
+    #[cfg(test)]
+    pub(super) fn slot_visits(&self) -> usize {
+        self.slot_visits.get()
+    }
+    #[cfg(test)]
+    pub(super) fn occupied_slots(&self) -> usize {
+        self.slots.iter().filter(|s| s.bucket.is_some()).count()
+    }
+    #[inline]
+    fn slot_visit(&self) {
+        #[cfg(test)]
+        self.slot_visits
+            .set(self.slot_visits.get().saturating_add(1));
+    }
     fn find(&self, key: PrefixKey) -> Option<usize> {
         self.slots
             .iter()
+            .inspect(|_| self.slot_visit())
             .position(|s| s.bucket.is_some_and(|b| b.key == key))
     }
     fn child_count(&self, root: PrefixKey, prefix: u8) -> usize {
         self.slots
             .iter()
+            .inspect(|_| self.slot_visit())
             .filter(|s| {
                 s.bucket
                     .is_some_and(|b| b.parent == root && b.key.prefix() == prefix && b.key != root)
@@ -190,20 +227,42 @@ impl LoginBudgetTable {
         parent: PrefixKey,
         now: Instant,
         protected: &[usize; 3],
+        parent_slot: Option<usize>,
     ) -> Option<usize> {
-        if let Some(idx) = self.slots.iter().position(|s| s.bucket.is_none()) {
+        if let Some(idx) = self
+            .slots
+            .iter()
+            .inspect(|_| self.slot_visit())
+            .position(|s| s.bucket.is_none())
+        {
             self.tick = self.tick.wrapping_add(1);
             self.slots[idx].bucket = Some(Bucket {
                 key,
                 parent,
+                parent_slot: parent_slot.unwrap_or(idx) as u16,
                 tokens: u64::from(capacity(key)) * SCALE,
                 updated: now,
                 touched: self.tick,
             });
             return Some(idx);
         }
+        let mut has_child = [false; BUCKETS];
+        let mut held_child = [false; BUCKETS];
+        for (child_idx, slot) in self.slots.iter().enumerate() {
+            self.slot_visit();
+            if let Some(child) = slot.bucket {
+                if child.parent_slot as usize != child_idx {
+                    let root_idx = child.parent_slot as usize;
+                    has_child[root_idx] = true;
+                    if protected.contains(&child_idx) || slot.pins.load(Ordering::Acquire) != 0 {
+                        held_child[root_idx] = true;
+                    }
+                }
+            }
+        }
         let mut last_candidate: Option<usize> = None;
         for i in 0..self.slots.len() {
+            self.slot_visit();
             let Some(bucket) = self.slots[i].bucket else {
                 continue;
             };
@@ -214,22 +273,7 @@ impl LoginBudgetTable {
             if self.slots[i].pins.load(Ordering::Acquire) != 0 {
                 continue;
             }
-            let root = bucket.key == bucket.parent;
-            let mut pinned_descendant = false;
-            if root && self.has_children(bucket.key) {
-                for (child_idx, child) in self.slots.iter().enumerate() {
-                    if child
-                        .bucket
-                        .is_some_and(|b| b.parent == bucket.key && b.key != bucket.key)
-                        && (protected.contains(&child_idx)
-                            || child.pins.load(Ordering::Acquire) != 0)
-                    {
-                        pinned_descendant = true;
-                        break;
-                    }
-                }
-            }
-            if pinned_descendant {
+            if bucket.key == bucket.parent && has_child[i] && held_child[i] {
                 continue;
             }
             let fullness = self.slots[i].bucket.expect("resident bucket").tokens;
@@ -261,33 +305,28 @@ impl LoginBudgetTable {
         let idx = last_candidate?;
         let old = self.slots[idx].bucket.expect("resident bucket");
         if self.slots[idx].pins.load(Ordering::Acquire) != 0
-            || (old.key == old.parent
-                && self.slots.iter().enumerate().any(|(child_idx, slot)| {
-                    slot.bucket.is_some_and(|child| {
-                        child.parent == old.key
-                            && child.key != old.key
-                            && (protected.contains(&child_idx)
-                                || slot.pins.load(Ordering::Acquire) != 0)
-                    })
-                }))
+            || (old.key == old.parent && has_child[idx] && held_child[idx])
         {
             return None;
         }
         if old.key != old.parent {
-            if let Some(parent_idx) = self.find(old.parent) {
-                self.refill(parent_idx, now, capacity(old.parent));
-                let debt = u64::from(capacity(old.key)) * SCALE - old.tokens;
-                let parent_bucket = self.slots[parent_idx]
-                    .bucket
-                    .as_mut()
-                    .expect("resident parent");
-                parent_bucket.tokens = parent_bucket.tokens.saturating_sub(debt);
-            }
+            let parent_idx = old.parent_slot as usize;
+            self.refill(parent_idx, now, capacity(old.parent));
+            let debt = u64::from(capacity(old.key)) * SCALE - old.tokens;
+            let parent_bucket = self.slots[parent_idx]
+                .bucket
+                .as_mut()
+                .expect("resident parent");
+            parent_bucket.tokens = parent_bucket.tokens.saturating_sub(debt);
         } else {
+            #[cfg(test)]
+            let slot_visits = &self.slot_visits;
             for slot in self.slots.iter_mut() {
+                #[cfg(test)]
+                slot_visits.set(slot_visits.get().saturating_add(1));
                 if slot
                     .bucket
-                    .is_some_and(|b| b.parent == old.key && b.key != old.key)
+                    .is_some_and(|b| b.parent_slot as usize == idx && b.key != b.parent)
                 {
                     slot.bucket = None;
                 }
@@ -297,16 +336,12 @@ impl LoginBudgetTable {
         self.slots[idx].bucket = Some(Bucket {
             key,
             parent,
+            parent_slot: parent_slot.unwrap_or(idx) as u16,
             tokens: u64::from(capacity(key)) * SCALE,
             updated: now,
             touched: self.tick,
         });
         Some(idx)
-    }
-    fn has_children(&self, key: PrefixKey) -> bool {
-        self.slots
-            .iter()
-            .any(|s| s.bucket.is_some_and(|b| b.parent == key && b.key != key))
     }
     fn refill(&mut self, idx: usize, now: Instant, cap: u32) {
         let Some(b) = self.slots[idx].bucket.as_mut() else {
@@ -331,6 +366,7 @@ impl LoginBudgetTable {
         }
     }
 }
+
 fn distinct_tiers(source: Source) -> ([PrefixKey; 3], usize) {
     let tiers = source.tiers();
     if tiers[1] == tiers[2] {
