@@ -47,19 +47,6 @@ approved_by = "PHPCraftdream"
 approved_on = "2026-10-24"
 
 [[exception]]
-package = "mio"
-version = "1.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
-published = "2026-10-03T16:33:10Z"
-expires = "2026-11-02"
-kind = "security"
-companion_of = "tokio@1.51.6"
-reason = "Lockstep companion: tokio 1.51.6 requires mio 1.2.x; admitted only because its primary requires it."
-approved_by = "PHPCraftdream"
-approved_on = "2026-10-24"
-
-[[exception]]
 package = "cranelift-assembler-x64"
 version = "0.135.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,6 +1,6 @@
 use super::create::{finish, open, resolve, service, CliIo};
 use crate::config::Config;
-use crate::security::tokens::TokenStore;
+use crate::security::tokens::{TokenAuditContext, TokenStore};
 use base64::Engine;
 use shamir_connect::server::token::TokenId;
 pub enum Action {
@@ -48,10 +48,18 @@ pub async fn run_revoke(c: &Config, a: Action, io: &mut CliIo<'_>) -> anyhow::Re
     let svc = service(c, &m, d.clone(), w.clone()).await?;
     let result: anyhow::Result<String> = async {
         let now = shamir_connect::common::time::UnixNanos::try_now()?.as_u64();
+        let context = TokenAuditContext {
+            actor_username: String::new(),
+            transport: "cli".to_owned(),
+            session_id_prefix: [0; 8],
+        };
         match a {
             Action::One(x) => Ok(format!(
                 "{}\n",
-                if svc.revoke(id(&x)?, now).await? {
+                if svc
+                    .revoke_with_context(id(&x)?, now, context.clone())
+                    .await?
+                {
                     "revoked=1"
                 } else {
                     "already_revoked=1"
@@ -59,7 +67,11 @@ pub async fn run_revoke(c: &Config, a: Action, io: &mut CliIo<'_>) -> anyhow::Re
             )),
             Action::User(n) => {
                 let u = resolve(&d, &n)?.user_id;
-                Ok(format!("revoked={}\n", svc.revoke_user(u, now).await?))
+                Ok(format!(
+                    "revoked={}\n",
+                    svc.revoke_user_with_context(u, now, context.clone())
+                        .await?
+                ))
             }
             Action::All => {
                 let mut owners = all_ids.unwrap_or_default();
@@ -67,7 +79,9 @@ pub async fn run_revoke(c: &Config, a: Action, io: &mut CliIo<'_>) -> anyhow::Re
                 owners.dedup();
                 let mut count = 0usize;
                 for u in owners {
-                    count += svc.revoke_user(u, now).await?;
+                    count += svc
+                        .revoke_user_with_context(u, now, context.clone())
+                        .await?;
                 }
                 Ok(format!("revoked={count}\n"))
             }

@@ -22,6 +22,7 @@ mod error;
 mod to_wire;
 
 pub mod response;
+pub mod token_admin;
 
 pub use error::WireError;
 pub use to_wire::ToWire;

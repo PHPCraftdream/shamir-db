@@ -1,5 +1,4 @@
 use crate::security::perimeter::http_rest::AllowedOperation;
-use serde::Serialize;
 use shamir_collections::new_map;
 use shamir_connect::server::token::TokenMode;
 use shamir_query_builder::batch::{Batch, IntoBatchOp, Subscribe};
@@ -295,6 +294,27 @@ fn top_level_admin_requests_are_denied_using_typed_variants() {
             node_id: "n".into(),
             capabilities: None,
         }),
+        DbRequest::CreateApiToken {
+            label: "t".into(),
+            ttl_secs: None,
+            mode: None,
+            channels: None,
+            databases: None,
+            for_user: None,
+            hmac: None,
+        },
+        DbRequest::ListApiTokens {
+            for_user: None,
+            hmac: None,
+        },
+        DbRequest::RevokeApiToken {
+            id: "t".into(),
+            hmac: None,
+        },
+        DbRequest::RevokeUserTokens {
+            user: None,
+            hmac: None,
+        },
     ];
     for request in requests {
         assert_eq!(
@@ -370,36 +390,5 @@ fn unsupported_transaction_and_cursor_requests_precede_database_denial() {
             classify_request(&request, TokenMode::ReadOnly, Some(&["inside".into()])),
             Decision::NotSupported("not_supported_over_rest")
         );
-    }
-}
-
-// These management variants are deliberately modeled as a test-only wire
-// fixture: DbRequest has no such variants yet, so decoding must reject them.
-#[derive(Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-enum ApiTokenManagementWireFixture {
-    CreateApiToken { name: String },
-    ListApiTokens,
-    RevokeApiToken { token_id: String },
-    RevokeUserTokens { user: String },
-}
-
-#[test]
-fn api_token_management_wire_variants_are_not_available_yet() {
-    let fixtures = [
-        ApiTokenManagementWireFixture::CreateApiToken {
-            name: "fixture".into(),
-        },
-        ApiTokenManagementWireFixture::ListApiTokens,
-        ApiTokenManagementWireFixture::RevokeApiToken {
-            token_id: "fixture".into(),
-        },
-        ApiTokenManagementWireFixture::RevokeUserTokens {
-            user: "fixture".into(),
-        },
-    ];
-    for fixture in fixtures {
-        let wire = rmp_serde::to_vec_named(&fixture).expect("typed MessagePack fixture");
-        assert!(rmp_serde::from_slice::<DbRequest>(&wire).is_err());
     }
 }

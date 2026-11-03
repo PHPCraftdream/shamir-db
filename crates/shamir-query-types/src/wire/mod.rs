@@ -17,6 +17,8 @@ pub mod repl;
 #[cfg(test)]
 mod tests;
 
+pub use crate::auth::token_admin;
+pub use crate::auth::token_admin::{ApiTokenChannels, ApiTokenMode, ApiTokenView, CreatedApiToken};
 pub use change_password_secrets::ChangePasswordSecrets;
 pub use cursor_id::CursorId;
 pub use db_message::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
