@@ -570,3 +570,14 @@ PARTIAL — the brief is not implemented in full and is not merge-ready. Changes
 
 OBSERVED final permitted gates after restoring baseline lockout assertions at `crates/shamir-connect/src/server/tests/security/lockout_storage_tests.rs:161–162`: `cargo fmt -p shamir-server -p shamir-connect` (job01D) exit0; `cargo fmt -p shamir-server -p shamir-connect -- --check` (job01E) exit0; `python -I scripts/ci/check_layout.py`: layout check: OK (0 baselined, 0 hint(s)). Parent diff shows observer imports/new tests without baseline assertion loss. No source changes followed these gates. No compilation, clippy, discovery, tests or CI. Review is bounded manual source review, not compiler proof or 40 continuous minutes. Overall PARTIAL, not merge-ready.
 
+
+### Tails review fixes (orchestrator, source only, CI pending)
+
+Two independent compiler-style reviews of the tails commit were applied. No compilation or test result is claimed.
+
+- N1 corrected: the earlier `min(request_timeout, 120 s)` worker drain exceeded the server's 10 s listener deadline (workers 120 s + audit 2 s), so a hung worker made shutdown unclean. The worker drain is now capped at 7 s (`WORKER_DRAIN_CAP` in `http_login/routes.rs`), leaving the 2 s audit drain inside the 10 s deadline; the unit test asserts the cap and the docs/example config state 7 s.
+- Pair-slots gauge: the constructors no longer push an initial occupancy delta (the recorder did not exist yet and the delta was lost); `InMemoryLockoutStore::occupied_pair_count` is public and the launcher republishes the absolute value every 30 s. The observer now reports only real changes (no zero deltas) and the occupancy scans run only when an observer is installed; the drop reason is computed lazily after a failed admission.
+- Admission: a `Dropped` debit (no evictable bucket, possible once in-flight inputs pin buckets) now fails closed with `ServerBusy` instead of admitting an undebited source.
+- Metrics: a 404 from a disabled route is counted as `InvalidRequest`, not as an authentication failure. Histogram bucket configuration moved out of `observability/mod.rs` into `observability/login_histogram.rs`.
+- Test fixes: clippy `needless_borrows_for_generic_args` in `compensation_tests.rs`, a tautological Origin sentinel assertion removed from `audit_tests.rs`, the e2e `login_as` helper no longer derives the Argon2 keys twice.
+- Still open (unchanged status): S9 response-write permit ownership (the input permit is released before the transport writes the response; this needs a transport API change), S6 blocking-thread redaction (the compensation test captures through an explicitly passed dispatcher, so it does not prove propagation into `TokenService` blocking logs), per-listener physical audit queues, full memory proof, the ordered expiry queue still scans on reclaim, and the `TOKEN_LOGIN_HTTP.md` status banner still says "not implemented".

@@ -367,16 +367,12 @@ impl InMemoryLockoutStore {
             Ok(None) => {}
             Err(error) => log::warn!("lockout snapshot load failed; starting empty: {error}"),
         }
-        if let Some(observer) = &store.observer {
-            observer(store.occupied_pair_count() as i64, None);
-        }
         store
     }
 
-    /// Install an observer on an existing store. Intended for exclusive initialization; `self`
-    /// is consumed, so no shared store reference can mutate during the initial occupancy report.
+    /// Install an observer on an existing store. The observer sees deltas only; a gauge owner
+    /// reads the absolute value through [`Self::occupied_pair_count`] once its recorder exists.
     pub fn with_observer(self, observer: Arc<PairStoreObserver>) -> Self {
-        observer(self.occupied_pair_count() as i64, None);
         Self {
             observer: Some(observer),
             ..self
@@ -384,12 +380,18 @@ impl InMemoryLockoutStore {
     }
 
     /// Count occupied pair slots, including lockout-only entries.
-    fn occupied_pair_count(&self) -> usize {
-        self.slots
-            .lock()
-            .iter()
-            .filter(|slot| slot.occupied)
-            .count()
+    pub fn occupied_pair_count(&self) -> usize {
+        count_occupied(&self.slots.lock())
+    }
+
+    /// Notify the observer, skipping the no-change case.
+    fn report(&self, delta: i64, dropped: Option<PairDropReason>) {
+        if delta == 0 && dropped.is_none() {
+            return;
+        }
+        if let Some(observer) = &self.observer {
+            observer(delta, dropped);
+        }
     }
 
     /// Count pairs with recorded failures.
@@ -498,6 +500,26 @@ fn source_base(subnet: Subnet) -> (u8, [u8; 6]) {
     match subnet {
         Subnet::V4(v) => (4, [v[0], v[1], 0, 0, 0, 0]),
         Subnet::V6(v) => (6, [v[0], v[1], v[2], v[3], v[4], v[5]]),
+    }
+}
+
+fn count_occupied(slots: &[PairSlot]) -> usize {
+    slots.iter().filter(|slot| slot.occupied).count()
+}
+
+/// Why `key` could not be admitted: an exhausted base/parent quota, else a full table.
+fn pair_drop_reason(slots: &[PairSlot], key: PairKey, now_ns: u64) -> PairDropReason {
+    let parent = source_base(key.0);
+    let mut base_count = 0;
+    let mut parent_count = 0;
+    for slot in slots.iter().filter(|slot| !pair_is_free(slot, now_ns)) {
+        base_count += (slot.key.0 == key.0) as usize;
+        parent_count += (source_base(slot.key.0) == parent) as usize;
+    }
+    if base_count >= LOCKOUT_BASE_QUOTA || parent_count >= LOCKOUT_PARENT_QUOTA {
+        PairDropReason::PairQuota
+    } else {
+        PairDropReason::TableFull
     }
 }
 
@@ -623,34 +645,20 @@ impl LockoutStore for InMemoryLockoutStore {
                 count: 1,
                 last_fail_at_ns: now_ns,
             };
-            let mut base_count = 0;
-            let mut parent_count = 0;
-            let parent = source_base(key.0);
-            for slot in slots.iter().filter(|slot| !pair_is_free(slot, now_ns)) {
-                base_count += (slot.key.0 == key.0) as usize;
-                parent_count += (source_base(slot.key.0) == parent) as usize;
-            }
-            let exhausted_base = base_count >= LOCKOUT_BASE_QUOTA;
-            let exhausted_parent = parent_count >= LOCKOUT_PARENT_QUOTA;
-            let reason = if exhausted_base || exhausted_parent {
-                PairDropReason::PairQuota
-            } else {
-                PairDropReason::TableFull
-            };
-            let before = slots.iter().filter(|slot| slot.occupied).count();
+            // The scans below run only when an observer is installed.
+            let before = self.observer.is_some().then(|| count_occupied(&slots));
             let index = find_or_admit(&mut slots, key, failure, None, now_ns, true);
-            let after = slots.iter().filter(|slot| slot.occupied).count();
-            delta = after as i64 - before as i64;
-            if index.is_none() {
-                dropped = Some(reason);
+            if let Some(before) = before {
+                delta = count_occupied(&slots) as i64 - before as i64;
+                if index.is_none() {
+                    dropped = Some(pair_drop_reason(&slots, key, now_ns));
+                }
             }
             (index, 1)
         };
         let Some(index) = index else {
             drop(slots);
-            if let Some(observer) = &self.observer {
-                observer(delta, dropped);
-            }
+            self.report(delta, dropped);
             return FailureOutcome::Backoff { delay_ms: 0 };
         };
         let outcome = if count >= LOCKOUT_THRESHOLD {
@@ -670,9 +678,7 @@ impl LockoutStore for InMemoryLockoutStore {
             }
         };
         drop(slots);
-        if let Some(observer) = &self.observer {
-            observer(delta, dropped);
-        }
+        self.report(delta, dropped);
         outcome
     }
 
@@ -687,9 +693,7 @@ impl LockoutStore for InMemoryLockoutStore {
         };
         drop(slots);
         if removed {
-            if let Some(observer) = &self.observer {
-                observer(-1, None);
-            }
+            self.report(-1, None);
         }
     }
 
@@ -749,7 +753,7 @@ impl LockoutStore for InMemoryLockoutStore {
 
     fn admin_unlock_user(&self, username_hash: [u8; 16]) {
         let mut slots = self.slots.lock();
-        let before = slots.iter().filter(|slot| slot.occupied).count();
+        let before = self.observer.is_some().then(|| count_occupied(&slots));
         let mut cleared = false;
         let mut index = 0;
         while index < slots.len() {
@@ -762,19 +766,16 @@ impl LockoutStore for InMemoryLockoutStore {
         if cleared {
             compact_pairs(&mut slots);
         }
-        let removed =
-            before.saturating_sub(slots.iter().filter(|slot| slot.occupied).count()) as i64;
+        let removed = before
+            .map(|before| before.saturating_sub(count_occupied(&slots)) as i64)
+            .unwrap_or(0);
         drop(slots);
-        if removed != 0 {
-            if let Some(observer) = &self.observer {
-                observer(-removed, None);
-            }
-        }
+        self.report(-removed, None);
     }
 
     fn gc(&self, now_ns: u64) {
         let mut slots = self.slots.lock();
-        let before = slots.iter().filter(|slot| slot.occupied).count();
+        let before = self.observer.is_some().then(|| count_occupied(&slots));
         let mut cleared = false;
         let mut index = 0;
         while index < slots.len() {
@@ -804,14 +805,11 @@ impl LockoutStore for InMemoryLockoutStore {
         if cleared {
             compact_pairs(&mut slots);
         }
-        let removed =
-            before.saturating_sub(slots.iter().filter(|slot| slot.occupied).count()) as i64;
+        let removed = before
+            .map(|before| before.saturating_sub(count_occupied(&slots)) as i64)
+            .unwrap_or(0);
         drop(slots);
-        if removed != 0 {
-            if let Some(observer) = &self.observer {
-                observer(-removed, None);
-            }
-        }
+        self.report(-removed, None);
     }
 }
 

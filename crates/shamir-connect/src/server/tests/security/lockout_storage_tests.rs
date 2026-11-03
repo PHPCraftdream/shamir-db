@@ -747,7 +747,7 @@ fn observer_reports_admission_drop_reasons_and_occupancy_mutations() {
 }
 
 #[test]
-fn observer_initial_count_includes_restored_lockout_only_slots() {
+fn occupied_count_includes_restored_lockout_only_slots() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let capture = Arc::clone(&events);
     let observer: Arc<PairStoreObserver> = Arc::new(move |delta, reason| {
@@ -756,8 +756,10 @@ fn observer_initial_count_includes_restored_lockout_only_slots() {
     let pair = key4(3, 1, 7);
     let store = seeded(Vec::new(), vec![(pair, active_lock())]).with_observer(observer);
 
+    assert_eq!(store.occupied_pair_count(), 1);
     store.admin_unlock_user(pair.1);
-    assert_eq!(*events.lock().unwrap(), vec![(1, None), (-1, None)]);
+    assert_eq!(store.occupied_pair_count(), 0);
+    assert_eq!(*events.lock().unwrap(), vec![(-1, None)]);
 }
 
 #[test]

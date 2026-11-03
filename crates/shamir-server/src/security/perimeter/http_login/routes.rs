@@ -14,6 +14,9 @@ use std::sync::{
 use std::time::Duration;
 use tracing::Instrument;
 
+/// Upper bound of the login worker drain at shutdown (see `worker_drain_budget`).
+const WORKER_DRAIN_CAP: Duration = Duration::from_secs(7);
+
 /// Tracks detached route workers independently of the listener's lifetime.
 struct InFlight {
     count: AtomicUsize,
@@ -43,7 +46,7 @@ fn result_for_status(status: u16) -> LoginResult {
         403 => LoginResult::PolicyDenied,
         429 => LoginResult::RateLimited,
         503 => LoginResult::ServerBusy,
-        400 | 405 | 413 | 415 => LoginResult::InvalidRequest,
+        400 | 404 | 405 | 413 | 415 => LoginResult::InvalidRequest,
         _ => LoginResult::AuthenticationFailed,
     }
 }
@@ -69,11 +72,11 @@ impl HttpLoginRoutes {
         }
     }
 
-    /// Bound worker draining by the HTTP transport request deadline, capped at its
-    /// maximum supported request timeout (120 seconds). The listener's outer
-    /// shutdown deadline may still preempt this drain and detach workers.
+    /// Bound worker draining by the HTTP transport request deadline, capped at 7 seconds:
+    /// the server's outer listener deadline is 10 seconds and the audit consumer needs
+    /// 2 seconds after the workers, so a longer drain would only be preempted by an abort.
     pub(crate) fn worker_drain_budget(request_timeout_ms: u64) -> Duration {
-        Duration::from_millis(request_timeout_ms.min(120_000))
+        Duration::from_millis(request_timeout_ms).min(WORKER_DRAIN_CAP)
     }
 
     /// Create a listener service from shared dependencies and validated policy.

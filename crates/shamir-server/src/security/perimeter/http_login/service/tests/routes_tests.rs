@@ -186,19 +186,18 @@ async fn global_input_capacity_returns_503_without_touching_pending_state() {
 }
 
 #[test]
-fn worker_drain_budget_tracks_request_timeout_and_transport_cap() {
+fn worker_drain_budget_tracks_request_timeout_and_fits_the_outer_deadline() {
     assert_eq!(
         HttpLoginRoutes::worker_drain_budget(1),
         Duration::from_millis(1)
     );
-    assert_eq!(
-        HttpLoginRoutes::worker_drain_budget(120_000),
-        Duration::from_secs(120)
-    );
-    assert_eq!(
-        HttpLoginRoutes::worker_drain_budget(u64::MAX),
-        Duration::from_secs(120)
-    );
+    // Workers plus the 2 s audit drain must fit the server's 10 s listener deadline.
+    for timeout_ms in [120_000, u64::MAX] {
+        assert_eq!(
+            HttpLoginRoutes::worker_drain_budget(timeout_ms),
+            Duration::from_secs(7)
+        );
+    }
 }
 
 #[tokio::test(start_paused = true)]

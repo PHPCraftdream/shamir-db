@@ -107,7 +107,10 @@ impl AdmissionState {
                 });
             }
             Ok(super::DebitOutcome::Dropped(_)) => {
+                // Fail closed: admitting an undebited source would let pinned buckets
+                // switch the per-source rate limit off.
                 super::super::metrics::record_budget_drop("arrival_table_full");
+                return Err(AdmissionError::ServerBusy);
             }
             Ok(super::DebitOutcome::Charged) => {}
         }
@@ -119,7 +122,10 @@ impl AdmissionState {
                 });
             }
             Ok(super::DebitOutcome::Dropped(_)) => {
+                // Fail closed: admitting an undebited source would let pinned buckets
+                // switch the per-source rate limit off.
                 super::super::metrics::record_budget_drop("credit_table_full");
+                return Err(AdmissionError::ServerBusy);
             }
             Ok(super::DebitOutcome::Charged) => {}
         }

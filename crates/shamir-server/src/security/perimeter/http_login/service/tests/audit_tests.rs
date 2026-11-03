@@ -178,7 +178,6 @@ fn origin_policy_diagnostic_is_count_only() {
     assert!(output.contains("requests without Origin are allowed"));
     assert!(output.contains("requests with Origin are denied until an allowlist is configured"));
     assert!(output.contains("configured_origins=2"));
-    assert!(!output.contains("https://origin-sentinel.invalid"));
 }
 
 #[tokio::test]

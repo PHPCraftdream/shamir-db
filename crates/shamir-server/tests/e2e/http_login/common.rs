@@ -272,7 +272,8 @@ pub async fn login_as(
         },
     )
     .expect("derive login keys");
-    let proof = proof_for(username, label, "read_only", password, &challenge);
+    let signature = hmac_sha256(&keys.stored_key.0, &transcript);
+    let proof: [u8; 32] = core::array::from_fn(|index| keys.client_key[index] ^ signature[index]);
     let (status, headers, body) = post(
         addr,
         "/shamir/v1/auth/finish",

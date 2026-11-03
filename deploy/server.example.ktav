@@ -119,7 +119,7 @@ listeners: [
     ##     ## Each enabled HTTP listener gets its persisted listener identity from server_meta unless listener_id is supplied.
     ##     ## Startup publishes a count-only KDF-ineligible account gauge and WARN; it never logs account identifiers.
     ##     ## Pending challenges are volatile and discarded on restart.
-    ##     ## Worker wait uses request_timeout_ms (capped at 120s) plus 2s for audit; the listener's 10s deadline may preempt it.
+    ##     ## Worker wait uses request_timeout_ms (capped at 7s) plus 2s for audit, inside the listener's 10s deadline.
     ##     ## Late audit events are best-effort and are not guaranteed to drain.
     ## }
 ]

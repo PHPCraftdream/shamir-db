@@ -321,6 +321,29 @@ impl ServerLauncher {
             shutdown_token.clone(),
         ));
 
+        // The metrics recorder is installed later in boot, so pair-slot deltas
+        // seen before then are lost; republish the absolute occupancy.
+        {
+            let lockout = lockout.clone();
+            let token = shutdown_token.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval_at(
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                    Duration::from_secs(30),
+                );
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        _ = tick.tick() => {
+                            metrics::gauge!("shamir_login_http_pair_slots")
+                                .set(lockout.occupied_pair_count() as f64);
+                        }
+                    }
+                }
+            });
+        }
+
         // 4. Audit chain — load from checkpoint if present.
         //
         // CRITICAL: the writer (used by every connection task to emit

@@ -264,7 +264,7 @@ async fn begin_finish_redaction_captures_blocking_audit_control() {
         USER.to_owned(),
         source().address().to_string(),
         hex::encode(id),
-        hex::encode(&proof),
+        hex::encode(proof),
         token,
         token_secret,
         hex::encode(client_nonce),
