@@ -20,7 +20,7 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | HTTP | revoked after connect / next request | `crates/shamir-server/tests/e2e/token_matrix/suite/lifecycle.rs::admin_revoke_invalidates_online_token` — partial HTTP body is completed after revoke; final request returns 401 | DONE |
 | HTTP | owner kicked | TOKEN_API §5 explicitly leaves `kick_session` unaffected; REST token invalidation is distinct | BLOCKED SPEC |
 | HTTP | owner roles changed | `crates/shamir-server/tests/e2e/token_matrix/suite/issuance.rs::owner_role_change_invalidates_rest_tokens` (tls=false and tls=true) — 401 after `grant_role` | DONE |
-| HTTP | owner password changed | No matching REST invalidation test located | GAP |
+| HTTP | owner password changed | `crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs::ordinary_user_password_change_revokes_http_ws_tokens` — HTTP REST token returns 401 after ordinary owner's SCRAM password change | DONE |
 | HTTP | oversized body | `crates/shamir-server/tests/e2e/token_matrix/suite/framing.rs::http_channel_header_flood_slow_head_and_oversize_are_bounded` lines 9-75 — oversized request body bounded | DONE |
 | HTTP | header flood | `crates/shamir-server/tests/e2e/token_matrix/suite/framing.rs::http_channel_header_flood_slow_head_and_oversize_are_bounded` lines 9-75 — header flood bounded | DONE |
 | HTTP | slow/incomplete head | `crates/shamir-server/tests/e2e/token_matrix/suite/framing.rs::http_channel_header_flood_slow_head_and_oversize_are_bounded` lines 9-75 — incomplete head timeout/EOF | DONE |
@@ -37,7 +37,7 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | WS | revoked after connect (4011) | `crates/shamir-server/tests/e2e/http_ws/revocation.rs::http_ws_revocation_expiry_group` | DONE |
 | WS | owner kicked | TOKEN_API §5 explicitly leaves `kick_session` unaffected; WS token invalidation is distinct | BLOCKED SPEC |
 | WS | owner roles changed | `crates/shamir-server/tests/e2e/http_ws/revocation.rs::http_ws_revocation_expiry_group` lines 525-565; role invalidation / close 4011 | DONE |
-| WS | owner password changed | No matching assertion located | GAP |
+WS | owner password changed | `crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs::ordinary_user_password_change_revokes_http_ws_tokens` — password change through SCRAM; live token WS closes 4011 | DONE |
 | WS | oversized frame | `crates/shamir-server/tests/e2e/http_ws/native.rs::frame_close_cases` via `http_ws_native_group`, lines 561-595; oversized frame closes 1009/reset | DONE |
 | WS | header flood | `crates/shamir-server/tests/e2e/token_matrix/suite/channel_matrix.rs::ws_channel_header_flood_and_slow_upgrade_head_are_bounded` lines 523-550 — 431 | DONE |
 | WS | slow/incomplete upgrade head | `crates/shamir-server/tests/e2e/token_matrix/suite/channel_matrix.rs::ws_channel_header_flood_and_slow_upgrade_head_are_bounded` lines 523-550 — 408 and EOF | DONE |
@@ -54,7 +54,7 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | HTTPS | revoked after connect / next request | same helper and per-case tests — revoked token next REST request 401 | DONE |
 | HTTPS | owner kicked | TOKEN_API §5 explicitly leaves `kick_session` unaffected; REST token invalidation is distinct | BLOCKED SPEC |
 | HTTPS | owner roles changed | `crates/shamir-server/tests/e2e/token_matrix/suite/issuance.rs::owner_role_change_invalidates_rest_tokens` (tls=false and tls=true) — 401 after `grant_role` | DONE |
-| HTTPS | owner password changed | No matching HTTPS invalidation test located | GAP |
+| HTTPS | owner password changed | `crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs::ordinary_user_password_change_revokes_https_wss_tokens` — SCRAM password change; HTTPS REST returns 401 | DONE |
 | HTTPS | oversized body | `crates/shamir-server/tests/e2e/token_matrix/suite/framing.rs::https_channel_header_flood_slow_head_and_oversize_are_bounded` lines 64-76; shared framing assertions lines 41-55; 413 | DONE |
 | HTTPS | header flood | same test; shared framing assertion lines 16-18; 431 | DONE |
 | HTTPS | slow/incomplete head | same test; shared framing assertion lines 26-39; 408 and EOF | DONE |
@@ -70,8 +70,8 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | WSS | expired | same helper and per-case tests — 401 | DONE |
 | WSS | revoked after connect (4011) | `crates/shamir-server/tests/e2e/token_matrix/suite/framing.rs::wss_oversized_frame_and_revoke_closure` lines 136-195 — live close 4011 and session count reaches zero | DONE |
 | WSS | owner kicked | TOKEN_API §5 explicitly leaves `kick_session` unaffected; WSS token invalidation is distinct | BLOCKED SPEC |
-| WSS | owner roles changed | No WSS token invalidation assertion located | GAP |
-| WSS | owner password changed | No matching WSS invalidation test located | GAP |
+| WSS | owner roles changed | `crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs::owner_role_change_over_wss_closes_token_session` — owner role change through SCRAM; live WSS receives 4011 | DONE |
+| WSS | owner password changed | `crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs::ordinary_user_password_change_revokes_https_wss_tokens` — after ordinary owner's SCRAM password change, live WSS closes 4011 | DONE | |
 | WSS | oversized frame | `crates/shamir-server/tests/e2e/token_matrix/suite/framing.rs::wss_oversized_frame_and_revoke_closure` lines 79-134 — oversized frame close 1009 | DONE |
 | WSS | header flood | `crates/shamir-server/tests/e2e/token_matrix/suite/channel_matrix.rs::wss_channel_header_flood_and_slow_upgrade_head_are_bounded` lines 552-585 — 431 | DONE |
 | WSS | slow/incomplete upgrade head | `crates/shamir-server/tests/e2e/token_matrix/suite/channel_matrix.rs::wss_channel_header_flood_and_slow_upgrade_head_are_bounded` lines 552-585 — 408 and EOF | DONE |
@@ -85,7 +85,7 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 |---|---|---|
 | Cross-listener replay: token sid over SCRAM rejected | `crates/shamir-server/tests/e2e/http_ws/session_loop.rs::exercise_native_session` calls `assert_token_sid_rejected_over_scram`; asserts session_expired | DONE |
 | Cross-listener replay: SCRAM sid over token session rejected (4010) | `crates/shamir-server/tests/e2e/http_ws/native.rs::execute_rw_and_session_features` submits SCRAM sid and asserts close 4010 | DONE |
-| Token sid absent from SCRAM SessionStore | No direct store-absence assertion located | GAP |
+| Token sid absent from SCRAM SessionStore | No public Store/seam to inspect absence (source reviewed); no claim beyond documented process/token-store isolation | BLOCKED |
 | Privilege: superuser-owned token, every admin DbRequest | Classifier private; no exported exhaustive fixture/list, no socket sweep | BLOCKED |
 | Privilege: replicator-owned token, every admin DbRequest | Same missing seam | BLOCKED |
 | Privilege: superuser-owned token, every admin BatchOp | Same missing seam | BLOCKED |
@@ -96,7 +96,7 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | Privilege: List::Users | Normative scope denies only when requested database is outside a scoped allowlist; blanket denial is incorrect. No exhaustive token socket case located | PARTIAL |
 | Privilege: AccessTree(db) | Normative scope permits when db is allowlisted and denies out-of-scope db; blanket denial is incorrect. No exhaustive token socket case located | PARTIAL |
 | Subscription stops push after revoke without client action | `crates/shamir-server/tests/e2e/http_ws/revocation.rs::http_ws_revocation_expiry_group` lines 408-418; revoke then close 4011 and zero sessions without client request | DONE |
-| Revoke race: in-flight requests, none authorized after revoke returns | No deterministic race test; WS authorization synchronization seam absent | BLOCKED |
+| Revoke race: in-flight requests, none authorized after revoke returns | `crates/shamir-server/tests/e2e/token_matrix/gaps/revoke_race.rs::rest_and_websocket_revoke_race_is_deterministic` — bounded REST in-flight/post-flag and WS-close checks (source only) | DONE |
 | 16 active token sockets do not block owner SCRAM login | `crates/shamir-server/tests/e2e/http_ws/shutdown.rs::http_ws_shutdown_group` lines 20-80; opens/counts 16 and completes SCRAM login/ping | DONE |
 | Pre-auth body flood remains under global body budget | `crates/shamir-server/tests/e2e/token_matrix/suite/lifecycle.rs::preauth_declared_body_flood_does_not_consume_authenticated_body_capacity` lines 37-83 tests 16 unauthenticated partial declared-body requests get 401 without 100 Continue; lines 85-167 then admits 16 authenticated reservations, rejects the 17th with 503, verifies unauthenticated request remains 401 while full, releases reservations and observes authenticated Pong. **PARTIAL:** shows this scenario/capacity outcome, not peak memory or a budget counter/full global-budget guarantee. | PARTIAL |
 | Response-byte guard held until body written | No real-socket assertion located; ServerHandle exposes no response-budget counter/assertion seam | BLOCKED |
@@ -107,7 +107,7 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | Issuance: foreign user revoke denied | same test — foreign revoke denied | DONE |
 | Issuance: nonadmin `for_user` denied | same test — nonadmin delegation denied | DONE |
 | Issuance: admin signed `for_user` | same test — admin `for_user` creation evidenced | DONE |
-| Issuance: admin unsigned-HMAC control | No unsigned-HMAC control fixture/assertion located; raw fixture could be shared pending extraction. NOT IMPLEMENTED; no external impossibility claimed | GAP |
+| Issuance: admin unsigned-HMAC control | `crates/shamir-server/tests/e2e/token_matrix/gaps/issuance_wire.rs::for_user_requires_hmac_and_signed_control_uses_same_raw_scram_fixture` — `hmac_required` negative and signed positive control | DONE |
 | Issuance: TTL cap | `crates/shamir-server/tests/e2e/token_matrix/suite/issuance.rs::token_issuance_caps_are_enforced` — invalid TTL rejection and max TTL asserted | DONE |
 | Issuance: maximum user token cap | same test — per-user cap asserted | DONE |
 | Issuance: `allow_self_service=false` | `crates/shamir-server/tests/e2e/token_matrix/suite/issuance.rs::disabled_self_service_retains_list_and_revoke` — ordinary create denied; listing/revoke available | DONE |
@@ -116,8 +116,8 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 | Issuance: token-session revoke-user denied | same test — revoke-user denied | DONE |
 | Issuance: token-session revoke-token denied | same test — revoke-token denied | DONE |
 | Issuance: secret absent from listing | `crates/shamir-server/tests/e2e/token_matrix/suite/issuance.rs::ordinary_user_issues_lists_and_revokes_own_tokens` — serialized list lacks secret segment and full token | DONE |
-| Issuance: secret exactly once after decode | same test lines 67-82 — decoded `created` value contains full token once; no wire-level exactly-once proof | PARTIAL |
-| Issuance: password change revokes tokens | No matching assertion located | GAP |
+| Issuance: secret exactly once after decode | `crates/shamir-server/tests/e2e/token_matrix/gaps/issuance_wire.rs::create_token_wire_reveals_secret_once_and_wire_list_omits_it` — raw create response contains full token exactly once; raw list contains neither full token nor secret segment | DONE |
+| Issuance: password change revokes tokens | `crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs::ordinary_user_password_change_revokes_http_ws_tokens` (HTTP/WS) and `::ordinary_user_password_change_revokes_https_wss_tokens` (HTTPS/WSS), ordinary user's SCRAM change | DONE |
 | Channels: Rest-only refused at WS upgrade (403/no 101) | `crates/shamir-server/tests/e2e/http_ws/native.rs::exercise_native_group` lines 680-698; asserts 403 and token_channel_denied | DONE |
 | Channels: Ws-only refused on REST | `crates/shamir-server/tests/e2e/token_matrix/suite/channel_matrix.rs::https_channel_data_and_scope_matrix` lines 318-330 — HTTPS 403 `token_channel_denied` | DONE |
 | Channels: Both works on REST and WS using same token | Same test lines 332-365 — one Both token succeeds on HTTPS REST Pong and WSS Pong | DONE |
@@ -139,12 +139,13 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 
 ## Substantive blockers and limitations
 
-- Privilege enumeration is not implemented: `crates/shamir-server/src/security/perimeter/http_rest/scope.rs::classify_request` (lines 97-134) and `classify_batch` (149-251) are private exhaustive classifiers; no exported exhaustive fixture/list exists. Also, blanket metadata denial conflicts with normative scope: `ListDatabases`/`ListUsers` deny only for out-of-scope databases; `AccessTree(db)` is permitted for an allowlisted db.
-- Direct SCRAM-store absence and body/response budget counters are not asserted through current `ServerHandle`; no public SCRAM store, body-budget counter, or response-budget counter. Do not alter production to expose them. An internal raw SCRAM fixture exists in `http_ws/session_loop.rs`, but is not currently a public fixture for this assertion; pending fixture extraction, NOT IMPLEMENTED (not an external impossibility). Auth-before-body has an implemented lifecycle child using HTTP `Expect: 100-continue` without inventing counters.
-- WS revoke-race lacks an authorization synchronization seam; no deterministic assertion is evidenced.
-- Other matrix rows remain GAP where no assertion was found. Password-change invalidation and unsigned-HMAC control assertions remain NOT IMPLEMENTED; do not claim they cannot be done. WSS owner-role/password invalidation remain missing; REST owner-role invalidation now has HTTP/HTTPS source evidence. Owner kick semantics are explicitly unaffected by TOKEN_API §5; the separate REST-token/WS-token invalidation expectation remains a specification conflict and is classified BLOCKED SPEC, not unspecified. No assertion was weakened. HTTPS query-token ignored is DONE above. HTTP/1 query and WS/WSS query coverage are distinct.
+- Privilege test work is present but under repair; do not claim DONE or replicator coverage as verified until the source fixture is corrected and reviewed. `scope.rs:157-160` denies ListDatabases/ListUsers whenever `databases` is Some; these global list operations have no database parameter. This conflicts with TOKEN_API §7 and the brief's allowed-in-scope exception. `scope.rs:165-178` checks AccessTree's explicit database; current source cases use allowlisted `default` and denied `outside`.
+- Direct SCRAM-store absence and body/response budget counters remain BLOCKED: no public SCRAM store, body-budget counter, or response-budget counter. An internal raw SCRAM fixture exists, but no direct store-absence assertion is evidenced; auth-before-body source test does not prove peak/global budget. WS revoke-race now has a deterministic source test (`gaps/revoke_race.rs`); runtime remains unverified.
+- Other matrix rows remain GAP where no assertion was found. Password-change invalidation, unsigned-HMAC control, wire-level secret-once proof, and revoke race have source tests in revision 1; none has compile/runtime evidence. Owner kick semantics remain BLOCKED SPEC as described above. HTTPS query-token ignored is DONE. HTTP/1 query and WS/WSS query coverage are distinct.
 - Dependency pins are not changed by this task (`Cargo.lock` is tracked and untouched). Compilation, tests, and CI are unverified.
 
+
+- Revision 1 items 1 and 2 — DONE (source exists; no compile/runtime evidence): `ordinary_user_password_change_revokes_http_ws_tokens` and `ordinary_user_password_change_revokes_https_wss_tokens` perform the actual SCRAM change-password protocol and assert REST 401 plus live WS/WSS close 4011 on their respective TLS modes; `owner_role_change_over_wss_closes_token_session` mirrors the SCRAM role-change path over TLS WSS and asserts 4011. No commands, builds or tests run.
 
 ## Run progress (historical append-only log)
 
@@ -159,10 +160,36 @@ Design §15 matrix cases are interpreted per transport: HTTP body vs WS frame; s
 - Finish-status update — overall status remains PARTIAL. The issuance matrix was split into individual subcases. Source review includes all seven token-matrix Rust files and `crates/shamir-server/tests/e2e/main.rs`; this is source review, not compile/test evidence. Formatting check was observed successful (`cargo fmt -p shamir-server -- --check`, exit 0); layout OK, zero baseline, zero hints. No Rust compile, tests, or CI ran. REST owner-role invalidation is source-reviewed in `issuance.rs:264-325` for HTTP and HTTPS; the log-redaction capture is bounded at 8 MiB and the fixture is nested from the start. WSS owner-role and password invalidation remain missing; HTTP and HTTPS query-token gap is now DONE. Explicit TOKEN_API §5 unaffected kick semantics conflict with token-invalidation expectations, classified BLOCKED SPEC. Remaining gaps/blockers include exhaustive privilege sweep/private classifier seam, normative metadata-scope contradiction, direct SessionStore/response-budget proof, WS authorization race, peak full-body-budget proof, wire-level exactly-once proof, password-change and unsigned-HMAC controls, and other browser §10/CI evidence. Source review found no sleeps, TODOs or allows; token_matrix has 7 direct entries; each source file stays within 1000 lines. No full-task completion is claimed.
 - Finished checks — `cargo fmt -p shamir-server -- --check` exit 0; layout OK, zero baseline, zero hints.
 
-## Final report message
+- 16:22 CET — Revision 1 item 3 DONE source-only: raw SCRAM `for_user_requires_hmac_and_signed_control_uses_same_raw_scram_fixture` asserts `hmac_required` and signed success (`gaps/issuance_wire.rs`).
+- 16:22 CET — Revision 1 item 5 DONE source-only: `rest_and_websocket_revoke_race_is_deterministic` coordinates bounded REST in-flight/post-revoke checks and WS 4011 closure (`gaps/revoke_race.rs`). No compile/runtime evidence.
+- Revision 1 item 1 DONE source-only: password change revocation cases in `gaps/invalidation.rs`; item 2 DONE source-only: WSS owner-role invalidation in the same file. Neither compiled or run.
+- Privilege sweep source has since been repaired: exhaustive fixtures include 10 admin DbRequest and 62 BatchOp cases per owner. Superuser and actual replicator ownership are exercised; the replicator token is issued only after a successful `set_replicator` operation. Source review only; no compilation/runtime evidence. Sweep remains PARTIAL because the brief's allowed-in-scope ListDatabases/ListUsers behavior conflicts with `scope.rs:157-160`; the source denies global list operations for any scoped token.
+- Formatting progress: two earlier `cargo fmt` parse attempts failed while the privilege fixture was being edited. Latest `cargo fmt -p shamir-server` completed successfully. Final `cargo fmt -p shamir-server -- --check` succeeded with no output; `python -I scripts/ci/check_layout.py` succeeded: layout check OK (0 baselined, 0 hints). All children were awaited; no compile, tests, or CI ran.
 
+## Final report message (HISTORICAL)
 PARTIAL — added the token coverage audit and real-socket matrix, issuance, revocation-race, budget-admission, restore, and redaction tests under `crates/shamir-server/tests/e2e/token_matrix/`; registered them in `crates/shamir-server/tests/e2e/main.rs`.
 Checks: `cargo fmt -p shamir-server -- --check` and `python -I scripts/ci/check_layout.py` passed. No compilation or tests ran.
 Remaining: exhaustive privilege sweep and specification conflicts; WSS owner-role/password invalidation, password-change and unsigned-HMAC issuance controls, direct session-store/response-budget proof, deterministic WS authorization race, and wire-level secret-once proof. Full details and unverified claims: `docs/dev-artifacts/audits/2026-11-03-token-t7/DESIGN.md`.
 No production code, dependencies, manifests, lockfiles, or workflows changed; no commits or git mutations were made.
 OBSERVED: an empty untracked root file `framing` appeared in the worktree during the run (origin unverified); the orchestrator removed it before committing.
+
+## Revision 1 current status — source only
+
+| Item | Status / evidence |
+|---|---|
+| 1 Password-change invalidation | DONE — source implementation authored in `gaps/invalidation.rs:169-308`; actual SCRAM password change, REST 401 and WS/WSS 4011 assertions; execution unverified |
+| 2 WSS owner-role change | DONE — source implementation authored in `gaps/invalidation.rs:124-157`; execution unverified |
+| 3 Unsigned-HMAC control | DONE — source implementation authored in `gaps/issuance_wire.rs:43-80`; execution unverified |
+| 4 Privilege sweep | PARTIAL — source has 10 admin DbRequest and 62 BatchOp cases per owner, with superuser and replicator token paths; exhaustive fixture source reviewed. The ListDatabases/ListUsers brief/source conflict remains; compilation/runtime unverified. |
+| 5 Deterministic revoke race | DONE — source implementation authored in `gaps/revoke_race.rs:224-`; execution unverified |
+| 6 Wire-level secret exactly once | DONE — source implementation authored in `gaps/issuance_wire.rs:82-`; execution unverified |
+| 7 Blocked evidence | BLOCKED — direct SCRAM-store absence and response-byte guard lack seams; Windows/Linux CI unavailable. |
+
+Final checks: two earlier `cargo fmt` parse attempts failed while the privilege fixture was being edited; latest `cargo fmt -p shamir-server` succeeded. Final `cargo fmt -p shamir-server -- --check` succeeded with no output. `python -I scripts/ci/check_layout.py` succeeded: layout check OK (0 baselined, 0 hints). No compilation, tests, or CI have run. All children were awaited. OBSERVED: an empty stray nested path exists at `crates/shamir-db/worktrees/p34-t7-matrix/crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs`; it was preserved, not removed.
+
+## Current final report
+PARTIAL — Added revision 1 test sources in `crates/shamir-server/tests/e2e/token_matrix/gaps/`, shared `RawScram` in `support.rs`, module wiring in `token_matrix/mod.rs`, and updated this audit.
+Implemented source: password invalidation on HTTP/WS/HTTPS/WSS, WSS role invalidation, unsigned-HMAC control, deterministic revoke checks, and wire-level secret-once checks. Privilege sweep is PARTIAL: metadata scope conflicts with the brief; positive metadata controls and exhaustive fixture completeness remain unverified.
+Checks passed: `cargo fmt -p shamir-server -- --check`; `python -I scripts/ci/check_layout.py`. No compilation, tests, or CI ran; direct SCRAM-store absence, response-byte guard, and Windows/Linux CI remain BLOCKED.
+All children awaited. No production/dependency/git mutations. The empty stray nested `crates/shamir-db/worktrees/p34-t7-matrix/crates/shamir-server/tests/e2e/token_matrix/gaps/invalidation.rs` was preserved, not removed.
+
