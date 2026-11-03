@@ -703,8 +703,8 @@ fn indexed_lookup_survives_reset_unlock_gc_and_slot_reuse() {
 fn observer_reports_admission_drop_reasons_and_occupancy_mutations() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let capture = Arc::clone(&events);
-    let observer: Arc<PairStoreObserver> = Arc::new(move |delta, reason| {
-        capture.lock().unwrap().push((delta, reason));
+    let observer: Arc<PairStoreObserver> = Arc::new(move |occupied, reason| {
+        capture.lock().unwrap().push((occupied, reason));
     });
 
     let saturated = seeded(
@@ -740,18 +740,70 @@ fn observer_reports_admission_drop_reasons_and_occupancy_mutations() {
     live.register_failure(pair, NOW);
     live.admin_unlock_user(pair.1);
     let events = events.lock().unwrap();
-    assert!(events.contains(&(0, Some(PairDropReason::PairQuota))));
-    assert!(events.contains(&(0, Some(PairDropReason::TableFull))));
+    assert!(events.contains(&(64, Some(PairDropReason::PairQuota))));
+    assert!(events.contains(&(LOCKOUT_PAIR_CAPACITY, Some(PairDropReason::TableFull))));
     assert!(events.contains(&(1, None)));
-    assert!(events.contains(&(-1, None)));
+    assert!(events.contains(&(0, None)));
+}
+
+#[test]
+fn observer_reports_absolute_occupancy_for_insert_replace_drop_and_reload() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Arc::clone(&events);
+    let observer: Arc<PairStoreObserver> = Arc::new(move |occupied, _| {
+        capture.lock().unwrap().push(occupied);
+    });
+    let first_key = key4(4, 1, 1);
+    let second_key = key4(4, 1, 2);
+    let first = InMemoryLockoutStore::new().with_observer(Arc::clone(&observer));
+    first.register_failure(first_key, NOW);
+    first.register_failure(second_key, NOW);
+    assert_eq!(&*events.lock().unwrap(), &[0, 1, 2]);
+
+    let replacement_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let replacement_capture = Arc::clone(&replacement_events);
+    let replacement: Arc<PairStoreObserver> = Arc::new(move |occupied, _| {
+        replacement_capture.lock().unwrap().push(occupied);
+    });
+    let first = first.with_observer(Arc::clone(&replacement));
+    assert_eq!(&*events.lock().unwrap(), &[0, 1, 2, 0]);
+    first.reset_on_success(first_key);
+    assert_eq!(first.occupied_pair_count(), 1);
+    drop(first);
+    assert_eq!(&*replacement_events.lock().unwrap(), &[2, 1, 0]);
+
+    let reloaded =
+        InMemoryLockoutStore::with_snapshot(snapshot(vec![(first_key, failure(3, NOW))], vec![]))
+            .with_observer(Arc::clone(&replacement));
+    assert_eq!(reloaded.occupied_pair_count(), 1);
+    assert_eq!(&*replacement_events.lock().unwrap(), &[2, 1, 0, 1]);
+    drop(reloaded);
+    assert_eq!(&*replacement_events.lock().unwrap(), &[2, 1, 0, 1, 0]);
+}
+
+#[test]
+fn absolute_observer_uses_store_local_occupancy_with_multiple_stores() {
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let capture = Arc::clone(&events);
+    let observer: Arc<PairStoreObserver> = Arc::new(move |occupied, _| {
+        capture.lock().unwrap().push(occupied);
+    });
+    let left = InMemoryLockoutStore::new().with_observer(Arc::clone(&observer));
+    let right = InMemoryLockoutStore::new().with_observer(observer);
+    left.register_failure(key4(8, 1, 1), NOW);
+    right.register_failure(key4(9, 1, 1), NOW);
+    left.register_failure(key4(8, 1, 2), NOW);
+    assert_eq!(left.occupied_pair_count(), 2);
+    assert_eq!(right.occupied_pair_count(), 1);
+    assert_eq!(&*events.lock().unwrap(), &[0, 0, 1, 1, 2]);
 }
 
 #[test]
 fn occupied_count_includes_restored_lockout_only_slots() {
     let events = Arc::new(std::sync::Mutex::new(Vec::new()));
     let capture = Arc::clone(&events);
-    let observer: Arc<PairStoreObserver> = Arc::new(move |delta, reason| {
-        capture.lock().unwrap().push((delta, reason));
+    let observer: Arc<PairStoreObserver> = Arc::new(move |occupied, reason| {
+        capture.lock().unwrap().push((occupied, reason));
     });
     let pair = key4(3, 1, 7);
     let store = seeded(Vec::new(), vec![(pair, active_lock())]).with_observer(observer);
@@ -759,7 +811,7 @@ fn occupied_count_includes_restored_lockout_only_slots() {
     assert_eq!(store.occupied_pair_count(), 1);
     store.admin_unlock_user(pair.1);
     assert_eq!(store.occupied_pair_count(), 0);
-    assert_eq!(*events.lock().unwrap(), vec![(-1, None)]);
+    assert_eq!(*events.lock().unwrap(), vec![(1, None), (0, None)]);
 }
 
 #[test]

@@ -17,6 +17,9 @@ enum State {
 }
 
 /// Validates a whole request head before exposing it, then limits reads to its body envelope.
+/// Receives the route and status of a refusal made by the framing layer.
+pub(crate) type RefusalHook = std::sync::Arc<dyn Fn(&[u8], u16) + Send + Sync>;
+
 pub(crate) struct GuardedIo<T> {
     inner: T,
     head: Vec<u8>,
@@ -34,6 +37,9 @@ pub(crate) struct GuardedIo<T> {
     hsts: bool,
     response_head: Vec<u8>,
     login_errors: bool,
+    refusal_hook: Option<RefusalHook>,
+    request_route: Vec<u8>,
+    refusal_reported: bool,
     write_timeout_override_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     response_started: bool,
     response_remaining: Option<u64>,
@@ -78,6 +84,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
             hsts,
             response_head: Vec::new(),
             login_errors: false,
+            refusal_hook: None,
+            request_route: Vec::new(),
+            refusal_reported: false,
             write_timeout_override_ms: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             response_started: false,
             response_remaining: None,
@@ -99,6 +108,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
     }
     pub(crate) fn with_login_errors(mut self, enabled: bool) -> Self {
         self.login_errors = enabled;
+        self
+    }
+    pub(crate) fn with_refusal_hook(mut self, hook: RefusalHook) -> Self {
+        self.refusal_hook = Some(hook);
         self
     }
     pub(crate) fn with_write_timeout_override(
@@ -164,6 +177,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
             }
         }
         if expired {
+            if reading_head {
+                // Head timeout with a fully or partially seen route line is reported;
+                // the accept hook matches exact full paths, so a truncated route
+                // fails closed and drops the metric rather than mislabeling it.
+                self.report_refusal(408);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "HTTP deadline expired",
@@ -171,7 +190,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         }
         Ok(())
     }
+    fn report_refusal(&mut self, status: u16) {
+        if !self.login_errors || self.refusal_reported {
+            return;
+        }
+        self.refusal_reported = true;
+        if let Some(hook) = &self.refusal_hook {
+            // The scanner holds the (possibly partial) target until a verdict stores it.
+            let route = if self.request_route.is_empty() {
+                self.scanner.path().to_vec()
+            } else {
+                self.request_route.clone()
+            };
+            hook(&route, status);
+        }
+    }
     fn reject(&mut self, status: u16) {
+        if self.state == State::Head && !self.response_active {
+            self.report_refusal(status);
+        }
+        // The hook reports only whole-request-head refusals; body-phase rejections
+        // stay in the route handler, so a stalled body never double-counts here.
         self.request_deadline = None;
         self.request_active = false;
         self.head_deadline = None;
@@ -306,6 +345,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
                     if self.state == State::Head {
                         self.scanner = Scanner::new();
                         self.response_active = true;
+                        self.request_route.clear();
                     }
                 }
                 State::ChunkData(left) => {
@@ -547,6 +587,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
                     if is_head {
                         if !self.request_active {
                             self.request_active = true;
+                            self.request_route.clear();
+                            self.refusal_reported = false;
                             self.request_deadline = self
                                 .request_timeout
                                 .map(|duration| Box::pin(tokio::time::sleep(duration)));
@@ -558,10 +600,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
                         match verdict {
                             Verdict::NeedMore => continue,
                             Verdict::BadRequest => {
+                                self.request_route = self.scanner.path().to_vec();
                                 self.reject(400);
                                 continue;
                             }
                             Verdict::TooLarge | Verdict::TooManyHeaders => {
+                                self.request_route = self.scanner.path().to_vec();
                                 self.reject(431);
                                 continue;
                             }
@@ -575,6 +619,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncRead for GuardedIo<T> {
                                         .map(|duration| Box::pin(tokio::time::sleep(duration)));
                                 }
                                 self.pending = std::mem::take(&mut self.head);
+                                self.request_route = self.scanner.path().to_vec();
                                 self.response_active = true;
                                 self.response_started = false;
                                 self.response_interim = false;
@@ -724,6 +769,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for GuardedIo<T> {
                         self.response_started = false;
                         self.write_deadline = None;
                         self.request_deadline = None;
+                        self.request_route.clear();
+                        self.refusal_reported = false;
                         self.request_active = false;
                         self.active_hold = None;
                         if let Some(waker) = self.reader.take() {

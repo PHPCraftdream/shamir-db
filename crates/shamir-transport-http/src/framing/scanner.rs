@@ -75,6 +75,15 @@ impl Scanner {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+    pub(crate) fn path(&self) -> &[u8] {
+        self.bytes
+            .split(|byte| *byte == b' ')
+            .nth(1)
+            .unwrap_or_default()
+            .split(|byte| *byte == b'\r' || *byte == b'\n')
+            .next()
+            .unwrap_or_default()
+    }
     pub(crate) fn framing(&self) -> Option<Framing> {
         self.framing
     }

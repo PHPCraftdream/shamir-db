@@ -212,10 +212,12 @@ async fn shutdown_without_workers_is_immediate() {
     let rejected = routes
         .handle(
             Bytes::from_static(b"/shamir/v1/auth/begin"),
-            admission
-                .admit_slot_for_test(source())
-                .await
-                .expect("permit"),
+            Arc::new(
+                admission
+                    .admit_slot_for_test(source())
+                    .await
+                    .expect("permit"),
+            ),
             Bytes::new(),
         )
         .await;
@@ -261,7 +263,7 @@ async fn dropping_routes_does_not_abort_detached_worker() {
         .expect("permit");
     let mut future = Box::pin(routes.handle(
         Bytes::from_static(b"/shamir/v1/auth/begin"),
-        permit,
+        Arc::new(permit),
         Bytes::new(),
     ));
     std::future::poll_fn(|cx| {
@@ -294,7 +296,7 @@ async fn shutdown_budget_and_dropped_receiver_leave_worker_running() {
         .expect("permit");
     let mut future = Box::pin(routes.handle(
         Bytes::from_static(b"/shamir/v1/auth/begin"),
-        permit,
+        Arc::new(permit),
         Bytes::new(),
     ));
     std::future::poll_fn(|cx| {
@@ -318,10 +320,12 @@ async fn shutdown_budget_and_dropped_receiver_leave_worker_running() {
     let rejected = routes
         .handle(
             Bytes::from_static(b"/shamir/v1/auth/begin"),
-            admission
-                .admit_slot_for_test(source())
-                .await
-                .expect("permit"),
+            Arc::new(
+                admission
+                    .admit_slot_for_test(source())
+                    .await
+                    .expect("permit"),
+            ),
             Bytes::new(),
         )
         .await;
@@ -330,6 +334,8 @@ async fn shutdown_budget_and_dropped_receiver_leave_worker_running() {
         axum::http::StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(pending.count().await, 0);
+    // The rejected reply still carries the slot until it is dropped.
+    drop(rejected);
     let mut permits = Vec::new();
     for _ in 0..16 {
         permits.push(
@@ -354,7 +360,7 @@ async fn simultaneous_shutdown_waiters_both_observe_worker_completion() {
         .expect("permit");
     let mut future = Box::pin(routes.handle(
         Bytes::from_static(b"/shamir/v1/auth/begin"),
-        permit,
+        Arc::new(permit),
         Bytes::new(),
     ));
     std::future::poll_fn(|cx| {

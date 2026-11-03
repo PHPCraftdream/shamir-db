@@ -2,6 +2,7 @@ use super::{LoginHead, LoginResponse, LoginRoutes};
 use crate::gate::PeerInfo;
 use bytes::Bytes;
 use http::StatusCode;
+use std::sync::Arc;
 
 /// Built-in disabled login service used by `serve`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -23,7 +24,12 @@ impl LoginRoutes for NoLogin {
         Err(not_found())
     }
 
-    async fn handle(&self, _route: Bytes, _permit: Self::Permit, _body: Bytes) -> LoginResponse {
+    async fn handle(
+        &self,
+        _route: Bytes,
+        _permit: Arc<Self::Permit>,
+        _body: Bytes,
+    ) -> LoginResponse {
         not_found()
     }
 
