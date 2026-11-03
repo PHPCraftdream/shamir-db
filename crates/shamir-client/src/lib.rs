@@ -60,6 +60,9 @@ pub use visibility::{
 // Re-export the wire payloads so callers don't need to depend on
 // `shamir-query-types` directly.
 pub use shamir_query_types::batch::{BatchRequest, BatchResponse};
+pub use shamir_query_types::wire::token_admin::{
+    ApiTokenChannels, ApiTokenMode, ApiTokenView, CreatedApiToken,
+};
 pub use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 // Re-export the fluent query builder under `shamir_client::builder` so a

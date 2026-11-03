@@ -1,5 +1,6 @@
 use crate::security::tokens::{
-    NewToken, SessionCanceller, TokenCreateError, TokenService, TokenServiceOptions,
+    NewToken, SessionCanceller, TokenAuditContext, TokenCreateError, TokenService,
+    TokenServiceOptions,
 };
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
@@ -249,8 +250,13 @@ async fn token_audit_events_include_ids_without_secret_or_mac() {
     })
     .await
     .expect("service");
+    let audit_context = TokenAuditContext {
+        actor_username: "operator".into(),
+        transport: "test-cli".into(),
+        session_id_prefix: [0; 8],
+    };
     let first = service
-        .create(new_token("audit".into(), Some(60)))
+        .create_with_context(new_token("audit".into(), Some(60)), audit_context.clone())
         .await
         .expect("create");
     let first_token = first.token.as_bytes().to_vec();
@@ -263,11 +269,14 @@ async fn token_audit_events_include_ids_without_secret_or_mac() {
         .record()
         .mac;
     service
-        .revoke(TokenId(first_id), now + 1)
+        .revoke_with_context(TokenId(first_id), now + 1, audit_context.clone())
         .await
         .expect("revoke");
     let second = service
-        .create(new_token("audit-user".into(), Some(60)))
+        .create_with_context(
+            new_token("audit-user".into(), Some(60)),
+            audit_context.clone(),
+        )
         .await
         .expect("create second");
     let second_token = second.token.as_bytes().to_vec();
@@ -280,7 +289,7 @@ async fn token_audit_events_include_ids_without_secret_or_mac() {
         .record()
         .mac;
     service
-        .revoke_user([1; 16], now + 2)
+        .revoke_user_with_context([1; 16], now + 2, audit_context)
         .await
         .expect("revoke user");
 
@@ -319,6 +328,10 @@ async fn token_audit_events_include_ids_without_secret_or_mac() {
     let appended = appender.entries.lock().expect("appender entries");
     assert_eq!(appended.len(), 4);
     for entry in entries {
+        assert_eq!(entry.user, "operator");
+        assert_eq!(entry.transport, "test-cli");
+        assert!(entry.ip_subnet.is_empty());
+        assert_eq!(entry.session_id_prefix, [0; 8]);
         for sensitive in [
             first_token.as_slice(),
             second_token.as_slice(),
@@ -644,6 +657,13 @@ async fn retained_non_live_record_is_revocable() {
             .count(),
         1
     );
+    let audit_entries = audit_chain.snapshot();
+    assert!(audit_entries.iter().all(|entry| {
+        entry.transport == "token"
+            && entry.user.is_empty()
+            && entry.ip_subnet.is_empty()
+            && entry.session_id_prefix == [0; 8]
+    }));
 }
 
 #[tokio::test]

@@ -3,7 +3,9 @@ use crate::{
     audit_appender::FjallAuditAppender,
     config::Config,
     engine::server_meta::ServerMetaStore,
-    security::tokens::{DirectoryOwnerFloors, NewToken, TokenService, TokenServiceOptions},
+    security::tokens::{
+        DirectoryOwnerFloors, NewToken, TokenAuditContext, TokenService, TokenServiceOptions,
+    },
     user_directory::{FjallUserDirectory, UserDirectoryState},
 };
 use base64::Engine;
@@ -41,23 +43,30 @@ pub async fn run_create(c: &Config, a: CreateArgs, io: &mut CliIo<'_>) -> anyhow
         }
     };
     let result = svc
-        .create(NewToken {
-            owner_user_id: owner.user_id,
-            owner_roles: owner.roles,
-            label: a.label.clone(),
-            ttl_secs: a.ttl,
-            mode: if a.read_write {
-                TokenMode::ReadWrite
-            } else {
-                TokenMode::ReadOnly
+        .create_with_context(
+            NewToken {
+                owner_user_id: owner.user_id,
+                owner_roles: owner.roles,
+                label: a.label.clone(),
+                ttl_secs: a.ttl,
+                mode: if a.read_write {
+                    TokenMode::ReadWrite
+                } else {
+                    TokenMode::ReadOnly
+                },
+                channels: channel,
+                databases: if a.databases.is_empty() {
+                    None
+                } else {
+                    Some(a.databases)
+                },
             },
-            channels: channel,
-            databases: if a.databases.is_empty() {
-                None
-            } else {
-                Some(a.databases)
+            TokenAuditContext {
+                actor_username: String::new(),
+                transport: "cli".to_owned(),
+                session_id_prefix: [0; 8],
             },
-        })
+        )
         .await;
     let prepared = result.map(|created| {
         let id = id_text(created.record_view.id);
