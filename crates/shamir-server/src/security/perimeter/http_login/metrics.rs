@@ -50,7 +50,7 @@ pub fn record_eviction(reason: &'static str) {
 pub fn record_result(endpoint: &'static str, result: LoginResult) {
     metrics::counter!("shamir_login_http_total", "endpoint" => endpoint, "result" => result.as_str()).increment(1);
 }
-/// Record bounded budget-table accounting drops with a fixed reason label.
+/// Record a source budget-table accounting drop with its fixed reason label.
 pub fn record_budget_drop(reason: &'static str) {
     let reason = match reason {
         "arrival_table_full" => "arrival_table_full",

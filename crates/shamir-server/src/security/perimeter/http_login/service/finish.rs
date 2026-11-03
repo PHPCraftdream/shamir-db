@@ -120,8 +120,6 @@ async fn finish_inner(context: &LoginServiceContext, source: Source, body: &[u8]
         || entry.user_id.is_none()
     {
         context.lockout.register_failure(pair, now);
-        metrics::gauge!("shamir_login_http_pair_slots")
-            .set(context.lockout.failure_pair_count() as f64);
         return failed();
     }
     if !context.self_service {
@@ -200,8 +198,6 @@ async fn finish_inner(context: &LoginServiceContext, source: Source, body: &[u8]
     }) {
         Ok(body) => {
             context.lockout.reset_on_success(pair);
-            metrics::gauge!("shamir_login_http_pair_slots")
-                .set(context.lockout.failure_pair_count() as f64);
             if let Some(audit) = &context.audit {
                 audit.issued(created.record_view.id);
             }
@@ -230,25 +226,30 @@ async fn snapshot(
     let hardening = context.hardening;
     let default_kdf = context.default_kdf;
     let span = tracing::Span::current();
+    let dispatch = tracing::dispatcher::get_default(Clone::clone);
     tokio::task::spawn_blocking(move || {
-        let _entered = span.enter();
-        let state = users.state_by_user_id(&id)?;
-        if state.username != expected_name {
-            return None;
-        }
-        let record = UserDirectory::lookup_by_name(users.as_ref(), &expected_name)?;
-        let id_by_name = UserDirectory::user_id(users.as_ref(), &expected_name)?;
-        if id_by_name != id || record.tickets_invalid_before_ns != state.tickets_invalid_before_ns {
-            return None;
-        }
-        Some(UserSnapshot {
-            username: state.username,
-            roles: state.roles,
-            stored_key: Zeroizing::new(record.stored_key.0),
-            floor: state.tickets_invalid_before_ns,
-            privileged: state.superuser || state.replicator,
-            eligible: record.kdf_params.validate_client_limits().is_ok()
-                && (!hardening || record.kdf_params == default_kdf),
+        tracing::dispatcher::with_default(&dispatch, || {
+            let _entered = span.enter();
+            let state = users.state_by_user_id(&id)?;
+            if state.username != expected_name {
+                return None;
+            }
+            let record = UserDirectory::lookup_by_name(users.as_ref(), &expected_name)?;
+            let id_by_name = UserDirectory::user_id(users.as_ref(), &expected_name)?;
+            if id_by_name != id
+                || record.tickets_invalid_before_ns != state.tickets_invalid_before_ns
+            {
+                return None;
+            }
+            Some(UserSnapshot {
+                username: state.username,
+                roles: state.roles,
+                stored_key: Zeroizing::new(record.stored_key.0),
+                floor: state.tickets_invalid_before_ns,
+                privileged: state.superuser || state.replicator,
+                eligible: record.kdf_params.validate_client_limits().is_ok()
+                    && (!hardening || record.kdf_params == default_kdf),
+            })
         })
     })
     .await

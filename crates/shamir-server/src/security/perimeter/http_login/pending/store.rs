@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,9 +17,15 @@ const RELEASED: u8 = 2;
 
 type Selector = Arc<dyn Fn(u64) -> Option<u64> + Send + Sync>;
 
-/// Opaque random handshake identifier.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Opaque random handshake identifier; its bytes are never formatted.
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PendingId(pub [u8; 32]);
+
+impl fmt::Debug for PendingId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PendingId(<redacted>)")
+    }
+}
 
 /// Retained handshake material; transcript is stored exactly once.
 pub struct PendingEntry {
@@ -97,6 +104,8 @@ pub enum PendingError {
     AlreadyClaimed,
     /// Bounded random selection could not complete.
     Entropy,
+    /// Identifier collided with a live entry; the caller may generate another.
+    Collision,
 }
 
 struct Cell {
@@ -112,6 +121,7 @@ struct Cell {
 struct State {
     cells: Vec<Option<Cell>>,
     markers: Box<[Arc<AtomicU8>]>,
+    expirations: std::collections::BinaryHeap<std::cmp::Reverse<(Instant, usize)>>,
 }
 
 /// Fixed-capacity, bounded pending table with injected monotonic time.
@@ -142,6 +152,7 @@ impl PendingStore {
             inner: Mutex::new(State {
                 cells: (0..CAPACITY).map(|_| None).collect(),
                 markers,
+                expirations: std::collections::BinaryHeap::with_capacity(CAPACITY),
             }),
         }
     }
@@ -174,9 +185,14 @@ impl PendingStore {
         // This mutex protects only a fixed-capacity table; its critical section does no awaits.
         let mut state = self.inner.lock().await;
         let now = self.clock.now();
+        reclaim_released(&mut state);
         purge_expired(&mut state, now);
-        if state.cells.iter().flatten().any(|cell| cell.id == id) {
-            return Err(PendingError::Invalid);
+        let collision = state.cells.iter().flatten().fold(false, |found, cell| {
+            let equal = shamir_connect::common::crypto::constant_time_eq(&cell.id.0, &id.0);
+            found | (equal && cell.marker.load(Ordering::Acquire) != RELEASED)
+        });
+        if collision {
+            return Err(PendingError::Collision);
         }
         enforce_prefix_caps(&state, entry.source)?;
         let empty = state.cells.iter().position(Option::is_none);
@@ -185,12 +201,16 @@ impl PendingStore {
             None => {
                 let index = choose_eviction(&state, &self.selector)?;
                 super::super::metrics::record_eviction("fair_share");
+                state
+                    .expirations
+                    .retain(|std::cmp::Reverse((_, queued_index))| *queued_index != index);
                 index
             }
         };
         let source = entry.source;
         let listener_id = entry.listener_id;
         let security_class = entry.security_class;
+        let expires = now + TTL;
         let marker = Arc::clone(&state.markers[index]);
         marker.store(LIVE, Ordering::Release);
         if empty.is_some() {
@@ -198,7 +218,7 @@ impl PendingStore {
         }
         state.cells[index] = Some(Cell {
             id,
-            expires: now + TTL,
+            expires,
             source,
             listener_id,
             security_class,
@@ -206,6 +226,7 @@ impl PendingStore {
             marker,
             pins,
         });
+        state.expirations.push(std::cmp::Reverse((expires, index)));
         Ok(())
     }
 
@@ -219,34 +240,62 @@ impl PendingStore {
     ) -> Result<PendingClaim, PendingError> {
         let mut state = self.inner.lock().await;
         let now = self.clock.now();
+        reclaim_released(&mut state);
         purge_expired(&mut state, now);
-        let cell = state
-            .cells
-            .iter_mut()
-            .flatten()
-            .find(|cell| cell.id == id)
-            .ok_or(PendingError::NotFound)?;
-        match cell.marker.load(Ordering::Acquire) {
-            CLAIMED => return Err(PendingError::AlreadyClaimed),
-            RELEASED => return Err(PendingError::NotFound),
-            _ => {}
+        let mut match_index = None;
+        for (index, cell) in state.cells.iter().enumerate() {
+            if let Some(cell) = cell {
+                let equal = shamir_connect::common::crypto::constant_time_eq(&cell.id.0, &id.0);
+                if equal && cell.marker.load(Ordering::Acquire) != RELEASED {
+                    match_index = Some(index);
+                }
+            }
         }
-        if cell.source.tiers()[0] != source.tiers()[0]
-            || cell.listener_id != listener_id
-            || cell.security_class != class
-        {
-            return Err(PendingError::WrongScope);
+        let match_index = match_index.ok_or(PendingError::NotFound)?;
+        let claim = {
+            let cell = state
+                .cells
+                .get_mut(match_index)
+                .and_then(Option::as_mut)
+                .ok_or(PendingError::NotFound)?;
+            match cell.marker.load(Ordering::Acquire) {
+                CLAIMED => return Err(PendingError::AlreadyClaimed),
+                RELEASED => return Err(PendingError::NotFound),
+                _ => {}
+            }
+            if cell.source.tiers()[0] != source.tiers()[0]
+                || cell.listener_id != listener_id
+                || cell.security_class != class
+            {
+                return Err(PendingError::WrongScope);
+            }
+            cell.marker.store(CLAIMED, Ordering::Release);
+            let payload = cell.entry.take().ok_or(PendingError::AlreadyClaimed)?;
+            let pins = cell.pins.take();
+            PendingClaim {
+                payload: Some(payload),
+                marker: Arc::clone(&cell.marker),
+                expires: cell.expires,
+                clock: Arc::clone(&self.clock),
+                _pins: pins,
+            }
+        };
+        state
+            .expirations
+            .retain(|std::cmp::Reverse((_, queued_index))| *queued_index != match_index);
+        Ok(claim)
+    }
+
+    /// Returns whether an identifier is stored, comparing every live identifier.
+    pub async fn contains_id(&self, id: PendingId) -> bool {
+        let mut state = self.inner.lock().await;
+        purge_expired(&mut state, self.clock.now());
+        let mut found = false;
+        for cell in state.cells.iter().flatten() {
+            let equal = shamir_connect::common::crypto::constant_time_eq(&cell.id.0, &id.0);
+            found |= equal && cell.marker.load(Ordering::Acquire) != RELEASED;
         }
-        cell.marker.store(CLAIMED, Ordering::Release);
-        let payload = cell.entry.take().ok_or(PendingError::AlreadyClaimed)?;
-        let pins = cell.pins.take();
-        Ok(PendingClaim {
-            payload: Some(payload),
-            marker: Arc::clone(&cell.marker),
-            expires: cell.expires,
-            clock: Arc::clone(&self.clock),
-            _pins: pins,
-        })
+        found
     }
 
     /// Returns active entry count, excluding released cells and purging expiry.
@@ -259,13 +308,6 @@ impl PendingStore {
             .flatten()
             .filter(|cell| cell.marker.load(Ordering::Acquire) != RELEASED)
             .count()
-    }
-
-    /// Returns whether an identifier is currently stored, purging expiry first.
-    pub async fn contains_id(&self, id: PendingId) -> bool {
-        let mut state = self.inner.lock().await;
-        purge_expired(&mut state, self.clock.now());
-        state.cells.iter().flatten().any(|cell| cell.id == id)
     }
 
     /// Copies active source prefixes for the admission layer to pin.
@@ -322,22 +364,51 @@ impl Drop for PendingClaim {
     }
 }
 
-fn purge_expired(state: &mut State, now: Instant) {
+fn reclaim_released(state: &mut State) {
+    let mut changed = false;
     for cell in &mut state.cells {
-        if cell.as_ref().is_some_and(|value| {
-            value.marker.load(Ordering::Acquire) == RELEASED
-                || value.expires <= now && value.marker.load(Ordering::Acquire) != CLAIMED
-        }) {
-            if cell
-                .as_ref()
-                .is_some_and(|value| value.marker.load(Ordering::Acquire) != RELEASED)
-            {
-                super::super::metrics::update_pending(-1);
-                if cell.as_ref().is_some_and(|value| value.expires <= now) {
-                    super::super::metrics::record_eviction("expired");
-                }
-            }
+        if cell
+            .as_ref()
+            .is_some_and(|cell| cell.marker.load(Ordering::Acquire) == RELEASED)
+        {
             *cell = None;
+            changed = true;
+        }
+    }
+    if changed {
+        let cells = &state.cells;
+        state
+            .expirations
+            .retain(|std::cmp::Reverse((_, index))| cells[*index].is_some());
+    }
+}
+
+fn purge_expired(state: &mut State, now: Instant) {
+    while state
+        .expirations
+        .peek()
+        .is_some_and(|std::cmp::Reverse((expires, _))| *expires <= now)
+    {
+        let Some(std::cmp::Reverse((_expires, index))) = state.expirations.pop() else {
+            break;
+        };
+        let Some(cell) = state.cells.get_mut(index).and_then(Option::take) else {
+            continue;
+        };
+        if cell.expires > now {
+            let expires = cell.expires;
+            state.cells[index] = Some(cell);
+            state.expirations.push(std::cmp::Reverse((expires, index)));
+            continue;
+        }
+        let marker = cell.marker.load(Ordering::Acquire);
+        if marker == CLAIMED || marker == RELEASED {
+            state.cells[index] = Some(cell);
+            continue;
+        }
+        if marker != RELEASED {
+            super::super::metrics::update_pending(-1);
+            super::super::metrics::record_eviction("expired");
         }
     }
 }

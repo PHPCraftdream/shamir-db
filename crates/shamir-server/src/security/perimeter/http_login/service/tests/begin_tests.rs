@@ -1,4 +1,5 @@
 use super::super::begin;
+use super::super::begin_with_id_generator;
 use super::fixture::Fixture;
 use crate::http_login::admission::Source;
 use crate::http_login::wire::{response, TokenScopeMode};
@@ -94,6 +95,83 @@ async fn begin_policy_denials_are_padded_and_have_no_side_effects() {
         );
         assert_eq!(fixture.context.tokens.mirror_entry_count_hint(), 0);
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn begin_retries_a_forced_handshake_id_collision() {
+    let fixture = Fixture::new().await;
+    let first_id = [0x11; 32];
+    let retry_id = [0x22; 32];
+    let first = begin_with_id_generator(
+        &fixture.context,
+        source(),
+        &valid_begin(TokenScopeMode::ReadOnly),
+        || Some(first_id),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(fixture.context.pending.count().await, 1);
+
+    let mut generated = [first_id, retry_id].into_iter();
+    let retried = begin_with_id_generator(
+        &fixture.context,
+        source(),
+        &valid_begin(TokenScopeMode::ReadOnly),
+        || generated.next(),
+    )
+    .await;
+    assert_eq!(retried.status(), StatusCode::OK);
+    let challenge: Challenge = rmp_serde::from_slice(retried.body()).expect("challenge");
+    assert_eq!(challenge.handshake_id.as_ref(), retry_id);
+    assert_eq!(fixture.context.pending.count().await, 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn begin_returns_busy_after_three_forced_handshake_id_collisions() {
+    let fixture = Fixture::new().await;
+    let id = [0x33; 32];
+    let first = begin_with_id_generator(
+        &fixture.context,
+        source(),
+        &valid_begin(TokenScopeMode::ReadOnly),
+        || Some(id),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let mut calls = 0;
+    let result = begin_with_id_generator(
+        &fixture.context,
+        source(),
+        &valid_begin(TokenScopeMode::ReadOnly),
+        || {
+            calls += 1;
+            Some(id)
+        },
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(calls, 3);
+    assert_eq!(fixture.context.pending.count().await, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn begin_returns_busy_when_handshake_id_generation_fails() {
+    let fixture = Fixture::new().await;
+    let mut calls = 0;
+    let result = begin_with_id_generator(
+        &fixture.context,
+        source(),
+        &valid_begin(TokenScopeMode::ReadOnly),
+        || {
+            calls += 1;
+            None
+        },
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(calls, 1);
+    assert_eq!(fixture.context.pending.count().await, 0);
 }
 
 #[derive(Deserialize)]

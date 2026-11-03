@@ -49,7 +49,7 @@ use axum::{
     routing::get,
     Router,
 };
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::PrometheusHandle;
 use metrics_process::Collector;
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -62,6 +62,7 @@ pub mod doctor;
 pub mod logging;
 
 mod durability_export;
+mod login_histogram;
 mod visibility_export;
 
 #[cfg(test)]
@@ -314,7 +315,8 @@ pub async fn spawn_with_byte_budget(
     //    spawn multiple servers in the same process pass
     //    `install_recorder = false` for the second+ instance.
     let prom_handle = if install_recorder {
-        match PrometheusBuilder::new().install_recorder() {
+        let builder = login_histogram::builder_with_login_buckets()?;
+        match builder.install_recorder() {
             Ok(h) => Some(h),
             Err(e) => return Err(ObservabilityError::RecorderInstall(e.to_string())),
         }

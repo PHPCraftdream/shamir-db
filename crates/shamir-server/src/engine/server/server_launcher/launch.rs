@@ -9,7 +9,9 @@ use shamir_connect::server::argon2_semaphore::Argon2Semaphore;
 use shamir_connect::server::audit_chain::{AuditAppender, AuditChain, AuditChainWriter};
 use shamir_connect::server::dispatch::RequestHandler;
 use shamir_connect::server::durable_counters::FjallConsumedCounters;
-use shamir_connect::server::lockout::{InMemoryLockoutStore, LockoutSnapshotSink};
+use shamir_connect::server::lockout::{
+    InMemoryLockoutStore, LockoutSnapshotSink, PairDropReason, PairStoreObserver,
+};
 use shamir_connect::server::rate_limit::{InMemoryRateLimiter, RateLimitSnapshotSink};
 use shamir_connect::server::resume::ResumeConfig;
 use shamir_connect::server::session::SessionStore;
@@ -271,7 +273,22 @@ impl ServerLauncher {
         // the trade-off rationale (≤60s loss window vs fsync-per-failure).
         let lockout_sink: Arc<dyn LockoutSnapshotSink> =
             Arc::new(MetaLockoutSink::new(meta.clone()));
-        let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink(lockout_sink));
+        let lockout_observer: Arc<PairStoreObserver> = Arc::new(|delta, reason| {
+            metrics::gauge!("shamir_login_http_pair_slots").increment(delta as f64);
+            match reason {
+                Some(PairDropReason::PairQuota) => {
+                    metrics::counter!("shamir_login_http_accounting_dropped", "reason" => "pair_quota").increment(1);
+                }
+                Some(PairDropReason::TableFull) => {
+                    metrics::counter!("shamir_login_http_accounting_dropped", "reason" => "pair_table_full").increment(1);
+                }
+                None => {}
+            }
+        });
+        let lockout = Arc::new(InMemoryLockoutStore::with_snapshot_sink_and_observer(
+            lockout_sink,
+            Some(lockout_observer),
+        ));
         let now_ns = boot_now_ns()?;
         // Rate-limit buckets are persisted by the SAME periodic task as
         // lockout (one 60s tick writes both). On boot the depleted-bucket
@@ -303,6 +320,29 @@ impl ServerLauncher {
             rate_limit.clone(),
             shutdown_token.clone(),
         ));
+
+        // The metrics recorder is installed later in boot, so pair-slot deltas
+        // seen before then are lost; republish the absolute occupancy.
+        {
+            let lockout = lockout.clone();
+            let token = shutdown_token.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval_at(
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                    Duration::from_secs(30),
+                );
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = token.cancelled() => break,
+                        _ = tick.tick() => {
+                            metrics::gauge!("shamir_login_http_pair_slots")
+                                .set(lockout.occupied_pair_count() as f64);
+                        }
+                    }
+                }
+            });
+        }
 
         // 4. Audit chain — load from checkpoint if present.
         //

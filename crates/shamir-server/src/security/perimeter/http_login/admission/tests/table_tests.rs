@@ -17,6 +17,62 @@ fn v6(child: u16) -> Source {
 }
 
 #[test]
+fn failed_tier_debit_is_atomic_and_preserves_depleted_base_debt() {
+    let mut table = LoginBudgetTable::new(Duration::from_secs(60));
+    let now = Instant::now();
+    let base = Source::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 1, 1)));
+    for _ in 0..10 {
+        assert_eq!(table.debit(base, now), Ok(DebitOutcome::Charged));
+    }
+    assert!(table.debit(base, now).is_err());
+
+    // Spend the other 150 children of the parent tier's 160-token budget.
+    for child in 2..=16 {
+        let other = Source::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, child, 1)));
+        for _ in 0..10 {
+            assert_eq!(table.debit(other, now), Ok(DebitOutcome::Charged));
+        }
+    }
+    let fresh = Source::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 17, 1)));
+    assert!(table.debit(fresh, now).is_err());
+    assert!(table.debit(base, now).is_err());
+}
+
+#[test]
+fn dropped_fallback_preserves_unrelated_state_and_existing_debt() {
+    let mut table = LoginBudgetTable::new(Duration::from_secs(60));
+    let now = Instant::now();
+    let original = Source::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 1, 1)));
+    for _ in 0..10 {
+        assert_eq!(table.debit(original, now), Ok(DebitOutcome::Charged));
+    }
+    assert!(table.debit(original, now).is_err());
+    let original_pin = table.pin(original);
+    let held_pins = (0u32..2047)
+        .map(|index| {
+            let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new(
+                (index >> 8) as u8,
+                index as u8,
+                7,
+                9,
+            )));
+            assert_eq!(table.debit(source, now), Ok(DebitOutcome::Charged));
+            table.pin(source)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(table.occupied_slots(), 4096);
+
+    let unrelated = Source::from_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 1, 1)));
+    assert!(matches!(
+        table.debit(unrelated, now),
+        Ok(DebitOutcome::Dropped(_))
+    ));
+    assert_eq!(table.occupied_slots(), 4096);
+    assert!(table.debit(original, now).is_err());
+    drop(held_pins);
+    drop(original_pin);
+}
+#[test]
 fn full_table_eviction_scan_has_linear_slot_visit_bound() {
     let mut table = LoginBudgetTable::new(Duration::from_secs(60));
     let now = Instant::now();

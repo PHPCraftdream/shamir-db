@@ -4,8 +4,37 @@ use serde_bytes::ByteBuf;
 use shamir_connect::server::audit_chain::{
     AuditAppender, AuditChain, AuditChainWriter, AuditEntry,
 };
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::fmt::MakeWriter;
+
+#[derive(Clone, Default)]
+struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+impl Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("trace capture lock")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for TraceCapture {
+    type Writer = TraceWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter(Arc::clone(&self.0))
+    }
+}
 
 #[derive(Default)]
 struct CaptureAppender(Mutex<Vec<AuditEntry>>);
@@ -82,6 +111,76 @@ async fn captures_compensation_event_with_token_id_only() {
 }
 
 #[tokio::test]
+async fn process_budget_bounds_events_across_audit_consumers() {
+    let (appender_a, writer_a) = captured_writer();
+    let (appender_b, writer_b) = captured_writer();
+    let budget = Arc::new(tokio::sync::Semaphore::new(1_024));
+    let (audit_a, task_a) =
+        LoginAudit::start_with_budget(CancellationToken::new(), writer_a, Arc::clone(&budget));
+    let (audit_b, task_b) =
+        LoginAudit::start_with_budget(CancellationToken::new(), writer_b, Arc::clone(&budget));
+    for id in 0..1_024_u16 {
+        if id % 2 == 0 {
+            audit_a.issued([id as u8; 16]);
+        } else {
+            audit_b.issued([id as u8; 16]);
+        }
+    }
+    audit_a.issued([0; 16]);
+    assert_eq!(budget.available_permits(), 0);
+    drop(audit_a);
+    drop(audit_b);
+    task_a.await.expect("first audit worker");
+    task_b.await.expect("second audit worker");
+    let entries_a = appender_a.0.lock().expect("capture lock");
+    let entries_b = appender_b.0.lock().expect("capture lock");
+    assert_eq!(entries_a.len(), 512);
+    assert_eq!(entries_b.len(), 512);
+    assert_eq!(entries_a.len() + entries_b.len(), 1_024);
+    assert_eq!(budget.available_permits(), 1_024);
+}
+
+#[tokio::test]
+async fn compensation_failure_has_critical_result() {
+    let (appender, writer) = captured_writer();
+    let (audit, task) = LoginAudit::start(CancellationToken::new(), writer);
+    audit.compensation_failed([5; 16]);
+    drop(audit);
+    task.await.expect("audit worker");
+    assert_eq!(
+        appender.0.lock().expect("capture lock")[0].result,
+        "critical"
+    );
+}
+
+#[test]
+fn origin_policy_diagnostic_is_count_only() {
+    let capture = TraceCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_writer(capture.clone())
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(
+            "{}",
+            crate::http_login::HttpLoginRoutes::describe_origin_policy(0)
+        );
+        tracing::info!(
+            "{}",
+            crate::http_login::HttpLoginRoutes::describe_origin_policy(2)
+        );
+    });
+
+    let output = String::from_utf8(capture.0.lock().expect("trace capture lock").clone())
+        .expect("captured tracing output");
+    assert!(output.contains("requests without Origin are allowed"));
+    assert!(output.contains("requests with Origin are denied until an allowlist is configured"));
+    assert!(output.contains("configured_origins=2"));
+}
+
+#[tokio::test]
 async fn failures_count_only_fixed_classes() {
     let (appender, writer) = captured_writer();
     let (audit, task) = LoginAudit::start(CancellationToken::new(), writer);
@@ -90,7 +189,8 @@ async fn failures_count_only_fixed_classes() {
         .as_u64()
         / 60_000_000_000;
     audit.failure(LoginResult::AuthenticationFailed);
-    audit.failure(LoginResult::AuthenticationFailed);
+    audit.failure(LoginResult::RateLimited);
+    audit.failure(LoginResult::ServerBusy);
     audit.failure(LoginResult::PolicyDenied);
     audit.failure(LoginResult::InvalidRequest);
     audit.failure(LoginResult::Challenge);
@@ -111,7 +211,7 @@ async fn failures_count_only_fixed_classes() {
     let (minute, authentication, policy, invalid) =
         rmp_serde::from_slice::<(u64, u32, u32, u32)>(details).expect("failure counts");
     assert!((minute_before..=minute_after).contains(&minute));
-    assert_eq!(authentication, 2);
+    assert_eq!(authentication, 1);
     assert_eq!(policy, 1);
     assert_eq!(invalid, 1);
 }
