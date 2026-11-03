@@ -7,6 +7,7 @@ use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_types::types::value::InnerValue;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 async fn fixture() -> (RepoInstance, TableManager) {
     let repo = RepoInstance::new(
@@ -46,10 +47,11 @@ async fn cancelled_persist_reattaches_and_unfreezes_source() {
         }),
     );
     for _ in 0..100 {
-        if poll!(rename.as_mut()).is_pending() && entered.load(Ordering::Acquire) {
-            break;
+        match poll!(rename.as_mut()) {
+            Poll::Ready(result) => panic!("rename completed early: {result:?}"),
+            Poll::Pending if entered.load(Ordering::Acquire) => break,
+            Poll::Pending => tokio::task::yield_now().await,
         }
-        tokio::task::yield_now().await;
     }
     assert!(entered.load(Ordering::Acquire));
     drop(rename);
@@ -63,15 +65,18 @@ async fn cancelled_visibility_wait_reattaches_and_unfreezes_source() {
     let version = gate.assign_next_version_guarded();
     let mut rename = Box::pin(repo.rename_table_stores_with("a", "b", |_| async { Ok(()) }));
     for _ in 0..100 {
-        if poll!(rename.as_mut()).is_pending()
-            && source
-                .index_manager_ref()
-                .write_barrier_flags()
-                .is_set(MIGRATION_FREEZE)
-        {
-            break;
+        match poll!(rename.as_mut()) {
+            Poll::Ready(result) => panic!("rename completed early: {result:?}"),
+            Poll::Pending
+                if source
+                    .index_manager_ref()
+                    .write_barrier_flags()
+                    .is_set(MIGRATION_FREEZE) =>
+            {
+                break
+            }
+            Poll::Pending => tokio::task::yield_now().await,
         }
-        tokio::task::yield_now().await;
     }
     assert!(source
         .index_manager_ref()

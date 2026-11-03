@@ -391,6 +391,9 @@ impl RepoInstance {
         if !self.configs.contains_key(from) {
             return Ok(false);
         }
+        if self.configs.contains_key(to) {
+            return Err(DbError::Validation(format!("Table '{to}' already exists")));
+        }
         let source = self.get_table_admitted(from, &permit).await?;
         let freeze = RenameFreeze::begin(source, &permit).await?;
         freeze.await_visible(self, from).await?;
@@ -421,6 +424,9 @@ impl RepoInstance {
         log::debug!("rename_table_stores: enter from={from} to={to}");
         if !self.configs.contains_key(from) {
             return Ok(false);
+        }
+        if self.configs.contains_key(to) {
+            return Err(DbError::Validation(format!("Table '{to}' already exists")));
         }
         let source = self.get_table_admitted(from, permit).await?;
         let freeze = RenameFreeze::begin(source, permit).await?;
