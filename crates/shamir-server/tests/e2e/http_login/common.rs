@@ -1,5 +1,4 @@
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use shamir_connect::common::crypto::{constant_time_eq, hmac_sha256};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::scram::DerivedKeys;
@@ -21,8 +20,12 @@ pub const USERNAME: &str = "http-login-user";
 pub const PASSWORD: &[u8] = b"http-login-test-password";
 
 pub(super) async fn launch() -> Harness {
+    launch_with_options(false, false).await
+}
+
+pub(super) async fn launch_with_options(tls: bool, allow_read_write: bool) -> Harness {
     let mut settings = shamir_server::config::HttpListenerSettings {
-        tls: Some(false),
+        tls: Some(tls),
         ..Default::default()
     };
     settings.login.enabled = true;
@@ -30,7 +33,7 @@ pub(super) async fn launch() -> Harness {
         "127.0.0.1:0",
         settings,
         true,
-        |_| {},
+        |config| config.tokens.login_allow_read_write = allow_read_write,
         |path| {
             seed_user(path);
         },
@@ -39,6 +42,10 @@ pub(super) async fn launch() -> Harness {
 }
 
 pub fn seed_user(data_dir: &Path) -> ([u8; 16], Vec<String>) {
+    seed_account(data_dir, USERNAME, PASSWORD)
+}
+
+pub fn seed_account(data_dir: &Path, username: &str, password: &[u8]) -> ([u8; 16], Vec<String>) {
     let directory = FjallUserDirectory::open(data_dir.join("users")).expect("user directory");
     let salt = [0x42; 16];
     let params = KdfParams {
@@ -47,10 +54,10 @@ pub fn seed_user(data_dir: &Path) -> ([u8; 16], Vec<String>) {
         parallelism: 1,
         argon2_version: 0x13,
     };
-    let keys = DerivedKeys::derive(PASSWORD, &salt, &params).expect("derive seeded user keys");
+    let keys = DerivedKeys::derive(password, &salt, &params).expect("derive seeded user keys");
     let id = directory
         .insert(
-            USERNAME.into(),
+            username.into(),
             shamir_connect::server::user_record::UserRecord {
                 salt,
                 stored_key: keys.stored_key,
@@ -146,14 +153,18 @@ struct Begin<'a> {
 }
 
 pub fn begin_body(label: &str, nonce: &[u8; 32]) -> Vec<u8> {
+    begin_body_for(USERNAME, label, "read_only", nonce)
+}
+
+pub fn begin_body_for(user: &str, label: &str, mode: &'static str, nonce: &[u8; 32]) -> Vec<u8> {
     rmp_serde::to_vec_named(&Begin {
         protocol_version: 1,
-        user: USERNAME,
+        user,
         client_nonce: serde_bytes::Bytes::new(nonce),
         binding_mode: 3,
         token: LoginScope {
             label,
-            mode: "read_only",
+            mode,
             channels: "rest",
             databases: None,
         },
@@ -215,9 +226,22 @@ pub async fn login(
     label: &str,
     password: &[u8],
 ) -> Result<LoginSuccess, (u16, String, Vec<u8>)> {
+    login_as(addr, USERNAME, label, password).await
+}
+
+pub async fn login_as(
+    addr: std::net::SocketAddr,
+    username: &str,
+    label: &str,
+    password: &[u8],
+) -> Result<LoginSuccess, (u16, String, Vec<u8>)> {
     let nonce = [9u8; 32];
-    let (status, headers, body) =
-        post(addr, "/shamir/v1/auth/begin", &begin_body(label, &nonce)).await;
+    let (status, headers, body) = post(
+        addr,
+        "/shamir/v1/auth/begin",
+        &begin_body_for(username, label, "read_only", &nonce),
+    )
+    .await;
     if status != 200 {
         return Err((status, headers, body));
     }
@@ -227,53 +251,19 @@ pub async fn login(
         (
             challenge.protocol_version,
             challenge.binding_mode,
-            challenge.kdf
+            challenge.kdf.as_str()
         ),
-        (1, 3, "argon2id".into())
+        (1, 3, "argon2id")
     );
-    let salt: [u8; 16] = challenge.salt.as_ref().try_into().expect("salt length");
-    let listener_id: [u8; 16] = challenge
-        .listener_id
-        .as_ref()
-        .try_into()
-        .expect("listener ID length");
     let handshake_id: [u8; 32] = challenge
         .handshake_id
         .as_ref()
         .try_into()
         .expect("handshake ID length");
-    let server_nonce: [u8; 32] = challenge
-        .server_nonce
-        .as_ref()
-        .try_into()
-        .expect("server nonce length");
-    let scope = encode_scope(&HttpLoginScope {
-        label,
-        mode: HttpLoginMode::ReadOnly,
-        channels: HttpLoginChannels::Rest,
-        databases: None,
-    })
-    .expect("encode transcript scope");
-    let transcript = build_transcript(&HttpLoginTranscriptInput {
-        protocol_version: 1,
-        binding_mode: 3,
-        security: challenge.security,
-        listener_id: &listener_id,
-        handshake_id: &handshake_id,
-        user: USERNAME,
-        client_nonce: &nonce,
-        server_nonce: &server_nonce,
-        salt: &salt,
-        memory_kb: challenge.memory_kb,
-        time: challenge.time,
-        parallelism: challenge.parallelism,
-        argon2_version: challenge.argon2_version,
-        scope_bytes: &scope,
-    })
-    .expect("build login transcript");
+    let transcript = transcript_for(username, label, "read_only", &nonce, &challenge);
     let keys = DerivedKeys::derive(
         password,
-        &salt,
+        &challenge.salt,
         &KdfParams {
             memory_kb: challenge.memory_kb,
             time: challenge.time,
@@ -282,8 +272,8 @@ pub async fn login(
         },
     )
     .expect("derive login keys");
-    let sig = hmac_sha256(&keys.stored_key.0, &transcript);
-    let proof: [u8; 32] = core::array::from_fn(|i| keys.client_key[i] ^ sig[i]);
+    let signature = hmac_sha256(&keys.stored_key.0, &transcript);
+    let proof: [u8; 32] = core::array::from_fn(|index| keys.client_key[index] ^ signature[index]);
     let (status, headers, body) = post(
         addr,
         "/shamir/v1/auth/finish",
@@ -305,7 +295,7 @@ pub async fn login(
         success.id.as_ref(),
         "token ID mismatch"
     );
-    assert_eq!(success.owner, USERNAME);
+    assert_eq!(success.owner, username);
     assert_eq!(success.databases, None);
     assert!(success.expires_at_ns > success.created_at_ns);
     assert_eq!(
@@ -317,6 +307,83 @@ pub async fn login(
         (1, "read_only", "rest")
     );
     Ok(success)
+}
+
+pub fn proof_for(
+    user: &str,
+    label: &str,
+    mode: &str,
+    password: &[u8],
+    challenge: &LoginChallenge,
+) -> [u8; 32] {
+    let nonce = [9u8; 32];
+    let transcript = transcript_for(user, label, mode, &nonce, challenge);
+    let keys = DerivedKeys::derive(
+        password,
+        &challenge.salt,
+        &KdfParams {
+            memory_kb: challenge.memory_kb,
+            time: challenge.time,
+            parallelism: challenge.parallelism,
+            argon2_version: challenge.argon2_version,
+        },
+    )
+    .expect("derive login keys");
+    let signature = hmac_sha256(&keys.stored_key.0, &transcript);
+    core::array::from_fn(|index| keys.client_key[index] ^ signature[index])
+}
+
+fn transcript_for(
+    user: &str,
+    label: &str,
+    mode: &str,
+    nonce: &[u8; 32],
+    challenge: &LoginChallenge,
+) -> Vec<u8> {
+    let salt: [u8; 16] = challenge.salt.as_ref().try_into().expect("salt length");
+    let listener_id: [u8; 16] = challenge
+        .listener_id
+        .as_ref()
+        .try_into()
+        .expect("listener ID length");
+    let handshake_id: [u8; 32] = challenge
+        .handshake_id
+        .as_ref()
+        .try_into()
+        .expect("handshake ID length");
+    let server_nonce: [u8; 32] = challenge
+        .server_nonce
+        .as_ref()
+        .try_into()
+        .expect("server nonce length");
+    let scope = encode_scope(&HttpLoginScope {
+        label,
+        mode: if mode == "read_write" {
+            HttpLoginMode::ReadWrite
+        } else {
+            HttpLoginMode::ReadOnly
+        },
+        channels: HttpLoginChannels::Rest,
+        databases: None,
+    })
+    .expect("encode transcript scope");
+    build_transcript(&HttpLoginTranscriptInput {
+        protocol_version: 1,
+        binding_mode: 3,
+        security: challenge.security,
+        listener_id: &listener_id,
+        handshake_id: &handshake_id,
+        user,
+        client_nonce: nonce,
+        server_nonce: &server_nonce,
+        salt: &salt,
+        memory_kb: challenge.memory_kb,
+        time: challenge.time,
+        parallelism: challenge.parallelism,
+        argon2_version: challenge.argon2_version,
+        scope_bytes: &scope,
+    })
+    .expect("build login transcript")
 }
 
 pub(super) fn token_scope(label: &str, mode: TokenMode, channels: TokenChannels) -> LoginScope<'_> {

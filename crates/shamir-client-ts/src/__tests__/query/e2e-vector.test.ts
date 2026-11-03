@@ -580,11 +580,17 @@ describe.skipIf(!SERVER_AVAILABLE)(
       const total = 280;
       await insertClusteredBatched(client!, db, 'docs', total, dim, 32);
 
-      // v-0 is the axis vector on axis 0; it must survive in its own top-3
-      // (SQ8 dequant-rescore can reorder near-ties but the exact-match
-      // vector must survive).
-      const probeId = 'v-0';
-      const probeVec = axisVector(dim, 0);
+      // The clustered fixture repeats pure axis vectors (v-0 ties with v-8,
+      // v-160, ...), so a fixture id is not a stable probe. Insert one vector
+      // with a direction no fixture vector has; its exact match must survive
+      // in its own top-3 (SQ8 dequant-rescore can reorder near-ties only).
+      const probeId = 'probe';
+      const probeVec = new Array(dim).fill(0.0);
+      probeVec[3] = 1.0;
+      probeVec[11] = 1.0;
+      await seed(client!, db, 'docs', [
+        { id: probeId, embedding: probeVec, cluster: -1 },
+      ]);
 
       const resp = br(await Batch.create('q-probe')
         .add('r', Query.from('docs')

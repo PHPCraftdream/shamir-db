@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use super::super::admission::Source;
 use super::super::metrics::{observe_begin, record_result, LoginResult};
-use super::super::pending::{PendingEntry, PendingError, PendingId, PendingStore};
+use super::super::pending::{PendingEntry, PendingError, PendingId};
 use super::super::wire::{
     challenge, response, BeginRequest, Challenge, LoginResponse, TokenScopeMode,
 };
@@ -45,11 +45,14 @@ pub async fn begin(context: &LoginServiceContext, source: Source, body: &[u8]) -
         }
     };
     if let Some(denial) = policy_denial(context, &request) {
-        return finish(context, received, denial, None).await;
+        let jitter = sample_jitter();
+        let denial = jitter.map_or_else(busy, |_| denial);
+        return finish(context, received, denial, jitter).await;
     }
     let jitter = sample_jitter();
+    let mut generate_id = unique_id;
     let value = match jitter {
-        Some(_) => begin_inner(context, source, request).await,
+        Some(_) => begin_inner(context, source, request, &mut generate_id).await,
         None => busy(),
     };
     finish(context, received, value, jitter).await
@@ -96,11 +99,15 @@ fn policy_denial(
     None
 }
 
-async fn begin_inner(
+async fn begin_inner<F>(
     context: &LoginServiceContext,
     source: Source,
     request: BeginRequest<'_>,
-) -> LoginResponse {
+    generate_id: &mut F,
+) -> LoginResponse
+where
+    F: FnMut() -> Option<[u8; 32]>,
+{
     let username = match NormalizedUsername::from_raw(request.user) {
         Ok(value) if value.as_str().as_bytes() == request.user.as_bytes() => value,
         _ => return invalid(),
@@ -162,10 +169,6 @@ async fn begin_inner(
             context.default_kdf,
         )
     };
-    let id = match unique_id(&context.pending).await {
-        Some(value) => value,
-        None => return busy(),
-    };
     let nonce = match server_nonce(request.client_nonce) {
         Some(value) => value,
         None => return busy(),
@@ -174,70 +177,78 @@ async fn begin_inner(
         Ok(value) => value,
         Err(_) => return invalid(),
     };
-    let transcript = match build_transcript(&HttpLoginTranscriptInput {
-        protocol_version: 1,
-        binding_mode: 3,
-        security: context.security_class,
-        listener_id: &context.listener_id,
-        handshake_id: &id,
-        user: request.user,
-        client_nonce: &request.client_nonce,
-        server_nonce: &nonce,
-        salt: &salt,
-        memory_kb: kdf.memory_kb,
-        time: kdf.time,
-        parallelism: kdf.parallelism,
-        argon2_version: kdf.argon2_version,
-        scope_bytes: &scope,
-    }) {
-        Ok(value) => value,
-        Err(_) => return invalid(),
-    };
-    let pins = context.admission.pin_source(source).await;
-    match context
-        .pending
-        .insert_pinned(
-            PendingId(id),
-            PendingEntry {
-                transcript: Zeroizing::new(transcript),
-                user_id,
-                stored_key: Zeroizing::new(stored_key),
-                server_key,
-                tickets_invalid_before_ns: threshold,
-                begin_time_ns: now,
-                eligible,
-                listener_id: context.listener_id,
-                security_class: context.security_class,
-                source,
-            },
-            pins,
-        )
-        .await
-    {
-        Ok(()) => {}
-        Err(PendingError::Full) => {
-            return response(
-                StatusCode::TOO_MANY_REQUESTS.as_u16(),
-                "rate_limited",
-                Some(1),
+    for _ in 0..3 {
+        let Some(id) = generate_id() else {
+            return busy();
+        };
+        let transcript = match build_transcript(&HttpLoginTranscriptInput {
+            protocol_version: 1,
+            binding_mode: 3,
+            security: context.security_class,
+            listener_id: &context.listener_id,
+            handshake_id: &id,
+            user: request.user,
+            client_nonce: &request.client_nonce,
+            server_nonce: &nonce,
+            salt: &salt,
+            memory_kb: kdf.memory_kb,
+            time: kdf.time,
+            parallelism: kdf.parallelism,
+            argon2_version: kdf.argon2_version,
+            scope_bytes: &scope,
+        }) {
+            Ok(value) => value,
+            Err(_) => return invalid(),
+        };
+        let pins = context.admission.pin_source(source).await;
+        match context
+            .pending
+            .insert_pinned(
+                PendingId(id),
+                PendingEntry {
+                    transcript: Zeroizing::new(transcript),
+                    user_id,
+                    stored_key: Zeroizing::new(stored_key),
+                    server_key: Zeroizing::new(*server_key),
+                    tickets_invalid_before_ns: threshold,
+                    begin_time_ns: now,
+                    eligible,
+                    listener_id: context.listener_id,
+                    security_class: context.security_class,
+                    source,
+                },
+                pins,
             )
-            .expect("fixed response");
+            .await
+        {
+            Ok(()) => {
+                return match challenge(&Challenge {
+                    security: context.security_class,
+                    listener_id: &context.listener_id,
+                    handshake_id: &id,
+                    salt: &salt,
+                    memory_kb: kdf.memory_kb,
+                    time: kdf.time,
+                    parallelism: kdf.parallelism,
+                    server_nonce: &nonce,
+                }) {
+                    Ok(body) => LoginResponse::new(StatusCode::OK, body),
+                    Err(_) => busy(),
+                };
+            }
+            Err(PendingError::Collision) => continue,
+            Err(PendingError::Full) => {
+                return response(
+                    StatusCode::TOO_MANY_REQUESTS.as_u16(),
+                    "rate_limited",
+                    Some(1),
+                )
+                .expect("fixed response");
+            }
+            Err(_) => return busy(),
         }
-        Err(_) => return busy(),
     }
-    match challenge(&Challenge {
-        security: context.security_class,
-        listener_id: &context.listener_id,
-        handshake_id: &id,
-        salt: &salt,
-        memory_kb: kdf.memory_kb,
-        time: kdf.time,
-        parallelism: kdf.parallelism,
-        server_nonce: &nonce,
-    }) {
-        Ok(body) => LoginResponse::new(StatusCode::OK, body),
-        Err(_) => busy(),
-    }
+    busy()
 }
 
 async fn load_snapshot(
@@ -246,28 +257,45 @@ async fn load_snapshot(
     secrets: Arc<ServerSecrets>,
     span: tracing::Span,
 ) -> Result<VerifierSnapshot, ()> {
+    let dispatcher = tracing::dispatcher::get_default(Clone::clone);
     tokio::task::spawn_blocking(move || -> Result<VerifierSnapshot, ()> {
-        let _entered = span.enter();
-        let real = users.lookup_by_name(username.as_str());
-        let user_id = users.user_id(username.as_str());
-        let floor = user_id
-            .and_then(|id| users.floor_if_present(&id))
-            .unwrap_or(0);
-        let fake = FakeBlob::derive(&secrets.server_secret, &username).map_err(|_| ())?;
-        Ok((real, user_id, floor, fake))
+        tracing::dispatcher::with_default(&dispatcher, || {
+            let _entered = span.enter();
+            let real = users.lookup_by_name(username.as_str());
+            let user_id = users.user_id(username.as_str());
+            let floor = user_id
+                .and_then(|id| users.floor_if_present(&id))
+                .unwrap_or(0);
+            let fake = FakeBlob::derive(&secrets.server_secret, &username).map_err(|_| ())?;
+            Ok((real, user_id, floor, fake))
+        })
     })
     .await
     .unwrap_or(Err(()))
 }
 
-async fn unique_id(pending: &PendingStore) -> Option<[u8; 32]> {
-    for _ in 0..3 {
-        let candidate = shamir_connect::common::crypto::try_random_array::<32>().ok()?;
-        if !pending.contains_id(PendingId(candidate)).await {
-            return Some(candidate);
-        }
+fn unique_id() -> Option<[u8; 32]> {
+    shamir_connect::common::crypto::try_random_array::<32>().ok()
+}
+
+#[cfg(test)]
+pub(crate) async fn begin_with_id_generator<F>(
+    context: &LoginServiceContext,
+    source: Source,
+    body: &[u8],
+    mut generate_id: F,
+) -> LoginResponse
+where
+    F: FnMut() -> Option<[u8; 32]>,
+{
+    let request = match BeginRequest::parse(body) {
+        Ok(request) => request,
+        Err(_) => return invalid(),
+    };
+    if let Some(denial) = policy_denial(context, &request) {
+        return denial;
     }
-    None
+    begin_inner(context, source, request, &mut generate_id).await
 }
 
 fn server_nonce(client_nonce: [u8; 32]) -> Option<[u8; 32]> {

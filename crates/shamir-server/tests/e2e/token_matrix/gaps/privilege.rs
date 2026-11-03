@@ -205,7 +205,11 @@ async fn elevated_owner_tokens_cannot_call_privileged_requests_or_batches() {
         cases.iter().map(|(_, label)| *label).collect();
     let batch_labels: std::collections::HashSet<_> =
         batches.iter().map(|(_, label)| *label).collect();
-    assert_eq!(request_labels.len(), cases.len(), "request labels are unique");
+    assert_eq!(
+        request_labels.len(),
+        cases.len(),
+        "request labels are unique"
+    );
     assert_eq!(batch_labels.len(), batches.len(), "batch labels are unique");
 
     for token in [&superuser_token, &replicator_token] {

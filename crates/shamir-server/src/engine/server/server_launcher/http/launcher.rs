@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -98,6 +98,13 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
             "HTTP listener setup used for non-HTTP listener".into(),
         ));
     }
+    let settings = &listener_config.http;
+    if settings.login.enabled {
+        tracing::info!(
+            "{}",
+            HttpLoginRoutes::describe_origin_policy(listener_config.browser_origin_allowlist.len())
+        );
+    }
     let address: SocketAddr = listener_config.addr.parse().map_err(|error| {
         BootError::Bind(format!("HTTP address {}: {error}", listener_config.addr))
     })?;
@@ -107,7 +114,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
     let address = listener
         .local_addr()
         .map_err(|error| BootError::Bind(format!("HTTP local address: {error}")))?;
-    let settings = &listener_config.http;
+    let request_timeout_ms = settings.request_timeout_ms;
     let tls_enabled = settings.tls == Some(true);
     let tls = if tls_enabled {
         let validated = validate_http_tls(&env.config.tls, address, settings.allow_self_signed)?;
@@ -422,16 +429,17 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
                     },
                 )
                 .await;
-                if !routes.shutdown(std::time::Duration::from_secs(5)).await {
-                    tracing::warn!("HTTP login worker drain timed out; workers remain detached");
+                let worker_drain = HttpLoginRoutes::worker_drain_budget(request_timeout_ms);
+                if !routes.shutdown(worker_drain).await {
+                    tracing::warn!(drain_ms = worker_drain.as_millis(), "HTTP login worker drain timed out; workers remain detached; later audit events may be lost");
                 }
                 audit_shutdown.cancel();
                 let mut audit_task = audit_task;
-                if tokio::time::timeout(std::time::Duration::from_secs(2), &mut audit_task)
+                if tokio::time::timeout(Duration::from_secs(2), &mut audit_task)
                     .await
                     .is_err()
                 {
-                    tracing::warn!("HTTP login audit consumer drain timed out");
+                    tracing::warn!("HTTP login audit consumer drain timed out; queued and late events may be lost");
                     audit_task.abort();
                     let _ = audit_task.await;
                 }
