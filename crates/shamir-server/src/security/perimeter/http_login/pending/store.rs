@@ -1,5 +1,4 @@
 use std::fmt;
-use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -254,6 +253,7 @@ impl PendingStore {
         state.reclaim_visits.load(Ordering::Relaxed)
     }
 
+    /// Claims once when effective source prefix, listener, and class match.
     pub async fn claim(
         &self,
         id: PendingId,

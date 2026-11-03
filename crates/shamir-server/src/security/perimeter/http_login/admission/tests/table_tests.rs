@@ -47,31 +47,30 @@ fn dropped_fallback_preserves_unrelated_state_and_existing_debt() {
         assert_eq!(table.debit(original, now), Ok(DebitOutcome::Charged));
     }
     assert!(table.debit(original, now).is_err());
-    let original_pin = table.pin(original).unwrap();
-    let original_pin_bucket_count = table.pinned_bucket_count();
-    assert_eq!(original_pin_bucket_count, 2);
-    let mut held_pins = Vec::with_capacity(1_023);
-    for index in 0u32..1_023 {
-        let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new(
-            (index >> 8) as u8,
-            index as u8,
-            7,
-            9,
-        )));
-        assert_eq!(table.debit(source, now), Ok(DebitOutcome::Charged));
-        held_pins.push(table.pin(source).unwrap());
-    }
-    assert_eq!(table.pinned_bucket_count(), 3_072);
+    let original_pin = table.pin(original);
+    let held_pins = (0u32..2047)
+        .map(|index| {
+            let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new(
+                (index >> 8) as u8,
+                index as u8,
+                7,
+                9,
+            )));
+            assert_eq!(table.debit(source, now), Ok(DebitOutcome::Charged));
+            table.pin(source)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(table.occupied_slots(), 4096);
+
+    let unrelated = Source::from_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 1, 1)));
     assert!(matches!(
         table.debit(unrelated, now),
-        Ok(DebitOutcome::Charged)
+        Ok(DebitOutcome::Dropped(_))
     ));
+    assert_eq!(table.occupied_slots(), 4096);
     assert!(table.debit(original, now).is_err());
     drop(held_pins);
-    assert_eq!(table.pinned_bucket_count(), original_pin_bucket_count);
-    assert_eq!(table.occupied_slots(), 4096);
     drop(original_pin);
-    assert_eq!(table.pinned_bucket_count(), 0);
 }
 #[test]
 fn full_table_eviction_scan_has_linear_slot_visit_bound() {
@@ -108,7 +107,7 @@ fn public_debit_oracle_survives_unique_prefix_churn_and_preserves_pinned_source(
     for _ in 0..10 {
         assert_eq!(table.debit(pinned, now), Ok(DebitOutcome::Charged));
     }
-    let pin = table.pin(pinned).unwrap();
+    let pin = table.pin(pinned);
     for index in 0u32..2050 {
         let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new(
             (index >> 8) as u8,
@@ -178,12 +177,10 @@ fn unrelated_source_denial_does_not_subtract_available_tier_tokens() {
 fn pins_release_and_budget_storage_is_preallocated() {
     let mut table = LoginBudgetTable::new(Duration::from_secs(1));
     let source = v4(17);
-    let now = Instant::now();
-    table.debit(source, now).unwrap();
-    let pin = table.pin(source).unwrap();
+    table.debit(source, Instant::now()).unwrap();
+    let pin = table.pin(source);
     let clone = pin.clone();
     drop(pin);
     drop(clone);
-    assert_eq!(table.pinned_bucket_count(), 0);
     assert!(LoginBudgetTable::bucket_size() <= 128);
 }

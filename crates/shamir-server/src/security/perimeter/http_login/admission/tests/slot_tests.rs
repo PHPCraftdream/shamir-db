@@ -19,25 +19,6 @@ fn state() -> AdmissionState {
 }
 
 #[tokio::test]
-async fn exhausted_credit_pin_budget_fails_closed_without_leaking_arrival_pin() {
-    let state = state();
-    let mut permits = Vec::with_capacity(1_024);
-    for index in 0..1_024u16 {
-        let source = Source::from_ip(IpAddr::V6(Ipv6Addr::new(
-            0x2001, 0xdb8, index, 0, 0, 0, 0, 1,
-        )));
-        let (arrival, credit) = state.pin_source(source).await.expect("initial pins");
-        permits.push((arrival, credit));
-    }
-    assert!(matches!(
-        state.pin_source(v4(11, 1, 1, 1)).await,
-        Err(AdmissionError::ServerBusy)
-    ));
-    drop(permits);
-    assert!(state.pin_source(v4(11, 1, 1, 1)).await.is_ok());
-}
-
-#[tokio::test]
 async fn denied_slot_does_not_refund_admission_budget() {
     let state = state();
     let source = v4(10, 1, 2, 3);

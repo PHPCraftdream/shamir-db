@@ -200,10 +200,7 @@ where
             Ok(value) => value,
             Err(_) => return invalid(),
         };
-        let pins = match context.admission.pin_source(source).await {
-            Ok(pins) => pins,
-            Err(_) => return busy(),
-        };
+        let pins = context.admission.pin_source(source).await;
         match context
             .pending
             .insert_pinned(
