@@ -21,7 +21,7 @@ pub(crate) fn validate_head(
     origins: &[String],
     host_allowlist: &[String],
 ) -> Result<HeadOk<ValidatedHead>, WsReject> {
-    if head.method != &Method::GET {
+    if head.method != Method::GET {
         return Err(reject(StatusCode::METHOD_NOT_ALLOWED, false));
     }
     let one = |name: &str| -> Option<&[u8]> {
@@ -36,7 +36,7 @@ pub(crate) fn validate_head(
         }
     };
     if !one("upgrade").is_some_and(|value| value.eq_ignore_ascii_case(b"websocket"))
-        || !one("sec-websocket-version").is_some_and(|value| value == b"13")
+        || one("sec-websocket-version").is_none_or(|value| value != b"13")
         || !one("sec-websocket-key").is_some_and(valid_key)
         || head.headers.get_all("sec-websocket-key").iter().count() != 1
         || head.headers.get_all("sec-websocket-version").iter().count() != 1

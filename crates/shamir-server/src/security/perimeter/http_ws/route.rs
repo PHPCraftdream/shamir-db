@@ -32,6 +32,9 @@ use crate::sync::connection::token_ws::{
 };
 use crate::tokens::TokenService;
 
+/// Resolves a token owner id to the username used in session metadata.
+pub(crate) type UsernameLookup = Arc<dyn Fn(&[u8; 16]) -> String + Send + Sync>;
+
 /// Listener policy and dependencies for the native and browser token routes.
 pub(crate) struct WsUpgradeService {
     pub(crate) gate: Arc<RestGate>,
@@ -43,7 +46,7 @@ pub(crate) struct WsUpgradeService {
     pub(crate) browser_available: bool,
     pub(crate) origins: Vec<String>,
     pub(crate) host_allowlist: Vec<String>,
-    pub(crate) username: Arc<dyn Fn(&[u8; 16]) -> String + Send + Sync>,
+    pub(crate) username: UsernameLookup,
     pub(crate) caps: TokenSocketCaps,
     pub(crate) session_max_age_hours: u64,
     pub(crate) ping_interval: Duration,
