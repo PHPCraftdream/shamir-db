@@ -1,5 +1,5 @@
 use crate::common::kdf_params::KdfParams;
-use crate::common::user::username::NormalizedUsername;
+use crate::common::username::NormalizedUsername;
 
 /// Fixed fields that bind an HTTP-login challenge to its proof.
 pub struct HttpLoginTranscriptInput<'a> {
