@@ -6,6 +6,8 @@ import { login as loginBrowser } from '../../browser.js';
 import { ApiToken } from '../../entry/api-token.js';
 import * as BrowserPlatform from '../../platform/browser.js';
 import * as NodePlatform from '../../platform/node.js';
+import * as BrowserLoginHttp from '../browser/browser-http.js';
+import * as NodeLoginHttp from '../node/node-http.js';
 import { decode as decodeWire, encode as encodeWire } from '@msgpack/msgpack';
 import type { LoginHttp } from '../core.js';
 import type { TokenPlatform, TokenSocket, TokenSocketCloseEvent } from '../../platform/token/types.js';
@@ -32,21 +34,21 @@ const hmac = (k: Uint8Array, b: Uint8Array) => createHmac('sha256', k).update(b)
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 // Independent fake-server oracle: deliberately builds the wire transcript itself.
-function oracleTranscript(nonce: Uint8Array): Buffer {
+function oracleTranscript(nonce: Uint8Array, security = 0): Buffer {
   const label = enc.encode('http-login');
-  return Buffer.concat([Buffer.from('SHAMIR-HTTP-LOGIN-v1'), Buffer.from([1, 3, 0]), Buffer.alloc(16, 1), Buffer.alloc(32, 2), u16(5), Buffer.from('alice'), Buffer.from(nonce), Buffer.alloc(32, 4), Buffer.alloc(16, 3), u32(19456), u32(2), u32(1), Buffer.from([19]), u16(label.length), label, Buffer.from([0, 2, 255])]);
+  return Buffer.concat([Buffer.from('SHAMIR-HTTP-LOGIN-v1'), Buffer.from([1, 3, security]), Buffer.alloc(16, 1), Buffer.alloc(32, 2), u16(5), Buffer.from('alice'), Buffer.from(nonce), Buffer.alloc(32, 4), Buffer.alloc(16, 3), u32(19456), u32(2), u32(1), Buffer.from([19]), u16(label.length), label, Buffer.from([0, 2, 255])]);
 }
 function installCrypto(): void {
   vi.stubGlobal('crypto', webcrypto);
   vi.spyOn(BrowserPlatform.BrowserPlatform, 'argon2id').mockImplementation(async password => hmac(password, Buffer.from('test salted password')));
   vi.spyOn(NodePlatform.NodePlatform, 'argon2id').mockImplementation(async password => hmac(password, Buffer.from('test salted password')));
 }
-function loginHttp(): LoginHttp {
+function loginHttp(security = 0): LoginHttp {
   let nonce: Uint8Array | undefined;
   return { async request(url, body) {
-    if (url.pathname.endsWith('/begin')) { nonce = new Uint8Array(decodeRecord(body).client_nonce as Uint8Array); return { status: 200, contentType: 'application/msgpack', retryAfter: null, body: encRecord({ protocol_version: 1, binding_mode: 3, security: 0, listener_id: bytes(16, 1), handshake_id: bytes(32, 2), salt: bytes(16, 3), kdf: 'argon2id', memory_kb: 19456, time: 2, parallelism: 1, argon2_version: 19, server_nonce: bytes(32, 4) }) }; }
+    if (url.pathname.endsWith('/begin')) { nonce = new Uint8Array(decodeRecord(body).client_nonce as Uint8Array); return { status: 200, contentType: 'application/msgpack', retryAfter: null, body: encRecord({ protocol_version: 1, binding_mode: 3, security, listener_id: bytes(16, 1), handshake_id: bytes(32, 2), salt: bytes(16, 3), kdf: 'argon2id', memory_kb: 19456, time: 2, parallelism: 1, argon2_version: 19, server_nonce: bytes(32, 4) }) }; }
     if (!nonce) throw new Error('missing begin');
-    const t = oracleTranscript(nonce);
+    const t = oracleTranscript(nonce, security);
     const salted = hmac(enc.encode('correct horse'), Buffer.from('test salted password'));
     const clientKey = hmac(salted, Buffer.from('Client Key'));
     const stored = sha(clientKey);
@@ -75,7 +77,10 @@ describe('public login token handoff', () => {
   it('logs in through the browser public entry and continues over HTTP and buffered WS', async () => {
     installCrypto();
     const browserFactory = vi.spyOn(BrowserPlatform, 'createBrowserTokenPlatform');
-    const result = await loginBrowser({ username: 'ALICE', password: 'correct horse', url: 'http://127.0.0.1/', scope: { label: 'http-login', mode: 'read_only', channels: 'both' } }, loginHttp());
+    const fakeHttp = loginHttp();
+    vi.spyOn(BrowserLoginHttp.browserLoginHttp, 'request').mockImplementation(fakeHttp.request);
+    const result = await loginBrowser({ username: 'ALICE', password: 'correct horse', url: 'http://127.0.0.1/', scope: { label: 'http-login', mode: 'read_only', channels: 'both' } });
+    expect(loginBrowser).toHaveLength(1);
     expect(result.token).toBeInstanceOf(ApiToken); expect(result.metadata.owner).toBe('alice');
     const httpPlatform = platform('browser'); browserFactory.mockReturnValue(httpPlatform);
     const http: Promise<TokenHttpClient> = result.connect({ channel: 'http' });
@@ -92,7 +97,10 @@ describe('public login token handoff', () => {
   it('uses Node public login continuation over HTTP and WS without sending a token frame', async () => {
     installCrypto();
     const nodeFactory = vi.spyOn(NodePlatform, 'createNodeTokenPlatform');
-    const result = await loginNode({ username: 'alice', password: 'correct horse', url: 'http://127.0.0.1/', scope: { label: 'http-login', channels: 'both' } }, loginHttp());
+    const fakeHttp = loginHttp();
+    vi.spyOn(NodeLoginHttp.nodeLoginHttp, 'request').mockImplementation(fakeHttp.request);
+    const result = await loginNode({ username: 'alice', password: 'correct horse', url: 'http://127.0.0.1/', scope: { label: 'http-login', channels: 'both' } });
+    expect(loginNode).toHaveLength(1);
     const nodePlatform = platform('node'); nodeFactory.mockReturnValue(nodePlatform);
     const client: TokenHttpClient = await result.connect({ channel: 'http' });
     await expect(client.ping()).resolves.toEqual({ kind: 'pong' }); await client.close();
@@ -109,11 +117,43 @@ describe('public login token handoff', () => {
     const handle = result.token; expect(handle.toString()).toBe('[REDACTED]'); expect(JSON.stringify(handle)).not.toContain(secret); expect(inspect(handle)).not.toContain(secret);
   });
 
+  it('preserves a copied CA through public Node HTTP and WS continuations', async () => {
+    installCrypto();
+    const nodeFactory = vi.spyOn(NodePlatform, 'createNodeTokenPlatform');
+    const fakeHttp = loginHttp(1);
+    const requestSpy = vi.spyOn(NodeLoginHttp.nodeLoginHttp, 'request').mockImplementation(fakeHttp.request);
+    const ca = bytes(3, 7);
+    const result = await loginNode({ username: 'alice', password: 'correct horse', url: 'https://example.test/', ca, scope: { label: 'http-login', channels: 'both' } });
+    ca.fill(9);
+    expect(requestSpy).toHaveBeenCalledTimes(2);
+    expect(result.metadata.channels).toBe('both');
+
+    const httpPlatform = platform('node'); nodeFactory.mockReturnValue(httpPlatform);
+    const client: TokenHttpClient = await result.connect({ channel: 'http' });
+    await client.close();
+    expect(nodeFactory).toHaveBeenLastCalledWith(expect.objectContaining({ token: result.token, channel: 'http', tls: { ca: bytes(3, 7) } }));
+
+    const wsSocket = new Socket(); const wsPlatform = platform('node', wsSocket); nodeFactory.mockReturnValue(wsPlatform);
+    const wsClient: TokenWsClient = await result.connect({ channel: 'ws' });
+    await wsClient.close();
+    expect(nodeFactory).toHaveBeenLastCalledWith(expect.objectContaining({ token: result.token, channel: 'ws', tls: { ca: bytes(3, 7) } }));
+  });
+
+  it('rejects CA on browser public login before making a request', async () => {
+    installCrypto();
+    const requestSpy = vi.spyOn(BrowserLoginHttp.browserLoginHttp, 'request').mockImplementation(loginHttp(1).request);
+    await expect(loginBrowser({ username: 'alice', password: 'correct horse', url: 'https://example.test/', ca: bytes(3, 7) }))
+      .rejects.toMatchObject({ code: 'invalid_request' });
+    expect(requestSpy).not.toHaveBeenCalled();
+  });
+
   it('rejects post-creation expiry with typed token-expired error and no secret disclosure', async () => {
     installCrypto();
     const factory = vi.spyOn(BrowserPlatform, 'createBrowserTokenPlatform');
     const fake = platform('browser'); factory.mockReturnValue(fake);
-    const result = await loginBrowser({ username: 'alice', password: 'correct horse', url: 'http://127.0.0.1/', scope: { channels: 'both' } }, loginHttp());
+    const fakeHttp = loginHttp();
+    vi.spyOn(BrowserLoginHttp.browserLoginHttp, 'request').mockImplementation(fakeHttp.request);
+    const result = await loginBrowser({ username: 'alice', password: 'correct horse', url: 'http://127.0.0.1/', scope: { channels: 'both' } });
     const clientPromise = result.connect({ channel: 'http' });
     const client = await clientPromise;
     const db = client.db('app');
@@ -144,7 +184,7 @@ describe('public login token handoff', () => {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../');
     const visited = new Set<string>();
     const walk = async (file: string): Promise<void> => {
-      const path = resolve(file); if (visited.has(path)) return; visited.add(path);
+      const path = resolve(file).replace(/\\/g, '/'); if (visited.has(path)) return; visited.add(path);
       const source = await readFile(path, 'utf8');
       expect(source).not.toMatch(/(?:from\s*|import\s*\()\s*['"](?:node:[^'"]+|ws(?:\/[^'"]*)?)['"]/);
       for (const match of source.matchAll(/(?:from\s*|import\s*\()(['"])(\.\.?\/[^'"]+)\1/g)) {
@@ -154,7 +194,7 @@ describe('public login token handoff', () => {
     await walk(resolve(root, 'browser.ts'));
     expect([...visited].some(path => path.endsWith('/platform/connect/node-connect.ts'))).toBe(false);
     const nodeGraph = new Set<string>();
-    const walkNode = async (file: string): Promise<void> => { const path = resolve(file); if (nodeGraph.has(path)) return; nodeGraph.add(path); const source = await readFile(path, 'utf8'); expect(source).not.toContain('connectTokenBrowser'); for (const match of source.matchAll(/(?:from\s*|import\s*\()(['"])(\.\.?\/[^'"]+)\1/g)) { const target = resolve(dirname(path), match[2]!.replace(/\.js$/, '.ts')); await readFile(target, 'utf8'); await walkNode(target); } };
+    const walkNode = async (file: string): Promise<void> => { const path = resolve(file).replace(/\\/g, '/'); if (nodeGraph.has(path)) return; nodeGraph.add(path); const source = await readFile(file, 'utf8'); expect(source).not.toContain('connectTokenBrowser'); for (const match of source.matchAll(/(?:from\s*|import\s*\()(['"])(\.\.?\/[^'"]+)\1/g)) { const target = resolve(dirname(file), match[2]!.replace(/\.js$/, '.ts')); await readFile(target, 'utf8'); await walkNode(target); } };
     await walkNode(resolve(root, 'index.ts'));
   });
 });
@@ -162,7 +202,15 @@ describe('public login token handoff', () => {
 it('retains the SCRAM connect overload as a compile-only probe', () => {
   type Assert<T extends true> = T;
   type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends (<T>() => T extends B ? 1 : 2) ? true : false;
-  const probe = (): void => { const node: Promise<import('../../core/client/client.js').ShamirClient> = import('../../index.js').then(({ connect }) => connect({ host: 'localhost', port: 7000, username: 'alice', password: 'password' })); void node; };
+  const probe = (): void => {
+    const node: Promise<import('../../core/client/client.js').ShamirClient> = import('../../index.js').then(({ connect }) => connect({ host: 'localhost', port: 7000, username: 'alice', password: 'password' }));
+    void node;
+    const loginOptions: import('../types.js').LoginOptions = { username: 'alice', password: 'password', url: 'http://localhost/' };
+    // @ts-expect-error Public login entries accept options only, never transport injection.
+    void loginNode(loginOptions, loginHttp());
+    // @ts-expect-error Public browser login entries accept options only, never transport injection.
+    void loginBrowser(loginOptions, loginHttp());
+  };
   type Result = Assert<Equal<ReturnType<typeof loginNode>, ReturnType<typeof loginBrowser>>>;
   void probe; void (0 as unknown as Result);
 });

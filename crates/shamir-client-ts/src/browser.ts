@@ -1,5 +1,8 @@
-import { loginBrowser as login } from './login/browser/browser.js';
-export { login };
+import { loginBrowser } from './login/browser/browser.js';
+import type { LoginOptions, LoginResult } from './login/types.js';
+export function login(options: LoginOptions): Promise<LoginResult> {
+  return loginBrowser(options);
+}
 export { LoginError } from './login/errors.js';
 export type { LoginErrorCode } from './login/errors.js';
 export type { LoginOptions, LoginResult, LoginMetadata, LoginScope } from './login/types.js';

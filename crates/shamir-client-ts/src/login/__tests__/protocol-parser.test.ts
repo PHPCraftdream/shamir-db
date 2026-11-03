@@ -1,8 +1,31 @@
 import { describe, expect, it } from 'vitest';
-import { decodeMessage } from '../protocol.js';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { canonicalUser, decodeMessage } from '../protocol.js';
 
 const decode = (wire: number[]) => decodeMessage(Uint8Array.from(wire));
 const invalid = (wire: number[]) => expect(() => decode(wire)).toThrow();
+const usernameVectors = JSON.parse(readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../../shamir-query-types/test-vectors/username_precis.json'),
+  'utf8',
+)) as { vectors: Array<{ name: string; input: string; normalized?: string; reason?: string; ts_fail_closed?: boolean; ts_reason?: string }> };
+
+describe('login username PRECIS vectors', () => {
+  it('matches shared normalizations and explicitly rejects fail-closed divergences', () => {
+    expect(usernameVectors.vectors.length).toBeGreaterThanOrEqual(20);
+    for (const vector of usernameVectors.vectors) {
+      if (vector.ts_fail_closed) {
+        expect(vector.ts_reason, vector.name).toBe('unsupported_bidi');
+        expect(() => canonicalUser(vector.input), `${vector.name} (${vector.ts_reason})`).toThrow();
+      } else if (vector.normalized !== undefined) {
+        expect(canonicalUser(vector.input), vector.name).toBe(vector.normalized);
+      } else {
+        expect(() => canonicalUser(vector.input), `${vector.name} (${vector.reason})`).toThrow();
+      }
+    }
+  });
+});
 
 describe('login MessagePack strict parsing', () => {
   it('accepts non-shortest unsigned integers but rejects every signed integer marker', () => {

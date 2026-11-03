@@ -46,13 +46,24 @@ pub async fn fresh_in_memory() -> ShamirDb {
 
 /// Open a seeded/installed follower home from disk. `init_seed` runs the
 /// boot gate: an abandoned (incomplete) installation is never registered.
+/// A previous instance dropped just before still holds the fjall file lock
+/// until its background handles release it, so a `Locked` error is retried.
 pub async fn open_home(data_dir: &Path) -> ShamirDb {
-    // Boxed: keeps the in-process engine future off the debug test-thread stack.
-    Box::pin(ShamirDb::init_seed(SystemStoreConfig::Fjall(
-        data_dir.join("shamir_db_meta.redb"),
-    )))
-    .await
-    .expect("open follower home")
+    for _ in 0..100 {
+        // Boxed: keeps the in-process engine future off the debug test-thread stack.
+        match Box::pin(ShamirDb::init_seed(SystemStoreConfig::Fjall(
+            data_dir.join("shamir_db_meta.redb"),
+        )))
+        .await
+        {
+            Ok(home) => return home,
+            Err(e) if e.to_string().contains("Locked") => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("open follower home: {e}"),
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
 }
 
 /// True when an ordinary read of `table` is refused with the typed

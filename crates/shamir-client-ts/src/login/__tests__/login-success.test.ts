@@ -1,10 +1,15 @@
 import { createHash, createHmac } from 'node:crypto';
+import { NodePlatform } from '../../platform/node.js';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
 import { inspect } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
+import { buildLoginTranscript, encodeScope, freezeScope, type Challenge } from '../protocol.js';
+import { nodeLoginCrypto } from '../node/node-crypto.js';
 import { login } from '../../index.js';
-import { NodePlatform } from '../../platform/node.js';
 import { ApiToken } from '../../entry/api-token.js';
 import { decode as decodeWire, encode as encodeWire } from '@msgpack/msgpack';
 type Fields = Record<string, unknown>;
@@ -128,6 +133,87 @@ async function close(server: ReturnType<typeof createServer>): Promise<void> {
 const deterministicArgon = (pw: Uint8Array) => hmac(pw, Buffer.concat([Buffer.from('test salted password'), Buffer.from([3])]));
 const loginWith = (url: string, pw = 'correct horse battery staple', username = 'ALICE') => login({ username, password: pw, url });
 
+const vectorDir = resolve(dirname(fileURLToPath(import.meta.url)), '../../../../shamir-connect/test-vectors');
+const loadVector = <T>(name: string): T => JSON.parse(readFileSync(resolve(vectorDir, name), 'utf8')) as T;
+const fromHex = (hex: string): Uint8Array => new Uint8Array(Buffer.from(hex, 'hex'));
+const toHex = (value: Uint8Array): string => Buffer.from(value).toString('hex');
+
+describe('published server login vectors', () => {
+  it('reproduces all published HTTP transcript bytes using production builders', () => {
+    type TranscriptInput = {
+      protocol_version: number; binding_mode: number; security: number; listener_id_hex: string;
+      handshake_id_hex: string; user: string; client_nonce_hex: string; server_nonce_hex: string;
+      salt_hex: string; memory_kb: number; time: number; parallelism: number; argon2_version: number;
+      scope: { label: string; mode: 'read_only' | 'read_write'; channels: 'rest' | 'ws' | 'both'; databases: string[] | null };
+    };
+    type TranscriptVector = { name: string; input: TranscriptInput; scope_bytes_hex: string; transcript_hex: string };
+    const vectors = loadVector<{ cases: TranscriptVector[] }>('http_login_transcript_v1.json');
+    expect(vectors.cases).toHaveLength(3);
+    for (const vector of vectors.cases) {
+      const { input } = vector;
+      const scope = freezeScope(input.scope);
+      const scopeBytes = encodeScope(scope);
+      expect(toHex(scopeBytes)).toBe(vector.scope_bytes_hex);
+      const challenge: Challenge = {
+        security: input.security, listenerId: fromHex(input.listener_id_hex),
+        handshakeId: fromHex(input.handshake_id_hex), salt: fromHex(input.salt_hex),
+        serverNonce: fromHex(input.server_nonce_hex), memoryKb: input.memory_kb,
+        time: input.time, parallelism: input.parallelism,
+      };
+      const transcriptBytes = buildLoginTranscript(input.user, fromHex(input.client_nonce_hex), challenge,
+        input.argon2_version, scope);
+      expect(toHex(transcriptBytes), vector.name).toBe(vector.transcript_hex);
+      transcriptBytes.fill(0);
+    }
+  });
+
+  it('matches the published native SCRAM key schedule vector (not an HTTP proof vector)', async () => {
+    const flow = loadVector<{ inputs: { password: string; salt_hex: string; auth_message_hex: string; kdf_params: { memory_kb: number; time: number; parallelism: number } }; expected: Record<string, string> }>('scram_flow_default.json');
+    const argon = loadVector<{ expected: { salted_password_hex: string } }>('argon2id_default.json');
+    const { inputs, expected } = flow;
+    const salt = fromHex(inputs.salt_hex);
+    const message = fromHex(inputs.auth_message_hex);
+    const params = { memoryKb: inputs.kdf_params.memory_kb, time: inputs.kdf_params.time, parallelism: inputs.kdf_params.parallelism, argon2Version: 19 };
+    const passwordBytes = enc.encode(inputs.password);
+    let salted: Uint8Array | undefined;
+    let clientKey: Uint8Array | undefined;
+    let serverKey: Uint8Array | undefined;
+    let storedKey: Uint8Array | undefined;
+    let clientSignature: Uint8Array | undefined;
+    let proof: Uint8Array | undefined;
+    let serverSignature: Uint8Array | undefined;
+    try {
+      salted = await nodeLoginCrypto.argon2id(passwordBytes, salt, params);
+      expect(toHex(salted)).toBe(argon.expected.salted_password_hex);
+      expect(toHex(salted)).toBe(expected.salted_password_hex);
+      clientKey = await nodeLoginCrypto.hmac(salted, enc.encode('Client Key'));
+      serverKey = await nodeLoginCrypto.hmac(salted, enc.encode('Server Key'));
+      storedKey = await nodeLoginCrypto.sha256(clientKey);
+      clientSignature = await nodeLoginCrypto.hmac(storedKey, message);
+      proof = Uint8Array.from(clientKey, (byte, index) => byte ^ clientSignature![index]);
+      serverSignature = await nodeLoginCrypto.hmac(serverKey, message);
+      expect(toHex(clientKey)).toBe(expected.client_key_hex);
+      expect(toHex(serverKey)).toBe(expected.server_key_hex);
+      expect(toHex(storedKey)).toBe(expected.stored_key_hex);
+      expect(toHex(proof)).toBe(expected.client_proof_hex);
+      expect(toHex(serverSignature)).toBe(expected.server_signature_hex);
+      expect(toHex(await nodeLoginCrypto.hmac(storedKey, Uint8Array.from([...message, 0])))).not.toBe(toHex(clientSignature));
+      const changedServerKey = new Uint8Array(serverKey);
+      changedServerKey[0] ^= 1;
+      try {
+        expect(toHex(await nodeLoginCrypto.hmac(changedServerKey, message))).not.toBe(expected.server_signature_hex);
+      } finally { changedServerKey.fill(0); }
+      const changedProof = new Uint8Array(proof); changedProof[0] ^= 1;
+      try { expect(toHex(changedProof)).not.toBe(expected.client_proof_hex); }
+      finally { changedProof.fill(0); }
+    } finally {
+      passwordBytes.fill(0); salt.fill(0); message.fill(0);
+      salted?.fill(0); clientKey?.fill(0); serverKey?.fill(0); storedKey?.fill(0);
+      clientSignature?.fill(0); proof?.fill(0); serverSignature?.fill(0);
+    }
+  }, 60_000);
+});
+
 describe('public Node login success contract', () => {
   it('verifies an independently assembled transcript and real minimum Argon2id proof', async () => {
     const f = await fixture('correct horse battery staple', { realArgon: true });
@@ -165,8 +251,12 @@ describe('public Node login success contract', () => {
   it('discards the token when the server signature is tampered', async () => {
     const f = await fixture('correct horse battery staple', { signatureTamper: true });
     const argon = vi.spyOn(NodePlatform, 'argon2id').mockImplementation(async pw => deterministicArgon(pw));
-    try { await expect(loginWith(f.url)).rejects.toMatchObject({ code: 'authentication_failed' }); }
-    finally { argon.mockRestore(); await close(f.server); }
+    try {
+      const result = await loginWith(f.url).catch(error => error);
+      expect(result).toMatchObject({ code: 'server_signature_mismatch', status: 200 });
+      expect(result).not.toHaveProperty('token');
+      expect(f.proofChecks).toBe(1);
+    } finally { argon.mockRestore(); await close(f.server); }
   });
 
   it.each([

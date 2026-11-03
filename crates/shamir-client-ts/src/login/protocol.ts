@@ -74,22 +74,18 @@ function validText(value: unknown, minimum: number, maximum: number): Uint8Array
 }
 
 export function canonicalUser(value: string): string {
-  // Partial UsernameCaseMapped compatibility: width-map only characters whose
-  // compatibility decomposition is explicitly width-related. This uses the
-  // runtime Unicode tables, not a pinned Unicode 15.1 PRECIS implementation.
-  const widthMapped = value.replace(/[\u3000\uFF01-\uFFEE]/gu, (character) => {
-    const codePoint = character.codePointAt(0)!;
-    if (codePoint === 0x3000 || (codePoint >= 0xff01 && codePoint <= 0xffee)) {
-      return character.normalize('NFKC');
-    }
-    return character;
+  // Partial UsernameCaseMapped compatibility; JavaScript Unicode tables are not pinned to 15.1.
+  const kanaMapped = value.replace(/[\uFF61-\uFF9F]+/gu, (run) => run.normalize('NFKC'));
+  const mappedWidth = kanaMapped.replace(/[\u3000\uFF01-\uFF60\uFFA0-\uFFEE]/gu, (character) => {
+    return character.normalize('NFKC');
   });
-  // Normalize contiguous halfwidth kana together so dakuten/handakuten compose.
-  const mappedWidth = widthMapped.replace(/[\uFF61-\uFF9F]+/gu, (run) => run.normalize('NFKC'));
   // RFC 8265 order: the class check follows width mapping and precedes case mapping and NFC.
   checkIdentifierClass(mappedWidth);
   // Per code point, so the context-sensitive final-sigma rule never applies.
   const mapped = Array.from(mappedWidth, (character) => character.toLowerCase()).join('').normalize('NFC');
+  if (/[\u0590-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF\u{10800}-\u{10FFF}\u{1E800}-\u{1EFFF}]/u.test(mapped)) {
+    return invalidRequest();
+  }
   const bytes = validText(mapped, 1, 255);
   checkIdentifierClass(mapped);
   return decoder.decode(bytes);

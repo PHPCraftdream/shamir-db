@@ -44,12 +44,15 @@ export const browserLoginHttp: LoginHttp = {
     let response: ResponseLike | undefined;
     let settled = false;
     let completed = false;
+    let chunks: Uint8Array[] = [];
+    let size = 0;
     let rejectAbort: (() => void) | undefined;
     const abortWait = new Promise<never>((_, reject) => {
       rejectAbort = () => reject(new LoginError(
         signal.aborted ? 'client_aborted' : timerFired ? 'client_timeout' : 'network_error',
       ));
     });
+    const wipeChunks = (): void => { for (const chunk of chunks) chunk.fill(0); chunks = []; };
     const abort = () => {
       controller.abort();
       rejectAbort?.();
@@ -101,18 +104,21 @@ export const browserLoginHttp: LoginHttp = {
         throw new LoginError('http_body_too_large', undefined, status);
       }
 
-      const chunks: Uint8Array[] = [];
-      let size = 0;
       reader = response.body?.getReader();
       const activeReader = reader;
       if (activeReader) {
         for (;;) {
-          const read = Promise.resolve().then(() => activeReader.read());
+          const read = Promise.resolve().then(() => activeReader.read()).then((item) => {
+            if (settled || controller.signal.aborted) item.value?.fill(0);
+            return item;
+          });
           const item = await Promise.race([read, abortWait]);
-          if (item.done) break;
+          if (settled || controller.signal.aborted) { item.value?.fill(0); throw new LoginError(signal.aborted ? 'client_aborted' : timerFired ? 'client_timeout' : 'network_error'); }
+          if (item.done) { item.value?.fill(0); break; }
           if (!item.value) continue;
           size += item.value.byteLength;
           if (size > 4096) {
+            item.value.fill(0);
             cancelWithoutWaiting(() => activeReader.cancel());
             throw new LoginError('http_body_too_large', undefined, status);
           }
@@ -122,22 +128,23 @@ export const browserLoginHttp: LoginHttp = {
 
       const bytes = new Uint8Array(size);
       let offset = 0;
-      for (const chunk of chunks) {
-        bytes.set(chunk, offset);
-        offset += chunk.byteLength;
+      try {
+        for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+        const contentType = response.headers.get('content-type');
+        const retryAfter = response.headers.get('retry-after');
+        wipeChunks();
+        completed = true;
+        return { status, contentType, retryAfter, body: bytes };
+      } catch (error) {
+        bytes.fill(0);
+        throw error;
       }
-      completed = true;
-      return {
-        status,
-        contentType: response.headers.get('content-type'),
-        retryAfter: response.headers.get('retry-after'),
-        body: bytes,
-      };
     } catch (error) {
       if (error instanceof LoginError) throw error;
       throw new LoginError(signal.aborted ? 'client_aborted' : timerFired ? 'client_timeout' : 'network_error');
     } finally {
       settled = true;
+      wipeChunks();
       signal.removeEventListener('abort', onAbort);
       if (timer !== undefined) clearTimeout(timer);
       const activeReader = reader;
