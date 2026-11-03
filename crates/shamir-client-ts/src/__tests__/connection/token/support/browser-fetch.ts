@@ -1,6 +1,11 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest, type RequestOptions as HttpsRequestOptions } from 'node:https';
 
+/** An abort error shaped like the DOM one (the `lib` setting has no DOMException). */
+function abortError(): Error {
+  return Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+}
+
 interface LoginFetchInit {
   method: 'POST';
   headers: Readonly<Record<string, string>>;
@@ -38,7 +43,7 @@ export function installBrowserFetch(
     if ((url.protocol !== 'http:' && url.protocol !== 'https:') || init.redirect !== 'error' || init.credentials !== 'omit') {
       throw new TypeError('Unsupported browser login fetch request');
     }
-    if (init.signal.aborted) throw new DOMException('The operation was aborted', 'AbortError');
+    if (init.signal.aborted) throw abortError();
     const headers: Record<string, string> = { ...init.headers, Origin: origin };
     onRequest?.({ url: url.href, method: init.method, headers: { ...headers } });
 
@@ -106,7 +111,7 @@ export function installBrowserFetch(
           resolve(response);
         }
       };
-      const abort = (): void => finish(new DOMException('The operation was aborted', 'AbortError'));
+      const abort = (): void => finish(abortError());
       request.once('error', (error) => finish(error));
       request.once('close', () => {
         if (!incomingResponse?.complete) finish(new Error('HTTP request closed before response completed'));

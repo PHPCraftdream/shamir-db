@@ -105,7 +105,7 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
   }, 60000);
 
   it('expires a login token at configured login TTL on the server', async () => {
-    const fixture = await setupTokenFixture({ loginTtl: 2, loginAllowReadWrite: true });
+    const fixture = await setupTokenFixture({ loginTtl: 4, loginAllowReadWrite: true });
     try {
       const url = `http://${HOST}:${fixture.server.http}`;
       const result = await login(loginOptions(`login-ttl-${process.pid}`, url, { mode: 'read_write', channels: 'both' }));
@@ -116,7 +116,7 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
         await http.ping();
         ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
         await ws.ping();
-        expect(result.metadata.expiresAtNs - result.metadata.createdAtNs).toBe(2_000_000_000n);
+        expect(result.metadata.expiresAtNs - result.metadata.createdAtNs).toBe(4_000_000_000n);
         const closed = await observer.sockets[0]!.waitForClose(15000);
         expect(closed).toMatchObject({ code: 4012, reason: 'token_expired' });
         const deadline = Date.now() + 5000;
@@ -127,6 +127,7 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
             if (error instanceof TokenTransportError && error.code === 'unauthorized' && error.status === 401) { expired = true; break; }
             throw error;
           }
+          await new Promise((resolve) => setTimeout(resolve, 50));
         }
         expect(expired).toBe(true);
       } finally { if (ws) await ws.close().catch(() => undefined); observer.restore(); await http.close(); }
@@ -193,6 +194,14 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
         try { await expect(client.execute('default', Batch.create(`login-ro-write-${channel}`).add('write', write.insert('items', [{ id: `ro-${channel}-${process.pid}`, value: 'no' }])).build())).rejects.toMatchObject({ code: 'token_read_only' }); }
         finally { await client.close(); }
       }
+    } finally { await fixture.admin.close().catch(() => undefined); await fixture.scram.close().catch(() => undefined); await fixture.server.stop(); }
+  }, 120000);
+
+  it('enforces login channel restrictions on http and ws', async () => {
+    // Own server: the per-source login credit bucket (10 requests/min per /24) is shared by every login.
+    const fixture = await setupTokenFixture({ loginAllowReadWrite: true });
+    try {
+      const url = `http://${HOST}:${fixture.server.http}`;
       const restOnly = await login(loginOptions(`login-channel-${process.pid}`, url, { channels: 'rest' }));
       const restOnWs = connect({
         auth: 'token',
@@ -231,7 +240,7 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
     finally { await authority.admin.close().catch(() => undefined); await authority.scram.close().catch(() => undefined); await authority.server.stop(); }
   }, 60000);
 
-  it('exercises isolated backoff for repeated password failures last', async () => {
+  it('rate-limits a burst of failing login attempts from one source (last, isolated server)', async () => {
     const fixture = await setupTokenFixture();
     const user = `dedicated-login-user-${process.pid}`;
     try {
