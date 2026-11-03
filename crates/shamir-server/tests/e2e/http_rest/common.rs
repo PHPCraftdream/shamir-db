@@ -1,14 +1,12 @@
 use shamir_connect::server::token::{TokenChannels, TokenMode};
-use shamir_query_builder::{batch::Batch, ddl};
-use shamir_query_types::admin::ChmodOp;
-use shamir_query_types::batch::BatchOp;
-use shamir_query_types::hmac::{canonical_batch_op, compute_tag_hex, derive_session_hmac_key};
+use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_query_types::wire::{DbRequest, DbResponse};
 use shamir_server::bootstrap::{ensure_superuser, BootstrapPolicy};
 use shamir_server::config::{Config, ListenerConfig, ListenerKind};
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_server::tokens::NewToken;
 use shamir_server::user_directory::FjallUserDirectory;
+use shamir_types::access::ResourcePath;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
@@ -101,7 +99,7 @@ impl Harness {
     where
         F: FnOnce(&mut Config),
     {
-        Self::launch_with_hooks(addr, settings, native, hook, seed_owner).await
+        Self::launch_with_hooks(addr, settings, native, hook, |_| {}).await
     }
 
     /// Starts the shared HTTP harness with test-specific config and user seeding.
@@ -114,11 +112,12 @@ impl Harness {
     ) -> Self
     where
         C: FnOnce(&mut Config),
-        S: FnOnce(&std::path::Path) -> ([u8; 16], Vec<String>),
+        S: FnOnce(&std::path::Path),
     {
         let temp = tempfile::TempDir::new().expect("tempdir");
         let data_dir = temp.path().to_path_buf();
-        let (owner, owner_roles) = seed(&data_dir);
+        let (owner, owner_roles) = seed_owner(&data_dir).await;
+        seed(&data_dir);
         let mut config = config_for_with(&data_dir, addr, settings);
         configure(&mut config);
         if native {
@@ -219,7 +218,11 @@ impl Harness {
     }
 }
 
-pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
+/// The database's `0o757` mode grants other principals read, write, and execute,
+/// allowing interactive transaction commit (which authorizes Write on the database).
+/// The store's `0o711` mode grants traversal. Both resources are System-owned at
+/// `0o700` by default, which hides even tables the token owner created.
+pub async fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
     let directory = FjallUserDirectory::open(data_dir.join("users")).expect("directory");
     let kdf = shamir_server::config::KdfConfig {
         memory_kb: 19_456,
@@ -247,43 +250,52 @@ pub fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
         .expect("seeded owner state")
         .roles;
     drop(directory);
-    (owner, owner_roles)
-}
 
-/// The database's `0o757` mode grants other principals read, write, and execute,
-/// allowing interactive transaction commit (which authorizes Write on the database).
-/// The store's `0o711` mode grants traversal. Both resources are System-owned at
-/// `0o700` by default, which hides even tables the token owner created.
-pub(crate) async fn grant_default_main_access(client: &shamir_client::Client) {
-    let key = derive_session_hmac_key(&client.session_id());
-    let mut batch = Batch::new();
-    for (alias, resource, mode) in [
-        ("chmod_db", ddl::res::database("default"), 0o757),
-        ("chmod_store", ddl::res::store("default", "main"), 0o711),
-    ] {
-        let unsigned = BatchOp::Chmod(ChmodOp {
-            chmod: resource.clone(),
-            mode,
-            hmac: None,
-        });
-        let tag = compute_tag_hex(
-            &key,
-            &canonical_batch_op("default", &unsigned).expect("chmod canonical form"),
-        );
-        batch.chmod(
-            alias,
-            ddl::chmod(resource, mode)
-                .hmac(tag)
-                .build()
-                .expect("build chmod"),
-        );
-    }
-    let response = client
-        .execute("default", batch.build())
+    let db = shamir_db::ShamirDb::init(shamir_db::SystemStoreConfig::Fjall(
+        data_dir.join("shamir_db_meta.redb"),
+    ))
+    .await
+    .expect("initialize owner seed database");
+    db.create_db("default")
         .await
-        .expect("grant default.main access");
-    assert!(response.results.contains_key("chmod_db"));
-    assert!(response.results.contains_key("chmod_store"));
+        .expect("create default database");
+    db.add_repo(
+        "default",
+        RepoConfig::new(
+            "main",
+            BoxRepoFactory::fjall(data_dir.join("shamir_db_default_main.redb")),
+        ),
+    )
+    .await
+    .expect("create default main repository");
+
+    for (path, mode) in [
+        (
+            ResourcePath::Database {
+                db: "default".into(),
+            },
+            0o757,
+        ),
+        (
+            ResourcePath::Store {
+                db: "default".into(),
+                store: "main".into(),
+            },
+            0o711,
+        ),
+    ] {
+        let mut meta = db
+            .resource_meta(&path)
+            .await
+            .expect("read resource metadata");
+        meta.mode = mode;
+        db.set_resource_meta(&path, &meta)
+            .await
+            .expect("set resource mode");
+    }
+    db.flush_all().await.expect("flush owner seed database");
+    drop(db);
+    (owner, owner_roles)
 }
 
 pub fn config_for(data_dir: &std::path::Path) -> Config {

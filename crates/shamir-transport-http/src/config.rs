@@ -37,6 +37,10 @@ pub struct HttpLimits {
     pub body_timeout: Duration,
     /// Deadline for processing the complete request.
     pub request_timeout: Duration,
+    /// Deadline for draining connection tasks after listener shutdown. The server launcher
+    /// selects five seconds, below its outer listener shutdown budget. `None` preserves
+    /// the legacy behavior by using `request_timeout` as the drain deadline.
+    pub connection_drain_timeout: Option<Duration>,
     /// Shared budget for admitted request-body bytes.
     pub body_budget: Arc<BodyBudget>,
     /// Per-response write deadline, normally equal to request_timeout.
@@ -53,6 +57,7 @@ impl HttpLimits {
             head_timeout: Duration::from_secs(5),
             body_timeout: Duration::from_secs(30),
             request_timeout: Duration::from_secs(120),
+            connection_drain_timeout: None,
             body_budget,
             write_timeout: Duration::from_secs(120),
         }

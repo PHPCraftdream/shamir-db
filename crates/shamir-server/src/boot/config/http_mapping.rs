@@ -27,6 +27,7 @@ pub fn to_http_server_config(
         Duration::from_millis(settings.head_timeout_ms.unwrap_or(auth_init_timeout_ms));
     limits.body_timeout = Duration::from_millis(settings.body_timeout_ms);
     limits.request_timeout = Duration::from_millis(settings.request_timeout_ms);
+    limits.connection_drain_timeout = Some(Duration::from_secs(5));
     limits.write_timeout = limits.request_timeout;
     Ok(HttpServerConfig {
         limits,

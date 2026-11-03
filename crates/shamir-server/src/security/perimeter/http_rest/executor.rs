@@ -123,6 +123,22 @@ impl RestHandler {
         (gate, executor)
     }
 
+    #[cfg(test)]
+    pub(super) fn with_scoped_handler(
+        service: Arc<TokenService>,
+        handler: ScopedHandler,
+        clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,
+        username: Arc<OwnerName>,
+    ) -> Self {
+        Self {
+            service,
+            handler,
+            clock,
+            username,
+            buckets: Arc::new(BucketCache::default()),
+        }
+    }
+
     fn rate_limited(retry: u32) -> ExecOutcome {
         let seconds = retry.max(1);
         let mut outcome = Self::error("rate_limited", ExecStatus::RateLimited);

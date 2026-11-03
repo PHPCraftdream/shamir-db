@@ -8,7 +8,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use zeroize::Zeroizing;
 
-use super::common::{grant_default_main_access, request, Harness};
+use super::common::{request, Harness};
 
 async fn raw_response(addr: SocketAddr, request: &str) -> (String, Vec<u8>) {
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -148,7 +148,6 @@ async fn http_rest_remote_plaintext_opt_in_allows_executor_after_write_rail() {
         .execute("default", create.build())
         .await
         .expect("create table");
-    grant_default_main_access(&client).await;
     drop(client);
     let token = harness
         .token("remote-write-enabled", TokenMode::ReadWrite)

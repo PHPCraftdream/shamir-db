@@ -1,4 +1,4 @@
-use super::super::http_rest::common::{grant_default_main_access, Harness, ADMIN_PASSWORD};
+use super::super::http_rest::common::{Harness, ADMIN_PASSWORD};
 use futures_util::{SinkExt, StreamExt};
 use rustls::pki_types::pem::PemObject;
 use serde::{Deserialize, Serialize};
@@ -327,7 +327,6 @@ pub(super) async fn exercise_native_session(harness: &Harness) {
             .await
             .expect("seed row");
     }
-    grant_default_main_access(&admin).await;
     drop(admin);
     let created = harness
         .token_with_options(
