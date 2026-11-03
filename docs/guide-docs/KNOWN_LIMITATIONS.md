@@ -1397,6 +1397,34 @@ measurements on one development host and are a floor, not a promise.
 - Benchmarks in the repository go up to 100k rows per table; larger tables
   have no published measurements (`docs/dev-artifacts/ops/CAPACITY_PLANNING.md`).
 
+## Token API
+
+The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and password-login issuance paths. See the [token API operator guide](guide/token-api.md).
+
+### Credential lifecycle
+
+- **Bearer tokens are plaintext credentials.** A stolen token can be used until expiry or revocation. The remote-plaintext write rail (`allow_plaintext_write: false`) does not keep a `read_write` secret safe: the secret is exposed before the server rejects it with 403 and emits `api_token_exposed`. Protect tokens as secrets, use TLS outside loopback, and avoid URLs. Query-string token authentication is ignored; a valid `Authorization` header still works alongside a query string. Creation returns the secret once; listings omit it. Sources: `crates/shamir-server/src/security/tokens/cli/secret_output.rs`, `crates/shamir-server/src/security/perimeter/`.
+- **`kick_session` is not a supported API-token revocation mechanism.** TOKEN_API §5 specifies no token effect. The legacy connect helper at `crates/shamir-connect/src/server/ops/admin.rs:154-170` bumps the shared credential floor, but only integration-test callers were found and runtime behavior is unverified. Explicit token revocation is supported.
+- **Shared credential invalidation has a strict timestamp boundary.** Tokens are invalidated when `created_at_ns <= tickets_invalid_before_ns`; validity requires `created_at_ns > floor`. Password changes, actual role/flag changes, and `revoke_user_tickets` advance the shared floor; user deletion removes the owner's identity from the cache, while restore advances the floor. A `kick_session` helper also bumps the shared floor, but production callers were not found and runtime behavior is unverified; do not rely on it for API-token revocation. Sources: `crates/shamir-server/src/security/tokens/service/token_service.rs:544-557`, `crates/shamir-server/src/sync/durability/restore.rs:394-398`, `crates/shamir-connect/src/server/ops/admin.rs:154-170`.
+- **A lost login response can leave a token active.** If issuance completes but the response is lost, the client may not know the secret while the server-side credential remains valid until TTL or administrative revocation. Treat uncertain issuance as a credential-cleanup incident; no client acknowledgement protocol is claimed here.
+
+### Protocol and policy boundaries
+
+- **REST is request/response only.** Interactive multi-request transactions, cursors and subscriptions are unsupported over REST (`not_supported_over_rest`). Single-request transactional Execute batches remain available; use token WebSocket for interactive/session features. Source: `crates/shamir-server/src/security/perimeter/http_rest/scope.rs:63-75,97-105,185-187`.
+- **No cross-origin browser REST/CORS support in v1.** The token listener does not provide CORS headers. Same-origin access is an implementation/deployment possibility without CORS, not a verified runtime claim. Browser WebSocket has Host/Origin policy controls. Sources: `docs/guide-docs/client-server-protocol-spec/ADMIN_UI_HOSTING.md:86,123`, `crates/shamir-server/src/security/perimeter/http_ws/browser/`.
+- **Scoped-token global listing interpretation remains BLOCKED SPEC.** The implementation denies top-level `ListDatabases` and `ListUsers` for tokens with a non-null `databases` list (including an empty one), while `databases: null` tokens may use them; (`crates/shamir-server/src/security/perimeter/http_rest/scope.rs:157-164`); `AccessTree` allows an explicitly allowlisted database and denies absent/out-of-scope databases (165-178). Do not present unresolved global-list interpretation as normative permission.
+
+### Shutdown and evidence limits
+
+- **Shutdown is not a request-completion guarantee.** The observed bounds are 5 seconds for connections, `min(request_timeout, 7s)` for workers, and 2 seconds for audit, subject to an outer 10-second deadline; these are not a guaranteed additive grace period. Forced shutdown can interrupt work. Sources: `crates/shamir-server/src/boot/config/http_mapping.rs:30`, `crates/shamir-transport-http/src/server/accept.rs:368-398`, `crates/shamir-server/src/engine/server/server_launcher/http/launcher.rs:432-445`, `crates/shamir-server/src/engine/server/server_handle.rs:192-218`.
+- **T7 evidence gaps are not proven runtime failures.** Its BLOCKED response-byte-guard row means no real-socket assertion/counter seam demonstrated permit ownership through body write; SCRAM-store absence is likewise unproven because no public store/seam permits direct proof. T7 DONE/PARTIAL entries indicate source assertions, not that tests compiled or passed. Linux and Windows CI were not observed there.
+- **Audit and memory guarantees are limited.** Response-write permit ownership through actual body completion, credential redaction in blocking threads, per-listener audit queues, and a full measured memory bound remain unresolved or unproven. A global process-audit event semaphore bounds logical events; it does not remove per-listener queue allocations or establish a full-memory bound. Sources: `crates/shamir-server/src/security/perimeter/http_login/service/audit.rs:11-22,76`; see `docs/dev-artifacts/audits/2026-11-02-token-auth1/DESIGN.md`.
+
+### Other status
+
+- **More T7 and AUTH1 evidence gaps.** T7: the privilege sweep over real sockets is PARTIAL (fixture decode round-trip not run), the WebSocket revoke race is a post-revoke refusal check without an in-flight WS request, and the no-sleep rule is not audited suite-wide. AUTH1: transport refusals before the login hook, body-read refusals and timeouts are not counted in login metrics; there are no cross-tests through the native wire and admin dispatch; the `shamir_login_http_pair_slots` gauge has no decrement on store drop or observer replacement, so several servers in one process can exceed the 8,192 slot capacity; input and pending pins together can exceed 3,072 of 4,096 table buckets, in which case a debit that cannot be charged is answered 503.
+- **Fjall status is unverified.** Reviewed material provides no current evidence to classify a Fjall-specific flake as present or closed; reassess if current CI evidence is reported.
+
 ## 12. Security defaults
 
 - New resources are open (`0o777`) until `chmod`-ed
