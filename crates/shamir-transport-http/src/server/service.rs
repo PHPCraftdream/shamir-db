@@ -9,6 +9,9 @@ use http_body_util::{combinators::BoxBody, BodyExt};
 use hyper::body::Incoming;
 use std::sync::Arc;
 
+type UpgradeSlot<S> =
+    tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<(S, hyper::upgrade::OnUpgrade)>>>;
+
 pub(crate) struct Context<G, E, W>
 where
     G: TokenGate,
@@ -20,9 +23,7 @@ where
     pub peer: PeerInfo,
     pub holds: tokio::sync::mpsc::Sender<Box<dyn Send + Sync>>,
     pub ws: Arc<W>,
-    pub upgrade: tokio::sync::Mutex<
-        Option<tokio::sync::oneshot::Sender<(W::Session, hyper::upgrade::OnUpgrade)>>,
-    >,
+    pub upgrade: UpgradeSlot<W::Session>,
 }
 
 pub(crate) async fn handle<G, E, W>(
@@ -42,8 +43,8 @@ where
         ));
     }
     let ws_route = match request.uri().path() {
-        "/shamir/v1/ws" => Some(WsRoute::Native),
-        "/shamir/v1/ws/browser" => Some(WsRoute::Browser),
+        "/shamir/v1/ws" if context.cfg.endpoints.ws => Some(WsRoute::Native),
+        "/shamir/v1/ws/browser" if context.cfg.endpoints.ws => Some(WsRoute::Browser),
         _ => None,
     };
     if let Some(route) = ws_route {
@@ -52,9 +53,14 @@ where
     let started = tokio::time::Instant::now();
     let deadline = started + context.cfg.limits.request_timeout;
     let path = request.uri().path().to_owned();
-    let endpoint = Endpoint::Rest;
+    let endpoint = if path == "/shamir/v1/ws" {
+        Endpoint::Ws
+    } else {
+        Endpoint::Rest
+    };
     let known = match path.as_str() {
         "/shamir/v1/request" | "/shamir/v1/ping" => context.cfg.endpoints.rest,
+        "/shamir/v1/ws" => context.cfg.endpoints.ws,
         _ => false,
     };
     let auth = auth_header(request.headers());
@@ -119,7 +125,7 @@ where
     }
     let method = match path.as_str() {
         "/shamir/v1/request" => Method::POST,
-        "/shamir/v1/ping" => Method::GET,
+        "/shamir/v1/ping" | "/shamir/v1/ws" => Method::GET,
         _ => Method::GET,
     };
     if request.method() != method {

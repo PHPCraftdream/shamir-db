@@ -101,6 +101,7 @@ async fn exercise_browser_group_with_harness(harness: &Harness) {
     browser_first_frame_failures(harness, &token).await;
     browser_canonical_credential_failures(harness, &token).await;
     browser_cap_case(harness, &token).await;
+    browser_pre_auth_capacity(harness).await;
 }
 
 #[derive(serde::Serialize)]
@@ -131,6 +132,72 @@ async fn close_cleanly(mut socket: WebSocketStream<TcpStream>) {
     })
     .await
     .expect("server close timeout");
+}
+
+async fn browser_pre_auth_capacity(harness: &Harness) {
+    let request = upgrade(
+        "/shamir/v1/ws/browser",
+        "localhost",
+        Some("https://app.example"),
+        "",
+    );
+    let sockets = tokio::time::timeout(Duration::from_secs(4), async {
+        let sockets =
+            futures_util::future::join_all((0..8).map(|_| browser_socket(harness.addr()))).await;
+        let (headers, _) = raw_response(harness.addr(), &request).await;
+        assert_eq!(headers.split_whitespace().nth(1), Some("503"), "{headers}");
+        let retry_after = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("retry-after")
+                .then(|| value.trim())
+        });
+        assert_eq!(retry_after, Some("1"), "{headers}");
+        sockets
+    })
+    .await
+    .expect("opening sockets and first capacity probe exceeded four seconds");
+
+    let invalid = rmp_serde::to_vec_named(&TokenFrame {
+        token: "invalid-token-without-secret-material",
+    })
+    .expect("encode invalid token");
+    futures_util::future::join_all(sockets.into_iter().map(|mut socket| {
+        let invalid = invalid.clone();
+        async move {
+            send_frame(&mut socket, invalid).await;
+            assert_close_code(&mut socket, 4000).await;
+        }
+    }))
+    .await;
+
+    let reopened = tokio::time::timeout(Duration::from_secs(4), async {
+        let reopened =
+            futures_util::future::join_all((0..8).map(|_| browser_socket(harness.addr()))).await;
+        let (headers, _) = raw_response(harness.addr(), &request).await;
+        assert_eq!(headers.split_whitespace().nth(1), Some("503"), "{headers}");
+        let retry_after = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("retry-after")
+                .then(|| value.trim())
+        });
+        assert_eq!(retry_after, Some("1"), "{headers}");
+        reopened
+    })
+    .await
+    .expect("reopening sockets and second capacity probe exceeded four seconds");
+
+    let invalid = rmp_serde::to_vec_named(&TokenFrame {
+        token: "invalid-token-without-secret-material",
+    })
+    .expect("encode invalid token");
+    futures_util::future::join_all(reopened.into_iter().map(|mut socket| {
+        let invalid = invalid.clone();
+        async move {
+            send_frame(&mut socket, invalid).await;
+            assert_close_code(&mut socket, 4000).await;
+        }
+    }))
+    .await;
 }
 
 async fn browser_cap_case(harness: &Harness, token: &str) {

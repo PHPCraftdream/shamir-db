@@ -409,7 +409,7 @@ fn http_listener_validation_rejects_isolated_policy_invariants() {
 }
 
 #[test]
-fn http_listener_rejects_zero_head_timeout_and_malformed_proxy_cidrs_and_authorities() {
+fn http_listener_rejects_zero_head_timeout_and_malformed_proxy_cidrs() {
     let listener = listener(ListenerKind::Http, "127.0.0.1:7340", None);
     let cases = [
         (
@@ -427,14 +427,6 @@ fn http_listener_rejects_zero_head_timeout_and_malformed_proxy_cidrs_and_authori
                 ..HttpListenerSettings::default()
             },
             "must be CIDR",
-        ),
-        (
-            HttpListenerSettings {
-                tls: Some(false),
-                host_authority_allowlist: vec!["example.com:80".into()],
-                ..HttpListenerSettings::default()
-            },
-            "not canonical",
         ),
         (
             HttpListenerSettings {

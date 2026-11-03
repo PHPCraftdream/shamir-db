@@ -1,6 +1,6 @@
 use std::net::Ipv6Addr;
 
-/// Returns true only when the raw Origin has a valid serialized HTTP(S) tuple origin.
+/// Returns the canonical HTTP(S) tuple origin, or `None` when invalid.
 pub(crate) fn valid_origin(value: &[u8]) -> Option<String> {
     let value = std::str::from_utf8(value).ok()?;
     if value == "null"

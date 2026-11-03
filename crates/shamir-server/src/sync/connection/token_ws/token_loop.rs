@@ -138,7 +138,7 @@ pub(crate) async fn run_token_loop(ctx: TokenLoopContext, stream: WebSocketStrea
     run_token_halves(ctx, reader, writer, close_requested, cleanup_complete).await;
 }
 
-async fn run_token_halves<R, W>(
+pub(super) async fn run_token_halves<R, W>(
     ctx: TokenLoopContext,
     mut reader: R,
     writer: W,

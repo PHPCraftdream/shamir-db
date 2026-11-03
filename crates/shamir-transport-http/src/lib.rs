@@ -20,4 +20,6 @@ pub use gate::{
     TokenGate,
 };
 pub use server::accept::{serve, serve_with_ws, ServeError};
-pub use server::routes::ws::{HeadOk, UpgradeHead, UpgradedIo, WsReject, WsRoute, WsUpgrade};
+pub use server::routes::ws::{
+    HeadOk, UpgradeHead, UpgradedIo, WsAdmission, WsReject, WsRoute, WsUpgrade,
+};

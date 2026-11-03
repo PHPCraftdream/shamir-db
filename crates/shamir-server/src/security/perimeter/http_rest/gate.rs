@@ -52,7 +52,8 @@ pub struct RestGate {
 }
 
 impl RestGate {
-    /// Stop and join the maintenance worker.
+    /// Stop and join the maintenance worker. If this future is cancelled while
+    /// awaiting, the worker may continue until its shutdown signal is observed.
     pub async fn shutdown(&self) {
         self.maintenance.shutdown().await;
     }
@@ -60,7 +61,9 @@ impl RestGate {
     /// Construct using shared service and a current Unix-nanosecond clock.
     ///
     /// # Panics
-    /// Panics unless called from within a Tokio runtime.
+    ///
+    /// Panics unless called from within a Tokio runtime; the owned maintenance
+    /// worker is spawned on the current runtime.
     pub fn new(
         service: Arc<TokenService>,
         clock: Arc<dyn Fn() -> Option<u64> + Send + Sync>,

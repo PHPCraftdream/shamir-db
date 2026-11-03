@@ -37,7 +37,7 @@ impl TokenSessionTeardown {
         }
     }
 
-    /// Mark activation after the route increments the active-socket gauge.
+    /// Mark activation and increment the active-socket gauge.
     pub(crate) fn activate_metric(&self) {
         metrics::gauge!("shamir_token_active_ws").increment(1.0);
         self.active_metric.store(true, Ordering::Release);

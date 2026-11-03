@@ -1,4 +1,4 @@
-//! Token WebSocket HTTP head validation, authentication, admission, and session activation.
+//! Token WebSocket HTTP head validation.
 
 use base64::Engine;
 

@@ -91,6 +91,9 @@ impl tokio::io::AsyncWrite for UpgradedIo {
     }
 }
 
+/// Admitted session plus the extra `101` response headers chosen by the application.
+pub type WsAdmission<S> = (S, Vec<(http::HeaderName, http::HeaderValue)>);
+
 /// Application-supplied WebSocket admission and session lifecycle.
 ///
 /// This is an internal-workspace extension point, intentionally generic over the bearer grant.
@@ -115,7 +118,7 @@ pub trait WsUpgrade<G>: Send + Sync + 'static {
         head: HeadOk<Self::HeadState>,
         grant: Option<G>,
         peer: PeerInfo,
-    ) -> Result<(Self::Session, Vec<(http::HeaderName, http::HeaderValue)>), WsReject>;
+    ) -> Result<WsAdmission<Self::Session>, WsReject>;
 
     /// Runs the upgraded connection until completion or listener shutdown.
     fn run(

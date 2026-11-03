@@ -31,13 +31,6 @@ where
             .insert(header::ALLOW, http::HeaderValue::from_static("GET"));
         return Ok(response);
     }
-    if !context.cfg.endpoints.ws {
-        return Ok(canned(
-            StatusCode::NOT_FOUND,
-            context.peer.tls,
-            context.cfg.hsts,
-        ));
-    }
     let peer = peer(context.peer.addr, context.peer.tls, request.headers());
     let head = UpgradeHead {
         path: request.uri().path(),
@@ -57,7 +50,7 @@ where
         .await
         {
             Ok(GateDecision::Allow(grant)) => Some(grant),
-            Ok(GateDecision::Unauthorized) | Err(_) => {
+            Ok(GateDecision::Unauthorized) => {
                 let mut response = response(
                     StatusCode::UNAUTHORIZED,
                     unauthorized_body(),
@@ -70,6 +63,13 @@ where
                     http::HeaderValue::from_static("Bearer"),
                 );
                 return Ok(response);
+            }
+            Err(_) => {
+                return Ok(canned(
+                    StatusCode::REQUEST_TIMEOUT,
+                    context.peer.tls,
+                    context.cfg.hsts,
+                ));
             }
             Ok(GateDecision::Forbidden(code)) => {
                 return Ok(response(

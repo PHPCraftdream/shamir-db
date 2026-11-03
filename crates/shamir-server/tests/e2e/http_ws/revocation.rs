@@ -447,7 +447,7 @@ async fn http_ws_revocation_expiry_group() {
             .records
             .iter()
             .any(|record| record.get_value_i64("n") == Some(987654)),
-        "revoked session's staged write must roll back"
+        "revoked session's staged write must not be visible to another session"
     );
     let unknown_cursor = DbRequest::FetchNext {
         cursor_id,
@@ -457,10 +457,10 @@ async fn http_ws_revocation_expiry_group() {
         &send_request(&mut verify_ws, &verify_sid, 7, &unknown_cursor).await,
     )
     .expect("cursor error envelope");
-    assert!(
-        matches!(rmp_serde::from_slice::<DbResponse>(&cursor_error.res).expect("cursor error"),
-        DbResponse::Error { ref code, .. } if code == "cursor_not_found")
-    );
+    assert!(matches!(
+        rmp_serde::from_slice::<DbResponse>(&cursor_error.res).expect("cursor error"),
+        DbResponse::Error { ref code, .. } if code == "cursor_not_found"
+    ), "cursor ownership mismatch is not proof of removal; the cursor is not visible to another session");
     let read = native_admin(&harness).await;
     let mut query = Batch::new();
     query.query("all", shamir_query_builder::Query::from("items"));
@@ -476,7 +476,7 @@ async fn http_ws_revocation_expiry_group() {
             .records
             .iter()
             .any(|record| record.get_value_i64("n") == Some(987654)),
-        "revoked session's staged write must roll back"
+        "revoked session's staged write must not be visible to another session"
     );
     drop(read);
 

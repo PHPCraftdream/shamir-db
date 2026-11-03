@@ -85,7 +85,7 @@ async fn invalid_initial_frame_matrix_is_rejected() {
     let mut unmasked = vec![0x82, payload.len() as u8];
     unmasked.extend_from_slice(&payload);
     assert!(read_one(unmasked).await.is_err());
-    assert!(read_one(frame(9, true, 0, &vec![0; 126])).await.is_err());
+    assert!(read_one(frame(9, true, 0, &[0_u8; 126])).await.is_err());
 }
 
 #[tokio::test]

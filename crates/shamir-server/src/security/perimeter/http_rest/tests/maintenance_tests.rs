@@ -698,6 +698,60 @@ async fn ws_exposure_audit_summary_carries_ws_channel() {
 }
 
 #[tokio::test]
+async fn exposure_drops_are_reported_in_the_matching_channel_summary() {
+    let appender = Arc::new(Capture::new());
+    let worker = maintenance(
+        appender.clone(),
+        Arc::new(|| Some(1)),
+        CancellationToken::new(),
+    );
+    let permits = worker
+        .exposure_sender
+        .reserve_many(NOTICE_CAPACITY)
+        .await
+        .expect("exposure channel remains open");
+    drop(permits);
+    for index in 0..NOTICE_CAPACITY {
+        let mut id = [0; 16];
+        id[14..].copy_from_slice(&(index as u16).to_be_bytes());
+        worker.record_exposed(Endpoint::Rest, id, [0x34; 16], subnet(4), 1);
+    }
+    worker.record_exposed(Endpoint::Ws, [0x56; 16], [0x78; 16], subnet(5), 1);
+    worker.record_failure(Endpoint::Rest, subnet(7), 1);
+    worker.record_failure(Endpoint::Ws, subnet(8), 1);
+    worker.shutdown().await;
+
+    let entries = appender.entries.lock().expect("entries").clone();
+    let summaries: Vec<_> = entries
+        .iter()
+        .filter(|entry| entry.event == "api_token_auth_failures")
+        .collect();
+    assert_eq!(summaries.len(), 2);
+    let rest: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&summaries[0].details_canonical_msgpack).expect("REST summary");
+    let ws: (
+        String,
+        String,
+        u64,
+        usize,
+        [Option<Subnet>; 4],
+        u64,
+        u64,
+        u64,
+    ) = rmp_serde::from_slice(&summaries[1].details_canonical_msgpack).expect("WS summary");
+    assert_eq!((rest.0.as_str(), rest.7), ("rest", 0));
+    assert_eq!((ws.0.as_str(), ws.7), ("ws", 1));
+}
+
+#[tokio::test]
 async fn ws_failure_audit_summary_carries_ws_channel() {
     let appender = Arc::new(Capture::new());
     let worker = maintenance(

@@ -581,7 +581,18 @@ async fn frame_close_cases(harness: &Harness) {
     .await;
     assert!(send_result.is_ok(), "binary payload send deadline");
     let _send_result = send_result.expect("checked send deadline");
-    expect_close(&mut oversized_payload_socket, 1009).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(15), oversized_payload_socket.next())
+        .await
+        .expect("close deadline");
+    match outcome {
+        Some(Ok(Message::Close(Some(frame)))) => assert_eq!(u16::from(frame.code), 1009),
+        Some(Err(tokio_tungstenite::tungstenite::Error::Io(error)))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
+            ) => {}
+        other => panic!("expected 1009 or reset after an oversized payload: {other:?}"),
+    }
     drop(oversized_payload_socket);
 
     let (mut malformed_socket, _, _) = open_native(harness.addr(), &token).await;

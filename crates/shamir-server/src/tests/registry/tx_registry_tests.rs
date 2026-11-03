@@ -60,6 +60,29 @@ async fn remaining_lifetime_zero_at_creation_and_after_expiry() {
 }
 
 #[tokio::test]
+async fn remove_for_session_removes_only_that_sessions_tx_and_frees_slot() {
+    let reg = TxRegistry::new();
+    let (handle_a, tx_a) = make_tx(SID_A, Duration::from_secs(300), 1).await;
+    let (handle_b, tx_b) = make_tx(SID_B, Duration::from_secs(300), 2).await;
+    reg.register(handle_a, tx_a).unwrap();
+    reg.register(handle_b, tx_b).unwrap();
+
+    let removed = reg.remove_for_session(&SID_A).expect("owned tx removed");
+    assert_eq!(removed.owner_sid(), &SID_A);
+    assert!(reg.remove_for_session(&SID_A).is_none());
+    assert!(matches!(
+        reg.get_owned(handle_a, &SID_A),
+        Err(TxRegistryError::TxNotFound)
+    ));
+    assert_eq!(reg.get_owned(handle_b, &SID_B).unwrap().owner_sid(), &SID_B);
+
+    let (reused_handle, reused_tx) = make_tx(SID_A, Duration::from_secs(300), 3).await;
+    reg.register(reused_handle, reused_tx)
+        .expect("session slot reusable after teardown removal");
+    assert_eq!(reg.len(), 2);
+}
+
+#[tokio::test]
 async fn register_then_get_owned_roundtrip() {
     let reg = TxRegistry::new();
     let (handle, it) = make_tx(SID_A, Duration::from_secs(300), 1).await;

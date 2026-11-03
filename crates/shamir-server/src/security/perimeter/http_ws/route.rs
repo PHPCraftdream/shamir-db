@@ -13,6 +13,7 @@ use shamir_transport_http::server::routes::ws::{
 };
 use shamir_transport_http::PeerInfo;
 use shamir_transport_ws::framing::MAX_WS_FRAME_SIZE;
+use tokio::io::AsyncReadExt;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::{
     frame::coding::CloseCode, CloseFrame, Role, WebSocketConfig,
@@ -154,7 +155,12 @@ impl WsUpgrade<Verified> for WsUpgradeService {
     ) {
         if session.grant.is_none() {
             let token = tokio::select! {
-                _ = shutdown.cancelled() => return,
+                _ = shutdown.cancelled() => {
+                    drop(session.permit.take());
+                    let mut socket = websocket(io).await;
+                    close(&mut socket, 1000, &CancellationToken::new()).await;
+                    return;
+                },
                 result = read_browser_token(&mut io) => match result {
                     Ok(token) => token,
                     Err(()) => {
@@ -221,7 +227,12 @@ impl WsUpgrade<Verified> for WsUpgradeService {
         };
         let mut socket = websocket(io).await;
         tokio::select! {
-            _ = shutdown.cancelled() => return,
+            _ = shutdown.cancelled() => {
+                drop(session.registration.take());
+                self.service.sessions().remove(&sid);
+                close(&mut socket, 1000, &CancellationToken::new()).await;
+                return;
+            },
             _ = cancel.cancelled() => {
                 drop(session.registration.take());
                 self.service.sessions().remove(&sid);
@@ -329,6 +340,10 @@ async fn websocket(io: UpgradedIo) -> WebSocketStream<UpgradedIo> {
     WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await
 }
 
+/// Unread client bytes drained after a terminal close so the socket ends with FIN, not RST.
+const CLOSE_LINGER_LIMIT: usize = 64 * 1024;
+const CLOSE_LINGER: Duration = Duration::from_secs(2);
+
 async fn close(socket: &mut WebSocketStream<UpgradedIo>, code: u16, shutdown: &CancellationToken) {
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         tokio::select! {
@@ -340,6 +355,21 @@ async fn close(socket: &mut WebSocketStream<UpgradedIo>, code: u16, shutdown: &C
         }
     })
     .await;
+    let io = socket.get_mut();
+    let mut scratch = [0_u8; 1024];
+    let mut drained = 0_usize;
+    let drain = async {
+        while drained < CLOSE_LINGER_LIMIT {
+            match io.read(&mut scratch).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => drained += read,
+            }
+        }
+    };
+    tokio::select! {
+        _ = shutdown.cancelled() => {}
+        _ = tokio::time::timeout(CLOSE_LINGER, drain) => {}
+    }
 }
 
 fn reject(status: StatusCode, retry_after: Option<u64>) -> WsReject {
