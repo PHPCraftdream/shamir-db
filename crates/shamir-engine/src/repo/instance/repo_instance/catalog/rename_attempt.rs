@@ -82,7 +82,7 @@ impl<'p> RenameAttempt<'p> {
 
     pub(crate) fn abort(mut self) {
         if self.was_fenced {
-            self.into_fence();
+            self.fence_retained();
         } else {
             self.source.reattach_after_rename();
             drop(self.freeze.take());
@@ -91,11 +91,11 @@ impl<'p> RenameAttempt<'p> {
     }
 
     pub(crate) fn into_doubt(mut self) {
-        self.into_fence();
+        self.fence_retained();
         self.ended = true;
     }
 
-    fn into_fence(&mut self) {
+    fn fence_retained(&mut self) {
         if let Some(freeze) = self.freeze.take() {
             self.repo.raise_rename_fence(RenameInDoubt {
                 from: self.from.clone(),
@@ -112,7 +112,7 @@ impl Drop for RenameAttempt<'_> {
             return;
         }
         if self.was_fenced || self.phase == AttemptPhase::Persisting {
-            self.into_fence();
+            self.fence_retained();
         } else {
             self.source.reattach_after_rename();
             drop(self.freeze.take());

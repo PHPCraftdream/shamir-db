@@ -319,15 +319,13 @@ impl RepoInstance {
                 "rename source incarnation changed".into(),
             ));
         }
-        if destination.is_some() {
-            if destination.as_ref().is_some_and(|destination| {
-                destination.store_id != config.store_id
-                    || destination.enable_indexes != config.enable_indexes
-            }) {
-                return Err(DbError::Validation(
-                    "rename destination incarnation changed".into(),
-                ));
-            }
+        if destination.as_ref().is_some_and(|destination| {
+            destination.store_id != config.store_id
+                || destination.enable_indexes != config.enable_indexes
+        }) {
+            return Err(DbError::Validation(
+                "rename destination incarnation changed".into(),
+            ));
         }
         if !source_matches {
             // When the source registration is absent and only the destination
@@ -443,7 +441,7 @@ impl RepoInstance {
         attempt.mark_persisting();
         match persist(config.clone()).await {
             RenamePersistOutcome::Committed => {
-                self.commit_table_rename_admitted(from, config, true, &permit)
+                self.commit_table_rename_admitted(from, config, &permit)
                     .await?;
 
                 attempt.commit();
@@ -484,9 +482,7 @@ impl RepoInstance {
         self.check_table_rename_fence(to)?;
         let source = self.get_table_admitted_unfenced(from, permit).await?;
         let freeze = RenameFreeze::begin(source, permit).await?;
-        if let Err(error) = freeze.await_visible(self, from).await {
-            return Err(error);
-        }
+        freeze.await_visible(self, from).await?;
         let config = match self
             .prepare_table_rename_admitted(from, to, permit, &freeze)
             .await
@@ -499,7 +495,7 @@ impl RepoInstance {
                 return Err(error);
             }
         };
-        self.commit_table_rename_admitted(from, config, true, permit)
+        self.commit_table_rename_admitted(from, config, permit)
             .await?;
 
         freeze.retire();
@@ -598,7 +594,6 @@ impl RepoInstance {
         &self,
         from: &str,
         config: TableConfig,
-        remove_source: bool,
         permit: &RepoWritePermit,
     ) -> DbResult<()> {
         self.write_domain.debug_check_permit(permit);

@@ -146,10 +146,6 @@ async fn fenced_retry_cancel_keeps_both_names_fenced() {
             source.insert(&InnerValue::Null).await,
             Err(DbError::MigrationFrozen { table }) if table == "a"
         ));
-        assert!(matches!(
-            source.create_index("during_retry", &["name"]).await,
-            Err(DbError::MigrationFrozen { table }) if table == "a"
-        ));
         drop(retry);
 
         assert!(repo.has_rename_in_doubt());

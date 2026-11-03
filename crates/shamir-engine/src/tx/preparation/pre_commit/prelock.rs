@@ -811,7 +811,9 @@ async fn validate_staging_table_identities(
         if !tx.table_tokens.contains_key(token) {
             continue;
         }
-        let Some(current) = repo.table_by_token(*token).await? else {
+        // Lock-free and without write-domain admission: this runs while the commit already
+        // holds drain guards. A dormant (not yet instantiated) cell means another incarnation.
+        let Some(current) = repo.table_by_token_if_live(*token).await else {
             return Err(TxError::MigrationFrozen {
                 table: tx.table_tokens[token].clone(),
             });

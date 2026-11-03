@@ -8,6 +8,8 @@ use shamir_tx::{IsolationLevel, StagingStore, TxContext, TxId};
 
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
+use crate::table::table_manager::table_token_for;
+use crate::table::TableConfig;
 use crate::tx::commit_tx;
 
 fn make_repo() -> RepoInstance {
@@ -942,17 +944,20 @@ async fn live_entry_derives_the_projected_event_for_random_write_sets() {
 #[tokio::test]
 async fn committed_wal_entry_carries_a_derivable_event() {
     let repo = make_repo();
+    // A named staging must belong to a live table incarnation (the M5 check).
+    repo.add_table_for_test(TableConfig::new("items"));
+    let table = repo.get_table("items").await.unwrap();
+    let token = table_token_for("items");
     let mut tx = TxContext::new(TxId::new(31), 0, 0, IsolationLevel::Snapshot);
-    let data_store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let mut staging = StagingStore::new(data_store);
+    let mut staging = StagingStore::new(table.data_store().clone());
     let mut rid_bytes = [0u8; 16];
     rid_bytes[15] = 9;
     staging.set(
         shamir_storage::types::RecordKey::from_slice(&rid_bytes),
         Bytes::from_static(b"payload"),
     );
-    tx.table_tokens.insert(4, "items".to_string());
-    tx.write_set.insert(4, staging);
+    tx.table_tokens.insert(token, "items".to_string());
+    tx.write_set.insert(token, staging);
 
     let outcome = commit_tx(tx, &repo).await.unwrap();
 

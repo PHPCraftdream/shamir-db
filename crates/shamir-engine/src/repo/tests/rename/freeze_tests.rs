@@ -373,7 +373,7 @@ async fn cancelled_preparing_rename_aborts_fresh_and_restores_source() {
         assert!(!repo.has_rename_in_doubt());
         assert!(repo.check_table_rename_fence("a").is_ok());
         assert!(repo.check_table_rename_fence("b").is_ok());
-        assert!(source.index_exists("ix_prepare").await.unwrap());
+        assert!(source.index_exists("ix_prepare").await);
         source.insert(&InnerValue::Null).await.unwrap();
         source
             .create_index("ix_after_preparing_abort", &["name"])
