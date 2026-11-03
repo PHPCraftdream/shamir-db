@@ -55,6 +55,8 @@ fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
                 (ids[0], InnerValue::Str("persisted-one".into())),
                 (ids[1], InnerValue::Str("persisted-two".into())),
             ];
+            // Make the rows durable before the injected fault, as the reopen reads them from disk.
+            db.flush_all_for_test().await.unwrap();
             let source_record = db
                 .system_store()
                 .load_table_record("restart", "main", "a")
