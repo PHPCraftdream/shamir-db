@@ -166,7 +166,8 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
         await ws.ping();
         const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
         try { await http.ping(); } finally { await http.close(); }
-        const userClient = await connectLocal({ addr: fixture.server.ipc, username: user, password: oldPassword, connectTimeoutMs: 10000, requestTimeoutMs: 10000 });
+        // changePassword builds its proof for the WebSocket/TLS (no exporter) binding, so use the SCRAM WS listener, not IPC.
+        const userClient = await connect({ host: HOST, port: fixture.server.scramWs, username: user, password: oldPassword, tls: { rejectUnauthorized: false }, origin: ORIGIN });
         try { await userClient.changePassword(oldPassword, newPassword); } finally { await userClient.close(); }
         expect(await observer.sockets[0]!.waitForClose(10000)).toMatchObject({ code: 4011, reason: 'token_revoked' });
         const afterChange = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
