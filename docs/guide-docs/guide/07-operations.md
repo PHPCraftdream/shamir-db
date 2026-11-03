@@ -186,12 +186,12 @@ A `kind: http` listener requires `tls: true` or `tls: false`; this example uses 
 |---|---|---|---|---|
 | `login.enabled` | bool | `false` | per listener | Disabled routes return 404; enabled wrong method returns 405. |
 | `login.authority_allowlist` | array | loopback aliases | per listener | Exact canonical Host authority allowlist. |
-| `login.listener_id` | string | generated once | per logical listener | Optional stable 16-byte identity, configured as exactly 32 lowercase hex characters; generated IDs persist in server metadata. |
+| `login.listener_id` | string | generated once | per logical listener | Optional stable 16-byte identity, configured as exactly 32 lowercase hex characters; a generated ID persists in server metadata keyed by the configured listener `addr` (two listeners with the same `addr` share it; changing `addr` generates a new one). |
 | `tokens.login_ttl` | u32 seconds | 86400 | global | Range 1–86400, additionally capped by `tokens.max_ttl_days`; invalid configuration fails startup. |
 | `tokens.login_allow_read_write` | bool | `false` | global | Opt-in required for read-write login issuance; ordinary rights still apply. |
 | `security.login_enumeration_hardening` | bool | `true` | global | HTTP login only; mismatching stored KDF tuples make accounts individually ineligible. Raising defaults may affect existing users; preflight and disclose impact. |
 
-`login.authority_allowlist` is optional in configuration; when omitted on loopback, the launcher derives bound-port loopback aliases. Direct non-loopback TLS and proxy TLS require an explicit nonempty authority list. `login.listener_id` can be generated and persisted if omitted.
+`login.authority_allowlist` is optional in configuration; when omitted on loopback, the launcher derives bound-port loopback aliases. Direct non-loopback TLS and proxy TLS require an explicit nonempty authority list. `login.listener_id` can be generated and persisted if omitted. Listener defaults: `max_request_body_bytes` 16 MiB, body/request timeouts 30 s/120 s, head timeout inherited from `security.connection.auth_init_timeout_ms` (typically 5 s); remote plaintext login must stay disabled.
 
 Shared token policy: `tokens.max_per_user` is 20, `tokens.max_sockets_per_token` is 8, `tokens.max_sockets_per_owner` is 32, `tokens.session_max_age_hours` is 24, `tokens.default_ttl_days` is 30, and `tokens.max_ttl_days` is 365. These are global shared token settings, not login-only defaults.
 

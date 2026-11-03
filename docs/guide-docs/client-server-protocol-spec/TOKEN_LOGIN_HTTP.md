@@ -1,6 +1,6 @@
 # TOKEN-AUTH0: Login/password sign-in over HTTP
 
-**Status:** implementation exists in source; this is a normative protocol specification, not a blanket conformance claim. Source review found divergences; see [§9 source-review audit](../../dev-artifacts/audits/2026-11-03-token-auth3/DESIGN.md). Runtime validation remains pending. These routes verify a SCRAM client proof and issue an ordinary reusable TOKEN_API bearer token—not an HTTP session, cookie, Basic credential or database session. The password never crosses the network. No shared SCRAM `TransportKind`/`BindingMode` enum or AUTH_PROTOCOL messages change. Binding mode `0x03` is protocol-local and never parsed through `BindingMode`.
+**Status:** implementation exists in source; this is a normative protocol specification, not a blanket conformance claim. Source review found divergences; see [AUTH3 source-review audit](../../dev-artifacts/audits/2026-11-03-token-auth3/DESIGN.md). The server end-to-end tests under `crates/shamir-server/tests/e2e/http_login/` exist; the TypeScript client end-to-end validation is pending in the fork nightly lane. These routes verify a SCRAM client proof and issue an ordinary reusable TOKEN_API bearer token—not an HTTP session, cookie, Basic credential or database session. The password never crosses the network. No shared SCRAM `TransportKind`/`BindingMode` enum or AUTH_PROTOCOL messages change. Binding mode `0x03` is protocol-local and never parsed through `BindingMode`.
 
 ## 1. Endpoints and exact wire contract
 
