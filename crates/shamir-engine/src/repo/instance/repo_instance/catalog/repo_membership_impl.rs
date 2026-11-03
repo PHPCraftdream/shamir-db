@@ -37,7 +37,10 @@ impl RepoInstance {
         self.write_domain.debug_check_permit(permit);
         let name = self.token_names.read_sync(&token, |_, name| name.clone());
         match name {
-            Some(name) => self.get_table_admitted(&name, permit).await.map(Some),
+            Some(name) => self
+                .get_table_admitted_unfenced(&name, permit)
+                .await
+                .map(Some),
             None => Ok(None),
         }
     }
@@ -49,6 +52,7 @@ impl RepoInstance {
     /// calls retry; no partial table is exposed. The clone of the cell
     /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
+        self.check_table_rename_fence(table_name)?;
         if let Some(table) = self.initialized_table(table_name) {
             return Ok(table);
         }
@@ -57,6 +61,7 @@ impl RepoInstance {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
+        self.check_table_rename_fence(table_name)?;
         // S5c-X Round-12 (stack layout): `get_table_ctx` embeds the whole
         // cold-init chain inline (`create_table_context` →
         // `create_with_domain_admitted` → store_get/tx_gate/interner/MVCC).
@@ -64,6 +69,19 @@ impl RepoInstance {
         // await state on the heap instead of widening this fn's future,
         // which is embedded inline in every catalogue read/write along the
         // main-thread admin (ALTER SUBSCRIPTION ... RESUME) poll chain.
+        Box::pin(self.get_table_ctx(table_name, &permit)).await
+    }
+
+    /// Resolve a table during frozen-source token lookups without checking the name fence.
+    pub(super) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
+        if let Some(table) = self.initialized_table(table_name) {
+            return Ok(table);
+        }
+        let permit = self
+            .write_domain
+            .admit()
+            .await
+            .map_err(|error| DbError::Internal(error.to_string()))?;
         Box::pin(self.get_table_ctx(table_name, &permit)).await
     }
 
@@ -86,11 +104,17 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
         self.write_domain.debug_check_permit(permit);
-        // S5c-X Round-11 (stack layout): `get_table_ctx` embeds the whole
-        // cold-init chain (`create_table_context` →
-        // `create_with_domain_admitted`) inline; pinning it keeps that
-        // await state on the heap instead of widening every admitted
-        // caller's future along the seed-install / replay poll chains.
+        self.check_table_rename_fence(table_name)?;
+        Box::pin(self.get_table_ctx(table_name, permit)).await
+    }
+
+    /// Admitted table lookup that deliberately bypasses the rename name fence.
+    pub(super) async fn get_table_admitted_unfenced(
+        &self,
+        table_name: &str,
+        permit: &RepoWritePermit,
+    ) -> DbResult<TableManager> {
+        self.write_domain.debug_check_permit(permit);
         Box::pin(self.get_table_ctx(table_name, permit)).await
     }
 

@@ -1,4 +1,5 @@
 use crate::access::{Actor, ResourceMeta};
+use crate::engine::repo::RenamePersistOutcome;
 use crate::engine::table::{TableConfig, TableManager};
 use crate::shamir_db::shamir_db::schema_management::SCHEMA_FIELD;
 use crate::shamir_db::system_store::TableRenameKey;
@@ -70,6 +71,7 @@ impl ShamirDb {
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        repo.check_table_rename_fence(table_name)?;
         let existing_config = repo.table_config(table_name);
         let newly_registered = existing_config.is_none();
         let config = if let Some(config) = existing_config {
@@ -133,6 +135,10 @@ impl ShamirDb {
         let db = self
             .get_db(db_name)
             .ok_or_else(|| DbError::NotFound(format!("Database '{}' not found", db_name)))?;
+        let repo = db
+            .get_repo(repo_name)
+            .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        repo.check_table_rename_fence(table_name)?;
         let removed = db.drop_table_checked(repo_name, table_name).await?;
 
         // Always clear the catalogue entry (idempotent), even if the
@@ -177,6 +183,11 @@ impl ShamirDb {
         table_name: &str,
         control: &crate::shamir_db::shamir_db::ReplicationControlGuard<'_>,
     ) -> DbResult<bool> {
+        // 0. A fenced (in-doubt) name must be refused before any validator side effect.
+        if let Some(repo) = self.get_db(db_name).and_then(|db| db.get_repo(repo_name)) {
+            repo.check_table_rename_fence(table_name)?;
+        }
+
         // 1. Clean validator bound_in references.
         let table_ref = Self::table_ref_str(db_name, repo_name, table_name);
         let affected = self.validators.unbind_all_for_table(&table_ref);
@@ -285,6 +296,7 @@ impl ShamirDb {
         let repo = db
             .get_repo(repo_name)
             .ok_or_else(|| DbError::NotFound(format!("Repository '{}' not found", repo_name)))?;
+        repo.check_rename_pair(from, to)?;
         let snapshot = self.table_catalogue_snapshot(db_name, repo_name).await?;
         let old = snapshot.get(from).cloned();
         let destination = snapshot.get(to).cloned();
@@ -371,11 +383,13 @@ impl ShamirDb {
                 config,
                 expected_source_id.as_ref(),
                 |destination| async move {
-                    let destination_id = destination.store_id.as_ref().ok_or_else(|| {
-                        DbError::Internal("rename destination lacks store_id".into())
-                    })?;
+                    let Some(destination_id) = destination.store_id.as_ref() else {
+                        return RenamePersistOutcome::InDoubt(DbError::Internal(
+                            "rename destination lacks store_id".into(),
+                        ));
+                    };
                     self.system_store
-                        .complete_table_rename_row(
+                        .complete_table_rename_row_outcome(
                             TableRenameKey {
                                 db_name,
                                 repo_name,
@@ -411,11 +425,13 @@ impl ShamirDb {
         Self::check_fk_snapshot(&snapshot, from)?;
         let result = repo
             .rename_table_stores_with(from, to, |destination| async move {
-                let destination_id = destination.store_id.as_ref().ok_or_else(|| {
-                    DbError::Internal("rename destination has no store_id".into())
-                })?;
+                let Some(destination_id) = destination.store_id.as_ref() else {
+                    return RenamePersistOutcome::NotCommitted(DbError::Internal(
+                        "rename destination has no store_id".into(),
+                    ));
+                };
                 self.system_store
-                    .rename_table_row(
+                    .rename_table_row_outcome(
                         TableRenameKey {
                             db_name,
                             repo_name,

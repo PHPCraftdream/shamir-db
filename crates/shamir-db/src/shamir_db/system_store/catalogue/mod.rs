@@ -1,6 +1,7 @@
 mod ops;
 mod rename_key;
 mod rename_recovery;
+mod rename_resolution;
 mod table_catalogue_config;
 
 pub(crate) use rename_key::TableRenameKey;

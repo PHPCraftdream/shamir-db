@@ -136,8 +136,8 @@ impl TableManager {
             None => index_ops.extend(self.plan_base_index_insert_ops(id, value).await?),
         }
 
-        // HIGH-6: stage the new vector tx-locally (apply_committed_vectors
-        // upsert-replaces the prior committed entry at commit time).
+        tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
+
         self.stage_vectors(id, value, tx).await;
         // gap#1 (update branch): if the update REMOVES the embedding field,
         // stage a vector delete — otherwise the old vector stays live in the
@@ -274,7 +274,7 @@ impl TableManager {
                             .await?,
                     );
 
-                    // HNSW vector staging (RecordRef-generic via the backend trait).
+                    tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
                     let token = self.table_token();
                     for backend in self.index2_registry.all_backends().await {
                         if let Some(v) = backend.staged_vector(id, &new_view).await {
@@ -339,6 +339,7 @@ impl TableManager {
                         self.plan_base_index_update_ops(id, &old_tree, &new_tree)
                             .await?,
                     );
+                    tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
                     self.stage_vectors(id, &new_tree, tx).await;
 
                     (ops, 0_i64)

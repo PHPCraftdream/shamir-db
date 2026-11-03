@@ -636,6 +636,15 @@ impl ShamirDb {
             )));
         }
 
+        if db
+            .get_repo(from)
+            .is_some_and(|repo| repo.has_rename_in_doubt())
+        {
+            return Err(DbError::Conflict(format!(
+                "rename in doubt: repository '{db_name}/{from}' contains an unresolved table rename"
+            )));
+        }
+
         // Snapshot the table list BEFORE the re-key so the catalogue rows
         // can be rewritten once the in-memory re-key has succeeded.
         let table_names = db.list_tables(from).unwrap_or_default();
