@@ -4,4 +4,5 @@
 pub mod accept;
 pub(crate) mod body;
 pub(crate) mod response;
+pub(crate) mod routes;
 pub(crate) mod service;

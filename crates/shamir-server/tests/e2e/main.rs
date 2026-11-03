@@ -10,6 +10,8 @@ mod duplex_e2e;
 mod duplex_loop;
 #[path = "../connection/framer_split.rs"]
 mod framer_split;
+#[path = "http_login/mod.rs"]
+mod http_login;
 #[path = "http_rest/mod.rs"]
 mod http_rest;
 #[path = "core/interactive_tx_e2e.rs"]

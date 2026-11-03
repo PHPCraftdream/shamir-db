@@ -9,5 +9,5 @@ mod tests;
 mod tls_policy;
 
 pub(super) use boot_guard::BootGuard;
-pub(super) use launcher::start_http_listener;
+pub(super) use launcher::{start_http_listener, LoginResources};
 pub(super) use tls_policy::validate_http_tls;
