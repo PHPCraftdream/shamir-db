@@ -1,8 +1,12 @@
 use shamir_connect::server::audit_chain::AuditChainWriter;
-use shamir_connect::server::token::OwnerFloors;
+use shamir_connect::server::token::{OwnerFloors, TokenError, TokenId, TokenSecret};
 use shamir_connect::server::TokenSessionStore;
 use std::sync::Arc;
 use zeroize::Zeroizing;
+
+/// Callable used to generate token ID and secret pairs.
+pub(crate) type TokenGenerator =
+    dyn Fn() -> Result<(TokenId, TokenSecret), TokenError> + Send + Sync;
 
 /// Dependencies and settings for opening a `TokenService`.
 pub struct TokenServiceOptions {

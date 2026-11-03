@@ -37,10 +37,15 @@
 //! | DropReplicationProfile | 0x001D |
 //! | DropPublication | 0x001E |
 //! | DropSubscription | 0x001F |
+//! | CreateApiToken | 0x0020 |
+//! | ListApiTokens | 0x0021 |
+//! | RevokeApiToken | 0x0022 |
+//! | RevokeUserTokens | 0x0023 |
 
 use crate::admin::{GroupRef, PurgeScope, ResourceRef};
 use crate::batch::BatchOp;
 use crate::batch::BatchOp::*;
+use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use crate::wire::DbRequest;
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -80,6 +85,10 @@ enum OpTag {
     DropReplicationProfile = 0x001D,
     DropPublication = 0x001E,
     DropSubscription = 0x001F,
+    CreateApiToken = 0x0020,
+    ListApiTokens = 0x0021,
+    RevokeApiToken = 0x0022,
+    RevokeUserTokens = 0x0023,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalEncodingError {
@@ -119,6 +128,10 @@ impl Encoder {
     }
     fn bool(&mut self, b: bool) {
         self.bytes.push(u8::from(b));
+    }
+    /// Encodes a discriminant byte.
+    fn u8(&mut self, n: u8) {
+        self.bytes.push(n);
     }
     fn opt<T>(
         &mut self,
@@ -678,6 +691,51 @@ pub fn canonical_db_request(r: &DbRequest) -> Result<Vec<u8>, CanonicalOpError> 
             e = Encoder::new(OpTag::SetReplicator);
             e.str(user)?;
             e.bool(*on)
+        }
+        DbRequest::CreateApiToken {
+            label,
+            ttl_secs,
+            mode,
+            channels,
+            databases,
+            for_user,
+            hmac: _,
+        } => {
+            e = Encoder::new(OpTag::CreateApiToken);
+            e.str(label)?;
+            e.opt(*ttl_secs, |e, value| {
+                e.u64(value);
+                Ok(())
+            })?;
+            e.opt(*mode, |e, value| {
+                e.u8(match value {
+                    ApiTokenMode::ReadOnly => 0,
+                    ApiTokenMode::ReadWrite => 1,
+                });
+                Ok(())
+            })?;
+            e.opt(*channels, |e, value| {
+                e.u8(match value {
+                    ApiTokenChannels::Rest => 0,
+                    ApiTokenChannels::Ws => 1,
+                    ApiTokenChannels::Both => 2,
+                });
+                Ok(())
+            })?;
+            e.opt(databases.as_ref(), |e, value| e.list(value))?;
+            e.opt(for_user.as_deref(), |e, value| e.str(value))?;
+        }
+        DbRequest::ListApiTokens { for_user, hmac: _ } => {
+            e = Encoder::new(OpTag::ListApiTokens);
+            e.opt(for_user.as_deref(), |e, value| e.str(value))?;
+        }
+        DbRequest::RevokeApiToken { id, hmac: _ } => {
+            e = Encoder::new(OpTag::RevokeApiToken);
+            e.str(id)?;
+        }
+        DbRequest::RevokeUserTokens { user, hmac: _ } => {
+            e = Encoder::new(OpTag::RevokeUserTokens);
+            e.opt(user.as_deref(), |e, value| e.str(value))?;
         }
         _ => return Err(CanonicalOpError::UnsupportedOperation),
     }

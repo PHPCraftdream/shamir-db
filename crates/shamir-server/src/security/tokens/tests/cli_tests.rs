@@ -11,7 +11,7 @@ use crate::security::tokens::cli::{
     revoke::parse_id,
     secret_output,
 };
-use crate::security::tokens::TokenView;
+use crate::security::tokens::{TokenAuditContext, TokenView};
 use crate::security::user_directory::FjallUserDirectory;
 use clap::Parser;
 use shamir_connect::common::{crypto::StoredKey, kdf_params::KdfParams};
@@ -162,6 +162,13 @@ fn secret_file_is_exclusive_and_unix_mode_0600() {
         .expect("warning")
         .contains("ACLs were not tightened"));
 }
+#[test]
+fn service_audit_context_defaults_to_token_transport() {
+    let context = TokenAuditContext::default();
+    assert_eq!(context.transport, "token");
+    assert!(context.actor_username.is_empty());
+    assert_eq!(context.session_id_prefix, [0; 8]);
+}
 #[tokio::test]
 async fn create_list_revoke_reopen_and_verify_audit_continuity() {
     let tmp = TempDir::new().expect("tmp");
@@ -219,6 +226,28 @@ async fn create_list_revoke_reopen_and_verify_audit_continuity() {
             .expect("revoke");
     }
     assert_eq!(revoked, b"revoked=1\n");
+    let mut user_revoked = Vec::new();
+    let mut user_re = Vec::new();
+    {
+        let mut io = streams(&mut user_revoked, &mut user_re, false);
+        run_with_io(
+            &c,
+            TokenAction::RevokeUser {
+                user: "alice".into(),
+            },
+            &mut io,
+        )
+        .await
+        .expect("revoke user");
+    }
+    let mut all_revoked = Vec::new();
+    let mut all_re = Vec::new();
+    {
+        let mut io = streams(&mut all_revoked, &mut all_re, false);
+        run_with_io(&c, TokenAction::RevokeAll { yes: true }, &mut io)
+            .await
+            .expect("revoke all");
+    }
     let mut again = Vec::new();
     let mut ae = Vec::new();
     {
@@ -246,6 +275,24 @@ async fn create_list_revoke_reopen_and_verify_audit_continuity() {
     AuditChain::verify_against_checkpoint(&entries, cp.0, &cp.1).expect("checkpoint verifies");
     assert!(entries.iter().any(|x| x.event == "api_token_created"));
     assert!(entries.iter().any(|x| x.event == "api_token_revoked"));
+    for entry in entries.iter().filter(|x| {
+        matches!(
+            x.event.as_str(),
+            "api_token_created" | "api_token_revoked" | "api_token_user_revoked"
+        )
+    }) {
+        assert_eq!(entry.transport, "cli");
+        assert!(entry.user.is_empty());
+        assert_eq!(entry.session_id_prefix, [0; 8]);
+        assert!(entry.ip_subnet.is_empty());
+    }
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|x| x.event == "api_token_user_revoked")
+            .count(),
+        2
+    );
     drop(meta);
     let reopened = FjallUserDirectory::open(c.data_dir.join("users")).expect("users second open");
     assert!(reopened

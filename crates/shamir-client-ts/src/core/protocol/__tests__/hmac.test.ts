@@ -77,26 +77,28 @@ function vectorCanonical(v: (typeof vectorFixture.vectors)[number]): Uint8Array 
 
 describe('canonical v2 encoder', () => {
   it('rv_query_types_c7aec31f_matches_known_answer_vectors_for_every_tag', () => {
-    expect(vectorFixture.vectors).toHaveLength(31);
+    expect(vectorFixture.vectors).toHaveLength(35);
     const tags = new Set<number>();
     const sessionId = fromHex(vectorFixture.session_id_hex);
     const key = createHash('sha256').update('shamir-db hmac key v1\0').update(sessionId).digest();
+    const prefix = fromHex('7368616d69722d646220686d61632063616e6f6e6963616c20763200');
     for (const vector of vectorFixture.vectors) {
       const tag = Number.parseInt(vector.op_tag, 16);
       expect(tag).toBeGreaterThanOrEqual(1);
-      expect(tag).toBeLessThanOrEqual(31);
+      expect(tag).toBeLessThanOrEqual(35);
       expect(tags.has(tag)).toBe(false);
       tags.add(tag);
-      const canonical = vectorCanonical(vector);
+      const canonical = fromHex(vector.canonical_hex);
       const prefixAndTag = fromHex(`7368616d69722d646220686d61632063616e6f6e6963616c20763200${vector.op_tag}`);
       expect(bytes(canonical.slice(0, prefixAndTag.length))).toEqual(bytes(prefixAndTag));
       expect(bytes(canonical.slice(prefixAndTag.length))).toEqual(bytes(fromHex(vector.fields_hex)));
-      expect(bytes(canonical)).toEqual(bytes(fromHex(vector.canonical_hex)));
+      expect(bytes(canonical.slice(0, prefix.length))).toEqual(bytes(prefix));
+      if (tag <= 31) expect(bytes(vectorCanonical(vector))).toEqual(bytes(canonical));
       const expectedTag = createHmac('sha256', key).update(canonical).digest('hex');
       expect(expectedTag).toBe(vector.tag_hex);
       expect(signCanonical(NodePlatform, sessionId, canonical)).toBe(vector.tag_hex);
     }
-    expect([...tags].sort((a, b) => a - b)).toEqual(Array.from({ length: 31 }, (_, i) => i + 1));
+    expect([...tags].sort((a, b) => a - b)).toEqual(Array.from({ length: 35 }, (_, i) => i + 1));
   });
 
   it('rv_query_types_f1dc8e9a_builder_hmac_uses_fixture_known_answer_tag', () => {

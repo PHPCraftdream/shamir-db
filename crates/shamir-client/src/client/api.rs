@@ -394,7 +394,112 @@ impl Client {
 
         Ok(response)
     }
+}
 
+/// Compute the session-bound signature for an API-token administration request.
+fn admin_request_tag(session_id: &[u8; 32], request: &DbRequest) -> Result<String, ClientError> {
+    let canonical = shamir_query_types::hmac::canonical_db_request(request)
+        .map_err(|_| ClientError::Protocol("canonical request failed".into()))?;
+    let key = shamir_connect::common::crypto::derive_session_hmac_key(session_id);
+    Ok(shamir_query_types::hmac::compute_tag_hex(&key, &canonical))
+}
+
+#[cfg(test)]
+pub(crate) fn admin_request_tag_for_test(
+    session_id: &[u8; 32],
+    request: &DbRequest,
+) -> Result<String, ClientError> {
+    admin_request_tag(session_id, request)
+}
+
+impl Client {
+    /// Create an API token; see TOKEN_API section 12. Requests are always signed; the server remains authoritative for authorization and validation.
+    ///
+    /// Section-12 error codes surfaced as `ClientError::Db` include:
+    /// `permission_denied`, `token_not_found`, `token_browser_session`,
+    /// `token_request_denied`, `token_self_service_disabled`, `read_only_replica`,
+    /// `hmac_required`, `hmac_mismatch`, `session_invalidated`, `invalid_username`,
+    /// `not_found`, `not_supported`, `internal`, `token_label_exists`,
+    /// `token_limit_reached`, and `token_ttl_invalid`.
+    pub async fn create_api_token(
+        &self,
+        request: shamir_query_builder::token_admin::CreateApiToken,
+    ) -> Result<shamir_query_types::wire::token_admin::CreatedApiToken, ClientError> {
+        let mut builder = request;
+        let unsigned = builder.clone().build();
+        builder = builder.hmac(admin_request_tag(&self.session_id, &unsigned)?);
+        let req = builder.build();
+        let created = match self.roundtrip(&req).await? {
+            DbResponse::ApiTokenCreated(created) => created,
+            _ => {
+                return Err(ClientError::Protocol(
+                    "unexpected API token creation response".into(),
+                ));
+            }
+        };
+        let token = created.token.reveal().as_bytes();
+        if token.len() != 71
+            || !token.starts_with(b"shk1.")
+            || token.get(27) != Some(&b'.')
+            || token.get(5..27) != Some(created.id.as_bytes())
+        {
+            return Err(ClientError::Protocol(
+                "malformed api token in creation response".into(),
+            ));
+        }
+        Ok(created)
+    }
+
+    /// List API tokens; see [`Self::create_api_token`] for the section-12 error codes and signing behavior.
+    pub async fn list_api_tokens(
+        &self,
+        for_user: Option<&str>,
+    ) -> Result<Vec<shamir_query_types::wire::token_admin::ApiTokenView>, ClientError> {
+        let mut builder = shamir_query_builder::token_admin::list_api_tokens();
+        if let Some(user) = for_user {
+            builder = builder.for_user(user);
+        }
+        let unsigned = builder.clone().build();
+        builder = builder.hmac(admin_request_tag(&self.session_id, &unsigned)?);
+        match self.roundtrip(&builder.build()).await? {
+            DbResponse::ApiTokensListed { tokens } => Ok(tokens),
+            _ => Err(ClientError::Protocol(
+                "unexpected API token list response".into(),
+            )),
+        }
+    }
+
+    /// Revoke an API token; see [`Self::create_api_token`] for the section-12 error codes and signing behavior.
+    pub async fn revoke_api_token(&self, id: &str) -> Result<(), ClientError> {
+        let mut builder = shamir_query_builder::token_admin::revoke_api_token(id);
+        let unsigned = builder.clone().build();
+        builder = builder.hmac(admin_request_tag(&self.session_id, &unsigned)?);
+        match self.roundtrip(&builder.build()).await? {
+            DbResponse::ApiTokenRevoked => Ok(()),
+            _ => Err(ClientError::Protocol(
+                "unexpected API token revoke response".into(),
+            )),
+        }
+    }
+
+    /// Revoke a user's API tokens; see [`Self::create_api_token`] for the section-12 error codes and signing behavior.
+    pub async fn revoke_user_tokens(&self, user: Option<&str>) -> Result<u64, ClientError> {
+        let mut builder = shamir_query_builder::token_admin::revoke_user_tokens();
+        if let Some(user) = user {
+            builder = builder.user(user);
+        }
+        let unsigned = builder.clone().build();
+        builder = builder.hmac(admin_request_tag(&self.session_id, &unsigned)?);
+        match self.roundtrip(&builder.build()).await? {
+            DbResponse::ApiUserTokensRevoked { count } => Ok(count),
+            _ => Err(ClientError::Protocol(
+                "unexpected user token revoke response".into(),
+            )),
+        }
+    }
+}
+
+impl Client {
     /// Create a SCRAM-authenticatable user. Requires the current
     /// session to be a superuser (server enforces). Returns the
     /// stable 16-byte `user_id`.
