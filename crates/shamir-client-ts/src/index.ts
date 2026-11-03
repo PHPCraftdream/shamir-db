@@ -1,6 +1,9 @@
 import { ShamirClient } from './core/client/client.js';
-import { loginNode as login } from './login/node/node.js';
-export { login };
+import { loginNode } from './login/node/node.js';
+import type { LoginOptions, LoginResult } from './login/types.js';
+export function login(options: LoginOptions): Promise<LoginResult> {
+  return loginNode(options);
+}
 export { LoginError } from './login/errors.js';
 export type { LoginErrorCode } from './login/errors.js';
 export type { LoginOptions, LoginResult, LoginMetadata, LoginScope } from './login/types.js';

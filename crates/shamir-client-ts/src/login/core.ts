@@ -17,7 +17,7 @@ export interface LoginCrypto {
 }
 
 export interface LoginHttp {
-  request(url: URL, body: Uint8Array, signal: AbortSignal, timeout: number): Promise<{
+  request(url: URL, body: Uint8Array, signal: AbortSignal, timeout: number, ca?: string | Uint8Array): Promise<{
     status: number;
     contentType: string | null;
     retryAfter: string | null;
@@ -81,11 +81,12 @@ function optionsCheck(o: LoginOptions): void {
   if (!o || typeof o !== 'object' || typeof o.username !== 'string' ||
       typeof o.password !== 'string' || typeof o.url !== 'string') throw err('invalid_request');
   const keys = ['username','password','url','label','mode','channels','databases','scope','externalTls',
-    'listenerId','expectedKdf','signal','timeoutMs','connectTimeoutMs','requestTimeoutMs','ttl'];
+    'listenerId','expectedKdf','signal','timeoutMs','connectTimeoutMs','requestTimeoutMs','ttl','ca'];
   if (Object.keys(o).some((k) => !keys.includes(k)) || 'ttl' in o) throw err('invalid_request');
   for (const n of ['timeoutMs', 'connectTimeoutMs', 'requestTimeoutMs'] as const) {
     if (o[n] !== undefined && !validTimeout(o[n])) throw err('invalid_request');
   }
+  if (o.ca !== undefined && !(typeof o.ca === 'string' && o.ca.length > 0) && !(o.ca instanceof Uint8Array && o.ca.length > 0)) throw err('invalid_request');
   if ((o.externalTls !== undefined && typeof o.externalTls !== 'boolean') ||
       (o.listenerId !== undefined && (!(o.listenerId instanceof Uint8Array) || o.listenerId.length !== 16))) {
     throw err('invalid_request');
@@ -123,43 +124,48 @@ function scopeFor(o: LoginOptions): Scope {
 
 function makeAbort(parent?: AbortSignal, timeout = 0) {
   const c = new AbortController();
-  const onAbort = () => c.abort();
-  if (parent?.aborted) c.abort();
+  let origin: 'caller' | 'timeout' | undefined;
+  const abort = (why: 'caller' | 'timeout') => {
+    if (origin !== undefined) return;
+    origin = why;
+    c.abort();
+  };
+  const onAbort = () => abort('caller');
+  if (parent?.aborted) abort('caller');
   else parent?.addEventListener('abort', onAbort, { once: true });
-  const timer = timeout ? setTimeout(onAbort, timeout) : undefined;
-  return { c, close() { if (timer) clearTimeout(timer); parent?.removeEventListener('abort', onAbort); } };
+  const timer = timeout ? setTimeout(() => abort('timeout'), timeout) : undefined;
+  return { c, origin: () => origin, close() { if (timer) clearTimeout(timer); parent?.removeEventListener('abort', onAbort); } };
 }
 
-function aborted(signal: AbortSignal, parent?: AbortSignal): never {
-  throw err(parent?.aborted ? 'client_aborted' : signal.aborted ? 'client_timeout' : 'network_error');
+function aborted(signal: AbortSignal, parent?: AbortSignal, origin?: 'caller' | 'timeout'): never {
+  throw err(origin === 'caller' ? 'client_aborted' : origin === 'timeout' ? 'client_timeout' : parent?.aborted ? 'client_aborted' : signal.aborted ? 'client_timeout' : 'network_error');
 }
 
-async function awaitGuarded<T>(promise: Promise<T>, signal: AbortSignal, parent?: AbortSignal): Promise<T> {
-  if (signal.aborted) aborted(signal, parent);
+async function awaitGuarded<T>(promise: Promise<T>, signal: AbortSignal, parent?: AbortSignal,
+  origin?: () => 'caller' | 'timeout' | undefined): Promise<T> {
+  if (signal.aborted) { void promise.catch(() => {}); aborted(signal, parent, origin?.()); }
   let remove = () => {};
   const stop = new Promise<never>((_, reject) => {
-    const onAbort = () => reject(err(parent?.aborted ? 'client_aborted' : 'client_timeout'));
+    const onAbort = () => reject(err(origin?.() === 'caller' ? 'client_aborted' : 'client_timeout'));
     signal.addEventListener('abort', onAbort, { once: true });
     remove = () => signal.removeEventListener('abort', onAbort);
   });
   try { return await Promise.race([promise, stop]); }
-  catch (error) { if (signal.aborted) aborted(signal, parent); throw error; }
+  catch (error) { if (signal.aborted) aborted(signal, parent, origin?.()); throw error; }
   finally { remove(); }
 }
 
-async function awaitSecret(promise: Promise<Uint8Array>, signal: AbortSignal, parent?: AbortSignal): Promise<Uint8Array> {
+async function awaitSecret(promise: Promise<Uint8Array>, signal: AbortSignal, parent?: AbortSignal,
+  origin?: () => 'caller' | 'timeout' | undefined): Promise<Uint8Array> {
   let abortedEarly = signal.aborted;
   const guarded = promise.then((value) => {
     if (abortedEarly || signal.aborted) value.fill(0);
     return value;
   });
-  if (signal.aborted) {
-    void guarded.catch(() => {});
-    aborted(signal, parent);
-  }
+  if (signal.aborted) { void guarded.catch(() => {}); aborted(signal, parent, origin?.()); }
   let remove = () => {};
   const stop = new Promise<never>((_, reject) => {
-    const onAbort = () => { abortedEarly = true; reject(err(parent?.aborted ? 'client_aborted' : 'client_timeout')); };
+    const onAbort = () => { abortedEarly = true; reject(err(origin?.() === 'caller' ? 'client_aborted' : 'client_timeout')); };
     signal.addEventListener('abort', onAbort, { once: true });
     remove = () => signal.removeEventListener('abort', onAbort);
   });
@@ -167,26 +173,26 @@ async function awaitSecret(promise: Promise<Uint8Array>, signal: AbortSignal, pa
 }
 
 async function secretHmac(crypto: LoginCrypto, key: Uint8Array, data: Uint8Array,
-  signal: AbortSignal, parent?: AbortSignal): Promise<Uint8Array> {
+  signal: AbortSignal, parent?: AbortSignal, origin?: () => 'caller' | 'timeout' | undefined): Promise<Uint8Array> {
   const keyCopy = new Uint8Array(key);
   const dataCopy = new Uint8Array(data);
   let work: Promise<Uint8Array>;
   try { work = crypto.hmac(keyCopy, dataCopy); }
   catch (error) { keyCopy.fill(0); dataCopy.fill(0); throw error; }
   work = work.finally(() => { keyCopy.fill(0); dataCopy.fill(0); });
-  const result = await awaitSecret(work, signal, parent);
+  const result = await awaitSecret(work, signal, parent, origin);
   if (result.length !== 32) { result.fill(0); throw err('protocol_error'); }
   return result;
 }
 
 async function secretSha(crypto: LoginCrypto, data: Uint8Array,
-  signal: AbortSignal, parent?: AbortSignal): Promise<Uint8Array> {
+  signal: AbortSignal, parent?: AbortSignal, origin?: () => 'caller' | 'timeout' | undefined): Promise<Uint8Array> {
   const dataCopy = new Uint8Array(data);
   let work: Promise<Uint8Array>;
   try { work = crypto.sha256(dataCopy); }
   catch (error) { dataCopy.fill(0); throw error; }
   work = work.finally(() => dataCopy.fill(0));
-  const result = await awaitSecret(work, signal, parent);
+  const result = await awaitSecret(work, signal, parent, origin);
   if (result.length !== 32) { result.fill(0); throw err('protocol_error'); }
   return result;
 }
@@ -262,6 +268,8 @@ function immutableResult(token: ApiToken, metadata: LoginMetadata, expiresAtNs: 
     }
     const channel = options.channel;
     if (channel !== 'http' && channel !== 'ws') throw err('invalid_request');
+    const allowed = channel === 'http' ? ['rest', 'both'] : ['ws', 'both'];
+    if (!allowed.includes(metadata.channels)) throw new TokenTransportError('token_channel_denied', 'Token channel is not allowed');
     const connectUrl = new URL(url);
     if (channel === 'ws') connectUrl.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const result = await connect(token, connectUrl, channel, options.signal, options.requestTimeoutMs ?? defaultTimeout);
@@ -317,6 +325,7 @@ function immutableResult(token: ApiToken, metadata: LoginMetadata, expiresAtNs: 
 export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: LoginHttp,
   connect: LoginConnect): Promise<LoginResult> {
   optionsCheck(o);
+  const ca = o.ca === undefined ? undefined : typeof o.ca === 'string' ? o.ca : new Uint8Array(o.ca);
   const url = parseUrl(o.url);
   const scope = scopeFor(o);
   const user = canonicalUser(o.username);
@@ -329,6 +338,7 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
   const requestTimeout = o.requestTimeoutMs ?? 120_000;
   const password = o.password;
   const guard = makeAbort(parent, timeoutMs);
+  const origin = guard.origin;
   let pw: Uint8Array | undefined;
   let salted: Uint8Array | undefined;
   let clientKey: Uint8Array | undefined;
@@ -340,42 +350,61 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
   let transcript: Uint8Array | undefined;
   let encodedProofBody: Uint8Array | undefined;
   try {
-    if (guard.c.signal.aborted) aborted(guard.c.signal, parent);
+    if (guard.c.signal.aborted) aborted(guard.c.signal, parent, origin());
     const nonce = crypto.randomBytes(32);
     if (nonce.length !== 32 || !nonce.some((b) => b !== 0)) throw err('network_error');
     const post = async (path: string, payload: unknown, timeout: number) => {
       const body = encodeMessage(payload);
+      const received: { response?: Awaited<ReturnType<LoginHttp['request']>> } = {};
+      let handedOff = false;
       try {
-        if (guard.c.signal.aborted) aborted(guard.c.signal, parent);
-      const response = await awaitGuarded(http.request(new URL(`/shamir/v1/auth/${path}`, url), body, guard.c.signal, timeout), guard.c.signal, parent);
-        if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) throw err('protocol_error');
+        if (guard.c.signal.aborted) aborted(guard.c.signal, parent, origin());
+        const responsePromise = http.request(new URL(`/shamir/v1/auth/${path}`, url), body, guard.c.signal, timeout, ca).then((response) => {
+          received.response = response;
+          if (guard.c.signal.aborted) response.body.fill(0);
+          return response;
+        });
+        const response = await awaitGuarded(responsePromise, guard.c.signal, parent, origin);
+        if (!Number.isInteger(response.status) || response.status < 100 || response.status > 599) {
+          response.body.fill(0);
+          throw err('protocol_error');
+        }
+        handedOff = true;
         return response;
+      } finally {
+        if (!handedOff) received.response?.body.fill(0);
+        body.fill(0);
       }
-      finally { body.fill(0); }
     };
     const begin = await post('begin', {
       protocol_version: 1, user, client_nonce: nonce, binding_mode: 3,
       token: { label: scope.label, mode: scope.mode, channels: scope.channels, databases: scope.databases },
     }, connectTimeout);
-    if (begin.contentType !== 'application/msgpack') throw err('http_unsupported_media_type', begin.status);
-    if (begin.status !== 200) throw statusError(begin);
-    const r = decodeMessage(begin.body);
-    exact(r, ['protocol_version','binding_mode','security','listener_id','handshake_id','salt','kdf',
-      'memory_kb','time','parallelism','argon2_version','server_nonce']);
-    if (int(r.protocol_version, 255) !== 1 || int(r.binding_mode, 255) !== 3 || r.kdf !== 'argon2id') throw err('protocol_error');
-    const version = int(r.argon2_version, 255);
-    const challenge: Challenge = {
-      security: int(r.security, 255), listenerId: bin(r.listener_id, 16), handshakeId: bin(r.handshake_id, 32),
-      salt: bin(r.salt, 16), serverNonce: bin(r.server_nonce, 32), memoryKb: int(r.memory_kb),
-      time: int(r.time), parallelism: int(r.parallelism),
-    };
-    if (challenge.security !== sec || (listenerId && !crypto.equal(listenerId, challenge.listenerId))) throw err('security_mismatch');
-    if (version !== 19) throw err('kdf_params_rejected');
-    if (!challenge.serverNonce.some((x) => x !== 0) || crypto.equal(nonce, challenge.serverNonce)) throw err('protocol_error');
-    try { validateKdfParams({ memoryKb: challenge.memoryKb, time: challenge.time,
-      parallelism: challenge.parallelism, argon2Version: version }); } catch { throw err('kdf_params_rejected'); }
-    if (expectedKdf && (expectedKdf.memoryKb !== challenge.memoryKb || expectedKdf.time !== challenge.time ||
-        expectedKdf.parallelism !== challenge.parallelism)) throw err('kdf_params_rejected');
+    const parsed = (() => {
+      try {
+        if (begin.contentType !== 'application/msgpack') throw err('http_unsupported_media_type', begin.status);
+        if (begin.status !== 200) throw statusError(begin);
+        const r = decodeMessage(begin.body);
+        exact(r, ['protocol_version','binding_mode','security','listener_id','handshake_id','salt','kdf',
+          'memory_kb','time','parallelism','argon2_version','server_nonce']);
+        if (int(r.protocol_version, 255) !== 1 || int(r.binding_mode, 255) !== 3 || r.kdf !== 'argon2id') throw err('protocol_error');
+        const version = int(r.argon2_version, 255);
+        const challenge: Challenge = {
+          security: int(r.security, 255), listenerId: bin(r.listener_id, 16), handshakeId: bin(r.handshake_id, 32),
+          salt: bin(r.salt, 16), serverNonce: bin(r.server_nonce, 32), memoryKb: int(r.memory_kb),
+          time: int(r.time), parallelism: int(r.parallelism),
+        };
+        if (challenge.security !== sec || (listenerId && !crypto.equal(listenerId, challenge.listenerId))) throw err('security_mismatch');
+        if (version !== 19) throw err('kdf_params_rejected');
+        if (!challenge.serverNonce.some((x) => x !== 0) || crypto.equal(nonce, challenge.serverNonce)) throw err('protocol_error');
+        try { validateKdfParams({ memoryKb: challenge.memoryKb, time: challenge.time,
+          parallelism: challenge.parallelism, argon2Version: version }); } catch { throw err('kdf_params_rejected'); }
+        if (expectedKdf && (expectedKdf.memoryKb !== challenge.memoryKb || expectedKdf.time !== challenge.time ||
+            expectedKdf.parallelism !== challenge.parallelism)) throw err('kdf_params_rejected');
+        return { challenge, version };
+      } finally { begin.body.fill(0); }
+    })();
+    const { challenge, version } = parsed;
     transcript = buildLoginTranscript(user, nonce, challenge, version, scope);
     pw = new TextEncoder().encode(password);
     const kdfParams: Argon2Params = { memoryKb: challenge.memoryKb, time: challenge.time,
@@ -389,12 +418,12 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
       passwordBytes.fill(0); originalPassword.fill(0);
     });
     pw = undefined;
-    salted = await awaitSecret(kdfPromise, guard.c.signal, parent);
+    salted = await awaitSecret(kdfPromise, guard.c.signal, parent, origin);
     if (salted.length !== 32) throw err('protocol_error');
-    clientKey = await secretHmac(crypto, salted, new TextEncoder().encode('Client Key'), guard.c.signal, parent);
-    serverKey = await secretHmac(crypto, salted, new TextEncoder().encode('Server Key'), guard.c.signal, parent);
-    stored = await secretSha(crypto, clientKey, guard.c.signal, parent);
-    clientSignature = await secretHmac(crypto, stored, transcript, guard.c.signal, parent);
+    clientKey = await secretHmac(crypto, salted, new TextEncoder().encode('Client Key'), guard.c.signal, parent, origin);
+    serverKey = await secretHmac(crypto, salted, new TextEncoder().encode('Server Key'), guard.c.signal, parent, origin);
+    stored = await secretSha(crypto, clientKey, guard.c.signal, parent, origin);
+    clientSignature = await secretHmac(crypto, stored, transcript, guard.c.signal, parent, origin);
     salted.fill(0); salted = undefined;
     proof = new Uint8Array(32);
     for (let i = 0; i < 32; i++) proof[i] = clientKey[i] ^ clientSignature[i];
@@ -402,12 +431,21 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
     clientKey.fill(0); clientKey = undefined;
     stored.fill(0); stored = undefined;
     clientSignature.fill(0); clientSignature = undefined;
-    if (guard.c.signal.aborted) aborted(guard.c.signal, parent);
+    if (guard.c.signal.aborted) aborted(guard.c.signal, parent, origin());
+    const receivedFinish: { response?: Awaited<ReturnType<LoginHttp['request']>> } = {};
     let finish: Awaited<ReturnType<LoginHttp['request']>>;
     try {
-      if (guard.c.signal.aborted) aborted(guard.c.signal, parent);
-      finish = await awaitGuarded(http.request(new URL('/shamir/v1/auth/finish', url), encodedProofBody,
-        guard.c.signal, requestTimeout), guard.c.signal, parent);
+      if (guard.c.signal.aborted) aborted(guard.c.signal, parent, origin());
+      const finishPromise = http.request(new URL('/shamir/v1/auth/finish', url), encodedProofBody,
+        guard.c.signal, requestTimeout, ca).then((response) => {
+          receivedFinish.response = response;
+          if (guard.c.signal.aborted) response.body.fill(0);
+          return response;
+        });
+      finish = await awaitGuarded(finishPromise, guard.c.signal, parent, origin);
+    } catch (error) {
+      receivedFinish.response?.body.fill(0);
+      throw error;
     } finally { encodedProofBody.fill(0); encodedProofBody = undefined; proof.fill(0); proof = undefined; }
     const finishBody = finish.body;
     try {
@@ -419,34 +457,36 @@ export async function performLogin(o: LoginOptions, crypto: LoginCrypto, http: L
         'databases','created_at_ns','expires_at_ns']);
       if (int(success.protocol_version, 255) !== 1) throw err('protocol_error');
       const serverSignature = bin(success.server_signature, 32);
-      expectedSignature = await secretHmac(crypto, serverKey, transcript, guard.c.signal, parent);
-      const signatureMatches = expectedSignature.length === 32 && crypto.equal(expectedSignature, serverSignature);
-      expectedSignature.fill(0); expectedSignature = undefined;
-      if (!signatureMatches) throw err('authentication_failed');
-      if (typeof success.token !== 'string' || success.token.length !== 71 || typeof success.label !== 'string' ||
-          success.label !== scope.label || success.mode !== scope.mode || success.channels !== scope.channels ||
-          typeof success.owner !== 'string' || success.owner !== user || !sameDatabases(success.databases, scope.databases)) {
-        throw err('protocol_error');
-      }
-      const id = bin(success.id, 16);
-      if (!crypto.equal(id, decodeId(success.token.slice(5, 27)))) throw err('protocol_error');
-      const created = big(success.created_at_ns);
-      const expires = big(success.expires_at_ns);
-      const now = BigInt(Date.now()) * 1_000_000n;
-      if (created <= 0n || created > now + 5_000_000_000n || expires <= now || expires <= created ||
-          expires - created > 86_400_000_000_000n) throw err('protocol_error');
-      let token: ApiToken;
-      try { token = ApiToken.from(success.token); } catch { throw err('protocol_error'); }
-      const metadata: LoginMetadata = {
-        id: new Uint8Array(id), label: scope.label, owner: user, mode: scope.mode, channels: scope.channels,
-        databases: scope.databases === null ? null : Object.freeze([...scope.databases]),
-        createdAtNs: created, expiresAtNs: expires,
-      };
-      return immutableResult(token, metadata, expires, url, connect, requestTimeout);
+      try {
+        expectedSignature = await secretHmac(crypto, serverKey, transcript, guard.c.signal, parent, origin);
+        const signatureMatches = expectedSignature.length === 32 && crypto.equal(expectedSignature, serverSignature);
+        expectedSignature.fill(0); expectedSignature = undefined;
+        if (!signatureMatches) throw err('server_signature_mismatch', finish.status);
+        if (typeof success.token !== 'string' || success.token.length !== 71 || typeof success.label !== 'string' ||
+            success.label !== scope.label || success.mode !== scope.mode || success.channels !== scope.channels ||
+            typeof success.owner !== 'string' || success.owner !== user || !sameDatabases(success.databases, scope.databases)) {
+          throw err('protocol_error');
+        }
+        const id = bin(success.id, 16);
+        if (!crypto.equal(id, decodeId(success.token.slice(5, 27)))) throw err('protocol_error');
+        const created = big(success.created_at_ns);
+        const expires = big(success.expires_at_ns);
+        const now = BigInt(Date.now()) * 1_000_000n;
+        if (created <= 0n || created > now + 5_000_000_000n || expires <= now || expires <= created ||
+            expires - created > 86_400_000_000_000n) throw err('protocol_error');
+        let token: ApiToken;
+        try { token = ApiToken.from(success.token); } catch { throw err('protocol_error'); }
+        const metadata: LoginMetadata = {
+          id: new Uint8Array(id), label: scope.label, owner: user, mode: scope.mode, channels: scope.channels,
+          databases: scope.databases === null ? null : Object.freeze([...scope.databases]),
+          createdAtNs: created, expiresAtNs: expires,
+        };
+        return immutableResult(token, metadata, expires, url, connect, requestTimeout);
+      } finally { serverSignature.fill(0); }
     } finally { finishBody.fill(0); }
   } catch (e) {
     if (e instanceof LoginError || e instanceof TokenTransportError) throw e;
-    if (guard.c.signal.aborted) aborted(guard.c.signal, parent);
+    if (guard.c.signal.aborted) aborted(guard.c.signal, parent, origin());
     throw err('network_error');
   } finally {
     guard.close();

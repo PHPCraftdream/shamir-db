@@ -1,0 +1,152 @@
+{
+  "unicode_version": "15.1",
+  "vectors": [
+    {
+      "name": "ascii_case",
+      "input": "Alice",
+      "normalized": "alice"
+    },
+    {
+      "name": "ascii_punctuation",
+      "input": "A_b-9",
+      "normalized": "a_b-9"
+    },
+    {
+      "name": "german_sharp_s",
+      "input": "Straße",
+      "normalized": "straße"
+    },
+    {
+      "name": "greek_sigma",
+      "input": "ΟΔΥΣΣΕΥΣ",
+      "normalized": "οδυσσευσ"
+    },
+    {
+      "name": "cafe_decomposed",
+      "input": "Cafe\u0301",
+      "normalized": "café"
+    },
+    {
+      "name": "cafe_composed",
+      "input": "café",
+      "normalized": "café"
+    },
+    {
+      "name": "fullwidth_ascii",
+      "input": "ＡＢＣ",
+      "normalized": "abc"
+    },
+    {
+      "name": "halfwidth_kana_voiced",
+      "input": "ｶﾞ",
+      "normalized": "ガ"
+    },
+    {
+      "name": "halfwidth_kana_semivoiced",
+      "input": "ﾊﾟ",
+      "normalized": "パ"
+    },
+    {
+      "name": "turkish_dotted_i",
+      "input": "İ",
+      "normalized": "i̇"
+    },
+    {
+      "name": "hangul_syllable",
+      "input": "가",
+      "normalized": "가"
+    },
+    {
+      "name": "partial_composition",
+      "input": "n\u0303\u0301",
+      "normalized": "ñ́"
+    },
+    {
+      "name": "canonical_order",
+      "input": "a\u0300\u0316",
+      "normalized": "à\u0316"
+    },
+    {
+      "name": "cyrillic_compose",
+      "input": "И\u0306",
+      "normalized": "й"
+    },
+    {
+      "name": "ideographic_zero",
+      "input": "〇",
+      "normalized": "〇"
+    },
+    {
+      "name": "exactly_255_ascii_bytes",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "normalized": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "empty",
+      "input": "",
+      "reason": "precis"
+    },
+    {
+      "name": "whitespace_only",
+      "input": "   ",
+      "reason": "precis"
+    },
+    {
+      "name": "ascii_control",
+      "input": "alice\u0007bob",
+      "reason": "precis"
+    },
+    {
+      "name": "zero_width_joiner",
+      "input": "alice\u200Dbob",
+      "reason": "precis"
+    },
+    {
+      "name": "left_to_right_mark",
+      "input": "alice\u200Ebob",
+      "reason": "precis"
+    },
+    {
+      "name": "private_use",
+      "input": "alice\uE000",
+      "reason": "precis"
+    },
+    {
+      "name": "noncharacter",
+      "input": "alice\uFDD0",
+      "reason": "precis"
+    },
+    {
+      "name": "hangul_jamo",
+      "input": "\u1100\u1161\u11A8",
+      "reason": "precis"
+    },
+    {
+      "name": "angstrom_sign",
+      "input": "xÅ",
+      "reason": "precis"
+    },
+    {
+      "name": "compatibility_ligature",
+      "input": "xﬁ",
+      "reason": "precis"
+    },
+    {
+      "name": "superscript_two",
+      "input": "x²",
+      "reason": "precis"
+    },
+    {
+      "name": "oversized_ascii",
+      "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reason": "length"
+    },
+    {
+      "name": "rtl_hebrew",
+      "input": "שלום",
+      "normalized": "שלום",
+      "ts_fail_closed": true,
+      "ts_reason": "unsupported_bidi"
+    }
+  ]
+}
