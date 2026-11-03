@@ -9,7 +9,44 @@ use hyper_util::rt::TokioIo;
 use std::{sync::Arc, time::Duration};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
 
-struct Admit;
+struct DropSignal(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn response_extension_hold_survives_body_poll_until_owner_drop() {
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let response = LoginResponse::new(StatusCode::OK, Bytes::from_static(b"payload"))
+        .with_hold(Arc::new(DropSignal(Arc::clone(&drops))));
+    let response = login_response(response, false, false);
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let (parts, body) = response.into_parts();
+    let _ = body.collect().await.expect("collect body");
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(parts);
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn response_hold_is_owned_until_taken_or_response_drop() {
+    let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hold = Arc::new(DropSignal(Arc::clone(&drops)));
+    let response = LoginResponse::new(StatusCode::OK, Bytes::new()).with_hold(hold);
+    let mut response = response;
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(response.take_hold());
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let response = LoginResponse::new(StatusCode::OK, Bytes::new())
+        .with_hold(Arc::new(DropSignal(Arc::clone(&drops))));
+    drop(response);
+    assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+struct Admit(Arc<std::sync::atomic::AtomicUsize>);
 impl LoginRoutes for Admit {
     type Permit = ();
     fn enabled(&self) -> bool {
@@ -23,8 +60,11 @@ impl LoginRoutes for Admit {
     ) -> Result<Self::Permit, LoginResponse> {
         Ok(())
     }
-    async fn handle(&self, _: Bytes, _: Self::Permit, body: Bytes) -> LoginResponse {
+    async fn handle(&self, _: Bytes, _: Arc<Self::Permit>, body: Bytes) -> LoginResponse {
         LoginResponse::new(StatusCode::OK, body)
+    }
+    fn refused(&self, _: &[u8], _: StatusCode) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
     fn body_limit(&self, route: &[u8]) -> usize {
         if route.ends_with(b"finish") {
@@ -52,7 +92,7 @@ impl LoginRoutes for Deny {
             Bytes::from_static(b"deny"),
         ))
     }
-    async fn handle(&self, _: Bytes, _: Self::Permit, _: Bytes) -> LoginResponse {
+    async fn handle(&self, _: Bytes, _: Arc<Self::Permit>, _: Bytes) -> LoginResponse {
         LoginResponse::new(StatusCode::OK, Bytes::new())
     }
     fn body_limit(&self, route: &[u8]) -> usize {
@@ -116,6 +156,19 @@ async fn exchange_with_override<L: LoginRoutes>(
 }
 
 #[tokio::test]
+async fn refusal_hook_counts_each_transport_body_refusal_once() {
+    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let hook = Arc::new(Admit(Arc::clone(&count)));
+    let output = exchange(
+        b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Length: 4097\r\n\r\n",
+        hook,
+    )
+    .await;
+    assert!(output.starts_with(b"HTTP/1.1 413"));
+    assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn no_login_is_404_without_auth() {
     let output = exchange(
         b"PATCH /shamir/v1/auth/finish HTTP/1.1\r\nHost: x\r\n\r\n",
@@ -129,7 +182,7 @@ async fn no_login_is_404_without_auth() {
 async fn method_rejected_with_allow_post() {
     let output = exchange(
         b"GET /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\n\r\n",
-        Arc::new(Admit),
+        Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
     )
     .await;
     assert!(output.starts_with(b"HTTP/1.1 405"));
@@ -143,7 +196,7 @@ async fn route_arms_five_second_write_timeout_override() {
     let write_timeout_override = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let output = exchange_with_override(
         b"GET /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\n\r\n",
-        Arc::new(Admit),
+        Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
         write_timeout_override.clone(),
     )
     .await;
@@ -157,7 +210,7 @@ async fn route_arms_five_second_write_timeout_override() {
 async fn media_type_rejected_before_admission() {
     let output = exchange(
         b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack; charset=utf-8\r\nContent-Length: 0\r\n\r\n",
-        Arc::new(Admit),
+        Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
     )
     .await;
     assert!(output.starts_with(b"HTTP/1.1 415"));
@@ -169,19 +222,19 @@ async fn missing_or_duplicate_content_type_is_unsupported() {
         &b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n"[..],
         &b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Type: application/msgpack\r\nContent-Length: 0\r\n\r\n"[..],
     ] {
-        let output = exchange(wire, Arc::new(Admit)).await;
+        let output = exchange(wire, Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0))))).await;
         assert!(output.starts_with(b"HTTP/1.1 415"));
         assert!(output.ends_with(b"\x81\xa5error\xb6unsupported_media_type"));
     }
 }
 #[tokio::test]
 async fn content_encoding_rejected_even_when_empty() {
-    let output = exchange(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Encoding:\r\nContent-Length: 0\r\n\r\n", Arc::new(Admit)).await;
+    let output = exchange(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Encoding:\r\nContent-Length: 0\r\n\r\n", Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0))))).await;
     assert!(output.starts_with(b"HTTP/1.1 415"));
 }
 #[tokio::test]
 async fn declared_oversize_rejected_before_body_poll() {
-    let output = exchange(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Length: 4097\r\n\r\n", Arc::new(Admit)).await;
+    let output = exchange(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Length: 4097\r\n\r\n", Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0))))).await;
     assert!(output.starts_with(b"HTTP/1.1 413"));
 }
 #[tokio::test]
@@ -197,7 +250,11 @@ async fn streamed_oversize_body_is_capped() {
     let mut wire = b"POST /shamir/v1/auth/finish HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nTransfer-Encoding: chunked\r\n\r\n101\r\n".to_vec();
     wire.extend(std::iter::repeat_n(b'x', 257));
     wire.extend_from_slice(b"\r\n0\r\n\r\n");
-    let output = exchange(&wire, Arc::new(Admit)).await;
+    let output = exchange(
+        &wire,
+        Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
+    )
+    .await;
     assert!(output.starts_with(b"HTTP/1.1 413"));
 }
 #[tokio::test(start_paused = true)]
@@ -217,7 +274,7 @@ async fn stalled_body_times_out_after_three_seconds() {
             Ok::<_, std::convert::Infallible>(
                 handle_login(
                     request,
-                    Arc::new(Admit),
+                    Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
                     peer,
                     false,
                     tokio::time::Instant::now(),
@@ -265,7 +322,7 @@ async fn admitted_request_receives_continue_before_body_read() {
             Ok::<_, std::convert::Infallible>(
                 handle_login(
                     request,
-                    Arc::new(Admit),
+                    Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0)))),
                     peer,
                     false,
                     tokio::time::Instant::now(),
@@ -301,7 +358,7 @@ async fn admitted_request_receives_continue_before_body_read() {
 
 #[tokio::test]
 async fn admitted_request_reads_body_and_preserves_exact_bytes() {
-    let output = exchange(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Length: 4\r\n\r\ndata", Arc::new(Admit)).await;
+    let output = exchange(b"POST /shamir/v1/auth/begin HTTP/1.1\r\nHost: x\r\nContent-Type: application/msgpack\r\nContent-Length: 4\r\n\r\ndata", Arc::new(Admit(Arc::new(std::sync::atomic::AtomicUsize::new(0))))).await;
     assert!(output.windows(4).any(|w| w == b"data"));
 }
 #[test]

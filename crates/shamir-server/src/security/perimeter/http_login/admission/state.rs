@@ -79,9 +79,23 @@ impl AdmissionState {
     }
 
     /// Pins the resident arrival and credit buckets for pending work.
-    pub async fn pin_source(&self, source: Source) -> (BudgetPin, BudgetPin) {
-        let state = self.inner.lock().await;
-        (state.arrival.pin(source), state.credit.pin(source))
+    pub async fn pin_source(
+        &self,
+        source: Source,
+    ) -> Result<(BudgetPin, BudgetPin), AdmissionError> {
+        let mut state = self.inner.lock().await;
+        let arrival = match state.arrival.pin(source) {
+            Some(pin) => pin,
+            None => return Err(AdmissionError::ServerBusy),
+        };
+        let credit = match state.credit.pin(source) {
+            Some(pin) => pin,
+            None => {
+                drop(arrival);
+                return Err(AdmissionError::ServerBusy);
+            }
+        };
+        Ok((arrival, credit))
     }
 
     /// Admits a slot without debiting rate budgets; test-only slot accounting seam.
@@ -130,8 +144,23 @@ impl AdmissionState {
             Ok(super::DebitOutcome::Charged) => {}
         }
         let mut permit = admit_slot(&mut state.slots, source)?;
-        permit._arrival_pin = Some(state.arrival.pin(source));
-        permit._credit_pin = Some(state.credit.pin(source));
+        let arrival = match state.arrival.pin(source) {
+            Some(pin) => pin,
+            None => {
+                drop(permit);
+                return Err(AdmissionError::ServerBusy);
+            }
+        };
+        let credit = match state.credit.pin(source) {
+            Some(pin) => pin,
+            None => {
+                drop(arrival);
+                drop(permit);
+                return Err(AdmissionError::ServerBusy);
+            }
+        };
+        permit._arrival_pin = Some(arrival);
+        permit._credit_pin = Some(credit);
         Ok(permit)
     }
 }

@@ -1,4 +1,5 @@
 use std::fmt;
+use std::fmt;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -122,12 +123,16 @@ struct State {
     cells: Vec<Option<Cell>>,
     markers: Box<[Arc<AtomicU8>]>,
     expirations: std::collections::BinaryHeap<std::cmp::Reverse<(Instant, usize)>>,
+    released: tokio::sync::mpsc::Receiver<usize>,
+    #[cfg(test)]
+    reclaim_visits: std::sync::atomic::AtomicUsize,
 }
 
 /// Fixed-capacity, bounded pending table with injected monotonic time.
 pub struct PendingStore {
     clock: Arc<dyn LoginClock>,
     selector: Selector,
+    released: tokio::sync::mpsc::Sender<usize>,
     inner: Mutex<State>,
 }
 
@@ -146,13 +151,20 @@ impl PendingStore {
             .map(|_| Arc::new(AtomicU8::new(RELEASED)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
+        let (released_tx, released_rx) = tokio::sync::mpsc::channel(CAPACITY);
+        // Claimed slots cannot be evicted or reused before their one Drop notification is drained.
+        // Thus no more than CAPACITY notifications can be outstanding and try_send cannot overflow.
         Self {
             clock,
             selector: Arc::new(selector),
+            released: released_tx,
             inner: Mutex::new(State {
                 cells: (0..CAPACITY).map(|_| None).collect(),
                 markers,
                 expirations: std::collections::BinaryHeap::with_capacity(CAPACITY),
+                released: released_rx,
+                #[cfg(test)]
+                reclaim_visits: std::sync::atomic::AtomicUsize::new(0),
             }),
         }
     }
@@ -230,7 +242,18 @@ impl PendingStore {
         Ok(())
     }
 
-    /// Claims once when effective source prefix, listener, and class match.
+    #[cfg(test)]
+    pub(super) async fn reset_reclaim_visits(&self) {
+        let state = self.inner.lock().await;
+        state.reclaim_visits.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(super) async fn reclaim_visits(&self) -> usize {
+        let state = self.inner.lock().await;
+        state.reclaim_visits.load(Ordering::Relaxed)
+    }
+
     pub async fn claim(
         &self,
         id: PendingId,
@@ -278,6 +301,8 @@ impl PendingStore {
                 expires: cell.expires,
                 clock: Arc::clone(&self.clock),
                 _pins: pins,
+                released: self.released.clone(),
+                slot: match_index,
             }
         };
         state
@@ -346,6 +371,8 @@ pub struct PendingClaim {
     expires: Instant,
     clock: Arc<dyn LoginClock>,
     _pins: Option<(BudgetPin, BudgetPin)>,
+    released: tokio::sync::mpsc::Sender<usize>,
+    slot: usize,
 }
 impl PendingClaim {
     /// Moves the sensitive payload to the FINISH task.
@@ -360,26 +387,23 @@ impl PendingClaim {
 impl Drop for PendingClaim {
     fn drop(&mut self) {
         self.marker.store(RELEASED, Ordering::Release);
+        let _ = self.released.try_send(self.slot);
         super::super::metrics::update_pending(-1);
     }
 }
 
 fn reclaim_released(state: &mut State) {
-    let mut changed = false;
-    for cell in &mut state.cells {
-        if cell
-            .as_ref()
+    while let Ok(index) = state.released.try_recv() {
+        #[cfg(test)]
+        state.reclaim_visits.fetch_add(1, Ordering::Relaxed);
+        if state
+            .cells
+            .get(index)
+            .and_then(Option::as_ref)
             .is_some_and(|cell| cell.marker.load(Ordering::Acquire) == RELEASED)
         {
-            *cell = None;
-            changed = true;
+            state.cells[index] = None;
         }
-    }
-    if changed {
-        let cells = &state.cells;
-        state
-            .expirations
-            .retain(|std::cmp::Reverse((_, index))| cells[*index].is_some());
     }
 }
 

@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use http::StatusCode;
+use std::sync::Arc;
 
 /// Exact application-owned MessagePack login response.
 #[derive(Clone)]
@@ -7,6 +8,7 @@ pub struct LoginResponse {
     status: StatusCode,
     body: Bytes,
     retry_after: Option<u32>,
+    hold: Option<Arc<dyn Send + Sync>>,
 }
 
 impl LoginResponse {
@@ -16,6 +18,7 @@ impl LoginResponse {
             status,
             body,
             retry_after: None,
+            hold: None,
         }
     }
 
@@ -25,7 +28,18 @@ impl LoginResponse {
             status,
             body,
             retry_after: Some(seconds),
+            hold: None,
         }
+    }
+
+    /// Retains an application permit until response writing completes or the connection drops.
+    pub fn with_hold(mut self, hold: Arc<dyn Send + Sync>) -> Self {
+        self.hold = Some(hold);
+        self
+    }
+    /// Internal response hold, moved into the connection's write owner.
+    pub(crate) fn take_hold(&mut self) -> Option<Arc<dyn Send + Sync>> {
+        self.hold.take()
     }
 
     /// Response status.

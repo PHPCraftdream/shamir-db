@@ -9,6 +9,7 @@ use super::{PrefixKey, Source};
 const BUCKETS: usize = 4096;
 const CHILD_QUOTA: usize = 32;
 const SCALE: u64 = 1_000_000;
+const MAX_PINNED_BUCKETS: usize = 3_072;
 
 #[derive(Clone, Copy)]
 struct Bucket {
@@ -29,6 +30,7 @@ pub struct LoginBudgetTable {
     slots: Box<[Slot]>,
     period_ns: u128,
     tick: u64,
+    pinned_buckets: Arc<AtomicUsize>,
     #[cfg(test)]
     slot_visits: Cell<usize>,
 }
@@ -56,14 +58,25 @@ pub struct BudgetDenied {
 /// Pins a source hierarchy against safe eviction until dropped.
 pub struct BudgetPin {
     markers: [Option<Arc<AtomicUsize>>; 3],
+    lease: Arc<PinLease>,
+}
+struct PinLease {
+    budget: Arc<AtomicUsize>,
+    units: usize,
+}
+impl Drop for PinLease {
+    fn drop(&mut self) {
+        self.budget.fetch_sub(self.units, Ordering::AcqRel);
+    }
 }
 impl Clone for BudgetPin {
     fn clone(&self) -> Self {
-        let markers = std::array::from_fn(|i| self.markers[i].clone());
-        for marker in markers.iter().flatten() {
-            marker.fetch_add(1, Ordering::AcqRel);
+        let markers: [Option<Arc<AtomicUsize>>; 3] =
+            std::array::from_fn(|i| self.markers[i].clone());
+        Self {
+            markers,
+            lease: Arc::clone(&self.lease),
         }
-        Self { markers }
     }
 }
 impl Drop for BudgetPin {
@@ -87,6 +100,7 @@ impl LoginBudgetTable {
             slots,
             period_ns: period.as_nanos().max(1),
             tick: 0,
+            pinned_buckets: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             slot_visits: Cell::new(0),
         }
@@ -168,21 +182,41 @@ impl LoginBudgetTable {
         }
         Ok(DebitOutcome::Charged)
     }
-    /// Pins all currently resident levels for a source hierarchy.
-    pub fn pin(&self, source: Source) -> BudgetPin {
+    /// Pins all currently resident levels for a source hierarchy. Each lease conservatively charges up to three distinct buckets; clones share that lease. The bounded table lock serializes reservations and pin-count updates.
+    pub fn pin(&mut self, source: Source) -> Option<BudgetPin> {
         let (tiers, count) = distinct_tiers(source);
-        let markers = std::array::from_fn(|i| {
-            (i < count)
-                .then(|| tiers[i])
-                .and_then(|key| self.find(key))
-                .map(|idx| {
-                    let marker = self.slots[idx].pins.clone();
-                    marker.fetch_add(1, Ordering::AcqRel);
-                    marker
-                })
+        let indices: [Option<usize>; 3] =
+            std::array::from_fn(|i| (i < count).then(|| tiers[i]).and_then(|key| self.find(key)));
+        let reservation =
+            self.pinned_buckets
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(3)
+                        .filter(|next| *next <= MAX_PINNED_BUCKETS)
+                });
+        if reservation.is_err() {
+            return None;
+        }
+        let markers: [Option<Arc<AtomicUsize>>; 3] = std::array::from_fn(|i| {
+            indices[i].map(|idx| {
+                let marker = Arc::clone(&self.slots[idx].pins);
+                marker.fetch_add(1, Ordering::AcqRel);
+                marker
+            })
         });
-        BudgetPin { markers }
+        Some(BudgetPin {
+            markers,
+            lease: Arc::new(PinLease {
+                budget: Arc::clone(&self.pinned_buckets),
+                units: 3,
+            }),
+        })
     }
+    #[cfg(test)]
+    pub(super) fn pinned_bucket_count(&self) -> usize {
+        self.pinned_buckets.load(Ordering::Acquire)
+    }
+
     #[cfg(test)]
     pub(super) fn bucket_size() -> usize {
         std::mem::size_of::<Slot>() + 24

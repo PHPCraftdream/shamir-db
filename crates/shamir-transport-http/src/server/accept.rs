@@ -275,6 +275,7 @@ where
                         Box::new(stream)
                     };
                     let write_timeout_override = Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    let login_refusal = login.clone();
                     let guarded = GuardedIo::new(
                         stream,
                         cfg.limits.max_head_bytes,
@@ -284,6 +285,16 @@ where
                         hold_rx,
                     )
                     .with_login_errors(login.enabled())
+                    .with_refusal_hook(Arc::new(move |route, status| {
+                        if login_refusal.enabled()
+                            && (route == b"/shamir/v1/auth/begin"
+                                || route == b"/shamir/v1/auth/finish")
+                        {
+                            if let Ok(status) = StatusCode::from_u16(status) {
+                                login_refusal.refused(route, status);
+                            }
+                        }
+                    }))
                     .with_write_timeout_override(write_timeout_override.clone())
                     .with_timeouts(
                         cfg.limits.head_timeout,

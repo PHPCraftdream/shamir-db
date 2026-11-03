@@ -143,12 +143,17 @@ impl TokenService {
     /// Current count of ACTIVE persisted tokens as of this timestamp.
     pub async fn active_count(&self, now_ns: u64) -> Result<u64, TokenStoreError> {
         let store = self.store.clone();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            Ok(store
-                .scan_blocking()?
-                .iter()
-                .filter(|record| record.revoked_at_ns.is_none() && record.expires_at_ns > now_ns)
-                .count() as u64)
+            tracing::dispatcher::with_default(&dispatcher, || {
+                Ok(store
+                    .scan_blocking()?
+                    .iter()
+                    .filter(|record| {
+                        record.revoked_at_ns.is_none() && record.expires_at_ns > now_ns
+                    })
+                    .count() as u64)
+            })
         })
         .await
         .map_err(|_| TokenStoreError::Join)?
@@ -214,86 +219,89 @@ impl TokenService {
         let test_generator = Arc::clone(&self.test_generator);
         let mirror_insert_conflict = Arc::clone(&self.mirror_insert_conflict);
         let max_per_user = self.max_per_user;
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         let result = tokio::task::spawn_blocking(move || {
-            let _gate = gate;
-            let existing = store
-                .with_locked_records(|_, _| store.scan_locked())
-                .map_err(TokenCreateError::Store)?
-                .into_iter()
-                .filter(|r| r.owner_user_id == input.owner_user_id)
-                .collect::<Vec<_>>();
-            let live = existing.iter().filter(|r| {
-                r.owner_user_id == input.owner_user_id
-                    && r.revoked_at_ns.is_none()
-                    && r.expires_at_ns > now
-            });
-            if live.clone().any(|r| r.label == input.label) {
-                return Err(TokenCreateError::LabelExists);
-            }
-            if live.count() >= max_per_user {
-                return Err(TokenCreateError::LimitReached);
-            }
-            let mut generated = None;
-            for _ in 0..8 {
-                let (id, secret) = test_generator().map_err(|_| TokenCreateError::Entropy)?;
-                if mirror.get(&id).is_some() {
-                    continue;
-                }
-                let record = TokenRecord {
-                    id: id.0,
-                    owner_user_id: input.owner_user_id,
-                    label: input.label.clone(),
-                    mac: compute_mac(&key, 1, 1, &id, &secret),
-                    key_id: 1,
-                    format_version: 1,
-                    created_at_ns: now,
-                    expires_at_ns: expires,
-                    mode: input.mode,
-                    channels: input.channels,
-                    databases: input.databases.clone(),
-                    roles: input.owner_roles.clone(),
-                    revoked_at_ns: None,
-                };
-                record
-                    .validate_shape()
-                    .map_err(|_| TokenCreateError::InvalidInput)?;
-                if store
-                    .put_if_absent_blocking(&record)
+            tracing::dispatcher::with_default(&dispatcher, || {
+                let _gate = gate;
+                let existing = store
+                    .with_locked_records(|_, _| store.scan_locked())
                     .map_err(TokenCreateError::Store)?
-                {
-                    generated = Some((record, encode_token(&id, &secret)));
-                    break;
+                    .into_iter()
+                    .filter(|r| r.owner_user_id == input.owner_user_id)
+                    .collect::<Vec<_>>();
+                let live = existing.iter().filter(|r| {
+                    r.owner_user_id == input.owner_user_id
+                        && r.revoked_at_ns.is_none()
+                        && r.expires_at_ns > now
+                });
+                if live.clone().any(|r| r.label == input.label) {
+                    return Err(TokenCreateError::LabelExists);
                 }
-            }
-            let (record, token) = generated.ok_or(TokenCreateError::IdCollision)?;
-            if mirror_insert_conflict.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                let mut conflict = record.clone();
-                conflict.label.push_str("-conflict");
-                let _ = mirror.insert(conflict);
-            }
-            if !mirror.insert(record.clone()) {
-                store
-                    .delete_blocking(&TokenId(record.id))
+                if live.count() >= max_per_user {
+                    return Err(TokenCreateError::LimitReached);
+                }
+                let mut generated = None;
+                for _ in 0..8 {
+                    let (id, secret) = test_generator().map_err(|_| TokenCreateError::Entropy)?;
+                    if mirror.get(&id).is_some() {
+                        continue;
+                    }
+                    let record = TokenRecord {
+                        id: id.0,
+                        owner_user_id: input.owner_user_id,
+                        label: input.label.clone(),
+                        mac: compute_mac(&key, 1, 1, &id, &secret),
+                        key_id: 1,
+                        format_version: 1,
+                        created_at_ns: now,
+                        expires_at_ns: expires,
+                        mode: input.mode,
+                        channels: input.channels,
+                        databases: input.databases.clone(),
+                        roles: input.owner_roles.clone(),
+                        revoked_at_ns: None,
+                    };
+                    record
+                        .validate_shape()
+                        .map_err(|_| TokenCreateError::InvalidInput)?;
+                    if store
+                        .put_if_absent_blocking(&record)
+                        .map_err(TokenCreateError::Store)?
+                    {
+                        generated = Some((record, encode_token(&id, &secret)));
+                        break;
+                    }
+                }
+                let (record, token) = generated.ok_or(TokenCreateError::IdCollision)?;
+                if mirror_insert_conflict.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                    let mut conflict = record.clone();
+                    conflict.label.push_str("-conflict");
+                    let _ = mirror.insert(conflict);
+                }
+                if !mirror.insert(record.clone()) {
+                    store
+                        .delete_blocking(&TokenId(record.id))
+                        .map_err(TokenCreateError::Store)?;
+                    return Err(TokenCreateError::IdCollision);
+                }
+                let details = rmp_serde::to_vec_named(&(record.id, record.owner_user_id))
+                    .map_err(TokenStoreError::Encoding)
                     .map_err(TokenCreateError::Store)?;
-                return Err(TokenCreateError::IdCollision);
-            }
-            let details = rmp_serde::to_vec_named(&(record.id, record.owner_user_id))
-                .map_err(TokenStoreError::Encoding)
-                .map_err(TokenCreateError::Store)?;
-            if let Err(error) = audit.append(
-                "api_token_created",
-                audit_context.transport.as_str(),
-                audit_context.actor_username.as_str(),
-                "",
-                audit_context.session_id_prefix,
-                "ok",
-                details,
-                now,
-            ) {
-                tracing::warn!(error = ?error, "api token audit append failed");
-            }
-            counters.count_created();
-            Ok((record, token))
+                if let Err(error) = audit.append(
+                    "api_token_created",
+                    audit_context.transport.as_str(),
+                    audit_context.actor_username.as_str(),
+                    "",
+                    audit_context.session_id_prefix,
+                    "ok",
+                    details,
+                    now,
+                ) {
+                    tracing::warn!(error = ?error, "api token audit append failed");
+                }
+                counters.count_created();
+                Ok((record, token))
+            })
         })
         .await
         .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))??;
@@ -328,10 +336,13 @@ impl TokenService {
         }
         let Some(owner) = self.mirror.get(&id).map(|s| s.record().owner_user_id) else {
             let store = self.store.clone();
-            let retained = tokio::task::spawn_blocking(move || store.get_blocking(&id))
-                .await
-                .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))?
-                .map_err(TokenCreateError::Store)?;
+            let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+            let retained = tokio::task::spawn_blocking(move || {
+                tracing::dispatcher::with_default(&dispatcher, || store.get_blocking(&id))
+            })
+            .await
+            .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))?
+            .map_err(TokenCreateError::Store)?;
             let Some(retained) = retained else {
                 return Err(TokenCreateError::NotFound);
             };
@@ -342,42 +353,46 @@ impl TokenService {
             let store = self.store.clone();
             let audit = Arc::clone(&self.audit);
             let counters = Arc::clone(&self.counters);
+            let dispatcher = tracing::dispatcher::get_default(Clone::clone);
             return tokio::task::spawn_blocking(move || {
-                let _gate = gate;
-                let outcome = store.with_locked_records(|db, ks| {
-                    let Some(mut current) = store.scan_locked()?.into_iter().find(|r| r.id == id.0)
-                    else {
-                        return Ok(None);
-                    };
-                    if current.revoked_at_ns.is_some() {
-                        return Ok(Some((current.owner_user_id, false)));
-                    }
-                    current.revoked_at_ns = Some(now_ns.max(1));
-                    store.write_locked(db, ks, &current)?;
-                    Ok(Some((current.owner_user_id, true)))
-                })?;
-                match outcome {
-                    None => Ok(None),
-                    Some((_, false)) => Ok(Some(false)),
-                    Some((owner_id, true)) => {
-                        counters.count_revoked();
-                        let details = rmp_serde::to_vec_named(&(id.0, owner_id))
-                            .map_err(TokenStoreError::Encoding)?;
-                        if let Err(error) = audit.append(
-                            "api_token_revoked",
-                            audit_context.transport.as_str(),
-                            audit_context.actor_username.as_str(),
-                            "",
-                            audit_context.session_id_prefix,
-                            "ok",
-                            details,
-                            now_ns,
-                        ) {
-                            tracing::warn!(error = ?error, "api token audit append failed");
+                tracing::dispatcher::with_default(&dispatcher, || {
+                    let _gate = gate;
+                    let outcome = store.with_locked_records(|db, ks| {
+                        let Some(mut current) =
+                            store.scan_locked()?.into_iter().find(|r| r.id == id.0)
+                        else {
+                            return Ok(None);
+                        };
+                        if current.revoked_at_ns.is_some() {
+                            return Ok(Some((current.owner_user_id, false)));
                         }
-                        Ok(Some(true))
+                        current.revoked_at_ns = Some(now_ns.max(1));
+                        store.write_locked(db, ks, &current)?;
+                        Ok(Some((current.owner_user_id, true)))
+                    })?;
+                    match outcome {
+                        None => Ok(None),
+                        Some((_, false)) => Ok(Some(false)),
+                        Some((owner_id, true)) => {
+                            counters.count_revoked();
+                            let details = rmp_serde::to_vec_named(&(id.0, owner_id))
+                                .map_err(TokenStoreError::Encoding)?;
+                            if let Err(error) = audit.append(
+                                "api_token_revoked",
+                                audit_context.transport.as_str(),
+                                audit_context.actor_username.as_str(),
+                                "",
+                                audit_context.session_id_prefix,
+                                "ok",
+                                details,
+                                now_ns,
+                            ) {
+                                tracing::warn!(error = ?error, "api token audit append failed");
+                            }
+                            Ok(Some(true))
+                        }
                     }
-                }
+                })
             })
             .await
             .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))?
@@ -393,38 +408,41 @@ impl TokenService {
         let canceller = Arc::clone(&self.canceller);
         let audit = Arc::clone(&self.audit);
         let counters = Arc::clone(&self.counters);
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            let _gate = gate;
-            let Some(state) = mirror.get(&id) else {
-                return Ok(false);
-            };
-            if state.is_revoked() {
-                return Ok(false);
-            }
-            let mut next = state.record().clone();
-            next.revoked_at_ns = Some(now_ns.max(1));
-            store.with_locked_records(|db, ks| store.write_locked(db, ks, &next))?;
-            mirror.revoke(&id, now_ns);
-            counters.count_revoked();
-            canceller.cancel_token(&id);
-            for session in sessions.sessions_of_token(&id) {
-                sessions.remove(&session.session_id);
-            }
-            let details = rmp_serde::to_vec_named(&(next.id, next.owner_user_id))
-                .map_err(TokenStoreError::Encoding)?;
-            if let Err(error) = audit.append(
-                "api_token_revoked",
-                audit_context.transport.as_str(),
-                audit_context.actor_username.as_str(),
-                "",
-                audit_context.session_id_prefix,
-                "ok",
-                details,
-                now_ns,
-            ) {
-                tracing::warn!(error = ?error, "api token audit append failed");
-            }
-            Ok(true)
+            tracing::dispatcher::with_default(&dispatcher, || {
+                let _gate = gate;
+                let Some(state) = mirror.get(&id) else {
+                    return Ok(false);
+                };
+                if state.is_revoked() {
+                    return Ok(false);
+                }
+                let mut next = state.record().clone();
+                next.revoked_at_ns = Some(now_ns.max(1));
+                store.with_locked_records(|db, ks| store.write_locked(db, ks, &next))?;
+                mirror.revoke(&id, now_ns);
+                counters.count_revoked();
+                canceller.cancel_token(&id);
+                for session in sessions.sessions_of_token(&id) {
+                    sessions.remove(&session.session_id);
+                }
+                let details = rmp_serde::to_vec_named(&(next.id, next.owner_user_id))
+                    .map_err(TokenStoreError::Encoding)?;
+                if let Err(error) = audit.append(
+                    "api_token_revoked",
+                    audit_context.transport.as_str(),
+                    audit_context.actor_username.as_str(),
+                    "",
+                    audit_context.session_id_prefix,
+                    "ok",
+                    details,
+                    now_ns,
+                ) {
+                    tracing::warn!(error = ?error, "api token audit append failed");
+                }
+                Ok(true)
+            })
         })
         .await
         .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))?
@@ -458,57 +476,63 @@ impl TokenService {
         let canceller = Arc::clone(&self.canceller);
         let audit = Arc::clone(&self.audit);
         let counters = Arc::clone(&self.counters);
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            let _gate = gate;
-            let rows = store.with_locked_records(|db, ks| {
-                let mut rows: Vec<_> = store
-                    .scan_locked()?
-                    .into_iter()
-                    .filter(|r| {
-                        r.owner_user_id == owner
-                            && r.revoked_at_ns.is_none()
-                            && r.expires_at_ns > now_ns
-                    })
-                    .collect();
-                for row in &mut rows {
-                    row.revoked_at_ns = Some(now_ns.max(1));
-                }
-                let mut batch = db.batch().durability(Some(fjall::PersistMode::SyncAll));
+            tracing::dispatcher::with_default(&dispatcher, || {
+                let _gate = gate;
+                let rows = store.with_locked_records(|db, ks| {
+                    let mut rows: Vec<_> = store
+                        .scan_locked()?
+                        .into_iter()
+                        .filter(|r| {
+                            r.owner_user_id == owner
+                                && r.revoked_at_ns.is_none()
+                                && r.expires_at_ns > now_ns
+                        })
+                        .collect();
+                    for row in &mut rows {
+                        row.revoked_at_ns = Some(now_ns.max(1));
+                    }
+                    let mut batch = db.batch().durability(Some(fjall::PersistMode::SyncAll));
+                    for row in &rows {
+                        let bytes =
+                            rmp_serde::to_vec_named(row).map_err(TokenStoreError::Encoding)?;
+                        batch.insert(ks, row.id, bytes.as_slice());
+                    }
+                    if !rows.is_empty() {
+                        store.fail_locked_write()?;
+                        batch.commit()?;
+                    }
+                    Ok(rows)
+                })?;
                 for row in &rows {
-                    let bytes = rmp_serde::to_vec_named(row).map_err(TokenStoreError::Encoding)?;
-                    batch.insert(ks, row.id, bytes.as_slice());
+                    let id = TokenId(row.id);
+                    mirror.revoke(&id, now_ns);
+                    canceller.cancel_token(&id);
+                    for session in sessions.sessions_of_token(&id) {
+                        sessions.remove(&session.session_id);
+                    }
+                    counters.count_revoked();
                 }
-                if !rows.is_empty() {
-                    store.fail_locked_write()?;
-                    batch.commit()?;
+                let details = rmp_serde::to_vec_named(&(
+                    owner,
+                    rows.iter().map(|r| r.id).collect::<Vec<_>>(),
+                ))
+                .map_err(TokenStoreError::Encoding)?;
+                if let Err(error) = audit.append(
+                    "api_token_user_revoked",
+                    audit_context.transport.as_str(),
+                    audit_context.actor_username.as_str(),
+                    "",
+                    audit_context.session_id_prefix,
+                    "ok",
+                    details,
+                    now_ns,
+                ) {
+                    tracing::warn!(error = ?error, "api token audit append failed");
                 }
-                Ok(rows)
-            })?;
-            for row in &rows {
-                let id = TokenId(row.id);
-                mirror.revoke(&id, now_ns);
-                canceller.cancel_token(&id);
-                for session in sessions.sessions_of_token(&id) {
-                    sessions.remove(&session.session_id);
-                }
-                counters.count_revoked();
-            }
-            let details =
-                rmp_serde::to_vec_named(&(owner, rows.iter().map(|r| r.id).collect::<Vec<_>>()))
-                    .map_err(TokenStoreError::Encoding)?;
-            if let Err(error) = audit.append(
-                "api_token_user_revoked",
-                audit_context.transport.as_str(),
-                audit_context.actor_username.as_str(),
-                "",
-                audit_context.session_id_prefix,
-                "ok",
-                details,
-                now_ns,
-            ) {
-                tracing::warn!(error = ?error, "api token audit append failed");
-            }
-            Ok(rows.len())
+                Ok(rows.len())
+            })
         })
         .await
         .map_err(|_| TokenCreateError::Store(TokenStoreError::Join))?
@@ -517,11 +541,14 @@ impl TokenService {
     /// Find a retained token record by id without exposing its bearer secret.
     pub async fn lookup(&self, id: [u8; 16]) -> Result<Option<TokenView>, TokenStoreError> {
         let store = self.store.clone();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            Ok(store
-                .get_blocking(&TokenId(id))?
-                .as_ref()
-                .map(TokenView::from))
+            tracing::dispatcher::with_default(&dispatcher, || {
+                Ok(store
+                    .get_blocking(&TokenId(id))?
+                    .as_ref()
+                    .map(TokenView::from))
+            })
         })
         .await
         .map_err(|_| TokenStoreError::Join)?
@@ -530,13 +557,16 @@ impl TokenService {
     /// List the owner's secret-free token metadata.
     pub async fn list(&self, owner: [u8; 16]) -> Result<Vec<TokenView>, TokenStoreError> {
         let store = self.store.clone();
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            Ok(store
-                .scan_blocking()?
-                .iter()
-                .filter(|r| r.owner_user_id == owner)
-                .map(TokenView::from)
-                .collect())
+            tracing::dispatcher::with_default(&dispatcher, || {
+                Ok(store
+                    .scan_blocking()?
+                    .iter()
+                    .filter(|r| r.owner_user_id == owner)
+                    .map(TokenView::from)
+                    .collect())
+            })
         })
         .await
         .map_err(|_| TokenStoreError::Join)?

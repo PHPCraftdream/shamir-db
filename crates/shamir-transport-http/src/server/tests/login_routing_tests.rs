@@ -68,9 +68,10 @@ impl LoginRoutes for Enabled {
     ) -> Result<Self::Permit, LoginResponse> {
         Ok(())
     }
-    async fn handle(&self, _: Bytes, _: Self::Permit, _: Bytes) -> LoginResponse {
+    async fn handle(&self, _: Bytes, _: Arc<Self::Permit>, _: Bytes) -> LoginResponse {
         LoginResponse::new(http::StatusCode::OK, Bytes::new())
     }
+    fn refused(&self, _: &[u8], _: http::StatusCode) {}
     fn body_limit(&self, _: &[u8]) -> usize {
         4096
     }

@@ -52,7 +52,7 @@ where
     let path = request.uri().path().to_owned();
     if path == "/shamir/v1/auth/begin" || path == "/shamir/v1/auth/finish" {
         let request_peer = peer(context.peer.addr, context.peer.tls, request.headers());
-        return Ok(super::routes::handle_login(
+        let mut response = super::routes::handle_login(
             request,
             context.login.clone(),
             request_peer,
@@ -61,7 +61,16 @@ where
             context.cfg.limits.request_timeout,
             context.write_timeout_override.clone(),
         )
-        .await);
+        .await;
+        if let Some(hold) = response.extensions_mut().remove::<Arc<dyn Send + Sync>>() {
+            let (parts, body) = response.into_parts();
+            let _ = context
+                .holds
+                .send(Box::new(hold) as Box<dyn Send + Sync>)
+                .await;
+            return Ok(Response::from_parts(parts, body));
+        }
+        return Ok(response);
     }
     let ws_route = match path.as_str() {
         "/shamir/v1/ws" if context.cfg.endpoints.ws => Some(WsRoute::Native),

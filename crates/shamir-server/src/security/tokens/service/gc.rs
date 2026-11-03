@@ -36,30 +36,34 @@ impl GcService {
         }
         let store = self.store.clone();
         let mirror = Arc::clone(&self.mirror);
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
         tokio::task::spawn_blocking(move || {
-            let _gates = gates;
-            store.with_locked_records(|db, ks| {
-                let mut batch = db.batch().durability(Some(fjall::PersistMode::SyncAll));
-                let mut ids = Vec::new();
-                for row in store.scan_locked()? {
-                    let expired = row.expires_at_ns.saturating_add(30 * 86_400_000_000_000) < now;
-                    let revoked = row
-                        .revoked_at_ns
-                        .is_some_and(|at| at.saturating_add(30 * 86_400_000_000_000) < now);
-                    if expired || revoked {
-                        let id = TokenId(row.id);
-                        batch.remove(ks, id.0);
-                        ids.push(id);
+            tracing::dispatcher::with_default(&dispatcher, || {
+                let _gates = gates;
+                store.with_locked_records(|db, ks| {
+                    let mut batch = db.batch().durability(Some(fjall::PersistMode::SyncAll));
+                    let mut ids = Vec::new();
+                    for row in store.scan_locked()? {
+                        let expired =
+                            row.expires_at_ns.saturating_add(30 * 86_400_000_000_000) < now;
+                        let revoked = row
+                            .revoked_at_ns
+                            .is_some_and(|at| at.saturating_add(30 * 86_400_000_000_000) < now);
+                        if expired || revoked {
+                            let id = TokenId(row.id);
+                            batch.remove(ks, id.0);
+                            ids.push(id);
+                        }
                     }
-                }
-                if !ids.is_empty() {
-                    store.fail_locked_write()?;
-                    batch.commit()?;
-                    for id in &ids {
-                        mirror.remove(id);
+                    if !ids.is_empty() {
+                        store.fail_locked_write()?;
+                        batch.commit()?;
+                        for id in &ids {
+                            mirror.remove(id);
+                        }
                     }
-                }
-                Ok(ids.len())
+                    Ok(ids.len())
+                })
             })
         })
         .await

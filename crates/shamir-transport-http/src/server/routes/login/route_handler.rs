@@ -23,7 +23,10 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
     write_timeout_override: Arc<AtomicU64>,
 ) -> Response<BoxBody<Bytes, Infallible>> {
     let tls = peer.tls;
+    let route = Bytes::copy_from_slice(request.uri().path().as_bytes());
+    let report_refusal = |status| routes.refused(route.as_ref(), status);
     if request.version() != http::Version::HTTP_11 {
+        report_refusal(StatusCode::BAD_REQUEST);
         return finish_reply(
             error_response(StatusCode::BAD_REQUEST, "invalid_request"),
             tls,
@@ -31,7 +34,6 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
             &write_timeout_override,
         );
     }
-    let route = Bytes::copy_from_slice(request.uri().path().as_bytes());
     let request_deadline = request_started + request_limit.min(Duration::from_secs(120));
     let total_deadline = if routes.enabled() {
         request_deadline
@@ -50,6 +52,7 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
         );
     }
     if request.method() != http::Method::POST {
+        report_refusal(StatusCode::METHOD_NOT_ALLOWED);
         return finish_reply(
             error_response(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed"),
             tls,
@@ -71,6 +74,7 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
         || content_types[0].as_bytes() != b"application/msgpack"
         || !encoding_values.is_empty()
     {
+        report_refusal(StatusCode::UNSUPPORTED_MEDIA_TYPE);
         return finish_reply(
             error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type"),
             tls,
@@ -87,6 +91,7 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
         || (request.headers().contains_key(header::TRANSFER_ENCODING)
             && !declared_values.is_empty())
     {
+        report_refusal(StatusCode::BAD_REQUEST);
         return finish_reply(
             error_response(StatusCode::BAD_REQUEST, "invalid_request"),
             tls,
@@ -104,6 +109,7 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
             .iter()
             .any(|value| value.as_bytes() != b"chunked")
     {
+        report_refusal(StatusCode::BAD_REQUEST);
         return finish_reply(
             error_response(StatusCode::BAD_REQUEST, "invalid_request"),
             tls,
@@ -121,20 +127,22 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
         Some(value) => match value.to_str().ok().and_then(|s| s.parse::<usize>().ok()) {
             Some(length) if length <= limit => Some(length),
             Some(_) => {
+                report_refusal(StatusCode::PAYLOAD_TOO_LARGE);
                 return finish_reply(
                     error_response(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large"),
                     tls,
                     hsts,
                     &write_timeout_override,
-                )
+                );
             }
             None => {
+                report_refusal(StatusCode::BAD_REQUEST);
                 return finish_reply(
                     error_response(StatusCode::BAD_REQUEST, "invalid_request"),
                     tls,
                     hsts,
                     &write_timeout_override,
-                )
+                );
             }
         },
         None => None,
@@ -151,16 +159,18 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
     .await;
     let permit = match admission {
         Err(_) => {
+            report_refusal(StatusCode::REQUEST_TIMEOUT);
             return finish_reply(
                 error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
                 tls,
                 hsts,
                 &write_timeout_override,
-            )
+            );
         }
         Ok(Err(reply)) => return finish_reply(reply, tls, hsts, &write_timeout_override),
         Ok(Ok(permit)) => permit,
     };
+    let permit = Arc::new(permit);
     let admitted = tokio::time::Instant::now();
     let deadline = (admitted + Duration::from_secs(3)).min(total_deadline);
     let mut body = request.into_body();
@@ -184,45 +194,65 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
     .await;
     match read {
         Err(_) => {
-            return finish_reply(
+            report_refusal(StatusCode::REQUEST_TIMEOUT);
+            let response = finish_reply(
                 error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
                 tls,
                 hsts,
                 &write_timeout_override,
-            )
+            );
+            return attach_hold(response, Arc::clone(&permit));
         }
         Ok(Err(BodyReadFailure::TooLarge)) => {
-            return finish_reply(
+            report_refusal(StatusCode::PAYLOAD_TOO_LARGE);
+            let response = finish_reply(
                 error_response(StatusCode::PAYLOAD_TOO_LARGE, "request_too_large"),
                 tls,
                 hsts,
                 &write_timeout_override,
-            )
+            );
+            return attach_hold(response, Arc::clone(&permit));
         }
         Ok(Err(BodyReadFailure::Invalid)) => {
-            return finish_reply(
+            report_refusal(StatusCode::BAD_REQUEST);
+            let response = finish_reply(
                 error_response(StatusCode::BAD_REQUEST, "invalid_request"),
                 tls,
                 hsts,
                 &write_timeout_override,
-            )
+            );
+            return attach_hold(response, Arc::clone(&permit));
         }
         Ok(Ok(())) => {}
     }
     match tokio::time::timeout_at(
         total_deadline,
-        routes.handle(route, permit, Bytes::from(collected)),
+        routes.handle(route, Arc::clone(&permit), Bytes::from(collected)),
     )
     .await
     {
         Ok(reply) => finish_reply(reply, tls, hsts, &write_timeout_override),
-        Err(_) => finish_reply(
-            error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
-            tls,
-            hsts,
-            &write_timeout_override,
-        ),
+        Err(_) => {
+            report_refusal(StatusCode::REQUEST_TIMEOUT);
+            let response = finish_reply(
+                error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
+                tls,
+                hsts,
+                &write_timeout_override,
+            );
+            attach_hold(response, Arc::clone(&permit))
+        }
     }
+}
+
+fn attach_hold<P: Send + Sync + 'static>(
+    mut response: Response<BoxBody<Bytes, Infallible>>,
+    permit: P,
+) -> Response<BoxBody<Bytes, Infallible>> {
+    response
+        .extensions_mut()
+        .insert(Arc::new(permit) as Arc<dyn Send + Sync>);
+    response
 }
 
 fn finish_reply(
@@ -242,7 +272,7 @@ enum BodyReadFailure {
 }
 
 pub(super) fn login_response(
-    reply: LoginResponse,
+    mut reply: LoginResponse,
     tls: bool,
     hsts: bool,
 ) -> Response<BoxBody<Bytes, Infallible>> {
@@ -277,6 +307,9 @@ pub(super) fn login_response(
     }
     if reply.status() == StatusCode::METHOD_NOT_ALLOWED {
         headers.insert(header::ALLOW, HeaderValue::from_static("POST"));
+    }
+    if let Some(hold) = reply.take_hold() {
+        output.extensions_mut().insert(hold);
     }
     output
 }
