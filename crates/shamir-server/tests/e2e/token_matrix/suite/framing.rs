@@ -1,5 +1,5 @@
-use super::super::http_rest::common::Harness;
-use super::support::{connect, send_http, status, DEADLINE, MAX_HEAD};
+use crate::http_rest::common::Harness;
+use crate::token_matrix::support::{connect, send_http, status, DEADLINE, MAX_HEAD};
 use futures_util::StreamExt;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::token::{parse_token, Endpoint, TokenMode, VerifyFailure};
@@ -29,7 +29,7 @@ async fn framing(harness: &Harness, tls: bool) {
         .await
         .expect("partial head write timeout")
         .expect("partial head write");
-    let (head, _) = super::support::read_response(&mut stream).await;
+    let (head, _) = crate::token_matrix::support::read_response(&mut stream).await;
     assert_eq!(status(&head), 408);
     let mut byte = [0; 1];
     let n = tokio::time::timeout(DEADLINE, stream.read(&mut byte))
@@ -50,7 +50,7 @@ async fn framing(harness: &Harness, tls: bool) {
         .await
         .expect("oversized request write timeout")
         .expect("oversized request head");
-    let (head, _) = super::support::read_response(&mut stream).await;
+    let (head, _) = crate::token_matrix::support::read_response(&mut stream).await;
     assert_eq!(status(&head), 413);
 }
 
@@ -208,116 +208,150 @@ async fn wss_oversized_frame_and_revoke_closure() {
     assert!(report.errors().is_empty(), "shutdown errors: {report:?}");
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tls_rest_and_wss_authentication_gaps() {
-    for endpoint in ["rest", "wss"] {
-        for case in [
-            "missing",
-            "duplicate",
-            "wrong-secret",
-            "unknown",
-            "expired",
-            "revoked",
-        ] {
-            if endpoint == "rest" && matches!(case, "wrong-secret" | "unknown") {
-                continue;
-            }
-            let harness = Harness::launch_with(
-                "127.0.0.1:0",
-                shamir_server::config::HttpListenerSettings {
-                    tls: Some(true),
-                    ..Default::default()
-                },
-            )
-            .await;
-            let token = harness.token("tls-auth-gap", TokenMode::ReadOnly).await;
-            let parsed = parse_token(token.as_bytes()).expect("issued token parses");
-            let credential = match case {
-                "wrong-secret" => {
-                    let mut bytes = token.as_bytes().to_vec();
-                    bytes[28] = if bytes[28] == b'A' { b'B' } else { b'A' };
-                    String::from_utf8(bytes).expect("mutated token")
-                }
-                "unknown" => {
-                    "shk1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-                        .to_owned()
-                }
-                "expired" => {
-                    let mut record = harness
-                        .handle
-                        .token_service
-                        .mirror()
-                        .get(&parsed.id)
-                        .expect("token record")
-                        .record()
-                        .clone();
-                    record.created_at_ns = 1;
-                    record.expires_at_ns = 2;
-                    assert!(harness.handle.token_service.mirror().remove(&parsed.id));
-                    assert!(harness.handle.token_service.mirror().insert(record));
-                    let now = UnixNanos::try_now().expect("clock").as_u64();
-                    assert!(matches!(
-                        harness
-                            .handle
-                            .token_service
-                            .verify(token.as_bytes(), Endpoint::Rest, now),
-                        Err(VerifyFailure::Expired)
-                    ));
-                    token.clone()
-                }
-                "revoked" => {
-                    harness
-                        .handle
-                        .token_service
-                        .revoke(parsed.id, UnixNanos::try_now().expect("clock").as_u64())
-                        .await
-                        .expect("revoke");
-                    token.clone()
-                }
-                _ => token.clone(),
-            };
-            if case == "unknown" {
-                let id = parse_token(credential.as_bytes()).expect("unknown parses");
-                assert!(harness.handle.token_service.mirror().get(&id.id).is_none());
-            }
-            if endpoint == "rest" {
-                let auth = match case {
-                    "missing" => String::new(),
-                    "duplicate" => format!(
-                        "Authorization: Bearer {token}\r\nAuthorization: Bearer {token}\r\n"
-                    ),
-                    _ => format!("Authorization: Bearer {credential}\r\n"),
-                };
-                let req=format!("GET /shamir/v1/ping HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/msgpack\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-                let (head, body) = send_http(&harness, true, &req).await;
-                assert_eq!(status(&head), 401, "{case}");
-                assert_eq!(body, b"\x81\xa5error\xacunauthorized", "{case}");
-                let h = head.to_ascii_lowercase();
-                assert!(h.lines().any(|x| x.trim() == "www-authenticate: bearer"));
-                assert!(h.lines().any(|x| x.trim() == "connection: close"));
-            } else {
-                let auth = match case {
-                    "missing" => String::new(),
-                    "duplicate" => format!(
-                        "Authorization: Bearer {token}\r\nAuthorization: Bearer {token}\r\n"
-                    ),
-                    _ => format!("Authorization: Bearer {credential}\r\n"),
-                };
-                let req = format!("GET /shamir/v1/ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: shamir-v1\r\n{auth}\r\n");
-                let (head, body) = send_http(&harness, true, &req).await;
-                assert_eq!(status(&head), 401, "{case}");
-                assert_eq!(body, b"\x81\xa5error\xacunauthorized", "{case}");
-                let h = head.to_ascii_lowercase();
-                assert!(h.lines().any(|x| x.trim() == "www-authenticate: bearer"));
-                assert!(h.lines().any(|x| x.trim() == "connection: close"));
-            }
-            let report = tokio::time::timeout(
-                std::time::Duration::from_secs(45),
-                harness.handle.shutdown(),
-            )
-            .await
-            .expect("shutdown timeout");
-            assert!(report.errors().is_empty(), "{case}: {report:?}");
+async fn tls_auth_gap(endpoint: &str, case: &str) {
+    let harness = Harness::launch_with(
+        "127.0.0.1:0",
+        shamir_server::config::HttpListenerSettings {
+            tls: Some(true),
+            ..Default::default()
+        },
+    )
+    .await;
+    let token = harness.token("tls-auth-gap", TokenMode::ReadOnly).await;
+    let parsed = parse_token(token.as_bytes()).expect("issued token parses");
+    let credential = match case {
+        "wrong-secret" => {
+            let mut bytes = token.as_bytes().to_vec();
+            bytes[28] = if bytes[28] == b'A' { b'B' } else { b'A' };
+            String::from_utf8(bytes).expect("mutated token")
         }
+        "unknown" => {
+            "shk1.AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned()
+        }
+        "expired" => {
+            let mut record = harness
+                .handle
+                .token_service
+                .mirror()
+                .get(&parsed.id)
+                .expect("token record")
+                .record()
+                .clone();
+            record.created_at_ns = 1;
+            record.expires_at_ns = 2;
+            assert!(harness.handle.token_service.mirror().remove(&parsed.id));
+            assert!(harness.handle.token_service.mirror().insert(record));
+            let now = UnixNanos::try_now().expect("clock").as_u64();
+            assert!(matches!(
+                harness
+                    .handle
+                    .token_service
+                    .verify(token.as_bytes(), Endpoint::Rest, now),
+                Err(VerifyFailure::Expired)
+            ));
+            token.clone()
+        }
+        "revoked" => {
+            harness
+                .handle
+                .token_service
+                .revoke(parsed.id, UnixNanos::try_now().expect("clock").as_u64())
+                .await
+                .expect("revoke");
+            token.clone()
+        }
+        _ => token.clone(),
+    };
+    if case == "unknown" {
+        let id = parse_token(credential.as_bytes()).expect("unknown parses");
+        assert!(harness.handle.token_service.mirror().get(&id.id).is_none());
     }
+    if endpoint == "rest" {
+        let auth = match case {
+            "missing" => String::new(),
+            "duplicate" => {
+                format!("Authorization: Bearer {token}\r\nAuthorization: Bearer {token}\r\n")
+            }
+            _ => format!("Authorization: Bearer {credential}\r\n"),
+        };
+        let req=format!("GET /shamir/v1/ping HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Type: application/msgpack\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let (head, body) = send_http(&harness, true, &req).await;
+        assert_eq!(status(&head), 401, "{case}");
+        assert_eq!(body, b"\x81\xa5error\xacunauthorized", "{case}");
+        let h = head.to_ascii_lowercase();
+        assert!(h.lines().any(|x| x.trim() == "www-authenticate: bearer"));
+        assert!(h.lines().any(|x| x.trim() == "connection: close"));
+    } else {
+        let auth = match case {
+            "missing" => String::new(),
+            "duplicate" => {
+                format!("Authorization: Bearer {token}\r\nAuthorization: Bearer {token}\r\n")
+            }
+            _ => format!("Authorization: Bearer {credential}\r\n"),
+        };
+        let req = format!("GET /shamir/v1/ws HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Protocol: shamir-v1\r\n{auth}\r\n");
+        let (head, body) = send_http(&harness, true, &req).await;
+        assert_eq!(status(&head), 401, "{case}");
+        assert_eq!(body, b"\x81\xa5error\xacunauthorized", "{case}");
+        let h = head.to_ascii_lowercase();
+        assert!(h.lines().any(|x| x.trim() == "www-authenticate: bearer"));
+        assert!(h.lines().any(|x| x.trim() == "connection: close"));
+    }
+    let report = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        harness.handle.shutdown(),
+    )
+    .await
+    .expect("shutdown timeout");
+    assert!(report.errors().is_empty(), "{case}: {report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_rest_auth_gap_missing() {
+    tls_auth_gap("rest", "missing").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_rest_auth_gap_duplicate() {
+    tls_auth_gap("rest", "duplicate").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_rest_auth_gap_expired() {
+    tls_auth_gap("rest", "expired").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_rest_auth_gap_revoked() {
+    tls_auth_gap("rest", "revoked").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_wss_auth_gap_missing() {
+    tls_auth_gap("wss", "missing").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_wss_auth_gap_duplicate() {
+    tls_auth_gap("wss", "duplicate").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_wss_auth_gap_wrong_secret() {
+    tls_auth_gap("wss", "wrong-secret").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_wss_auth_gap_unknown() {
+    tls_auth_gap("wss", "unknown").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_wss_auth_gap_expired() {
+    tls_auth_gap("wss", "expired").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_wss_auth_gap_revoked() {
+    tls_auth_gap("wss", "revoked").await;
 }

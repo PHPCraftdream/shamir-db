@@ -1,5 +1,5 @@
-use super::super::http_rest::common::{Harness, ADMIN_PASSWORD};
-use super::support::{self, connect, send_http, status, DEADLINE, MAX_HEAD};
+use crate::http_rest::common::{Harness, ADMIN_PASSWORD};
+use crate::token_matrix::support::{self, connect, send_http, status, DEADLINE, MAX_HEAD};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};

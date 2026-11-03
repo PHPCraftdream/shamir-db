@@ -1,6 +1,6 @@
-use super::super::http_rest::common::{ping_body, request, Harness, ADMIN_PASSWORD};
 use super::issuance::connect;
-use super::support::DEADLINE;
+use crate::http_rest::common::{ping_body, request, Harness, ADMIN_PASSWORD};
+use crate::token_matrix::support::DEADLINE;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::server::token::{TokenChannels, TokenId, TokenMode};
 use shamir_query_builder::{batch::Batch, ddl, token_admin, Query};
@@ -284,8 +284,8 @@ async fn admin_revoke_invalidates_online_token() {
         "unexpected final response: {}",
         final_head
     );
-    let body_len =
-        super::support::content_length(&final_head).expect("final response content-length");
+    let body_len = crate::token_matrix::support::content_length(&final_head)
+        .expect("final response content-length");
     assert!(
         body_len <= 1024,
         "final response body too large: {body_len}"
@@ -306,21 +306,17 @@ async fn admin_revoke_invalidates_online_token() {
             batch.build()
         },
     };
+    let control = admin
+        .create_api_token(
+            token_admin::create_api_token("read-check")
+                .mode(ApiTokenMode::ReadOnly)
+                .channels(ApiTokenChannels::Rest),
+        )
+        .await
+        .expect("read control token");
     let (status, _, bytes) = request(
         harness.addr(),
-        Some(
-            &admin
-                .create_api_token(
-                    token_admin::create_api_token("read-check")
-                        .mode(ApiTokenMode::ReadOnly)
-                        .channels(ApiTokenChannels::Rest),
-                )
-                .await
-                .expect("read control token")
-                .token
-                .reveal()
-                .to_owned(),
-        ),
+        Some(control.token.reveal()),
         &rmp_serde::to_vec_named(&query).expect("encode query"),
     )
     .await;
@@ -346,8 +342,8 @@ async fn restore_invalidates_tokens_and_allows_fresh_issuance() {
     let restore_root = tempfile::TempDir::new().expect("restore data parent");
     let data_dir = restore_root.path().join("data");
     std::fs::create_dir(&data_dir).expect("create data directory");
-    let (owner, owner_roles) = super::super::http_rest::common::seed_owner(&data_dir).await;
-    let handle = ServerLauncher::new(super::super::http_rest::common::config_for(&data_dir))
+    let (owner, owner_roles) = crate::http_rest::common::seed_owner(&data_dir).await;
+    let handle = ServerLauncher::new(crate::http_rest::common::config_for(&data_dir))
         .with_bootstrap(BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
@@ -385,7 +381,7 @@ async fn restore_invalidates_tokens_and_allows_fresh_issuance() {
     let snapshot_dir = tempfile::TempDir::new().expect("snapshot parent");
     let snapshot =
         backup::backup(&data_dir, snapshot_dir.path()).expect("backup stopped data directory");
-    let server = ServerLauncher::new(super::super::http_rest::common::config_for(&data_dir))
+    let server = ServerLauncher::new(crate::http_rest::common::config_for(&data_dir))
         .with_bootstrap(BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
@@ -439,7 +435,7 @@ async fn restore_invalidates_tokens_and_allows_fresh_issuance() {
         directory.tickets_invalid_before_ns_by_user_id(&owner) > token.record_view.created_at_ns
     );
     drop(directory);
-    let restarted = ServerLauncher::new(super::super::http_rest::common::config_for(&data_dir))
+    let restarted = ServerLauncher::new(crate::http_rest::common::config_for(&data_dir))
         .with_bootstrap(BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),

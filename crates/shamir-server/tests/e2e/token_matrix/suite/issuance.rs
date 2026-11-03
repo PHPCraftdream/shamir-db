@@ -1,4 +1,4 @@
-use super::super::http_rest::common::{ping_body, request, Harness, ADMIN_PASSWORD};
+use crate::http_rest::common::{ping_body, request, Harness, ADMIN_PASSWORD};
 use shamir_client::{Client, ClientError, ConnectOptions};
 use shamir_query_builder::{batch::Batch, ddl, token_admin};
 use shamir_query_types::batch::BatchOp;
@@ -258,6 +258,7 @@ async fn token_sessions_cannot_manage_tokens_over_rest() {
     }
 
     let (status, _, _) = request(harness.addr(), Some(&token), &ping_body()).await;
+    assert_eq!(status, 200, "the session stays usable after the denials");
     shutdown(harness).await;
 }
 
@@ -287,8 +288,8 @@ async fn owner_role_change_invalidates_rest_tokens() {
             "GET /shamir/v1/ping HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
             rest_token.token.reveal()
         );
-        let (head, _) = super::support::send_http(&harness, tls, &get).await;
-        assert_eq!(super::support::status(&head), 200);
+        let (head, _) = crate::token_matrix::support::send_http(&harness, tls, &get).await;
+        assert_eq!(crate::token_matrix::support::status(&head), 200);
         let unsigned = ddl::grant_role("matrix_role", "admin")
             .hmac("placeholder")
             .build()
@@ -316,8 +317,8 @@ async fn owner_role_change_invalidates_rest_tokens() {
             .await
             .expect("grant owner role");
 
-        let (head, body) = super::support::send_http(&harness, tls, &get).await;
-        assert_eq!(super::support::status(&head), 401);
+        let (head, body) = crate::token_matrix::support::send_http(&harness, tls, &get).await;
+        assert_eq!(crate::token_matrix::support::status(&head), 401);
         assert_eq!(body, b"\x81\xa5error\xacunauthorized");
         drop(admin);
         shutdown(harness).await;

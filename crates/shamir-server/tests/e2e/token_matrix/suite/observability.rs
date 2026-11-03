@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use super::super::http_rest::common::{assert_pong, ping_body, request, Harness};
+use crate::http_rest::common::{assert_pong, ping_body, request, Harness};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use shamir_connect::server::token::{parse_token, TokenChannels, TokenMode};
