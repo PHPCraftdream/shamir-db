@@ -83,7 +83,48 @@ listeners: [
             https://app.example.com
         ]
     }
+    ## Token REST, loopback plaintext, login disabled.
+    ## A body cap of 4 MiB becomes a shared 64 MiB budget if this is the largest HTTP listener.
+    ## {
+    ##     kind: http
+    ##     addr: 127.0.0.1:7340
+    ##     tls: false
+    ##     max_request_body_bytes: 4194304
+    ##     head_timeout_ms: 5000
+    ##     body_timeout_ms: 15000
+    ##     request_timeout_ms: 60000
+    ##     login: {
+    ##         enabled: false
+    ##         authority_allowlist: []
+    ##     }
+    ## }
+    ## Optional TLS login on loopback; configure top-level tls cert/key first.
+    ## {
+    ##     kind: http
+    ##     addr: 127.0.0.1:7341
+    ##     tls: true
+    ##     max_request_body_bytes: 4194304
+    ##     head_timeout_ms: 5000
+    ##     body_timeout_ms: 15000
+    ##     request_timeout_ms: 60000
+    ##     login: {
+    ##         enabled: true
+    ##         authority_allowlist: []
+    ##     }
+    ## }
 ]
+## Example token settings (uncomment and configure for token API use):
+## tokens: {
+##     default_ttl_days: 7
+##     max_ttl_days: 30
+##     max_per_user: 5
+##     allow_self_service: true
+##     session_max_age_hours: 12
+##     max_sockets_per_token: 2
+##     max_sockets_per_owner: 8
+##     login_ttl: 3600
+##     login_allow_read_write: false
+## }
 
 tls: {
     cert_path: /var/lib/shamir-db/cert.pem
