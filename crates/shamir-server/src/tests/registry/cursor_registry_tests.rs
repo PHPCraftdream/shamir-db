@@ -33,6 +33,34 @@ async fn make_cursor(seed: u64) -> Cursor {
 }
 
 #[tokio::test]
+async fn remove_all_for_session_removes_only_owned_cursors() {
+    let reg = CursorRegistry::new();
+    for id in 1..=2 {
+        reg.register(id, SID_A, make_cursor(id).await, 16).unwrap();
+    }
+    let cursor_b = Cursor::new(
+        ReadQuery::new("items"),
+        PaginationMode::Offset,
+        shamir_tx::RepoTxGate::new(0, 3).open_snapshot().await,
+        0,
+        10,
+        SID_B,
+        "db".to_string(),
+        "repo".to_string(),
+    );
+    reg.register(3, SID_B, cursor_b, 16).unwrap();
+
+    let removed = reg.remove_all_for_session(&SID_A);
+    assert_eq!(removed.len(), 2);
+    assert!(reg.get_owned(1, &SID_A).is_err());
+    assert!(reg.get_owned(2, &SID_A).is_err());
+    assert_eq!(reg.get_owned(3, &SID_B).unwrap().owner_sid(), &SID_B);
+    assert_eq!(reg.open_count_for_session(&SID_A), 0);
+    assert_eq!(reg.open_count_for_session(&SID_B), 1);
+    assert!(reg.remove_all_for_session(&SID_A).is_empty());
+}
+
+#[tokio::test]
 async fn register_then_get_owned_roundtrip() {
     let reg = CursorRegistry::new();
     let cursor = make_cursor(1).await;

@@ -10,6 +10,8 @@ use shamir_transport_http::BodyBudget;
 
 use crate::db_handler::ShamirDbHandler;
 use crate::http_rest::RestGate;
+use crate::http_ws::browser::PreAuthAdmission;
+use crate::http_ws::cancel_registry::TokenWsCancelRegistry;
 use crate::tokens::TokenService;
 
 use shamir_connect::common::kdf_params::KdfParams;
@@ -69,6 +71,8 @@ pub(super) struct ListenerEnv<'a> {
     pub(super) handler: &'a Arc<dyn RequestHandler>,
     pub(super) meta: &'a Arc<ServerMetaStore>,
     pub(super) token_service: &'a Arc<TokenService>,
+    pub(super) token_ws_cancel_registry: &'a Arc<TokenWsCancelRegistry>,
+    pub(super) pre_auth_admission: &'a Arc<PreAuthAdmission>,
     pub(super) handler_concrete: &'a Arc<ShamirDbHandler>,
     pub(super) conn_tasks: &'a ConnTasks,
     pub(super) read_only: bool,

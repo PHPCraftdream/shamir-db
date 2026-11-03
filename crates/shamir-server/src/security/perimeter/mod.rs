@@ -5,4 +5,6 @@ pub mod byte_budget;
 pub mod http_login;
 /// REST bearer-token authentication and execution.
 pub mod http_rest;
+/// HTTP WebSocket channel security and admission.
+pub mod http_ws;
 pub mod tls;

@@ -8,8 +8,14 @@ use tracing::Instrument;
 
 use shamir_connect::server::admin::UserDirectory;
 use shamir_query_types::wire::DbRequest;
-use shamir_transport_http::{serve, serve_with_login, BodyBudget, ConnAdmission, EndpointSet};
+use shamir_transport_http::{
+    serve_with_routes, BodyBudget, ConnAdmission, EndpointSet, NoLogin, RouteServices,
+};
+use shamir_tunables::instance_defaults::{CONN_MAX_IN_FLIGHT, WS_PING_INTERVAL, WS_PONG_TIMEOUT};
 
+use super::super::listeners::ListenerEnv;
+use super::proxy::{Cidr, ProxyGate};
+use super::validate_http_tls;
 use crate::boot::config::{to_http_server_config, ListenerConfig, ListenerKind};
 use crate::conn_limiter::{ConnLimiter, PerIpLimiter};
 use crate::http_login::admission::{AdmissionState, LoginClock, LoginHeadPolicy};
@@ -18,11 +24,10 @@ use crate::http_login::service::{LoginAudit, LoginServiceContext, LoginServiceOp
 use crate::http_login::set_ineligible_users;
 use crate::http_login::HttpLoginRoutes;
 use crate::http_rest::{RestGate, RestGateRails, RestHandler};
+use crate::http_ws::WsUpgradeService;
 use crate::server::boot_error::BootError;
-
-use super::super::listeners::ListenerEnv;
-use super::proxy::{Cidr, ProxyGate};
-use super::validate_http_tls;
+use shamir_connect::server::token_session::TokenSocketCaps;
+use shamir_transport_http::PeerInfo;
 
 type StartedHttp = (SocketAddr, JoinHandle<()>, Arc<RestGate>);
 type UsernameLookup = Arc<dyn Fn(&[u8; 16]) -> String + Send + Sync>;
@@ -141,7 +146,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
         Arc::clone(env.token_service),
         Arc::clone(env.handler_concrete),
         gate_clock,
-        username_lookup,
+        Arc::clone(&username_lookup),
         rails,
     );
     let gate = Arc::new(gate);
@@ -173,7 +178,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
             settings,
             EndpointSet {
                 rest: true,
-                ws: false,
+                ws: true,
             },
             body_budget,
             env.config.security.connection.auth_init_timeout_ms,
@@ -358,6 +363,45 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
     };
     let task_gate = proxy_gate;
     let task_shutdown = shutdown.child_token();
+    for result in [
+        "success",
+        "invalid",
+        "forbidden",
+        "rate_limited",
+        "unavailable",
+    ] {
+        metrics::counter!("shamir_token_auth_total", "channel" => "ws", "result" => result)
+            .increment(0);
+    }
+    metrics::counter!("shamir_token_request_denied_total", "endpoint" => "ws").increment(0);
+    let ws_service = Arc::new(WsUpgradeService {
+        gate: Arc::clone(&gate),
+        service: Arc::clone(env.token_service),
+        handler: Arc::clone(env.handler_concrete),
+        registry: Arc::clone(env.token_ws_cancel_registry),
+        pre_auth: Arc::clone(env.pre_auth_admission),
+        tls: settings.tls == Some(true),
+        browser_available: settings.tls == Some(true) || address.ip().is_loopback(),
+        origins: listener_config.browser_origin_allowlist.clone(),
+        host_allowlist: settings.host_authority_allowlist.clone(),
+        username: Arc::clone(&username_lookup),
+        caps: TokenSocketCaps {
+            per_token: env.config.tokens.max_sockets_per_token,
+            per_owner: env.config.tokens.max_sockets_per_owner,
+        },
+        session_max_age_hours: env.config.tokens.session_max_age_hours,
+        ping_interval: WS_PING_INTERVAL,
+        pong_timeout: WS_PONG_TIMEOUT,
+        max_in_flight: CONN_MAX_IN_FLIGHT,
+        resolve_peer: Arc::new({
+            let trusted = settings
+                .trusted_proxies
+                .iter()
+                .filter_map(|item| super::proxy::parse_cidr(item))
+                .collect::<Vec<_>>();
+            move |peer: &PeerInfo| super::proxy::resolve_peer(peer, &trusted)
+        }),
+    });
     let span = tracing::Span::current();
     let task = tokio::spawn(
         async move {
@@ -365,14 +409,17 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
             let executor = Arc::new(executor);
             let result = if let Some((routes, audit_task, audit_shutdown)) = routes {
                 let _audit_stop = audit_shutdown.clone().drop_guard();
-                let result = serve_with_login(
+                let result = serve_with_routes(
                     listener,
                     config,
                     task_gate,
                     executor,
                     admission,
-                    Arc::clone(&routes),
                     task_shutdown.clone(),
+                    RouteServices {
+                        login: Arc::clone(&routes),
+                        ws: ws_service,
+                    },
                 )
                 .await;
                 if !routes.shutdown(std::time::Duration::from_secs(5)).await {
@@ -390,13 +437,17 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
                 }
                 result
             } else {
-                serve(
+                serve_with_routes(
                     listener,
                     config,
                     task_gate,
                     executor,
                     admission,
                     task_shutdown,
+                    RouteServices {
+                        login: Arc::new(NoLogin),
+                        ws: ws_service,
+                    },
                 )
                 .await
             };
