@@ -30,13 +30,13 @@ impl RepoInstance {
     // Index Management API (proxy to TableManager)
     // ============================================================================
 
+    /// Create a regular index on a table.
+    ///
     /// cancel-safe: NO — multi-step state mutation. Looks up the table
     /// (one await) then calls `table.create_index` which itself performs
     /// catalogue updates and persistence. Partial cancellation can leave
     /// the index in an inconsistent state; recovery is at the caller's
     /// discretion.
-    ///
-    /// Create a non-unique index on a table.
     pub async fn create_index(
         &self,
         table_name: &str,
@@ -49,11 +49,11 @@ impl RepoInstance {
             .await
     }
 
+    /// Create a unique index on a table.
+    ///
     /// cancel-safe: NO — same shape as `create_index`. Catalogue and
     /// persistence updates inside `table.create_unique_index` are not
     /// atomic across cancellation.
-    ///
-    /// Create a unique index on a table.
     pub async fn create_unique_index(
         &self,
         table_name: &str,
@@ -66,11 +66,11 @@ impl RepoInstance {
             .await
     }
 
+    /// Drop a regular index from a table.
+    ///
     /// cancel-safe: NO — multi-step state mutation: lookup table then
     /// delete catalogue entries and persisted index data. Partial
     /// cancellation may leave orphaned index state.
-    ///
-    /// Drop a non-unique index, returning whether it existed.
     pub async fn drop_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         self.get_table(table_name)
             .await?
@@ -78,10 +78,10 @@ impl RepoInstance {
             .await
     }
 
+    /// Drop a unique index from a table.
+    ///
     /// cancel-safe: NO — same shape as `drop_index`. Partial cancellation
     /// may leave orphaned unique-index state.
-    ///
-    /// Drop a unique index, returning whether it existed.
     pub async fn drop_unique_index(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         self.get_table(table_name)
             .await?
@@ -89,10 +89,10 @@ impl RepoInstance {
             .await
     }
 
+    /// Check if a regular index exists on a table.
+    ///
     /// cancel-safe: yes — read-only: looks up the table and queries
     /// existence. No state mutation; cancellation drops the query.
-    ///
-    /// Check whether a non-unique index exists.
     pub async fn index_exists(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         Ok(self
             .get_table(table_name)
@@ -101,9 +101,9 @@ impl RepoInstance {
             .await)
     }
 
-    /// cancel-safe: yes — read-only existence query. No state mutation.
+    /// Check if a unique index exists on a table.
     ///
-    /// Check whether a unique index exists.
+    /// cancel-safe: yes — read-only existence query. No state mutation.
     pub async fn unique_index_exists(&self, table_name: &str, index_name: &str) -> DbResult<bool> {
         Ok(self
             .get_table(table_name)
@@ -112,10 +112,11 @@ impl RepoInstance {
             .await)
     }
 
+    /// Look up records by index value.
+    ///
     /// cancel-safe: yes — read-only lookup. Cancellation drops the query
     /// future with no state mutation.
     ///
-    /// Find record ids matching indexed values.
     pub async fn lookup_by_index(
         &self,
         table_name: &str,
@@ -293,8 +294,15 @@ impl RepoInstance {
         self.configs.len()
     }
 
-    /// Count degraded indexes in initialized table managers.
+    /// #984 — count degraded (non-`Ready`) indexes across all ALREADY-OPEN
+    /// tables in this repo. Pure in-memory — zero store reads. Does NOT
+    /// force-open closed tables (that would turn a cheap `/metrics` gauge
+    /// into an expensive scan and change server behaviour as a side-effect
+    /// of scraping). See [`TableManager::degraded_index_count`] for the
+    /// per-table cost model.
     pub async fn degraded_index_count(&self) -> u64 {
+        // Collect clones first to avoid holding DashMap read guards across
+        // the `.await` points inside the loop.
         let tables: Vec<TableManager> = self
             .tables
             .iter()
@@ -375,6 +383,8 @@ impl RepoInstance {
         RepoIdentity::bump(&store, None).await
     }
 
+    /// Retry-safe even when a previous open bumped before marker removal.
+    ///
     /// Apply an idempotent restore operation to the history epoch.
     pub async fn apply_restore_operation(&self, operation: [u8; 16]) -> DbResult<RepoIdentity> {
         let permit = self
@@ -398,6 +408,8 @@ impl RepoInstance {
         RepoIdentity::bump(&store, Some(operation)).await
     }
 
+    /// Safe only with a persisted destination row; source registration is switched after the write.
+    ///
     /// Rename table stores after durable catalogue persistence.
     ///
     /// `persist` reports whether the catalogue commit is known, known not to have
@@ -761,6 +773,7 @@ impl RepoInstance {
         Ok(new_config)
     }
 
+    /// Commit the prepared rename after its destination catalogue row is durable.
     async fn commit_table_rename_admitted(
         &self,
         from: &str,
