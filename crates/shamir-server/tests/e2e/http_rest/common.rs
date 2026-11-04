@@ -131,17 +131,7 @@ impl Harness {
                 http: Default::default(),
             });
         }
-        let handle = ServerLauncher {
-            config,
-            node_mode: Default::default(),
-            bootstrap: BootstrapMode::Password {
-                username: "admin".into(),
-                password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
-            },
-        }
-        .launch()
-        .await
-        .expect("launch HTTP listener");
+        let handle = launch_through_fjall_release(config).await;
         Self {
             handle,
             temp,
@@ -216,6 +206,32 @@ impl Harness {
             .token
             .to_string()
     }
+}
+
+/// `seed_owner` drops its stores just before the launch; fjall releases the
+/// directory locks from background handles, so the first attempt can observe
+/// `Locked`. That is transient: retry until the release lands.
+async fn launch_through_fjall_release(config: Config) -> ServerHandle {
+    for _ in 0..200 {
+        let launched = ServerLauncher {
+            config: config.clone(),
+            node_mode: Default::default(),
+            bootstrap: BootstrapMode::Password {
+                username: "admin".into(),
+                password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
+            },
+        }
+        .launch()
+        .await;
+        match launched {
+            Ok(handle) => return handle,
+            Err(e) if format!("{e:?}").contains("Locked") => {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(e) => panic!("launch HTTP listener: {e:?}"),
+        }
+    }
+    panic!("fjall lock was not released within the retry window");
 }
 
 /// The database's `0o757` mode grants other principals read, write, and execute,
