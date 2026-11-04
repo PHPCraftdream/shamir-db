@@ -29,6 +29,23 @@ impl TableResolver for DbTableResolver {
         Ok(table)
     }
 
+    /// Same as [`DbTableResolver::resolve`] but routes through
+    /// `DbInstance::get_table_unfenced` — the rename-in-doubt name fence is
+    /// bypassed so read-only declaration walks still resolve a fenced source.
+    async fn resolve_unfenced(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        let mut table = self
+            .db
+            .get_table_unfenced(&table_ref.repo, &table_ref.table)
+            .await?;
+        table.set_validator_registry(self.validators.clone());
+        table
+            .set_scalar_resolver(ScalarResolver::new(std::sync::Arc::clone(
+                self.db.scalars(),
+            )))
+            .await;
+        Ok(table)
+    }
+
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::engine::repo::RepoInstance> {
         self.db.get_repo(repo_name).ok_or_else(|| {
             crate::DbError::NotFound(format!("Repository '{}' not found", repo_name))

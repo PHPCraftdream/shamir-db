@@ -136,6 +136,8 @@ impl TableManager {
             None => index_ops.extend(self.plan_base_index_insert_ops(id, value).await?),
         }
 
+        // Staging before fallible planning: if an operator below fails, the
+        // empty staging stays in the write set and this tx loses the read-only commit fast path.
         tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
 
         self.stage_vectors(id, value, tx).await;
@@ -274,8 +276,9 @@ impl TableManager {
                             .await?,
                     );
 
+                    // Staging before fallible planning: if an operator below fails, the
+                    // empty staging stays in the write set and this tx loses the read-only commit fast path.
                     tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
-                    let token = self.table_token();
                     for backend in self.index2_registry.all_backends().await {
                         if let Some(v) = backend.staged_vector(id, &new_view).await {
                             tx.stage_vector(token, id, v);
@@ -339,6 +342,8 @@ impl TableManager {
                         self.plan_base_index_update_ops(id, &old_tree, &new_tree)
                             .await?,
                     );
+                    // Staging before fallible planning: if an operator below fails, the
+                    // empty staging stays in the write set and this tx loses the read-only commit fast path.
                     tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
                     self.stage_vectors(id, &new_tree, tx).await;
 

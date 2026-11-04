@@ -18,6 +18,10 @@ artifact).
 
 Table catalogue records may contain an optional node-local `store_id`, and tables created or renamed by a new binary use incarnation-qualified physical store names. New binaries open old id-less catalogue rows and old store names unchanged; old binaries are not guaranteed to open ID-bearing tables. Rolling back after new CREATE/RENAME requires restoring a pre-change backup. No migration or orphan-store purge is performed by this change.
 
+## P34-03e — rename-in-doubt fence has no clean rollback exit
+
+Once a rename attempt ends in doubt, the rename fence stays raised and there is no "known rolled back" exit from it short of a process restart: a fenced retry that the catalogue answers `NotCommitted` transfers back into doubt (the fence is re-raised), so the pair can never be proven rolled back from inside the running process. Additionally, every fenced retry copies the source table's three stores again, and each failed attempt leaves those copies behind; orphaned store copies accumulate until cleanup runs. Sources: `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_attempt.rs`, `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs`, `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs`.
+
 ## 1. Transactions
 
 - **Write acknowledgements wait for contiguous settlement, not just their own

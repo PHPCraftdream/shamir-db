@@ -19,6 +19,16 @@ use shamir_types::types::common::TMap;
 pub trait TableResolver: Send + Sync {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager>;
 
+    /// Resolve a table reference bypassing the rename-in-doubt name fence.
+    ///
+    /// Only for read-only declaration walks (FK reverse-cache scan): the
+    /// data of a frozen in-doubt source is stable and its FK declarations
+    /// cannot change, so the walk must not fail on the fenced source name.
+    /// Default: the ordinary fenced [`TableResolver::resolve`].
+    async fn resolve_unfenced(&self, table_ref: &TableRef) -> DbResult<TableManager> {
+        self.resolve(table_ref).await
+    }
+
     /// Resolve a repository by name to its [`crate::repo::RepoInstance`].
     ///
     /// Used by tx-aware paths to obtain the per-repo coordinator
