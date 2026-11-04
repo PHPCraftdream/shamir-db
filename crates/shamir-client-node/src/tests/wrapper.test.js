@@ -10,18 +10,37 @@ let decodedInputs = [];
 // These are codec-boundary responses, not examples of query construction.
 let response;
 let requestBytes;
+let nativeCalls = [];
 class NativeClient {
+  static async connectWs(o) { nativeCalls.push(['connectWs', o]); return new NativeClient(); }
+  static async connectPlain(o) { nativeCalls.push(['connectPlain', o]); return new NativeClient(); }
+  static async connectLocal(o) { nativeCalls.push(['connectLocal', o]); return new NativeClient(); }
+  static async resume(o) { nativeCalls.push(['resume', o]); return new NativeClient(); }
+  static async resumeWs(o) { nativeCalls.push(['resumeWs', o]); return new NativeClient(); }
+  static async connectTokenWs(o) { nativeCalls.push(['connectTokenWs', o]); return new NativeClient(); }
+  authKind() { return 'token'; }
+  async createApiToken(o) { nativeCalls.push(['createApiToken', o]); return response; }
   async createScramUser() { return response; }
   async repl() { return response; }
   async setReplicator() { return response; }
   async execute(db, bytes) { requestBytes = bytes; return response; }
 }
 
+class NativeTokenHttpClient {
+  static async connect(o) { nativeCalls.push(['httpConnect', o]); return new NativeTokenHttpClient(); }
+  async execute(db, bytes) { requestBytes = bytes; return response; }
+}
+async function nativeLogin(o) { nativeCalls.push(['login', o]); return response; }
+
 const load = Module._load;
 let wrapper;
 try {
   Module._load = function (request, parent, isMain) {
-    if (request === '../native/index.js') return { ShamirClient: NativeClient };
+    if (request === '../native/index.js') return {
+      ShamirClient: NativeClient,
+      ShamirTokenHttpClient: NativeTokenHttpClient,
+      login: nativeLogin,
+    };
     if (request === '@msgpack/msgpack') return {
       ...codec,
       decode(input, options) { decodedInputs.push(input); return codec.decode(input, options); },
@@ -138,4 +157,140 @@ test('execute decodes typed errors and ordinary success', async () => {
   response = Buffer.from(encode({ kind: 'error', code: 'validation', message: 'bad' }));
   await assert.rejects(() => client.execute('db', {}), error =>
     error instanceof wrapper.ShamirDbError && error.code === 'validation');
+});
+
+const SECRET = 'S3CR3T-distinct-value';
+const SECRET_BYTES = Buffer.from(SECRET);
+const PIN = Buffer.alloc(32, 1);
+const errorBuf = () => Buffer.from(encode({ kind: 'error', code: 'token_request_denied', message: 'no' }));
+const tokenMap = () => ({
+  token: 'tok', id: new Uint8Array(16).fill(5), owner: 'alice', label: 'l', mode: 'read_only',
+  channels: 'ws', databases: null, created_at_ns: 5, expires_at_ns: 9007199254740993n,
+});
+
+test('new statics return wrapped instances and forward options', async () => {
+  const opts = {
+    connectWs: { host: 'h', port: 1, serverName: 's', username: 'u', password: SECRET },
+    connectPlain: { host: '127.0.0.1', port: 1, username: 'u', password: SECRET },
+    connectLocal: { addr: '/tmp/s', username: 'u', password: SECRET },
+    resume: { host: 'h', port: 1, serverName: 's', ticket: SECRET_BYTES, trustedPin: PIN },
+    resumeWs: { host: 'h', port: 1, serverName: 's', ticket: SECRET_BYTES, trustedPin: PIN },
+    connectTokenWs: { host: 'h', port: 1, token: SECRET },
+  };
+  for (const [name, o] of Object.entries(opts)) {
+    nativeCalls = [];
+    const client = await wrapper.ShamirClient[name](o);
+    assert.ok(client instanceof wrapper.ShamirClient, name);
+    assert.deepEqual(nativeCalls.map(c => c[0]), [name]);
+    assert.strictEqual(nativeCalls[0][1], o);
+  }
+});
+
+test('validation rejects with TypeError, leaks no secret, skips native', async () => {
+  const cases = [
+    ['resume', { host: 'h', port: 1, serverName: 's', ticket: Buffer.alloc(0), trustedPin: PIN }],
+    ['resume', { host: 'h', port: 1, serverName: 's', ticket: SECRET, trustedPin: PIN }],
+    ['resumeWs', { host: 'h', port: 1, serverName: 's', ticket: SECRET_BYTES, trustedPin: SECRET_BYTES }],
+    ['connectTokenWs', { host: 'h', port: 1, token: '' }],
+    ['connectTokenWs', { host: 'h', port: 1, token: 42, caPem: SECRET }],
+    ['connectTokenWs', { host: 'h', port: 1, token: SECRET, caPem: 7 }],
+    ['connectPlain', { host: '127.0.0.1', port: 1, username: 'u', password: 5 }],
+    ['connectPlain', { host: '127.0.0.1', port: 1, username: 'u', password: SECRET, trustedPin: SECRET_BYTES }],
+    ['connectLocal', { addr: 5, username: 'u', password: SECRET }],
+    ['connectWs', null],
+  ];
+  for (const [name, o] of cases) {
+    nativeCalls = [];
+    await assert.rejects(() => wrapper.ShamirClient[name](o), error => {
+      assert.ok(error instanceof TypeError);
+      assert.ok(!error.message.includes(SECRET));
+      return true;
+    });
+    assert.equal(nativeCalls.length, 0);
+  }
+  await assert.rejects(() => wrapper.ShamirClient.resume(
+    { host: 'h', port: 1, serverName: 's', ticket: Buffer.alloc(0), trustedPin: PIN }),
+  { message: 'ticket must be a non-empty Buffer' });
+  await assert.rejects(() => wrapper.ShamirClient.resume(
+    { host: 'h', port: 1, serverName: 's', ticket: SECRET_BYTES, trustedPin: Buffer.alloc(31) }),
+  { message: 'trustedPin must be 32 bytes' });
+  await assert.rejects(() => wrapper.ShamirClient.connectTokenWs({ host: 'h', port: 1, token: '' }),
+    { message: 'token must be a non-empty string' });
+});
+
+test('createApiToken maps the success map and throws typed errors', async () => {
+  const client = await wrapper.ShamirClient.connectTokenWs({ host: 'h', port: 1, token: 't' });
+  response = Buffer.from(
+    encode({ ...tokenMap(), id: 'abcdefghijklmnopqrstuv' }, { useBigInt64: true }),
+  );
+  const created = await client.createApiToken({ label: 'l' });
+  assert.equal(created.token, 'tok');
+  assert.equal(created.owner, 'alice');
+  assert.equal(created.mode, 'read_only');
+  assert.equal(created.channels, 'ws');
+  assert.equal(created.databases, null);
+  assert.equal(created.createdAtNs, 5n);
+  assert.equal(created.expiresAtNs, 9007199254740993n);
+  assert.equal(created.id, 'abcdefghijklmnopqrstuv');
+  response = errorBuf();
+  await assert.rejects(() => client.createApiToken({ label: 'l' }), error =>
+    error instanceof wrapper.ShamirDbError && error.code === 'token_request_denied');
+  nativeCalls = [];
+  await assert.rejects(() => client.createApiToken({ label: 'l', mode: 'admin' }), TypeError);
+  await assert.rejects(() => client.createApiToken({ label: '' }), TypeError);
+  assert.equal(nativeCalls.length, 0);
+});
+
+test('login maps the success map and validates input', async () => {
+  response = Buffer.from(encode(tokenMap(), { useBigInt64: true }));
+  nativeCalls = [];
+  const o = { host: 'h', port: 1, username: 'u', password: SECRET, mode: 'read_only', channels: 'both' };
+  const result = await wrapper.login(o);
+  assert.strictEqual(nativeCalls[0][1], o);
+  assert.equal(result.token, 'tok');
+  assert.ok(Buffer.isBuffer(result.id));
+  assert.equal(result.id.length, 16);
+  assert.equal(result.databases, null);
+  assert.equal(result.createdAtNs, 5n);
+  assert.equal(result.expiresAtNs, 9007199254740993n);
+  response = errorBuf();
+  await assert.rejects(() => wrapper.login(o), error =>
+    error instanceof wrapper.ShamirDbError && error.code === 'token_request_denied');
+  nativeCalls = [];
+  const bad = [{ mode: 'admin' }, { channels: 'all' }, { listenerId: Buffer.alloc(15) },
+    { databases: 'x' }, { password: 1 }];
+  for (const extra of bad) {
+    await assert.rejects(() => wrapper.login({ ...o, ...extra }), error =>
+      error instanceof TypeError && !error.message.includes(SECRET));
+  }
+  await assert.rejects(() => wrapper.login({ ...o, mode: 'admin' }),
+    { message: 'mode must be read_only or read_write' });
+  assert.equal(nativeCalls.length, 0);
+});
+
+test('ShamirTokenHttpClient rewraps, encodes and decodes like ShamirClient', async () => {
+  nativeCalls = [];
+  await assert.rejects(() => wrapper.ShamirTokenHttpClient.connect({ host: 'h', port: 1, token: '' }), TypeError);
+  assert.equal(nativeCalls.length, 0);
+  const client = await wrapper.ShamirTokenHttpClient.connect({ host: 'h', port: 1, token: SECRET });
+  assert.ok(client instanceof wrapper.ShamirTokenHttpClient);
+  response = Buffer.from(encode({ result: 3 }));
+  assert.deepEqual(await client.execute('db', { n: 4294967296 }), { result: 3 });
+  assert.equal(codec.decode(requestBytes, { useBigInt64: true }).n, 4294967296n);
+  response = Buffer.from(encode({ kind: 'error', code: 'validation', message: 'bad' }));
+  await assert.rejects(() => client.execute('db', {}), error =>
+    error instanceof wrapper.ShamirDbError && error.code === 'validation');
+});
+
+test('authKind passes through', async () => {
+  assert.equal(new wrapper.ShamirClient().authKind(), 'token');
+});
+
+test('exports are the wrapped classes and functions', () => {
+  assert.ok(wrapper.ShamirClient.prototype instanceof NativeClient);
+  assert.notEqual(wrapper.ShamirClient, NativeClient);
+  assert.ok(wrapper.ShamirTokenHttpClient.prototype instanceof NativeTokenHttpClient);
+  assert.notEqual(wrapper.ShamirTokenHttpClient, NativeTokenHttpClient);
+  assert.notEqual(wrapper.login, nativeLogin);
+  assert.equal(typeof wrapper.login, 'function');
 });

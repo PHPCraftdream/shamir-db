@@ -9,13 +9,31 @@
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
-/** Connected, authenticated client over TLS 1.3 + SCRAM-Argon2id. */
+/**
+ * Connected, authenticated client (SCRAM over TLS / WebSocket / plain
+ * loopback / local IPC, or an API-token WebSocket session).
+ */
 export declare class ShamirClient {
   /**
    * Run the full TCP→TLS→SCRAM handshake; resolves to a connected
    * client.
    */
   static connect(opts: ConnectOptions): Promise<ShamirClient>
+  /**
+   * Same as `connect` over the native WebSocket listener. Only the first
+   * resolved address of `host` is tried.
+   */
+  static connectWs(opts: ConnectOptions): Promise<ShamirClient>
+  /** SCRAM over plain TCP; the core refuses non-loopback addresses. */
+  static connectPlain(opts: ConnectPlainOptions): Promise<ShamirClient>
+  /** SCRAM over a Unix domain socket or Windows named pipe. */
+  static connectLocal(opts: ConnectLocalOptions): Promise<ShamirClient>
+  /** Resume a session over TLS with a previously issued ticket. */
+  static resume(opts: ResumeOptions): Promise<ShamirClient>
+  /** Resume a session over the native WebSocket listener. */
+  static resumeWs(opts: ResumeOptions): Promise<ShamirClient>
+  /** Open an API-token session over the token WebSocket. */
+  static connectTokenWs(opts: TokenWsOptions): Promise<ShamirClient>
   /**
    * `SHA256(server_ed25519_pub_key)` — persist this and pass back
    * as `trustedPin` on subsequent connections.
@@ -29,12 +47,17 @@ export declare class ShamirClient {
    */
   expiresAtNs(): bigint
   /**
-   * Resumption ticket bytes (if issued). Node has no resume input.
+   * Resumption ticket bytes (if issued); feed it to `resume` / `resumeWs`.
    * Returns null after close; previously returned JS copies are not erased.
    */
   resumptionTicket(): Buffer | null
   /** Resumption expiry (paired with [`Self::resumption_ticket`]). */
   resumptionExpiresAtNs(): bigint | null
+  /**
+   * How the session was authenticated: `"scram"`, `"token"` or
+   * `"unknown"` for kinds this binding does not know yet.
+   */
+  authKind(): string
   /** Health check. */
   ping(): Promise<void>
   /**
@@ -56,6 +79,11 @@ export declare class ShamirClient {
    */
   createScramUser(name: string, password: string, roles: Array<string>): Promise<Buffer>
   /**
+   * Mint an API token for the current user (or `forUser`). Resolves to the
+   * msgpack of the created token view, or a DB-error marker `Buffer`.
+   */
+  createApiToken(opts: CreateApiTokenOptions): Promise<Buffer>
+  /**
    * Grant or revoke the `replicator` role on an existing SCRAM user via
    * the dedicated `SetReplicator` wire op (the `replicator` pseudo-role is
    * reserved — it cannot be attached through `create_scram_user`'s generic
@@ -72,6 +100,50 @@ export declare class ShamirClient {
    * a no-op.
    */
   close(): Promise<void>
+}
+
+/** Token-authenticated REST client: `ping` and `execute` only. */
+export declare class ShamirTokenHttpClient {
+  /** Dial the REST endpoint; resolves to a connected client. */
+  static connect(opts: TokenHttpOptions): Promise<ShamirTokenHttpClient>
+  /** Health check. */
+  ping(): Promise<void>
+  /**
+   * Execute a MessagePack-encoded `BatchRequest`; resolves to the
+   * MessagePack `BatchResponse`, or a DB-error marker `Buffer`.
+   */
+  execute(db: string, batch: Buffer): Promise<Buffer>
+  /** Close the connection. Idempotent — second call is a no-op. */
+  close(): Promise<void>
+}
+
+/**
+ * Parameters of `ShamirClient.connectLocal`: SCRAM over a local IPC
+ * endpoint.
+ *
+ * A JavaScript string cannot be wiped; only the owned native copy of
+ * `password` is zeroized.
+ */
+export interface ConnectLocalOptions {
+  /** Unix socket path or `\\.\pipe\name` Windows pipe, used as is. */
+  addr: string
+  /** Username (raw — server-side normalisation applies). */
+  username: string
+  /**
+   * Plaintext password. Only the native copy is zeroized; the JavaScript
+   * string cannot be wiped.
+   */
+  password: string
+  /** Trust-on-first-use, see `ConnectOptions.acceptNewHost`. */
+  acceptNewHost?: boolean
+  /** Pre-pinned server identity hash, exactly 32 bytes. */
+  trustedPin?: Buffer
+  /** Deadline (ms) for the IPC connect attempt. */
+  connectTimeoutMs?: number
+  /** Deadline (ms) for the whole handshake. */
+  handshakeTimeoutMs?: number
+  /** Deadline (ms) for each request/response round-trip. */
+  requestTimeoutMs?: number
 }
 
 /** Connection parameters passed to `ShamirClient.connect`. */
@@ -109,5 +181,189 @@ export interface ConnectOptions {
    */
   handshakeTimeoutMs?: number
   /** Deadline (ms) for each request/response round-trip after connect. */
+  requestTimeoutMs?: number
+}
+
+/**
+ * Parameters of `ShamirClient.connectPlain`: SCRAM over plain TCP. The core
+ * refuses any non-loopback address.
+ *
+ * A JavaScript string cannot be wiped; only the owned native copy of
+ * `password` is zeroized.
+ */
+export interface ConnectPlainOptions {
+  /** Server host; only its first resolved address is used. */
+  host: string
+  /** Server port. */
+  port: number
+  /** Username (raw — server-side normalisation applies). */
+  username: string
+  /**
+   * Plaintext password. Only the native copy is zeroized; the JavaScript
+   * string cannot be wiped.
+   */
+  password: string
+  /** Trust-on-first-use, see `ConnectOptions.acceptNewHost`. */
+  acceptNewHost?: boolean
+  /** Pre-pinned server identity hash, exactly 32 bytes. */
+  trustedPin?: Buffer
+  /** Deadline (ms) for the TCP connect attempt. */
+  connectTimeoutMs?: number
+  /** Deadline (ms) for the whole handshake. */
+  handshakeTimeoutMs?: number
+  /** Deadline (ms) for each request/response round-trip. */
+  requestTimeoutMs?: number
+}
+
+/** Parameters of `ShamirClient.createApiToken`. */
+export interface CreateApiTokenOptions {
+  /** Token label. */
+  label: string
+  /** Lifetime in seconds; the server default applies when omitted. */
+  ttlSecs?: number
+  /** `"read_only"` or `"read_write"`. */
+  mode?: string
+  /** `"rest"`, `"ws"` or `"both"`. */
+  channels?: string
+  /** Database allowlist; omitted means every accessible database. */
+  databases?: Array<string>
+  /** Mint the token for this user instead of the session user. */
+  forUser?: string
+}
+
+/**
+ * Password login over the HTTP listener. Success is the named msgpack of
+ * `LoginView`, a DB error is the usual error-marker `Buffer`.
+ */
+export declare function login(opts: LoginOptions): Promise<Buffer>
+
+/**
+ * Parameters of the `login` function (password login for an API token).
+ *
+ * A JavaScript string cannot be wiped; only the owned native copy of
+ * `password` is zeroized.
+ */
+export interface LoginOptions {
+  /** Server host; only its first resolved address is used. */
+  host: string
+  /** Server port. */
+  port: number
+  /** TLS server name; defaults to `host`. */
+  serverName?: string
+  /**
+   * PEM bundle of trusted CAs; defaults to the bundled WebPKI roots.
+   * Not allowed together with `plainLoopback`.
+   */
+  caPem?: string
+  /** Use plain HTTP; the core accepts loopback addresses only. */
+  plainLoopback?: boolean
+  /** Username (raw — server-side normalisation applies). */
+  username: string
+  /**
+   * Plaintext password. Only the native copy is zeroized; the JavaScript
+   * string cannot be wiped.
+   */
+  password: string
+  /** Label of the minted token. */
+  label?: string
+  /** `"read_only"` or `"read_write"`. */
+  mode?: string
+  /** `"rest"`, `"ws"` or `"both"`. */
+  channels?: string
+  /** Database allowlist; omitted means every database. */
+  databases?: Array<string>
+  /** Expected listener id, exactly 16 bytes. */
+  listenerId?: Buffer
+  /** Deadline (ms) for the TCP connect attempt. */
+  connectTimeoutMs?: number
+  /** Deadline (ms) for each request. */
+  requestTimeoutMs?: number
+}
+
+/**
+ * Parameters of `ShamirClient.resume` / `resumeWs`.
+ *
+ * The ticket is copied into a native buffer that is zeroized on drop,
+ * including when the resume is cancelled before it starts; the JavaScript
+ * `Buffer` it came from cannot be wiped by the binding.
+ */
+export interface ResumeOptions {
+  /** Server host; only its first resolved address is used. */
+  host: string
+  /** Server port. */
+  port: number
+  /** SNI hostname for TLS. */
+  serverName: string
+  /** Resumption ticket from a previous session. */
+  ticket: Buffer
+  /** Required pin of the server identity, exactly 32 bytes. */
+  trustedPin: Buffer
+  /** Deadline (ms) for the whole resume, DNS included. */
+  handshakeTimeoutMs?: number
+  /** Deadline (ms) for each request/response round-trip. */
+  requestTimeoutMs?: number
+}
+
+/**
+ * Parameters of `ShamirTokenHttpClient.connect`.
+ *
+ * A JavaScript string cannot be wiped; only the owned native copy of
+ * `token` is zeroized.
+ */
+export interface TokenHttpOptions {
+  /** Server host; only its first resolved address is used. */
+  host: string
+  /** Server port. */
+  port: number
+  /** TLS server name; defaults to `host`. */
+  serverName?: string
+  /**
+   * PEM bundle of trusted CAs; defaults to the bundled WebPKI roots.
+   * Not allowed together with `plainLoopback`.
+   */
+  caPem?: string
+  /** Use plain HTTP; the core accepts loopback addresses only. */
+  plainLoopback?: boolean
+  /**
+   * `shk1.` API token. Only the native copy is zeroized; the JavaScript
+   * string cannot be wiped.
+   */
+  token: string
+  /** Deadline (ms) for the TCP connect attempt. */
+  connectTimeoutMs?: number
+  /** Deadline (ms) for each request. */
+  requestTimeoutMs?: number
+}
+
+/**
+ * Parameters of `ShamirClient.connectTokenWs`.
+ *
+ * A JavaScript string cannot be wiped; only the owned native copy of
+ * `token` is zeroized.
+ */
+export interface TokenWsOptions {
+  /** Server host; only its first resolved address is used. */
+  host: string
+  /** Server port. */
+  port: number
+  /** TLS server name; defaults to `host`. */
+  serverName?: string
+  /**
+   * PEM bundle of trusted CAs; defaults to the bundled WebPKI roots.
+   * Not allowed together with `plainLoopback`.
+   */
+  caPem?: string
+  /** Use plain HTTP; the core accepts loopback addresses only. */
+  plainLoopback?: boolean
+  /**
+   * `shk1.` API token. Only the native copy is zeroized; the JavaScript
+   * string cannot be wiped.
+   */
+  token: string
+  /** Deadline (ms) for the TCP connect attempt. */
+  connectTimeoutMs?: number
+  /** Deadline (ms) for the whole WebSocket handshake. */
+  handshakeTimeoutMs?: number
+  /** Deadline (ms) for each request/response round-trip. */
   requestTimeoutMs?: number
 }
