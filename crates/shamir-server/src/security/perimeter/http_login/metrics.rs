@@ -55,6 +55,7 @@ pub fn record_budget_drop(reason: &'static str) {
     let reason = match reason {
         "arrival_table_full" => "arrival_table_full",
         "credit_table_full" => "credit_table_full",
+        "pin_budget" => "pin_budget",
         _ => return,
     };
     metrics::counter!("shamir_login_http_accounting_dropped", "reason" => reason).increment(1);
