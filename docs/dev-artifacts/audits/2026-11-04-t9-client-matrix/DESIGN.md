@@ -198,3 +198,26 @@ Public API untouched: `lib.rs` re-exports, options file byte-identical. Guard te
 DONE by the orchestrator: `connect.rs` and `options.rs` were removed (renames into `session/`); `client/` has 6 entries.
 
 Not verified locally: compilation, clippy, tests (CI only).
+
+## T9-1 R1 report (Rust client handshake module, one SCRAM for every transport)
+
+Status: DONE in code. No local compile/test was run (policy); checked by a compiler-style read plus `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py`. Verification is CI only.
+
+What moved (bodies verbatim, only imports and visibility adjusted):
+- `client/transport.rs` -> `client/handshake/wire.rs`: all eight `Wire*` structs. `transport.rs` re-exports them under `#[cfg(test)]` (non-test code no longer uses that path), so `crate::client::transport::Wire*` still resolves for the guard tests.
+- `client/session/entry.rs` -> `client/handshake/auth_ok.rs` (`VerifiedAuthOk`, `verify_auth_ok`) and `client/handshake/resume.rs` (`ResumedHandshake`, `resume_wire_exchange`, `verify_resume_identity_proof`).
+- New `client/handshake/scram.rs`: `run_scram<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(r, w, ScramRequest) -> ScramOutcome`, the single SCRAM exchange. `ScramRequest` carries username, `TransportKind`, `BindingMode`, exporter `[u8; 32]`, trusted pin, accept-new-host, password slice and `phase: Option<&AtomicU8>`. `Client::handshake` (TCP+TLS) and `Client::connect_local` (IPC) now both do: dial (unchanged) -> `run_scram` -> `Client::assemble` with `session_meta(outcome, request_timeout)`.
+- `client/` has 7 entries: `api.rs cursor_stream.rs handshake/ mod.rs session/ subscription/ transport.rs`; `handshake/` has 5.
+- New guard test `src/tests/wire/scram_binding_tests.rs` (`run_scram` over `tokio::io::duplex` against an emulated `ServerHandshake`; bindings `(Tcp, TlsExporter, [0x5A; 32])` and `(Unix, None, zeros)`; asserts the `auth_init.binding_mode` byte, completion, session id and `server_query_version`; not `cfg(unix)`).
+
+Differences found between the two old SCRAM copies (each preserved as a parameter):
+1. Phase tracking: only the TCP copy stored `PHASE_SCRAM` (start), `PHASE_KDF` (before `spawn_blocking`) and `PHASE_SCRAM` (after the join); IPC stored none -> `ScramRequest::phase` is `Some` for TCP, `None` for IPC (same three store points).
+2. Channel binding: TCP `(Tcp, TlsExporter)` + `.tls_exporter(exporter)`; IPC `(Unix, None)` with the builder default (all zeros) -> now explicit parameters, IPC passes `[0u8; 32]` (identical to the default).
+3. Order: TCP built the `HandshakeBuilder` before `split(tls)`; now `split` happens first (no I/O in between, `PHASE_SCRAM` is still stored before any frame I/O).
+4. Writer variant: `WriteSink::Tls(w)` vs `WriteSink::Ipc(w)` stay in the call sites. `connect_local` still has no `handshake_timeout`. Error strings, `MAX_PRE_AUTH_FRAME`, Argon2 in `spawn_blocking`, `Zeroizing` of password and ticket unchanged. The two `SessionMeta` constructions were identical and are now `session_meta()` in `entry.rs`. Everything else (comments aside) was identical.
+
+Visibility widenings vs base (all within the crate, none public): `VerifiedAuthOk` and its fields private -> `pub(crate)`; `verify_auth_ok` private -> `pub(super)` (inside `handshake`); `PHASE_SCRAM`/`PHASE_KDF` private (in `entry.rs`) -> `pub(in crate::client)` (in `scram.rs`); new `pub(crate)` items `ScramRequest`, `ScramOutcome`, `run_scram`; `resume_wire_exchange`/`ResumedHandshake`/`verify_resume_identity_proof` keep `pub(crate)`; `handshake::wire` is `pub(in crate::client)`. `PHASE_DNS/TCP/TLS` and `phase_name` stay in `entry.rs`.
+
+Public API untouched (`lib.rs`, option structs, `Client::connect/connect_host/connect_local/resume/resume_secure`). No Cargo.toml/lockfile change. Only the doc links of `Client::resume` changed (full paths to the moved `Wire*` types) and the `connect_local` doc sentence now says it shares `run_scram`.
+
+BLOCKED: nothing. Not verified locally: compilation, clippy, tests (CI only).
