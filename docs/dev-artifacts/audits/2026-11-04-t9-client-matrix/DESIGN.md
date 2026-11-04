@@ -178,3 +178,23 @@ Status: DONE as written, UNVERIFIED by any compiler or test run (no local builds
 - **Not touched:** `src/index.ts`, `src/browser.ts`, `core/protocol/scram.ts`, token path, `package.json`, lockfiles, workflows. `changePassword` still hard-codes the browser binding (S4, out of scope).
 - **Layout:** `python -I scripts/ci/check_layout.py` reports OK.
 - **Known caveats:** `_channelBinding` is stored but not yet read (S4 will use it). `resume` yields `normalizedUser: undefined` exactly as before.
+
+## T9-1 R2 report (Rust client session + mux move, behaviour unchanged)
+
+Status: DONE in code. No local compile/test was run (policy); verified by a compiler-style read plus `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py`.
+
+What moved (bodies verbatim, only imports and visibility adjusted):
+- `client/connect.rs` -> `client/session/client.rs` (`SessionMeta`, `struct Client`, `Client::assemble`, the `cfg(test)` accessors) and `client/session/entry.rs` (`connect`, `connect_until`, `connect_host`, `handshake`, `connect_local`, `resume`, `resume_secure`, `verify_auth_ok`, `resume_wire_exchange`, `verify_resume_identity_proof`, `ResumedHandshake`, the `#[path]` link to `interner_cache/resume/security.rs`, now `../../interner_cache/resume/security.rs`).
+- `client/options.rs` -> `client/session/options.rs` (byte-identical).
+- From `client/transport.rs` -> `client/session/mux/lifecycle.rs` (`PendingSender`, `ClosedState`, `PendingRegistry`, `PendingMap`, `Lifecycle`, `ShutdownGuard`, `LifecycleHooks`), `mux/reader.rs` (`DemuxResult`, `IncomingEnvelope`, `decode_frame`, `await_pending_response`, `reader_task`), `mux/hooks.rs` (`HookPoint`, test-only).
+- `client/transport.rs` keeps `WriteSink`, `connect_tcp`, `connect_ipc`, `connect_with_timeout` and all `Wire*` structs, and re-exports `HookPoint` (cfg(test)), `ClosedState`, `Lifecycle`, `LifecycleHooks`, `ShutdownGuard`, `await_pending_response`, `reader_task`, so every `crate::client::transport::{..}` path still resolves. `client/mod.rs` keeps every public and `pub(crate)` path.
+
+Visibility widenings (all within the crate, none public): the `Client` fields were `pub(super)` (scope `client`) and are now `pub(in crate::client)` (same scope, path spelled out because the struct moved one level down); `resume_security` was `pub(super)` and is now `pub(in crate::client)`; `session::entry` is `pub(in crate::client)`; `session::mux` is `pub(crate)`. The effective visibility scope is unchanged.
+
+Dropped: the `pub(super) use resume_security::deserialize_resume_ticket;` re-export (the `WireResumeOk` serde attribute now names `crate::client::session::entry::resume_security::deserialize_resume_ticket` directly).
+
+Public API untouched: `lib.rs` re-exports, options file byte-identical. Guard tests untouched.
+
+DONE by the orchestrator: `connect.rs` and `options.rs` were removed (renames into `session/`); `client/` has 6 entries.
+
+Not verified locally: compilation, clippy, tests (CI only).

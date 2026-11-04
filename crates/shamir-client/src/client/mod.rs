@@ -10,16 +10,14 @@
 //! completion order (not send order); the reader task matches each by `rid`.
 
 mod api;
-mod connect;
-mod options;
+mod session;
 pub(crate) mod transport;
 
 pub mod cursor_stream;
 pub mod subscription;
 
-pub use connect::Client;
-pub use options::{
-    bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions,
+pub use session::{
+    bound_until, resolve_host, Client, ConnectLocalOptions, ConnectOptions, ResumeOptions,
     SecureResumeOptions,
 };
 
@@ -29,11 +27,13 @@ pub(crate) use api::admin_request_tag_for_test as admin_request_tag;
 pub(crate) use api::encode_named_into;
 pub(crate) use api::should_advertise_interner_epochs;
 #[cfg(test)]
-pub(crate) use connect::resume_security::{
+pub(crate) use session::entry::resume_security::{
     read_resume_frame, serialize_resume, ProtectedResumeBuffer,
 };
 #[cfg(test)]
-pub(crate) use connect::{resume_wire_exchange, take_resume_wipes, verify_resume_identity_proof};
+pub(crate) use session::entry::{
+    resume_wire_exchange, take_resume_wipes, verify_resume_identity_proof,
+};
 
 #[cfg(test)]
 pub(crate) use transport::{
