@@ -23,6 +23,10 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   let matrixPromise = null;
   let counter = 0;
+  // The server admits at most 16 live sessions per user (MAX_SESSIONS_PER_USER), so
+  // the suite shares ONE admin session and uses a fresh ordinary user for every
+  // session-and-resume case.
+  let sharedAdminPromise = null;
 
   function matrix() {
     if (matrixPromise === null) matrixPromise = startMatrixServer();
@@ -56,14 +60,15 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
     });
   }
 
+  function sharedAdmin(m) {
+    if (sharedAdminPromise === null) sharedAdminPromise = adminTcp(m);
+    return sharedAdminPromise;
+  }
+
   async function withAdmin(fn) {
     const m = await matrix();
-    const admin = await adminTcp(m);
-    try {
-      return await fn(admin, m);
-    } finally {
-      await closeQuietly(admin);
-    }
+    const admin = await sharedAdmin(m);
+    return fn(admin, m);
   }
 
   // A fresh table with one seeded row, built with the shared fixtures.
@@ -131,6 +136,20 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
     const password = `pw-${unique('secret')}-Zx9`;
     await admin.createScramUser(name, password, []);
     return { name, password };
+  }
+
+  // A fresh ordinary user with its own SCRAM session over TCP+TLS.
+  async function freshUserTcp(m) {
+    const user = await ordinaryUser(await sharedAdmin(m));
+    return ShamirClient.connect({
+      host: m.host,
+      port: m.ports.tcp,
+      serverName: 'localhost',
+      username: user.name,
+      password: user.password,
+      acceptNewHost: true,
+      ...SESSION_TIMEOUTS,
+    });
   }
 
   test('matrix server starts with six listeners', async () => {
@@ -223,7 +242,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   test('resume: TCP+TLS resumption from a fresh session ticket', async () => {
     const m = await matrix();
-    const first = await adminTcp(m);
+    const first = await freshUserTcp(m);
     let resumed = null;
     try {
       const ticket = first.resumptionTicket();
@@ -245,7 +264,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   test('resumeWs: ticket obtained over TCP', async () => {
     const m = await matrix();
-    const first = await adminTcp(m);
+    const first = await freshUserTcp(m);
     let resumed = null;
     try {
       const ticket = first.resumptionTicket();
@@ -267,12 +286,13 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   test('resumeWs: ticket obtained over WS', async () => {
     const m = await matrix();
+    const user = await ordinaryUser(await sharedAdmin(m));
     const first = await ShamirClient.connectWs({
       host: m.host,
       port: m.ports.ws,
       serverName: 'localhost',
-      username: m.user,
-      password: m.password,
+      username: user.name,
+      password: user.password,
       acceptNewHost: true,
       ...SESSION_TIMEOUTS,
     });
@@ -297,7 +317,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   test('resume: wrong pin rejects without echoing ticket or pin', async () => {
     const m = await matrix();
-    const first = await adminTcp(m);
+    const first = await freshUserTcp(m);
     try {
       const ticket = Buffer.from(first.resumptionTicket());
       const realPin = Buffer.from(first.serverPubKeyPin());
@@ -320,7 +340,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   test('resume: corrupted ticket rejects without echoing ticket or pin', async () => {
     const m = await matrix();
-    const first = await adminTcp(m);
+    const first = await freshUserTcp(m);
     try {
       const original = Buffer.from(first.resumptionTicket());
       const pin = Buffer.from(first.serverPubKeyPin());
@@ -622,6 +642,13 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
   });
 
   test('matrix server teardown', async () => {
+    if (sharedAdminPromise !== null) {
+      try {
+        await closeQuietly(await sharedAdminPromise);
+      } catch (_) {
+        /* admin connect failed; nothing to close */
+      }
+    }
     if (matrixPromise === null) return;
     let m = null;
     try {
