@@ -200,9 +200,8 @@ impl Client {
     /// socket / Windows Named Pipe and return a ready client. Shares
     /// `run_scram` with [`Client::connect`] — same SCRAM flow, same
     /// `auth_ok`/resumption-ticket/TOFU-pin handling — only the transport
-    /// setup and the `transport_kind`/`binding_mode` fed to
-    /// `HandshakeBuilder` differ (spec TRANSPORT_UNIX.md: `binding_mode =
-    /// 0x00`, zeroed channel binding — passed as an all-zero exporter).
+    /// setup and the `ChannelBinding` fed to `run_scram` differ (spec
+    /// TRANSPORT_UNIX.md: `binding_mode = 0x00`, zeroed channel binding).
     pub async fn connect_local(opts: ConnectLocalOptions) -> Result<Self, ClientError> {
         let username = NormalizedUsername::from_raw(&opts.username)
             .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
