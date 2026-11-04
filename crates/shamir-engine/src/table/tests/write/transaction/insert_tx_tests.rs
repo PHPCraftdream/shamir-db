@@ -223,9 +223,9 @@ async fn delete_tx_some_stages_remove() {
     let removed = tbl.delete_tx(rid, Some(&mut tx)).await.unwrap();
     assert!(removed);
 
+    // Main store still has the record (staged remove not applied).
     let _ = tbl.get(rid).await.unwrap();
 
-    // Main store still has the record (staged remove not applied).
     let token = tbl.table_token();
     assert_eq!(*tx.counter_deltas.get(&token).unwrap(), -1);
 }
