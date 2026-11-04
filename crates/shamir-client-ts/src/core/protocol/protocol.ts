@@ -13,11 +13,12 @@ import {
   computeClientProof,
   validateKdfParams,
   verifyServerSignature,
-  TRANSPORT_KIND_WS,
   BINDING_MODE_TLS_NO_EXPORT,
   SUPPORTED_VERSION,
   type KdfParams,
 } from './scram.js';
+import { browserWsBinding } from './session/binding.js';
+import type { ChannelBinding } from './session/binding.js';
 
 /**
  * rmp_serde (the Rust msgpack library) serialises structs as **arrays**
@@ -90,21 +91,28 @@ export interface HandshakeResult {
  * Run the 4-message SCRAM-Argon2id handshake over `framer`.
  * Throws on any validation or crypto failure.
  *
- * `transportKind`/`bindingMode` default to the WebSocket/browser path
- * (`TRANSPORT_KIND_WS`/`BINDING_MODE_TLS_NO_EXPORT`) — every existing
- * caller (native WS `connect`/`resume`, every test) relies on that default
- * and needed no change when `connectLocal` (local IPC, spec
- * TRANSPORT_UNIX.md) started passing `TRANSPORT_KIND_UNIX`/
- * `BINDING_MODE_NONE` explicitly instead.
+ * `binding` defaults to the WebSocket/browser profile
+ * (`browserWsBinding()`: `TRANSPORT_KIND_WS`/`BINDING_MODE_TLS_NO_EXPORT`).
+ * A legacy numeric form is also accepted: a bare `transportKind` number plus
+ * an optional `legacyBindingModeIfNumber` (default
+ * `BINDING_MODE_TLS_NO_EXPORT`) — kept so existing callers (the
+ * `protocol.test.ts` guard tests) need no change. In either form the
+ * exporter is zero-filled and is NOT included in the SCRAM `auth_message`
+ * (wire-identical).
  */
 export async function runHandshake(
   platform: Platform,
   framer: WsFramer,
   username: string,
   password: string,
-  transportKind: number = TRANSPORT_KIND_WS,
-  bindingMode: number = BINDING_MODE_TLS_NO_EXPORT,
+  binding: ChannelBinding | number = browserWsBinding(),
+  legacyBindingModeIfNumber?: number,
 ): Promise<HandshakeResult> {
+  const resolved: ChannelBinding = typeof binding === 'number'
+    ? { transportKind: binding as ChannelBinding['transportKind'],
+        bindingMode: (legacyBindingModeIfNumber ?? BINDING_MODE_TLS_NO_EXPORT) as ChannelBinding['bindingMode'],
+        exporter: new Uint8Array(32) }
+    : binding;
   // Server normalises the username (PRECIS UsernameCaseMapped + NFC).
   // We send the NFC form so the two byte strings agree for ASCII usernames.
   const normalizedUser = username.normalize('NFC');
@@ -115,7 +123,7 @@ export async function runHandshake(
     encode({
       user: normalizedUser,
       client_nonce: clientNonce,
-      binding_mode: bindingMode,
+      binding_mode: resolved.bindingMode,
       version: SUPPORTED_VERSION,
     }),
   );
@@ -144,8 +152,8 @@ export async function runHandshake(
     serverNonce,
     salt,
     kdf,
-    transportKind,
-    bindingMode,
+    transportKind: resolved.transportKind,
+    bindingMode: resolved.bindingMode,
   });
   const { clientProof, serverKey } = await computeClientProof(
     platform,

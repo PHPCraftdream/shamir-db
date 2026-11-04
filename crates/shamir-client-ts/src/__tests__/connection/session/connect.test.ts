@@ -14,14 +14,14 @@ import { spawn, ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { connect } from '../../index.js';
-import type { ShamirClient } from '../../index.js';
+import { connect } from '../../../index.js';
+import type { ShamirClient } from '../../../index.js';
 
 // ─── server binary path ───────────────────────────────────────────────────────
 
-// File layout: src/__tests__/connection/connect.test.ts → __tests__ → src → shamir-client-ts → crates → repo root
+// File layout: src/__tests__/connection/session/connect.test.ts → session → connection → __tests__ → src → shamir-client-ts → crates → repo root
 const _fileUrl = new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1');
-const REPO_ROOT = path.resolve(path.dirname(_fileUrl), '../../../../..');
+const REPO_ROOT = path.resolve(path.dirname(_fileUrl), '../../../../../..');
 
 const SERVER_BIN = path.join(
   REPO_ROOT,
