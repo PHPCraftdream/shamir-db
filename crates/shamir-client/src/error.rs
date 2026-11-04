@@ -183,6 +183,15 @@ pub enum CloseCause {
     /// The background reader task was aborted/cancelled before its loop ran
     /// to completion.
     ReaderCancelled,
+    /// The server sent a WebSocket Close frame with a code. Codes: 4003 no
+    /// pong, 4010 sid mismatch, 4011 token revoked, 4012 token/session
+    /// expired, 1013 server busy, 1000 normal.
+    PeerClosed {
+        /// WebSocket close code.
+        code: u16,
+        /// Sanitised close reason.
+        reason: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for CloseCause {
@@ -195,6 +204,9 @@ impl std::fmt::Display for CloseCause {
             CloseCause::LocalClose => write!(f, "local close"),
             CloseCause::ClientDropped => write!(f, "client dropped"),
             CloseCause::ReaderCancelled => write!(f, "reader cancelled"),
+            CloseCause::PeerClosed { code, reason } => {
+                write!(f, "peer closed: {code} {reason}")
+            }
         }
     }
 }

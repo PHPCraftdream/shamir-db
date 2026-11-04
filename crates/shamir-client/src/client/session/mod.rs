@@ -13,4 +13,4 @@ pub use options::{
     bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions,
     SecureResumeOptions,
 };
-pub use token::{ApiToken, TokenHttpClient, TokenHttpOptions};
+pub use token::{ApiToken, AuthKind, TokenHttpClient, TokenHttpOptions, TokenWsOptions};

@@ -3,11 +3,11 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory;
-use shamir_connect::server::token::{TokenChannels, TokenMode};
+use shamir_connect::server::token::{parse_token, TokenChannels, TokenMode};
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_types::access::ResourcePath;
 use tempfile::TempDir;
@@ -80,6 +80,41 @@ impl TokenFixture {
     }
 
     async fn issue(&self, label: &str, mode: TokenMode) -> String {
+        self.issue_with(label, mode, TokenChannels::Rest, 3600)
+            .await
+    }
+
+    pub async fn issue_ws(&self, label: &str, mode: TokenMode, ttl_secs: u64) -> String {
+        self.issue_with(label, mode, TokenChannels::Ws, ttl_secs)
+            .await
+    }
+
+    pub async fn revoke_token(&self, token: &str) {
+        let id = parse_token(token.as_bytes())
+            .expect("parse canonical token")
+            .id;
+        let now_ns = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos(),
+        )
+        .expect("timestamp fits u64");
+        assert!(self
+            .handle
+            .token_service
+            .revoke(id, now_ns)
+            .await
+            .expect("revoke token"));
+    }
+
+    async fn issue_with(
+        &self,
+        label: &str,
+        mode: TokenMode,
+        channels: TokenChannels,
+        ttl_secs: u64,
+    ) -> String {
         let created = self
             .handle
             .token_service
@@ -87,9 +122,9 @@ impl TokenFixture {
                 owner_user_id: self.owner,
                 owner_roles: self.owner_roles.clone(),
                 label: label.into(),
-                ttl_secs: Some(3600),
+                ttl_secs: Some(ttl_secs),
                 mode,
-                channels: TokenChannels::Rest,
+                channels,
                 databases: None,
             })
             .await

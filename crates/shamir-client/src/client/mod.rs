@@ -17,7 +17,7 @@ pub(crate) mod transport;
 pub mod cursor_stream;
 pub mod subscription;
 
-pub use session::{ApiToken, TokenHttpClient, TokenHttpOptions};
+pub use session::{ApiToken, AuthKind, TokenHttpClient, TokenHttpOptions, TokenWsOptions};
 pub use transport::token::{TokenEndpoint, TokenTrust};
 
 pub use session::{

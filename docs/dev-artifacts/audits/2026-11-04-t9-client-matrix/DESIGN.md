@@ -285,3 +285,48 @@ Visibility widenings: only the new public exports above; `transport::token` and 
 Decisions: `TokenTransport::connect` dials up front (TCP + TLS + HTTP/1 handshake) under `connect_timeout`; a request that hits `request_timeout` drops its connection; an HTTP exchange failing after a possible write is a `Protocol` error and is never retried; after a failed retry on a fresh connection the error is `ConnectionClosed(PeerEof)`; `execute` over REST does not announce interner epochs or merge deltas; the encoded request body handed to hyper cannot be wiped (documented), the header value and the `ApiToken` are zeroizing.
 
 Not done / open: no positive `TokenTrust::pem` unit test (no certificate fixture without a build step; covered by the integration test with the server's `cert.pem`); no connect-timeout unit test (racy on loopback; only refused connect is tested); the token WebSocket (T9-3b) and password login (T9-4) are out of scope; nothing was compiled, so CI may reveal compile or clippy errors that a read could not.
+
+## T9-3b report (Rust client: token over native WebSocket)
+
+Status: implemented in full but NOT compiled or run locally (policy); verification is CI only (`cargo fmt --check` and the layout check passed locally).
+
+Added (crate `shamir-client`):
+- `transport/token/dial_ws.rs`: hyper upgrade, sensitive `Authorization`, checks of `Accept` / subprotocol / no extensions, reject body capped at 64 KiB and mapped through the new `status::map_upgrade_reply`.
+- `handshake/bearer.rs`: strict binding decoder (map marker check, `deny_unknown_fields`, no trailing bytes, `ok == true`, 32-byte non-zero `sid`, `expires_at_ns > 0`); `read_binding`.
+- `transport/ws_stream.rs`: `WsFraming::{Prefixed, Raw}`, `WsByteStream::raw`, `WsPeerClose`.
+- `WriteSink::TokenWs`; `CloseCause::PeerClosed {code, reason}` mapped in `reader_task`.
+- `AuthKind` (`session/token/auth_kind.rs`), `SessionMeta.auth`, `Client.auth`, `Client::auth_kind`.
+- `Client::require_scram`, first line of `create_api_token`, `list_api_tokens`, `revoke_api_token`, `revoke_user_tokens`, `create_scram_user`, `set_replicator`, `repl`.
+- `TokenWsOptions`, `Client::connect_token_ws` in `session/entry_ws.rs` (224 lines).
+
+Tests:
+- Unit: `handshake/tests/bearer_tests.rs`, `session/token/tests/{ws_raw_tests,close_cause_tests,refusal_tests}.rs`.
+- Integration `tests/matrix/token/ws.rs` (9 tests): ping, execute read/write, read-only denied, REST-only token -> `token_channel_denied`, unknown secret -> 401, revoke -> 4011, 2 s TTL -> 4012, admin refusal, plain loopback.
+- Fixture helpers `issue_ws`, `revoke_token`, `issue_with` in `tests/matrix/token/common.rs`.
+
+Public items: `Client::connect_token_ws`, `Client::auth_kind`, `AuthKind`, `TokenWsOptions`, `CloseCause::PeerClosed`.
+
+Widenings beyond the public items:
+- `WsByteStream` re-export in `transport/mod.rs` is no longer `cfg(test)`.
+- New `pub(crate)` re-exports: `WsPeerClose`, `dial_token_ws`, `read_binding`.
+- `session/client.rs`: `pub(crate) require_scram`, `#[cfg(test)] for_test_with_auth`.
+- `pub(super) map_upgrade_reply` in `status.rs`.
+
+Decisions / deviations:
+- Raw mode rejects a zero declared length on write (`InvalidData`); Prefixed mode unchanged (Close = EOF).
+- `connect_timeout` bounds only the TCP connect; `handshake_timeout` bounds TLS + upgrade + binding frame.
+- The token is dropped right after the `Authorization` header is built.
+
+Not done / risks:
+- Subscriptions and cursors over the token WS have no integration tests (no fixture pattern).
+- No unit test for `dial_ws.rs` (`transport/token/tests` is at the 7-entry limit).
+- `server_query_version` is 0 on token sessions, as designed.
+- Everything needs CI confirmation (compile, `clippy -D warnings`, tests).
+- `api.rs` is 917 lines (< 1000).
+
+Review fixes (orchestrator, after an independent compiler-style read):
+- `oversized_incoming_message_is_invalid_data` lifts tungstenite's own limits so the Raw length check is what fires (the first version deadlocked on the small duplex).
+- A write after a peer `Close` reports the same `WsPeerClose` (`peer_close` in `WsByteStream`, shared helper `WsPeerClose::cause_of`), so a concurrent writer cannot replace `PeerClosed` with `Io`.
+- The binding decoder accepts `sid` only as a msgpack `bin` of 32 bytes (`str` and arrays are refused).
+- Raw-mode outgoing messages no longer copy the payload.
+- Added a `reader_task` close-mapping test; refusal and binding tests are bounded by timeouts.

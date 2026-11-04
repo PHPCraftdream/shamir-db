@@ -19,6 +19,7 @@ use crate::client::session::client::{Client, SessionMeta};
 use crate::client::session::options::{
     ConnectLocalOptions, ConnectOptions, ResumeOptions, SecureResumeOptions,
 };
+use crate::client::session::token::AuthKind;
 use crate::client::transport::{dial_ipc, dial_tcp_tls, LifecycleHooks};
 use crate::error::ClientError;
 
@@ -60,6 +61,7 @@ pub(in crate::client) fn session_meta(
         request_timeout,
         rotation_in_progress: verified.auth_ok.rotation_in_progress,
         kdf_upgrade_required: outcome.kdf_upgrade_required,
+        auth: AuthKind::Scram,
     }
 }
 
@@ -283,6 +285,7 @@ impl Client {
                 request_timeout: None,
                 rotation_in_progress: None,
                 kdf_upgrade_required: false,
+                auth: AuthKind::Scram,
             },
             LifecycleHooks::default(),
         ))

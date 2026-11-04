@@ -1,6 +1,7 @@
 //! Token-over-REST transport: endpoint description, TLS trust and the
 //! HTTP/1.1 connection.
 
+mod dial_ws;
 mod endpoint;
 mod http_conn;
 mod status;
@@ -12,6 +13,7 @@ mod tests;
 pub use endpoint::TokenEndpoint;
 pub use tls::TokenTrust;
 
+pub(crate) use dial_ws::dial_token_ws;
 pub(crate) use endpoint::TokenScheme;
 #[cfg(test)]
 pub(crate) use http_conn::TokenReply;

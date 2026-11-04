@@ -44,6 +44,14 @@ pub(crate) fn map_ping_reply(reply: TokenReply) -> Result<(), ClientError> {
     Err(map_failure(&reply))
 }
 
+/// Maps a non-101 answer of the `GET /shamir/v1/ws` upgrade.
+pub(super) fn map_upgrade_reply(reply: TokenReply) -> ClientError {
+    if reply.status == 200 {
+        return ClientError::Protocol("websocket upgrade not performed".into());
+    }
+    map_failure(&reply)
+}
+
 fn map_failure(reply: &TokenReply) -> ClientError {
     match reply.status {
         400 | 403 => match decode_db_error(reply) {
