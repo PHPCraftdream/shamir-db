@@ -6,10 +6,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { Socket, Platform } from '../../core/support/platform.js';
-import { encode, decode } from '../../core/protocol/framing.js';
-import { ShamirClient } from '../../core/client/client.js';
-import type { ResumeOptions } from '../../core/types/index.js';
+import type { Socket, Platform } from '../../../core/support/platform.js';
+import { encode, decode } from '../../../core/protocol/framing.js';
+import { ShamirClient } from '../../../core/client/client.js';
+import type { ResumeOptions } from '../../../core/types/index.js';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -301,7 +301,7 @@ describe('ShamirClient resumption getters (via constructor)', () => {
   it('resumptionTicket() and resumptionExpiresAtNs() return undefined when not provided', async () => {
     // Reach into the private constructor via a cast — the same technique used
     // in client-demux.test.ts.
-    const { WsFramer } = await import('../../core/protocol/framing.js');
+    const { WsFramer } = await import('../../../core/protocol/framing.js');
 
     // Minimal socket that does nothing (we only need the constructor).
     const noopSocket: Socket = {
@@ -346,7 +346,7 @@ describe('ShamirClient resumption getters (via constructor)', () => {
   });
 
   it('resumptionTicket() and resumptionExpiresAtNs() return values when provided', async () => {
-    const { WsFramer } = await import('../../core/protocol/framing.js');
+    const { WsFramer } = await import('../../../core/protocol/framing.js');
     const noopSocket: Socket = {
       send: () => {},
       onMessage: () => {},

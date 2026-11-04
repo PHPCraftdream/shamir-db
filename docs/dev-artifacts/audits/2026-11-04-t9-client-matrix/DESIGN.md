@@ -166,3 +166,15 @@ Draft table:
 3. **Extra cells the protocol admits but T9 does not schedule** (resume x IPC for all clients, TCP plain for napi and TS Node, browser resume export, `identity_sig` pin in TS #622): collected as a follow-up task T9-8.
 4. **Browser profiles for native clients.** Session x WS browser profile: yes (useful behind a TLS-terminating proxy that breaks the exporter). Token x WS browser route for native clients: no.
 5. **napi generated files.** Artifact upload on drift in the `node-binding` job (workflow edit inside T9-5); no local `napi build`.
+
+## T9-1b S0-S2 report
+
+Status: DONE as written, UNVERIFIED by any compiler or test run (no local builds by policy); verification is CI only (`ci.yml` full tier and `ts-e2e-nightly.yml` via dispatch on the branch).
+
+- **S0:** `connect.test.ts`, `resume.test.ts`, `e2e-connect-local.test.ts`, `e2e-resume.test.ts` were copied to `crates/shamir-client-ts/src/__tests__/connection/session/` with only relative import paths fixed (`../../index.js` to `../../../index.js`, `../../core/...` to `../../../core/...`, `../e2e-harness.js` to `../../e2e-harness.js`, REPO_ROOT depth one level deeper in `connect.test.ts`). ORCHESTRATOR ACTION REQUIRED: the four OLD copies in `src/__tests__/connection/` (same file names) must be removed; they could not be deleted from this session and are still present, so until they are removed the tests run twice and `__tests__/connection` has 8 entries.
+- **S1:** new `core/protocol/session/{binding.ts,endpoint.ts,index.ts}` (`ChannelBinding`, `browserWsBinding()`, `ipcBinding()`, `SessionEndpoint`, `SessionLink`). `runHandshake` takes `ChannelBinding | number` (legacy numeric `transportKind, bindingMode` form kept, so `core/protocol/__tests__/protocol.test.ts` is unchanged); the exporter is NOT added to the SCRAM auth_message (wire identical). `ShamirClient` stores the binding in the private field `_channelBinding` (no new public member).
+- **S2:** bodies of `connect`, `connectLocal`, `resume` moved to `core/protocol/session/{open.ts,resume.ts}` (`openSession`, `openScramSession`, `openLocalSession`, `resumeSession`) returning the plain `SessionOpened` (`opened.ts`); the statics in `client.ts` are thin delegates through a private `fromOpened`. `client.ts` went from 993 to 777 lines. Import graph: `client.ts` -> `protocol/session/index.ts` -> `{open,resume}.ts` -> `{protocol.ts, framing.ts, client/client-internals.ts, types/connection.ts, binding.ts}`; no session file imports `client.ts`, so there is no cycle.
+- **Tests added:** `core/protocol/session/__tests__/binding.test.ts` (profile constants, fresh exporter arrays, `auth_init.binding_mode` for the browser, ipc and legacy numeric forms; fake socket, no network).
+- **Not touched:** `src/index.ts`, `src/browser.ts`, `core/protocol/scram.ts`, token path, `package.json`, lockfiles, workflows. `changePassword` still hard-codes the browser binding (S4, out of scope).
+- **Layout:** `python -I scripts/ci/check_layout.py` reports OK.
+- **Known caveats:** `_channelBinding` is stored but not yet read (S4 will use it). `resume` yields `normalizedUser: undefined` exactly as before.
