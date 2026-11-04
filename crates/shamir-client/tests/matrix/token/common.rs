@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::server::admin::UserDirectory;
@@ -18,13 +19,14 @@ use shamir_client::builder::doc;
 use shamir_client::builder::write::insert;
 use shamir_client::builder::Query;
 use shamir_client::{
-    ApiToken, BatchRequest, TokenEndpoint, TokenHttpClient, TokenHttpOptions, TokenTrust,
+    ApiToken, BatchRequest, Client, ConnectOptions, TokenEndpoint, TokenHttpClient,
+    TokenHttpOptions, TokenTrust,
 };
 
 use shamir_server::bootstrap::{ensure_superuser, BootstrapPolicy};
 use shamir_server::config::{
     Config, HttpListenerSettings, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig,
-    ObservabilityConfig, SecurityConfig, TlsConfig,
+    ObservabilityConfig, ProfileKind, SecurityConfig, TlsConfig,
 };
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_server::tokens::NewToken;
@@ -127,6 +129,20 @@ fn http_listener(tls: bool) -> ListenerConfig {
     }
 }
 
+/// Native SCRAM listener: a token may not run DDL, so the fixture creates its
+/// table through an admin session on this listener.
+fn native_listener() -> ListenerConfig {
+    ListenerConfig {
+        kind: ListenerKind::Tcp,
+        addr: "127.0.0.1:0".into(),
+        profile: Some(ProfileKind::TlsExporter),
+        path: None,
+        kdf_override: None,
+        browser_origin_allowlist: vec![],
+        http: Default::default(),
+    }
+}
+
 fn make_config(data_dir: &Path) -> Config {
     Config {
         tokens: Default::default(),
@@ -141,7 +157,7 @@ fn make_config(data_dir: &Path) -> Config {
         transactions: Default::default(),
         kdf_defaults: kdf(),
         argon2_concurrent_max: 4,
-        listeners: vec![http_listener(true), http_listener(false)],
+        listeners: vec![http_listener(true), http_listener(false), native_listener()],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),
             key_path: data_dir.join("key.pem"),
@@ -248,6 +264,8 @@ pub async fn boot() -> TokenFixture {
     .expect("launcher boot");
     let tls = handle.bound_addrs[0].expect("TLS listener bound");
     let plain = handle.bound_addrs[1].expect("plain listener bound");
+    let native = handle.bound_addrs[2].expect("native listener bound");
+    create_items_table(native).await;
     let cert_pem = std::fs::read(data_dir.join("cert.pem")).expect("generated cert");
 
     let mut fixture = TokenFixture {
@@ -266,7 +284,28 @@ pub async fn boot() -> TokenFixture {
     fixture
 }
 
-pub fn create_table_batch() -> BatchRequest {
+async fn create_items_table(native: SocketAddr) {
+    let admin = Client::connect(ConnectOptions {
+        addr: native,
+        server_name: SERVER_NAME.into(),
+        username: "admin".into(),
+        password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),
+        accept_new_host: true,
+        trusted_pin: None,
+        connect_timeout: Some(Duration::from_secs(10)),
+        handshake_timeout: Some(Duration::from_secs(60)),
+        request_timeout: Some(Duration::from_secs(30)),
+    })
+    .await
+    .expect("admin connect");
+    admin
+        .execute("default", create_table_batch())
+        .await
+        .expect("create table");
+    admin.close().await;
+}
+
+fn create_table_batch() -> BatchRequest {
     let mut batch = Batch::new();
     batch.id("mk-items");
     batch.create_table("mk", ddl::create_table("items"));

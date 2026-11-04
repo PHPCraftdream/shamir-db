@@ -4,13 +4,9 @@ use shamir_client::{
     ApiToken, ClientError, DbRequest, TokenHttpClient, TokenHttpOptions, CURRENT_QUERY_LANG_VERSION,
 };
 
-use super::common::{boot, create_table_batch, read_batch, seed_batch, write_batch, TokenFixture};
+use super::common::{boot, read_batch, seed_batch, write_batch, TokenFixture};
 
 async fn seed_items(client: &TokenHttpClient) {
-    client
-        .execute("default", create_table_batch())
-        .await
-        .expect("create table");
     client
         .execute("default", seed_batch())
         .await
