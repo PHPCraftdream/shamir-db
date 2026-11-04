@@ -184,8 +184,8 @@ impl LoginBudgetTable {
             markers: std::array::from_fn(|_| None),
             budget: Arc::clone(&self.pinned_buckets),
         };
-        for level in 0..count {
-            if let Some(idx) = self.find(tiers[level]) {
+        for (level, tier) in tiers.iter().enumerate().take(count) {
+            if let Some(idx) = self.find(*tier) {
                 let marker = Arc::clone(&self.slots[idx].pins);
                 if !try_pin_marker(&marker, &self.pinned_buckets) {
                     // Refused halfway: Drop releases every marker raised above.
