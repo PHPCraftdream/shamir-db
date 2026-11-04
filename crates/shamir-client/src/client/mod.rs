@@ -10,6 +10,7 @@
 //! completion order (not send order); the reader task matches each by `rid`.
 
 mod api;
+mod handshake;
 mod session;
 pub(crate) mod transport;
 
@@ -27,13 +28,15 @@ pub(crate) use api::admin_request_tag_for_test as admin_request_tag;
 pub(crate) use api::encode_named_into;
 pub(crate) use api::should_advertise_interner_epochs;
 #[cfg(test)]
+pub(crate) use handshake::{
+    resume_wire_exchange, run_scram, verify_resume_identity_proof, ScramRequest,
+};
+#[cfg(test)]
 pub(crate) use session::entry::resume_security::{
     read_resume_frame, serialize_resume, ProtectedResumeBuffer,
 };
 #[cfg(test)]
-pub(crate) use session::entry::{
-    resume_wire_exchange, take_resume_wipes, verify_resume_identity_proof,
-};
+pub(crate) use session::entry::take_resume_wipes;
 
 #[cfg(test)]
 pub(crate) use transport::{
