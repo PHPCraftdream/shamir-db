@@ -63,12 +63,11 @@ where
         )
         .await;
         if let Some(hold) = response.extensions_mut().remove::<Arc<dyn Send + Sync>>() {
-            // try_send: a failure means the connection is already dead; dropping the
-            // hold Box here releases the login slot immediately.
+            // Closed means the connection is gone; Full cannot happen (one in-flight request,
+            // consumed on the first response write). Either way a failed hold is dropped here.
             let _ = context
                 .holds
                 .try_send(Box::new(hold) as Box<dyn Send + Sync>);
-            return Ok(response);
         }
         return Ok(response);
     }

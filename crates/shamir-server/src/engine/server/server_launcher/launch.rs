@@ -337,8 +337,7 @@ impl ServerLauncher {
                     tokio::select! {
                         _ = token.cancelled() => break,
                         _ = tick.tick() => {
-                            metrics::gauge!("shamir_login_http_pair_slots")
-                                .set(lockout.occupied_pair_count() as f64);
+                            lockout.republish_occupancy();
                         }
                     }
                 }

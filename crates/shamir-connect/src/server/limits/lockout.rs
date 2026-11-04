@@ -289,7 +289,8 @@ pub enum PairDropReason {
 }
 
 /// Receives absolute pair-store occupancy and rejected-admission reasons.
-/// Callbacks run while the slots mutex is held and must be fast/nonblocking.
+/// Callbacks run while the slots mutex is held and must be fast/nonblocking; they must not call
+/// back into the store (the mutex is not reentrant).
 pub type PairStoreObserver = dyn Fn(usize, Option<PairDropReason>) + Send + Sync;
 
 /// In-memory lockout store backed by a fixed, bounded pair table.
@@ -392,6 +393,13 @@ impl InMemoryLockoutStore {
     /// Count occupied pair slots, including lockout-only entries.
     pub fn occupied_pair_count(&self) -> usize {
         self.occupied_pairs.load(Ordering::Relaxed)
+    }
+
+    /// Re-publish the current occupancy through the observer while the slots mutex is held, so a
+    /// periodic caller cannot overwrite a newer mutation publication with an older value.
+    pub fn republish_occupancy(&self) {
+        let _slots = self.slots.lock();
+        self.report(None);
     }
 
     /// Notify the observer with this store's absolute occupancy.
