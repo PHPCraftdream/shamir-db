@@ -69,7 +69,7 @@ impl ShamirFunction for GlobalBump {
 
 // Many observed writer completions between reads increase the likelihood of
 // detecting a missing-key gap under concurrent updates. This is statistical,
-// not a guarantee: even 20,000 such observations can miss a gap.
+// not a guarantee: even thousands of such observations can miss a gap.
 //
 // The pace of the writer depends on how much CPU the runner gives this test
 // (nextest runs many tests in parallel), so overlap is not bounded by wall
@@ -77,7 +77,9 @@ impl ShamirFunction for GlobalBump {
 // made no progress at all for `STALL` (a real hang). A truly stuck test is
 // killed by the nextest slow-timeout.
 const STALL: Duration = Duration::from_secs(30);
-const OBSERVATIONS: u32 = 20_000;
+// macOS runners manage only ~200-400 observed hand-offs per second, so the
+// count is sized to finish well inside the 30 s slow-timeout period there.
+const OBSERVATIONS: u32 = 5_000;
 
 fn check_setter_reads<W, R>(write: W, read: R)
 where
