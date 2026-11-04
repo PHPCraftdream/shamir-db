@@ -166,3 +166,23 @@ Draft table:
 3. **Extra cells the protocol admits but T9 does not schedule** (resume x IPC for all clients, TCP plain for napi and TS Node, browser resume export, `identity_sig` pin in TS #622): collected as a follow-up task T9-8.
 4. **Browser profiles for native clients.** Session x WS browser profile: yes (useful behind a TLS-terminating proxy that breaks the exporter). Token x WS browser route for native clients: no.
 5. **napi generated files.** Artifact upload on drift in the `node-binding` job (workflow edit inside T9-5); no local `napi build`.
+
+## T9-1 R2 report (Rust client session + mux move, behaviour unchanged)
+
+Status: DONE in code, PENDING orchestrator actions below. No local compile/test was run (policy); verified by a compiler-style read plus `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py`.
+
+What moved (bodies verbatim, only imports and visibility adjusted):
+- `client/connect.rs` -> `client/session/client.rs` (`SessionMeta`, `struct Client`, `Client::assemble`, the `cfg(test)` accessors) and `client/session/entry.rs` (`connect`, `connect_until`, `connect_host`, `handshake`, `connect_local`, `resume`, `resume_secure`, `verify_auth_ok`, `resume_wire_exchange`, `verify_resume_identity_proof`, `ResumedHandshake`, the `#[path]` link to `interner_cache/resume/security.rs`, now `../../interner_cache/resume/security.rs`).
+- `client/options.rs` -> `client/session/options.rs` (byte-identical).
+- From `client/transport.rs` -> `client/session/mux/lifecycle.rs` (`PendingSender`, `ClosedState`, `PendingRegistry`, `PendingMap`, `Lifecycle`, `ShutdownGuard`, `LifecycleHooks`), `mux/reader.rs` (`DemuxResult`, `IncomingEnvelope`, `decode_frame`, `await_pending_response`, `reader_task`), `mux/hooks.rs` (`HookPoint`, test-only).
+- `client/transport.rs` keeps `WriteSink`, `connect_tcp`, `connect_ipc`, `connect_with_timeout` and all `Wire*` structs, and re-exports `HookPoint` (cfg(test)), `ClosedState`, `Lifecycle`, `LifecycleHooks`, `ShutdownGuard`, `await_pending_response`, `reader_task`, so every `crate::client::transport::{..}` path still resolves. `client/mod.rs` keeps every public and `pub(crate)` path.
+
+Visibility widenings (all within the crate, none public): the `Client` fields were `pub(super)` (scope `client`) and are now `pub(in crate::client)` (same scope, path spelled out because the struct moved one level down); `resume_security` was `pub(super)` and is now `pub(in crate::client)`; `session::entry` is `pub(in crate::client)`; `session::mux` is `pub(crate)`. The effective visibility scope is unchanged.
+
+Dropped: the `pub(super) use resume_security::deserialize_resume_ticket;` re-export (the `WireResumeOk` serde attribute now names `crate::client::session::entry::resume_security::deserialize_resume_ticket` directly).
+
+Public API untouched: `lib.rs` re-exports, options file byte-identical. Guard tests untouched.
+
+PENDING for the orchestrator: `crates/shamir-client/src/client/connect.rs` and `crates/shamir-client/src/client/options.rs` are now orphaned (no longer declared as modules, duplicates of the moved code). They must be removed (the worker could not delete files). Until they are removed `client/` holds 8 entries and the rust-guard `modules` gate would flag them. After removal `client/` has 6 entries: `api.rs cursor_stream.rs mod.rs session/ subscription/ transport.rs`.
+
+Not verified locally: compilation, clippy, tests (CI only).
