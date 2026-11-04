@@ -7,6 +7,8 @@ use tokio_rustls::client::TlsStream;
 
 use shamir_transport_ipc::IpcClientStream;
 
+use super::ws_stream::WsByteStream;
+
 /// [`Client`]'s write half, over whichever transport it connected with.
 /// `Client` itself stays a single concrete type regardless of transport —
 /// only this enum (and the analogous, but unnamed, generic `R` in
@@ -17,6 +19,8 @@ use shamir_transport_ipc::IpcClientStream;
 pub(crate) enum WriteSink {
     Tls(WriteHalf<TlsStream<TcpStream>>),
     Ipc(WriteHalf<IpcClientStream>),
+    Tcp(WriteHalf<TcpStream>),
+    Ws(WriteHalf<WsByteStream<TlsStream<TcpStream>>>),
     /// Test-only sink: the client→server half of an injected
     /// simplex/duplex pipe (P0 C1 `Client::for_test`).
     #[cfg(test)]
@@ -32,6 +36,8 @@ impl AsyncWrite for WriteSink {
         match self.get_mut() {
             WriteSink::Tls(w) => Pin::new(w).poll_write(cx, buf),
             WriteSink::Ipc(w) => Pin::new(w).poll_write(cx, buf),
+            WriteSink::Tcp(w) => Pin::new(w).poll_write(cx, buf),
+            WriteSink::Ws(w) => Pin::new(w).poll_write(cx, buf),
             #[cfg(test)]
             WriteSink::Test(w) => Pin::new(&mut **w).poll_write(cx, buf),
         }
@@ -41,6 +47,8 @@ impl AsyncWrite for WriteSink {
         match self.get_mut() {
             WriteSink::Tls(w) => Pin::new(w).poll_flush(cx),
             WriteSink::Ipc(w) => Pin::new(w).poll_flush(cx),
+            WriteSink::Tcp(w) => Pin::new(w).poll_flush(cx),
+            WriteSink::Ws(w) => Pin::new(w).poll_flush(cx),
             #[cfg(test)]
             WriteSink::Test(w) => Pin::new(&mut **w).poll_flush(cx),
         }
@@ -50,6 +58,8 @@ impl AsyncWrite for WriteSink {
         match self.get_mut() {
             WriteSink::Tls(w) => Pin::new(w).poll_shutdown(cx),
             WriteSink::Ipc(w) => Pin::new(w).poll_shutdown(cx),
+            WriteSink::Tcp(w) => Pin::new(w).poll_shutdown(cx),
+            WriteSink::Ws(w) => Pin::new(w).poll_shutdown(cx),
             #[cfg(test)]
             WriteSink::Test(w) => Pin::new(&mut **w).poll_shutdown(cx),
         }

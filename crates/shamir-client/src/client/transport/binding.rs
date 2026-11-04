@@ -19,6 +19,25 @@ impl ChannelBinding {
         }
     }
 
+    /// WebSocket over TLS: the binding is the TLS-session exporter, extracted
+    /// before the upgrade (identical value and label as on TCP).
+    pub(crate) fn ws_tls_exporter(exporter: [u8; 32]) -> Self {
+        Self {
+            transport: TransportKind::WebSocket,
+            mode: BindingMode::TlsExporter,
+            exporter,
+        }
+    }
+
+    /// Plain TCP (loopback only): no TLS, zeroed channel binding.
+    pub(crate) fn tcp_plain() -> Self {
+        Self {
+            transport: TransportKind::Tcp,
+            mode: BindingMode::None,
+            exporter: [0u8; 32],
+        }
+    }
+
     /// Local IPC (Unix socket / Named Pipe): no TLS, zeroed channel binding.
     pub(crate) fn ipc() -> Self {
         Self {
