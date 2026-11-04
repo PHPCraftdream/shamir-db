@@ -1,6 +1,6 @@
 //! Session over the browser-profile WebSocket listener (binding mode 0x02).
 
-use shamir_client::Client;
+use shamir_client::{Client, ClientError};
 
 use crate::common::{boot, browser_session_options, exercise};
 
@@ -33,6 +33,7 @@ async fn browser_ws_upgrade_is_refused_without_and_with_a_wrong_origin() {
         Err(e) => e,
         Ok(_) => panic!("missing Origin must be refused"),
     };
+    assert!(matches!(err, ClientError::Handshake { .. }), "{err}");
     assert!(err.to_string().contains("websocket upgrade"), "{err}");
 
     // An origin outside the allowlist: 403, again a clean handshake error.
@@ -41,6 +42,7 @@ async fn browser_ws_upgrade_is_refused_without_and_with_a_wrong_origin() {
         Err(e) => e,
         Ok(_) => panic!("wrong Origin must be refused"),
     };
+    assert!(matches!(err, ClientError::Handshake { .. }), "{err}");
     assert!(err.to_string().contains("websocket upgrade"), "{err}");
 
     matrix.shutdown().await;

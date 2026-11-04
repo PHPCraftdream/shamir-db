@@ -59,7 +59,15 @@ async fn native_tcp_ticket_is_refused_over_plain_tcp() {
         Err(e) => e,
         Ok(_) => panic!("resume downgrade 0x01 -> 0x00 must be refused"),
     };
-    assert!(!err.to_string().is_empty(), "{err}");
+    // Same refusal shape as a forged ticket (the server answers a generic auth failure and
+    // closes); the success of the plain -> plain case above shows the client path itself works.
+    assert!(
+        matches!(
+            err,
+            ClientError::Transport { .. } | ClientError::ConnectionClosed(_)
+        ),
+        "{err}"
+    );
 
     tcp_client.close().await;
     matrix.shutdown().await;

@@ -2,7 +2,7 @@
 
 use shamir_client::Client;
 
-use crate::common::{boot, browser_resume_options, browser_session_options, exercise};
+use crate::common::{boot, browser_resume_options, browser_session_options, exercise, options};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn resume_over_browser_ws_after_a_browser_ws_session() {
@@ -45,5 +45,31 @@ async fn wrong_ticket_is_refused_over_browser_ws() {
     );
 
     first.close().await;
+    matrix.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_ws_ticket_is_refused_over_browser_ws() {
+    let matrix = boot().await;
+
+    let native = Client::connect_ws(options(matrix.ws))
+        .await
+        .expect("connect_ws");
+    // Anti-downgrade: a ticket issued under the TLS exporter (strength 2) cannot resume under the
+    // browser profile (strength 1). The server answers a generic auth failure and closes.
+    let err = match Client::resume_ws_browser(browser_resume_options(&matrix, &native)).await {
+        Err(e) => e,
+        Ok(_) => panic!("resume downgrade native -> browser profile must be refused"),
+    };
+    assert!(
+        matches!(
+            err,
+            shamir_client::ClientError::Transport { .. }
+                | shamir_client::ClientError::ConnectionClosed(_)
+        ),
+        "{err}"
+    );
+
+    native.close().await;
     matrix.shutdown().await;
 }
