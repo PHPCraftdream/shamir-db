@@ -1,6 +1,16 @@
 use serde::{Serialize, Serializer};
 
 use shamir_client as core;
+use zeroize::Zeroizing;
+
+// The native copy is wiped on drop, but the msgpack `Buffer` handed to JS and
+// the resulting JS string cannot be wiped.
+fn serialize_token<S: Serializer>(
+    token: &Zeroizing<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(token)
+}
 
 fn serialize_id<S: Serializer>(id: &[u8; 16], serializer: S) -> Result<S::Ok, S::Error> {
     serializer.serialize_bytes(id)
@@ -10,7 +20,8 @@ fn serialize_id<S: Serializer>(id: &[u8; 16], serializer: S) -> Result<S::Ok, S:
 #[derive(Serialize)]
 pub(crate) struct CreatedTokenView {
     pub(crate) id: String,
-    pub(crate) token: String,
+    #[serde(serialize_with = "serialize_token")]
+    pub(crate) token: Zeroizing<String>,
     pub(crate) label: String,
     pub(crate) owner: String,
     pub(crate) mode: core::ApiTokenMode,
@@ -23,7 +34,7 @@ pub(crate) struct CreatedTokenView {
 impl CreatedTokenView {
     pub(crate) fn from_created(created: core::CreatedApiToken) -> Self {
         Self {
-            token: created.token.reveal().to_owned(),
+            token: Zeroizing::new(created.token.reveal().to_owned()),
             id: created.id,
             label: created.label,
             owner: created.owner,
@@ -39,7 +50,8 @@ impl CreatedTokenView {
 /// Named-msgpack shape of a password login result; `id` is a 16-byte bin.
 #[derive(Serialize)]
 pub(crate) struct LoginView {
-    pub(crate) token: String,
+    #[serde(serialize_with = "serialize_token")]
+    pub(crate) token: Zeroizing<String>,
     #[serde(serialize_with = "serialize_id")]
     pub(crate) id: [u8; 16],
     pub(crate) owner: String,
@@ -54,7 +66,7 @@ pub(crate) struct LoginView {
 impl LoginView {
     pub(crate) fn from_outcome(outcome: core::LoginOutcome) -> Self {
         Self {
-            token: outcome.token.reveal().to_owned(),
+            token: Zeroizing::new(outcome.token.reveal().to_owned()),
             id: outcome.id,
             owner: outcome.owner,
             label: outcome.scope.label,

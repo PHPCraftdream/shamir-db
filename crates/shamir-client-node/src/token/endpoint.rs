@@ -4,7 +4,7 @@ use napi::bindgen_prelude::*;
 
 use shamir_client as core;
 
-use crate::{bounded, checked_port, infra_error};
+use crate::{bounded, checked_port};
 
 /// DNS budget when the caller supplied no connect/handshake timeout, so a
 /// stalled resolver never hangs a token call forever.
@@ -40,7 +40,10 @@ impl EndpointSpec {
             Scheme::Plain
         } else {
             let trust = match ca_pem {
-                Some(pem) => core::TokenTrust::pem(pem.as_bytes()).map_err(infra_error)?,
+                // The underlying error can echo a line of the PEM input, so it
+                // is dropped in favour of a fixed message.
+                Some(pem) => core::TokenTrust::pem(pem.as_bytes())
+                    .map_err(|_| Error::from_reason("caPem: no valid PEM certificate"))?,
                 None => core::TokenTrust::webpki_roots(),
             };
             Scheme::Https(trust)

@@ -26,18 +26,50 @@ const SERVER_BIN = path.join(
 const { ADMIN_USER, ADMIN_PASSWORD } = require('./server');
 
 const HOST = '127.0.0.1';
-const DEFAULT_PORT_BASE = 14200;
 const LISTENER_COUNT = 6;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 
-function portBase() {
-  const raw = process.env.SHAMIR_E2E_MATRIX_PORT_BASE;
-  if (raw === undefined || raw === '') return DEFAULT_PORT_BASE;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n < 1024 || n > 65530) {
-    throw new Error(`SHAMIR_E2E_MATRIX_PORT_BASE must be an integer in 1024..65530, got "${raw}"`);
+/**
+ * Parse the server's `listener bound` log lines (only complete lines, i.e.
+ * terminated by a newline) into the real ephemeral ports. Returns undefined
+ * until every socket listener has been reported.
+ *
+ * Log shape: `local_addr=127.0.0.1:PORT kind=Tcp profile=Some(TlsExporter)`;
+ * http listeners log `kind="http"` with no profile and are told apart by
+ * config order (TLS first, plain second).
+ */
+function readBoundListeners(logs, ipcAddr) {
+  const lines = logs.replace(ANSI_RE, '').split('\n');
+  const complete = lines.slice(0, -1).filter((l) => /listener bound/i.test(l));
+  const ipcBound = complete.some((l) => /kind="?unix"?/i.test(l) && l.includes(ipcAddr));
+  const tcp = [];
+  const ws = [];
+  const http = [];
+  for (const line of complete) {
+    const addr = /local_addr=([^\s,]+)/.exec(line);
+    if (!addr) continue;
+    const port = /:(\d+)$/.exec(addr[1].replace(/^"|"$/g, ''));
+    if (!port) continue;
+    const kind = /kind="?(\w+)"?/i.exec(line);
+    if (!kind) continue;
+    const profile = /profile=(?:Some\()?"?(\w+)/i.exec(line);
+    const entry = { port: Number(port[1]), profile: profile ? profile[1].toLowerCase() : '' };
+    const k = kind[1].toLowerCase();
+    if (k === 'tcp') tcp.push(entry);
+    else if (k === 'ws') ws.push(entry);
+    else if (k === 'http') http.push(entry);
   }
-  return n;
+  const tcpTls = tcp.find((e) => e.profile === 'tlsexporter');
+  const tcpPlain = tcp.find((e) => e.profile === 'plain');
+  const wsTls = ws.find((e) => e.profile === 'tlsexporter');
+  if (!ipcBound || !tcpTls || !tcpPlain || !wsTls || http.length < 2) return undefined;
+  return {
+    tcp: tcpTls.port,
+    ws: wsTls.port,
+    plain: tcpPlain.port,
+    httpTls: http[0].port,
+    httpPlain: http[1].port,
+  };
 }
 
 function ipcAddress(dataDir) {
@@ -47,7 +79,7 @@ function ipcAddress(dataDir) {
   return path.join(dataDir, `shamir-napi-e2e-${process.pid}.sock`);
 }
 
-function writeKtavConfig(dir, ports, ipcAddr) {
+function writeKtavConfig(dir, ipcAddr) {
   const cfg = `
 data_dir: ${dir.replace(/\\/g, '/')}
 
@@ -68,23 +100,23 @@ argon2_concurrent_max: 4
 listeners: [
     {
         kind: tcp
-        addr: ${HOST}:${ports.tcp}
+        addr: ${HOST}:0
         profile: tls_exporter
     }
     {
         kind: ws
-        addr: ${HOST}:${ports.ws}
+        addr: ${HOST}:0
         path: /shamir/v1
         profile: tls_exporter
     }
     {
         kind: tcp
-        addr: ${HOST}:${ports.plain}
+        addr: ${HOST}:0
         profile: plain
     }
     {
         kind: http
-        addr: ${HOST}:${ports.httpTls}
+        addr: ${HOST}:0
         tls: true
         login: {
             enabled: true
@@ -92,7 +124,7 @@ listeners: [
     }
     {
         kind: http
-        addr: ${HOST}:${ports.httpPlain}
+        addr: ${HOST}:0
         tls: false
         login: {
             enabled: true
@@ -170,18 +202,9 @@ async function startMatrixServer() {
     );
   }
 
-  const base = portBase();
-  const ports = {
-    tcp: base,
-    ws: base + 1,
-    plain: base + 2,
-    httpTls: base + 3,
-    httpPlain: base + 4,
-  };
-
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shamir-e2e-matrix-'));
   const ipcAddr = ipcAddress(dataDir);
-  const configPath = writeKtavConfig(dataDir, ports, ipcAddr);
+  const configPath = writeKtavConfig(dataDir, ipcAddr);
 
   const child = spawn(
     SERVER_BIN,
@@ -197,9 +220,10 @@ async function startMatrixServer() {
   child.stderr.on('data', onData);
 
   async function stop() {
-    if (!child.killed && child.exitCode === null) {
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = new Promise((r) => child.once('exit', r));
       child.kill(process.platform === 'win32' ? 'SIGKILL' : 'SIGTERM');
-      await new Promise((r) => child.once('exit', r));
+      await exited;
     }
     try {
       fs.rmSync(dataDir, { recursive: true, force: true });
@@ -208,8 +232,9 @@ async function startMatrixServer() {
     }
   }
 
+  let ports;
   try {
-    await new Promise((resolve, reject) => {
+    ports = await new Promise((resolve, reject) => {
       let resolved = false;
       const timeout = setTimeout(() => {
         if (!resolved) {
@@ -220,12 +245,11 @@ async function startMatrixServer() {
 
       function check() {
         if (resolved) return;
-        const plain = logBuf.replace(ANSI_RE, '');
-        const bound = (plain.match(/listener bound/gi) || []).length;
-        if (bound >= LISTENER_COUNT) {
+        const found = readBoundListeners(logBuf, ipcAddr);
+        if (found) {
           resolved = true;
           clearTimeout(timeout);
-          setTimeout(() => resolve(), 100);
+          resolve(found);
         }
       }
       child.stdout.on('data', check);

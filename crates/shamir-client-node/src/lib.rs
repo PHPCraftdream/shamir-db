@@ -4,7 +4,7 @@
 //! and cursors: TLS, WebSocket, plain-loopback and local (Unix socket / named
 //! pipe) SCRAM connects, ticket resumption over TLS and WebSocket, API-token
 //! WebSocket sessions, the token REST client, password `login`, batch
-//! execution, replication and user / API-token administration.
+//! execution, replication and API-token creation (`createApiToken`).
 //! JavaScript sees:
 //!
 //! ```js
@@ -56,6 +56,7 @@ mod request_state;
 mod secrets;
 mod token;
 use request_state::{Closed, State};
+// Required: keeps the free `login` function from being dead code under cfg(test).
 pub use token::{login, LoginOptions};
 
 use shamir_client as core;

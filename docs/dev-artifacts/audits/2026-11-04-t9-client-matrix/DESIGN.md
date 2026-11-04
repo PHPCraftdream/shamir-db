@@ -400,7 +400,7 @@ CI result (T9-6): `ts-e2e-nightly` on the fork ran `e2e-native-transports.test.t
 
 ## T9-5 report (napi matrix)
 
-Status: DONE in code, UNVERIFIED by any compiler or test run (no local builds by policy); verification is the PR CI (`ci.yml` full tier incl. `node-binding`, and the e2e suite `tests/e2e`). Local checks run: `cargo fmt -p shamir-client-node -- --check` and `python -I scripts/ci/check_layout.py` only.
+Status: DONE in code, UNVERIFIED by any compiler or test run (no local builds by policy); verification is the PR CI (`ci.yml` full tier incl. `node-binding`) PLUS a manual dispatch of `ts-e2e-nightly.yml` (the per-PR CI does not run the napi e2e suite `tests/e2e`). Row 6d (resume over plain TCP) was blocked by a missing core API, so it has no napi path. Local checks run: `cargo fmt -p shamir-client-node -- --check` and `python -I scripts/ci/check_layout.py` only.
 
 Added (napi, `crates/shamir-client-node`):
 - `ShamirClient.connectWs`, `connectPlain` (loopback only, enforced by the core), `connectLocal`, `resume` (`resume_secure`), `resumeWs` (`resume_ws_secure`), `connectTokenWs` (returns the same wrapper class; admin calls are refused by the core with `token_request_denied`), instance `authKind()` (`"scram"|"token"|"unknown"`) and `createApiToken`.
@@ -415,8 +415,26 @@ CI: `node-binding` got an `if: failure()` step that uploads `native/index.js` an
 
 Tests written (CI only): `src/tests/wrapper.test.js` (validation, no secret in errors, option forwarding, createApiToken/login mapping, token client), `error_wire.rs` (view wire shapes, no `derive(Debug)`, `secrets::protect` present), `secrets_lifecycle.rs`; e2e `tests/e2e/tests/21-connection-matrix.test.js` with `helpers/matrix-server.js` (six listeners: TCP+TLS, WS, plain TCP, HTTPS and HTTP with login, IPC) covering connectWs, connectPlain, connectLocal, resume over TCP and WS, token REST over HTTPS and plain, connectTokenWs, login, createApiToken. `consumer.ts` typechecks the new public names.
 
-Docs: `docs/guide-docs/guide/client-matrix.md` napi column rows 1b, 2, 4, 6a, 6b, 7, 8, 10 set to "plan T9-5 (e2e written; status yes after a green run)" (rows 3, 6d, 6e, 9 unchanged: no napi variant); new `docs/guide-docs/guide/node-client.md`, linked from the guide README; `tests/e2e/README.md` section.
+Docs: `docs/guide-docs/guide/client-matrix.md` napi column rows 1b, 2, 4, 6a, 6b, 7, 8, 10 set to "plan T9-5 (e2e written; status yes after a green run)" (rows 3, 6c, 6d are `нет (T9-8)`; rows 6e, 9 unchanged: no napi variant); new `docs/guide-docs/guide/node-client.md`, linked from the guide README; `tests/e2e/README.md` section.
 
 Unverified points to check in CI: free `#[napi] fn login<'env>(env: &'env Env, ..) -> Result<PromiseRaw<..>>` compiles under napi-derive 3.5.10; `connectWs` e2e relies on the core connecting to the WS path `/shamir/v1` by default; `connectTokenWs` e2e targets the HTTPS http listener; exact server error codes are intentionally not asserted for token-scope refusals and superuser login.
 
 Not done: rows of the napi column are not flipped to "yes" (orchestrator, after the green e2e run); generated `native/index.*` not regenerated (artifact flow).
+
+## T9-5b report (napi review fixes)
+
+Fixes, per `docs/dev-artifacts/prompts/t9/t9-5b-napi-review-fixes.md` items 1-9:
+1. CI `node-binding`: the generated-files upload step condition fixed and `overwrite` enabled.
+2. e2e: timeouts on every connect and login; `stop()` of the matrix server is signal-safe. (2b) Strong assertions: `ShamirDbError` instance checks, `login_account_denied`, `token_channel_denied`.
+3. e2e listeners bind ephemeral ports (`127.0.0.1:0`); ports are read from the `listener bound` log lines. (3') Connect budget is shared between DNS and the core handshake; resume runs in one bounded budget.
+4. `connectLocal` accepts `handshakeTimeoutMs`.
+5. Token views hold `Zeroizing<String>`; the msgpack Buffer and the JS string cannot be wiped.
+6. `caPem` errors use a fixed message.
+7. `authKind` typed `'scram'|'token'|'unknown'`; `null` accepted; `Uint8Array` normalised to `Buffer`.
+8. Docs fixes (client matrix napi rows 3, 6c, 6d are `нет (T9-8)`).
+9. `src/connect_variants.rs` split into the folder `src/connect_variants/` (`mod`, `connect_local`, `connect_plain`, `connect_ws`, `options/*`, `resume/*`), with comments. `src/tests/error_wire.rs` includes each file.
+
+Not verified / open:
+- Nothing was compiled or run locally (policy). Verification: CI fast tier (clippy) plus a dispatch of `ts-e2e-nightly.yml`.
+- The orchestrator must delete `crates/shamir-client-node/src/connect_variants.rs` before compiling (module conflict with the folder).
+- The e2e port parsing of `listener bound` lines was written from reading the server tracing calls, not from observed output.

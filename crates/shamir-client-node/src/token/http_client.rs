@@ -118,6 +118,7 @@ impl ShamirTokenHttpClient {
         let (state, mut shutdown, deadline, timeout) = self.request_parts();
         let batch = snapshot_bytes(&batch);
         env.spawn_future(async move {
+            // Sanctioned FFI boundary: deserialising a request that arrived as JS bytes
             let request: core::BatchRequest = rmp_serde::from_slice(&batch)
                 .map_err(|error| Error::from_reason(format!("invalid batch payload: {error}")))?;
             let result: std::result::Result<core::BatchResponse, core::ClientError> =

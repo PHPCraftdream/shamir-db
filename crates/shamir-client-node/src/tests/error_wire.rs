@@ -6,9 +6,21 @@ use std::collections::BTreeMap;
 use serde::de::IgnoredAny;
 use shamir_client as core;
 use shamir_query_types::wire::DbResponse;
+use zeroize::Zeroizing;
 
 const CLIENT_RS: &str = include_str!("../client.rs");
-const CONNECT_VARIANTS_RS: &str = include_str!("../connect_variants.rs");
+const CV_MOD_RS: &str = include_str!("../connect_variants/mod.rs");
+const CV_CONNECT_LOCAL_RS: &str = include_str!("../connect_variants/connect_local.rs");
+const CV_CONNECT_PLAIN_RS: &str = include_str!("../connect_variants/connect_plain.rs");
+const CV_CONNECT_WS_RS: &str = include_str!("../connect_variants/connect_ws.rs");
+const CV_OPTIONS_MOD_RS: &str = include_str!("../connect_variants/options/mod.rs");
+const CV_OPTIONS_LOCAL_RS: &str = include_str!("../connect_variants/options/local.rs");
+const CV_OPTIONS_PLAIN_RS: &str = include_str!("../connect_variants/options/plain.rs");
+const CV_OPTIONS_RESUME_RS: &str = include_str!("../connect_variants/options/resume.rs");
+const CV_RESUME_MOD_RS: &str = include_str!("../connect_variants/resume/mod.rs");
+const CV_RESUME_SHARED_RS: &str = include_str!("../connect_variants/resume/shared.rs");
+const CV_RESUME_TLS_RS: &str = include_str!("../connect_variants/resume/tls.rs");
+const CV_RESUME_WS_RS: &str = include_str!("../connect_variants/resume/ws.rs");
 const TOKEN_ADMIN_RS: &str = include_str!("../token/admin.rs");
 const TOKEN_ENDPOINT_RS: &str = include_str!("../token/endpoint.rs");
 const TOKEN_HTTP_CLIENT_RS: &str = include_str!("../token/http_client.rs");
@@ -51,7 +63,7 @@ fn created_token_view_wire_shape_is_named_and_not_an_error_marker() {
     let _ = views::CreatedTokenView::from_created;
     let view = views::CreatedTokenView {
         id: "abc".to_owned(),
-        token: "shk1.secret".to_owned(),
+        token: Zeroizing::new("shk1.secret".to_owned()),
         label: "ci".to_owned(),
         owner: "admin".to_owned(),
         mode: core::ApiTokenMode::ReadWrite,
@@ -88,7 +100,7 @@ fn login_view_wire_shape_has_binary_id_and_is_not_an_error_marker() {
     let _ = views::LoginView::from_outcome;
     let id: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
     let view = views::LoginView {
-        token: "shk1.secret".to_owned(),
+        token: Zeroizing::new("shk1.secret".to_owned()),
         id,
         owner: "admin".to_owned(),
         label: "http-login".to_owned(),
@@ -131,7 +143,18 @@ fn derive_lines_with_debug(source: &str) -> Vec<&str> {
 fn option_and_view_sources_never_derive_debug() {
     for (name, source) in [
         ("client.rs", CLIENT_RS),
-        ("connect_variants.rs", CONNECT_VARIANTS_RS),
+        ("connect_variants/mod.rs", CV_MOD_RS),
+        ("connect_variants/connect_local.rs", CV_CONNECT_LOCAL_RS),
+        ("connect_variants/connect_plain.rs", CV_CONNECT_PLAIN_RS),
+        ("connect_variants/connect_ws.rs", CV_CONNECT_WS_RS),
+        ("connect_variants/options/mod.rs", CV_OPTIONS_MOD_RS),
+        ("connect_variants/options/local.rs", CV_OPTIONS_LOCAL_RS),
+        ("connect_variants/options/plain.rs", CV_OPTIONS_PLAIN_RS),
+        ("connect_variants/options/resume.rs", CV_OPTIONS_RESUME_RS),
+        ("connect_variants/resume/mod.rs", CV_RESUME_MOD_RS),
+        ("connect_variants/resume/shared.rs", CV_RESUME_SHARED_RS),
+        ("connect_variants/resume/tls.rs", CV_RESUME_TLS_RS),
+        ("connect_variants/resume/ws.rs", CV_RESUME_WS_RS),
         ("token/admin.rs", TOKEN_ADMIN_RS),
         ("token/endpoint.rs", TOKEN_ENDPOINT_RS),
         ("token/http_client.rs", TOKEN_HTTP_CLIENT_RS),
@@ -153,7 +176,9 @@ fn secret_bearing_sources_protect_their_secrets() {
         ("token/http_client.rs", TOKEN_HTTP_CLIENT_RS),
         ("token/ws.rs", TOKEN_WS_RS),
         ("token/login.rs", TOKEN_LOGIN_RS),
-        ("connect_variants.rs", CONNECT_VARIANTS_RS),
+        ("connect_variants/connect_local.rs", CV_CONNECT_LOCAL_RS),
+        ("connect_variants/connect_plain.rs", CV_CONNECT_PLAIN_RS),
+        ("connect_variants/resume/shared.rs", CV_RESUME_SHARED_RS),
     ] {
         assert!(source.contains("secrets::protect"), "{name} lacks protect");
     }

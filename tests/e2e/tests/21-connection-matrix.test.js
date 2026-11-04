@@ -15,6 +15,12 @@ const { ShamirClient, ShamirTokenHttpClient, ShamirDbError, login } = require('s
 const { startMatrixServer } = require('../helpers/matrix-server');
 
 module.exports = async function ({ test, assert, assertEq, assertThrows, fixtures }) {
+  // Bounded deadlines so a hung connect fails the test instead of the run.
+  const SESSION_TIMEOUTS = { connectTimeoutMs: 10000, handshakeTimeoutMs: 30000, requestTimeoutMs: 30000 };
+  const RESUME_TIMEOUTS = { handshakeTimeoutMs: 30000, requestTimeoutMs: 30000 };
+  const LOCAL_TIMEOUTS = { connectTimeoutMs: 10000, requestTimeoutMs: 30000 };
+  const TOKEN_TIMEOUTS = { connectTimeoutMs: 10000, requestTimeoutMs: 30000 };
+
   let matrixPromise = null;
   let counter = 0;
 
@@ -46,6 +52,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
       username: m.user,
       password: m.password,
       acceptNewHost: true,
+      ...SESSION_TIMEOUTS,
     });
   }
 
@@ -91,11 +98,19 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
   }
 
   function tokenHttpOpts(m, token) {
-    return { host: m.host, port: m.ports.httpTls, serverName: 'localhost', caPem: m.caPem, token };
+    return { host: m.host, port: m.ports.httpTls, serverName: 'localhost', caPem: m.caPem, token, ...TOKEN_TIMEOUTS };
   }
 
   function tokenWsOpts(m, token) {
-    return { host: m.host, port: m.ports.httpTls, serverName: 'localhost', caPem: m.caPem, token };
+    return {
+      host: m.host,
+      port: m.ports.httpTls,
+      serverName: 'localhost',
+      caPem: m.caPem,
+      token,
+      ...TOKEN_TIMEOUTS,
+      handshakeTimeoutMs: 30000,
+    };
   }
 
   // Secret material must never appear in an error message, in any common
@@ -135,6 +150,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
       username: m.user,
       password: m.password,
       acceptNewHost: true,
+      ...SESSION_TIMEOUTS,
     });
     try {
       assertEq(c.authKind(), 'scram');
@@ -158,6 +174,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
       username: m.user,
       password: m.password,
       acceptNewHost: true,
+      ...SESSION_TIMEOUTS,
     });
     try {
       assertEq(c.authKind(), 'scram');
@@ -177,6 +194,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
           username: m.user,
           password: m.password,
           acceptNewHost: true,
+          ...SESSION_TIMEOUTS,
         }),
       (e) => /loopback/i.test(e.message),
       'non-loopback plain connect must name the loopback rule'
@@ -192,6 +210,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
       username: m.user,
       password: m.password,
       acceptNewHost: true,
+      ...LOCAL_TIMEOUTS,
     });
     try {
       await c.ping();
@@ -215,6 +234,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         serverName: 'localhost',
         ticket,
         trustedPin: first.serverPubKeyPin(),
+        ...RESUME_TIMEOUTS,
       });
       await resumed.ping();
     } finally {
@@ -236,6 +256,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         serverName: 'localhost',
         ticket,
         trustedPin: first.serverPubKeyPin(),
+        ...RESUME_TIMEOUTS,
       });
       await resumed.ping();
     } finally {
@@ -253,6 +274,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
       username: m.user,
       password: m.password,
       acceptNewHost: true,
+      ...SESSION_TIMEOUTS,
     });
     let resumed = null;
     try {
@@ -264,6 +286,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         serverName: 'localhost',
         ticket,
         trustedPin: first.serverPubKeyPin(),
+        ...RESUME_TIMEOUTS,
       });
       await resumed.ping();
     } finally {
@@ -286,6 +309,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
           serverName: 'localhost',
           ticket,
           trustedPin: wrongPin,
+          ...RESUME_TIMEOUTS,
         })
       );
       assert(!leaks(err.message, [ticket, realPin, wrongPin]), 'error must not echo ticket or pin');
@@ -310,6 +334,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
           serverName: 'localhost',
           ticket: corrupted,
           trustedPin: pin,
+          ...RESUME_TIMEOUTS,
         })
       );
       assert(!leaks(err.message, [original, corrupted, pin]), 'error must not echo ticket or pin');
@@ -355,6 +380,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         port: m.ports.httpPlain,
         plainLoopback: true,
         token: t.token,
+        ...TOKEN_TIMEOUTS,
       });
       try {
         await http.ping();
@@ -375,7 +401,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         assertEq(rows.length, 1);
         await assertThrows(
           () => writeRow(http, db, 'denied', 9),
-          (e) => !(e instanceof ShamirDbError) || typeof e.code === 'string',
+          (e) => e instanceof ShamirDbError,
           'read_only token must not write'
         );
         // The denied row must not exist.
@@ -438,7 +464,11 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
   test('connectTokenWs: rest-only token is refused', async () => {
     await withAdmin(async (admin, m) => {
       const t = await newToken(admin, { channels: 'rest' });
-      await assertThrows(() => ShamirClient.connectTokenWs(tokenWsOpts(m, t.token)));
+      await assertThrows(
+        () => ShamirClient.connectTokenWs(tokenWsOpts(m, t.token)),
+        (e) => e instanceof ShamirDbError && e.code === 'token_channel_denied',
+        'rest-only token must be channel-denied over WS'
+      );
     });
   });
 
@@ -464,6 +494,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         label: unique('matrix-login'),
         mode: 'read_only',
         channels: 'rest',
+        ...TOKEN_TIMEOUTS,
       });
       assertIssued(issued, u.name);
       const http = await ShamirTokenHttpClient.connect(tokenHttpOpts(m, issued.token));
@@ -487,6 +518,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         label: unique('matrix-login-plain'),
         mode: 'read_only',
         channels: 'rest',
+        ...TOKEN_TIMEOUTS,
       });
       assertIssued(issued, u.name);
       const http = await ShamirTokenHttpClient.connect({
@@ -494,6 +526,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         port: m.ports.httpPlain,
         plainLoopback: true,
         token: issued.token,
+        ...TOKEN_TIMEOUTS,
       });
       try {
         await http.ping();
@@ -516,6 +549,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         label: unique('matrix-login-both'),
         mode: 'read_only',
         channels: 'both',
+        ...TOKEN_TIMEOUTS,
       });
       assertIssued(issued, u.name);
       const c = await ShamirClient.connectTokenWs(tokenWsOpts(m, issued.token));
@@ -542,6 +576,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
           password: wrong,
           mode: 'read_only',
           channels: 'rest',
+          ...TOKEN_TIMEOUTS,
         })
       );
       assert(!err.message.includes(wrong), 'error must not echo the supplied password');
@@ -551,17 +586,21 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
 
   test('login: superuser account is denied', async () => {
     const m = await matrix();
-    await assertThrows(() =>
-      login({
-        host: m.host,
-        port: m.ports.httpTls,
-        serverName: 'localhost',
-        caPem: m.caPem,
-        username: m.user,
-        password: m.password,
-        mode: 'read_only',
-        channels: 'rest',
-      })
+    await assertThrows(
+      () =>
+        login({
+          host: m.host,
+          port: m.ports.httpTls,
+          serverName: 'localhost',
+          caPem: m.caPem,
+          username: m.user,
+          password: m.password,
+          mode: 'read_only',
+          channels: 'rest',
+          ...TOKEN_TIMEOUTS,
+        }),
+      (e) => /login_account_denied/.test(e.message),
+      'superuser login must be denied'
     );
   });
 
@@ -576,6 +615,7 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
         port: m.ports.httpPlain,
         plainLoopback: true,
         token: bogus,
+        ...TOKEN_TIMEOUTS,
       })
     );
     assert(!String(err.message).includes(bogus), 'error must not echo the supplied token');

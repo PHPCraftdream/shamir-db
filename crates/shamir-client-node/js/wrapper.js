@@ -126,10 +126,6 @@ function throwIfError(buf) {
 }
 
 // ---------------------------------------------------------------------------
-// Wrapped ShamirClient.
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
 // Argument validation. Messages never include input values: they may be
 // secrets (ticket, token, password, caPem).
 // ---------------------------------------------------------------------------
@@ -151,8 +147,27 @@ function requireString(options, key) {
   if (typeof options[key] !== 'string') throw new TypeError(`${key} must be a string`);
 }
 
+// Convert a non-Buffer Uint8Array view to a Buffer over the same memory.
+function toBuffer(v) {
+  return Buffer.isBuffer(v) ? v : Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+}
+
+// Return `options` itself unless a byte field needs normalising, in which case
+// return a shallow copy with those fields converted (inputs are validated).
+function normaliseBytes(options, keys) {
+  let out = options;
+  for (const key of keys) {
+    const v = options[key];
+    if (v != null && !Buffer.isBuffer(v) && v instanceof Uint8Array) {
+      if (out === options) out = { ...options };
+      out[key] = toBuffer(v);
+    }
+  }
+  return out;
+}
+
 function optionalString(options, key) {
-  if (options[key] !== undefined && typeof options[key] !== 'string') {
+  if (options[key] != null && typeof options[key] !== 'string') {
     throw new TypeError(`${key} must be a string`);
   }
 }
@@ -169,20 +184,20 @@ function validateEndpoint(options) {
   if (!Number.isInteger(options.port)) throw new TypeError('port must be an integer');
   optionalString(options, 'serverName');
   optionalString(options, 'caPem');
-  if (options.plainLoopback !== undefined && typeof options.plainLoopback !== 'boolean') {
+  if (options.plainLoopback != null && typeof options.plainLoopback !== 'boolean') {
     throw new TypeError('plainLoopback must be a boolean');
   }
 }
 
 function validateEnum(options, key, allowed, label) {
-  if (options[key] !== undefined && !allowed.includes(options[key])) {
+  if (options[key] != null && !allowed.includes(options[key])) {
     throw new TypeError(`${key} must be ${label}`);
   }
 }
 
 function validateDatabases(options) {
   const dbs = options.databases;
-  if (dbs !== undefined && (!Array.isArray(dbs) || dbs.some(d => typeof d !== 'string'))) {
+  if (dbs != null && (!Array.isArray(dbs) || dbs.some(d => typeof d !== 'string'))) {
     throw new TypeError('databases must be an array of strings');
   }
 }
@@ -194,7 +209,7 @@ function validateModeChannels(options) {
 }
 
 function validateOptionalPin(options) {
-  if (options.trustedPin !== undefined &&
+  if (options.trustedPin != null &&
       (!isBytes(options.trustedPin) || options.trustedPin.length !== 32)) {
     throw new TypeError('trustedPin must be 32 bytes');
   }
@@ -221,6 +236,10 @@ function validateConnectTls(options) {
 function validateConnectLocal(options) {
   validateCredentials(options);
   requireString(options, 'addr');
+  const t = options.handshakeTimeoutMs;
+  if (t != null && (!Number.isInteger(t) || t < 0 || t > 0xffffffff)) {
+    throw new TypeError('handshakeTimeoutMs must be a non-negative integer');
+  }
 }
 
 function validateResume(options) {
@@ -247,7 +266,7 @@ function validateLogin(options) {
   requireString(options, 'password');
   optionalString(options, 'label');
   validateModeChannels(options);
-  if (options.listenerId !== undefined &&
+  if (options.listenerId != null &&
       (!isBytes(options.listenerId) || options.listenerId.length !== 16)) {
     throw new TypeError('listenerId must be 16 bytes');
   }
@@ -256,7 +275,7 @@ function validateLogin(options) {
 function validateCreateApiToken(options) {
   requireObject(options);
   requireNonEmptyString(options, 'label');
-  if (options.ttlSecs !== undefined && !Number.isInteger(options.ttlSecs)) {
+  if (options.ttlSecs != null && !Number.isInteger(options.ttlSecs)) {
     throw new TypeError('ttlSecs must be an integer');
   }
   optionalString(options, 'forUser');
@@ -285,32 +304,35 @@ function rewrap(client) {
 
 class ShamirClient extends native.ShamirClient {
   static async connect(options) {
+    if (options !== null && typeof options === 'object' && !Array.isArray(options)) {
+      options = normaliseBytes(options, ['trustedPin']);
+    }
     return rewrap(await super.connect(options));
   }
 
   static async connectWs(options) {
     validateConnectTls(options);
-    return rewrap(await super.connectWs(options));
+    return rewrap(await super.connectWs(normaliseBytes(options, ['trustedPin'])));
   }
 
   static async connectPlain(options) {
     validateConnect(options);
-    return rewrap(await super.connectPlain(options));
+    return rewrap(await super.connectPlain(normaliseBytes(options, ['trustedPin'])));
   }
 
   static async connectLocal(options) {
     validateConnectLocal(options);
-    return rewrap(await super.connectLocal(options));
+    return rewrap(await super.connectLocal(normaliseBytes(options, ['trustedPin'])));
   }
 
   static async resume(options) {
     validateResume(options);
-    return rewrap(await super.resume(options));
+    return rewrap(await super.resume(normaliseBytes(options, ['ticket', 'trustedPin'])));
   }
 
   static async resumeWs(options) {
     validateResume(options);
-    return rewrap(await super.resumeWs(options));
+    return rewrap(await super.resumeWs(normaliseBytes(options, ['ticket', 'trustedPin'])));
   }
 
   static async connectTokenWs(options) {
@@ -366,7 +388,7 @@ class ShamirClient extends native.ShamirClient {
     // Void op — no payload to return.
   }
 
-  /** `'scram'` or `'token'`. Token sessions refuse admin methods (`token_request_denied`). */
+  /** `'scram'`, `'token'` or `'unknown'`. Token sessions refuse admin methods (`token_request_denied`). */
   authKind() {
     return super.authKind();
   }
@@ -397,7 +419,7 @@ class ShamirTokenHttpClient extends native.ShamirTokenHttpClient {
 /** Exchange username/password for an API token over the token endpoint. */
 async function login(options) {
   validateLogin(options);
-  return mapToken(decodeOrThrow(await native.login(options)));
+  return mapToken(decodeOrThrow(await native.login(normaliseBytes(options, ['listenerId']))));
 }
 
 module.exports = {

@@ -4,12 +4,10 @@
 
 Как подключиться к серверу из Node.js нативным биндингом `shamir-client` (крейт `crates/shamir-client-node`). Какие способы входа и транспорты вообще есть — в [`client-matrix.md`](./client-matrix.md); про токены и вход по паролю на стороне сервера — в [`token-api.md`](./token-api.md).
 
-Запросы собираются билдерами из `@shamir/client` (`ddl`, `write`, `Query`, `filter`), а не руками: клиент принимает готовый объект батча.
+Батчи собираются билдерами из `@shamir/client` (`Batch`, `ddl`, `write`, `Query`, `filter`): `Batch.create(id).add(alias, операция)....build()`. Объект `{ id, queries }` руками не пишется.
 
 ```js
-const { ddl, write, Query, filter } = require('@shamir/client');
-
-const batch = (id, queries) => ({ id, queries });
+const { Batch, ddl, write, Query, filter } = require('@shamir/client');
 ```
 
 ## Сессия (SCRAM): TCP+TLS
@@ -26,17 +24,19 @@ const client = await ShamirClient.connect({
   acceptNewHost: true, // TOFU: запомнить пин сервера при первом подключении
 });
 
-await client.execute('default', batch('mk', { mk: ddl.createDb('shop') }));
-await client.execute('shop', batch('t', {
-  mr: ddl.createRepo('main'),
-  tb: ddl.createTable('items', { repo: 'main' }),
-}));
-await client.execute('shop', batch('w', {
-  w: write.upsert('items', { id: 'a' }, { id: 'a', qty: 1 }),
-}));
-const resp = await client.execute('shop', batch('r', {
-  r: Query.from('items').where(filter.eq('id', 'a')).build(),
-}));
+await client.execute('default', Batch.create('mk')
+  .add('mk', ddl.createDb('shop'))
+  .build());
+await client.execute('shop', Batch.create('t')
+  .add('mr', ddl.createRepo('main'))
+  .add('tb', ddl.createTable('items', { repo: 'main' }))
+  .build());
+await client.execute('shop', Batch.create('w')
+  .add('w', write.upsert('items', { id: 'a' }, { id: 'a', qty: 1 }))
+  .build());
+const resp = await client.execute('shop', Batch.create('r')
+  .add('r', Query.from('items').where(filter.eq('id', 'a')))
+  .build());
 console.log(resp.results.r.records);
 
 await client.close();
@@ -46,7 +46,9 @@ await client.close();
 
 ## WebSocket, plain loopback, IPC
 
-Параметры у всех вариантов такие же, как у `connect`; различается только слушатель, к которому идёт подключение.
+Параметры похожи на `connect` (`host`, `port`, `username`, `password`, `acceptNewHost`, таймауты), но не одинаковы: у `connectPlain` нет `serverName` (TLS нет), а `connectLocal` вместо `host`/`port` принимает `addr` и не имеет `handshakeTimeoutMs`. Точные имена опций — в `js/wrapper.d.ts`.
+
+Таймауты (`connectTimeoutMs`, `handshakeTimeoutMs`, `requestTimeoutMs`): если опцию не указать, остаётся значение по умолчанию из ядра; `0` означает «истечь немедленно», а не «без ограничения».
 
 ```js
 // Сессия по WebSocket (слушатель ws, profile: tls_exporter).
@@ -95,7 +97,7 @@ const b = await ShamirClient.resumeWs({
 
 ## Токены
 
-Токен выпускает суперпользователь из сессии SCRAM:
+Токен выпускает любой пользователь SCRAM из своей сессии для самого себя (настройка `tokens.allow_self_service`, по умолчанию включена); суперпользователь нужен только для выпуска токена другому пользователю (`forUser`):
 
 ```js
 const issued = await client.createApiToken({
@@ -119,7 +121,7 @@ const http = await ShamirTokenHttpClient.connect({
   token: issued.token,
 });
 await http.ping();
-await http.execute('shop', batch('r', { r: Query.from('items').build() }));
+await http.execute('shop', Batch.create('r').add('r', Query.from('items')).build());
 await http.close();
 ```
 

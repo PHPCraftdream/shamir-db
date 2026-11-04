@@ -92,7 +92,7 @@ export async function checkMatrix(): Promise<void> {
     trustedPin,
   });
 
-  const kind: 'scram' | 'token' = ws.authKind();
+  const kind: 'scram' | 'token' | 'unknown' = ws.authKind();
   const created = await ws.createApiToken({
     label: 'l',
     ttlSecs: 60,
