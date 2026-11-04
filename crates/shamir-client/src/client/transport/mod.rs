@@ -1,0 +1,28 @@
+//! Transport axis of the client: the write sink, the dial helpers and the
+//! channel binding handed to the handshake.
+
+mod binding;
+mod dial;
+mod write_sink;
+
+// Re-exports: the mux/lifecycle/reader code lives in `client/session/mux/`
+// but `crate::client::transport::{...}` paths must keep resolving for the
+// subscription registry and the guard tests.
+#[cfg(test)]
+pub(crate) use crate::client::handshake::wire::{
+    WireAuthInit, WireAuthOk, WireChallenge, WireClientProof, WireResumeInit, WireResumeOk,
+    WireResumeProofOk,
+};
+#[cfg(test)]
+pub(crate) use crate::client::session::mux::hooks::HookPoint;
+pub(crate) use crate::client::session::mux::lifecycle::{
+    ClosedState, Lifecycle, LifecycleHooks, ShutdownGuard,
+};
+pub(crate) use crate::client::session::mux::reader::{await_pending_response, reader_task};
+
+pub(crate) use binding::ChannelBinding;
+pub(crate) use dial::{dial_ipc, dial_tcp_tls};
+pub(crate) use write_sink::WriteSink;
+
+#[cfg(test)]
+pub(crate) use dial::connect_with_timeout;

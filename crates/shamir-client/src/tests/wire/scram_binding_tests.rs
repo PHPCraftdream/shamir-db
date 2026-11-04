@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use crate::client::transport::{WireAuthInit, WireAuthOk, WireChallenge, WireClientProof};
+use crate::client::transport::{
+    ChannelBinding, WireAuthInit, WireAuthOk, WireChallenge, WireClientProof,
+};
 use crate::client::{run_scram, ScramRequest};
 use shamir_connect::common::crypto::Ed25519Keypair;
 use shamir_connect::common::kdf_params::KdfParams;
@@ -162,7 +164,12 @@ where
     auth_ok.session_id
 }
 
-async fn run_binding(transport_kind: TransportKind, binding_mode: BindingMode, exporter: [u8; 32]) {
+async fn run_binding(
+    transport_kind: TransportKind,
+    binding_mode: BindingMode,
+    exporter: [u8; 32],
+    binding: ChannelBinding,
+) {
     let (client_end, server_end) = tokio::io::duplex(64 * 1024);
     let (mut client_r, mut client_w) = split(client_end);
     let (mut server_r, mut server_w) = split(server_end);
@@ -181,9 +188,7 @@ async fn run_binding(transport_kind: TransportKind, binding_mode: BindingMode, e
             &mut client_w,
             ScramRequest {
                 username: NormalizedUsername::from_raw("scram-binding").unwrap(),
-                transport_kind,
-                binding_mode,
-                tls_exporter: exporter,
+                binding,
                 trusted_pin: None,
                 accept_new_host: true,
                 password: PASSWORD,
@@ -205,10 +210,22 @@ async fn run_binding(transport_kind: TransportKind, binding_mode: BindingMode, e
 
 #[tokio::test]
 async fn scram_completes_with_tcp_tls_exporter_binding() {
-    run_binding(TransportKind::Tcp, BindingMode::TlsExporter, [0x5A; 32]).await;
+    run_binding(
+        TransportKind::Tcp,
+        BindingMode::TlsExporter,
+        [0x5A; 32],
+        ChannelBinding::tcp_tls_exporter([0x5A; 32]),
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn scram_completes_with_unix_none_binding() {
-    run_binding(TransportKind::Unix, BindingMode::None, [0u8; 32]).await;
+    run_binding(
+        TransportKind::Unix,
+        BindingMode::None,
+        [0u8; 32],
+        ChannelBinding::ipc(),
+    )
+    .await;
 }

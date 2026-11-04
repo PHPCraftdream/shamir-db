@@ -8,17 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::crypto::aws_lc_rs::default_provider;
-use rustls::pki_types::ServerName;
-use tokio::io::split;
-use tokio_rustls::TlsConnector;
 use zeroize::Zeroizing;
 
-use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
-
-use shamir_transport_tcp::tls::{
-    extract_tls_exporter, make_client_config_app_authenticated, AppLayerServerAuth,
-};
 
 use crate::client::handshake::{
     resume_wire_exchange, run_scram, ScramOutcome, ScramRequest, PHASE_KDF, PHASE_SCRAM,
@@ -27,7 +19,7 @@ use crate::client::session::client::{Client, SessionMeta};
 use crate::client::session::options::{
     ConnectLocalOptions, ConnectOptions, ResumeOptions, SecureResumeOptions,
 };
-use crate::client::transport::{connect_ipc, connect_tcp, LifecycleHooks, WriteSink};
+use crate::client::transport::{dial_ipc, dial_tcp_tls, LifecycleHooks};
 use crate::error::ClientError;
 
 #[path = "../../interner_cache/resume/security.rs"]
@@ -39,8 +31,8 @@ use resume_security::ProtectedResumeBuffer;
 /// Handshake phases for [`ClientError::HandshakeTimeout`] diagnostics —
 /// stored in a shared atomic and updated before each stage.
 const PHASE_DNS: u8 = 0;
-const PHASE_TCP: u8 = 1;
-const PHASE_TLS: u8 = 2;
+pub(in crate::client) const PHASE_TCP: u8 = 1;
+pub(in crate::client) const PHASE_TLS: u8 = 2;
 
 fn phase_name(phase: u8) -> &'static str {
     match phase {
@@ -174,29 +166,20 @@ impl Client {
         username: NormalizedUsername,
         phase: Arc<AtomicU8>,
     ) -> Result<Self, ClientError> {
-        // ---- TLS ----
-        phase.store(PHASE_TCP, Ordering::Relaxed);
-        let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
-            .map_err(|e| ClientError::tls("client config", e))?;
-        let connector = TlsConnector::from(client_cfg);
-        let server_name = ServerName::try_from(opts.server_name.clone())
-            .map_err(|e| ClientError::tls("server name", e))?;
-        let tcp = connect_tcp(opts.addr, opts.connect_timeout).await?;
-        phase.store(PHASE_TLS, Ordering::Relaxed);
-        let tls = connector.connect(server_name, tcp).await?;
-        let exporter = extract_tls_exporter(&tls)
-            .map_err(|e| ClientError::tls("TLS exporter unavailable", e))?;
-
-        let (mut r, mut w) = split(tls);
+        let mut dialed = dial_tcp_tls(
+            opts.addr,
+            &opts.server_name,
+            opts.connect_timeout,
+            Some(phase.as_ref()),
+        )
+        .await?;
 
         let outcome = run_scram(
-            &mut r,
-            &mut w,
+            &mut dialed.read,
+            &mut dialed.write,
             ScramRequest {
                 username,
-                transport_kind: TransportKind::Tcp,
-                binding_mode: BindingMode::TlsExporter,
-                tls_exporter: exporter,
+                binding: dialed.binding,
                 trusted_pin: opts.trusted_pin,
                 accept_new_host: opts.accept_new_host,
                 password: &opts.password,
@@ -206,8 +189,8 @@ impl Client {
         .await?;
 
         Ok(Self::assemble(
-            r,
-            WriteSink::Tls(w),
+            dialed.read,
+            dialed.write,
             session_meta(outcome, opts.request_timeout),
             LifecycleHooks::default(),
         ))
@@ -217,26 +200,21 @@ impl Client {
     /// socket / Windows Named Pipe and return a ready client. Shares
     /// `run_scram` with [`Client::connect`] — same SCRAM flow, same
     /// `auth_ok`/resumption-ticket/TOFU-pin handling — only the transport
-    /// setup and the `transport_kind`/`binding_mode` fed to
-    /// `HandshakeBuilder` differ (spec TRANSPORT_UNIX.md: `binding_mode =
-    /// 0x00`, zeroed channel binding — passed as an all-zero exporter).
+    /// setup and the `ChannelBinding` fed to `run_scram` differ (spec
+    /// TRANSPORT_UNIX.md: `binding_mode = 0x00`, zeroed channel binding).
     pub async fn connect_local(opts: ConnectLocalOptions) -> Result<Self, ClientError> {
         let username = NormalizedUsername::from_raw(&opts.username)
             .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
 
         // ---- IPC connect (no TLS) ----
-        let stream = connect_ipc(&opts.addr, opts.connect_timeout).await?;
-
-        let (mut r, mut w) = split(stream);
+        let mut dialed = dial_ipc(&opts.addr, opts.connect_timeout).await?;
 
         let outcome = run_scram(
-            &mut r,
-            &mut w,
+            &mut dialed.read,
+            &mut dialed.write,
             ScramRequest {
                 username,
-                transport_kind: TransportKind::Unix,
-                binding_mode: BindingMode::None,
-                tls_exporter: [0u8; 32],
+                binding: dialed.binding,
                 trusted_pin: opts.trusted_pin,
                 accept_new_host: opts.accept_new_host,
                 password: &opts.password,
@@ -246,8 +224,8 @@ impl Client {
         .await?;
 
         Ok(Self::assemble(
-            r,
-            WriteSink::Ipc(w),
+            dialed.read,
+            dialed.write,
             session_meta(outcome, opts.request_timeout),
             LifecycleHooks::default(),
         ))
@@ -274,30 +252,24 @@ impl Client {
     pub async fn resume_secure(opts: SecureResumeOptions) -> Result<Self, ClientError> {
         let ticket = ProtectedResumeBuffer(opts.ticket);
         let _ = default_provider().install_default();
-        // ---- TLS ----
-        let client_cfg = make_client_config_app_authenticated(AppLayerServerAuth::exporter_bound())
-            .map_err(|e| ClientError::tls("client config", e))?;
-        let connector = TlsConnector::from(client_cfg);
-        let server_name = ServerName::try_from(opts.server_name.clone())
-            .map_err(|e| ClientError::tls("server name", e))?;
         // ResumeOptions carries no timeout knobs — resumption preserves the
-        // prior unbounded-wait connect behaviour (None).
-        let tcp = connect_tcp(opts.addr, None).await?;
-        let tls = connector.connect(server_name, tcp).await?;
-        // Verify TLS exporter is available (required for channel-binding). The
-        // exporter value will be used by the server to verify binding; the
+        // prior unbounded-wait connect behaviour (None). The exporter in the
+        // dialed binding is used by the server to verify channel binding; the
         // client sends it implicitly via binding_mode in WireResumeInit.
-        let tls_exporter = extract_tls_exporter(&tls)
-            .map_err(|e| ClientError::tls("TLS exporter unavailable", e))?;
+        let mut dialed = dial_tcp_tls(opts.addr, &opts.server_name, None, None).await?;
 
-        let (mut r, mut w) = split(tls);
-
-        let resumed =
-            resume_wire_exchange(&mut r, &mut w, ticket, opts.pinned_hash, tls_exporter).await?;
+        let resumed = resume_wire_exchange(
+            &mut dialed.read,
+            &mut dialed.write,
+            ticket,
+            opts.pinned_hash,
+            dialed.binding.exporter,
+        )
+        .await?;
 
         Ok(Self::assemble(
-            r,
-            WriteSink::Tls(w),
+            dialed.read,
+            dialed.write,
             SessionMeta {
                 session_id: resumed.session_id,
                 pinned_hash: opts.pinned_hash,
