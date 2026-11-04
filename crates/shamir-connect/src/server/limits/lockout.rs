@@ -289,7 +289,8 @@ pub enum PairDropReason {
 }
 
 /// Receives absolute pair-store occupancy and rejected-admission reasons.
-/// Callbacks run after the slots mutex is released and must be fast/nonblocking.
+/// Callbacks run while the slots mutex is held and must be fast/nonblocking; they must not call
+/// back into the store (the mutex is not reentrant).
 pub type PairStoreObserver = dyn Fn(usize, Option<PairDropReason>) + Send + Sync;
 
 /// In-memory lockout store backed by a fixed, bounded pair table.
@@ -392,6 +393,13 @@ impl InMemoryLockoutStore {
     /// Count occupied pair slots, including lockout-only entries.
     pub fn occupied_pair_count(&self) -> usize {
         self.occupied_pairs.load(Ordering::Relaxed)
+    }
+
+    /// Re-publish the current occupancy through the observer while the slots mutex is held, so a
+    /// periodic caller cannot overwrite a newer mutation publication with an older value.
+    pub fn republish_occupancy(&self) {
+        let _slots = self.slots.lock();
+        self.report(None);
     }
 
     /// Notify the observer with this store's absolute occupancy.
@@ -672,10 +680,11 @@ impl LockoutStore for InMemoryLockoutStore {
             }
         };
         let Some(index) = index else {
-            drop(slots);
+            let occupied = self.occupied_pair_count();
             if let Some(observer) = &self.observer {
-                observer(self.occupied_pair_count(), dropped);
+                observer(occupied, dropped);
             }
+            drop(slots);
             return FailureOutcome::Backoff { delay_ms: 0 };
         };
         let outcome = if count >= LOCKOUT_THRESHOLD {
@@ -695,12 +704,12 @@ impl LockoutStore for InMemoryLockoutStore {
             }
         };
         let occupied = self.occupied_pair_count();
-        drop(slots);
         if position.is_none() {
             if let Some(observer) = &self.observer {
                 observer(occupied, None);
             }
         }
+        drop(slots);
         outcome
     }
 
@@ -715,11 +724,9 @@ impl LockoutStore for InMemoryLockoutStore {
         };
         if removed {
             self.occupied_pairs.fetch_sub(1, Ordering::Relaxed);
-        }
-        drop(slots);
-        if removed {
             self.report(None);
         }
+        drop(slots);
     }
 
     fn pair_status(&self, key: PairKey, now_ns: u64) -> PairStatus {
@@ -790,11 +797,9 @@ impl LockoutStore for InMemoryLockoutStore {
         if removed != 0 {
             compact_pairs(&mut slots);
             self.occupied_pairs.fetch_sub(removed, Ordering::Relaxed);
-        }
-        drop(slots);
-        if removed != 0 {
             self.report(None);
         }
+        drop(slots);
     }
 
     fn gc(&self, now_ns: u64) {
@@ -828,9 +833,6 @@ impl LockoutStore for InMemoryLockoutStore {
         if removed != 0 {
             compact_pairs(&mut slots);
             self.occupied_pairs.fetch_sub(removed, Ordering::Relaxed);
-        }
-        drop(slots);
-        if removed != 0 {
             self.report(None);
         }
     }

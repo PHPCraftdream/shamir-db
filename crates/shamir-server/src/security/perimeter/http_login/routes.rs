@@ -46,7 +46,8 @@ fn result_for_status(status: u16) -> LoginResult {
         403 => LoginResult::PolicyDenied,
         429 => LoginResult::RateLimited,
         503 => LoginResult::ServerBusy,
-        400 | 404 | 405 | 413 | 415 => LoginResult::InvalidRequest,
+        // 408 and 431 come only from the transport's `refused` hook; the rest are shared.
+        408 | 431 | 400 | 404 | 405 | 413 | 415 => LoginResult::InvalidRequest,
         _ => LoginResult::AuthenticationFailed,
     }
 }
@@ -258,14 +259,7 @@ impl LoginRoutes for HttpLoginRoutes {
     }
 
     fn refused(&self, route: &[u8], status: axum::http::StatusCode) {
-        let result = match status.as_u16() {
-            403 => LoginResult::PolicyDenied,
-            429 => LoginResult::RateLimited,
-            503 => LoginResult::ServerBusy,
-            400 | 404 | 405 | 408 | 413 | 415 | 431 => LoginResult::InvalidRequest,
-            _ => LoginResult::AuthenticationFailed,
-        };
-        record_result(route_result(route), result);
+        record_result(route_result(route), result_for_status(status.as_u16()));
     }
 
     fn body_limit(&self, route: &[u8]) -> usize {

@@ -54,9 +54,12 @@ impl TokenStore {
     /// Open or create `<data_dir>/api_tokens` on a blocking thread.
     pub async fn open(data_dir: impl AsRef<Path>) -> Result<Self, TokenStoreError> {
         let path = data_dir.as_ref().join("api_tokens");
-        tokio::task::spawn_blocking(move || Self::open_blocking(path))
-            .await
-            .map_err(|_| TokenStoreError::Join)?
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatcher, || Self::open_blocking(path))
+        })
+        .await
+        .map_err(|_| TokenStoreError::Join)?
     }
 
     fn open_blocking(path: PathBuf) -> Result<Self, TokenStoreError> {
@@ -75,9 +78,12 @@ impl TokenStore {
     /// Scan records, warning with token ID only and skipping corrupt/invalid values.
     pub async fn scan(&self) -> Result<Vec<TokenRecord>, TokenStoreError> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || store.scan_blocking())
-            .await
-            .map_err(|_| TokenStoreError::Join)?
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatcher, || store.scan_blocking())
+        })
+        .await
+        .map_err(|_| TokenStoreError::Join)?
     }
 
     pub(crate) fn scan_blocking(&self) -> Result<Vec<TokenRecord>, TokenStoreError> {
@@ -121,9 +127,12 @@ impl TokenStore {
     /// Read one record on a blocking thread.
     pub async fn get(&self, id: TokenId) -> Result<Option<TokenRecord>, TokenStoreError> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || store.get_blocking(&id))
-            .await
-            .map_err(|_| TokenStoreError::Join)?
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatcher, || store.get_blocking(&id))
+        })
+        .await
+        .map_err(|_| TokenStoreError::Join)?
     }
 
     pub(crate) fn get_blocking(
@@ -187,9 +196,12 @@ impl TokenStore {
     /// Store a record durably before resolving.
     pub async fn put(&self, record: TokenRecord) -> Result<(), TokenStoreError> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || store.put_blocking(&record))
-            .await
-            .map_err(|_| TokenStoreError::Join)?
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatcher, || store.put_blocking(&record))
+        })
+        .await
+        .map_err(|_| TokenStoreError::Join)?
     }
 
     fn put_blocking(&self, record: &TokenRecord) -> Result<(), TokenStoreError> {
@@ -218,9 +230,12 @@ impl TokenStore {
     /// Delete a record durably before resolving.
     pub async fn delete(&self, id: TokenId) -> Result<(), TokenStoreError> {
         let store = self.clone();
-        tokio::task::spawn_blocking(move || store.delete_blocking(&id))
-            .await
-            .map_err(|_| TokenStoreError::Join)?
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        tokio::task::spawn_blocking(move || {
+            tracing::dispatcher::with_default(&dispatcher, || store.delete_blocking(&id))
+        })
+        .await
+        .map_err(|_| TokenStoreError::Join)?
     }
 
     pub(crate) fn delete_blocking(&self, id: &TokenId) -> Result<(), TokenStoreError> {

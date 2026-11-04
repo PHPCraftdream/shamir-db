@@ -63,12 +63,11 @@ where
         )
         .await;
         if let Some(hold) = response.extensions_mut().remove::<Arc<dyn Send + Sync>>() {
-            let (parts, body) = response.into_parts();
+            // Closed means the connection is gone; Full cannot happen (one in-flight request,
+            // consumed on the first response write). Either way a failed hold is dropped here.
             let _ = context
                 .holds
-                .send(Box::new(hold) as Box<dyn Send + Sync>)
-                .await;
-            return Ok(Response::from_parts(parts, body));
+                .try_send(Box::new(hold) as Box<dyn Send + Sync>);
         }
         return Ok(response);
     }
