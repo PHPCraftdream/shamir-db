@@ -22,7 +22,7 @@ runs:
   using: composite
   steps:
     - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-    - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+    - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
       with:
         tool: nextest@0.9.137
     - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
