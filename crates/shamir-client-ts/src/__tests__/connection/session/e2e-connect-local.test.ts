@@ -22,8 +22,8 @@ import * as path from 'node:path';
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-import type { ShamirClient } from '../../index.js';
-import { connectLocal, ddl, write, Query, Batch } from '../../index.js';
+import type { ShamirClient } from '../../../index.js';
+import { connectLocal, ddl, write, Query, Batch } from '../../../index.js';
 import {
   SERVER_BIN,
   SERVER_AVAILABLE,
@@ -32,7 +32,7 @@ import {
   ADMIN_PASSWORD,
   br,
   uniqueDbName,
-} from '../e2e-harness.js';
+} from '../../e2e-harness.js';
 
 // ─── kind: unix server spawn ────────────────────────────────────────────────
 
