@@ -141,6 +141,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> GuardedIo<T> {
         self.write_timeout = Some(write);
         self
     }
+    /// Drops any pending or active response hold (login slot or REST byte budget) without
+    /// waiting for the connection to end, so a dead connection cannot keep it through the
+    /// linger window.
+    pub(crate) fn release_holds(&mut self) {
+        self.holds = None;
+        self.active_hold = None;
+        if let Some(waker) = self.reader.take() {
+            waker.wake();
+        }
+    }
     fn poll_deadlines(
         &mut self,
         cx: &mut std::task::Context<'_>,

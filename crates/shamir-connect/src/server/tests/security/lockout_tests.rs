@@ -2,11 +2,12 @@ use crate::common::time::{ns, UnixNanos};
 use crate::server::lockout::{
     subnet_of, username_hash, FailureOutcome, FailureState, InMemoryLockoutStore, LockoutSnapshot,
     LockoutSnapshotError, LockoutSnapshotSink, LockoutState, LockoutStore, PairKey, PairStatus,
-    Subnet, LOCKOUT_DURATION_NS,
+    PairStoreObserver, Subnet, LOCKOUT_DURATION_NS,
 };
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 struct FailingSink;
 impl LockoutSnapshotSink for FailingSink {
@@ -481,4 +482,100 @@ fn snapshot_second_codec_roundtrip() {
     let restored: LockoutSnapshot = rmp_serde::from_slice(&bytes).expect("decode");
     assert_eq!(restored.failures.len(), snap.failures.len());
     assert_eq!(restored.total_lockouts, snap.total_lockouts);
+}
+
+#[test]
+fn observer_publications_are_ordered_by_the_store_mutex() {
+    let recording = Arc::new(Mutex::new(Vec::<usize>::new()));
+    // Gate: released flag + condvar; `entered` is set before blocking so
+    // the test can tell thread A is inside the observer callback.
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let observer: Arc<PairStoreObserver> = {
+        let recording = Arc::clone(&recording);
+        let gate = Arc::clone(&gate);
+        let entered = Arc::clone(&entered);
+        Arc::new(move |occupied, _| {
+            recording.lock().unwrap().push(occupied);
+            if occupied == 1 && !entered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                // Block once until the main thread releases the gate,
+                // while the store mutex is held.
+                let (lock, cvar) = &*gate;
+                let mut released = lock.lock().unwrap();
+                while !*released {
+                    released = cvar.wait(released).unwrap();
+                }
+            }
+        })
+    };
+    let store = Arc::new(InMemoryLockoutStore::with_snapshot_sink_and_observer(
+        MemSink::new(),
+        Some(observer),
+    ));
+    let now = 1_000_000_000;
+
+    let (a_done, a_done_rx) = mpsc::channel();
+    let a_store = Arc::clone(&store);
+    let a = std::thread::spawn(move || {
+        a_store.register_failure(key(1, 1), now);
+        let _ = a_done.send(());
+    });
+
+    // Wait until A has published occupancy 1 and is parked inside the
+    // observer (still holding the store mutex).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let ready = entered.load(std::sync::atomic::Ordering::SeqCst)
+            && *recording.lock().unwrap() == vec![1];
+        if ready || Instant::now() > deadline {
+            assert!(ready, "thread A never entered the observer with [1]");
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // B must block on the store mutex: A's observer call (which publishes
+    // the absolute occupancy) runs while the mutex is held, so B cannot
+    // publish until A's callback returns.
+    let (b_done, b_done_rx) = mpsc::channel();
+    let b_store = Arc::clone(&store);
+    let b = std::thread::spawn(move || {
+        b_store.register_failure(key(2, 1), now);
+        let _ = b_done.send(());
+    });
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        *recording.lock().unwrap(),
+        vec![1],
+        "B published while A held the mutex"
+    );
+    assert!(
+        b_done_rx.recv_timeout(Duration::from_millis(1)).is_err(),
+        "thread B should still be blocked on the store mutex"
+    );
+
+    // Release the gate; A's observer returns, the mutex frees, and B
+    // publishes occupancy 2.
+    let (lock, cvar) = &*gate;
+    *lock.lock().unwrap() = true;
+    cvar.notify_all();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if *recording.lock().unwrap() == vec![1, 2] || Instant::now() > deadline {
+            assert_eq!(*recording.lock().unwrap(), vec![1, 2]);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(a_done_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    assert!(b_done_rx.recv_timeout(Duration::from_secs(5)).is_ok());
+    a.join().expect("thread A");
+    b.join().expect("thread B");
+
+    // Keep the store alive until the threads are joined: its Drop fires a
+    // final observer publication.
+    drop(store);
 }
