@@ -26,6 +26,10 @@ mod repo_membership_impl;
 pub(crate) mod visibility_impl;
 
 impl RepoInstance {
+    // ============================================================================
+    // Index Management API (proxy to TableManager)
+    // ============================================================================
+
     /// cancel-safe: NO — multi-step state mutation. Looks up the table
     /// (one await) then calls `table.create_index` which itself performs
     /// catalogue updates and persistence. Partial cancellation can leave
@@ -124,6 +128,10 @@ impl RepoInstance {
             .await
     }
 
+    /// cancel-safe: yes — one `scc::HashMap` read plus a single
+    /// `get_table` call. Cancellation leaves no state mutated (apart from
+    /// the cancel-safe `get_table` OnceCell init).
+    ///
     /// Look up the table whose token matches `token`. Used by V2 WAL
     /// recovery to resolve ops by `table_id_interned`, and by the commit
     /// pipeline (Phases 1, 2.6, 5b–5d) while holding the per-repo
@@ -305,6 +313,17 @@ impl RepoInstance {
     /// the old manager is retired. This path refuses a fenced rename pair when it
     /// cannot durably resolve the catalogue state; it must not guess at an unknown
     /// persistence outcome.
+    /// Rename a table's live registration: copies the three physical
+    /// data stores (`__data__`, `__info__`, `__history__`) from the old
+    /// name to the new one via [`Repo::copy_store`], then swaps the
+    /// in-memory config + reverse-index entry. Returns `false` if the
+    /// source table was not configured.
+    ///
+    /// The OLD physical stores are intentionally orphaned (same
+    /// disposition as `drop_table`, which orphans `__data__` because
+    /// the catalogue is the source of truth). If the caller also needs
+    /// the old stores gone, follow up with `store_delete` per namespace.
+    ///
     pub async fn rename_table_stores(&self, from: &str, to: &str) -> DbResult<bool> {
         let permit = self
             .write_domain

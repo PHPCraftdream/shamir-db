@@ -122,6 +122,9 @@ impl RepoInstance {
                 log::error!(
                     "rename fence invariant violated: source name '{from}' already present outside retry while raising '{from}' to '{to}'"
                 );
+                // Keep the source frozen (fail closed) and leave the counter alone.
+                source.freeze.retire();
+                return;
             }
             scc::hash_map::Entry::Vacant(vacant) => {
                 vacant.insert_entry(RenameFenceEntry::Source(Box::new(source)));

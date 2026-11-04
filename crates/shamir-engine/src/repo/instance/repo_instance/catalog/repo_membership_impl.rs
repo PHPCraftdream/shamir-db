@@ -116,11 +116,9 @@ impl RepoInstance {
 
     /// Admitted table lookup that deliberately bypasses the rename name fence.
     ///
-    /// Read-only repo-wide walkers (FK reverse-cache scan, shutdown flush,
-    /// seed walks) use this while a rename is in doubt; the fenced accessors
-    /// (`get_table_admitted`) stay for anything that mutates or resolves a
-    /// name for a user request.
-    pub(crate) async fn get_table_admitted_unfenced(
+    /// Admitted lookup that ignores the in-doubt rename fence; used by the rename
+    /// machinery itself. Read-only repo-wide walkers use `get_table_unfenced`.
+    pub(super) async fn get_table_admitted_unfenced(
         &self,
         table_name: &str,
         permit: &RepoWritePermit,

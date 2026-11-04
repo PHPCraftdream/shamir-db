@@ -9,6 +9,7 @@ use shamir_query_builder::batch::Batch;
 use shamir_query_builder::filter;
 use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
+use shamir_query_builder::write::UpdateReturnMode;
 use shamir_query_types::admin::FkAction;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryRepo;
@@ -171,21 +172,22 @@ async fn parent_fk_update_still_works_while_rename_in_doubt() {
         let (resolver, repo) = fixture().await;
         fence_child_rename_in_doubt(&repo).await;
 
-        // Parent key update triggers the FK on_update discovery, whose
-        // repo-wide reverse-cache walk must resolve the fenced child name.
+        // A parent update rebuilds the cold reverse-FK cache, whose repo-wide
+        // walk must resolve the fenced child name.
         let mut b = Batch::new();
         b.id(3);
         b.try_update(
             "upd_parent",
             write::update("parent")
                 .where_(filter::eq("id", 1))
-                .set(doc().set("name", "P1-updated").unwrap()),
+                .set(doc().set("name", "P1-updated").unwrap())
+                .returning(UpdateReturnMode::All),
         )
         .unwrap();
         let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
             .unwrap();
-        assert!(!resp.results["upd_parent"].records.is_empty());
+        assert_eq!(resp.results["upd_parent"].records.len(), 1);
 
         // Child FK bookkeeping still resolves: the read-only walk succeeds
         // and still discovers the child as a dependent of `parent`.
@@ -213,13 +215,15 @@ async fn parent_fk_delete_still_works_while_rename_in_doubt() {
         b.id(3);
         b.try_delete(
             "del_parent",
-            write::delete("parent").where_(filter::eq("id", 1)),
+            write::delete("parent")
+                .where_(filter::eq("id", 1))
+                .returning(),
         )
         .unwrap();
         let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test")
             .await
             .unwrap();
-        assert!(!resp.results["del_parent"].records.is_empty());
+        assert_eq!(resp.results["del_parent"].records.len(), 1);
 
         let entries = build_reverse_fk_entries(&resolver, "default")
             .await
