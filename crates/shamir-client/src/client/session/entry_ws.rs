@@ -73,7 +73,7 @@ impl Client {
     /// non-loopback `opts.addr` is refused here, before any socket is
     /// opened. `opts.server_name` is ignored.
     pub async fn connect_plain(opts: ConnectOptions) -> Result<Self, ClientError> {
-        if !opts.addr.ip().is_loopback() {
+        if !opts.addr.ip().to_canonical().is_loopback() {
             return Err(ClientError::handshake("plain TCP is loopback-only"));
         }
         let username = NormalizedUsername::from_raw(&opts.username)

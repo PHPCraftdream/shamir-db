@@ -52,6 +52,7 @@ impl<S> WsByteStream<S> {
 impl<S> Drop for WsByteStream<S> {
     fn drop(&mut self) {
         self.write_buf.zeroize();
+        self.read_buf.zeroize();
     }
 }
 
@@ -94,11 +95,10 @@ where
             return Poll::Ready(Ok(()));
         }
         ready!(Pin::new(&mut self.ws).poll_ready(cx)).map_err(ws_to_io)?;
-        let message = Message::Binary(self.write_buf.clone().into());
+        let message = Message::Binary(std::mem::take(&mut self.write_buf).into());
         Pin::new(&mut self.ws)
             .start_send(message)
             .map_err(ws_to_io)?;
-        self.write_buf.zeroize();
         Poll::Ready(Ok(()))
     }
 }
