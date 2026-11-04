@@ -28,8 +28,9 @@ function zeroExporter(): Uint8Array {
  * TLS terminated upstream without exporter — `BINDING_MODE_TLS_NO_EXPORT`).
  * Matches the wire today. Returns a FRESH object with a fresh exporter array
  * on every call (never share the mutable `Uint8Array`). The exporter is
- * carried for the transport layer and is NOT added to the SCRAM
- * `auth_message` (wire-identical requirement).
+ * carried for the transport layer and is NOT added to the handshake SCRAM
+ * `auth_message` (wire-identical requirement); it IS the
+ * `channel_binding_at_auth` field of `auth_message_cp` (password change).
  */
 export function browserWsBinding(): ChannelBinding {
   return {
@@ -43,8 +44,9 @@ export function browserWsBinding(): ChannelBinding {
  * Binding for the local-IPC profile (Unix domain socket / Windows Named Pipe,
  * plain transport, no TLS — `BINDING_MODE_NONE`). Matches the wire today.
  * Returns a FRESH object with a fresh exporter array on every call. The
- * exporter is carried for the transport layer and is NOT added to the SCRAM
- * `auth_message` (wire-identical requirement).
+ * exporter is carried for the transport layer and is NOT added to the handshake
+ * SCRAM `auth_message` (wire-identical requirement); it IS the
+ * `channel_binding_at_auth` field of `auth_message_cp` (password change).
  */
 export function ipcBinding(): ChannelBinding {
   return {
