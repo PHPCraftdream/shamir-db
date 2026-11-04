@@ -23,7 +23,7 @@ durable-fjall = ["server", "fjall"]
 # Crypto primitives (per spec §18)
 argon2 = "0.5"
 hmac = "0.12"
-hkdf = "0.12"
+hkdf = "0.13"
 sha2 = "0.10"
 ed25519-dalek = { version = "2.1", features = ["zeroize"] }
 aes-gcm = "0.10"
