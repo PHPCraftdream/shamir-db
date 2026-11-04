@@ -570,6 +570,17 @@ jobs:
         os: ${{ fromJSON(contains(fromJSON('["workflow_dispatch","schedule"]'), github.event_name) && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest","windows-latest"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      # The ubuntu runner ran out of disk while linking the integration test
+      # binaries (ENOSPC, `ld` SIGBUS). Drop preinstalled toolchains this job
+      # never uses before building, and print the free space before/after so a
+      # shrinking margin is visible in the log.
+      - name: free disk space (linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
       # Pinned to the cargo-nextest version documented as the perimeter-guard
       # baseline in .config/nextest.toml (0.9.137, commit 75ddba7e9). The
@@ -597,6 +608,10 @@ jobs:
       # and `kind(bench)` (never a correctness gate).
       - run: ./scripts/test.sh --full --locked -E 'kind(test)'
         shell: bash
+      - name: disk usage after the run
+        if: always() && runner.os != 'Windows'
+        shell: bash
+        run: df -h / && du -sh target 2>/dev/null || true
 
   # Pure-TypeScript unit tests for `crates/shamir-client-ts` (query
   # builders, framing, hmac, msgpack round-trips — the
@@ -656,7 +671,7 @@ jobs:
 
   # Dependency admission gate (RFC 3923 cooldown, fail-closed; policy:
   # /cooldown.toml, DEC-3 Q4). Fails the PR when it admits a registry version
-  # younger than 7 days (present in the head Cargo.lock, absent from the
+  # younger than 3 days (present in the head Cargo.lock, absent from the
   # protected base) without an exact, unexpired entry in
   # /cooldown-exceptions.toml, and fails on any unused or expired entry. The
   # `--locked` flags above keep the other jobs on the committed Cargo.lock;
