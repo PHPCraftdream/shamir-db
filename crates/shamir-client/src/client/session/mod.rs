@@ -10,7 +10,7 @@ pub mod token;
 
 pub use client::Client;
 pub use options::{
-    bound_until, resolve_host, ConnectLocalOptions, ConnectOptions, ResumeOptions,
-    SecureResumeOptions,
+    bound_until, resolve_host, BrowserResumeOptions, BrowserWsOptions, ConnectLocalOptions,
+    ConnectOptions, ResumeLocalOptions, ResumeOptions, SecureResumeOptions,
 };
 pub use token::{ApiToken, AuthKind, TokenHttpClient, TokenHttpOptions, TokenWsOptions};

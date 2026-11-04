@@ -29,6 +29,16 @@ impl ChannelBinding {
         }
     }
 
+    /// WebSocket over TLS with the browser profile (`tls_no_export`): the
+    /// TLS exporter is not part of the binding — zeros, per spec §6.4.
+    pub(crate) fn ws_browser() -> Self {
+        Self {
+            transport: TransportKind::WebSocket,
+            mode: BindingMode::TlsNoExport,
+            exporter: [0u8; 32],
+        }
+    }
+
     /// Plain TCP (loopback only): no TLS, zeroed channel binding.
     pub(crate) fn tcp_plain() -> Self {
         Self {

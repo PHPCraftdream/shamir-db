@@ -141,3 +141,69 @@ pub(crate) fn verify_resume_identity_proof(
     }
     Ok(())
 }
+
+/// The resume exchange for the channel bindings WITHOUT a TLS exporter —
+/// plain TCP and the browser WebSocket profile (binding modes 0x00 and
+/// 0x02). The identity-proof preamble is not spoken on these profiles (the
+/// server treats the preamble as optional; the local-IPC resume and the
+/// TypeScript browser profile both go straight to `ResumeInit`): the ticket
+/// IS the first frame, `binding_mode` carries the listener's mode, and the
+/// exporter stays zeros on both sides. The server authenticates itself
+/// out-of-band on these listeners: ordinary TLS certificate trust on the
+/// browser profile, the loopback-only bind rule on plain TCP.
+pub(crate) async fn resume_wire_exchange_unbound<R, W>(
+    r: &mut R,
+    w: &mut W,
+    ticket: ProtectedResumeBuffer,
+    binding_mode: BindingMode,
+) -> Result<ResumedHandshake, ClientError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // ---- Generate 32-byte client nonce ----
+    let mut client_nonce = [0u8; 32];
+    {
+        rand::rng().fill_bytes(&mut client_nonce);
+    }
+
+    // ---- Send ResumeInit (no proof preamble on this binding) ----
+    let init_wire = WireResumeInit {
+        ticket: &ticket,
+        client_nonce: client_nonce.to_vec(),
+        binding_mode: binding_mode as u8,
+    };
+    let init_bytes = serialize_resume(&init_wire, ticket.len().saturating_add(128))?;
+    write_frame(w, &init_bytes)
+        .await
+        .map_err(|e| ClientError::transport("send resume_init", e))?;
+
+    // ---- Read ResumeOk ----
+    let ok_bytes = read_resume_frame(r)
+        .await
+        .map_err(|e| ClientError::transport("read resume_ok", e))?;
+    let ok_wire: WireResumeOk = rmp_serde::from_slice(&ok_bytes)?;
+
+    let session_id: [u8; 32] = ok_wire
+        .session_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| ClientError::Protocol("resume: session_id size".into()))?;
+
+    let (resumption_ticket, resumption_expires_at_ns) = if ok_wire.resumption_ticket.is_empty() {
+        (None, None)
+    } else {
+        (
+            Some(ok_wire.resumption_ticket.into_inner()),
+            Some(ok_wire.resumption_expires_at_ns),
+        )
+    };
+
+    Ok(ResumedHandshake {
+        session_id,
+        expires_at_ns: ok_wire.expires_at_ns,
+        resumption_ticket,
+        resumption_expires_at_ns,
+        server_query_version: ok_wire.server_query_version,
+    })
+}

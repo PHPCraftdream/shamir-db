@@ -21,7 +21,7 @@ use shamir_client::builder::ddl;
 use shamir_client::builder::doc;
 use shamir_client::builder::write::upsert;
 use shamir_client::builder::Query;
-use shamir_client::{Client, ConnectLocalOptions};
+use shamir_client::{Client, ConnectLocalOptions, ResumeLocalOptions};
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
@@ -123,7 +123,7 @@ async fn sdk_full_lifecycle_over_local_ipc() {
 
     // ---- SDK in action, over local IPC ----
     let client = Client::connect_local(ConnectLocalOptions {
-        addr: bound_addr,
+        addr: bound_addr.clone(),
         username: "admin".into(),
         password: Zeroizing::new(password),
         accept_new_host: true,
@@ -190,7 +190,35 @@ async fn sdk_full_lifecycle_over_local_ipc() {
     assert_eq!(rd.records[0].get_value_str("sku"), Some("X1"));
     assert_eq!(rd.records[0].get_value_i64("qty"), Some(42));
 
-    // 5. clean close
+    // 5. resume over local IPC with the ticket issued above (binding 0x00, ticket first, no
+    //    identity-proof preamble): a fresh independent connection, same pin, new session id.
+    let ticket = client.resumption_ticket().expect("ticket").to_vec();
+    let resumed = Client::resume_local(ResumeLocalOptions {
+        addr: bound_addr.clone(),
+        ticket: Zeroizing::new(ticket),
+        pinned_hash: pin,
+        connect_timeout: None,
+    })
+    .await
+    .expect("resume_local");
+    assert_eq!(resumed.server_pub_key_pin(), pin);
+    resumed
+        .ping()
+        .await
+        .expect("ping over the resumed IPC session");
+    resumed.close().await;
+
+    // 5b. a forged ticket is refused over IPC (no panic, a clean error).
+    let forged = Client::resume_local(ResumeLocalOptions {
+        addr: bound_addr,
+        ticket: Zeroizing::new(vec![0x51; 64]),
+        pinned_hash: pin,
+        connect_timeout: None,
+    })
+    .await;
+    assert!(forged.is_err(), "forged ticket must be refused over IPC");
+
+    // 6. clean close
     client.close().await;
 
     // Give the server a beat to register the disconnect, then shutdown.

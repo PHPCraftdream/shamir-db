@@ -1,9 +1,11 @@
 //! Connection option structs for the ShamirDB client.
 
+use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 
 use zeroize::Zeroizing;
 
+use crate::client::transport::token::TokenTrust;
 use crate::error::ClientError;
 
 /// Connection parameters.
@@ -128,6 +130,20 @@ pub struct SecureResumeOptions {
     pub pinned_hash: [u8; 32],
 }
 
+/// Resumption options for [`Client::resume_local`] (local IPC: Unix domain
+/// socket / Windows Named Pipe, binding mode 0x00). The ticket is wiped on
+/// drop; there is no TLS and no server name.
+pub struct ResumeLocalOptions {
+    /// Raw platform endpoint, as in [`ConnectLocalOptions::addr`].
+    pub addr: String,
+    /// Resumption ticket, wiped when its owner is dropped.
+    pub ticket: Zeroizing<Vec<u8>>,
+    /// Pinned SHA256 of the server identity key; the resumed session carries it.
+    pub pinned_hash: [u8; 32],
+    /// Deadline for establishing the IPC connection (`None` = unbounded).
+    pub connect_timeout: Option<std::time::Duration>,
+}
+
 impl From<ResumeOptions> for SecureResumeOptions {
     fn from(opts: ResumeOptions) -> Self {
         Self {
@@ -164,4 +180,109 @@ pub struct ConnectLocalOptions {
     /// Deadline for a single request/response round-trip — see
     /// [`ConnectOptions::request_timeout`].
     pub request_timeout: Option<std::time::Duration>,
+}
+
+/// Options for
+/// [`Client::connect_ws_browser`](crate::Client::connect_ws_browser)
+/// — a SCRAM session over the browser-profile WebSocket listener (`kind: ws`,
+/// `profile: tls_no_export`, path `/shamir/v1/browser`, binding mode 0x02,
+/// `Origin` required). Built for TLS-terminating proxies that break the TLS
+/// exporter: the TLS server is authenticated by the ordinary certificate
+/// check against `trust` (WebPKI roots by default, caller-supplied anchors
+/// when given); the Ed25519 identity TOFU-pin handling of [`ConnectOptions`]
+/// is unchanged and still applies on top.
+#[non_exhaustive]
+pub struct BrowserWsOptions {
+    /// Session options (address, credentials, pins, timeouts). `server_name`
+    /// is the TLS SNI / hostname the certificate is checked against.
+    pub inner: ConnectOptions,
+    /// `Origin` header value sent on the WebSocket upgrade. The listener
+    /// rejects the upgrade without an allowed `Origin`; an empty string means
+    /// the header is omitted entirely (and is refused by the listener).
+    pub origin: String,
+    /// Which certificate authorities the TLS connection trusts.
+    pub trust: TokenTrust,
+}
+
+impl BrowserWsOptions {
+    pub fn new(inner: ConnectOptions, origin: impl Into<String>, trust: TokenTrust) -> Self {
+        Self {
+            inner,
+            origin: origin.into(),
+            trust,
+        }
+    }
+
+    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.origin = origin.into();
+        self
+    }
+
+    pub fn with_trust(mut self, trust: TokenTrust) -> Self {
+        self.trust = trust;
+        self
+    }
+}
+
+impl fmt::Debug for BrowserWsOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `inner` carries the password: it is never delegated to `Debug`.
+        f.debug_struct("BrowserWsOptions")
+            .field("addr", &self.inner.addr)
+            .field("server_name", &self.inner.server_name)
+            .field("username", &self.inner.username)
+            .field("origin", &self.origin)
+            .field("trust", &self.trust)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Options for
+/// [`Client::resume_ws_browser`](crate::Client::resume_ws_browser)
+/// — ticket resumption over the browser-profile WebSocket listener (binding
+/// mode 0x02). There is no `resume_proof` preamble on this binding (the
+/// profile has no TLS exporter): the server is authenticated by the TLS
+/// certificate check against `trust`, and the pinned hash rides unchanged on
+/// the resumed session.
+#[non_exhaustive]
+pub struct BrowserResumeOptions {
+    /// Resumption options (address, SNI, ticket, pinned hash). The ticket is
+    /// an ordinary `Vec` until the future is polled — see [`ResumeOptions`].
+    pub inner: ResumeOptions,
+    /// `Origin` header value sent on the WebSocket upgrade (empty = omitted).
+    pub origin: String,
+    /// Which certificate authorities the TLS connection trusts.
+    pub trust: TokenTrust,
+}
+
+impl BrowserResumeOptions {
+    pub fn new(inner: ResumeOptions, origin: impl Into<String>, trust: TokenTrust) -> Self {
+        Self {
+            inner,
+            origin: origin.into(),
+            trust,
+        }
+    }
+
+    pub fn with_origin(mut self, origin: impl Into<String>) -> Self {
+        self.origin = origin.into();
+        self
+    }
+
+    pub fn with_trust(mut self, trust: TokenTrust) -> Self {
+        self.trust = trust;
+        self
+    }
+}
+
+impl fmt::Debug for BrowserResumeOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `inner` carries the bearer ticket: it never appears in `Debug`.
+        f.debug_struct("BrowserResumeOptions")
+            .field("addr", &self.inner.addr)
+            .field("server_name", &self.inner.server_name)
+            .field("origin", &self.origin)
+            .field("trust", &self.trust)
+            .finish_non_exhaustive()
+    }
 }

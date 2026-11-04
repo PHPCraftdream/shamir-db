@@ -1,4 +1,4 @@
-//! Shared fixture: one live server with TCP+TLS, WebSocket and plain TCP listeners.
+//! Shared fixture: one live server with TCP+TLS, WebSocket, plain TCP and browser-profile WebSocket listeners.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,7 +13,9 @@ use shamir_client::builder::ddl;
 use shamir_client::builder::doc;
 use shamir_client::builder::write::upsert;
 use shamir_client::builder::Query;
-use shamir_client::{Client, ConnectOptions, ResumeOptions};
+use shamir_client::{
+    BrowserResumeOptions, BrowserWsOptions, Client, ConnectOptions, ResumeOptions, TokenTrust,
+};
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
@@ -23,15 +25,26 @@ use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 pub const USERNAME: &str = "admin";
 pub const PASSWORD: &[u8] = b"correct horse battery staple";
 
+/// The one origin the fixture's browser listener allows.
+pub const BROWSER_ORIGIN: &str = "https://shamir.test";
+
 pub struct Matrix {
     pub handle: ServerHandle,
     pub tcp: SocketAddr,
     pub ws: SocketAddr,
     pub plain: SocketAddr,
+    pub ws_browser: SocketAddr,
     _temp: TempDir,
+    cert_pem: Vec<u8>,
 }
 
 impl Matrix {
+    /// Trust anchor for the server's self-signed certificate (the fixture
+    /// reads it from disk after boot, as the token fixture does).
+    pub fn browser_trust(&self) -> TokenTrust {
+        TokenTrust::pem(&self.cert_pem).expect("trust generated cert")
+    }
+
     pub async fn shutdown(self) {
         self.handle.shutdown().await;
     }
@@ -54,6 +67,18 @@ fn listener(kind: ListenerKind, profile: ProfileKind, path: Option<String>) -> L
         path,
         kdf_override: None,
         browser_origin_allowlist: vec![],
+        http: Default::default(),
+    }
+}
+
+fn browser_listener(path: String) -> ListenerConfig {
+    ListenerConfig {
+        kind: ListenerKind::Ws,
+        addr: "127.0.0.1:0".into(),
+        profile: Some(ProfileKind::TlsNoExport),
+        path: Some(path),
+        kdf_override: None,
+        browser_origin_allowlist: vec![BROWSER_ORIGIN.to_string()],
         http: Default::default(),
     }
 }
@@ -81,6 +106,7 @@ fn make_config(temp: &TempDir) -> Config {
                 Some("/shamir/v1".to_string()),
             ),
             listener(ListenerKind::Tcp, ProfileKind::Plain, None),
+            browser_listener("/shamir/v1/browser".to_string()),
         ],
         tls: TlsConfig {
             cert_path: data_dir.join("cert.pem"),
@@ -112,12 +138,16 @@ pub async fn boot() -> Matrix {
     let tcp = handle.bound_addrs[0].expect("listener bound");
     let ws = handle.bound_addrs[1].expect("listener bound");
     let plain = handle.bound_addrs[2].expect("listener bound");
+    let ws_browser = handle.bound_addrs[3].expect("listener bound");
+    let cert_pem = std::fs::read(temp.path().join("cert.pem")).expect("generated cert");
     Matrix {
         handle,
         tcp,
         ws,
         plain,
+        ws_browser,
         _temp: temp,
+        cert_pem,
     }
 }
 
@@ -149,6 +179,22 @@ pub fn resume_options(addr: SocketAddr, client: &Client) -> ResumeOptions {
         ticket: ticket_of(client),
         pinned_hash: client.server_pub_key_pin(),
     }
+}
+
+pub fn browser_session_options(matrix: &Matrix) -> BrowserWsOptions {
+    BrowserWsOptions::new(
+        options(matrix.ws_browser),
+        BROWSER_ORIGIN,
+        matrix.browser_trust(),
+    )
+}
+
+pub fn browser_resume_options(matrix: &Matrix, client: &Client) -> BrowserResumeOptions {
+    BrowserResumeOptions::new(
+        resume_options(matrix.ws_browser, client),
+        BROWSER_ORIGIN,
+        matrix.browser_trust(),
+    )
 }
 
 pub async fn exercise(client: &Client, db: &str) {

@@ -45,8 +45,8 @@ pub use client::cursor_stream::CursorStream;
 pub use client::subscription;
 pub use client::subscription::SubscriptionHandle;
 pub use client::{
-    bound_until, resolve_host, Client, ConnectLocalOptions, ConnectOptions, ResumeOptions,
-    SecureResumeOptions,
+    bound_until, resolve_host, BrowserResumeOptions, BrowserWsOptions, Client, ConnectLocalOptions,
+    ConnectOptions, ResumeLocalOptions, ResumeOptions, SecureResumeOptions,
 };
 pub use client::{
     login, ApiToken, AuthKind, LoginChannels, LoginMode, LoginOptions, LoginOutcome, LoginScope,

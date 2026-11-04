@@ -229,3 +229,14 @@ async fn scram_completes_with_unix_none_binding() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn scram_completes_with_ws_browser_binding() {
+    run_binding(
+        TransportKind::WebSocket,
+        BindingMode::TlsNoExport,
+        [0u8; 32],
+        ChannelBinding::ws_browser(),
+    )
+    .await;
+}

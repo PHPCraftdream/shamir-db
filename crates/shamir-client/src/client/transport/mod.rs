@@ -25,7 +25,7 @@ pub(crate) use crate::client::session::mux::reader::{await_pending_response, rea
 
 pub(crate) use binding::ChannelBinding;
 pub(crate) use dial::{dial_ipc, dial_tcp_plain, dial_tcp_tls, Dialed};
-pub(crate) use dial_ws::dial_ws_native;
+pub(crate) use dial_ws::{dial_ws_browser, dial_ws_native};
 pub(crate) use write_sink::WriteSink;
 
 pub(crate) use ws_stream::{WsByteStream, WsPeerClose};
