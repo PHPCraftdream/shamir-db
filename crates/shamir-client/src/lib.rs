@@ -49,8 +49,8 @@ pub use client::{
     SecureResumeOptions,
 };
 pub use client::{
-    ApiToken, AuthKind, TokenEndpoint, TokenHttpClient, TokenHttpOptions, TokenTrust,
-    TokenWsOptions,
+    login, ApiToken, AuthKind, LoginChannels, LoginMode, LoginOptions, LoginOutcome, LoginScope,
+    TokenEndpoint, TokenHttpClient, TokenHttpOptions, TokenTrust, TokenWsOptions,
 };
 pub mod visibility;
 pub use error::{ClientError, CloseCause};

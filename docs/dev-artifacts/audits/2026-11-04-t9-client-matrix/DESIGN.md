@@ -330,3 +330,41 @@ Review fixes (orchestrator, after an independent compiler-style read):
 - The binding decoder accepts `sid` only as a msgpack `bin` of 32 bytes (`str` and arrays are refused).
 - Raw-mode outgoing messages no longer copy the payload.
 - Added a `reader_task` close-mapping test; refusal and binding tests are bounded by timeouts.
+
+## T9-4 report (password login, `shamir-client`)
+
+Status: implemented in full; NOT compiled or run locally (project policy), everything needs CI confirmation (clippy -D warnings, unit and matrix tests).
+
+Added (crate `shamir-client`):
+- `client/handshake/token/` (now exactly 7 entries): `login.rs` (flow), `login_wire.rs` (strict begin/finish decoders and encoders: `deny_unknown_fields`, map-marker check, no trailing bytes, binary fields only as msgpack bin of exact length, `databases` required but nullable, token deserialised into a zeroizing buffer), `login_options.rs`, `login_outcome.rs`, `login_scope.rs`.
+- Flow order: normalise user (`NormalizedUsername`), sort+dedup databases, `encode_scope`, non-zero 32-byte nonce, `POST /shamir/v1/auth/begin` on a fresh connection, strict challenge decode, class check (https -> 0x01, loopback http -> 0x00, taken from the endpoint), optional listener-id pin, `build_transcript` (validates KDF limits before Argon2), Argon2id + keys on `spawn_blocking` (password `Zeroizing<String>` moved into the closure and wiped there), proof = client_key XOR HMAC(stored_key, T), `POST /shamir/v1/auth/finish` on a fresh connection, raw body wiped best-effort, constant-time server-signature check FIRST, then token id == `id` (`parse_token`), echoed scope == request, `expires_at_ns > created_at_ns`; token moved into `ApiToken` without copy.
+- `client/transport/token/http_conn.rs`: `TokenTransport.authorization` is now `Option<HeaderValue>`; private `new`; `TokenTransport::anonymous` (no Authorization, no up-front dial); `post_fresh` (new connection per request, never pooled, no retry). `connect` unchanged. `status.rs`: `map_login_failure` (decodes `{ "error": code }` leniently, `retry_after` only for 429/503, body never copied into the error).
+- Tests: unit `handshake/tests/{login_fake,login_tests,login_wire_tests}.rs` (fake plaintext loopback server that verifies the real client proof; honest path incl. exact request headers and begin keys, sorted databases, class mismatch, pin mismatch/match, KDF out of bounds, bad signature (+ redaction), wrong token id, changed scope, bad expiry, 401/429 mapping, wrong password, Debug redaction, invalid username; strict decoder cases). Integration `tests/matrix/token/login.rs` (TLS login then REST ping and WS ping, wrong password and unknown user both 401 `authentication_failed`, read-write refused with 403 `login_write_forbidden` unless `tokens.login_allow_read_write`, allowed when set, listener-id pin match/mismatch, plain loopback, untrusted certificate refused) with fixture additions `boot_login`, `LoginSetup`, `seed_login_user` and `login_options_{tls,plain}` in `tests/matrix/token/common.rs` (`boot()` behaviour unchanged).
+
+Public items: `login`, `LoginOptions`, `LoginOutcome`, `LoginScope`, `LoginMode`, `LoginChannels`.
+
+Widenings beyond the public items:
+- `pub(crate)` `TokenTransport::{anonymous, post_fresh}`, `pub(crate) map_login_failure` re-export in `transport/token/mod.rs`.
+- `#[cfg(test)] pub(crate)` re-exports of `decode_challenge`, `decode_finish`, `encode_begin`, `encode_finish` in `handshake/token/mod.rs`.
+
+Decisions / deviations:
+- Class 0x02 (https behind a TLS-terminating proxy) is not supported: `TokenEndpoint` has no option for it, so an https endpoint always expects 0x01. A proxy class needs an explicit endpoint/option in a later task.
+- No Ed25519 pin on this path; TLS (WebPKI or custom roots via `TokenTrust`) authenticates the server, as designed.
+- Key derivation lives in a private `derive_proof` function called from `spawn_blocking`.
+- Server error bodies map to `Http { status, code, retry_after }` through the new login mapper (not the REST mapper, because login errors use `{ "error": code }` bodies, not `DbResponse`).
+
+Not done / risks:
+- Unwipeable copies remain (hyper buffers, rustls plaintext buffers, rmp-serde scratch strings while decoding the success body); the raw body is wiped only when its `Bytes` is uniquely owned.
+- No unit test for TLS login against the fake (the fake is plaintext); TLS is covered by the matrix tests only.
+- The matrix tests assume the login listener's default loopback Host allowlist accepts `localhost:<port>` (TLS) and `127.0.0.1:<port>` (plain), as in the server e2e tests.
+- Unverified by compiler: the `pub use login::login` name (private module `login` plus function `login`) re-exported through `handshake` and `client`; if CI reports a name clash, rename the private module to `login_flow`.
+
+Review fixes (orchestrator, after an independent read against the server source):
+- The proof no longer leaves `stored_key`, the HMAC signature or the finish body unwiped; the finish body is a `Zeroizing` buffer handed to hyper by ownership.
+- Login replies are capped at 8 KiB while they are read (`post_fresh` takes the limit), not after a 16 MiB collect.
+- The strict decoder reads from the slice (`from_read_ref`), so no copy of the token stays in a decoder scratch buffer; the trailing-byte check reads one more value and requires end of input.
+- `TokenReply` has a redacted `Debug`; `owner` is checked against the canonical user name; errors after issuance carry the issued token id (not secret) so the caller can revoke it.
+- Correction to the report: the raw-body wipe is usually a no-op (hyper and rustls keep their own buffers); it is best effort only.
+- Not done: no exact-KDF pin (design section 6 "optional expected KDF", spec section 2 SHOULD); only the client limit floor and ceiling are enforced before Argon2. It needs a new public field on `LoginOptions`.
+- Tests: byte-level assertions of the begin and finish keys, a Send guard for the `login` future, a TLS-error assertion for an untrusted certificate, a superuser case (403 `login_account_denied`), the seeded KDF tuple derived from `kdf()`.
+

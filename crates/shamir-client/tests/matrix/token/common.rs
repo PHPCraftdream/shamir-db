@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shamir_connect::common::kdf_params::KdfParams;
+use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::server::admin::UserDirectory;
 use shamir_connect::server::token::{parse_token, TokenChannels, TokenMode};
+use shamir_connect::server::user_record::UserRecord;
 use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
 use shamir_types::access::ResourcePath;
 use tempfile::TempDir;
@@ -19,7 +21,7 @@ use shamir_client::builder::doc;
 use shamir_client::builder::write::insert;
 use shamir_client::builder::Query;
 use shamir_client::{
-    ApiToken, BatchRequest, Client, ConnectOptions, TokenEndpoint, TokenHttpClient,
+    ApiToken, BatchRequest, Client, ConnectOptions, LoginOptions, TokenEndpoint, TokenHttpClient,
     TokenHttpOptions, TokenTrust,
 };
 
@@ -32,8 +34,23 @@ use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_server::tokens::NewToken;
 use shamir_server::user_directory::FjallUserDirectory;
 
-const ADMIN_PASSWORD: &[u8] = b"token-matrix-admin-password";
+pub const ADMIN_PASSWORD_TEXT: &str = "token-matrix-admin-password";
+const ADMIN_PASSWORD: &[u8] = ADMIN_PASSWORD_TEXT.as_bytes();
 const SERVER_NAME: &str = "localhost";
+
+/// Ordinary (non-superuser, no roles) account seeded when login is enabled.
+pub const LOGIN_USER: &str = "login-user";
+pub const LOGIN_PASSWORD: &str = "login-user-password";
+/// Stable identity configured on the TLS listener (32 lowercase hex digits).
+pub const LOGIN_LISTENER_ID_HEX: &str = "00112233445566778899aabbccddeeff";
+pub const LOGIN_LISTENER_ID: [u8; 16] = [
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+];
+
+/// Password-login server setup for [`boot_with`].
+pub struct LoginSetup {
+    pub allow_read_write: bool,
+}
 
 pub struct TokenFixture {
     pub handle: ServerHandle,
@@ -63,6 +80,22 @@ impl TokenFixture {
 
     pub fn plain_endpoint(&self) -> TokenEndpoint {
         TokenEndpoint::plain_loopback(self.plain).expect("loopback endpoint")
+    }
+
+    pub fn login_options_tls(&self, user: &str, password: &str) -> LoginOptions {
+        LoginOptions::new(
+            self.tls_endpoint(),
+            user,
+            Zeroizing::new(password.to_string()),
+        )
+    }
+
+    pub fn login_options_plain(&self, user: &str, password: &str) -> LoginOptions {
+        LoginOptions::new(
+            self.plain_endpoint(),
+            user,
+            Zeroizing::new(password.to_string()),
+        )
     }
 
     pub async fn connect_tls(&self, token: &str) -> TokenHttpClient {
@@ -280,15 +313,59 @@ async fn seed_owner(data_dir: &Path) -> ([u8; 16], Vec<String>) {
     (owner, owner_roles)
 }
 
+/// Seed an ordinary login account with the fixture's KDF tuple.
+fn seed_login_user(data_dir: &Path) {
+    let directory = FjallUserDirectory::open(data_dir.join("users")).expect("user directory");
+    let salt = [0x42; 16];
+    let kdf = kdf();
+    let params = KdfParams {
+        memory_kb: kdf.memory_kb,
+        time: kdf.time,
+        parallelism: kdf.parallelism,
+        argon2_version: kdf.argon2_version,
+    };
+    let keys = DerivedKeys::derive(LOGIN_PASSWORD.as_bytes(), &salt, &params)
+        .expect("derive seeded user keys");
+    directory
+        .insert(
+            LOGIN_USER.into(),
+            UserRecord {
+                salt,
+                stored_key: keys.stored_key,
+                server_key: keys.server_key,
+                kdf_params: params,
+                tickets_invalid_before_ns: 0,
+            },
+        )
+        .expect("insert seeded login user");
+    drop(directory);
+}
+
 pub async fn boot() -> TokenFixture {
+    boot_with(None).await
+}
+
+pub async fn boot_login(allow_read_write: bool) -> TokenFixture {
+    boot_with(Some(LoginSetup { allow_read_write })).await
+}
+
+async fn boot_with(login: Option<LoginSetup>) -> TokenFixture {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let temp = TempDir::new().expect("tempdir");
     let data_dir: PathBuf = temp.path().to_path_buf();
     let (owner, owner_roles) = seed_owner(&data_dir).await;
+    let mut config = make_config(&data_dir);
+    if let Some(setup) = login {
+        seed_login_user(&data_dir);
+        config.listeners[0].http.login.enabled = true;
+        config.listeners[0].http.login.listener_id = Some(LOGIN_LISTENER_ID_HEX.to_string());
+        config.listeners[1].http.login.enabled = true;
+        config.tokens.login_allow_read_write = setup.allow_read_write;
+    }
     let handle = ServerLauncher {
         node_mode: Default::default(),
-        config: make_config(&data_dir),
+        config,
         bootstrap: BootstrapMode::Password {
             username: "admin".into(),
             password: Zeroizing::new(ADMIN_PASSWORD.to_vec()),

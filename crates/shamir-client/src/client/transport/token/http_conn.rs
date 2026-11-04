@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -29,13 +30,22 @@ const MAX_IDLE: usize = 4;
 const MAX_BUF_SIZE: usize = 64 * 1024;
 
 /// Raw HTTP reply; mapping to results lives in `status.rs`.
-#[derive(Debug)]
 pub(crate) struct TokenReply {
     pub(crate) status: u16,
     pub(crate) content_type_msgpack: bool,
     pub(crate) has_content_encoding: bool,
     pub(crate) retry_after: Option<Duration>,
     pub(crate) body: Bytes,
+}
+
+// The body of a login reply carries a bearer token: never print it.
+impl fmt::Debug for TokenReply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenReply")
+            .field("status", &self.status)
+            .field("body_len", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 enum Outcome {
@@ -49,12 +59,14 @@ struct TlsDial {
     server_name: ServerName<'static>,
 }
 
-/// HTTP/1.1 client over a small lock-free pool of idle connections.
+/// HTTP/1.1 client over a small lock-free pool of idle connections. An
+/// anonymous transport sends no `Authorization` header and is only used for
+/// one-shot requests on fresh connections.
 pub(crate) struct TokenTransport {
     addr: SocketAddr,
     tls: Option<TlsDial>,
     host: HeaderValue,
-    authorization: HeaderValue,
+    authorization: Option<HeaderValue>,
     connect_timeout: Option<Duration>,
     request_timeout: Option<Duration>,
     pool: Bag<SendRequest<Full<Bytes>>>,
@@ -69,6 +81,54 @@ impl TokenTransport {
         connect_timeout: Option<Duration>,
         request_timeout: Option<Duration>,
     ) -> Result<Self, ClientError> {
+        let transport = Self::new(
+            endpoint,
+            Some(authorization),
+            connect_timeout,
+            request_timeout,
+        )?;
+        let sender = transport.dial_timed().await?;
+        transport.release(sender);
+        Ok(transport)
+    }
+
+    /// No `Authorization` header and no up-front dial.
+    pub(crate) fn anonymous(
+        endpoint: &TokenEndpoint,
+        connect_timeout: Option<Duration>,
+        request_timeout: Option<Duration>,
+    ) -> Result<Self, ClientError> {
+        Self::new(endpoint, None, connect_timeout, request_timeout)
+    }
+
+    /// One request on a brand-new connection that is never pooled.
+    pub(crate) async fn post_fresh(
+        &self,
+        path: &'static str,
+        body: Bytes,
+        max_body: usize,
+    ) -> Result<TokenReply, ClientError> {
+        let mut sender = self.dial_timed().await?;
+        let req = self.build(Method::POST, path, body);
+        let outcome = match self.request_timeout {
+            Some(limit) => tokio::time::timeout(limit, Self::attempt(&mut sender, req, max_body))
+                .await
+                .map_err(|_| ClientError::RequestTimeout(limit))?,
+            None => Self::attempt(&mut sender, req, max_body).await,
+        };
+        match outcome {
+            Outcome::Reply { reply, .. } => Ok(reply),
+            Outcome::NotWritten => Err(ClientError::ConnectionClosed(CloseCause::PeerEof)),
+            Outcome::Failed(err) => Err(err),
+        }
+    }
+
+    fn new(
+        endpoint: &TokenEndpoint,
+        authorization: Option<HeaderValue>,
+        connect_timeout: Option<Duration>,
+        request_timeout: Option<Duration>,
+    ) -> Result<Self, ClientError> {
         let tls = match endpoint.scheme() {
             TokenScheme::Https(trust) => Some(TlsDial {
                 connector: build_connector(trust)?,
@@ -78,7 +138,7 @@ impl TokenTransport {
         };
         let host = HeaderValue::from_str(&endpoint.host_header())
             .map_err(|_| ClientError::handshake("invalid host header"))?;
-        let transport = Self {
+        Ok(Self {
             addr: endpoint.addr(),
             tls,
             host,
@@ -87,10 +147,7 @@ impl TokenTransport {
             request_timeout,
             pool: Bag::default(),
             idle: AtomicUsize::new(0),
-        };
-        let sender = transport.dial_timed().await?;
-        transport.release(sender);
-        Ok(transport)
+        })
     }
 
     /// `POST /shamir/v1/request`.
@@ -126,10 +183,12 @@ impl TokenTransport {
             };
             let req = self.build(method.clone(), path, body.clone());
             let outcome = match self.request_timeout {
-                Some(limit) => tokio::time::timeout(limit, Self::attempt(&mut sender, req))
-                    .await
-                    .map_err(|_| ClientError::RequestTimeout(limit))?,
-                None => Self::attempt(&mut sender, req).await,
+                Some(limit) => {
+                    tokio::time::timeout(limit, Self::attempt(&mut sender, req, MAX_RESPONSE_BODY))
+                        .await
+                        .map_err(|_| ClientError::RequestTimeout(limit))?
+                }
+                None => Self::attempt(&mut sender, req, MAX_RESPONSE_BODY).await,
             };
             match outcome {
                 Outcome::Reply { reply, reusable } => {
@@ -154,7 +213,9 @@ impl TokenTransport {
         *req.uri_mut() = Uri::from_static(path);
         let headers = req.headers_mut();
         headers.insert(HOST, self.host.clone());
-        headers.insert(AUTHORIZATION, self.authorization.clone());
+        if let Some(authorization) = &self.authorization {
+            headers.insert(AUTHORIZATION, authorization.clone());
+        }
         if msgpack {
             headers.insert(CONTENT_TYPE, HeaderValue::from_static(MEDIA_MSGPACK));
             headers.insert(ACCEPT, HeaderValue::from_static(MEDIA_MSGPACK));
@@ -162,7 +223,11 @@ impl TokenTransport {
         req
     }
 
-    async fn attempt(sender: &mut SendRequest<Full<Bytes>>, req: Request<Full<Bytes>>) -> Outcome {
+    async fn attempt(
+        sender: &mut SendRequest<Full<Bytes>>,
+        req: Request<Full<Bytes>>,
+        max_body: usize,
+    ) -> Outcome {
         if sender.ready().await.is_err() {
             return Outcome::NotWritten;
         }
@@ -184,10 +249,10 @@ impl TokenTransport {
             .get(CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.trim().parse::<u64>().ok());
-        if declared.is_some_and(|n| n > MAX_RESPONSE_BODY as u64) {
+        if declared.is_some_and(|n| n > max_body as u64) {
             return Outcome::Failed(body_too_large());
         }
-        let body = match Limited::new(body, MAX_RESPONSE_BODY).collect().await {
+        let body = match Limited::new(body, max_body).collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(err) if err.is::<LengthLimitError>() => {
                 return Outcome::Failed(body_too_large());
