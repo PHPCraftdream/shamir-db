@@ -4,6 +4,7 @@
 mod binding;
 mod dial;
 mod dial_ws;
+pub mod token;
 mod write_sink;
 mod ws_stream;
 

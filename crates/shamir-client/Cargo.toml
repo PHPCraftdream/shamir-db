@@ -21,6 +21,11 @@ tokio-rustls = "0.26"
 rustls  = { version = "0.23", default-features = false, features = ["std"] }
 # Native WebSocket transport (Client::connect_ws / resume_ws).
 tokio-tungstenite = "0.30"
+hyper          = { version = "1", default-features = false, features = ["client", "http1"] }
+hyper-util     = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes          = "1.9"
+webpki-roots   = "1"
 
 # Stream trait + `stream::unfold` combinator (Client::stream_cursor, FG-5c).
 futures = "0.3"
