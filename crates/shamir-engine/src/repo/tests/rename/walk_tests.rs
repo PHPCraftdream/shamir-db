@@ -19,6 +19,7 @@ use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
+use crate::query::batch::BatchError;
 use crate::query::batch::TableResolver;
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -72,6 +73,10 @@ impl TableResolver for WalkResolver {
 /// rename target: fencing it must not break parent writes whose FK
 /// reverse-cache walk has to resolve the fenced child name.
 async fn fixture() -> (WalkResolver, RepoInstance) {
+    fixture_with_action(FkAction::NoAction).await
+}
+
+async fn fixture_with_action(action: FkAction) -> (WalkResolver, RepoInstance) {
     let repo_config = RepoConfig {
         name: "default".to_string(),
         factory: BoxRepoFactory::in_memory(),
@@ -85,11 +90,7 @@ async fn fixture() -> (WalkResolver, RepoInstance) {
         path: vec!["parent_id".to_string()],
         ty: TypeTag::Int,
         constraints: Constraints {
-            foreign_key: Some(ForeignKeyRef::with_on_delete(
-                "parent",
-                "id",
-                FkAction::NoAction,
-            )),
+            foreign_key: Some(ForeignKeyRef::with_on_delete("parent", "id", action)),
             required: true,
             ..Default::default()
         },
@@ -231,6 +232,64 @@ async fn parent_fk_delete_still_works_while_rename_in_doubt() {
         assert!(entries.iter().any(|tagged| {
             tagged.parent_table == "parent" && tagged.entry.child_table == "child"
         }));
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test]
+async fn fenced_child_restrict_parent_delete_fails_conflict() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (resolver, repo) = fixture_with_action(FkAction::Restrict).await;
+        fence_child_rename_in_doubt(&repo).await;
+
+        // Fail closed: the RESTRICT gate resolves the fenced child through the
+        // fenced accessor, so the parent delete surfaces the fence error
+        // instead of silently skipping the child.
+        let mut b = Batch::new();
+        b.id(3);
+        b.try_delete(
+            "del_parent",
+            write::delete("parent")
+                .where_(filter::eq("id", 1))
+                .returning(),
+        )
+        .unwrap();
+        let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
+        assert!(matches!(
+            resp,
+            Err(BatchError::QueryError { code: Some(code), message, .. })
+                if code == "fk_restrict" && message.contains("rename in doubt")
+        ));
+    })
+    .await
+    .expect("test timed out");
+}
+
+#[tokio::test]
+async fn fenced_child_cascade_parent_delete_fails_conflict() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (resolver, repo) = fixture_with_action(FkAction::Cascade).await;
+        fence_child_rename_in_doubt(&repo).await;
+
+        // Fail closed: the CASCADE action planner resolves the fenced child
+        // through the fenced accessor, so the parent delete surfaces the
+        // fence error instead of silently skipping the child.
+        let mut b = Batch::new();
+        b.id(3);
+        b.try_delete(
+            "del_parent",
+            write::delete("parent")
+                .where_(filter::eq("id", 1))
+                .returning(),
+        )
+        .unwrap();
+        let resp = execute_batch(&b.build(), &resolver, None, None, Actor::System, "test").await;
+        assert!(matches!(
+            resp,
+            Err(BatchError::QueryError { code: Some(code), message, .. })
+                if code == "fk_actions" && message.contains("rename in doubt")
+        ));
     })
     .await
     .expect("test timed out");

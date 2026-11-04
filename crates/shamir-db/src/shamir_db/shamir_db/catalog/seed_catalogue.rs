@@ -207,6 +207,14 @@ impl ShamirDb {
         max_bytes: usize,
     ) -> DbResult<()> {
         let repo = self.system_store.system_repo()?;
+        // Fail closed: while a table rename is in doubt the catalogue may
+        // already hold the new name, so a seed catalogue written now could be
+        // stale.
+        if repo.has_rename_in_doubt() {
+            return Err(DbError::Conflict(
+                "seed refused: table rename in doubt".into(),
+            ));
+        }
         let version = repo.consistent_version().await?;
         let mut bytes = 0usize;
         let mut records = 0usize;
@@ -265,6 +273,13 @@ impl ShamirDb {
             }
         }
         let repo = self.system_store.system_repo()?;
+        // Fail closed, matching the engine seed walk: refuse while a table
+        // rename is in doubt.
+        if repo.has_rename_in_doubt() {
+            return Err(DbError::Conflict(
+                "seed refused: table rename in doubt".into(),
+            ));
+        }
         for name in repo.list_table_names() {
             // Seed catalogue flush walks only read a quiesced repo, so an
             // in-doubt fenced source name must still resolve.
