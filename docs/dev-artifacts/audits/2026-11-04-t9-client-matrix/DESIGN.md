@@ -441,3 +441,7 @@ Not verified / open:
 
 CI result (T9-5): `ts-e2e-nightly` on the fork ran `tests/e2e/tests/21-connection-matrix.test.js` against a real six-listener server: 181 passed; the napi matrix rows 1b, 2, 4, 6a, 6b, 7, 8, 10 are `да`. Two test-side defects were fixed on the way: the suite opened more than 16 SCRAM sessions for one user (`MAX_SESSIONS_PER_USER`), so it now shares one admin session and uses a fresh user per resume case; and a connect-time refusal surfaces as a plain `Error` carrying the server code in its message.
 
+
+## T9-7 report (documentation)
+
+Rust column of `docs/guide-docs/guide/client-matrix.md` set from the plan to the proven state: rows 1b, 2, 6b, 7, 8, 10 are `да` with the test file in `crates/shamir-client/tests/matrix/**` that proves each; rows 3, 6c, 6d are `нет (T9-8)`. The "planned" status and the per-subtask update note were removed (nothing is planned any more: every cell is `да`, `нет`, `не требуется` or `невозможно`). "Client coverage" in `docs/guide-docs/KNOWN_LIMITATIONS.md` now lists the real gaps (T9-8) instead of the pre-T9 ones. macOS cells of CI were not run for T9-5 and T9-7 (runner queue), to be run separately.
