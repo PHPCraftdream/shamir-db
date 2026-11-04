@@ -26,7 +26,7 @@ pub(crate) struct Dialed<R> {
     pub(in crate::client) binding: ChannelBinding,
 }
 
-fn mark_phase(phase: Option<&AtomicU8>, value: u8) {
+pub(super) fn mark_phase(phase: Option<&AtomicU8>, value: u8) {
     if let Some(phase) = phase {
         phase.store(value, Ordering::Relaxed);
     }
@@ -72,6 +72,20 @@ pub(crate) async fn dial_ipc(
         read,
         write: WriteSink::Ipc(write),
         binding: ChannelBinding::ipc(),
+    })
+}
+
+/// Plain TCP connect (no TLS; the server accepts it on loopback only) → split.
+pub(crate) async fn dial_tcp_plain(
+    addr: SocketAddr,
+    connect_timeout: Option<std::time::Duration>,
+) -> Result<Dialed<ReadHalf<TcpStream>>, ClientError> {
+    let tcp = connect_tcp(addr, connect_timeout).await?;
+    let (read, write) = split(tcp);
+    Ok(Dialed {
+        read,
+        write: WriteSink::Tcp(write),
+        binding: ChannelBinding::tcp_plain(),
     })
 }
 
