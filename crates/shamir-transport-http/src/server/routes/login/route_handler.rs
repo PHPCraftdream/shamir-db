@@ -236,7 +236,8 @@ pub(crate) async fn handle_login<L: LoginRoutes>(
             Arc::clone(&permit),
         ),
         Err(_) => {
-            report_refusal(StatusCode::REQUEST_TIMEOUT);
+            // After the request has been handed to `handle`, the outcome belongs to the
+            // application (the detached worker records it); the transport must not count it again.
             let response = finish_reply(
                 error_response(StatusCode::REQUEST_TIMEOUT, "request_timeout"),
                 tls,
@@ -252,9 +253,15 @@ fn attach_hold<P: Send + Sync + 'static>(
     mut response: Response<BoxBody<Bytes, Infallible>>,
     permit: P,
 ) -> Response<BoxBody<Bytes, Infallible>> {
+    // Keep a hold the application already attached: both live until the response is flushed.
+    let mut holds: Vec<Arc<dyn Send + Sync>> = Vec::new();
+    if let Some(existing) = response.extensions_mut().remove::<Arc<dyn Send + Sync>>() {
+        holds.push(existing);
+    }
+    holds.push(Arc::new(permit));
     response
         .extensions_mut()
-        .insert(Arc::new(permit) as Arc<dyn Send + Sync>);
+        .insert(Arc::new(holds) as Arc<dyn Send + Sync>);
     response
 }
 
