@@ -74,7 +74,7 @@ version = "0.2"
 version = "1.17"
 
 [dependencies.parking_lot]
-version = "0.12"
+version = "0.13"
 
 [dependencies.rand]
 version = "0.10"

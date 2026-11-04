@@ -1946,12 +1946,15 @@ mod shamir_lock_order_tests {
             });
         };
         spawn_reverse(&x);
+        // `is_locked_exclusive` is true for a QUEUED writer only up to parking_lot 0.12; from 0.13 it
+        // means "held exclusively". A reader cannot get in behind a pending writer, so a failed
+        // `try_read` while the pin is held proves a writer is queued, on every version.
         wait_until("the first reverse update to queue a writer on P", || {
-            p.neighbours.is_locked_exclusive()
+            p.neighbours.try_read().is_none()
         });
         spawn_reverse(&y);
         wait_until("the second reverse update to queue a writer on Q", || {
-            q.neighbours.is_locked_exclusive()
+            q.neighbours.try_read().is_none()
         });
         drop(pin_p);
         drop(pin_q);
