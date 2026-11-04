@@ -141,6 +141,26 @@ pub enum ClientError {
     /// elapsed (`dns`, `tcp`, `tls`, `scram`, `kdf`) — never guessed.
     #[error("handshake timed out after {0:?} (phase: {1})")]
     HandshakeTimeout(std::time::Duration, std::sync::Arc<str>),
+
+    /// HTTP-level failure of the token REST client (status table). `code` is
+    /// set only when it matches `[a-z][a-z0-9_]{0,63}`. Display never contains
+    /// a body or headers.
+    #[error("http: status {status}{}", http_code_suffix(.code))]
+    Http {
+        status: u16,
+        code: Option<String>,
+        retry_after: Option<std::time::Duration>,
+    },
+
+    #[error("invalid api token")]
+    InvalidToken,
+}
+
+fn http_code_suffix(code: &Option<String>) -> String {
+    match code {
+        Some(c) => format!(" (code {c})"),
+        None => String::new(),
+    }
 }
 
 /// Why the connection reached its terminal closed state. Shared by every
