@@ -200,7 +200,11 @@ where
             Ok(value) => value,
             Err(_) => return invalid(),
         };
-        let pins = context.admission.pin_source(source).await;
+        let pins = match context.admission.pin_source(source).await {
+            Some(pins) => pins,
+            // The unique pinned-bucket budget is exhausted: fail closed.
+            None => return busy(),
+        };
         match context
             .pending
             .insert_pinned(

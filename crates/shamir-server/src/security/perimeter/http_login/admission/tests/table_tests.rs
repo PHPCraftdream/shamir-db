@@ -15,6 +15,14 @@ fn v6(child: u16) -> Source {
         0x2001, 0xdb8, 0, child, 0, 0, 0, 1,
     )))
 }
+fn churn(index: u32) -> Source {
+    Source::from_ip(IpAddr::V4(Ipv4Addr::new(
+        (index >> 8) as u8,
+        index as u8,
+        7,
+        9,
+    )))
+}
 
 #[test]
 fn failed_tier_debit_is_atomic_and_preserves_depleted_base_debt() {
@@ -39,7 +47,7 @@ fn failed_tier_debit_is_atomic_and_preserves_depleted_base_debt() {
 }
 
 #[test]
-fn dropped_fallback_preserves_unrelated_state_and_existing_debt() {
+fn full_table_with_capped_pins_evicts_unpinned_buckets_and_preserves_pinned_debt() {
     let mut table = LoginBudgetTable::new(Duration::from_secs(60));
     let now = Instant::now();
     let original = Source::from_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 1, 1)));
@@ -47,26 +55,26 @@ fn dropped_fallback_preserves_unrelated_state_and_existing_debt() {
         assert_eq!(table.debit(original, now), Ok(DebitOutcome::Charged));
     }
     assert!(table.debit(original, now).is_err());
-    let original_pin = table.pin(original);
-    let held_pins = (0u32..2047)
+    let original_pin = table.pin(original).expect("pin within budget");
+    let held_pins = (0u32..1535)
         .map(|index| {
-            let source = Source::from_ip(IpAddr::V4(Ipv4Addr::new(
-                (index >> 8) as u8,
-                index as u8,
-                7,
-                9,
-            )));
+            let source = churn(index);
             assert_eq!(table.debit(source, now), Ok(DebitOutcome::Charged));
-            table.pin(source)
+            table.pin(source).expect("pin within budget")
         })
         .collect::<Vec<_>>();
+    assert_eq!(table.pinned_bucket_count(), 3_072);
+    // Fill every remaining slot with unpinned resident buckets.
+    for index in 2000u32..2512 {
+        assert_eq!(table.debit(churn(index), now), Ok(DebitOutcome::Charged));
+    }
     assert_eq!(table.occupied_slots(), 4096);
 
+    // With the pin budget capped at 3072 unique buckets a full table always
+    // keeps evictable unpinned buckets: an unrelated source evicts one instead
+    // of being dropped, while every pinned source keeps its bucket and debt.
     let unrelated = Source::from_ip(IpAddr::V4(Ipv4Addr::new(203, 0, 1, 1)));
-    assert!(matches!(
-        table.debit(unrelated, now),
-        Ok(DebitOutcome::Dropped(_))
-    ));
+    assert_eq!(table.debit(unrelated, now), Ok(DebitOutcome::Charged));
     assert_eq!(table.occupied_slots(), 4096);
     assert!(table.debit(original, now).is_err());
     drop(held_pins);

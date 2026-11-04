@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -9,6 +7,8 @@ use super::{PrefixKey, Source};
 const BUCKETS: usize = 4096;
 const CHILD_QUOTA: usize = 32;
 const SCALE: u64 = 1_000_000;
+/// Maximum unique buckets one table may pin at once (3072 of 4096).
+const PIN_BUDGET: usize = 3_072;
 
 #[derive(Clone, Copy)]
 struct Bucket {
@@ -27,10 +27,11 @@ struct Slot {
 /// Bounded hierarchical login token buckets.
 pub struct LoginBudgetTable {
     slots: Box<[Slot]>,
+    pinned_buckets: Arc<AtomicUsize>,
     period_ns: u128,
     tick: u64,
     #[cfg(test)]
-    slot_visits: Cell<usize>,
+    slot_visits: AtomicUsize,
 }
 
 /// Reason a new source could not obtain a resident bucket.
@@ -56,20 +57,26 @@ pub struct BudgetDenied {
 /// Pins a source hierarchy against safe eviction until dropped.
 pub struct BudgetPin {
     markers: [Option<Arc<AtomicUsize>>; 3],
+    budget: Arc<AtomicUsize>,
 }
 impl Clone for BudgetPin {
     fn clone(&self) -> Self {
         let markers = std::array::from_fn(|i| self.markers[i].clone());
+        // A clone never changes the 0/1 bucket state: the original keeps every
+        // marker above zero, so no budget unit is reserved or released.
         for marker in markers.iter().flatten() {
             marker.fetch_add(1, Ordering::AcqRel);
         }
-        Self { markers }
+        Self {
+            markers,
+            budget: Arc::clone(&self.budget),
+        }
     }
 }
 impl Drop for BudgetPin {
     fn drop(&mut self) {
         for marker in self.markers.iter().flatten() {
-            marker.fetch_sub(1, Ordering::AcqRel);
+            unpin_marker(marker, &self.budget);
         }
     }
 }
@@ -85,10 +92,11 @@ impl LoginBudgetTable {
             .collect();
         Self {
             slots,
+            pinned_buckets: Arc::new(AtomicUsize::new(0)),
             period_ns: period.as_nanos().max(1),
             tick: 0,
             #[cfg(test)]
-            slot_visits: Cell::new(0),
+            slot_visits: AtomicUsize::new(0),
         }
     }
     /// Atomically debits the distinct source tiers at the supplied instant.
@@ -168,20 +176,25 @@ impl LoginBudgetTable {
         }
         Ok(DebitOutcome::Charged)
     }
-    /// Pins all currently resident levels for a source hierarchy.
-    pub fn pin(&self, source: Source) -> BudgetPin {
+    /// Pins all currently resident levels for a source hierarchy, or fails closed
+    /// when the table's unique pinned-bucket budget is exhausted.
+    pub fn pin(&self, source: Source) -> Option<BudgetPin> {
         let (tiers, count) = distinct_tiers(source);
-        let markers = std::array::from_fn(|i| {
-            (i < count)
-                .then(|| tiers[i])
-                .and_then(|key| self.find(key))
-                .map(|idx| {
-                    let marker = self.slots[idx].pins.clone();
-                    marker.fetch_add(1, Ordering::AcqRel);
-                    marker
-                })
-        });
-        BudgetPin { markers }
+        let mut pin = BudgetPin {
+            markers: std::array::from_fn(|_| None),
+            budget: Arc::clone(&self.pinned_buckets),
+        };
+        for (level, tier) in tiers.iter().enumerate().take(count) {
+            if let Some(idx) = self.find(*tier) {
+                let marker = Arc::clone(&self.slots[idx].pins);
+                if !try_pin_marker(&marker, &self.pinned_buckets) {
+                    // Refused halfway: Drop releases every marker raised above.
+                    return None;
+                }
+                pin.markers[level] = Some(marker);
+            }
+        }
+        Some(pin)
     }
     #[cfg(test)]
     pub(super) fn bucket_size() -> usize {
@@ -204,21 +217,30 @@ impl LoginBudgetTable {
     }
     #[cfg(test)]
     pub(super) fn reset_slot_visits(&self) {
-        self.slot_visits.set(0);
+        self.slot_visits.store(0, Ordering::Release);
     }
     #[cfg(test)]
     pub(super) fn slot_visits(&self) -> usize {
-        self.slot_visits.get()
+        self.slot_visits.load(Ordering::Acquire)
     }
     #[cfg(test)]
     pub(super) fn occupied_slots(&self) -> usize {
         self.slots.iter().filter(|s| s.bucket.is_some()).count()
     }
+    #[cfg(test)]
+    pub(super) fn pinned_bucket_count(&self) -> usize {
+        self.pinned_buckets.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(super) fn pin_root_for_test(&self, source: Source) -> bool {
+        let (tiers, _) = distinct_tiers(source);
+        self.find(tiers[0])
+            .is_some_and(|idx| try_pin_marker(&self.slots[idx].pins, &self.pinned_buckets))
+    }
     #[inline]
     fn slot_visit(&self) {
         #[cfg(test)]
-        self.slot_visits
-            .set(self.slot_visits.get().saturating_add(1));
+        self.slot_visits.fetch_add(1, Ordering::Relaxed);
     }
     fn find(&self, key: PrefixKey) -> Option<usize> {
         self.slots
@@ -338,7 +360,7 @@ impl LoginBudgetTable {
             let slot_visits = &self.slot_visits;
             for slot in self.slots.iter_mut() {
                 #[cfg(test)]
-                slot_visits.set(slot_visits.get().saturating_add(1));
+                slot_visits.fetch_add(1, Ordering::Relaxed);
                 if slot
                     .bucket
                     .is_some_and(|b| b.parent_slot as usize == idx && b.key != b.parent)
@@ -388,6 +410,45 @@ fn distinct_tiers(source: Source) -> ([PrefixKey; 3], usize) {
         ([tiers[0], tiers[1], tiers[1]], 2)
     } else {
         (tiers, 3)
+    }
+}
+/// Raises a bucket marker, reserving one budget unit on its 0-to-1 transition.
+fn try_pin_marker(marker: &AtomicUsize, budget: &AtomicUsize) -> bool {
+    loop {
+        let current = marker.load(Ordering::Acquire);
+        if current > 0 {
+            // The unit of this bucket is already reserved by an existing pin.
+            if marker
+                .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+            continue;
+        }
+        // 0 -> 1: reserve the unit BEFORE publishing the marker.
+        if budget
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |u| {
+                (u < PIN_BUDGET).then_some(u + 1)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        if marker
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+        // Lost the race: give the unit back and retry.
+        budget.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+/// Lowers a bucket marker, releasing the reserved unit on its 1-to-0 transition.
+fn unpin_marker(marker: &AtomicUsize, budget: &AtomicUsize) {
+    if marker.fetch_sub(1, Ordering::AcqRel) == 1 {
+        budget.fetch_sub(1, Ordering::AcqRel);
     }
 }
 fn capacity(key: PrefixKey) -> u32 {
