@@ -14,8 +14,8 @@
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 
-import type { ShamirClient } from '../../index.js';
-import { resume } from '../../index.js';
+import type { ShamirClient } from '../../../index.js';
+import { resume } from '../../../index.js';
 import {
   SERVER_BIN,
   SERVER_AVAILABLE,
@@ -23,8 +23,8 @@ import {
   ORIGIN,
   startServer,
   connectAdmin,
-} from '../e2e-harness.js';
-import type { ServerHandle } from '../e2e-harness.js';
+} from '../../e2e-harness.js';
+import type { ServerHandle } from '../../e2e-harness.js';
 
 describe.skipIf(!SERVER_AVAILABLE)(
   'e2e resume() (requires release binary)',
