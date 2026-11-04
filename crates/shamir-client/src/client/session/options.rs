@@ -130,6 +130,20 @@ pub struct SecureResumeOptions {
     pub pinned_hash: [u8; 32],
 }
 
+/// Resumption options for [`Client::resume_local`] (local IPC: Unix domain
+/// socket / Windows Named Pipe, binding mode 0x00). The ticket is wiped on
+/// drop; there is no TLS and no server name.
+pub struct ResumeLocalOptions {
+    /// Raw platform endpoint, as in [`ConnectLocalOptions::addr`].
+    pub addr: String,
+    /// Resumption ticket, wiped when its owner is dropped.
+    pub ticket: Zeroizing<Vec<u8>>,
+    /// Pinned SHA256 of the server identity key; the resumed session carries it.
+    pub pinned_hash: [u8; 32],
+    /// Deadline for establishing the IPC connection (`None` = unbounded).
+    pub connect_timeout: Option<std::time::Duration>,
+}
+
 impl From<ResumeOptions> for SecureResumeOptions {
     fn from(opts: ResumeOptions) -> Self {
         Self {

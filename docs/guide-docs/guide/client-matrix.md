@@ -48,7 +48,7 @@
 | 6b | resume × WS native | да (тест: crates/shamir-client/tests/matrix/session/ws_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
 | 6c | resume × WS, браузерный профиль | да (тест: crates/shamir-client/tests/matrix/browser/ws_browser_resume.rs) | нет (T9-8) | да (без resume_proof) | нет: не экспортирован |
 | 6d | resume × TCP без TLS | да (тест: crates/shamir-client/tests/matrix/session/plain_resume.rs) | нет (T9-8) | нет | невозможно |
-| 6e | resume × IPC | нет | нет | нет | невозможно |
+| 6e | resume × IPC | да (тест: crates/shamir-client/tests/smoke_local.rs) | нет | нет | невозможно |
 | 7 | токен × REST | да (тест: crates/shamir-client/tests/matrix/token/http.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
 | 8 | токен × WS native (`/shamir/v1/ws`) | да (тест: crates/shamir-client/tests/matrix/token/ws.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | невозможно: у WebSocket нет заголовка |
 | 9 | токен × WS браузерный (`/shamir/v1/ws/browser`) | не требуется | не требуется | не требуется | да |

@@ -1,7 +1,8 @@
 //! WebSocket and plain-TCP entry points: [`Client::connect_ws`],
 //! [`Client::resume_ws`] / [`Client::resume_ws_secure`],
 //! [`Client::connect_ws_browser`] / [`Client::resume_ws_browser`] and
-//! [`Client::connect_plain`] / [`Client::resume_plain`]. Same three steps as
+//! [`Client::connect_plain`] / [`Client::resume_plain`] and
+//! [`Client::resume_local`]. Same three steps as
 //! the TCP twins in `entry.rs` — dial, `run_scram` / `resume_wire_exchange`,
 //! `assemble`.
 
@@ -24,12 +25,13 @@ use crate::client::session::client::{Client, SessionMeta};
 use crate::client::session::entry::resume_security::ProtectedResumeBuffer;
 use crate::client::session::entry::{phase_name, session_meta, PHASE_TCP};
 use crate::client::session::options::{
-    BrowserResumeOptions, BrowserWsOptions, ConnectOptions, ResumeOptions, SecureResumeOptions,
+    BrowserResumeOptions, BrowserWsOptions, ConnectOptions, ResumeLocalOptions, ResumeOptions,
+    SecureResumeOptions,
 };
 use crate::client::session::token::{AuthKind, TokenWsOptions};
 use crate::client::transport::token::dial_token_ws;
 use crate::client::transport::{
-    dial_tcp_plain, dial_ws_browser, dial_ws_native, Dialed, LifecycleHooks, WriteSink,
+    dial_ipc, dial_tcp_plain, dial_ws_browser, dial_ws_native, Dialed, LifecycleHooks, WriteSink,
     WsByteStream,
 };
 use crate::error::ClientError;
@@ -276,6 +278,43 @@ impl Client {
         }
         let ticket = ProtectedResumeBuffer(Zeroizing::new(opts.ticket));
         let mut dialed = dial_tcp_plain(opts.addr, None).await?;
+
+        let resumed = resume_wire_exchange_unbound(
+            &mut dialed.read,
+            &mut dialed.write,
+            ticket,
+            BindingMode::None,
+        )
+        .await?;
+
+        Ok(Self::assemble(
+            dialed.read,
+            dialed.write,
+            SessionMeta {
+                session_id: resumed.session_id,
+                pinned_hash: opts.pinned_hash,
+                expires_at_ns: resumed.expires_at_ns,
+                resumption_ticket: resumed.resumption_ticket,
+                resumption_expires_at_ns: resumed.resumption_expires_at_ns,
+                server_query_version: resumed.server_query_version,
+                request_timeout: None,
+                rotation_in_progress: None,
+                kdf_upgrade_required: false,
+                auth: AuthKind::Scram,
+            },
+            LifecycleHooks::default(),
+        ))
+    }
+
+    /// [`Client::resume`] over the local-IPC transport (Unix domain socket /
+    /// Windows Named Pipe, binding mode 0x00). No identity-proof preamble on
+    /// this binding: the ticket is the first frame, and the pinned hash rides
+    /// on the resumed session. The server refuses a ticket issued under a
+    /// stronger binding (anti-downgrade); a ticket from a local session
+    /// resumes here and on every stronger listener.
+    pub async fn resume_local(opts: ResumeLocalOptions) -> Result<Self, ClientError> {
+        let ticket = ProtectedResumeBuffer(opts.ticket);
+        let mut dialed = dial_ipc(&opts.addr, opts.connect_timeout).await?;
 
         let resumed = resume_wire_exchange_unbound(
             &mut dialed.read,

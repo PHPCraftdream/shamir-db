@@ -23,7 +23,7 @@ pub use transport::token::{TokenEndpoint, TokenTrust};
 
 pub use session::{
     bound_until, resolve_host, BrowserResumeOptions, BrowserWsOptions, Client, ConnectLocalOptions,
-    ConnectOptions, ResumeOptions, SecureResumeOptions,
+    ConnectOptions, ResumeLocalOptions, ResumeOptions, SecureResumeOptions,
 };
 
 #[cfg(test)]
