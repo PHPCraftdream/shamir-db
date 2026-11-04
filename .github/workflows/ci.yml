@@ -148,7 +148,7 @@ jobs:
           fi
       # Same pinned nextest as the `test` job (see its comment above for the
       # perimeter-guard rationale).
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         if: steps.affected.outputs.args != ''
         with:
           tool: nextest@0.9.137
@@ -477,7 +477,7 @@ jobs:
       # renaming/removing it and fail-closing ALL test runs. The shorthand
       # `taiki-e/install-action@nextest` form cannot pin a version — the
       # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         with:
           tool: nextest@0.9.137
       # The lib tests come prebuilt in the archive from `test-build`; the only
@@ -589,7 +589,7 @@ jobs:
       # renaming/removing it and fail-closing ALL test runs. The shorthand
       # `taiki-e/install-action@nextest` form cannot pin a version — the
       # full-form `@v2` + `with: { tool: "nextest@X.Y.Z" }` is required.
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
@@ -756,7 +756,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
         if: steps.deps.outputs.rust == 'true'
       # Prebuilt, version-pinned binary (same install action and pin as nextest).
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         if: steps.deps.outputs.rust == 'true'
         with:
           tool: cargo-deny@0.20.2
@@ -809,7 +809,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
@@ -1000,7 +1000,7 @@ jobs:
       # baseline in .config/nextest.toml (0.9.137) — same pin as every
       # other nextest job in this file. Both lists MUST come from the
       # same nextest version for the comparison to be meaningful.
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
@@ -1186,7 +1186,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
         with:
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32  # v2.88.0
+      - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b  # v2.89.0
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
