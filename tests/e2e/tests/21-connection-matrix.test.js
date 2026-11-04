@@ -486,7 +486,8 @@ module.exports = async function ({ test, assert, assertEq, assertThrows, fixture
       const t = await newToken(admin, { channels: 'rest' });
       await assertThrows(
         () => ShamirClient.connectTokenWs(tokenWsOpts(m, t.token)),
-        (e) => e instanceof ShamirDbError && e.code === 'token_channel_denied',
+        // A connect-time refusal surfaces as a plain Error carrying the server code in its message.
+        (e) => /token_channel_denied/.test(String(e.message)),
         'rest-only token must be channel-denied over WS'
       );
     });

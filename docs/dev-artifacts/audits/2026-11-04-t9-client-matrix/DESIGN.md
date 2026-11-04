@@ -438,3 +438,6 @@ Not verified / open:
 - Nothing was compiled or run locally (policy). Verification: CI fast tier (clippy) plus a dispatch of `ts-e2e-nightly.yml`.
 - The orchestrator must delete `crates/shamir-client-node/src/connect_variants.rs` before compiling (module conflict with the folder).
 - The e2e port parsing of `listener bound` lines was written from reading the server tracing calls, not from observed output.
+
+CI result (T9-5): `ts-e2e-nightly` on the fork ran `tests/e2e/tests/21-connection-matrix.test.js` against a real six-listener server: 181 passed; the napi matrix rows 1b, 2, 4, 6a, 6b, 7, 8, 10 are `да`. Two test-side defects were fixed on the way: the suite opened more than 16 SCRAM sessions for one user (`MAX_SESSIONS_PER_USER`), so it now shares one admin session and uses a fresh user per resume case; and a connect-time refusal surfaces as a plain `Error` carrying the server code in its message.
+
