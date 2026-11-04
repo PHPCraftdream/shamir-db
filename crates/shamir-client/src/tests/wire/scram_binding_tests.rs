@@ -174,27 +174,31 @@ async fn run_binding(transport_kind: TransportKind, binding_mode: BindingMode, e
         binding_mode,
         exporter,
     );
-    let client = run_scram(
-        &mut client_r,
-        &mut client_w,
-        ScramRequest {
-            username: NormalizedUsername::from_raw("scram-binding").unwrap(),
-            transport_kind,
-            binding_mode,
-            tls_exporter: exporter,
-            trusted_pin: None,
-            accept_new_host: true,
-            password: PASSWORD,
-            phase: None,
-        },
-    );
+    // A client failure panics at once instead of waiting for the server to time out.
+    let client = async {
+        run_scram(
+            &mut client_r,
+            &mut client_w,
+            ScramRequest {
+                username: NormalizedUsername::from_raw("scram-binding").unwrap(),
+                transport_kind,
+                binding_mode,
+                tls_exporter: exporter,
+                trusted_pin: None,
+                accept_new_host: true,
+                password: PASSWORD,
+                phase: None,
+            },
+        )
+        .await
+        .expect("run_scram succeeds")
+    };
 
     let (session_id, outcome) = tokio::time::timeout(Duration::from_secs(60), async {
         tokio::join!(server, client)
     })
     .await
     .expect("SCRAM exchange timed out");
-    let outcome = outcome.expect("run_scram succeeds");
     assert_eq!(outcome.verified.success.session_id, session_id);
     assert_eq!(outcome.server_query_version, SERVER_QUERY_VERSION);
 }

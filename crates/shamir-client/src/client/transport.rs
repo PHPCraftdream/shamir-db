@@ -7,7 +7,7 @@
 #[cfg(test)]
 pub(crate) use crate::client::handshake::wire::{
     WireAuthInit, WireAuthOk, WireChallenge, WireClientProof, WireResumeInit, WireResumeOk,
-    WireResumeProofInit, WireResumeProofOk,
+    WireResumeProofOk,
 };
 #[cfg(test)]
 pub(crate) use crate::client::session::mux::hooks::HookPoint;

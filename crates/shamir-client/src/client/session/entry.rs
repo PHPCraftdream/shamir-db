@@ -260,8 +260,8 @@ impl Client {
     /// 1. Open a new TLS connection (same as `connect`).
     /// 2. Verify the server's pinned identity proof over the TLS exporter and a
     ///    fresh nonce before disclosing the ticket.
-    /// 3. Send [`WireResumeInit`](crate::client::handshake::wire::WireResumeInit) with the ticket and channel-binding mode.
-    /// 4. Read [`WireResumeOk`](crate::client::handshake::wire::WireResumeOk) with the new session and optional rotated ticket.
+    /// 3. Send `WireResumeInit` with the ticket and channel-binding mode.
+    /// 4. Read `WireResumeOk` with the new session and optional rotated ticket.
     /// 5. Spawn the background reader task and return the ready `Client`.
     ///
     /// The legacy options contain a raw ticket until this future is polled.
