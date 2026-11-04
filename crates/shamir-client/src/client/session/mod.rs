@@ -3,6 +3,7 @@
 
 mod client;
 pub(in crate::client) mod entry;
+mod entry_ws;
 pub(crate) mod mux;
 mod options;
 

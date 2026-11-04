@@ -3,7 +3,9 @@
 
 mod binding;
 mod dial;
+mod dial_ws;
 mod write_sink;
+mod ws_stream;
 
 // Re-exports: the mux/lifecycle/reader code lives in `client/session/mux/`
 // but `crate::client::transport::{...}` paths must keep resolving for the
@@ -21,8 +23,12 @@ pub(crate) use crate::client::session::mux::lifecycle::{
 pub(crate) use crate::client::session::mux::reader::{await_pending_response, reader_task};
 
 pub(crate) use binding::ChannelBinding;
-pub(crate) use dial::{dial_ipc, dial_tcp_tls};
+pub(crate) use dial::{dial_ipc, dial_tcp_plain, dial_tcp_tls, Dialed};
+pub(crate) use dial_ws::dial_ws_native;
 pub(crate) use write_sink::WriteSink;
+
+#[cfg(test)]
+pub(crate) use ws_stream::WsByteStream;
 
 #[cfg(test)]
 pub(crate) use dial::connect_with_timeout;

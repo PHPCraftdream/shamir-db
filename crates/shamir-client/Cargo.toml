@@ -19,6 +19,8 @@ shamir-types        = { path = "../shamir-types" }
 tokio   = { version = "1", features = ["net", "io-util", "macros", "sync", "rt", "time"] }
 tokio-rustls = "0.26"
 rustls  = { version = "0.23", default-features = false, features = ["std"] }
+# Native WebSocket transport (Client::connect_ws / resume_ws).
+tokio-tungstenite = "0.30"
 
 # Stream trait + `stream::unfold` combinator (Client::stream_cursor, FG-5c).
 futures = "0.3"

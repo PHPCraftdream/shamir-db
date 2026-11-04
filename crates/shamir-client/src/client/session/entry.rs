@@ -34,7 +34,7 @@ const PHASE_DNS: u8 = 0;
 pub(in crate::client) const PHASE_TCP: u8 = 1;
 pub(in crate::client) const PHASE_TLS: u8 = 2;
 
-fn phase_name(phase: u8) -> &'static str {
+pub(in crate::client) fn phase_name(phase: u8) -> &'static str {
     match phase {
         PHASE_DNS => "dns",
         PHASE_TCP => "tcp",
@@ -45,7 +45,10 @@ fn phase_name(phase: u8) -> &'static str {
     }
 }
 
-fn session_meta(outcome: ScramOutcome, request_timeout: Option<Duration>) -> SessionMeta {
+pub(in crate::client) fn session_meta(
+    outcome: ScramOutcome,
+    request_timeout: Option<Duration>,
+) -> SessionMeta {
     let verified = outcome.verified;
     SessionMeta {
         session_id: verified.success.session_id,
