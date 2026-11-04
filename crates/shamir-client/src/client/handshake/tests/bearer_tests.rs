@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::client::handshake::bearer::{decode_binding, read_binding};
+use crate::client::handshake::token::{decode_binding, read_binding};
 use crate::error::{ClientError, CloseCause};
 
 #[derive(Serialize)]

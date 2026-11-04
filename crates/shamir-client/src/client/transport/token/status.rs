@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use serde::Deserialize;
 use shamir_query_types::wire::DbResponse;
 
 use super::http_conn::TokenReply;
@@ -50,6 +51,24 @@ pub(super) fn map_upgrade_reply(reply: TokenReply) -> ClientError {
         return ClientError::Protocol("websocket upgrade not performed".into());
     }
     map_failure(&reply)
+}
+
+#[derive(Deserialize)]
+struct LoginErrorBody {
+    error: String,
+}
+
+/// Maps a non-200 answer of the password-login endpoints; the body is never
+/// copied into the error.
+pub(crate) fn map_login_failure(reply: &TokenReply) -> ClientError {
+    let code = rmp_serde::from_slice::<LoginErrorBody>(&reply.body)
+        .ok()
+        .map(|b| b.error);
+    let retry = match reply.status {
+        429 | 503 => reply.retry_after,
+        _ => None,
+    };
+    http_error(reply.status, code.as_deref(), retry)
 }
 
 fn map_failure(reply: &TokenReply) -> ClientError {
