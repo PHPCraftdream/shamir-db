@@ -937,7 +937,7 @@ jobs:
           exit "$first_rc"
       - name: upload suggested deltas
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: rust-guard-suggested-delta
           path: suggested-*.toml
@@ -1147,7 +1147,7 @@ jobs:
           fi
       - name: upload suggested deltas
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: rust-guard-suggested-delta-${{ matrix.os }}-${{ matrix.config.id }}
           path: suggested-*.toml
@@ -1235,7 +1235,7 @@ jobs:
       # taken from this artifact when the drift check above fails.
       - name: upload generated files on drift
         if: failure() && steps.napi-drift.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           overwrite: true
           name: napi-generated-files
