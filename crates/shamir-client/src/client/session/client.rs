@@ -62,7 +62,7 @@ pub struct Client {
     /// Set once on connect/resume; never mutated afterward.
     pub(in crate::client) server_query_version: AtomicU8,
     /// Per-request response deadline carried over from
-    /// [`ConnectOptions::request_timeout`]. `None` = unbounded wait
+    /// [`crate::client::ConnectOptions::request_timeout`]. `None` = unbounded wait
     /// (prior behaviour). Applied in [`Self::roundtrip`].
     pub(in crate::client) request_timeout: Option<std::time::Duration>,
     /// `auth_ok` orphan-recovery hint (spec §6.5). A changed pin fails closed;
@@ -132,7 +132,7 @@ impl Client {
     {
         Self::assemble(
             reader,
-            crate::client::transport::WriteSink::Test(Box::new(writer)),
+            WriteSink::Test(Box::new(writer)),
             SessionMeta {
                 session_id: [0u8; 32],
                 pinned_hash: [0u8; 32],
@@ -154,7 +154,7 @@ impl Client {
         self.reader_handle.take()
     }
 
-    /// Test accessor: the client's lifecycle state (`pub(super)` fields are
+    /// Test accessor: the client's lifecycle state (`pub(in crate::client)` fields are
     /// not visible from the crate-root tests module).
     pub(crate) fn lifecycle_for_test(&self) -> &Lifecycle {
         &self.state

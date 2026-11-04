@@ -23,7 +23,9 @@ use tokio_rustls::client::TlsStream;
 
 use shamir_transport_ipc::IpcClientStream;
 
-use crate::client::session::entry::resume_security::ProtectedResumeBuffer;
+use crate::client::session::entry::resume_security::{
+    deserialize_resume_ticket, ProtectedResumeBuffer,
+};
 use crate::error::ClientError;
 
 /// [`Client`]'s write half, over whichever transport it connected with.
@@ -178,10 +180,7 @@ pub(crate) struct WireResumeOk {
     #[serde(with = "serde_bytes")]
     pub session_id: Vec<u8>,
     pub expires_at_ns: u64,
-    #[serde(
-        default,
-        deserialize_with = "crate::client::session::entry::resume_security::deserialize_resume_ticket"
-    )]
+    #[serde(default, deserialize_with = "deserialize_resume_ticket")]
     pub resumption_ticket: ProtectedResumeBuffer,
     #[serde(default)]
     pub resumption_expires_at_ns: u64,

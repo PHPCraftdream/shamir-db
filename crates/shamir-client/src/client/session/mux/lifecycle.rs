@@ -162,7 +162,7 @@ impl Lifecycle {
     }
 }
 
-/// Drop guard installed by [`reader_task`] BEFORE its read loop. On any exit
+/// Drop guard installed by [`super::reader::reader_task`] BEFORE its read loop. On any exit
 /// path that did not set a cause explicitly (EOF / I/O error do) — abort,
 /// cancel, panic — it shuts the lifecycle down with
 /// [`CloseCause::ReaderCancelled`].

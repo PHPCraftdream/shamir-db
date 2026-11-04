@@ -169,7 +169,7 @@ Draft table:
 
 ## T9-1 R2 report (Rust client session + mux move, behaviour unchanged)
 
-Status: DONE in code, PENDING orchestrator actions below. No local compile/test was run (policy); verified by a compiler-style read plus `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py`.
+Status: DONE in code. No local compile/test was run (policy); verified by a compiler-style read plus `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py`.
 
 What moved (bodies verbatim, only imports and visibility adjusted):
 - `client/connect.rs` -> `client/session/client.rs` (`SessionMeta`, `struct Client`, `Client::assemble`, the `cfg(test)` accessors) and `client/session/entry.rs` (`connect`, `connect_until`, `connect_host`, `handshake`, `connect_local`, `resume`, `resume_secure`, `verify_auth_ok`, `resume_wire_exchange`, `verify_resume_identity_proof`, `ResumedHandshake`, the `#[path]` link to `interner_cache/resume/security.rs`, now `../../interner_cache/resume/security.rs`).
@@ -183,6 +183,6 @@ Dropped: the `pub(super) use resume_security::deserialize_resume_ticket;` re-exp
 
 Public API untouched: `lib.rs` re-exports, options file byte-identical. Guard tests untouched.
 
-PENDING for the orchestrator: `crates/shamir-client/src/client/connect.rs` and `crates/shamir-client/src/client/options.rs` are now orphaned (no longer declared as modules, duplicates of the moved code). They must be removed (the worker could not delete files). Until they are removed `client/` holds 8 entries and the rust-guard `modules` gate would flag them. After removal `client/` has 6 entries: `api.rs cursor_stream.rs mod.rs session/ subscription/ transport.rs`.
+DONE by the orchestrator: `connect.rs` and `options.rs` were removed (renames into `session/`); `client/` has 6 entries.
 
 Not verified locally: compilation, clippy, tests (CI only).
