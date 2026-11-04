@@ -1405,6 +1405,10 @@ measurements on one development host and are a floor, not a promise.
 
 The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and password-login issuance paths. See the [token API operator guide](guide/token-api.md).
 
+### Client coverage
+
+- **Not every client implements every handshake x transport cell the server admits.** The Rust client has no WebSocket, HTTP or token support; the napi binding connects over TCP only; the TypeScript client in Node uses the browser WebSocket profile (weaker channel binding) for session connections and does not pin the server identity key (`identity_sig`). Changing the password over a local IPC session from the TypeScript client is not verified and is expected to fail. The full table with per-cell status is in the [client matrix](guide/client-matrix.md). Token over TCP/IPC, session over HTTP, QUIC and mTLS are not part of the protocol.
+
 ### Credential lifecycle
 
 - **Bearer tokens are plaintext credentials.** A stolen token can be used until expiry or revocation. The remote-plaintext write rail (`allow_plaintext_write: false`) does not keep a `read_write` secret safe: the secret is exposed before the server rejects it with 403 and emits `api_token_exposed`. Protect tokens as secrets, use TLS outside loopback, and avoid URLs. Query-string token authentication is ignored; a valid `Authorization` header still works alongside a query string. Creation returns the secret once; listings omit it. Sources: `crates/shamir-server/src/security/tokens/cli/secret_output.rs`, `crates/shamir-server/src/security/perimeter/`.
