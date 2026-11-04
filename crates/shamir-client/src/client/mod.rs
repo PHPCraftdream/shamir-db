@@ -17,6 +17,7 @@ pub(crate) mod transport;
 pub mod cursor_stream;
 pub mod subscription;
 
+pub use handshake::{login, LoginChannels, LoginMode, LoginOptions, LoginOutcome, LoginScope};
 pub use session::{ApiToken, AuthKind, TokenHttpClient, TokenHttpOptions, TokenWsOptions};
 pub use transport::token::{TokenEndpoint, TokenTrust};
 

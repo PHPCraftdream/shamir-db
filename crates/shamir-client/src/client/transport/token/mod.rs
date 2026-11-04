@@ -18,5 +18,5 @@ pub(crate) use endpoint::TokenScheme;
 #[cfg(test)]
 pub(crate) use http_conn::TokenReply;
 pub(crate) use http_conn::TokenTransport;
-pub(crate) use status::{map_ping_reply, map_reply};
+pub(crate) use status::{map_login_failure, map_ping_reply, map_reply};
 pub(crate) use tls::{build_connector, parse_server_name};
