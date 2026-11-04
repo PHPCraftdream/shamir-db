@@ -669,7 +669,7 @@ export class ShamirClient {
     oldPassword: string,
     newPassword: string,
   ): Promise<void> {
-    return changePassword(oldPassword, newPassword, this.platform, this._sessionId, this._normalizedUser, (req) => this.sendDbRequest(req));
+    return changePassword(oldPassword, newPassword, this.platform, this._sessionId, this._normalizedUser, this._channelBinding, (req) => this.sendDbRequest(req));
   }
 
   /**

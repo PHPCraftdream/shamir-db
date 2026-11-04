@@ -3,12 +3,11 @@ import type { BatchResponse } from '../types/write/batch.js';
 import type { WireValue } from '../types/write/write.js';
 import type { HmacSigner } from '../types/access/admin.js';
 import type { KdfParams } from '../protocol/scram.js';
+import type { ChannelBinding } from '../protocol/session/binding.js';
 import { ShamirTimeoutError, ShamirDbError } from '../support/errors.js';
 import {
   buildAuthMessageCp,
   computeClientProof,
-  TRANSPORT_KIND_WS,
-  BINDING_MODE_TLS_NO_EXPORT,
 } from '../protocol/scram.js';
 import { canonicalDbRequest } from '../protocol/hmac.js';
 import {
@@ -395,9 +394,10 @@ export async function changePassword(
   platform: Platform,
   sessionId: Uint8Array,
   normalizedUser: string | undefined,
+  binding: ChannelBinding | undefined,
   sendDbRequest: (req: object) => Promise<Record<string, unknown>>,
 ): Promise<void> {
-  if (normalizedUser === undefined) {
+  if (normalizedUser === undefined || binding === undefined) {
     throw new Error(
       'changePassword requires a full connect() session (not resume)',
     );
@@ -425,9 +425,9 @@ export async function changePassword(
   };
 
   // ── Step 2: build auth_message_cp + derive proofs ──────────────────
-  // Channel binding is always 32 zero bytes on the WS/no-exporter path —
-  // the server snapshotted the same value at session creation, so they
-  // MUST match bit-for-bit or the server's recomputation fails.
+  // Uses the session's channel binding snapshotted at connect; transport
+  // kind, binding mode and exporter MUST match the server's session values
+  // bit-for-bit or the server's recomputation fails.
   const authMessageCp = buildAuthMessageCp({
     username: normalizedUser,
     sessionId,
@@ -435,9 +435,9 @@ export async function changePassword(
     serverNonceCp,
     salt,
     kdf,
-    transportKind: TRANSPORT_KIND_WS,
-    bindingMode: BINDING_MODE_TLS_NO_EXPORT,
-    channelBindingAtAuth: new Uint8Array(32),
+    transportKind: binding.transportKind,
+    bindingMode: binding.bindingMode,
+    channelBindingAtAuth: binding.exporter,
   });
 
   // Old-password proof: full SCRAM derivation against current salt/KDF.

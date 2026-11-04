@@ -11,7 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { connect } from '../index.js';
+import { connect, connectLocal } from '../index.js';
 import type { ShamirClient, BatchResponse, WireValue } from '../index.js';
 import { ddl, write } from '../index.js';
 
@@ -433,4 +433,159 @@ export async function seed(
     queries[`s${i}`] = write.upsert(table, key, r);
   });
   return br(await client.execute(db, { id: `seed-${db}-${table}`, queries }));
+}
+
+// ─── kind: unix (local IPC) server ──────────────────────────────────────────
+
+let ipcCounter = 0;
+
+/**
+ * Local-IPC endpoint, unique per call. On Unix, a socket file inside the
+ * fresh `dataDir`. On Windows, a Named Pipe name unique per process + call.
+ */
+function ipcAddr(dataDir: string): string {
+  ipcCounter += 1;
+  if (process.platform === 'win32') {
+    return ['', '', '.', 'pipe', `shamir-ts-e2e-${process.pid}-${ipcCounter}-${Date.now()}`].join(path.win32.sep);
+  }
+  return path.join(dataDir, `shamir-ts-e2e-${ipcCounter}.sock`);
+}
+
+function writeUnixKtavConfig(dir: string, addr: string): string {
+  const certPath = path.join(dir, 'cert.pem').split(path.win32.sep).join('/');
+  const keyPath = path.join(dir, 'key.pem').split(path.win32.sep).join('/');
+  const cfg = `
+data_dir: ${dir.split(path.win32.sep).join('/')}
+
+logging: {
+    level: info
+    slow_query_threshold_ms: 0
+}
+
+kdf_defaults: {
+    memory_kb: 19456
+    time: 2
+    parallelism: 1
+    argon2_version: 19
+}
+
+argon2_concurrent_max: 4
+
+listeners: [
+    {
+        kind: unix
+        addr: ${addr}
+        profile: plain
+    }
+]
+
+tls: {
+    cert_path: ${certPath}
+    key_path:  ${keyPath}
+}
+
+security: {
+    connection: {
+        auth_init_timeout_ms: 10000
+        max_active_connections: 100
+    }
+    auth_init_rate_per_second: 1000
+}
+
+audit: {
+    max_file_size_mb: 0
+    retention_days: 0
+}
+
+observability: {
+    addr: 127.0.0.1:0
+}
+`.trim();
+
+  const configPath = path.join(dir, 'server.ktav');
+  fs.writeFileSync(configPath, cfg);
+  return configPath;
+}
+
+export interface LocalServerHandle {
+  addr: string;
+  stop: () => Promise<void>;
+  logs: () => string;
+}
+
+/** Spawn a server with a single `kind: unix`, `profile: plain` listener. */
+export async function startUnixServer(): Promise<LocalServerHandle> {
+  assertServerBinaryFresh();
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'shamir-ts-e2e-unix-'));
+  const addr = ipcAddr(dataDir);
+  const configPath = writeUnixKtavConfig(dataDir, addr);
+
+  const child = spawn(
+    SERVER_BIN,
+    ['--config', configPath, '--bootstrap-password', ADMIN_PASSWORD],
+    { stdio: ['ignore', 'pipe', 'pipe'] },
+  ) as ChildProcess;
+
+  let logBuf = '';
+  child.stdout?.on('data', (chunk: Buffer) => {
+    logBuf += chunk.toString();
+  });
+  child.stderr?.on('data', (chunk: Buffer) => {
+    logBuf += chunk.toString();
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        reject(new Error(`Server failed to bind within 15s.\nLogs:\n${logBuf}`));
+      }
+    }, 15_000);
+
+    function check() {
+      if (done) return;
+      if (/listener bound/i.test(logBuf)) {
+        done = true;
+        clearTimeout(timer);
+        setTimeout(() => resolve(), 150);
+      }
+    }
+    child.stdout?.on('data', check);
+    child.stderr?.on('data', check);
+    child.on('exit', (code: number | null, signal: string | null) => {
+      if (!done) {
+        done = true;
+        clearTimeout(timer);
+        reject(
+          new Error(`Server exited prematurely (code=${code} signal=${signal}).\nLogs:\n${logBuf}`),
+        );
+      }
+    });
+  });
+
+  return {
+    addr,
+    stop: async () => {
+      if (!child.killed) {
+        child.kill(process.platform === 'win32' ? 'SIGKILL' : 'SIGTERM');
+        await new Promise<void>((r) => child.once('exit', r));
+      }
+      try {
+        fs.rmSync(dataDir, { recursive: true, force: true });
+      } catch {
+        /* ok */
+      }
+    },
+    logs: () => logBuf,
+  };
+}
+
+/** Connect over the local IPC transport as `user`. */
+export async function connectLocalAs(
+  addr: string,
+  user: string,
+  password: string,
+): Promise<ShamirClient> {
+  return connectLocal({ addr, username: user, password });
 }
