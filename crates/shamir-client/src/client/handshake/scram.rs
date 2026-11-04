@@ -6,13 +6,13 @@ use zeroize::Zeroizing;
 use shamir_connect::client::handshake::{HandshakeBuilder, ServerChallenge};
 use shamir_connect::common::kdf_params::KdfParams;
 use shamir_connect::common::types::limits::MAX_PRE_AUTH_FRAME;
-use shamir_connect::common::types::{BindingMode, TransportKind};
 use shamir_connect::common::username::NormalizedUsername;
 
 use shamir_transport_tcp::framing::{read_frame, write_frame};
 
 use super::auth_ok::{verify_auth_ok, VerifiedAuthOk};
 use super::wire::{WireAuthInit, WireAuthOk, WireChallenge, WireClientProof};
+use crate::client::transport::ChannelBinding;
 use crate::error::ClientError;
 
 pub(in crate::client) const PHASE_SCRAM: u8 = 3;
@@ -20,9 +20,7 @@ pub(in crate::client) const PHASE_KDF: u8 = 4;
 
 pub(crate) struct ScramRequest<'a> {
     pub(crate) username: NormalizedUsername,
-    pub(crate) transport_kind: TransportKind,
-    pub(crate) binding_mode: BindingMode,
-    pub(crate) tls_exporter: [u8; 32],
+    pub(crate) binding: ChannelBinding,
     pub(crate) trusted_pin: Option<[u8; 32]>,
     pub(crate) accept_new_host: bool,
     pub(crate) password: &'a [u8],
@@ -52,8 +50,8 @@ where
     W: AsyncWrite + Unpin,
 {
     mark_phase(req.phase, PHASE_SCRAM);
-    let mut hb = HandshakeBuilder::new(req.username, req.transport_kind, req.binding_mode)
-        .tls_exporter(req.tls_exporter);
+    let mut hb = HandshakeBuilder::new(req.username, req.binding.transport, req.binding.mode)
+        .tls_exporter(req.binding.exporter);
     hb = match req.trusted_pin {
         Some(pin) => hb.pinned_hash(pin),
         None => hb.accept_new_host(req.accept_new_host),

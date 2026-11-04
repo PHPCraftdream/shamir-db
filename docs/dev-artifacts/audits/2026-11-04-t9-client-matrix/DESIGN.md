@@ -236,3 +236,13 @@ Visibility widenings vs base (all within the crate, none public): `VerifiedAuthO
 Public API untouched (`lib.rs`, option structs, `Client::connect/connect_host/connect_local/resume/resume_secure`). No Cargo.toml/lockfile change. Only the doc links of `Client::resume` changed (full paths to the moved `Wire*` types) and the `connect_local` doc sentence now says it shares `run_scram`.
 
 BLOCKED: nothing. Not verified locally: compilation, clippy, tests (CI only).
+
+## T9-1 R3 report (Rust client transport module, behaviour unchanged)
+
+Moved: `client/transport.rs` became the folder `client/transport/` (`mod.rs` re-exports only, `binding.rs`, `write_sink.rs`, `dial.rs`). `WriteSink` and its `AsyncWrite` impl moved verbatim to `write_sink.rs`; `connect_tcp`, `connect_ipc`, `connect_with_timeout` moved verbatim to `dial.rs`. New: `ChannelBinding {transport, mode, exporter}` (`Copy`, constructors `tcp_tls_exporter`, `ipc`), `Dialed<R> {read, write, binding}`, `dial_tcp_tls` (the TCP part of `Client::handshake` before SCRAM, with the `PHASE_TCP`/`PHASE_TLS` stores) and `dial_ipc`. `ScramRequest` now carries `binding: ChannelBinding` instead of three loose fields; `run_scram` reads `binding.transport/mode/exporter`. `session/entry.rs` reads dial -> `run_scram` -> `assemble` for `connect` and `connect_local`.
+
+Resume decision: `resume_secure` reuses `dial_tcp_tls(addr, server_name, None, None)`. The code is identical to the old inline path (client config, server name, TCP connect with no timeout, TLS connect, exporter extraction, split; same error values and texts); the only difference is that no phase atomic is passed, as before. The exporter for `resume_wire_exchange` is `dialed.binding.exporter`.
+
+Visibility widenings against the base: `PHASE_TCP` and `PHASE_TLS` in `session/entry.rs` went from private to `pub(in crate::client)` (needed by `dial.rs`). New items only otherwise: `ChannelBinding` and `Dialed` are `pub(crate)` with fields `pub(in crate::client)`; the helpers are `pub(crate)`.
+
+Not done / notes: `Dialed` is deliberately not re-exported from `transport/mod.rs` (nothing outside `dial.rs` names the type, so an `pub(crate) use` would be an unused import under `-D warnings`). The old `client/transport.rs` must be removed by the orchestrator (it cannot coexist with `transport/mod.rs`); `cargo fmt` could not run for this reason. The only test edit is `src/tests/wire/scram_binding_tests.rs` (new `binding` argument). No local compilation or tests were run; CI is the check. `connect_local`'s doc comment still mentions `transport_kind`/`binding_mode` (untouched).
