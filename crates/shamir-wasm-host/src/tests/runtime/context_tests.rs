@@ -69,7 +69,18 @@ impl ShamirFunction for GlobalBump {
 
 // Many observed writer completions between reads increase the likelihood of
 // detecting a missing-key gap under concurrent updates. This is statistical,
-// not a guarantee: even 20,000 such observations can miss a gap.
+// not a guarantee: even thousands of such observations can miss a gap.
+//
+// The pace of the writer depends on how much CPU the runner gives this test
+// (nextest runs many tests in parallel), so overlap is not bounded by wall
+// clock: the loop ends when enough observations were made, or when the writer
+// made no progress at all for `STALL` (a real hang). A truly stuck test is
+// killed by the nextest slow-timeout.
+const STALL: Duration = Duration::from_secs(30);
+// macOS runners manage only ~200-400 observed hand-offs per second, so the
+// count is sized to finish well inside the 30 s slow-timeout period there.
+const OBSERVATIONS: u32 = 5_000;
+
 fn check_setter_reads<W, R>(write: W, read: R)
 where
     W: Fn() + Send + 'static,
@@ -79,9 +90,8 @@ where
     let progress = Arc::new(AtomicU64::new(0));
     let writer_stop = Arc::clone(&stop);
     let writer_progress = Arc::clone(&progress);
-    let deadline = Instant::now() + Duration::from_secs(20);
     let writer = thread::spawn(move || {
-        while !writer_stop.load(Ordering::Acquire) && Instant::now() < deadline {
+        while !writer_stop.load(Ordering::Acquire) {
             write();
             writer_progress.fetch_add(1, Ordering::Release);
         }
@@ -90,7 +100,8 @@ where
     let mut count = 0;
     let mut missing = false;
     let mut previous = progress.load(Ordering::Acquire);
-    while count < 20_000 && Instant::now() < deadline {
+    let mut last_progress_at = Instant::now();
+    while count < OBSERVATIONS && last_progress_at.elapsed() < STALL {
         if !read() {
             missing = true;
             break;
@@ -98,6 +109,7 @@ where
         let current = progress.load(Ordering::Acquire);
         if current != previous {
             count += 1;
+            last_progress_at = Instant::now();
         } else {
             thread::yield_now();
         }
@@ -108,8 +120,8 @@ where
     assert!(joined.is_ok(), "writer thread panicked");
     assert!(!missing, "setter exposed a missing key");
     assert!(
-        count >= 20_000,
-        "overlap not achieved: only {count} reads observed writer progress before deadline"
+        count >= OBSERVATIONS,
+        "overlap not achieved: only {count} reads observed writer progress before the writer stalled"
     );
 }
 
