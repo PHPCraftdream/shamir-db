@@ -77,3 +77,24 @@ What it does:
 For pure-Rust integration tests (in-process `ServerLauncher`, no
 subprocess) see `crates/shamir-server/tests/mvp_e2e.rs` and
 `crates/shamir-client/tests/smoke.rs`.
+
+## Connection matrix (`tests/21-connection-matrix.test.js`)
+
+Starts its own second `shamir-server` (`helpers/matrix-server.js`) with six
+listeners on fixed loopback ports, chosen from a base (default `14200`;
+override with `SHAMIR_E2E_MATRIX_PORT_BASE`):
+
+| Port | Listener |
+|---|---|
+| base+0 | `tcp`, `tls_exporter` |
+| base+1 | `ws`, `tls_exporter`, path `/shamir/v1` |
+| base+2 | `tcp`, `plain` (loopback only) |
+| base+3 | `http`, TLS, password login enabled |
+| base+4 | `http`, plaintext, password login enabled |
+| — | `unix`, `plain` (Named Pipe on Windows, socket file in the tempdir elsewhere) |
+
+It proves every connection variant of the napi binding: `connectWs`,
+`connectPlain` (and its non-loopback refusal), `connectLocal`, `resume` /
+`resumeWs`, API tokens through `ShamirTokenHttpClient` and `connectTokenWs`
+(including the refusal of admin calls on token sessions), and password
+`login`. The server is started by the first test and stopped by the last one.

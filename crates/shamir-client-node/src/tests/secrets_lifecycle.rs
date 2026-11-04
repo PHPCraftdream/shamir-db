@@ -19,6 +19,18 @@ impl Zeroize for Probe {
     }
 }
 
+struct StringProbe {
+    value: String,
+    wipes: Arc<AtomicUsize>,
+}
+
+impl Zeroize for StringProbe {
+    fn zeroize(&mut self) {
+        self.value.zeroize();
+        self.wipes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 struct Noop;
 
 impl Wake for Noop {
@@ -70,6 +82,19 @@ fn invalid_connect_validation_drops_protected_password() {
     let result = secrets::protect_before(Probe(Arc::clone(&wiped)), || Err::<(), _>("invalid"));
     assert!(result.is_err());
     assert_eq!(wiped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn protected_string_secret_is_wiped_exactly_once_on_drop() {
+    let wipes = Arc::new(AtomicUsize::new(0));
+    let token = secrets::protect(StringProbe {
+        value: "secret".to_owned(),
+        wipes: Arc::clone(&wipes),
+    });
+    assert_eq!(token.value, "secret");
+    assert_eq!(wipes.load(Ordering::SeqCst), 0);
+    drop(token);
+    assert_eq!(wipes.load(Ordering::SeqCst), 1);
 }
 
 #[test]

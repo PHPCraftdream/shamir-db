@@ -779,3 +779,5 @@ function __napiStampBindingTarget(exportsObject, target) {
 module.exports.__napiBindingTarget = __napiStampBindingTarget(nativeBinding, __napiLoadedBindingTarget)
 module.exports = nativeBinding
 module.exports.ShamirClient = nativeBinding.ShamirClient
+module.exports.ShamirTokenHttpClient = nativeBinding.ShamirTokenHttpClient
+module.exports.login = nativeBinding.login
