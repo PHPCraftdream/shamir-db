@@ -40,25 +40,27 @@
 | # | Рукопожатие × транспорт | Rust `shamir-client` | napi `shamir-client-node` | TS в Node | TS в браузере |
 |---|---|---|---|---|---|
 | 1 | сессия × TCP+TLS | да | да | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет TCP |
-| 1b | сессия × TCP без TLS (loopback) | план T9-2 | план T9-5 | нет | невозможно |
-| 2 | сессия × WS native (`tls_exporter`) | план T9-2 | план T9-5 | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет exporter |
+| 1b | сессия × TCP без TLS (loopback) | план T9-2 | план T9-5 (e2e написан; статус «да» после зелёного прогона) | нет | невозможно |
+| 2 | сессия × WS native (`tls_exporter`) | план T9-2 | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет exporter |
 | 3 | сессия × WS, браузерный профиль (`tls_no_export`) | план T9-2 | план T9-5 | да | да |
-| 4 | сессия × IPC | да | план T9-5 | да (смена пароля по IPC: исправление S4) | невозможно |
-| 6a | resume × TCP+TLS | да | план T9-5 | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
-| 6b | resume × WS native | план T9-2 | план T9-5 | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
+| 4 | сессия × IPC | да | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да (смена пароля по IPC: исправление S4) | невозможно |
+| 6a | resume × TCP+TLS | да | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
+| 6b | resume × WS native | план T9-2 | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
 | 6c | resume × WS, браузерный профиль | план T9-2 | план T9-5 | да (без resume_proof) | нет: не экспортирован |
 | 6d | resume × TCP без TLS | план T9-2 | план T9-5 | нет | невозможно |
 | 6e | resume × IPC | нет | нет | нет | невозможно |
-| 7 | токен × REST | план T9-3 | план T9-5 | да | да |
-| 8 | токен × WS native (`/shamir/v1/ws`) | план T9-3 | план T9-5 | да | невозможно: у WebSocket нет заголовка |
+| 7 | токен × REST | план T9-3 | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да | да |
+| 8 | токен × WS native (`/shamir/v1/ws`) | план T9-3 | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да | невозможно: у WebSocket нет заголовка |
 | 9 | токен × WS браузерный (`/shamir/v1/ws/browser`) | не требуется | не требуется | не требуется | да |
-| 10 | вход по паролю → токен | план T9-4 | план T9-5 | да | да |
+| 10 | вход по паролю → токен | план T9-4 | план T9-5 (e2e написан; статус «да» после зелёного прогона) | да | да |
 
 Примечания:
 - Строка 9: нативному клиенту браузерный маршрут ничего не даёт, у него есть заголовок Authorization.
 - Строки 1b, 6d, 6e и пин `identity_sig` в TS (#622) собраны в задачу T9-8 и пока не запланированы.
 - Ячейка меняет статус на **да** только в PR, где лежит e2e, который её доказывает. Подзадачи обновляют строки так: T9-2 — 1b, 2, 3, 6b–6d (Rust); T9-3 — 7, 8 (Rust); T9-4 — 10 (Rust); T9-5 — весь столбец napi; T9-6 — 1, 2, 6a, 6b (TS в Node).
 - Строки 1, 2, 6a, 6b в TS: доверие к серверу — проверка TLS-сертификата (`rejectUnauthorized` по умолчанию true и опция `tls.ca`); пин `identity_sig` в TS не проверяется (#622, T9-8).
+
+Использование napi-клиента из Node: [`node-client.md`](./node-client.md).
 
 ## Ограничения REST
 

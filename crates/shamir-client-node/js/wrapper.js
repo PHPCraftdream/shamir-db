@@ -13,6 +13,9 @@
 //      (msgpack encode/decode happens here, as before).
 //   3. **repl / createScramUser** — detect domain-level DB error markers
 //      and throw `ShamirDbError`.
+//   4. **connectWs / connectPlain / connectLocal / resume / resumeWs /
+//      connectTokenWs, authKind, createApiToken, ShamirTokenHttpClient, login**
+//      — extra transports and API-token auth, validated in JS before native.
 //
 // **Why a JS-side wrapper (task #519):** napi-rs 3.x async `#[napi]` fns
 // hard-pin the error type to `napi::Error<Status>`, so a structured error
@@ -126,11 +129,193 @@ function throwIfError(buf) {
 // Wrapped ShamirClient.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Argument validation. Messages never include input values: they may be
+// secrets (ticket, token, password, caPem).
+// ---------------------------------------------------------------------------
+
+const MODES = ['read_only', 'read_write'];
+const CHANNELS = ['rest', 'ws', 'both'];
+
+function isBytes(value) {
+  return Buffer.isBuffer(value) || value instanceof Uint8Array;
+}
+
+function requireObject(options) {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('options must be an object');
+  }
+}
+
+function requireString(options, key) {
+  if (typeof options[key] !== 'string') throw new TypeError(`${key} must be a string`);
+}
+
+function optionalString(options, key) {
+  if (options[key] !== undefined && typeof options[key] !== 'string') {
+    throw new TypeError(`${key} must be a string`);
+  }
+}
+
+function requireNonEmptyString(options, key) {
+  if (typeof options[key] !== 'string' || options[key].length === 0) {
+    throw new TypeError(`${key} must be a non-empty string`);
+  }
+}
+
+function validateEndpoint(options) {
+  requireObject(options);
+  requireString(options, 'host');
+  if (!Number.isInteger(options.port)) throw new TypeError('port must be an integer');
+  optionalString(options, 'serverName');
+  optionalString(options, 'caPem');
+  if (options.plainLoopback !== undefined && typeof options.plainLoopback !== 'boolean') {
+    throw new TypeError('plainLoopback must be a boolean');
+  }
+}
+
+function validateEnum(options, key, allowed, label) {
+  if (options[key] !== undefined && !allowed.includes(options[key])) {
+    throw new TypeError(`${key} must be ${label}`);
+  }
+}
+
+function validateDatabases(options) {
+  const dbs = options.databases;
+  if (dbs !== undefined && (!Array.isArray(dbs) || dbs.some(d => typeof d !== 'string'))) {
+    throw new TypeError('databases must be an array of strings');
+  }
+}
+
+function validateModeChannels(options) {
+  validateEnum(options, 'mode', MODES, 'read_only or read_write');
+  validateEnum(options, 'channels', CHANNELS, 'rest, ws or both');
+  validateDatabases(options);
+}
+
+function validateOptionalPin(options) {
+  if (options.trustedPin !== undefined &&
+      (!isBytes(options.trustedPin) || options.trustedPin.length !== 32)) {
+    throw new TypeError('trustedPin must be 32 bytes');
+  }
+}
+
+function validateCredentials(options) {
+  requireObject(options);
+  requireString(options, 'username');
+  requireString(options, 'password');
+  validateOptionalPin(options);
+}
+
+function validateConnect(options) {
+  validateCredentials(options);
+  requireString(options, 'host');
+  if (!Number.isInteger(options.port)) throw new TypeError('port must be an integer');
+}
+
+function validateConnectTls(options) {
+  validateConnect(options);
+  requireString(options, 'serverName');
+}
+
+function validateConnectLocal(options) {
+  validateCredentials(options);
+  requireString(options, 'addr');
+}
+
+function validateResume(options) {
+  requireObject(options);
+  requireString(options, 'host');
+  if (!Number.isInteger(options.port)) throw new TypeError('port must be an integer');
+  requireString(options, 'serverName');
+  if (!isBytes(options.ticket) || options.ticket.length === 0) {
+    throw new TypeError('ticket must be a non-empty Buffer');
+  }
+  if (!isBytes(options.trustedPin) || options.trustedPin.length !== 32) {
+    throw new TypeError('trustedPin must be 32 bytes');
+  }
+}
+
+function validateTokenHttp(options) {
+  validateEndpoint(options);
+  requireNonEmptyString(options, 'token');
+}
+
+function validateLogin(options) {
+  validateEndpoint(options);
+  requireString(options, 'username');
+  requireString(options, 'password');
+  optionalString(options, 'label');
+  validateModeChannels(options);
+  if (options.listenerId !== undefined &&
+      (!isBytes(options.listenerId) || options.listenerId.length !== 16)) {
+    throw new TypeError('listenerId must be 16 bytes');
+  }
+}
+
+function validateCreateApiToken(options) {
+  requireObject(options);
+  requireNonEmptyString(options, 'label');
+  if (options.ttlSecs !== undefined && !Number.isInteger(options.ttlSecs)) {
+    throw new TypeError('ttlSecs must be an integer');
+  }
+  optionalString(options, 'forUser');
+  validateModeChannels(options);
+}
+
+// Timestamps arrive as Number when safe (mapIntegers); normalise to BigInt.
+function mapToken(m) {
+  return {
+    id: m.id === undefined ? undefined : typeof m.id === 'string' ? m.id : Buffer.from(m.id),
+    token: m.token,
+    label: m.label,
+    owner: m.owner,
+    mode: m.mode,
+    channels: m.channels,
+    databases: m.databases == null ? null : m.databases,
+    createdAtNs: BigInt(m.created_at_ns),
+    expiresAtNs: BigInt(m.expires_at_ns),
+  };
+}
+
+function rewrap(client) {
+  Object.setPrototypeOf(client, ShamirClient.prototype);
+  return client;
+}
+
 class ShamirClient extends native.ShamirClient {
   static async connect(options) {
-    const client = await super.connect(options);
-    Object.setPrototypeOf(client, ShamirClient.prototype);
-    return client;
+    return rewrap(await super.connect(options));
+  }
+
+  static async connectWs(options) {
+    validateConnectTls(options);
+    return rewrap(await super.connectWs(options));
+  }
+
+  static async connectPlain(options) {
+    validateConnect(options);
+    return rewrap(await super.connectPlain(options));
+  }
+
+  static async connectLocal(options) {
+    validateConnectLocal(options);
+    return rewrap(await super.connectLocal(options));
+  }
+
+  static async resume(options) {
+    validateResume(options);
+    return rewrap(await super.resume(options));
+  }
+
+  static async resumeWs(options) {
+    validateResume(options);
+    return rewrap(await super.resumeWs(options));
+  }
+
+  static async connectTokenWs(options) {
+    validateTokenHttp(options);
+    return rewrap(await super.connectTokenWs(options));
   }
 
   /**
@@ -180,11 +365,46 @@ class ShamirClient extends native.ShamirClient {
     throwIfError(resp);
     // Void op — no payload to return.
   }
+
+  /** `'scram'` or `'token'`. Token sessions refuse admin methods (`token_request_denied`). */
+  authKind() {
+    return super.authKind();
+  }
+
+  /** Mint an API token; resolves to the camelCase created-token record. */
+  async createApiToken(options) {
+    validateCreateApiToken(options);
+    return mapToken(decodeOrThrow(await super.createApiToken(options)));
+  }
+}
+
+class ShamirTokenHttpClient extends native.ShamirTokenHttpClient {
+  static async connect(options) {
+    validateTokenHttp(options);
+    const client = await super.connect(options);
+    Object.setPrototypeOf(client, ShamirTokenHttpClient.prototype);
+    return client;
+  }
+
+  /** Same object-level contract as `ShamirClient.execute`. */
+  async execute(db, batchObj) {
+    const buf = Buffer.from(encode(mapIntegers(batchObj, true), { useBigInt64: true }));
+    const resp = await super.execute(db, buf);
+    return decodeOrThrow(resp);
+  }
+}
+
+/** Exchange username/password for an API token over the token endpoint. */
+async function login(options) {
+  validateLogin(options);
+  return mapToken(decodeOrThrow(await native.login(options)));
 }
 
 module.exports = {
   ...native,
   ShamirClient,
+  ShamirTokenHttpClient,
+  login,
   ShamirDbError,
   isRetryableCode,
   RETRYABLE_ERROR_CODES,

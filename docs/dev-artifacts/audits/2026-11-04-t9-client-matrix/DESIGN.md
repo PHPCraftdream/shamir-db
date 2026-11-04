@@ -397,3 +397,26 @@ Review fixes (orchestrator, after an independent read against the server and the
 
 CI result (T9-6): `ts-e2e-nightly` on the fork ran `e2e-native-transports.test.ts` (9 tests) green against the real server; matrix rows 1, 2, 6a, 6b for TS Node are therefore `да`. The two unit failures of the first runs were test-side only (an identity expectation on the platform object that now carries `openNativeLink`, and a `ShamirTimeoutError` class identity after `vi.resetModules`).
 
+
+## T9-5 report (napi matrix)
+
+Status: DONE in code, UNVERIFIED by any compiler or test run (no local builds by policy); verification is the PR CI (`ci.yml` full tier incl. `node-binding`, and the e2e suite `tests/e2e`). Local checks run: `cargo fmt -p shamir-client-node -- --check` and `python -I scripts/ci/check_layout.py` only.
+
+Added (napi, `crates/shamir-client-node`):
+- `ShamirClient.connectWs`, `connectPlain` (loopback only, enforced by the core), `connectLocal`, `resume` (`resume_secure`), `resumeWs` (`resume_ws_secure`), `connectTokenWs` (returns the same wrapper class; admin calls are refused by the core with `token_request_denied`), instance `authKind()` (`"scram"|"token"|"unknown"`) and `createApiToken`.
+- class `ShamirTokenHttpClient` (`connect`, `ping`, `execute`, `close`) and free function `login()` (password -> API token). Success payloads are named msgpack (`CreatedTokenView`, `LoginView`); DB errors use the existing error-marker buffer, decoded to `ShamirDbError` in `js/wrapper.js`.
+- Endpoint options for token calls: `host`, `port`, `serverName` (default host), `caPem` (PEM trust, default WebPKI roots), `plainLoopback`.
+- Secrets (password, token, ticket) go through `secrets::protect` first; no option struct derives `Debug`; errors never echo input. Documented that a JS string/Buffer cannot be wiped.
+- Layout: `src/lib.rs` (module list + shared helpers), `src/client.rs`, `src/connect_variants.rs`, `src/token/{mod,endpoint,http_client,ws,admin,login,views}.rs`. Existing JS API unchanged.
+
+Deviations: the brief names `src/token.rs` and `src/login.rs`; the 7-entry folder limit forced a `src/token/` folder. `createApiToken` is an addition beyond the brief (needed by the e2e to mint tokens through the admin API). The token views live in a napi-free file so `src/tests/error_wire.rs` can include it by `#[path]`. `connectWs` / `connectPlain` / resume / token calls use the first resolved address only; DNS is bounded by the handshake (or connect) timeout, token calls default to a 10 s DNS budget.
+
+CI: `node-binding` got an `if: failure()` step that uploads `native/index.js` and `native/index.d.ts` as artifact `napi-generated-files` after the drift check. The generated files are NOT hand-edited and still drift: the orchestrator downloads the artifact and commits them in a follow-up commit.
+
+Tests written (CI only): `src/tests/wrapper.test.js` (validation, no secret in errors, option forwarding, createApiToken/login mapping, token client), `error_wire.rs` (view wire shapes, no `derive(Debug)`, `secrets::protect` present), `secrets_lifecycle.rs`; e2e `tests/e2e/tests/21-connection-matrix.test.js` with `helpers/matrix-server.js` (six listeners: TCP+TLS, WS, plain TCP, HTTPS and HTTP with login, IPC) covering connectWs, connectPlain, connectLocal, resume over TCP and WS, token REST over HTTPS and plain, connectTokenWs, login, createApiToken. `consumer.ts` typechecks the new public names.
+
+Docs: `docs/guide-docs/guide/client-matrix.md` napi column rows 1b, 2, 4, 6a, 6b, 7, 8, 10 set to "plan T9-5 (e2e written; status yes after a green run)" (rows 3, 6d, 6e, 9 unchanged: no napi variant); new `docs/guide-docs/guide/node-client.md`, linked from the guide README; `tests/e2e/README.md` section.
+
+Unverified points to check in CI: free `#[napi] fn login<'env>(env: &'env Env, ..) -> Result<PromiseRaw<..>>` compiles under napi-derive 3.5.10; `connectWs` e2e relies on the core connecting to the WS path `/shamir/v1` by default; `connectTokenWs` e2e targets the HTTPS http listener; exact server error codes are intentionally not asserted for token-scope refusals and superuser login.
+
+Not done: rows of the napi column are not flipped to "yes" (orchestrator, after the green e2e run); generated `native/index.*` not regenerated (artifact flow).

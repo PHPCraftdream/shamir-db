@@ -38,6 +38,8 @@ alpha: перед работой с ценными данными прочита
 | **8** | `08-interconnect.md` | Changefeed, live subscriptions, экспериментальная read-replica репликация; P2P/chat — только роадмап. | Нужен поток изменений / реплика. |
 | **9** | [`09-seed-recovery.md`](./09-seed-recovery.md) | Offline seed recovery (R2-lite): `replication-seed-export` / `verify` / `install`, validated Resume, отказ-коды, границы отказа. | Подписка в `resync_required` / новый follower против лидера с gap. |
 
+Справочник вне этажей: [`node-client.md`](./node-client.md) — как подключиться к серверу из Node.js через napi-клиент (все транспорты, resume, токены, вход по паролю).
+
 Справочник вне этажей: [`client-matrix.md`](./client-matrix.md) — какие рукопожатия (сессия, resume, токен, вход по паролю) на каких транспортах (TCP, WebSocket, HTTP, IPC) поддерживают сервер и каждый клиент (Rust, napi, TS в Node и в браузере).
 
 ## Сквозной принцип
