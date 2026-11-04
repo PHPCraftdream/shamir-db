@@ -11,6 +11,7 @@ use shamir_connect::common::push_envelope::{PushEnvelope, PushKind};
 
 use shamir_transport_tcp::framing::{read_frame_into, FrameError, MAX_FRAME_SIZE_DEFAULT};
 
+use crate::client::transport::WsPeerClose;
 use crate::error::{ClientError, CloseCause};
 
 use super::lifecycle::{Lifecycle, LifecycleHooks, ShutdownGuard};
@@ -179,6 +180,9 @@ pub(crate) async fn reader_task<R>(
                 break CloseCause::PeerEof;
             }
             Err(e) => {
+                if let Some(cause) = WsPeerClose::cause_of(&e) {
+                    break cause;
+                }
                 tracing::debug!("reader_task: read_frame error: {e}");
                 let s: Arc<str> = Arc::from(e.to_string());
                 break CloseCause::Io(s);

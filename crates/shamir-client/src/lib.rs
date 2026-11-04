@@ -48,6 +48,10 @@ pub use client::{
     bound_until, resolve_host, Client, ConnectLocalOptions, ConnectOptions, ResumeOptions,
     SecureResumeOptions,
 };
+pub use client::{
+    ApiToken, AuthKind, TokenEndpoint, TokenHttpClient, TokenHttpOptions, TokenTrust,
+    TokenWsOptions,
+};
 pub mod visibility;
 pub use error::{ClientError, CloseCause};
 pub use interner_cache::{FieldMap, InternerCacheRegistry};

@@ -9,7 +9,9 @@ use zeroize::Zeroizing;
 
 use shamir_connect::common::wire::RotationInProgressPayload;
 
+use crate::client::session::token::AuthKind;
 use crate::client::transport::{reader_task, Lifecycle, LifecycleHooks, ShutdownGuard, WriteSink};
+use crate::error::ClientError;
 use crate::interner_cache::InternerCacheRegistry;
 
 /// Session metadata shared by every client-construction path; consumed by
@@ -24,6 +26,7 @@ pub(crate) struct SessionMeta {
     pub(crate) request_timeout: Option<std::time::Duration>,
     pub(crate) rotation_in_progress: Option<RotationInProgressPayload>,
     pub(crate) kdf_upgrade_required: bool,
+    pub(crate) auth: AuthKind,
 }
 
 /// Connected, authenticated client.
@@ -71,6 +74,7 @@ pub struct Client {
     pub(in crate::client) rotation_in_progress: Option<RotationInProgressPayload>,
     /// `auth_ok` KDF-upgrade request (spec §13).
     pub(in crate::client) kdf_upgrade_required: bool,
+    pub(in crate::client) auth: AuthKind,
     /// Test-only lifecycle hooks (P0 C1). The type is zero-sized in
     /// production; the fields (and this field's readers) are test-only.
     #[cfg(test)]
@@ -113,9 +117,22 @@ impl Client {
             request_timeout: meta.request_timeout,
             rotation_in_progress: meta.rotation_in_progress,
             kdf_upgrade_required: meta.kdf_upgrade_required,
+            auth: meta.auth,
             #[cfg(test)]
             hooks,
         }
+    }
+
+    /// Refuses admin operations that need a SCRAM session (API-token
+    /// sessions are rejected before any tag or body is built).
+    pub(crate) fn require_scram(&self) -> Result<(), ClientError> {
+        if self.auth == AuthKind::Token {
+            return Err(ClientError::Db {
+                code: "token_request_denied".to_string(),
+                message: "requires a SCRAM session".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -126,6 +143,20 @@ impl Client {
     /// [`Self::assemble`] path (real lifecycle state + reader task).
     /// `reader` is the server→client half; `writer` the client→server half.
     pub(crate) fn for_test<R, W>(reader: R, writer: W, hooks: LifecycleHooks) -> Self
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+    {
+        Self::for_test_with_auth(reader, writer, hooks, AuthKind::Scram)
+    }
+
+    /// [`Self::for_test`] with an explicit [`AuthKind`].
+    pub(crate) fn for_test_with_auth<R, W>(
+        reader: R,
+        writer: W,
+        hooks: LifecycleHooks,
+        auth: AuthKind,
+    ) -> Self
     where
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Send + Unpin + 'static,
@@ -143,6 +174,7 @@ impl Client {
                 request_timeout: None,
                 rotation_in_progress: None,
                 kdf_upgrade_required: false,
+                auth,
             },
             hooks,
         )

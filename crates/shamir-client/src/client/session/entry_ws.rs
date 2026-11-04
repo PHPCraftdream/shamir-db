@@ -13,12 +13,16 @@ use tokio::io::AsyncRead;
 
 use shamir_connect::common::username::NormalizedUsername;
 
-use crate::client::handshake::{resume_wire_exchange, run_scram, ScramRequest};
+use crate::client::handshake::{read_binding, resume_wire_exchange, run_scram, ScramRequest};
 use crate::client::session::client::{Client, SessionMeta};
 use crate::client::session::entry::resume_security::ProtectedResumeBuffer;
 use crate::client::session::entry::{phase_name, session_meta, PHASE_TCP};
 use crate::client::session::options::{ConnectOptions, ResumeOptions, SecureResumeOptions};
-use crate::client::transport::{dial_tcp_plain, dial_ws_native, Dialed, LifecycleHooks};
+use crate::client::session::token::{AuthKind, TokenWsOptions};
+use crate::client::transport::token::dial_token_ws;
+use crate::client::transport::{
+    dial_tcp_plain, dial_ws_native, Dialed, LifecycleHooks, WriteSink, WsByteStream,
+};
 use crate::error::ClientError;
 
 async fn bound_handshake<T>(
@@ -159,6 +163,60 @@ impl Client {
                 request_timeout: None,
                 rotation_in_progress: None,
                 kdf_upgrade_required: false,
+                auth: AuthKind::Scram,
+            },
+            LifecycleHooks::default(),
+        ))
+    }
+
+    /// Open a session with an API token over the native token WebSocket
+    /// (`GET /shamir/v1/ws` on a `kind: http` listener, binding mode none).
+    /// TLS uses WebPKI trust of the endpoint (no Ed25519 pin). The data plane
+    /// is identical to [`Client::connect`]; admin operations
+    /// (`create_api_token`, ..., `repl`) are refused locally with
+    /// `Db { code: "token_request_denied" }`. Server closes arrive as
+    /// `ClientError::ConnectionClosed(CloseCause::PeerClosed { code, .. })`
+    /// (4011 revoked, 4012 expired, ...).
+    pub async fn connect_token_ws(opts: TokenWsOptions) -> Result<Self, ClientError> {
+        let _ = default_provider().install_default();
+        let TokenWsOptions {
+            endpoint,
+            token,
+            connect_timeout,
+            handshake_timeout,
+            request_timeout,
+        } = opts;
+        let authorization = token.authorization_header();
+        drop(token);
+        let authorization = authorization?;
+        let phase = Arc::new(AtomicU8::new(PHASE_TCP));
+        let fut = async {
+            let mut ws = dial_token_ws(
+                &endpoint,
+                authorization,
+                connect_timeout,
+                Some(phase.as_ref()),
+            )
+            .await?;
+            let binding = read_binding(&mut ws).await?;
+            Ok::<_, ClientError>((binding, tokio::io::split(WsByteStream::raw(ws))))
+        };
+        let (binding, (read, write)) = bound_handshake(handshake_timeout, &phase, fut).await?;
+
+        Ok(Self::assemble(
+            read,
+            WriteSink::TokenWs(write),
+            SessionMeta {
+                session_id: binding.sid,
+                pinned_hash: [0u8; 32],
+                expires_at_ns: binding.expires_at_ns,
+                resumption_ticket: None,
+                resumption_expires_at_ns: None,
+                server_query_version: 0,
+                request_timeout,
+                rotation_in_progress: None,
+                kdf_upgrade_required: false,
+                auth: AuthKind::Token,
             },
             LifecycleHooks::default(),
         ))

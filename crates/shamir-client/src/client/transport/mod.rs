@@ -4,6 +4,7 @@
 mod binding;
 mod dial;
 mod dial_ws;
+pub mod token;
 mod write_sink;
 mod ws_stream;
 
@@ -27,8 +28,7 @@ pub(crate) use dial::{dial_ipc, dial_tcp_plain, dial_tcp_tls, Dialed};
 pub(crate) use dial_ws::dial_ws_native;
 pub(crate) use write_sink::WriteSink;
 
-#[cfg(test)]
-pub(crate) use ws_stream::WsByteStream;
+pub(crate) use ws_stream::{WsByteStream, WsPeerClose};
 
 #[cfg(test)]
 pub(crate) use dial::connect_with_timeout;

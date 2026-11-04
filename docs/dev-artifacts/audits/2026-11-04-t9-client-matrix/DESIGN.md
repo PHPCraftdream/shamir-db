@@ -268,3 +268,65 @@ Layout: `transport/` 6 entries, `session/` 6, `tests/wire/` 7, crate `tests/` 6,
 Existing public API and wire bytes of the existing paths: unchanged.
 
 Not done / out of scope (as in the brief): the browser WebSocket profile (needs WebPKI trust), HTTP/token paths, napi, TypeScript. Not verified locally: compilation, clippy, tests (CI only). Known notes: `WsByteStream::poll_send_queued` clones the buffered frame into the message (one extra copy per frame, the original is zeroized); the `Cargo.lock` edge is the orchestrator's.
+
+## T9-3a report (Rust client: token over REST)
+
+Status: DONE in code, UNVERIFIED by any compiler or test run (no local builds by policy); verification is CI only (fast tier on the draft PR, `[ci full]` or `gh pr ready` for the full matrix). Checked locally: `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py` (both clean) plus a compiler-style read of every file against the hyper 1.9.0, http-body-util 0.1.3, hyper-util 0.1.20, sdd 4.8.11 (`scc::Bag`), tokio-rustls 0.26 and rustls 0.23 sources.
+
+Added (crate `shamir-client`, nothing else changes):
+- Public API (re-exported from `lib.rs`): `ApiToken`, `TokenEndpoint`, `TokenTrust`, `TokenHttpOptions`, `TokenHttpClient`; `ClientError::Http { status, code, retry_after }` and `ClientError::InvalidToken`. All new public structs/enums are `#[non_exhaustive]` with constructors.
+- `client/transport/token/`: `endpoint.rs` (`TokenEndpoint::https` / `plain_loopback`, loopback check on `ip().to_canonical()` before any socket), `tls.rs` (`TokenTrust::{webpki_roots, pem, der}`, TLS 1.3 only, aws-lc-rs provider, standard WebPKI verifier, ALPN `http/1.1`, early data off; `make_client_config_app_authenticated` is not used), `http_conn.rs` (hyper `conn::http1` over `TokioIo`, `scc::Bag` + `AtomicUsize` pool bounded at 4 idle connections, retry only when hyper returns the request unsent or `ready()` fails, 16 MiB `Limited` body, redirects never followed, no cookies, ALPN must be `http/1.1`), `status.rs` (status table and `Retry-After` delta-seconds parsing clamped to 1..=3600), plus `tests/` (fake `TcpListener` server: exact request heads, keep-alive reuse, `Connection: close`, chunked, 307 not followed, oversize body, request timeout, refused connect, status table, endpoint and TLS builders).
+- `client/session/token/`: `api_token.rs` (validation through `shamir_connect::server::token::parse_token`; `Zeroizing<String>`; redacted `Debug`; the `Authorization` header is built once into a zeroizing owner via `Bytes::from_owner`, `set_sensitive(true)`), `options.rs`, `request_filter.rs` (deny-by-default: `Ping`, `Execute`, `WaitForVisibility`, `GetDdlOpStatus` only; `Tx*` and cursor requests give `Db { code: "not_supported_over_rest" }`, everything else `token_request_denied`, nothing is sent), `http_client.rs` (`connect`, `ping`, `request`, `execute`, `wait_for_visibility`, `get_ddl_op_status`, `close`; reuses `visibility::map_response` and `receipts::wait_for_visibility_via`), plus `tests/`.
+- Integration: `tests/matrix/token/{mod,common,http}.rs` (own fixture with one TLS and one plaintext loopback HTTP listener, seeded owner, read-write and read-only tokens through `token_service.create`, trust anchor = generated `cert.pem`; cases: ping and execute over TLS, unknown secret gives `Http { 401, "unauthorized" }`, read-only write gives `Db { "token_read_only" }`, `TxBegin` gives `not_supported_over_rest` locally, plaintext loopback, webpki roots reject the self-signed server). `mod token;` added to `tests/matrix/main.rs`.
+- `Cargo.toml`: exactly the five lines of design section 3 (`hyper`, `hyper-util`, `http-body-util`, `bytes`, `webpki-roots`). `Cargo.lock` is NOT touched: the orchestrator regenerates it (expected new packages `want`, `try-lock` and the five edges in `shamir-client`).
+
+Visibility widenings: only the new public exports above; `transport::token` and `session::token` are `pub mod` inside the crate-private/`pub(crate)` parents (not reachable except through the `lib.rs` re-exports); `TokenReply`, `TokenTransport`, `TokenScheme`, `map_reply`, `map_ping_reply`, `build_connector`, `parse_server_name`, `check_request_allowed`, `ApiToken::authorization_header` are `pub(crate)`.
+
+Decisions: `TokenTransport::connect` dials up front (TCP + TLS + HTTP/1 handshake) under `connect_timeout`; a request that hits `request_timeout` drops its connection; an HTTP exchange failing after a possible write is a `Protocol` error and is never retried; after a failed retry on a fresh connection the error is `ConnectionClosed(PeerEof)`; `execute` over REST does not announce interner epochs or merge deltas; the encoded request body handed to hyper cannot be wiped (documented), the header value and the `ApiToken` are zeroizing.
+
+Not done / open: no positive `TokenTrust::pem` unit test (no certificate fixture without a build step; covered by the integration test with the server's `cert.pem`); no connect-timeout unit test (racy on loopback; only refused connect is tested); the token WebSocket (T9-3b) and password login (T9-4) are out of scope; nothing was compiled, so CI may reveal compile or clippy errors that a read could not.
+
+## T9-3b report (Rust client: token over native WebSocket)
+
+Status: implemented in full but NOT compiled or run locally (policy); verification is CI only (`cargo fmt --check` and the layout check passed locally).
+
+Added (crate `shamir-client`):
+- `transport/token/dial_ws.rs`: hyper upgrade, sensitive `Authorization`, checks of `Accept` / subprotocol / no extensions, reject body capped at 64 KiB and mapped through the new `status::map_upgrade_reply`.
+- `handshake/bearer.rs`: strict binding decoder (map marker check, `deny_unknown_fields`, no trailing bytes, `ok == true`, 32-byte non-zero `sid`, `expires_at_ns > 0`); `read_binding`.
+- `transport/ws_stream.rs`: `WsFraming::{Prefixed, Raw}`, `WsByteStream::raw`, `WsPeerClose`.
+- `WriteSink::TokenWs`; `CloseCause::PeerClosed {code, reason}` mapped in `reader_task`.
+- `AuthKind` (`session/token/auth_kind.rs`), `SessionMeta.auth`, `Client.auth`, `Client::auth_kind`.
+- `Client::require_scram`, first line of `create_api_token`, `list_api_tokens`, `revoke_api_token`, `revoke_user_tokens`, `create_scram_user`, `set_replicator`, `repl`.
+- `TokenWsOptions`, `Client::connect_token_ws` in `session/entry_ws.rs` (224 lines).
+
+Tests:
+- Unit: `handshake/tests/bearer_tests.rs`, `session/token/tests/{ws_raw_tests,close_cause_tests,refusal_tests}.rs`.
+- Integration `tests/matrix/token/ws.rs` (9 tests): ping, execute read/write, read-only denied, REST-only token -> `token_channel_denied`, unknown secret -> 401, revoke -> 4011, 2 s TTL -> 4012, admin refusal, plain loopback.
+- Fixture helpers `issue_ws`, `revoke_token`, `issue_with` in `tests/matrix/token/common.rs`.
+
+Public items: `Client::connect_token_ws`, `Client::auth_kind`, `AuthKind`, `TokenWsOptions`, `CloseCause::PeerClosed`.
+
+Widenings beyond the public items:
+- `WsByteStream` re-export in `transport/mod.rs` is no longer `cfg(test)`.
+- New `pub(crate)` re-exports: `WsPeerClose`, `dial_token_ws`, `read_binding`.
+- `session/client.rs`: `pub(crate) require_scram`, `#[cfg(test)] for_test_with_auth`.
+- `pub(super) map_upgrade_reply` in `status.rs`.
+
+Decisions / deviations:
+- Raw mode rejects a zero declared length on write (`InvalidData`); Prefixed mode unchanged (Close = EOF).
+- `connect_timeout` bounds only the TCP connect; `handshake_timeout` bounds TLS + upgrade + binding frame.
+- The token is dropped right after the `Authorization` header is built.
+
+Not done / risks:
+- Subscriptions and cursors over the token WS have no integration tests (no fixture pattern).
+- No unit test for `dial_ws.rs` (`transport/token/tests` is at the 7-entry limit).
+- `server_query_version` is 0 on token sessions, as designed.
+- Everything needs CI confirmation (compile, `clippy -D warnings`, tests).
+- `api.rs` is 917 lines (< 1000).
+
+Review fixes (orchestrator, after an independent compiler-style read):
+- `oversized_incoming_message_is_invalid_data` lifts tungstenite's own limits so the Raw length check is what fires (the first version deadlocked on the small duplex).
+- A write after a peer `Close` reports the same `WsPeerClose` (`peer_close` in `WsByteStream`, shared helper `WsPeerClose::cause_of`), so a concurrent writer cannot replace `PeerClosed` with `Io`.
+- The binding decoder accepts `sid` only as a msgpack `bin` of 32 bytes (`str` and arrays are refused).
+- Raw-mode outgoing messages no longer copy the payload.
+- Added a `reader_task` close-mapping test; refusal and binding tests are bounded by timeouts.

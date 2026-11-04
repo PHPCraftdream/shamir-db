@@ -18,7 +18,8 @@ use shamir_query_types::wire::repl::{ReplRequest, ReplResponse};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
 
 use crate::client::subscription::{SubscriptionHandle, CLIENT_SUB_CHANNEL_CAP};
-use crate::client::transport::{await_pending_response, Lifecycle};
+use crate::client::transport::{await_pending_response, Lifecycle, WsPeerClose};
+use crate::client::AuthKind;
 use crate::client::Client;
 use crate::error::{ClientError, CloseCause};
 
@@ -274,9 +275,15 @@ impl Client {
     }
 
     /// `SHA256(server_ed25519_pub_key)` — persist this for subsequent
-    /// connections via `ConnectOptions.trusted_pin`.
+    /// connections via `ConnectOptions.trusted_pin`. Returns `[0; 32]` on a
+    /// token session (no Ed25519 pin is involved).
     pub fn server_pub_key_pin(&self) -> [u8; 32] {
         self.pinned_hash
+    }
+
+    /// How this session was authenticated.
+    pub fn auth_kind(&self) -> AuthKind {
+        self.auth
     }
 
     /// Absolute session expiry (unix nanoseconds).
@@ -285,7 +292,8 @@ impl Client {
     }
 
     /// Resumption ticket bytes (if the server issued one). Persist
-    /// per-server to skip Argon2id on the next connection.
+    /// per-server to skip Argon2id on the next connection. Always `None` on
+    /// a token session.
     pub fn resumption_ticket(&self) -> Option<&[u8]> {
         self.resumption_ticket.as_deref().map(Vec::as_slice)
     }
@@ -425,6 +433,7 @@ impl Client {
         &self,
         request: shamir_query_builder::token_admin::CreateApiToken,
     ) -> Result<shamir_query_types::wire::token_admin::CreatedApiToken, ClientError> {
+        self.require_scram()?;
         let mut builder = request;
         let unsigned = builder.clone().build();
         builder = builder.hmac(admin_request_tag(&self.session_id, &unsigned)?);
@@ -455,6 +464,7 @@ impl Client {
         &self,
         for_user: Option<&str>,
     ) -> Result<Vec<shamir_query_types::wire::token_admin::ApiTokenView>, ClientError> {
+        self.require_scram()?;
         let mut builder = shamir_query_builder::token_admin::list_api_tokens();
         if let Some(user) = for_user {
             builder = builder.for_user(user);
@@ -471,6 +481,7 @@ impl Client {
 
     /// Revoke an API token; see [`Self::create_api_token`] for the section-12 error codes and signing behavior.
     pub async fn revoke_api_token(&self, id: &str) -> Result<(), ClientError> {
+        self.require_scram()?;
         let mut builder = shamir_query_builder::token_admin::revoke_api_token(id);
         let unsigned = builder.clone().build();
         builder = builder.hmac(admin_request_tag(&self.session_id, &unsigned)?);
@@ -484,6 +495,7 @@ impl Client {
 
     /// Revoke a user's API tokens; see [`Self::create_api_token`] for the section-12 error codes and signing behavior.
     pub async fn revoke_user_tokens(&self, user: Option<&str>) -> Result<u64, ClientError> {
+        self.require_scram()?;
         let mut builder = shamir_query_builder::token_admin::revoke_user_tokens();
         if let Some(user) = user {
             builder = builder.user(user);
@@ -513,6 +525,7 @@ impl Client {
         password: Zeroizing<String>,
         roles: Vec<String>,
     ) -> Result<Vec<u8>, ClientError> {
+        self.require_scram()?;
         let mut req = DbRequest::CreateScramUser {
             name: name.to_string(),
             password: password.as_str().to_owned().into(),
@@ -558,6 +571,7 @@ impl Client {
     /// checked before the HMAC gate). The confirmation tag is computed from
     /// `self.session_id` — callers don't need to know about the HMAC plumbing.
     pub async fn set_replicator(&self, user: &str, on: bool) -> Result<(), ClientError> {
+        self.require_scram()?;
         let mut req = DbRequest::SetReplicator {
             user: user.to_string(),
             on,
@@ -593,6 +607,7 @@ impl Client {
     /// enforces this inside `handle_repl` and returns
     /// `ReplResponse::Error { code: "bad_role" }` otherwise.
     pub async fn repl(&self, req: ReplRequest) -> Result<ReplResponse, ClientError> {
+        self.require_scram()?;
         match self.roundtrip(&DbRequest::Repl(req)).await? {
             DbResponse::Repl(r) => Ok(r),
             other => Err(ClientError::Protocol(format!(
@@ -844,8 +859,9 @@ impl Client {
             // lifecycle records the Io cause and drains all waiters), then
             // remove OUR entry. If it is already gone, the drain resolved it
             // — surface the drained result; otherwise the transport error.
-            let cause: Arc<str> = Arc::from(format!("send: {e}"));
-            self.state.shutdown(CloseCause::Io(cause));
+            let cause = WsPeerClose::cause_of(&e)
+                .unwrap_or_else(|| CloseCause::Io(Arc::from(format!("send: {e}"))));
+            self.state.shutdown(cause);
             let removed = self.state.pending.map.remove_sync(&rid).map(|(_, tx)| tx);
             if removed.is_none() {
                 let payload = await_pending_response(rx, None, &self.state, rid).await?;
