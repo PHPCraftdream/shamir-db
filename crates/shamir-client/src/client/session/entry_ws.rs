@@ -1,7 +1,9 @@
 //! WebSocket and plain-TCP entry points: [`Client::connect_ws`],
-//! [`Client::resume_ws`] / [`Client::resume_ws_secure`] and
-//! [`Client::connect_plain`]. Same three steps as the TCP twins in
-//! `entry.rs` — dial, `run_scram` / `resume_wire_exchange`, `assemble`.
+//! [`Client::resume_ws`] / [`Client::resume_ws_secure`],
+//! [`Client::connect_ws_browser`] / [`Client::resume_ws_browser`] and
+//! [`Client::connect_plain`] / [`Client::resume_plain`]. Same three steps as
+//! the TCP twins in `entry.rs` — dial, `run_scram` / `resume_wire_exchange`,
+//! `assemble`.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -10,18 +12,25 @@ use std::time::Duration;
 
 use rustls::crypto::aws_lc_rs::default_provider;
 use tokio::io::AsyncRead;
+use zeroize::Zeroizing;
 
+use shamir_connect::common::types::BindingMode;
 use shamir_connect::common::username::NormalizedUsername;
 
-use crate::client::handshake::{read_binding, resume_wire_exchange, run_scram, ScramRequest};
+use crate::client::handshake::{
+    read_binding, resume_wire_exchange, resume_wire_exchange_unbound, run_scram, ScramRequest,
+};
 use crate::client::session::client::{Client, SessionMeta};
 use crate::client::session::entry::resume_security::ProtectedResumeBuffer;
 use crate::client::session::entry::{phase_name, session_meta, PHASE_TCP};
-use crate::client::session::options::{ConnectOptions, ResumeOptions, SecureResumeOptions};
+use crate::client::session::options::{
+    BrowserResumeOptions, BrowserWsOptions, ConnectOptions, ResumeOptions, SecureResumeOptions,
+};
 use crate::client::session::token::{AuthKind, TokenWsOptions};
 use crate::client::transport::token::dial_token_ws;
 use crate::client::transport::{
-    dial_tcp_plain, dial_ws_native, Dialed, LifecycleHooks, WriteSink, WsByteStream,
+    dial_tcp_plain, dial_ws_browser, dial_ws_native, Dialed, LifecycleHooks, WriteSink,
+    WsByteStream,
 };
 use crate::error::ClientError;
 
@@ -147,6 +156,132 @@ impl Client {
             ticket,
             opts.pinned_hash,
             dialed.binding.exporter,
+        )
+        .await?;
+
+        Ok(Self::assemble(
+            dialed.read,
+            dialed.write,
+            SessionMeta {
+                session_id: resumed.session_id,
+                pinned_hash: opts.pinned_hash,
+                expires_at_ns: resumed.expires_at_ns,
+                resumption_ticket: resumed.resumption_ticket,
+                resumption_expires_at_ns: resumed.resumption_expires_at_ns,
+                server_query_version: resumed.server_query_version,
+                request_timeout: None,
+                rotation_in_progress: None,
+                kdf_upgrade_required: false,
+                auth: AuthKind::Scram,
+            },
+            LifecycleHooks::default(),
+        ))
+    }
+
+    /// Run the full TCP→TLS→WebSocket upgrade→SCRAM handshake against a
+    /// browser-profile WebSocket listener (`kind: ws`, `profile:
+    /// tls_no_export`, path `/shamir/v1/browser`, binding mode 0x02) and
+    /// return a ready client. Useful behind a TLS-terminating proxy that
+    /// breaks the TLS exporter: the TLS server is authenticated by the
+    /// ordinary certificate check against `opts.trust`, and the Ed25519
+    /// identity TOFU-pin dance is unchanged. `handshake_timeout` bounds the
+    /// whole sequence including the upgrade.
+    pub async fn connect_ws_browser(opts: BrowserWsOptions) -> Result<Self, ClientError> {
+        let _ = default_provider().install_default();
+        let username = NormalizedUsername::from_raw(&opts.inner.username)
+            .map_err(|e| ClientError::InvalidUsername(e.to_string()))?;
+        let phase = Arc::new(AtomicU8::new(PHASE_TCP));
+        let handshake_timeout = opts.inner.handshake_timeout;
+        let fut = Self::handshake_ws_browser(opts, username, phase.clone());
+        bound_handshake(handshake_timeout, &phase, fut).await
+    }
+
+    async fn handshake_ws_browser(
+        opts: BrowserWsOptions,
+        username: NormalizedUsername,
+        phase: Arc<AtomicU8>,
+    ) -> Result<Self, ClientError> {
+        let BrowserWsOptions {
+            inner,
+            origin,
+            trust,
+        } = opts;
+        let dialed = dial_ws_browser(
+            inner.addr,
+            &inner.server_name,
+            &origin,
+            &trust,
+            inner.connect_timeout,
+            Some(phase.as_ref()),
+        )
+        .await?;
+        Self::scram_and_assemble(dialed, inner, username, phase.as_ref()).await
+    }
+
+    /// [`Client::resume`] over the browser-profile WebSocket listener
+    /// (binding mode 0x02). There is no `resume_proof` preamble on this
+    /// binding (the profile has no TLS exporter, so the ticket is the first
+    /// frame — as on the plain and local-IPC paths); the server is
+    /// authenticated by the TLS certificate check against `opts.trust`, and
+    /// the pinned hash is carried onto the resumed session unchanged.
+    pub async fn resume_ws_browser(opts: BrowserResumeOptions) -> Result<Self, ClientError> {
+        let ticket = ProtectedResumeBuffer(Zeroizing::new(opts.inner.ticket));
+        let _ = default_provider().install_default();
+        let mut dialed = dial_ws_browser(
+            opts.inner.addr,
+            &opts.inner.server_name,
+            &opts.origin,
+            &opts.trust,
+            None,
+            None,
+        )
+        .await?;
+
+        let resumed = resume_wire_exchange_unbound(
+            &mut dialed.read,
+            &mut dialed.write,
+            ticket,
+            BindingMode::TlsNoExport,
+        )
+        .await?;
+
+        Ok(Self::assemble(
+            dialed.read,
+            dialed.write,
+            SessionMeta {
+                session_id: resumed.session_id,
+                pinned_hash: opts.inner.pinned_hash,
+                expires_at_ns: resumed.expires_at_ns,
+                resumption_ticket: resumed.resumption_ticket,
+                resumption_expires_at_ns: resumed.resumption_expires_at_ns,
+                server_query_version: resumed.server_query_version,
+                request_timeout: None,
+                rotation_in_progress: None,
+                kdf_upgrade_required: false,
+                auth: AuthKind::Scram,
+            },
+            LifecycleHooks::default(),
+        ))
+    }
+
+    /// [`Client::resume`] over the plain loopback TCP listener (`kind: tcp`,
+    /// `profile: plain`, binding mode 0x00). Same loopback-only refusal as
+    /// [`Client::connect_plain`], before any socket is opened. There is no
+    /// identity-proof preamble on this binding (as on the local-IPC path):
+    /// the ticket is the first frame, and the pinned hash rides on the
+    /// resumed session.
+    pub async fn resume_plain(opts: ResumeOptions) -> Result<Self, ClientError> {
+        if !opts.addr.ip().to_canonical().is_loopback() {
+            return Err(ClientError::handshake("plain TCP is loopback-only"));
+        }
+        let ticket = ProtectedResumeBuffer(Zeroizing::new(opts.ticket));
+        let mut dialed = dial_tcp_plain(opts.addr, None).await?;
+
+        let resumed = resume_wire_exchange_unbound(
+            &mut dialed.read,
+            &mut dialed.write,
+            ticket,
+            BindingMode::None,
         )
         .await?;
 
