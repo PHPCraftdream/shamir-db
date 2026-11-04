@@ -54,9 +54,14 @@ impl TokenEndpoint {
     }
 
     pub(crate) fn host_header(&self) -> String {
+        let name = if self.server_name.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]", self.server_name)
+        } else {
+            self.server_name.clone()
+        };
         match &self.scheme {
-            TokenScheme::Https(_) if self.addr.port() == 443 => self.server_name.clone(),
-            TokenScheme::Https(_) => format!("{}:{}", self.server_name, self.addr.port()),
+            TokenScheme::Https(_) if self.addr.port() == 443 => name,
+            TokenScheme::Https(_) => format!("{}:{}", name, self.addr.port()),
             TokenScheme::PlainLoopback => self.addr.to_string(),
         }
     }

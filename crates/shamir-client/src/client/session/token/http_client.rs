@@ -16,7 +16,8 @@ pub struct TokenHttpClient {
 
 impl TokenHttpClient {
     /// Dials the endpoint. The token is moved into a sensitive header and the
-    /// `ApiToken` is zeroized immediately.
+    /// `ApiToken` is zeroized when `opts` is dropped. Copies made by hyper in
+    /// its write buffer and by rustls cannot be wiped.
     pub async fn connect(opts: TokenHttpOptions) -> Result<Self, ClientError> {
         let header = opts.token.authorization_header()?;
         let transport = TokenTransport::connect(
