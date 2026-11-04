@@ -53,7 +53,7 @@ shamir-tunables = { path = "../shamir-tunables" }
 # Server-only (concurrent state)
 arc-swap = { version = "1.7", optional = true }
 dashmap = { version = "6.1", optional = true }
-parking_lot = { version = "0.12", optional = true }
+parking_lot = { version = "0.13", optional = true }
 # SmallVec for the per-user session slot in `SessionStore::by_user`
 # (stack-allocated at the spec §7.4 cap of 16; RV-CONNECT-D8C2825A).
 smallvec = "1.11"
