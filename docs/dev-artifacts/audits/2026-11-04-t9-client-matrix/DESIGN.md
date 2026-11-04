@@ -199,6 +199,21 @@ DONE by the orchestrator: `connect.rs` and `options.rs` were removed (renames in
 
 Not verified locally: compilation, clippy, tests (CI only).
 
+## T9-1b S4 report
+
+Status: DONE in code, UNVERIFIED by any compiler or test run (no local builds by policy); verification is CI only (`ci.yml` full tier and `ts-e2e-nightly.yml` dispatched on the branch; the new IPC e2e is the red/green proof).
+
+Step 0 finding (read from code): the server builds `auth_message_cp` in `crates/shamir-connect/src/server/auth/changepw.rs` (`verify_change_password_request_with_sid`, lines 140-150) from the SESSION's `transport_kind`, `binding_mode` and `channel_binding_at_auth`, which the handshake snapshots at session creation (`handshake.rs`: `transport_kind` from the listener, `binding_mode` from `auth_init`, `tls_exporter_or_zeros`). The client's `buildAuthMessageCp` (`core/protocol/scram.ts`) takes exactly these three inputs (`transportKind`, `bindingMode`, `channelBindingAtAuth`), so it can express them. The server therefore DOES depend on the session transport; the old hard-coded WS values only matched the browser-WS session, and a `connectLocal` session (UNIX / NONE) signed a different message.
+
+Files changed (crates/shamir-client-ts/src):
+- `core/client/client-internals.ts`: `changePassword` takes `binding: ChannelBinding | undefined` (after `normalizedUser`), refuses with the existing message when `normalizedUser` or `binding` is undefined (resumed client), and uses `binding.transportKind`, `binding.bindingMode`, `binding.exporter`; unused `TRANSPORT_KIND_WS` / `BINDING_MODE_TLS_NO_EXPORT` imports removed.
+- `core/client/client.ts`: the `changePassword` method passes `this._channelBinding` (public signature unchanged).
+- `core/protocol/session/__tests__/change-password-binding.test.ts` (new): fake-platform unit test; WS profile proof equals the legacy hard-coded wire, IPC profile uses UNIX/NONE, the two differ, undefined binding / user rejects without sending.
+- `__tests__/e2e-harness.ts`: appended `LocalServerHandle`, `startUnixServer`, `connectLocalAs` (existing exports unchanged; `connectLocal` added to the index import).
+- `__tests__/auth/e2e-change-password-ipc.test.ts` (new): change password over `connectLocal` (old pw rejected, new pw works) and wrong old password rejected.
+
+Layout: `python -I scripts/ci/check_layout.py` reports OK. Not touched: token path, `login/`, `package.json`, lockfiles, workflows. Note: `e2e-connect-local.test.ts` still has its own file-local copy of the unix launcher (not refactored to the shared harness helper).
+
 ## T9-1 R1 report (Rust client handshake module, one SCRAM for every transport)
 
 Status: DONE in code. No local compile/test was run (policy); checked by a compiler-style read plus `cargo fmt -p shamir-client -- --check` and `python -I scripts/ci/check_layout.py`. Verification is CI only.
