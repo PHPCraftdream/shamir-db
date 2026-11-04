@@ -141,6 +141,26 @@ pub enum ClientError {
     /// elapsed (`dns`, `tcp`, `tls`, `scram`, `kdf`) — never guessed.
     #[error("handshake timed out after {0:?} (phase: {1})")]
     HandshakeTimeout(std::time::Duration, std::sync::Arc<str>),
+
+    /// HTTP-level failure of the token REST client (status table). `code` is
+    /// set only when it matches `[a-z][a-z0-9_]{0,63}`. Display never contains
+    /// a body or headers.
+    #[error("http: status {status}{}", http_code_suffix(.code))]
+    Http {
+        status: u16,
+        code: Option<String>,
+        retry_after: Option<std::time::Duration>,
+    },
+
+    #[error("invalid api token")]
+    InvalidToken,
+}
+
+fn http_code_suffix(code: &Option<String>) -> String {
+    match code {
+        Some(c) => format!(" (code {c})"),
+        None => String::new(),
+    }
 }
 
 /// Why the connection reached its terminal closed state. Shared by every
@@ -163,6 +183,15 @@ pub enum CloseCause {
     /// The background reader task was aborted/cancelled before its loop ran
     /// to completion.
     ReaderCancelled,
+    /// The server sent a WebSocket Close frame with a code. Codes: 4003 no
+    /// pong, 4010 sid mismatch, 4011 token revoked, 4012 token/session
+    /// expired, 1013 server busy, 1000 normal.
+    PeerClosed {
+        /// WebSocket close code.
+        code: u16,
+        /// Sanitised close reason.
+        reason: Arc<str>,
+    },
 }
 
 impl std::fmt::Display for CloseCause {
@@ -175,6 +204,9 @@ impl std::fmt::Display for CloseCause {
             CloseCause::LocalClose => write!(f, "local close"),
             CloseCause::ClientDropped => write!(f, "client dropped"),
             CloseCause::ReaderCancelled => write!(f, "reader cancelled"),
+            CloseCause::PeerClosed { code, reason } => {
+                write!(f, "peer closed: {code} {reason}")
+            }
         }
     }
 }

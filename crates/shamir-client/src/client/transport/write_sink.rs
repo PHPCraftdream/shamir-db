@@ -1,6 +1,8 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use hyper::upgrade::Upgraded;
+use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncWrite, WriteHalf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -21,6 +23,7 @@ pub(crate) enum WriteSink {
     Ipc(WriteHalf<IpcClientStream>),
     Tcp(WriteHalf<TcpStream>),
     Ws(WriteHalf<WsByteStream<TlsStream<TcpStream>>>),
+    TokenWs(WriteHalf<WsByteStream<TokioIo<Upgraded>>>),
     /// Test-only sink: the client→server half of an injected
     /// simplex/duplex pipe (P0 C1 `Client::for_test`).
     #[cfg(test)]
@@ -38,6 +41,7 @@ impl AsyncWrite for WriteSink {
             WriteSink::Ipc(w) => Pin::new(w).poll_write(cx, buf),
             WriteSink::Tcp(w) => Pin::new(w).poll_write(cx, buf),
             WriteSink::Ws(w) => Pin::new(w).poll_write(cx, buf),
+            WriteSink::TokenWs(w) => Pin::new(w).poll_write(cx, buf),
             #[cfg(test)]
             WriteSink::Test(w) => Pin::new(&mut **w).poll_write(cx, buf),
         }
@@ -49,6 +53,7 @@ impl AsyncWrite for WriteSink {
             WriteSink::Ipc(w) => Pin::new(w).poll_flush(cx),
             WriteSink::Tcp(w) => Pin::new(w).poll_flush(cx),
             WriteSink::Ws(w) => Pin::new(w).poll_flush(cx),
+            WriteSink::TokenWs(w) => Pin::new(w).poll_flush(cx),
             #[cfg(test)]
             WriteSink::Test(w) => Pin::new(&mut **w).poll_flush(cx),
         }
@@ -60,6 +65,7 @@ impl AsyncWrite for WriteSink {
             WriteSink::Ipc(w) => Pin::new(w).poll_shutdown(cx),
             WriteSink::Tcp(w) => Pin::new(w).poll_shutdown(cx),
             WriteSink::Ws(w) => Pin::new(w).poll_shutdown(cx),
+            WriteSink::TokenWs(w) => Pin::new(w).poll_shutdown(cx),
             #[cfg(test)]
             WriteSink::Test(w) => Pin::new(&mut **w).poll_shutdown(cx),
         }
