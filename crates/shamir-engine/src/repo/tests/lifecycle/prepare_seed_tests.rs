@@ -1,11 +1,13 @@
 use std::sync::Arc;
+use std::time::Duration;
 
+use shamir_storage::error::DbError;
 use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::{RecordKey, Repo};
 use shamir_tx::changefeed::{encode_gap_marker, gap_marker_key};
 
 use crate::repo::prepare_seed::prepare_seed;
-use crate::repo::{BoxRepo, RepoInstance};
+use crate::repo::{BoxRepo, RenamePersistOutcome, RepoInstance};
 use crate::table::TableConfig;
 
 #[tokio::test]
@@ -47,4 +49,30 @@ async fn corrupt_history_key_is_not_silently_skipped() {
         .unwrap_err()
         .to_string()
         .contains("history key"));
+}
+
+#[tokio::test]
+async fn seed_refuses_while_table_rename_in_doubt() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let backing = Arc::new(InMemoryRepo::new());
+        let repo = RepoInstance::new(
+            "main".into(),
+            BoxRepo::InMemory(backing),
+            vec![TableConfig::new("a")],
+        );
+        assert!(matches!(
+            repo.rename_table_stores_with("a", "b", |_| async {
+                RenamePersistOutcome::InDoubt(DbError::Storage("uncertain".into()))
+            })
+            .await,
+            Err(DbError::Conflict(_))
+        ));
+        assert!(repo.has_rename_in_doubt());
+        let error = prepare_seed(&repo).await.unwrap_err();
+        assert!(
+            matches!(error, DbError::Conflict(ref msg) if msg == "seed refused: table rename in doubt")
+        );
+    })
+    .await
+    .expect("test timed out");
 }

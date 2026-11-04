@@ -12,6 +12,13 @@ use crate::repo::RepoInstance;
 /// Seed walks read declarations/history of a quiesced repo, so an in-doubt
 /// fenced source name must still resolve (unfenced access below).
 pub async fn prepare_seed(repo: &RepoInstance) -> DbResult<u64> {
+    // Fail closed: while a table rename is in doubt the catalogue may already
+    // hold the new name, so a seed exported under the old name could be stale.
+    if repo.has_rename_in_doubt() {
+        return Err(DbError::Conflict(
+            "seed refused: table rename in doubt".into(),
+        ));
+    }
     let mut names = repo.list_table_names();
     names.sort();
     for name in &names {
