@@ -83,12 +83,16 @@ impl<'p> RenameAttempt<'p> {
         self.ended = true;
     }
 
+    /// Reattach only what this attempt itself installed: a fresh attempt
+    /// that never passed `RenameFreeze::begin` holds no freeze and must be a
+    /// no-op with respect to reattach/freeze teardown. An attempt only
+    /// releases what it attached.
     pub(crate) fn abort(mut self) {
         if self.was_fenced {
             self.fence_retained();
-        } else {
+        } else if let Some(freeze) = self.freeze.take() {
             self.source.reattach_after_rename();
-            drop(self.freeze.take());
+            drop(freeze);
         }
         self.ended = true;
     }
@@ -116,9 +120,12 @@ impl Drop for RenameAttempt<'_> {
         }
         if self.was_fenced || self.phase == AttemptPhase::Persisting {
             self.fence_retained();
-        } else {
+        } else if let Some(freeze) = self.freeze.take() {
+            // Same ownership rule as `abort`: only release a freeze this
+            // attempt installed; a fresh attempt aborted before `begin`
+            // succeeded holds none and must not reattach.
             self.source.reattach_after_rename();
-            drop(self.freeze.take());
+            drop(freeze);
         }
     }
 }

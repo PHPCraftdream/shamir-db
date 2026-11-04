@@ -8,11 +8,14 @@ use crate::repo::RepoInstance;
 
 /// Offline caller owns admission: no handle may be shared with writers.
 /// Refuses allocation holes before any clean-horizon request.
+///
+/// Seed walks read declarations/history of a quiesced repo, so an in-doubt
+/// fenced source name must still resolve (unfenced access below).
 pub async fn prepare_seed(repo: &RepoInstance) -> DbResult<u64> {
     let mut names = repo.list_table_names();
     names.sort();
     for name in &names {
-        let table = repo.get_table(name).await?;
+        let table = repo.get_table_unfenced(name).await?;
         if table.mvcc_store().is_none() {
             return Err(DbError::Storage("seed requires MVCC".into()));
         }
@@ -35,7 +38,7 @@ pub async fn prepare_seed(repo: &RepoInstance) -> DbResult<u64> {
     // snapshot_stream skips unrecognised history keys; seed export must instead
     // reject them. Timestamp entries are the documented 0x00 + u64 namespace.
     for name in &names {
-        let table = repo.get_table(name).await?;
+        let table = repo.get_table_unfenced(name).await?;
         let mvcc = table
             .mvcc_store()
             .ok_or_else(|| DbError::Storage("seed requires MVCC".into()))?;
@@ -63,7 +66,7 @@ pub async fn prepare_seed(repo: &RepoInstance) -> DbResult<u64> {
     }
     repo.flush_buffers().await?;
     for name in &names {
-        let table = repo.get_table(name).await?;
+        let table = repo.get_table_unfenced(name).await?;
         table.counter().persist().await?;
         table.info_store().flush().await?;
     }

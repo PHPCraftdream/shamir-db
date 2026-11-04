@@ -483,6 +483,10 @@ impl FkReverseCache {
 /// used to run on every call before F-28 Step 4; now it runs at most once per
 /// [`FkReverseCache`] invalidation, via
 /// [`FkReverseCache::get_or_build_by_parent`].
+///
+/// The walk only READS FK declarations, so it resolves through the unfenced
+/// accessor ([`TableResolver::resolve_unfenced`]) and stays correct while a
+/// rename is in doubt (a frozen source's declarations and data are stable).
 pub async fn build_reverse_fk_entries(
     resolver: &dyn TableResolver,
     repo_name: &str,
@@ -499,7 +503,10 @@ pub async fn build_reverse_fk_entries(
         // publish an incomplete FK graph via the caller's CAS, allowing a
         // subsequent parent UPDATE/DELETE to violate referential integrity
         // by never discovering the missed child as a dependent.
-        let child_table = resolver.resolve(&child_ref).await?;
+        // The walk only READS FK declarations, so it resolves through the
+        // unfenced accessor and stays correct while a rename is in doubt (a
+        // frozen source's declarations and data are stable).
+        let child_table = resolver.resolve_unfenced(&child_ref).await?;
 
         for (field_path, fk) in child_table.collect_fk_refs() {
             entries.push(TaggedReverseFkEntry {

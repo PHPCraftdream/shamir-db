@@ -73,7 +73,13 @@ impl RepoInstance {
     }
 
     /// Resolve a table during frozen-source token lookups without checking the name fence.
-    pub(super) async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
+    ///
+    /// Read-only repo-wide walkers (FK reverse-cache scan, shutdown flush,
+    /// seed walks) use this while a rename is in doubt; the fenced accessors
+    /// (`get_table`/`get_table_admitted`) stay for anything that mutates or
+    /// resolves a name for a user request. `pub` (not `pub(crate)`) because
+    /// the seed-catalogue walker lives in the downstream `shamir-db` crate.
+    pub async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
         if let Some(table) = self.initialized_table(table_name) {
             return Ok(table);
         }
@@ -109,6 +115,9 @@ impl RepoInstance {
     }
 
     /// Admitted table lookup that deliberately bypasses the rename name fence.
+    ///
+    /// Admitted lookup that ignores the in-doubt rename fence; used by the rename
+    /// machinery itself. Read-only repo-wide walkers use `get_table_unfenced`.
     pub(super) async fn get_table_admitted_unfenced(
         &self,
         table_name: &str,

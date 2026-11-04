@@ -148,6 +148,9 @@ impl TableManager {
             index_ops = self.plan_insert_ops(rid, value, tx_id).await?;
             index_ops.extend(self.plan_base_index_insert_ops(rid, value).await?);
 
+            // Staging before fallible planning: if an operator below fails, the
+            // empty staging stays in the write set and this tx loses the read-only commit fast path.
+            // HIGH-6: stage HNSW vectors tx-locally (not into the live graph).
             tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
             self.stage_vectors(rid, value, tx).await;
         }
@@ -311,6 +314,8 @@ impl TableManager {
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
         // Ensure write-set membership before vector staging can occur.
+        // Staging before fallible planning: if an operator below fails, the
+        // empty staging stays in the write set and this tx loses the read-only commit fast path.
         tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
@@ -532,6 +537,8 @@ impl TableManager {
         //    indexes (L9 fast-path). The `has_any_index()` check is O(1)
         //    (atomic loads + `is_empty` on lock-free maps).
         // Ensure write-set membership before vector staging can occur.
+        // Staging before fallible planning: if an operator below fails, the
+        // empty staging stays in the write set and this tx loses the read-only commit fast path.
         tx.ensure_table_staging(token, &self.name, self.table.data_store().clone());
         let mut index_ops: Vec<shamir_tx::IndexWriteOp> = Vec::new();
         if self.has_any_index() {
