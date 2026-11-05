@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use super::super::token_loop::{run_token_halves, TokenLoopContext};
+use super::super::token_loop::{linger_after_close, run_token_halves, TokenLoopContext};
 use crate::config::TokensConfig;
 use crate::engine::db_handler::ShamirDbHandler;
 use crate::framer::{FrameReader, FrameWriter, FramerError};
@@ -313,4 +313,66 @@ async fn real_token_loop_handles_requests_limits_rate_and_cleans_up() {
     assert!(!registry.contains_entry(&token_id));
     assert!(service.sessions().get(&sid).is_none());
     gate.shutdown().await;
+}
+
+/// Reader that counts the frames it delivered before the channel closed.
+struct CountingReader {
+    rx: mpsc::Receiver<Vec<u8>>,
+    delivered: Arc<std::sync::atomic::AtomicUsize>,
+}
+impl FrameReader for CountingReader {
+    async fn read_frame_into(&mut self, _: usize, target: &mut Vec<u8>) -> Result<(), FramerError> {
+        let bytes = self
+            .rx
+            .recv()
+            .await
+            .ok_or_else(|| FramerError::Io("reader channel closed".into()))?;
+        target.clear();
+        target.extend_from_slice(&bytes);
+        self.delivered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn linger_drains_pending_frames_and_returns_when_the_peer_hangs_up() {
+    let (tx, rx) = mpsc::channel(8);
+    let delivered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut reader = CountingReader {
+        rx,
+        delivered: Arc::clone(&delivered),
+    };
+    for ping in 0..3u8 {
+        tx.send(vec![ping]).await.expect("queue a pending frame");
+    }
+    drop(tx);
+
+    let started = tokio::time::Instant::now();
+    linger_after_close(&mut reader).await;
+
+    assert_eq!(
+        delivered.load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "every frame the peer had in flight must be read before the socket is released"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1),
+        "a peer that hung up must not be waited for"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn linger_is_bounded_when_the_peer_stays_silent() {
+    let (_tx, rx) = mpsc::channel::<Vec<u8>>(1);
+    let mut reader = Reader { rx };
+
+    let started = tokio::time::Instant::now();
+    linger_after_close(&mut reader).await;
+
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_secs(1) && waited <= Duration::from_secs(2),
+        "a silent peer is waited for about the linger bound, got {waited:?}"
+    );
 }
