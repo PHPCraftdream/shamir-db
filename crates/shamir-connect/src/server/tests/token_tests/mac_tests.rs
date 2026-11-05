@@ -1,5 +1,5 @@
 use crate::server::token::{compute_mac, mac_eq, parse_token, TokenId};
-use hmac::Mac;
+use hmac::{KeyInit, Mac};
 
 #[test]
 fn independent_documented_layout_and_component_mutations() {

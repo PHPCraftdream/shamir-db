@@ -6,7 +6,7 @@ use crate::hmac::{
     HmacPolicy,
 };
 use crate::wire::DbRequest;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 #[test]
 fn key_derivation_stays_domain_separated() {

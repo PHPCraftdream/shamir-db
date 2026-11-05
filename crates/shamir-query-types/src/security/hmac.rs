@@ -47,7 +47,7 @@ use crate::batch::BatchOp;
 use crate::batch::BatchOp::*;
 use crate::wire::token_admin::{ApiTokenChannels, ApiTokenMode};
 use crate::wire::DbRequest;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 const PREFIX: &[u8] = b"shamir-db hmac canonical v2\0";
@@ -789,12 +789,14 @@ pub fn derive_session_hmac_key(session_id: &[u8; 32]) -> [u8; 32] {
     k
 }
 pub fn compute_tag_hex(key: &[u8; 32], canonical: &[u8]) -> String {
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut m =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     m.update(canonical);
     hex_encode(&m.finalize().into_bytes())
 }
 pub fn verify_tag_hex(key: &[u8; 32], canonical: &[u8], tag: &str) -> bool {
-    let mut m = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut m =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     m.update(canonical);
     let Ok(bytes) = hex_decode(tag) else {
         return false;

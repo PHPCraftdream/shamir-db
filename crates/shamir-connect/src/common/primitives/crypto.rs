@@ -12,7 +12,7 @@
 use crate::common::error::{EnvironmentError, Error, Result};
 use crate::common::kdf_params::KdfParams;
 use ::hkdf::Hkdf;
-use aes_gcm::aead::{Aead, AeadInPlace, KeyInit, Payload};
+use aes_gcm::aead::{Aead, AeadInOut, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 use argon2::{Algorithm, Argon2, Params, Version};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
@@ -180,7 +180,8 @@ pub fn derive_session_hmac_key(session_id: &[u8; 32]) -> [u8; 32] {
 /// so we accept the small CPU cost in exchange for branch-equivalence
 /// between real and fake paths.
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> HmacTag {
-    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac =
+        <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -355,10 +356,10 @@ pub fn aes256gcm_encrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("AES-GCM: bad key"))?;
-    let nonce = Nonce::from_slice(nonce);
+    let nonce = Nonce::from(*nonce);
     cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -378,10 +379,10 @@ pub fn aes256gcm_decrypt(
     aad: &[u8],
 ) -> Result<Vec<u8>> {
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| Error::Crypto("AES-GCM: bad key"))?;
-    let nonce = Nonce::from_slice(nonce);
+    let nonce = Nonce::from(*nonce);
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext_and_tag,
                 aad,
@@ -408,10 +409,10 @@ pub fn aes256gcm_encrypt_with_cipher(
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let nonce = Nonce::from_slice(nonce);
+    let nonce = Nonce::from(*nonce);
     cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -427,10 +428,10 @@ pub fn aes256gcm_decrypt_with_cipher(
     ciphertext_and_tag: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>> {
-    let nonce = Nonce::from_slice(nonce);
+    let nonce = Nonce::from(*nonce);
     cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: ciphertext_and_tag,
                 aad,
@@ -459,10 +460,10 @@ pub fn aes256gcm_decrypt_in_place_with_cipher(
     buffer: &mut [u8],
     tag: &[u8; 16],
 ) -> Result<()> {
-    let nonce = Nonce::from_slice(nonce);
-    let tag = Tag::from_slice(tag);
+    let nonce = Nonce::from(*nonce);
+    let tag = Tag::from(*tag);
     cipher
-        .decrypt_in_place_detached(nonce, aad, buffer, tag)
+        .decrypt_inout_detached(&nonce, aad, buffer.into(), &tag)
         .map_err(|_| Error::Crypto("AES-GCM: decrypt failed (tag mismatch?)"))
 }
 
