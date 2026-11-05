@@ -2,6 +2,7 @@ use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 use crate::types::value::InnerValue;
 use futures::StreamExt;
+use shamir_test_diag::FlakeGuard;
 use shamir_types::types::record_id::RecordId;
 use tokio::runtime::Builder;
 
@@ -25,6 +26,10 @@ fn assert_exact_rows(actual: &[(RecordId, InnerValue)], expected: &[(RecordId, I
 
 #[test]
 fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
+    // Failure-only flake diagnostics (design:
+    // docs/dev-artifacts/design/flake-failure-logs.md): the guard prints its
+    // timeline + captured log records ONLY while the test is panicking.
+    let guard = FlakeGuard::new("in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation");
     let directory = tempfile::tempdir().unwrap();
     let system_path = directory.path().join("system");
     let repo_path = directory.path().join("repo");
@@ -68,11 +73,14 @@ fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
                 .and_then(crate::types::value::QueryValue::as_str)
                 .unwrap()
                 .to_owned();
+            guard.note("pre-rename incarnation store_id", old_id.clone());
             db.system_store().arm_durability_tail_faults(2);
+            guard.mark("rename started (2 durability-tail faults armed)");
             assert!(matches!(
                 db.rename_table_as("restart", "main", "a", "b", crate::access::Actor::System).await,
                 Err(crate::DbError::Conflict(message)) if message.starts_with("rename in doubt:")
             ));
+            guard.mark("crash point: rename returned in-doubt");
             assert!(repo.has_rename_in_doubt());
             let destination_record = db
                 .system_store()
@@ -85,6 +93,7 @@ fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
                 .and_then(crate::types::value::QueryValue::as_str)
                 .unwrap()
                 .to_owned();
+            guard.note("post-crash destination store_id", new_id.clone());
             (expected, old_id, new_id)
         })
         .await
@@ -98,6 +107,7 @@ fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
             let db = ShamirDb::init(SystemStoreConfig::Fjall(system_path))
                 .await
                 .unwrap();
+            guard.mark("reopen after the in-doubt crash");
             let repo = db.get_db("restart").unwrap().get_repo("main").unwrap();
             assert!(!repo.has_rename_in_doubt());
             let a_row = db
@@ -110,6 +120,15 @@ fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
                 .load_table_record("restart", "main", "b")
                 .await
                 .unwrap();
+            guard.note(
+                "catalogue after reopen",
+                format!(
+                    "a present: {}, b present: {}",
+                    a_row.is_some(),
+                    b_row.is_some()
+                ),
+            );
+            guard.mark("catalogue contents read");
             assert_ne!(a_row.is_some(), b_row.is_some());
             let (name, row, other) = if let Some(row) = b_row {
                 ("b", row, "a")
@@ -129,6 +148,10 @@ fn in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation() {
                 "b"
             };
             assert_eq!(name, expected_name);
+            guard.note(
+                "surviving incarnation",
+                format!("table {name}, store_id {store_id}"),
+            );
             let table = repo.get_table(name).await.unwrap();
             assert_exact_rows(&rows(&table).await, &expected_rows);
             assert!(db

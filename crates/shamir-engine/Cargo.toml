@@ -125,6 +125,10 @@ memory-stats = "1.2"
 # Tests build queries via the typed query builder instead of raw wire values.
 # query-builder depends only on query-types/types — no cycle on engine.
 shamir-query-builder = { path = "../shamir-query-builder" }
+# Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
+# — dev-only crate; adopted by the CRIT-2 truncation-ceiling test. No `tracing`
+# feature: shamir-engine emits `log` records only.
+shamir-test-diag = { path = "../shamir-test-diag" }
 # (No dev-dep cycle on shamir-db. The two tests that needed the
 # `ShamirDb` facade — `admin_tests.rs`, `auth_tests.rs` — moved to
 # `crates/shamir-db/tests/` as integration tests instead. Keeping the

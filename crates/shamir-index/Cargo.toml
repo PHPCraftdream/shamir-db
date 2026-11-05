@@ -75,6 +75,11 @@ num-bigint = { version = "0.4", features = ["serde"] }
 shamir-bench-utils = { path = "../shamir-bench-utils" }
 bench-scale-tool = { workspace = true, features = ["async"] }
 
+# Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
+# — dev-only crate; adopted by the SQ8-recall and HNSW-recall statistical tests.
+# No `tracing` feature: shamir-index emits `log` records only.
+shamir-test-diag = { path = "../shamir-test-diag" }
+
 [[bench]]
 name = "sq8_hot_path"
 harness = false

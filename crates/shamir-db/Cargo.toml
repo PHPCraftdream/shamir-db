@@ -103,6 +103,11 @@ shamir-funclib = { path = "../shamir-funclib" }
 # `wat` text to wasm binaries for function-management tests.
 wat = "1.226"
 
+# Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
+# — dev-only crate; adopted by the rename-restart, FK on-delete and native-parity
+# flaky tests. No `tracing` feature: the facade emits `log` records only.
+shamir-test-diag = { path = "../shamir-test-diag" }
+
 [[bench]]
 name = "engine_perf"
 harness = false
