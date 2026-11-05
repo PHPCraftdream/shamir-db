@@ -6,7 +6,7 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_types::types::value::QueryValue;
 use shamir_wasm_host::{
-    FnBatch, FnCtx, Params, ShamirFunction, WasmEngine, WasmFunction, WasmLimits,
+    FnBatch, FnCtx, Params, ShamirFunction, TierMode, WasmEngine, WasmFunction, WasmLimits,
 };
 
 use crate::kernels;
@@ -16,9 +16,26 @@ const CONCURRENT: usize = 8;
 
 pub fn register(h: &mut Harness) {
     let engine = Arc::new(WasmEngine::new().expect("engine"));
+    // Pinned to the optimized tier: `Auto` (the default) would start the
+    // identity function on the fast tier and upgrade it mid-run.
     let function = Arc::new(
-        WasmFunction::from_wat(engine, &kernels::identity(), WasmLimits::default())
-            .expect("compile"),
+        WasmFunction::from_wat_with_mode(
+            engine.clone(),
+            &kernels::identity(),
+            WasmLimits::default(),
+            TierMode::Now,
+        )
+        .expect("compile"),
+    );
+    // Fast-tier twin for the tier trade-off report.
+    let fast_function = Arc::new(
+        WasmFunction::from_wat_with_mode(
+            engine,
+            &kernels::identity(),
+            WasmLimits::default(),
+            TierMode::Never,
+        )
+        .expect("compile"),
     );
 
     for (id, blob_bytes) in [
@@ -36,6 +53,23 @@ pub fn register(h: &mut Harness) {
         let batch = FnBatch::new();
         h.bench_async(&format!("warm/{id}"), move || {
             let function = function.clone();
+            let params = params.clone();
+            let ctx = ctx.clone();
+            let batch = batch.clone();
+            async move {
+                black_box(function.call(&ctx, &batch, &params).await.expect("call"));
+            }
+        });
+    }
+
+    {
+        let fast_function = Arc::clone(&fast_function);
+        let mut params = Params::new();
+        params.set("x", QueryValue::Int(42));
+        let ctx = FnCtx::new();
+        let batch = FnBatch::new();
+        h.bench_async("warm/call_identity_fast", move || {
+            let function = Arc::clone(&fast_function);
             let params = params.clone();
             let ctx = ctx.clone();
             let batch = batch.clone();

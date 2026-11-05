@@ -51,8 +51,14 @@ impl DbGateway for EpochKickDb {
         self.hit.store(true, Ordering::SeqCst);
         // Test-controlled epoch increment at a guest-verified
         // checkpoint (twice: strict and non-strict deadline compares).
-        self.engine.engine().increment_epoch();
-        self.engine.engine().increment_epoch();
+        // Both engines: a function created in `Auto` runs on the fast
+        // engine, whose epoch is independent of the optimized one.
+        for engine in
+            std::iter::once(self.engine.optimized_engine()).chain(self.engine.fast_engine())
+        {
+            engine.increment_epoch();
+            engine.increment_epoch();
+        }
         Ok(None)
     }
     async fn insert(&self, _: &str, _: &str, _: QueryValue) -> Result<QueryValue, DbGatewayError> {

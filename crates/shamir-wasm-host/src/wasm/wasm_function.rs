@@ -65,6 +65,11 @@
 //! ancestor retains no executable fuel, and the aggregate instruction count
 //! across the whole `ctx.call` fan-out is bounded by one shared budget —
 //! same as wall-clock + epoch already bound total time.
+//!
+//! # Two-tier compilation
+//!
+//! Creation compiles the fast tier (Winch); crossing `TierOptions::hot_calls`
+//! swaps in an optimized-tier (Cranelift) slot; in-flight calls keep theirs.
 
 use super::bindings::batch::{host_batch_get, host_batch_put};
 use super::bindings::call::host_call;
@@ -72,10 +77,11 @@ use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_
 use super::bindings::globals::{host_global_get, host_global_set};
 use super::bindings::http::host_http_fetch;
 use super::bindings::raise::host_raise_error;
+use super::engine::tier_upgrade::{maybe_schedule_upgrade, FunctionShared, FunctionSlot};
+use super::engine::{Tier, TierMode, WasmEngine, WasmLimits};
 #[cfg(test)]
 use super::fuel::FuelObserver;
 use super::fuel::{pool_refund, FuelLease};
-use super::wasm_engine::{WasmEngine, WasmLimits};
 use super::wasm_sanitizer::verify_wasm_module;
 use crate::gateway::db_gateway::DbGateway;
 use crate::gateway::net_gateway::NetGateway;
@@ -91,7 +97,8 @@ use shamir_types::codecs::{Codec, MessagePackCodec};
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use wasmtime::{InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+use std::time::Instant;
+use wasmtime::{Engine, InstancePre, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 // ── HostState ─────────────────────────────────────────────────────────
 
@@ -150,7 +157,7 @@ pub(crate) struct HostState {
 pub(crate) fn test_linker_and_store(
     engine: &WasmEngine,
 ) -> FnResult<(Linker<HostState>, Store<HostState>)> {
-    let linker = build_linker(engine)?;
+    let linker = build_linker(engine.engine())?;
     let state = HostState {
         limits: StoreLimitsBuilder::new().build(),
         batch: Arc::new(BatchContext::new()),
@@ -181,10 +188,14 @@ pub(crate) fn test_linker_and_store(
 ///
 /// Created from either WAT text ([`WasmFunction::from_wat`]) or binary
 /// `.wasm` bytes ([`WasmFunction::from_binary`]).
+///
+/// The compiled form lives in an RCU slot (`FunctionSlot`) pairing the
+/// engine the module was compiled for with its `InstancePre` and the tier
+/// it resides on. Creation compiles the fast tier; once the call counter
+/// crosses `TierOptions::hot_calls`, one bounded background job swaps in an
+/// optimized-tier slot.
 pub struct WasmFunction {
-    instance_pre: InstancePre<HostState>,
-    engine: Arc<WasmEngine>,
-    limits: WasmLimits,
+    shared: Arc<FunctionShared>,
 }
 
 /// Build a [`Linker`] with all host imports registered, resolving nothing
@@ -196,11 +207,9 @@ pub struct WasmFunction {
 /// `(module, name)` pairs (via [`Linker::iter`]) against
 /// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`] — this is the
 /// mechanism keeping the sanitizer's allowlist and the linker's actual
-/// registrations from silently drifting apart. Split out from
-/// [`build_instance_pre`] specifically so the cross-check test does not
-/// need a real [`Module`] to enumerate the registered surface.
-pub(crate) fn build_linker(engine: &WasmEngine) -> FnResult<Linker<HostState>> {
-    let mut linker: Linker<HostState> = Linker::new(engine.engine());
+/// registrations from silently drifting apart.
+pub(crate) fn build_linker(engine: &Engine) -> FnResult<Linker<HostState>> {
+    let mut linker: Linker<HostState> = Linker::new(engine);
 
     // Sync host imports under "shamir_host".
     linker
@@ -243,11 +252,10 @@ pub(crate) fn build_linker(engine: &WasmEngine) -> FnResult<Linker<HostState>> {
     Ok(linker)
 }
 
-/// Build a [`Linker`] with all host imports registered and pre-instantiate
-/// it against the given module. The resulting [`InstancePre`] resolves
-/// imports once; each subsequent `instantiate_async` only needs a fresh
-/// [`Store`].
-fn build_instance_pre(engine: &WasmEngine, module: &Module) -> FnResult<InstancePre<HostState>> {
+/// Pre-instantiate a [`Linker`] against the given module: the resulting
+/// [`InstancePre`] resolves imports once; each `instantiate_async` only
+/// needs a fresh [`Store`].
+fn build_instance_pre(engine: &Engine, module: &Module) -> FnResult<InstancePre<HostState>> {
     let linker = build_linker(engine)?;
     linker
         .instantiate_pre(module)
@@ -264,20 +272,23 @@ impl WasmFunction {
     /// defense-in-depth control (fail-fast + an explicit auditable
     /// allowlist) rather than a redundant re-check of what the linker
     /// already rejects for free.
+    /// Behaves as [`TierMode::Auto`].
     pub fn from_wat(engine: Arc<WasmEngine>, wat: &str, limits: WasmLimits) -> FnResult<Self> {
+        Self::from_wat_with_mode(engine, wat, limits, TierMode::Auto)
+    }
+
+    /// [`WasmFunction::from_wat`] with an explicit tier mode.
+    pub fn from_wat_with_mode(
+        engine: Arc<WasmEngine>,
+        wat: &str,
+        limits: WasmLimits,
+        mode: TierMode,
+    ) -> FnResult<Self> {
         engine.validate_limits(&limits)?;
         let wasm_bytes = wat::parse_str(wat)
             .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
         verify_wasm_module(&wasm_bytes)?;
-        let module = engine
-            .compile(&wasm_bytes)
-            .map_err(|e| FunctionError::Compute(format!("WAT compile error: {e}")))?;
-        let instance_pre = build_instance_pre(&engine, &module)?;
-        Ok(Self {
-            instance_pre,
-            engine,
-            limits,
-        })
+        Self::from_sanitized(engine, wasm_bytes.into(), limits, mode, "WAT compile error")
     }
 
     /// Compile a `.wasm` binary into a `WasmFunction`.
@@ -302,40 +313,179 @@ impl WasmFunction {
     /// sanitizer for a detected `.cwasm` header, relying on the fact that
     /// `.cwasm` can only be produced by our own prior `Module::serialize`
     /// call over an already-sanitized module).
+    /// Behaves as [`TierMode::Auto`].
     pub fn from_binary(
         engine: Arc<WasmEngine>,
         wasm_or_cwasm_bytes: &[u8],
         limits: WasmLimits,
     ) -> FnResult<Self> {
+        Self::from_binary_with_mode(engine, wasm_or_cwasm_bytes, limits, TierMode::Auto)
+    }
+
+    /// [`WasmFunction::from_binary`] with an explicit tier mode.
+    pub fn from_binary_with_mode(
+        engine: Arc<WasmEngine>,
+        wasm_or_cwasm_bytes: &[u8],
+        limits: WasmLimits,
+        mode: TierMode,
+    ) -> FnResult<Self> {
         engine.validate_limits(&limits)?;
         verify_wasm_module(wasm_or_cwasm_bytes)?;
-        let module = engine
-            .compile(wasm_or_cwasm_bytes)
-            .map_err(|e| FunctionError::Compute(format!("WASM compile error: {e}")))?;
-        let instance_pre = build_instance_pre(&engine, &module)?;
-        Ok(Self {
-            instance_pre,
+        Self::from_sanitized(
             engine,
+            wasm_or_cwasm_bytes.into(),
             limits,
-        })
+            mode,
+            "WASM compile error",
+        )
     }
     /// Async counterpart of [`WasmFunction::from_binary`].
     ///
     /// Cranelift compilation takes tens to hundreds of milliseconds of pure
-    /// CPU; async callers on the tokio runtime must not run it inline on a
-    /// worker thread. This moves the (identical) synchronous
-    /// [`WasmFunction::from_binary`] pipeline — sanitizer, compile,
-    /// instantiation — onto `tokio::task::spawn_blocking`. Behaviour and
-    /// error values are identical to `from_binary`, except that a panic or
-    /// cancellation inside the blocking task maps to
-    /// [`FunctionError::Compute`] (`blocking compile join failure: …`).
+    /// CPU; async callers must not run it inline on a worker thread. This
+    /// moves the synchronous [`WasmFunction::from_binary`] pipeline —
+    /// sanitizer, compile, instantiation — onto `tokio::task::spawn_blocking`.
+    /// Behaviour and error values are identical to `from_binary`; behaves as
+    /// [`TierMode::Auto`].
     pub async fn from_binary_blocking(
         engine: Arc<WasmEngine>,
         wasm_or_cwasm_bytes: &[u8],
         limits: WasmLimits,
     ) -> FnResult<Self> {
+        Self::from_binary_blocking_with_mode(engine, wasm_or_cwasm_bytes, limits, TierMode::Auto)
+            .await
+    }
+
+    /// [`WasmFunction::from_binary_blocking`] with an explicit tier mode.
+    pub async fn from_binary_blocking_with_mode(
+        engine: Arc<WasmEngine>,
+        wasm_or_cwasm_bytes: &[u8],
+        limits: WasmLimits,
+        mode: TierMode,
+    ) -> FnResult<Self> {
         let wasm = wasm_or_cwasm_bytes.to_vec();
-        run_compile_blocking(move || Self::from_binary(engine, &wasm, limits)).await
+        run_compile_blocking(move || Self::from_binary_with_mode(engine, &wasm, limits, mode)).await
+    }
+
+    /// The compilation tier the function's live slot is resident on.
+    pub fn tier(&self) -> Tier {
+        self.shared.tier()
+    }
+
+    /// Assemble the function from already-validated bytes (sanitizer and
+    /// limit checks ran once, before any compile).
+    fn from_sanitized(
+        engine: Arc<WasmEngine>,
+        wasm: Arc<[u8]>,
+        limits: WasmLimits,
+        mode: TierMode,
+        compile_context: &'static str,
+    ) -> FnResult<Self> {
+        let slot = Self::compile_initial_slot(&engine, &wasm, mode, compile_context)?;
+        Ok(Self {
+            shared: Arc::new(FunctionShared::new(
+                engine,
+                wasm,
+                limits,
+                mode,
+                slot,
+                build_instance_pre,
+            )),
+        })
+    }
+
+    /// Build the creation-time slot for `mode`, logging the tier decision
+    /// (tier, compile time, module size) at `info`.
+    ///
+    /// `Auto`: the fast tier synchronously, falling back to the optimized
+    /// tier (logged at `info`, not an error) when the fast compile fails or
+    /// the fast engine is absent. `Now`: the optimized tier, no upgrade.
+    /// `Never`: the fast tier only (the optimized tier when this engine has no fast tier).
+    fn compile_initial_slot(
+        engine: &WasmEngine,
+        wasm: &[u8],
+        mode: TierMode,
+        compile_context: &'static str,
+    ) -> FnResult<FunctionSlot> {
+        let started = Instant::now();
+        let (engine_handle, module, tier, decision) = match mode {
+            TierMode::Now => {
+                let module = engine
+                    .compile_optimized(wasm)
+                    .map_err(|e| FunctionError::Compute(format!("{compile_context}: {e}")))?;
+                (
+                    engine.optimized_engine().clone(),
+                    module,
+                    Tier::Optimized,
+                    "optimized (TierMode::Now)",
+                )
+            }
+            TierMode::Never => match engine.fast_engine().cloned() {
+                Some(fast_engine) => {
+                    let module = engine
+                        .compile_fast(wasm)
+                        .map_err(|e| FunctionError::Compute(format!("{compile_context}: {e}")))?;
+                    (fast_engine, module, Tier::Fast, "fast (TierMode::Never)")
+                }
+                None => {
+                    // No fast tier on this engine (tiering disabled or the fast engine could
+                    // not be built): there is nothing to stay on, the optimized tier hosts it.
+                    let module = engine
+                        .compile_optimized(wasm)
+                        .map_err(|e| FunctionError::Compute(format!("{compile_context}: {e}")))?;
+                    (
+                        engine.optimized_engine().clone(),
+                        module,
+                        Tier::Optimized,
+                        "optimized (Never, fast tier unavailable)",
+                    )
+                }
+            },
+            TierMode::Auto => match engine.fast_engine().cloned() {
+                Some(fast_engine) => match engine.compile_fast(wasm) {
+                    Ok(module) => (fast_engine, module, Tier::Fast, "fast (Auto)"),
+                    Err(fast_error) => {
+                        // Not an error for the caller: the optimized tier
+                        // hosts the slot from the first call on.
+                        log::info!(
+                            "wasm fast tier compile failed ({fast_error}); \
+                             the optimized tier hosts the slot"
+                        );
+                        let module = engine.compile_optimized(wasm).map_err(|e| {
+                            FunctionError::Compute(format!("{compile_context}: {e}"))
+                        })?;
+                        (
+                            engine.optimized_engine().clone(),
+                            module,
+                            Tier::Optimized,
+                            "optimized (Auto fast-compile fallback)",
+                        )
+                    }
+                },
+                None => {
+                    let module = engine
+                        .compile_optimized(wasm)
+                        .map_err(|e| FunctionError::Compute(format!("{compile_context}: {e}")))?;
+                    (
+                        engine.optimized_engine().clone(),
+                        module,
+                        Tier::Optimized,
+                        "optimized (Auto, fast engine unavailable)",
+                    )
+                }
+            },
+        };
+        let instance_pre = build_instance_pre(&engine_handle, &module)?;
+        log::info!(
+            "wasm function slot on the {decision} tier compiled in {:?}, {} module bytes",
+            started.elapsed(),
+            wasm.len()
+        );
+        Ok(FunctionSlot {
+            engine: engine_handle,
+            instance_pre,
+            tier,
+        })
     }
 }
 
@@ -476,10 +626,12 @@ pub(crate) fn encode_params(params: &Params) -> FnResult<Vec<u8>> {
 #[async_trait]
 impl ShamirFunction for WasmFunction {
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
+        maybe_schedule_upgrade(&self.shared);
         let input = encode_params(params)?;
 
-        let engine = self.engine.clone();
-        let limits = self.limits.clone();
+        // The slot is resolved once; a concurrent swap cannot disturb this call.
+        let slot = self.shared.slot();
+        let limits = self.shared.limits().clone();
         let batch_ctx = batch.context().clone();
         let globals = ctx.globals().clone();
         let registry = ctx.registry().cloned();
@@ -551,7 +703,7 @@ impl ShamirFunction for WasmFunction {
             #[cfg(test)]
             store_id: 0,
         };
-        let mut store: Store<HostState> = Store::new(engine.engine(), state);
+        let mut store: Store<HostState> = Store::new(&slot.engine, state);
         store.limiter(|s| &mut s.limits as &mut dyn wasmtime::ResourceLimiter);
         // Fail closed: the [`FuelLease`] token refunds the reservation before
         // the error propagates (drop on the early-return path).
@@ -598,7 +750,7 @@ impl ShamirFunction for WasmFunction {
             };
             let raw: FnResult<Vec<u8>> = async {
                 let store = accounted.store();
-                let instance = self
+                let instance = slot
                     .instance_pre
                     .instantiate_async(&mut *store)
                     .await

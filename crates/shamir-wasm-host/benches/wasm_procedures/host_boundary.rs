@@ -8,7 +8,7 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_types::types::value::QueryValue;
 use shamir_wasm_host::{
-    FnBatch, FnCtx, Params, ShamirFunction, WasmEngine, WasmFunction, WasmLimits,
+    FnBatch, FnCtx, Params, ShamirFunction, TierMode, WasmEngine, WasmFunction, WasmLimits,
 };
 
 use crate::kernels;
@@ -22,8 +22,16 @@ pub fn register(h: &mut Harness) {
         ("sync_put", kernels::sync_put_wat()),
         ("async_get", kernels::async_get_wat()),
     ] {
+        // Pinned to the optimized tier so the boundary cost is not mixed
+        // with the fast tier or a mid-run upgrade.
         let function = Arc::new(
-            WasmFunction::from_wat(engine.clone(), &wat, WasmLimits::default()).expect("compile"),
+            WasmFunction::from_wat_with_mode(
+                engine.clone(),
+                &wat,
+                WasmLimits::default(),
+                TierMode::Now,
+            )
+            .expect("compile"),
         );
         let batch = batch.clone();
         let ctx = FnCtx::new();

@@ -4042,6 +4042,7 @@ dependencies = [
 name = "shamir-wasm-host"
 version = "0.1.0-alpha.1"
 dependencies = [
+ "arc-swap",
  "argon2",
  "async-trait",
  "bench-scale-tool",

@@ -1448,3 +1448,33 @@ The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and passwo
   CA-verified certificate outside local development.
 - No at-rest encryption (`security/data-protection.md`); the audit log covers
   authentication events only.
+
+## 13. WASM compilation tiers
+
+- **Tier mode and hot-calls threshold are engine-construction options, not
+  DDL.** `TierMode` (Auto / Now / Never) is a parameter of the
+  `WasmFunction::from_*` constructors and `TierOptions` (`hot_calls`,
+  `background_jobs`) lives in `WasmEngineOptions`; every shipped call site
+  (function/validator DDL create and replace, catalogue recovery at startup)
+  uses the default `Auto` mode and default options, so there is no
+  per-function DDL or OQL knob yet. Sources:
+  `crates/shamir-wasm-host/src/wasm/engine/tier_options.rs:5-24`,
+  `crates/shamir-db/src/shamir_db/shamir_db/db/function_management.rs:187`,
+  `crates/shamir-db/src/shamir_db/shamir_db/db/validator_management.rs:234`,
+  `crates/shamir-db/src/shamir_db/shamir_db/core.rs:466,570`.
+- **Tier state is not persisted; every start recompiles on the fast tier.**
+  The catalogue stores the `.wasm` bytes only; the compiled slot (engine,
+  `InstancePre`, tier) lives in an in-memory `ArcSwap` and the call counter
+  resets with the process, so after a restart every function is recreated on
+  the fast (Winch) tier (on the optimized tier when its fast compile fails or the engine
+  has no fast tier) and re-earns its upgrade after `hot_calls` calls.
+  Sources: `crates/shamir-wasm-host/src/wasm/wasm_function.rs:377-395`,
+  `crates/shamir-wasm-host/src/wasm/engine/tier_upgrade.rs:51-64`.
+- **Two-tier engines reserve pooling address space twice.** With tiering
+  enabled and the pooling allocator active, both engines of the pair get
+  their own pooling instance-allocation strategy (128 memory slots at the
+  configured ceiling each), so the virtual-address-space reservation is paid
+  twice; it is virtual address space, not resident memory. The pool-derived
+  memory-limit rejection follows the optimized engine: the fast engine pools
+  with the same ceiling or not at all. Sources:
+  `crates/shamir-wasm-host/src/wasm/engine/wasm_engine.rs:166-215,378-409`.

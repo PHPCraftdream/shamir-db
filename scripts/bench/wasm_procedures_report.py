@@ -5,8 +5,10 @@ Usage: wasm_procedures_report.py <bench-out-dir> <strategy>
 
 Reads `wasm_procedures.log`, `wasm_db_calls.log` and `elapsed.txt` written by the workflow
 and prints the cell table plus the derived numbers the measurements exist for: the ratio to
-native per kernel, the cost of one guest->host call, the metering overhead and what a
-database call from a guest adds over the same call without a guest.
+native per kernel, the cost of one guest->host call, the metering overhead, what a
+database call from a guest adds over the same call without a guest, and the two-tier
+trade-off (compile delta fast vs optimized, the per-call saving of the optimized tier and
+the break-even number of calls).
 """
 
 import re
@@ -91,6 +93,47 @@ def main() -> int:
         if parts[0] == "metering" and len(parts) == 3:
             none = cells.get(f"metering/none/{parts[2]}", (0, 0.0))[1]
             print(f"| {parts[2]} | {parts[1]} | {fmt(ns)} | {ratio(ns, none)} |")
+
+    def ns(name: str) -> float:
+        return cells.get(name, (0, 0.0))[1]
+
+    print("\n### Tier trade-off (fast Winch tier vs optimized Cranelift tier)\n")
+    print("| kernel | compile fast | compile optimized | compile delta | call fast | call optimized"
+          " | saving per call | break-even calls |\n|---|---:|---:|---:|---:|---:|---:|---:|")
+    tier_rows = [
+        ("identity", "warm/call_identity", "warm/call_identity_fast"),
+        ("fn64", "", ""),
+        ("fn512", "", ""),
+        ("int_sum", "compute/wasm/int_sum", "compute/wasm_fast/int_sum"),
+        ("f64_poly", "compute/wasm/f64_poly", "compute/wasm_fast/f64_poly"),
+        ("mem_scan", "compute/wasm/mem_scan", "compute/wasm_fast/mem_scan"),
+        ("collatz", "compute/wasm/collatz", "compute/wasm_fast/collatz"),
+        ("fib", "compute/wasm/fib", "compute/wasm_fast/fib"),
+    ]
+    for kernel, call_optimized_cell, call_fast_cell in tier_rows:
+        compile_fast = ns(f"cold/compile_{kernel}_fast")
+        compile_optimized = ns(f"cold/compile_{kernel}_optimized")
+        compile_delta = (
+            compile_optimized - compile_fast if compile_fast and compile_optimized else 0.0
+        )
+        # The delta column shows the measured difference, negative included.
+        call_fast = ns(call_fast_cell) if call_fast_cell else 0.0
+        call_optimized = ns(call_optimized_cell) if call_optimized_cell else 0.0
+        saving = (
+            call_fast - call_optimized
+            if call_fast and call_optimized and call_fast > call_optimized
+            else 0.0
+        )
+        break_even = compile_delta / saving if compile_delta > 0 and saving > 0 else 0.0
+        print(
+            f"| {kernel} | {fmt(compile_fast) if compile_fast else 'n/a'}"
+            f" | {fmt(compile_optimized) if compile_optimized else 'n/a'}"
+            f" | {fmt(compile_delta) if compile_fast and compile_optimized else 'n/a'}"
+            f" | {fmt(call_fast) if call_fast else 'n/a'}"
+            f" | {fmt(call_optimized) if call_optimized else 'n/a'}"
+            f" | {fmt(saving) if saving > 0 else 'n/a'}"
+            f" | {f'{break_even:.0f} calls' if break_even > 0 else 'n/a'} |"
+        )
 
     if db_cells:
         direct = db_cells.get(f"direct/execute_read_x{DB_CALLS}", (0, 0.0))[1]
