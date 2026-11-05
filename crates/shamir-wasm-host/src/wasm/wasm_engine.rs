@@ -6,6 +6,32 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConfig};
 
+/// Bench-only (cargo feature `bench-strategies`, never enabled by the server build):
+/// `SHAMIR_WASM_STRATEGY` picks the code generator for an A/B run of the same suite -
+/// `cranelift` (default), `winch` (single-pass baseline compiler) or `pulley` (portable
+/// interpreter). Anything else is rejected.
+#[cfg(feature = "bench-strategies")]
+fn apply_bench_strategy(config: &mut wasmtime::Config) -> FnResult<()> {
+    const STRATEGY_ENV: &str = "SHAMIR_WASM_STRATEGY";
+    match std::env::var(STRATEGY_ENV).ok().as_deref() {
+        None | Some("" | "cranelift") => {}
+        Some("winch") => {
+            config.strategy(wasmtime::Strategy::Winch);
+        }
+        Some("pulley") => {
+            config
+                .target("pulley64")
+                .map_err(|error| FunctionError::Compute(error.to_string()))?;
+        }
+        Some(other) => {
+            return Err(FunctionError::Compute(format!(
+                "{STRATEGY_ENV}=`{other}`: expected cranelift, winch or pulley"
+            )));
+        }
+    }
+    Ok(())
+}
+
 // ── WasmEngine ────────────────────────────────────────────────────────
 
 /// A configured Wasmtime [`Engine`] with fuel and async support enabled.
@@ -124,7 +150,7 @@ impl WasmEngine {
         config.memory_init_cow(true);
 
         #[cfg(feature = "bench-strategies")]
-        super::bench_strategies::apply(&mut config)?;
+        apply_bench_strategy(&mut config)?;
 
         // ── Allocator strategy ───────────────────────────────────────
         //

@@ -5,8 +5,6 @@
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 //! * [`verify_wasm_module`] / [`SANCTIONED_HOST_IMPORTS`] — module verification.
 
-#[cfg(feature = "bench-strategies")]
-mod bench_strategies;
 pub(crate) mod bindings;
 pub(crate) mod compile_cache;
 mod fuel;
