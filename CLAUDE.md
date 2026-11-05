@@ -274,6 +274,19 @@ and FIX it. NEVER raise the timeout to paper over it. The wrapper also reaps
 stray test binaries on start so one hang can't wedge the next run's link
 (Windows LNK1104 cascade).
 
+**Every flaky test carries failure-only diagnostics (MANDATORY).** A test
+that has failed in CI without a code change is registered in
+`docs/dev-artifacts/design/flake-failure-logs.md` and instrumented in the
+same change that fixes (or investigates) it, so the next failure names its
+mechanism from the log alone: Rust tests use `shamir-test-diag`'s
+`FlakeGuard` (timeline marks, state notes, bounded `log`/`tracing` ring,
+`with_watchdog` for tests that can hang past the runner's kill), TypeScript
+e2e tests use `FailureRecorder` + `withFailureDiagnostics`. The evidence is
+printed ONLY when the test fails (guard `Drop` while panicking, or the
+thrown error message); a green run prints nothing new. Marks and notes
+state only what the code has already done at that point, never include
+secrets, and never change an assertion or a timing budget.
+
 **`cargo test` is BLOCKED outright** by the perimeter guard (cargo
 runner in `.cargo/config.toml`) — there is NO "allowed direct cargo
 test". Every narrow case the old guidance reached for already has a
