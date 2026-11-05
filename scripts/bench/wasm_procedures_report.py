@@ -111,8 +111,10 @@ def main() -> int:
         ("fib", "compute/wasm/fib", "compute/wasm_fast/fib"),
     ]
     for kernel, call_optimized_cell, call_fast_cell in tier_rows:
-        compile_fast = ns(f"cold/compile_{kernel}_fast")
-        compile_optimized = ns(f"cold/compile_{kernel}_optimized")
+        # Compute kernels are the same size: `int_sum` stands for their compile cost.
+        compile_kernel = kernel if kernel in ("identity", "fn64", "fn512") else "int_sum"
+        compile_fast = ns(f"cold/compile_{compile_kernel}_fast")
+        compile_optimized = ns(f"cold/compile_{compile_kernel}_optimized")
         compile_delta = (
             compile_optimized - compile_fast if compile_fast and compile_optimized else 0.0
         )

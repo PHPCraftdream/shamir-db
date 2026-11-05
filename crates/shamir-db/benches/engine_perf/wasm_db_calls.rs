@@ -7,7 +7,7 @@
 //! `wasm/* − direct/*` is what the guest boundary and the gateway add.
 //!
 //! The suite is sized to stay within a few seconds; counts are pinned in `bench-iters.txt`
-//! (`-- --calibrate 0.1` regenerates them).
+//! (`-- --calibrate 0.05` regenerates them).
 
 use std::hint::black_box;
 use std::sync::Arc;
