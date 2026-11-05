@@ -1407,7 +1407,7 @@ The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and passwo
 
 ### Client coverage
 
-- **Not every client implements every handshake x transport cell the protocol admits.** Gaps (tracked as T9-8c): the TypeScript client in Node has no plain loopback TCP session and no resume over plain TCP or local IPC (the Rust core and the napi binding cover them). Changing the password over a local IPC session from the TypeScript client is not verified and is expected to fail. The full table with per-cell status and the test that proves each cell is in the [client matrix](guide/client-matrix.md). Token over TCP/IPC, session over HTTP, QUIC and mTLS are not part of the protocol.
+- **Client coverage.** Every handshake x transport cell the protocol admits is implemented in the Rust client, the napi binding and the TypeScript clients, except the cells that are physically impossible on a platform (for example TCP in a browser). Changing the password over a local IPC session from the TypeScript client is not verified and is expected to fail. The full table with per-cell status and the test that proves each cell is in the [client matrix](guide/client-matrix.md). Token over TCP/IPC, session over HTTP, QUIC and mTLS are not part of the protocol.
 
 ### Credential lifecycle
 
