@@ -5,6 +5,7 @@ import { loginBrowser } from '../browser/browser.js';
 import { browserLoginHttp } from '../browser/browser-http.js';
 import type { LoginHttp } from '../core.js';
 import { encodeMessage, freezeScope, canonicalUser, buildLoginTranscript } from '../protocol.js';
+import { FailureRecorder, withFailureDiagnostics } from '../../__tests__/connection/token/support/failure-diagnostics.js';
 
 const bytes = (n: number, value: number) => new Uint8Array(n).fill(value);
 
@@ -107,19 +108,30 @@ describe('browser HTTP transport', () => {
   });
 
   it('settles promptly on caller abort while fetch is pending and cancels late response', async () => {
-    let resolveFetch!: (value: ReturnType<typeof response>['value']) => void;
-    let entered!: () => void; const fetchEntered = new Promise<void>(resolve => { entered = resolve; });
-    fetchStub = vi.fn<FetchArgs, Promise<unknown>>(() => { entered(); return new Promise(resolve => { resolveFetch = resolve; }); });
-    vi.stubGlobal('fetch', fetchStub);
-    const controller = new AbortController();
-    const pending = browserLoginHttp.request(new URL('https://example.test/'), bytes(1, 0), controller.signal, 0);
-    const rejection = expect(pending).rejects.toMatchObject({ code: 'client_aborted' });
-    await fetchEntered; controller.abort(); await rejection;
-    const late = response(); let canceled!: () => void;
-    const cancelEntered = new Promise<void>(resolve => { canceled = resolve; });
-    late.reader.cancel.mockImplementation(async () => { canceled(); });
-    resolveFetch(late.value); await cancelEntered;
-    expect(late.reader.cancel).toHaveBeenCalled();
+    const recorder = new FailureRecorder();
+    await withFailureDiagnostics(recorder, undefined, async () => {
+      let resolveFetch!: (value: ReturnType<typeof response>['value']) => void;
+      let entered!: () => void; const fetchEntered = new Promise<void>(resolve => { entered = resolve; });
+      fetchStub = vi.fn<FetchArgs, Promise<unknown>>(() => { entered(); return new Promise(resolve => { resolveFetch = resolve; }); });
+      vi.stubGlobal('fetch', fetchStub);
+      const controller = new AbortController();
+      recorder.mark('fetch started');
+      const pending = browserLoginHttp.request(new URL('https://example.test/'), bytes(1, 0), controller.signal, 0);
+      const rejection = expect(pending).rejects.toMatchObject({ code: 'client_aborted' });
+      await fetchEntered; recorder.mark('abort called'); controller.abort();
+      // Record what the promise actually settled with, expected or not.
+      await rejection.then(
+        () => recorder.mark('promise settled with the expected client_aborted rejection'),
+        (error: unknown) => { recorder.mark(`promise settled with an unexpected outcome: ${String(error)}`); throw error; },
+      );
+      const late = response(); let canceled!: () => void;
+      const cancelEntered = new Promise<void>(resolve => { canceled = resolve; });
+      late.reader.cancel.mockImplementation(async () => { canceled(); });
+      resolveFetch(late.value); recorder.mark('late response delivered'); await cancelEntered;
+      recorder.note('late cancel calls', late.reader.cancel.mock.calls.length);
+      expect(late.reader.cancel).toHaveBeenCalled();
+      recorder.mark('late response cancel observed');
+    });
   });
 
   it('wipes a value delivered with done=true after caller abort', async () => {

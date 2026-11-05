@@ -29,6 +29,7 @@ import {
   seed,
 } from '../e2e-harness.js';
 import type { ServerHandle } from '../e2e-harness.js';
+import { FailureRecorder, withFailureDiagnostics } from './token/support/failure-diagnostics.js';
 
 // ─── live subscriptions (A5) ─────────────────────────────────────────────────
 
@@ -40,12 +41,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     beforeAll(async () => {
       server = await startServer();
-      try {
-        client = await connectAdmin(HOST, server.port);
-      } catch (e) {
-        console.error('[live-subs] connection failed. Server logs:\n' + server.logs());
-        throw e;
-      }
+      const recorder = new FailureRecorder();
+      recorder.mark('admin connect');
+      recorder.note('connect target', `${HOST}:${server.port}`);
+      client = await withFailureDiagnostics(recorder, () => server!.logs(), () => connectAdmin(HOST, server!.port));
     }, 60_000);
 
     afterAll(async () => {

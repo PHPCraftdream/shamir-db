@@ -30,6 +30,7 @@ import {
   seed,
 } from '../../e2e-harness.js';
 import type { MultiServerHandle } from '../../e2e-harness.js';
+import { FailureRecorder, withFailureDiagnostics } from '../token/support/failure-diagnostics.js';
 
 describe.skipIf(!SERVER_AVAILABLE)(
   'e2e native transports (requires release binary)',
@@ -39,19 +40,17 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     beforeAll(async () => {
       server = await startMultiListenerServer();
-      try {
-        admin = await connectNativeAs(
-          'tcp',
-          HOST,
-          server.tcpPort,
-          server.caPem,
-          ADMIN_USER,
-          ADMIN_PASSWORD,
-        );
-      } catch (e) {
-        console.error('[e2e-native-transports] connection failed. Server logs:\n' + server.logs());
-        throw e;
-      }
+      const recorder = new FailureRecorder();
+      recorder.mark('admin connect (native tcp)');
+      recorder.note('connect target', `${HOST}:${server.tcpPort}`);
+      admin = await withFailureDiagnostics(recorder, () => server!.logs(), async () => connectNativeAs(
+        'tcp',
+        HOST,
+        server!.tcpPort,
+        server!.caPem,
+        ADMIN_USER,
+        ADMIN_PASSWORD,
+      ));
     }, 60_000);
 
     afterAll(async () => {

@@ -23,6 +23,7 @@ import {
   startMultiListenerServer,
 } from '../../e2e-harness.js';
 import { installBrowserSocket } from '../token/support/browser-socket.js';
+import { FailureRecorder, withFailureDiagnostics } from '../token/support/failure-diagnostics.js';
 import type { BrowserSocketObserver } from '../token/support/browser-socket.js';
 import type { MultiServerHandle } from '../../e2e-harness.js';
 
@@ -42,10 +43,13 @@ describe.skipIf(!SERVER_AVAILABLE)(
       // CA (same approach as e2e-browser.test.ts). Left installed for the
       // whole suite — `resumeBrowser` needs it too — and restored in afterAll.
       browserSocket = installBrowserSocket(ORIGIN, server.caPem);
-      try {
+      const recorder = new FailureRecorder();
+      recorder.mark('browser connect');
+      recorder.note('connect target', `${HOST}:${server.browserPort}`);
+      await withFailureDiagnostics(recorder, () => server!.logs(), async () => {
         first = await connectBrowser({
           host: HOST,
-          port: server.browserPort,
+          port: server!.browserPort,
           username: ADMIN_USER,
           password: ADMIN_PASSWORD,
         });
@@ -53,10 +57,7 @@ describe.skipIf(!SERVER_AVAILABLE)(
         firstTicket = first.resumptionTicket();
         expect(firstTicket).toBeInstanceOf(Uint8Array);
         expect(firstTicket!.length).toBeGreaterThan(0);
-      } catch (e) {
-        console.error('[e2e-browser-resume] connection failed. Server logs:\n' + server.logs());
-        throw e;
-      }
+      });
     }, 60_000);
 
     afterAll(async () => {
