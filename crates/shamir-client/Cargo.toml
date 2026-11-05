@@ -53,6 +53,9 @@ shamir-engine  = { path = "../shamir-engine" }
 tempfile  = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }
 bench-scale-tool = { workspace = true, features = ["async"] }
+# Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
+# — dev-only crate; the `tracing` feature enables the tracing ring layer.
+shamir-test-diag = { path = "../shamir-test-diag", features = ["tracing"] }
 
 [[bench]]
 name = "roundtrip"

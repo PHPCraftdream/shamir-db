@@ -18,6 +18,8 @@ use std::path::Path;
 
 use tempfile::TempDir;
 
+use shamir_test_diag::FlakeGuard;
+
 use crate::backup::backup;
 use crate::restore::{restore, RestoreError};
 
@@ -395,6 +397,7 @@ fn manifest_verification_failure_creates_no_temp_dir() {
 /// N-6 cleanup gap this task closes.
 #[test]
 fn step4_invalidation_failure_cleans_up_staged_temp_dir() {
+    let guard = FlakeGuard::new("step4_invalidation_failure_cleans_up_staged_temp_dir");
     let root = TempDir::new().unwrap();
     let src = root.path().join("src");
     fs::create_dir_all(&src).unwrap();
@@ -408,10 +411,13 @@ fn step4_invalidation_failure_cleans_up_staged_temp_dir() {
     let dst = root.path().join("snapshot_dest");
     fs::create_dir_all(&dst).unwrap();
     let report = backup(&src, &dst).expect("backup ok");
+    guard.mark("snapshot backup ok");
 
     let data_dir = root.path().join("data_dir");
 
     let err = restore(&report.dest_dir, &data_dir, true).unwrap_err();
+    guard.note("restore error", format!("{err}"));
+    guard.mark("restore failed at the step-4 users open/invalidate as expected");
     assert!(
         matches!(
             err,
@@ -419,6 +425,7 @@ fn step4_invalidation_failure_cleans_up_staged_temp_dir() {
         ),
         "expected a step-4 users-open/invalidate failure, got {err:?}"
     );
+    guard.mark("error confirmed as a step-4 users-open/invalidate failure");
 
     let leftover = fs::read_dir(root.path())
         .unwrap()
@@ -430,12 +437,14 @@ fn step4_invalidation_failure_cleans_up_staged_temp_dir() {
          (invalidate) failure — it survived, meaning the N-6 cleanup did \
          not run or failed silently"
     );
+    guard.mark("no staged *.restore_tmp_* dir survived");
 
     // data_dir itself must be untouched — the swap (step 5) never ran.
     assert!(
         !data_dir.exists(),
         "data_dir must not have been created — restore failed before step 5"
     );
+    guard.mark("data_dir never created — the swap (step 5) never ran");
 }
 
 // ----------------------------------------------------------------------------

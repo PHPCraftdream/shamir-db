@@ -12,6 +12,8 @@ use shamir_server::backup;
 use shamir_server::db_handler::DbResponse;
 use shamir_server::restore;
 
+use shamir_test_diag::FlakeGuard;
+
 use super::common::{create_table_req, launch, login, read_req, roundtrip, write_req};
 
 /// Snapshot every file's relative path + contents under `dir`, so a later
@@ -76,7 +78,10 @@ async fn quiescent_snapshot(dir: &std::path::Path) -> std::collections::BTreeMap
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
+    let guard =
+        FlakeGuard::new("restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched");
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    guard.mark("crypto provider installed");
     let password: &[u8] = b"correct horse battery staple CR-B7";
 
     let data_temp = TempDir::new().unwrap();
@@ -85,6 +90,7 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
     // ---- Boot #1: create table, write a row, then shut down cleanly. ----
     {
         let handle = launch(data_dir.clone(), 0, password).await;
+        guard.mark("boot #1 launched");
         let addr = handle.first_tls_exporter_addr().unwrap();
         let (mut r, mut w, sid) = login(addr, password).await;
 
@@ -92,17 +98,24 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
         assert!(matches!(res, DbResponse::Batch { .. }), "create_table");
         let res = roundtrip(&write_req("crb7_items", "ORIG", 7), sid, 2, &mut w, &mut r).await;
         assert!(matches!(res, DbResponse::Batch { .. }), "write");
+        guard.mark("table created and row written (boot #1)");
 
         let _ = w.shutdown().await;
         let mut tmp = [0u8; 1];
         let _ = r.read(&mut tmp).await;
         handle.shutdown().await;
+        guard.mark("boot #1 shut down");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     // Snapshot the CURRENT (pre-restore) data_dir contents in full, so we
     // can later assert byte-for-byte that nothing changed.
     let pre_restore_snapshot = quiescent_snapshot(&data_dir).await;
+    guard.note(
+        "pre-restore snapshot files",
+        pre_restore_snapshot.len().to_string(),
+    );
+    guard.mark("data_dir quiesced and snapshotted");
     assert!(
         !pre_restore_snapshot.is_empty(),
         "sanity: data_dir must contain files before the failed restore attempt"
@@ -111,6 +124,7 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
     // ---- Backup: snapshot the current state ----
     let backup_dest = TempDir::new().unwrap();
     let report = backup::backup(&data_dir, backup_dest.path()).expect("backup ok");
+    guard.mark("backup snapshot written");
 
     // ---- Corrupt the SNAPSHOT's `users` store so the pre-swap
     // invalidation step (which opens `temp_dir/users`, a COPY of this
@@ -161,6 +175,11 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
         !corrupted_rel_paths.is_empty(),
         "sanity: at least one users/ file must have been corrupted"
     );
+    guard.note(
+        "corrupted users/ files",
+        corrupted_rel_paths.len().to_string(),
+    );
+    guard.mark("snapshot users/ store corrupted");
 
     let manifest_path = report.dest_dir.join(backup::MANIFEST_FILE_NAME);
     let manifest_raw = std::fs::read(&manifest_path).unwrap();
@@ -185,6 +204,7 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
     // invalidation step (Step 4) it's meant to target.
     backup::verify_manifest(&report.dest_dir)
         .expect("patched manifest must verify against the corrupted snapshot content");
+    guard.mark("patched manifest verifies (failure target is step 4, not verification)");
 
     // ---- Restore MUST fail at the pre-swap invalidation step (the
     // corrupted `users` store cannot be opened as a fjall keyspace). Uses
@@ -195,6 +215,8 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
     // task's reordering fix, and would otherwise pollute the
     // byte-for-byte comparison below with an unrelated diff. ----
     let err = restore::restore(&report.dest_dir, &data_dir, true).unwrap_err();
+    guard.note("restore error", format!("{err}"));
+    guard.mark("restore failed at the pre-swap invalidation step as expected");
     eprintln!("restore failed as expected: {err}");
 
     // ---- Core guarantee: data_dir is BYTE-FOR-BYTE unchanged, and no
@@ -223,6 +245,7 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
              differing entries: {diffs:#?}"
         );
     }
+    guard.mark("data_dir byte-for-byte unchanged after the failed restore");
 
     // Scoped to a sibling name derived from THIS test's own data_dir name
     // (`restore.rs`'s naming scheme is `{dir_name}.pre_restore_backup_{stamp}`)
@@ -241,10 +264,12 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
         !found_pre_restore_sibling,
         "no .pre_restore_backup_* sibling must exist for this test's data_dir — the swap never ran"
     );
+    guard.mark("no .pre_restore_backup_* sibling — the swap never ran");
 
     // ---- Regression: the server can still boot normally against the
     // untouched, original data_dir. ----
     let handle = launch(data_dir.clone(), 0, password).await;
+    guard.mark("boot #2 against the untouched data_dir launched");
     let addr = handle.first_tls_exporter_addr().unwrap();
     let (mut r, mut w, sid) = login(addr, password).await;
     let res = roundtrip(&read_req("crb7_items"), sid, 1, &mut w, &mut r).await;
@@ -263,4 +288,5 @@ async fn restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched() {
     let mut tmp = [0u8; 1];
     let _ = r.read(&mut tmp).await;
     handle.shutdown().await;
+    guard.mark("boot #2 shut down; original data verified intact");
 }
