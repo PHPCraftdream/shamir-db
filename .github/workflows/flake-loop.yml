@@ -4,6 +4,19 @@ name: flake-loop
 # loop with full logs. Dispatch with `gh workflow run flake-loop.yml --ref <branch>`.
 on:
   workflow_dispatch:
+    inputs:
+      package:
+        description: Crate to test (scripts/test.sh -p)
+        type: string
+        default: shamir-db
+      filters:
+        description: Space-separated nextest name filters
+        type: string
+        default: durability_levels_tests durability_policy_tests
+      iterations:
+        description: How many times to run the filtered tests
+        type: string
+        default: '30'
   # A workflow that exists only on a branch cannot be dispatched through the
   # API, so the FLAKE-2 branch also runs it when this file changes.
   push:
@@ -25,19 +38,24 @@ jobs:
         with:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
-      - name: Run target tests 30x with full logs
+      - name: Run target tests in a loop with full logs
         shell: bash
+        env:
+          FLAKE_PACKAGE: ${{ inputs.package || 'shamir-db' }}
+          FLAKE_FILTERS: ${{ inputs.filters || 'durability_levels_tests durability_policy_tests' }}
+          FLAKE_ITERATIONS: ${{ inputs.iterations || '30' }}
         run: |
           failed=0
           logdir="$PWD/flake-logs"
           mkdir -p "$logdir"
-          for i in $(seq 1 30); do
+          for i in $(seq 1 "${FLAKE_ITERATIONS}"); do
             log="$logdir/iteration-$i.log"
             echo "=== iteration $i ==="
             # `shell: bash` runs with -e: capture the exit code explicitly so a
             # failing iteration does not end the loop.
             rc=0
-            ./scripts/test.sh -p shamir-db -- durability_levels_tests durability_policy_tests >"$log" 2>&1 || rc=$?
+            # shellcheck disable=SC2086 # the filters are a space-separated list on purpose
+            ./scripts/test.sh -p "${FLAKE_PACKAGE}" -- ${FLAKE_FILTERS} >"$log" 2>&1 || rc=$?
             echo "=== iteration $i exit code: $rc ==="
             grep -E "SLOW|FAIL|TIMEOUT|shutdown stage slow" "$log" || true
             if [ "$rc" -ne 0 ]; then
