@@ -1,6 +1,6 @@
 # Two-tier WASM compilation: Winch first, Cranelift for hot functions
 
-Status: accepted by the owner (2026-11-05). Scope: `shamir-wasm-host` (engine and
+Status: implemented (core, 2026-11-05; see Implementation notes at the end of this document). Scope: `shamir-wasm-host` (engine and
 function slot), call sites in `shamir-db` stay source-compatible. Out of scope here: the
 DDL/OQL surface for the mode (PROC-3b), the composite content hash and upload/download
 (PROC-1), a new source language (PROC-2).
@@ -46,8 +46,8 @@ modules, so the upgrade must be driven by hotness, not done for every function.
   semaphore (`background_jobs`), compile with the optimized engine, `instantiate_pre`, swap
   the slot. The job holds a `Weak` to the function state so a dropped function does not keep
   compiling for nobody.
-* Modes (`TierMode`): `Auto` (default, as above), `Now` (compile both synchronously at
-  creation, slot starts optimized), `Never` (stay on the fast tier; the upgrade is never
+* Modes (`TierMode`): `Auto` (default, as above), `Now` (compile the optimized tier
+  synchronously at creation; no fast slot is built and no upgrade is scheduled), `Never` (stay on the fast tier; the upgrade is never
   scheduled).
 * Defaults: `hot_calls = 64`, `background_jobs = max(1, cores / 4)`. The break-even point
   depends on the workload: a compute-bound procedure repays the Cranelift compile in a handful
@@ -66,14 +66,15 @@ modules, so the upgrade must be driven by hotness, not done for every function.
 
 ## Resources
 
-* Two engines mean two pooling reservations (virtual address space only) and two epoch
-  tickers. The ticker thread must tick **both** engines (one thread holding two `EngineWeak`s
-  is fine) and still exit when both are gone.
+* Two engines mean two pooling reservations (virtual address space only). One epoch-ticker
+  thread holds both engines' `EngineWeak`s, ticks **both** engines, and exits on the first
+  tick after the last strong `Engine` is gone.
 * The incremental compile cache is a Cranelift feature: enable it only on the optimized
   engine; the Winch engine compiles without it.
-* Binary size: the `winch` feature of `wasmtime` becomes part of the normal build (estimated
-  +1-3 MB). The `bench-strategies` feature keeps Pulley and the environment switch for A/B
-  runs; it must still compile.
+* Binary size: `winch` is a default feature of the `wasmtime` dependency in
+  `shamir-wasm-host`, so it is part of the normal build. The `bench-strategies` feature (off
+  by default, never enabled by the server build) additionally enables Pulley and the
+  `SHAMIR_WASM_STRATEGY` environment switch for A/B runs; it still compiles.
 
 ## Security
 
@@ -106,3 +107,36 @@ and epoch interruption trap identically on both tiers; both engines' epochs adva
   `--features bench-strategies` for the host crate), fmt and `check_layout.py` are clean.
 * `wasm-bench` (manual workflow) shows the cold start of a freshly created function on the
   fast tier and the post-upgrade warm call on the optimized tier.
+
+## Implementation notes
+
+Implemented in `shamir-wasm-host` (commit `feat(wasm-host): two-tier compilation core`).
+Files:
+
+* `crates/shamir-wasm-host/src/wasm/engine/wasm_engine.rs` — the engine pair, per-tier
+  pooling with fallback, the single epoch ticker for both engines, `compile_fast` /
+  `compile_optimized`, the upgrade permit semaphore, `TierStats`.
+* `crates/shamir-wasm-host/src/wasm/engine/tier.rs` / `tier_mode.rs` / `tier_options.rs` /
+  `tier_stats.rs` — `Tier`, `TierMode`, `TierOptions` (defaults: enabled, `hot_calls = 64`,
+  `background_jobs = max(1, cores / 4)`), `TierStats`.
+* `crates/shamir-wasm-host/src/wasm/engine/tier_upgrade.rs` — `FunctionSlot` /
+  `FunctionShared` (the `ArcSwap` slot), the call-path hook `maybe_schedule_upgrade`, the
+  bounded background upgrade job with one 16x-threshold retry.
+* `crates/shamir-wasm-host/src/wasm/wasm_function.rs` — creation paths (`from_wat`,
+  `from_binary`, `from_binary_blocking` and their `_with_mode` variants),
+  `compile_initial_slot` (tier decision + `info` log), the public `tier()` accessor.
+
+Deviations from the design as written above:
+
+* `WasmEngine::compile` is test-only: kept under its historical name for the compile-cache
+  test suite and compiled under `cfg(test)`; production compiles go through
+  `compile_fast` / `compile_optimized`.
+* The pooling ceiling follows the optimized engine: `pooling_memory_ceiling` reports the
+  optimized engine's active ceiling, and the fast engine pools with the same ceiling or not
+  at all. If the fast engine's own pool falls back to on-demand allocation, the optimized
+  engine's ceiling still drives limit validation: stricter, never looser.
+* The fast engine is not built when tiering is disabled (`TierOptions::enabled == false`):
+  a single-tier optimized engine.
+* `Now` compiles only the optimized tier (the design text above said both tiers).
+* `Never` falls back to the optimized tier when there is no fast engine (tiering disabled or
+  the fast engine failed to build); not an error for the caller.
