@@ -103,7 +103,7 @@ pub(crate) async fn bridge_task(
 ) {
     // Release this subscription's registry slot on EVERY exit path. Bound
     // before any `.await` so cancellation-unwind fires its `Drop` too.
-    let _slot_guard = SubscriptionSlotGuard { registry, sub_id };
+    let slot_guard = SubscriptionSlotGuard { registry, sub_id };
 
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
@@ -223,6 +223,11 @@ pub(crate) async fn bridge_task(
                 }
             }
         }
+
+        // The changefeed receivers are attached and the activation cut is sampled: from here
+        // every commit is delivered live. Release the activation barrier the `Subscribe`
+        // handler is waiting on, so the client's ack never precedes the attach.
+        slot_guard.registry.signal_ready(sub_id);
 
         let terminal_gates = delivery_gates.clone();
         let bridge_work = async {

@@ -782,7 +782,8 @@ impl ShamirDbHandler {
                     &batch,
                     &mut response,
                     actor.clone(),
-                );
+                )
+                .await;
 
                 DbResponse::Batch { response }
             }

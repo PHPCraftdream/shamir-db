@@ -3,6 +3,8 @@ use std::sync::Arc;
 use shamir_collections::TMap;
 use shamir_connect::server::conn_services::{ConnectionServices, PushRejected, PushSink};
 use shamir_db::access::Actor;
+use shamir_db::engine::repo::{BoxRepoFactory, RepoConfig};
+use shamir_db::engine::table::TableConfig;
 use shamir_db::types::common::new_map;
 use shamir_db::types::value::QueryValue;
 use shamir_db::ShamirDb;
@@ -26,6 +28,12 @@ impl PushSink for NoopPush {
 #[tokio::test]
 async fn activate_subscriptions_injects_sub_id_into_response() {
     let db = Arc::new(ShamirDb::init_memory().await.unwrap());
+    // The subscribed repo and table must exist: a bridge whose source is unavailable exits before
+    // attaching, and the activation barrier then returns with the slot already released.
+    db.create_db("test_db").await.expect("create_db");
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
+    db.add_repo("test_db", repo_config).await.expect("add_repo");
 
     let registry = Arc::new(SubscriptionRegistry::new());
     let push: Arc<dyn PushSink> = Arc::new(NoopPush);
@@ -103,7 +111,8 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
         &batch,
         &mut response,
         Actor::System,
-    );
+    )
+    .await;
 
     let qr = response
         .results
@@ -127,6 +136,12 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
     // further Subscribe ops rejected (error injected into the alias result),
     // not silently accepted as new bridge tasks.
     let db = Arc::new(ShamirDb::init_memory().await.unwrap());
+    // The subscribed repo and table must exist: a bridge whose source is unavailable exits before
+    // attaching, and the activation barrier then returns with the slot already released.
+    db.create_db("test_db").await.expect("create_db");
+    let repo_config =
+        RepoConfig::new("main", BoxRepoFactory::in_memory()).add_table(TableConfig::new("users"));
+    db.add_repo("test_db", repo_config).await.expect("add_repo");
 
     let registry = Arc::new(SubscriptionRegistry::with_cap(2));
     let push: Arc<dyn PushSink> = Arc::new(NoopPush);
@@ -209,7 +224,8 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
         &batch,
         &mut response,
         Actor::System,
-    );
+    )
+    .await;
 
     // Exactly 2 subscriptions active (the cap); the 3rd was rejected.
     assert_eq!(registry.count(), 2, "cap must bound active subscriptions");
@@ -319,19 +335,12 @@ async fn bridge_self_exit_releases_registry_slot() {
         &batch,
         &mut response,
         Actor::System,
-    );
+    )
+    .await;
 
-    // The slot was reserved + inserted synchronously; the spawned bridge task
-    // has not been polled yet (spawn does not run the body inline).
-    assert_eq!(
-        registry.count(),
-        1,
-        "slot reserved synchronously before the bridge task is scheduled"
-    );
-
-    // Yield repeatedly until the bridge's guard has released the slot. Bounded
-    // so a genuine leak surfaces as a test failure rather than an infinite
-    // loop; no fixed sleep, so it is neither flaky nor slow.
+    // The activation barrier waits for the bridge; a bridge that exits on its own (here: no
+    // authorized source) has already dropped its slot guard by the time the ack is produced.
+    // Poll anyway (bounded `yield_now`, no sleep) so a slow guard `Drop` cannot make this flaky.
     let mut released = false;
     for _ in 0..10_000 {
         if registry.count() == 0 {

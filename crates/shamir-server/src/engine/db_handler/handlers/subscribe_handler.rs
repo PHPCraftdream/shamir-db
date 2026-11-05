@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_db::access::Actor;
@@ -7,6 +8,11 @@ use shamir_query_types::batch::{BatchOp, BatchRequest, BatchResponse};
 use shamir_types::types::value::QueryValue;
 
 use crate::subscriptions::{bridge, SubscriptionRegistry};
+
+/// Upper bound on how long a `Subscribe` ack waits for the bridge task to attach its changefeed
+/// receivers. Normal attach takes milliseconds; the bound only protects the request from a
+/// stuck bridge (the subscription then stays active and the ack goes out as before).
+const ACTIVATION_WAIT: Duration = Duration::from_secs(5);
 
 /// Activates/deactivates subscriptions after a successful batch execute.
 /// Called from handler.rs alongside persist_table_lifecycle.
@@ -26,7 +32,15 @@ use crate::subscriptions::{bridge, SubscriptionRegistry};
 /// all-denied case by aborting (no receiver, no push). A future HIGH task
 /// could surface this as a synchronous rejection if `activate_subscriptions`
 /// is made async.
-pub(crate) fn activate_subscriptions(
+///
+/// # Activation barrier
+///
+/// The `sub_id` is not acknowledged to the client until each spawned bridge has
+/// attached its changefeed receivers and sampled the activation cut (bounded by
+/// [`ACTIVATION_WAIT`]). Without it the ack raced the attach: a write the client issued right
+/// after the ack could commit BEFORE the cut and never be delivered, because a live-only
+/// subscription starts at the cut.
+pub(crate) async fn activate_subscriptions(
     conn: &ConnectionServices,
     db: &Arc<ShamirDb>,
     db_name: &str,
@@ -55,6 +69,7 @@ pub(crate) fn activate_subscriptions(
         return;
     };
 
+    let mut ready_waiters = Vec::new();
     for (alias, entry) in &batch.queries {
         match &entry.op {
             BatchOp::Subscribe(op) => {
@@ -84,9 +99,10 @@ pub(crate) fn activate_subscriptions(
                 // handler got around to inserting the entry, leaving a
                 // permanently-dangling slot once the entry was inserted
                 // afterward. See `SubscriptionRegistry::reserve_pending`.
-                if !registry.reserve_pending(sub_id) {
+                let Some(ready_rx) = registry.reserve_pending_ready(sub_id) else {
                     continue;
-                }
+                };
+                ready_waiters.push(ready_rx);
                 // Operator-configured query limits (finding 2b-ii): the batch
                 // limits here are already capped to the operator maximums in
                 // `handler::execute`. Reactive `Batch`/`Call` deliveries run
@@ -121,5 +137,10 @@ pub(crate) fn activate_subscriptions(
             }
             _ => {}
         }
+    }
+    for ready_rx in ready_waiters {
+        // Err = the bridge exited (denied/unavailable source) or the wait timed out: the ack goes
+        // out either way, exactly as before the barrier existed.
+        let _ = tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await;
     }
 }
