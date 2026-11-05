@@ -123,6 +123,9 @@ impl WasmEngine {
         // instead of being copied byte-by-byte on each instantiation.
         config.memory_init_cow(true);
 
+        #[cfg(feature = "bench-strategies")]
+        super::bench_strategies::apply(&mut config)?;
+
         // ── Allocator strategy ───────────────────────────────────────
         //
         // By default, use the pooling allocator for slot reuse under

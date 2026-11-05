@@ -108,6 +108,11 @@ name = "engine_perf"
 harness = false
 
 [[bench]]
+name = "wasm_db_calls"
+path = "benches/engine_perf/wasm_db_calls.rs"
+harness = false
+
+[[bench]]
 name = "authorize_gate"
 harness = false
 
