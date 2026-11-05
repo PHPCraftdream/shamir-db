@@ -47,11 +47,22 @@ shamir-private-dir = { path = "../shamir-private-dir" }
 
 [dev-dependencies]
 argon2 = "0.5"
+bench-scale-tool = { workspace = true, features = ["async"] }
 # DEV-ONLY: `test-util` enables paused time (`start_paused`/`advance()`)
 # for the deterministic wall-clock-deadline regression. Same tokio
 # package+version as the main dependency — features unify, `Cargo.lock`
 # is unchanged.
 tokio = { version = "1.49.0", features = ["test-util"] }
+
+# Bench/A-B only: the Winch and Pulley backends plus env-selected engine strategy
+# (`SHAMIR_WASM_STRATEGY`). Off by default and never enabled by the server build.
+[features]
+bench-strategies = ["wasmtime/winch", "wasmtime/pulley"]
+
+[[bench]]
+name = "wasm_procedures"
+path = "benches/wasm_procedures/main.rs"
+harness = false
 
 [lib]
 doctest = false

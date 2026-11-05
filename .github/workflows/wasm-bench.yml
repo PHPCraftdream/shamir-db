@@ -1,0 +1,83 @@
+name: wasm-bench
+
+# Manual measurements of the WASM procedure path: cold/warm start, inner computation
+# against native, guest/host boundary, sandbox metering, and database calls from a guest.
+#
+# workflow_dispatch ONLY, like perf-gate and hot-path-ab: no push, pull_request or schedule
+# trigger, so it can never become part of the regular CI run. The whole measured run
+# (calibration + fixed-iteration sweep of both bench binaries) must stay within 15 seconds;
+# the step fails when it does not. Compilation happens before the clock starts.
+#
+# Hosted runners are shared and noisy: compare strategies from the same dispatch (jobs run in
+# parallel on equal runners) and read ratios, not absolute nanoseconds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      strategies:
+        description: JSON list of code generators to measure, one job each (cranelift | winch | pulley)
+        type: string
+        required: false
+        default: '["cranelift","winch","pulley"]'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: wasm procedures (${{ matrix.strategy }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        strategy: ${{ fromJSON(inputs.strategies) }}
+    env:
+      SHAMIR_WASM_STRATEGY: ${{ matrix.strategy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
+
+      # Release profile: the native twins of the compute kernels must be optimised for the
+      # ratio to mean anything (the default bench profile is opt-level 1).
+      - name: build the bench binaries (not timed)
+        run: |
+          cargo bench -p shamir-wasm-host --bench wasm_procedures --features bench-strategies --profile=release --no-run
+          if [ "${SHAMIR_WASM_STRATEGY}" = "cranelift" ]; then
+            cargo bench -p shamir-db --bench wasm_db_calls --profile=release --no-run
+          fi
+
+      - name: measure (budget 15 s)
+        run: |
+          set -o pipefail
+          mkdir -p bench-out
+          start=$(date +%s.%N)
+          cargo bench -p shamir-wasm-host --bench wasm_procedures --features bench-strategies --profile=release -- --calibrate 0.1 | tee bench-out/wasm_procedures.calibrate.log
+          cargo bench -p shamir-wasm-host --bench wasm_procedures --features bench-strategies --profile=release | tee bench-out/wasm_procedures.log
+          if [ "${SHAMIR_WASM_STRATEGY}" = "cranelift" ]; then
+            cargo bench -p shamir-db --bench wasm_db_calls --profile=release -- --calibrate 0.1 | tee bench-out/wasm_db_calls.calibrate.log
+            cargo bench -p shamir-db --bench wasm_db_calls --profile=release | tee bench-out/wasm_db_calls.log
+          fi
+          end=$(date +%s.%N)
+          elapsed=$(python3 -c "print(round(${end} - ${start}, 1))")
+          echo "measured wall time: ${elapsed}s" | tee bench-out/elapsed.txt
+          python3 -c "import sys; sys.exit(0 if ${elapsed} <= 15.0 else 1)" || { echo "::error::measured run took ${elapsed}s, over the 15 s budget"; exit 1; }
+
+      - name: summary
+        if: always()
+        run: |
+          python3 scripts/bench/wasm_procedures_report.py bench-out "${SHAMIR_WASM_STRATEGY}" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        if: always()
+        with:
+          name: wasm-bench-${{ matrix.strategy }}
+          path: bench-out
+          if-no-files-found: ignore
