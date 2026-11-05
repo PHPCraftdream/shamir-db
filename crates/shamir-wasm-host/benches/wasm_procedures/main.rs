@@ -22,7 +22,7 @@
 //! (needs `--features bench-strategies`). The switch applies to the OPTIMIZED tier's
 //! engine only — the fast tier is always Winch. An unsupported alternative prints `SKIP`
 //! and exits successfully, a failing default strategy panics. The whole run is sized to stay within about 15 seconds: iteration counts are
-//! small and pinned in `bench-iters.txt` (`-- --calibrate 0.1` regenerates them).
+//! small and pinned in `bench-iters.txt` (`-- --calibrate 0.05` regenerates them).
 
 mod cold_start;
 mod compute;

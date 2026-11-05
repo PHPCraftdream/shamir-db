@@ -59,10 +59,10 @@ jobs:
           set -o pipefail
           mkdir -p bench-out
           start=$(date +%s.%N)
-          cargo bench -p shamir-wasm-host --bench wasm_procedures --features bench-strategies --profile=release -- --calibrate 0.1 | tee bench-out/wasm_procedures.calibrate.log
+          cargo bench -p shamir-wasm-host --bench wasm_procedures --features bench-strategies --profile=release -- --calibrate 0.05 | tee bench-out/wasm_procedures.calibrate.log
           cargo bench -p shamir-wasm-host --bench wasm_procedures --features bench-strategies --profile=release | tee bench-out/wasm_procedures.log
           if [ "${SHAMIR_WASM_STRATEGY}" = "cranelift" ]; then
-            cargo bench -p shamir-db --bench wasm_db_calls --profile=release -- --calibrate 0.1 | tee bench-out/wasm_db_calls.calibrate.log
+            cargo bench -p shamir-db --bench wasm_db_calls --profile=release -- --calibrate 0.05 | tee bench-out/wasm_db_calls.calibrate.log
             cargo bench -p shamir-db --bench wasm_db_calls --profile=release | tee bench-out/wasm_db_calls.log
           fi
           end=$(date +%s.%N)

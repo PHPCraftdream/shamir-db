@@ -66,12 +66,13 @@ pub fn register(h: &mut Harness) {
     // Two-tier compile cells: the same module created through the fast
     // (Winch) and the optimized (Cranelift) path — the compile side of the
     // tier trade-off report.
-    let mut tier_modules = vec![
+    // One kernel-sized module (`int_sum`) stands for all compute kernels: their
+    // guests are the same size, and each extra pair costs bench budget.
+    for (id, wat) in [
         ("identity", kernels::identity()),
         ("fn64", kernels::many_functions(64)),
-    ];
-    tier_modules.extend(kernels::KERNELS.iter().map(|k| (k.name, (k.wat)())));
-    for (id, wat) in tier_modules {
+        ("int_sum", kernels::int_sum_wat()),
+    ] {
         for (suffix, mode) in [("fast", TierMode::Never), ("optimized", TierMode::Now)] {
             let engine = engine.clone();
             let wat = wat.clone();
