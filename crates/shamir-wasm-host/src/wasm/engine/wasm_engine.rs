@@ -5,6 +5,8 @@ use super::{TierOptions, TierStats};
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::wasm::compile_cache::DiskCacheStore;
 use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConfig};
@@ -34,6 +36,35 @@ fn apply_bench_strategy(config: &mut wasmtime::Config) -> FnResult<()> {
         }
     }
     Ok(())
+}
+
+/// Test-only fault injection for the two-tier paths (never compiled into
+/// non-test builds). Each engine owns its own switches, so parallel tests
+/// on distinct engines cannot interfere.
+///
+/// * `fail_fast_compile` — [`WasmEngine::compile_fast`] fails with an
+///   injected error, forcing the creation-time `Auto` fallback to the
+///   optimized tier without needing a module the Winch backend rejects.
+/// * `upgrade_fault` — the background upgrade job fails
+///   ([`TierFaults::UPGRADE_FAIL`]) or panics ([`TierFaults::UPGRADE_PANIC`])
+///   instead of compiling, exercising the failure/retry/exhaustion machine.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct TierFaults {
+    /// Forces the fast-tier compile to fail.
+    pub(crate) fail_fast_compile: AtomicBool,
+    /// What the background upgrade job does instead of compiling.
+    pub(crate) upgrade_fault: AtomicU8,
+}
+
+#[cfg(test)]
+impl TierFaults {
+    /// Upgrade job compiles normally.
+    pub(crate) const UPGRADE_NONE: u8 = 0;
+    /// Upgrade job fails with an injected compile error.
+    pub(crate) const UPGRADE_FAIL: u8 = 1;
+    /// Upgrade job panics (exercises the `JoinError` failure path).
+    pub(crate) const UPGRADE_PANIC: u8 = 2;
 }
 
 // ── WasmEngine ────────────────────────────────────────────────────────
@@ -69,6 +100,9 @@ pub struct WasmEngine {
     upgrade_permits: Arc<Semaphore>,
     /// Upgrade lifecycle counters shared with the background jobs.
     stats: Arc<TierStats>,
+    /// Test-only fault-injection switches (see [`TierFaults`]).
+    #[cfg(test)]
+    faults: Arc<TierFaults>,
     /// Test-only handle to observe cache hits through the public constructor.
     #[cfg(test)]
     store: Option<Arc<DiskCacheStore>>,
@@ -222,6 +256,8 @@ impl WasmEngine {
             tier_options: options.tier,
             upgrade_permits: Arc::new(Semaphore::new(options.tier.background_jobs.max(1))),
             stats: Arc::new(TierStats::default()),
+            #[cfg(test)]
+            faults: Arc::new(TierFaults::default()),
             #[cfg(test)]
             store,
         })
@@ -454,6 +490,12 @@ impl WasmEngine {
         &self.stats
     }
 
+    /// Test-only fault-injection switches of this engine (see [`TierFaults`]).
+    #[cfg(test)]
+    pub(crate) fn faults(&self) -> &Arc<TierFaults> {
+        &self.faults
+    }
+
     /// Permit pool bounding concurrent background upgrade compiles.
     pub(crate) fn upgrade_permits(&self) -> &Arc<Semaphore> {
         &self.upgrade_permits
@@ -467,6 +509,13 @@ impl WasmEngine {
     /// Compiles sanitized Wasm bytes on the fast (Winch) engine. Errors when
     /// the fast engine is unavailable (single-tier fallback).
     pub fn compile_fast(&self, wasm: &[u8]) -> Result<Module, wasmtime::Error> {
+        // Test-only seam (see `TierFaults`): forces the fast-tier compile to
+        // fail so the creation-time fallback to the optimized tier can be
+        // pinned without a module the Winch backend rejects.
+        #[cfg(test)]
+        if self.faults.fail_fast_compile.load(Ordering::Relaxed) {
+            return Err(wasmtime::Error::msg("injected fast-tier compile failure"));
+        }
         match &self.fast {
             Some(engine) => Module::from_binary(engine, wasm),
             None => Err(wasmtime::Error::msg(

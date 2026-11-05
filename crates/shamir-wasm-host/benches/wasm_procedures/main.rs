@@ -11,12 +11,17 @@
 //!   calls per invocation. Per-call cost = (cell − `warm/call_identity`) / 100.
 //! * `metering/*` — the same kernels on a bare engine with fuel and/or epoch interruption
 //!   on or off: what the sandbox's metering costs.
+//! * `tier/*` and the `cold/compile_*_{fast,optimized}` / `*_fast` cells — the two-tier
+//!   trade-off: fast (Winch) vs optimized (Cranelift) compile and per-call costs;
+//!   `scripts/bench/wasm_procedures_report.py` turns them into per-kernel break-even
+//!   numbers.
 //!
 //! Real database calls from a guest live in `shamir-db` (`wasm_db_calls`).
 //!
 //! The code generator is picked with `SHAMIR_WASM_STRATEGY=cranelift|winch|pulley`
-//! (needs `--features bench-strategies`); an unsupported alternative prints `SKIP` and exits
-//! successfully, a failing default strategy panics. The whole run is sized to stay within about 15 seconds: iteration counts are
+//! (needs `--features bench-strategies`). The switch applies to the OPTIMIZED tier's
+//! engine only — the fast tier is always Winch. An unsupported alternative prints `SKIP`
+//! and exits successfully, a failing default strategy panics. The whole run is sized to stay within about 15 seconds: iteration counts are
 //! small and pinned in `bench-iters.txt` (`-- --calibrate 0.1` regenerates them).
 
 mod cold_start;

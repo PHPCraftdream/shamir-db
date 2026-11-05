@@ -8,6 +8,8 @@
 //! [`WasmEngine`], and holds only a `Weak` to the function state so a
 //! dropped function never keeps a compile running for nobody.
 
+#[cfg(test)]
+use super::TierFaults;
 use super::{Tier, TierMode, WasmEngine, WasmLimits};
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::wasm::wasm_function::HostState;
@@ -212,6 +214,19 @@ fn upgrade_job(weak: &Weak<FunctionShared>, is_retry: bool) {
     };
     let started = Instant::now();
     let compiled = (|| -> FnResult<FunctionSlot> {
+        // Test-only fault injection (see `TierFaults`): a failing or
+        // panicking upgrade counts as failed and leaves exactly one retry,
+        // never a wedged state machine.
+        #[cfg(test)]
+        match engine.faults().upgrade_fault.load(Ordering::Relaxed) {
+            TierFaults::UPGRADE_FAIL => {
+                return Err(FunctionError::Compute(
+                    "injected optimized-tier compile failure".into(),
+                ));
+            }
+            TierFaults::UPGRADE_PANIC => panic!("injected tier-upgrade panic"),
+            _ => {}
+        }
         let module = engine
             .compile_optimized(&wasm)
             .map_err(|e| FunctionError::Compute(format!("optimized tier compile failed: {e}")))?;

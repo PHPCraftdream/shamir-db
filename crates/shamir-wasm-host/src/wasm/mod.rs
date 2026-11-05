@@ -35,6 +35,11 @@ pub(crate) use wasm_function::test_linker_and_store;
 #[cfg(test)]
 pub(crate) use fuel::FuelObserver;
 
+/// Test-only re-export: the fault-injection switches the two-tier engine
+/// tests drive through `WasmEngine::faults()` (see `engine::wasm_engine`).
+#[cfg(test)]
+pub(crate) use engine::TierFaults;
+
 /// Re-export: lets `compile::compile_rust_source_blocking` offload the
 /// synchronous pipeline via the shared `spawn_blocking` helper, and
 /// `tests::runtime::compile_tests` exercise its `JoinError` mapping path.

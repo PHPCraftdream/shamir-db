@@ -17,3 +17,8 @@ pub use tier_mode::TierMode;
 pub use tier_options::TierOptions;
 pub use tier_stats::TierStats;
 pub use wasm_engine::{WasmEngine, WasmEngineOptions, WasmLimits};
+
+/// Test-only re-export: the two-tier fault-injection switches (see
+/// `wasm_engine`); the `wasm` module forwards them to the tests.
+#[cfg(test)]
+pub(crate) use wasm_engine::TierFaults;
