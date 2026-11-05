@@ -33,3 +33,31 @@ fn tracing_ring_layer_captures_events_into_the_shared_ring() {
         records.len()
     );
 }
+
+/// The layer must not cap the verbosity of a composed subscriber: another
+/// layer of the same dispatch (a test asserting on TRACE events) still sees
+/// them, while the ring itself keeps only DEBUG and below.
+#[test]
+fn tracing_ring_layer_does_not_cap_the_composed_subscribers_verbosity() {
+    let layer = tracing_ring_layer();
+    assert!(
+        <crate::tracing_capture::TracingRingLayer as tracing_subscriber::Layer<
+            tracing_subscriber::Registry,
+        >>::max_level_hint(&layer)
+        .is_none(),
+        "the ring layer must not install a max level hint"
+    );
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::trace!(target: "tracing_capture_tests", "trace-level-event-not-kept");
+        tracing::debug!(target: "tracing_capture_tests", "debug-level-event-kept");
+    });
+    let records = shared_ring().snapshot();
+    assert!(records
+        .iter()
+        .any(|r| r.message.contains("debug-level-event-kept")));
+    assert!(!records
+        .iter()
+        .any(|r| r.message.contains("trace-level-event-not-kept")));
+}

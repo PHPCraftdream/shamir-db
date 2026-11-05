@@ -5,8 +5,7 @@
 use crate::ring::shared_ring;
 use std::fmt;
 use tracing::field::{Field, Visit};
-use tracing::level_filters::LevelFilter;
-use tracing::Event;
+use tracing::{Event, Level};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 /// Layer writing every `tracing` event up to `DEBUG` (design: all levels up
@@ -16,6 +15,12 @@ pub struct TracingRingLayer;
 
 impl<S: tracing::Subscriber> Layer<S> for TracingRingLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+        // Filter here, never through `max_level_hint`: a hint would cap the
+        // verbosity every other layer of a composed subscriber sees (a test
+        // asserting on TRACE events would lose them).
+        if *event.metadata().level() > Level::DEBUG {
+            return;
+        }
         let mut visitor = EventFields::default();
         event.record(&mut visitor);
         shared_ring().push(
@@ -23,10 +28,6 @@ impl<S: tracing::Subscriber> Layer<S> for TracingRingLayer {
             event.metadata().target().to_string(),
             visitor.render(),
         );
-    }
-
-    fn max_level_hint(&self) -> Option<LevelFilter> {
-        Some(LevelFilter::DEBUG)
     }
 }
 
