@@ -103,7 +103,8 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
         &batch,
         &mut response,
         Actor::System,
-    );
+    )
+    .await;
 
     let qr = response
         .results
@@ -209,7 +210,8 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
         &batch,
         &mut response,
         Actor::System,
-    );
+    )
+    .await;
 
     // Exactly 2 subscriptions active (the cap); the 3rd was rejected.
     assert_eq!(registry.count(), 2, "cap must bound active subscriptions");
@@ -319,7 +321,8 @@ async fn bridge_self_exit_releases_registry_slot() {
         &batch,
         &mut response,
         Actor::System,
-    );
+    )
+    .await;
 
     // The slot was reserved + inserted synchronously; the spawned bridge task
     // has not been polled yet (spawn does not run the body inline).

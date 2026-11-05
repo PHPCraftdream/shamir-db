@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use scc::HashMap as SccHashMap;
 use shamir_collections::THasher;
 use shamir_tunables::instance_defaults::MAX_SUBSCRIPTIONS_PER_CONNECTION;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 /// An active subscription with its bridge task handle.
@@ -15,6 +16,11 @@ use tokio::task::JoinHandle;
 /// review of task #527's self-exit slot-release fix).
 pub(crate) struct ActiveSubscription {
     pub bridge_handle: Option<JoinHandle<()>>,
+    /// Fired once by the bridge task after it attached its changefeed
+    /// receivers and sampled the activation cut (see
+    /// [`SubscriptionRegistry::signal_ready`]). Dropped unsent when the slot is
+    /// removed first, which wakes the waiter with an error.
+    pub ready: Option<oneshot::Sender<()>>,
 }
 
 impl Drop for ActiveSubscription {
@@ -110,7 +116,32 @@ impl SubscriptionRegistry {
     /// Reserve a handle-less placeholder slot for `id` before spawning.
     /// Returns `false` and releases the already-reserved slot if the registry
     /// is closed or the id is duplicated.
+    #[cfg(test)]
     pub(crate) fn reserve_pending(&self, id: u64) -> bool {
+        self.reserve_pending_inner(id, None)
+    }
+
+    /// [`Self::reserve_pending`] plus an activation barrier: the returned
+    /// receiver resolves when the bridge task has attached its changefeed
+    /// receivers ([`Self::signal_ready`]) or errors if the slot is dropped
+    /// first. `None` when the reservation itself failed.
+    pub(crate) fn reserve_pending_ready(&self, id: u64) -> Option<oneshot::Receiver<()>> {
+        let (tx, rx) = oneshot::channel();
+        self.reserve_pending_inner(id, Some(tx)).then_some(rx)
+    }
+
+    /// Mark the subscription `id` as attached to its changefeed: events
+    /// committed after this call are delivered live. Called by the bridge task
+    /// once; a missing slot or an already-fired barrier is a no-op.
+    pub(crate) fn signal_ready(&self, id: u64) {
+        self.subs.update_sync(&id, |_, sub| {
+            if let Some(tx) = sub.ready.take() {
+                let _ = tx.send(());
+            }
+        });
+    }
+
+    fn reserve_pending_inner(&self, id: u64, ready: Option<oneshot::Sender<()>>) -> bool {
         if self.closed.load(Ordering::Acquire) {
             self.release_reservation();
             return false;
@@ -121,6 +152,7 @@ impl SubscriptionRegistry {
                 id,
                 ActiveSubscription {
                     bridge_handle: None,
+                    ready,
                 },
             )
             .is_err()

@@ -63,3 +63,35 @@ async fn rv_server_6ca31df8_admission_rejected_after_close_all() {
     assert!(registry.try_reserve().is_err());
     assert_eq!(registry.count(), 0);
 }
+
+#[tokio::test]
+async fn reserve_pending_ready_resolves_after_signal_ready() {
+    let reg = SubscriptionRegistry::with_cap(4);
+    reg.try_reserve().unwrap();
+    let id = reg.next_id();
+
+    let rx = reg
+        .reserve_pending_ready(id)
+        .expect("reservation must succeed");
+    reg.signal_ready(id);
+    assert!(rx.await.is_ok(), "the barrier must fire after signal_ready");
+
+    // A second signal is a no-op (the sender is consumed).
+    reg.signal_ready(id);
+    assert_eq!(reg.count(), 1);
+}
+
+#[tokio::test]
+async fn reserve_pending_ready_errors_when_the_slot_is_removed_first() {
+    let reg = SubscriptionRegistry::with_cap(4);
+    reg.try_reserve().unwrap();
+    let id = reg.next_id();
+
+    let rx = reg
+        .reserve_pending_ready(id)
+        .expect("reservation must succeed");
+    // The bridge exited before attaching (denied / unavailable source): its slot guard removes
+    // the slot, which drops the sender and wakes the waiter with an error instead of hanging.
+    assert!(reg.remove(id));
+    assert!(rx.await.is_err(), "a dropped slot must wake the waiter");
+}
