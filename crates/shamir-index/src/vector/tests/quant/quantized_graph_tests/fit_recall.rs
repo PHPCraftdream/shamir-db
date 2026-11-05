@@ -3,10 +3,11 @@
 //! upserts, Cosine clamp, and delete-on-quantized-index tombstoning.
 //! Shared runner/RNG helpers live in `runner.rs`.
 
-use super::{clustered, phase, recall_at_k, rid, run_graph_test};
+use super::{clustered, note_recall_stats, phase, recall_at_k, rid, run_graph_test};
 use crate::kind::{VectorMetric, VectorQuantization};
 use crate::vector::adapter::{SearchOpts, VectorAdapter};
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig};
+use shamir_test_diag::FlakeGuard;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
@@ -125,16 +126,24 @@ async fn fit_transition_at_threshold_body() {
 
 #[test]
 fn recall_sq8_vs_f32_within_two_percent() {
+    // Failure-only flake diagnostics (design:
+    // docs/dev-artifacts/design/flake-failure-logs.md): the report prints
+    // ONLY while the test is panicking; `note_recall_stats` records the
+    // exact statistical setup so a miss is reproducible from the log. The
+    // guard lives here, outside the runner, so it also reports the runner's
+    // deadline panic (raised after the body future is dropped).
+    let guard = FlakeGuard::new("recall_sq8_vs_f32_within_two_percent");
     run_graph_test(
         "recall_sq8_vs_f32_within_two_percent",
-        recall_sq8_vs_f32_within_two_percent_body(),
+        recall_sq8_vs_f32_within_two_percent_body(&guard),
     );
 }
 
-async fn recall_sq8_vs_f32_within_two_percent_body() {
+async fn recall_sq8_vs_f32_within_two_percent_body(guard: &FlakeGuard) {
     let dim = 128u32;
     let n = 1200usize;
     let data = clustered(n, dim as usize, 50, 0.25, 0xBEEF);
+    guard.note("rng seed (clustered LCG)", "0xBEEF");
 
     // Two adapters: f32 (ground truth) and SQ8 (test).
     let cfg = HnswConfig {
@@ -167,6 +176,7 @@ async fn recall_sq8_vs_f32_within_two_percent_body() {
     // deterministically before asserting publication.
     crate::vector::hnsw_adapter::wait_for_fit(&sq8_adapter).await;
     assert!(sq8_adapter.is_quantized(), "SQ8 adapter did not fit");
+    guard.mark("both adapters built; SQ8 fitted");
     phase("recall_sq8_vs_f32", "queries");
 
     // Query the first 100 vectors and compare top-10 overlap.
@@ -187,6 +197,7 @@ async fn recall_sq8_vs_f32_within_two_percent_body() {
         total_recall += recall_at_k(&truth_rids, &cand_rids);
     }
     let avg_recall = total_recall / 100.0;
+    note_recall_stats(guard, n, k as usize, 256, avg_recall as f64, 0.95);
     // Machine-parseable line for `.github/workflows/hnsw-recall-matrix.yml`.
     println!("#1232 recall_sq8_at_10={avg_recall:.4}");
     // Measured recall@10 for SQ8 (4x compression) vs the f32 graph on this

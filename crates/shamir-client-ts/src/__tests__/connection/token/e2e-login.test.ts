@@ -10,6 +10,7 @@ import { installBrowserSocket } from './support/browser-socket.js';
 import { connect as browserConnect, login as browserLogin } from '../../../browser.js';
 import { installBrowserFetch, preloadBrowserCrypto } from './support/browser-fetch.js';
 import { Timeline, awaitLiveEvent, subscriptionLogLines } from './support/subscription-diagnostics.js';
+import { FailureRecorder, withFailureDiagnostics } from './support/failure-diagnostics.js';
 
 function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -113,52 +114,75 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
 
   it('expires a login token at configured login TTL on the server', async () => {
     const fixture = await setupTokenFixture({ loginTtl: 4, loginAllowReadWrite: true });
+    const recorder = new FailureRecorder();
     try {
-      const url = `http://${HOST}:${fixture.server.http}`;
-      const result = await login(loginOptions(`login-ttl-${process.pid}`, url, { mode: 'read_write', channels: 'both' }));
-      const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
-      const observer = installBrowserSocket(ORIGIN);
-      let ws: TokenWsClient | undefined;
-      try {
-        await http.ping();
-        ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
-        await ws.ping();
-        expect(result.metadata.expiresAtNs - result.metadata.createdAtNs).toBe(4_000_000_000n);
-        const closed = await observer.sockets[0]!.waitForClose(15000);
-        expect(closed).toMatchObject({ code: 4012, reason: 'token_expired' });
-        const deadline = Date.now() + 5000;
-        let expired = false;
-        while (Date.now() < deadline) {
-          try { await http.ping(); }
-          catch (error) {
-            if (error instanceof TokenTransportError && error.code === 'unauthorized' && error.status === 401) { expired = true; break; }
-            throw error;
+      await withFailureDiagnostics(recorder, () => fixture.server.logs(), async () => {
+        const url = `http://${HOST}:${fixture.server.http}`;
+        const result = await login(loginOptions(`login-ttl-${process.pid}`, url, { mode: 'read_write', channels: 'both' }));
+        recorder.mark('login issued');
+        recorder.note('ttl ns', (result.metadata.expiresAtNs - result.metadata.createdAtNs).toString());
+        const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
+        const observer = installBrowserSocket(ORIGIN);
+        let ws: TokenWsClient | undefined;
+        try {
+          await http.ping();
+          recorder.mark('http ping ok');
+          ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
+          recorder.mark('browser ws connected');
+          await ws.ping();
+          recorder.mark('ws ping ok');
+          expect(result.metadata.expiresAtNs - result.metadata.createdAtNs).toBe(4_000_000_000n);
+          const closed = await observer.sockets[0]!.waitForClose(15000);
+          recorder.event(`close code=${closed.code} reason=${closed.reason}`);
+          expect(closed).toMatchObject({ code: 4012, reason: 'token_expired' });
+          const deadline = Date.now() + 5000;
+          let expired = false;
+          let attempts = 0;
+          while (Date.now() < deadline) {
+            attempts += 1;
+            try { await http.ping(); }
+            catch (error) {
+              if (error instanceof TokenTransportError && error.code === 'unauthorized' && error.status === 401) { expired = true; recorder.note('http 401 after attempts', attempts); break; }
+              throw error;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
           }
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        expect(expired).toBe(true);
-      } finally { if (ws) await ws.close().catch(() => undefined); observer.restore(); await http.close(); }
+          expect(expired).toBe(true);
+        } finally { if (ws) await ws.close().catch(() => undefined); observer.restore(); await http.close(); }
+      });
     } finally { await fixture.admin.close().catch(() => undefined); await fixture.scram.close().catch(() => undefined); await fixture.server.stop(); }
   }, 60000);
 
   it('revokes a login-issued token and terminates its session', async () => {
     const fixture = await setupTokenFixture();
+    const recorder = new FailureRecorder();
     const observer = installBrowserSocket(ORIGIN);
-    let ws: TokenWsClient | undefined;
+    // Assigned inside the diagnostics closure: keep the declared type so the finally block does not see `never`.
+    let ws = undefined as TokenWsClient | undefined;
     try {
-      const url = `http://${HOST}:${fixture.server.http}`;
-      const result = await login(loginOptions(`login-revoke-${process.pid}`, url, { channels: 'both' }));
-      ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
-      await ws.ping();
-      await fixture.scram.apiTokens.revoke(Buffer.from(result.metadata.id).toString('base64url'));
-      expect(await observer.sockets[0]!.waitForClose(10000)).toMatchObject({ code: 4011, reason: 'token_revoked' });
-      const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
-      try { await expect(http.ping()).rejects.toMatchObject({ code: 'unauthorized', status: 401 }); } finally { await http.close(); }
+      await withFailureDiagnostics(recorder, () => fixture.server.logs(), async () => {
+        const url = `http://${HOST}:${fixture.server.http}`;
+        const result = await login(loginOptions(`login-revoke-${process.pid}`, url, { channels: 'both' }));
+        recorder.mark('login issued');
+        recorder.mark('browser ws connect sent');
+        ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
+        recorder.mark('browser ws connected');
+        await ws.ping();
+        recorder.mark('first ping acknowledged');
+        await fixture.scram.apiTokens.revoke(Buffer.from(result.metadata.id).toString('base64url'));
+        recorder.mark('revoke issued');
+        const closed = await observer.sockets[0]!.waitForClose(10000);
+        recorder.event(`close code=${closed.code} reason=${closed.reason}`);
+        expect(closed).toMatchObject({ code: 4011, reason: 'token_revoked' });
+        const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
+        try { await expect(http.ping()).rejects.toMatchObject({ code: 'unauthorized', status: 401 }); recorder.mark('http ping rejected 401 as expected'); } finally { await http.close(); }
+      });
     } finally { if (ws) await ws.close().catch(() => undefined); observer.restore(); await fixture.admin.close().catch(() => undefined); await fixture.scram.close().catch(() => undefined); await fixture.server.stop(); }
   }, 60000);
 
   it('invalidates login-issued tokens after SCRAM password change', async () => {
     const fixture = await setupTokenFixture();
+    const recorder = new FailureRecorder();
     try {
       const user = `login-password-${process.pid}`;
       const oldPassword = 'old-login-password';
@@ -167,18 +191,30 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
       const url = `http://${HOST}:${fixture.server.http}`;
       const result = await login(loginOptions(`login-password-change-${process.pid}`, url, { username: user, password: oldPassword, channels: 'both' }));
       const observer = installBrowserSocket(ORIGIN);
-      let ws: TokenWsClient | undefined;
+      // Assigned inside the diagnostics closure: keep the declared type so the finally block does not see `never`.
+      let ws = undefined as TokenWsClient | undefined;
       try {
-        ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
-        await ws.ping();
-        const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
-        try { await http.ping(); } finally { await http.close(); }
-        // changePassword builds its proof for the WebSocket/TLS (no exporter) binding, so use the SCRAM WS listener, not IPC.
-        const userClient = await connect({ host: HOST, port: fixture.server.scramWs, username: user, password: oldPassword, tls: { rejectUnauthorized: false }, origin: ORIGIN });
-        try { await userClient.changePassword(oldPassword, newPassword); } finally { await userClient.close(); }
-        expect(await observer.sockets[0]!.waitForClose(10000)).toMatchObject({ code: 4011, reason: 'token_revoked' });
-        const afterChange = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
-        try { await expect(afterChange.ping()).rejects.toMatchObject({ code: 'unauthorized', status: 401 }); } finally { await afterChange.close(); }
+        await withFailureDiagnostics(recorder, () => fixture.server.logs(), async () => {
+          recorder.mark('login issued');
+          recorder.note('user', user);
+          recorder.mark('browser ws connect sent');
+          ws = await browserConnect({ auth: 'token', channel: 'ws', url: `ws://127.0.0.1:${fixture.server.http}`, token: result.token, requestTimeoutMs: 10000 });
+          recorder.mark('browser ws connected');
+          await ws.ping();
+          recorder.mark('first ping acknowledged');
+          const http = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
+          try { await http.ping(); recorder.mark('http ping ok'); } finally { await http.close(); }
+          // changePassword builds its proof for the WebSocket/TLS (no exporter) binding, so use the SCRAM WS listener, not IPC.
+          const userClient = await connect({ host: HOST, port: fixture.server.scramWs, username: user, password: oldPassword, tls: { rejectUnauthorized: false }, origin: ORIGIN });
+          recorder.mark('change password sent');
+          try { await userClient.changePassword(oldPassword, newPassword); } finally { await userClient.close(); }
+          recorder.mark('password changed');
+          const closed = await observer.sockets[0]!.waitForClose(10000);
+          recorder.event(`close code=${closed.code} reason=${closed.reason}`);
+          expect(closed).toMatchObject({ code: 4011, reason: 'token_revoked' });
+          const afterChange = await connect({ auth: 'token', channel: 'http', url, token: result.token, requestTimeoutMs: 10000 });
+          try { await expect(afterChange.ping()).rejects.toMatchObject({ code: 'unauthorized', status: 401 }); recorder.mark('token rejected 401 after password change as expected'); } finally { await afterChange.close(); }
+        });
       } finally { if (ws) await ws.close().catch(() => undefined); observer.restore(); }
     } finally { await fixture.admin.close().catch(() => undefined); await fixture.scram.close().catch(() => undefined); await fixture.server.stop(); }
   }, 60000);
@@ -208,34 +244,43 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
   it('enforces login channel restrictions on http and ws', async () => {
     // Own server: the per-source login credit bucket (10 requests/min per /24) is shared by every login.
     const fixture = await setupTokenFixture({ loginAllowReadWrite: true });
+    const recorder = new FailureRecorder();
     try {
-      const url = `http://${HOST}:${fixture.server.http}`;
-      const restOnly = await login(loginOptions(`login-channel-${process.pid}`, url, { channels: 'rest' }));
-      const restOnWs = connect({
-        auth: 'token',
-        channel: 'ws',
-        url: `ws://${HOST}:${fixture.server.http}`,
-        token: restOnly.token,
-        connectTimeoutMs: 10000,
-        requestTimeoutMs: 10000,
-      });
-      await expect(restOnWs).rejects.toMatchObject({ code: 'permission_denied', status: 403 });
-      const observer = installBrowserSocket(ORIGIN);
-      try {
-        await expect(browserConnect({
+      await withFailureDiagnostics(recorder, () => fixture.server.logs(), async () => {
+        const url = `http://${HOST}:${fixture.server.http}`;
+        const restOnly = await login(loginOptions(`login-channel-${process.pid}`, url, { channels: 'rest' }));
+        recorder.mark('rest-only login issued');
+        const restOnWs = connect({
           auth: 'token',
           channel: 'ws',
-          url: `ws://127.0.0.1:${fixture.server.http}`,
+          url: `ws://${HOST}:${fixture.server.http}`,
           token: restOnly.token,
-          requestTimeoutMs: 10000,
           connectTimeoutMs: 10000,
-        })).rejects.toMatchObject({ code: 'authentication_failed' });
-        expect(await observer.sockets[0]!.waitForClose(5000)).toMatchObject({ code: 4013, reason: 'token_channel_denied' });
-      } finally { observer.restore(); }
-      const wsOnly = await login(loginOptions(`login-channel-ws-${process.pid}`, url, { channels: 'ws' }));
-      const httpClient = await connect({ auth: 'token', channel: 'http', url, token: wsOnly.token, requestTimeoutMs: 10000 });
-      try { await expect(httpClient.ping()).rejects.toMatchObject({ code: 'token_channel_denied', status: 403 }); }
-      finally { await httpClient.close(); }
+          requestTimeoutMs: 10000,
+        });
+        await expect(restOnWs).rejects.toMatchObject({ code: 'permission_denied', status: 403 });
+        recorder.mark('ws connect rejected as expected');
+        const observer = installBrowserSocket(ORIGIN);
+        try {
+          await expect(browserConnect({
+            auth: 'token',
+            channel: 'ws',
+            url: `ws://127.0.0.1:${fixture.server.http}`,
+            token: restOnly.token,
+            requestTimeoutMs: 10000,
+            connectTimeoutMs: 10000,
+          })).rejects.toMatchObject({ code: 'authentication_failed' });
+          recorder.mark('browser ws connect rejected as expected');
+          const closed = await observer.sockets[0]!.waitForClose(5000);
+          recorder.event(`close code=${closed.code} reason=${closed.reason}`);
+          expect(closed).toMatchObject({ code: 4013, reason: 'token_channel_denied' });
+        } finally { observer.restore(); }
+        const wsOnly = await login(loginOptions(`login-channel-ws-${process.pid}`, url, { channels: 'ws' }));
+        recorder.mark('ws-only login issued');
+        const httpClient = await connect({ auth: 'token', channel: 'http', url, token: wsOnly.token, requestTimeoutMs: 10000 });
+        try { await expect(httpClient.ping()).rejects.toMatchObject({ code: 'token_channel_denied', status: 403 }); recorder.mark('http ping rejected as expected'); }
+        finally { await httpClient.close(); }
+      });
     } finally { await fixture.admin.close().catch(() => undefined); await fixture.scram.close().catch(() => undefined); await fixture.server.stop(); }
   }, 120000);
 

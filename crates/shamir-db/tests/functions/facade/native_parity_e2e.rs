@@ -29,6 +29,8 @@ use shamir_engine::validator::{RecordFields, Validation, ValidatorCtx};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
+#[cfg(feature = "fjall")]
+use shamir_test_diag::FlakeGuard;
 use shamir_types::mpack;
 use shamir_types::record_view::ScalarRef;
 use shamir_types::types::value::QueryValue;
@@ -315,6 +317,11 @@ async fn init_fjall_retry(path: &std::path::Path) -> ShamirDb {
 #[cfg(feature = "fjall")]
 #[tokio::test]
 async fn boot_tolerates_native_validator_row() {
+    // Failure-only flake diagnostics (design:
+    // docs/dev-artifacts/design/flake-failure-logs.md): the report prints
+    // ONLY while the test is panicking; the reopen retry window is the
+    // flaky stretch and the marks pin it down.
+    let guard = FlakeGuard::new("boot_tolerates_native_validator_row");
     let tmp = tempfile::tempdir().unwrap();
     let sys_path = tmp.path().join("system.db");
     let repo_path = tmp.path().join("repo_main");
@@ -360,15 +367,21 @@ async fn boot_tolerates_native_validator_row() {
 
         // Verify the validator is live.
         assert!(db.validators().get_by_id(&id).is_some());
+        guard.mark("native validator registered + bound, verified live");
     }
 
     // Re-open WITHOUT re-registering the native artifact.
     {
         let db = init_fjall_retry(&sys_path).await;
+        guard.mark("reopen completed (fjall lock-acquire retry window)");
 
         // Boot must succeed (not crash on the Native row).
         // The validator catalogue row exists but the artifact is NOT registered.
         let records = db.system_store().load_validators().await.unwrap();
+        guard.note(
+            "catalogue validator rows after reopen",
+            records.len().to_string(),
+        );
         assert_eq!(records.len(), 1, "catalogue row should be persisted");
         assert_eq!(records[0]["name"].as_str(), Some("v_native"));
 
@@ -377,6 +390,7 @@ async fn boot_tolerates_native_validator_row() {
             db.validators().get_by_id(&id).is_none(),
             "native artifact must NOT be registered after boot (embedder must re-register)"
         );
+        guard.mark("boot skipped the native artifact (fail-closed expected)");
 
         // Attempt a write to the bound table — must fail closed, NOT panic.
         let req = insert_request("fail_closed", mpack!({"name": "Test"}));
@@ -386,6 +400,7 @@ async fn boot_tolerates_native_validator_row() {
             "write should fail closed when native artifact is not re-registered"
         );
         let err_msg = resp.unwrap_err().to_string();
+        guard.note("fail-closed error message", err_msg.clone());
         // The error should indicate the validator was not found / missing.
         assert!(
             err_msg.contains("not found in registry")
@@ -393,6 +408,7 @@ async fn boot_tolerates_native_validator_row() {
                 || err_msg.contains("missing"),
             "error should mention the missing validator, got: {err_msg}"
         );
+        guard.mark("write to the bound table failed closed");
     }
 }
 

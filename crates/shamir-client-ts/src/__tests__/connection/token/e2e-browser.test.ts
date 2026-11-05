@@ -7,6 +7,7 @@ import type { ShamirClient, TokenWsClient } from '../../../index.js';
 import { setupTokenFixture, SERVER_AVAILABLE, ORIGIN } from './support/harness.js';
 import type { TokenServer } from './support/harness.js';
 import { installBrowserSocket } from './support/browser-socket.js';
+import { FailureRecorder, withFailureDiagnostics } from './support/failure-diagnostics.js';
 
 describe.skipIf(!SERVER_AVAILABLE)('browser token socket e2e', () => {
   let server: TokenServer | null = null;
@@ -68,33 +69,42 @@ describe.skipIf(!SERVER_AVAILABLE)('browser token socket e2e', () => {
   });
 
   it('records the actual origin rejection response', async () => {
-    const token = (await scram!.apiTokens.create({
-      label: `origin-${process.pid}`,
-      for_user: `token_svc_${process.pid}`,
-      mode: 'read_only',
-      channels: 'ws',
-      ttl_secs: 3600,
-    })).token;
-    const observer = installBrowserSocket('https://unlisted.invalid');
-    try {
-      const rejected = browserConnect({
-        auth: 'token',
-        channel: 'ws',
-        url: `ws://127.0.0.1:${server!.http}`,
-        token,
-        connectTimeoutMs: 5000,
-        requestTimeoutMs: 5000,
-      });
-      await expect(rejected).rejects.toBeInstanceOf(TokenTransportError);
-      await expect(rejected).rejects.toMatchObject({ code: 'authentication_failed' });
-      const socket = observer.sockets[0];
-      expect(socket).toBeDefined();
-      expect(socket!.unexpectedStatus).toBe(403);
-      expect(socket!.hasAuthorization).toBe(false);
-      const closed = await socket!.waitForClose(5000);
-      expect(closed).toMatchObject({ code: 1006 });
-    } finally {
-      observer.restore();
-    }
+    const recorder = new FailureRecorder();
+    await withFailureDiagnostics(recorder, () => server!.logs(), async () => {
+      const token = (await scram!.apiTokens.create({
+        label: `origin-${process.pid}`,
+        for_user: `token_svc_${process.pid}`,
+        mode: 'read_only',
+        channels: 'ws',
+        ttl_secs: 3600,
+      })).token;
+      recorder.mark('token created');
+      recorder.note('origin', 'https://unlisted.invalid');
+      const observer = installBrowserSocket('https://unlisted.invalid');
+      try {
+        recorder.mark('ws connect sent with unlisted origin');
+        const rejected = browserConnect({
+          auth: 'token',
+          channel: 'ws',
+          url: `ws://127.0.0.1:${server!.http}`,
+          token,
+          connectTimeoutMs: 5000,
+          requestTimeoutMs: 5000,
+        });
+        await expect(rejected).rejects.toBeInstanceOf(TokenTransportError);
+        await expect(rejected).rejects.toMatchObject({ code: 'authentication_failed' });
+        recorder.mark('connect rejected as expected');
+        const socket = observer.sockets[0];
+        expect(socket).toBeDefined();
+        recorder.note('unexpected status', socket!.unexpectedStatus);
+        expect(socket!.unexpectedStatus).toBe(403);
+        expect(socket!.hasAuthorization).toBe(false);
+        const closed = await socket!.waitForClose(5000);
+        recorder.event(`close code=${closed.code} reason=${closed.reason}`);
+        expect(closed).toMatchObject({ code: 1006 });
+      } finally {
+        observer.restore();
+      }
+    });
   });
 });

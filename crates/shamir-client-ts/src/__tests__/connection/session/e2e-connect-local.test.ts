@@ -33,6 +33,7 @@ import {
   br,
   uniqueDbName,
 } from '../../e2e-harness.js';
+import { FailureRecorder, withFailureDiagnostics } from '../token/support/failure-diagnostics.js';
 
 // ─── kind: unix server spawn ────────────────────────────────────────────────
 
@@ -192,16 +193,14 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     beforeAll(async () => {
       server = await startUnixServer();
-      try {
-        client = await connectLocal({
-          addr: server.addr,
-          username: ADMIN_USER,
-          password: ADMIN_PASSWORD,
-        });
-      } catch (e) {
-        console.error('[e2e-connect-local] connection failed. Server logs:\n' + server.logs());
-        throw e;
-      }
+      const recorder = new FailureRecorder();
+      recorder.mark('admin connectLocal');
+      recorder.note('ipc addr', server.addr);
+      client = await withFailureDiagnostics(recorder, () => server!.logs(), async () => connectLocal({
+        addr: server!.addr,
+        username: ADMIN_USER,
+        password: ADMIN_PASSWORD,
+      }));
     }, 60_000);
 
     afterAll(async () => {

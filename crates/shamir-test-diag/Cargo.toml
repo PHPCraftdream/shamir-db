@@ -1,0 +1,25 @@
+[package]
+name = "shamir-test-diag"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "Failure-only diagnostics for flaky tests: a test-scoped timeline guard with a bounded process-wide log/tracing capture ring. Dev-only — never a production dependency."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/shamir-db"
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example).
+doctest = false
+
+[dependencies]
+# `std` requested explicitly: `log::set_boxed_logger` (used by the degraded-mode
+# unit test) is gated behind the `std` feature.
+log = { version = "0.4", features = ["std"] }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, optional = true, features = ["registry"] }
+
+[features]
+tracing = ["dep:tracing", "dep:tracing-subscriber"]
+
+[lints]
+workspace = true

@@ -24,6 +24,7 @@ use shamir_query_builder::ddl;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::{delete, insert};
 use shamir_query_types::admin::FkAction;
+use shamir_test_diag::FlakeGuard;
 use shamir_types::mpack;
 
 /// Set up db + repo with parent (indexed) + child (indexed on FK field),
@@ -241,25 +242,42 @@ async fn cascade_deletes_child_autocommit() {
 
 #[tokio::test]
 async fn set_null_nulls_child_fk_transactional() {
+    // Failure-only flake diagnostics (design:
+    // docs/dev-artifacts/design/flake-failure-logs.md): the report prints
+    // ONLY while the test is panicking; notes record the measured state so
+    // a failure explains itself from the log.
+    let guard = FlakeGuard::new("set_null_nulls_child_fk_transactional");
     let dir = tempfile::tempdir().unwrap();
     let db = setup(dir.path().join("meta.redb")).await;
+    guard.mark("db set up (parent dept_id=100 present)");
     set_child_fk_schema(&db, FkAction::SetNull, true).await;
+    guard.note(
+        "fk schema",
+        "employees.dept_id -> departments.dept_id ON DELETE SET NULL (nullable)",
+    );
     insert_child_tx(&db, 100, "Alice").await;
+    guard.mark("child row inserted (transactional batch committed)");
 
     delete_parent(&db, true)
         .await
         .expect("parent delete should succeed");
+    guard.mark("parent delete executed (transactional)");
 
     // Child survives.
+    let survivors = count_employees(&db, None).await;
+    guard.note("employees total after delete", survivors.to_string());
     assert_eq!(
-        count_employees(&db, None).await,
-        1,
+        survivors, 1,
         "SET NULL: child row should survive parent delete"
     );
     // Its FK is now null (no longer matches dept_id=100).
+    let still_referencing = count_employees(&db, Some(100)).await;
+    guard.note(
+        "employees still referencing dept_id=100",
+        still_referencing.to_string(),
+    );
     assert_eq!(
-        count_employees(&db, Some(100)).await,
-        0,
+        still_referencing, 0,
         "SET NULL: child FK should be nulled (not match old parent value)"
     );
 }

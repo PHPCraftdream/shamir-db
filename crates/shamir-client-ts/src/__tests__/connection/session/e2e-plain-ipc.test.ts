@@ -27,6 +27,7 @@ import {
   seed,
 } from '../../e2e-harness.js';
 import type { MultiServerHandle } from '../../e2e-harness.js';
+import { FailureRecorder, withFailureDiagnostics } from '../token/support/failure-diagnostics.js';
 
 describe.skipIf(!SERVER_AVAILABLE)(
   'e2e plain TCP + IPC session and resume (requires release binary)',
@@ -36,18 +37,16 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     beforeAll(async () => {
       server = await startMultiListenerServer();
-      try {
-        admin = await connect({
-          host: HOST,
-          port: server.tcpPlainPort,
-          username: ADMIN_USER,
-          password: ADMIN_PASSWORD,
-          transport: 'tcp-plain',
-        });
-      } catch (e) {
-        console.error('[e2e-plain-ipc] connection failed. Server logs:\n' + server.logs());
-        throw e;
-      }
+      const recorder = new FailureRecorder();
+      recorder.mark('admin connect (tcp-plain)');
+      recorder.note('connect target', `${HOST}:${server.tcpPlainPort}`);
+      admin = await withFailureDiagnostics(recorder, () => server!.logs(), async () => connect({
+        host: HOST,
+        port: server!.tcpPlainPort,
+        username: ADMIN_USER,
+        password: ADMIN_PASSWORD,
+        transport: 'tcp-plain',
+      }));
     }, 60_000);
 
     afterAll(async () => {

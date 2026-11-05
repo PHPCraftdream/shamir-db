@@ -6,6 +6,7 @@ use shamir_connect::common::envelope::{RequestEnvelope, ResponseEnvelope};
 use shamir_connect::server::token::{parse_token, TokenId, TokenMode};
 use shamir_query_builder::{batch::Batch, Query};
 use shamir_query_types::wire::{DbRequest, DbResponse, CURRENT_QUERY_LANG_VERSION};
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
@@ -654,7 +655,7 @@ async fn frame_close_cases(harness: &Harness) {
     close_socket(&mut invalid_request_socket).await;
 }
 
-pub(super) async fn exercise_native_group(harness: &Harness) {
+pub(super) async fn exercise_native_group(harness: &Harness, guard: &FlakeGuard) {
     let token = harness.token("ws-native", TokenMode::ReadOnly).await;
     let valid = upgrade(
         "/shamir/v1/ws",
@@ -664,6 +665,7 @@ pub(super) async fn exercise_native_group(harness: &Harness) {
     );
     let (headers, _) = raw_response(harness.addr(), &valid).await;
     assert_eq!(headers.split_whitespace().nth(1), Some("101"), "{headers}");
+    guard.mark("native ws upgrade 101");
     let missing_protocol = valid.replace("Sec-WebSocket-Protocol: shamir-v1\r\n", "");
     let wrong_protocol = valid.replace(
         "Sec-WebSocket-Protocol: shamir-v1\r\n",
@@ -677,6 +679,7 @@ pub(super) async fn exercise_native_group(harness: &Harness) {
         let (headers, _) = raw_response(harness.addr(), request).await;
         assert_eq!(headers.split_whitespace().nth(1), Some("400"), "{headers}");
     }
+    guard.mark("protocol violations rejected 400 (missing/wrong protocol, bad key)");
     let rest_only = harness
         .token_with_channels(
             "ws-rest-only",
@@ -696,7 +699,9 @@ pub(super) async fn exercise_native_group(harness: &Harness) {
         rmp_serde::from_slice::<DbResponse>(&body).expect("REST-only denial body"),
         DbResponse::Error { ref code, .. } if code == "token_channel_denied"
     ));
+    guard.mark("rest-only token ws denied 403 token_channel_denied");
     native_error_matrix(harness, &token).await;
+    guard.mark("native error matrix done");
     let case_token = harness.token("ws-case", TokenMode::ReadOnly).await;
     let invalid_origin = upgrade(
         "/shamir/v1/ws",
@@ -712,14 +717,20 @@ pub(super) async fn exercise_native_group(harness: &Harness) {
             .nth(1),
         Some("403")
     );
+    guard.mark("invalid origin denied 403");
     let wrong_method = valid.replacen("GET", "POST", 1);
     let (headers, _) = raw_response(harness.addr(), &wrong_method).await;
     assert_eq!(headers.split_whitespace().nth(1), Some("405"));
     assert!(headers.to_ascii_lowercase().contains("allow: get"));
+    guard.mark("wrong method denied 405 (allow: get)");
     caps_and_sid_isolation(harness).await;
+    guard.mark("caps + sid isolation done");
     execute_rw_and_session_features(harness).await;
+    guard.mark("execute/rw + session features done");
     frame_close_cases(harness).await;
+    guard.mark("frame close cases done");
     limiter_last(harness).await;
+    guard.mark("source limiter 429 + valid-after-limit ok");
 }
 
 async fn limiter_last(harness: &Harness) {
@@ -751,6 +762,11 @@ async fn limiter_last(harness: &Harness) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http_ws_native_group() {
+    let guard = FlakeGuard::new("http_ws_native_group");
+    // The whole group runs against one in-process server: capture its
+    // tracing (upgrade decisions, token checks, frame errors) into the
+    // report ring. Graceful no-op if a dispatch is already installed.
+    try_install_global_tracing_ring();
     let harness = Harness::launch_with_native_seed_hook(
         "127.0.0.1:0",
         shamir_server::config::HttpListenerSettings {
@@ -764,8 +780,12 @@ async fn http_ws_native_group() {
         },
     )
     .await;
+    guard.mark("harness launched (native seed hook, socket caps 2/3)");
     super::session_loop::exercise_native_session(&harness).await;
-    exercise_native_group(&harness).await;
+    guard.mark("native session loop exercised");
+    exercise_native_group(&harness, &guard).await;
+    guard.mark("native group exercised");
     let report = harness.handle.shutdown().await;
     assert!(report.errors().is_empty(), "{report:?}");
+    guard.mark("shutdown clean");
 }

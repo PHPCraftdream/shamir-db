@@ -1,4 +1,5 @@
 use fs4::fs_std::FileExt;
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use std::sync::Arc;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -10,6 +11,12 @@ use crate::server::{BootstrapMode, ServerLauncher};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly() {
+    // Failure-only diagnostics (see `launcher_shutdown_stops_token_gc_task`).
+    let guard = FlakeGuard::with_watchdog(
+        "launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     let config = Config {
@@ -60,6 +67,7 @@ async fn launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly() {
         node_mode: crate::db_handler::NodeMode::ReadWrite,
     };
     let handle = launcher.launch().await.expect("HTTP server launch");
+    guard.mark("server launched");
     let bound_addr = handle
         .bound_addrs
         .iter()
@@ -69,21 +77,32 @@ async fn launcher_starts_http_loopback_ephemeral_and_shuts_down_cleanly() {
         .expect("HTTP listener bound");
     assert_eq!(bound_addr.ip(), std::net::Ipv4Addr::LOCALHOST);
     assert_ne!(bound_addr.port(), 0);
+    guard.note("bound addr", bound_addr.to_string());
 
     let report = tokio::time::timeout(Duration::from_secs(30), handle.shutdown())
         .await
         .expect("server shutdown bounded");
+    guard.mark("shutdown report produced");
     assert!(report.is_clean(), "{report:?}");
     assert_eq!(report.exit_code(), 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn launcher_shutdown_stops_token_gc_task() {
-    // Surfaces the shutdown stage timers (`log::warn!`) in the failure output.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("warn")
-        .with_test_writer()
-        .try_init();
+    // Failure-only diagnostics (flake #1802: shutdown flush stall on
+    // Windows). The guard dumps the timeline + log ring once if the test is
+    // still alive after 150 s — below the runner's slow-timeout kill
+    // (30 s x 6 = 180 s in `.config/nextest.toml`'s default profile) so the
+    // evidence lands before the kill. The shutdown stage timers are
+    // `log::warn!` records (captured by the guard's log ring); the global
+    // tracing ring below additionally captures the server's own `tracing`
+    // events. Installing the ring directly (not through `try_init`) keeps
+    // the guard's `log` capture in place.
+    let guard = FlakeGuard::with_watchdog(
+        "launcher_shutdown_stops_token_gc_task",
+        Duration::from_secs(150),
+    );
+    try_install_global_tracing_ring();
     let temp = tempfile::tempdir().expect("tempdir");
     let data_dir = temp.path().to_path_buf();
     let config = Config {
@@ -134,9 +153,12 @@ async fn launcher_shutdown_stops_token_gc_task() {
         node_mode: crate::db_handler::NodeMode::ReadWrite,
     };
     let handle = launcher.launch().await.expect("server launch");
+    guard.mark("server launched");
     let service = Arc::clone(&handle.token_service);
     assert!(!service.gc_task_finished().await);
+    guard.mark("gc task alive before shutdown");
     let shutdown = tokio::spawn(handle.shutdown());
+    guard.mark("shutdown task spawned");
     tokio::time::timeout(Duration::from_secs(30), async {
         while !service.gc_task_finished().await {
             tokio::task::yield_now().await;
@@ -144,11 +166,13 @@ async fn launcher_shutdown_stops_token_gc_task() {
     })
     .await
     .expect("GC stopped during shutdown");
+    guard.mark("gc task stopped during shutdown");
     drop(service);
     let report = tokio::time::timeout(Duration::from_secs(30), shutdown)
         .await
         .expect("server shutdown bounded")
         .expect("shutdown task");
+    guard.mark("shutdown report produced");
     assert!(report.is_clean(), "{report:?}");
 }
 

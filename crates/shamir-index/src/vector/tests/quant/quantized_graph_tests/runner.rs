@@ -6,6 +6,7 @@
 //! `quantization == Some(Sq8)`; the topical test groups live in
 //! `fit_recall`, `vr8_memory`, and `fastpath_gate`.
 
+use shamir_test_diag::FlakeGuard;
 use shamir_types::types::record_id::RecordId;
 use std::future::Future;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
@@ -254,4 +255,24 @@ pub(in crate::vector::tests) fn recall_at_k(truth: &[RecordId], cand: &[RecordId
         .filter(|c| truth.iter().any(|t| t == *c))
         .count();
     hits as f32 / truth.len().max(1) as f32
+}
+
+/// Shared failure-only recall diagnostics for the statistical recall tests
+/// (design: docs/dev-artifacts/design/flake-failure-logs.md): notes the
+/// dataset size, k, ef and the measured recall against its floor so a
+/// statistical miss is reproducible from the failure log alone. Call right
+/// before the recall assertion.
+pub(in crate::vector::tests) fn note_recall_stats(
+    guard: &FlakeGuard,
+    dataset_n: usize,
+    k: usize,
+    ef_search: u32,
+    recall: f64,
+    floor: f64,
+) {
+    guard.note("dataset size", dataset_n.to_string());
+    guard.note("k", k.to_string());
+    guard.note("ef_search", ef_search.to_string());
+    guard.note("measured recall", format!("{recall:.4}"));
+    guard.note("recall floor", format!("{floor:.4}"));
 }

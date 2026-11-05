@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 use shamir_connect::server::token::TokenMode;
 use zeroize::Zeroizing;
 
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
+
 use shamir_client::{
     ApiToken, AuthKind, Client, ClientError, CloseCause, TokenEndpoint, TokenWsOptions,
 };
@@ -25,19 +27,45 @@ async fn open(fixture: &TokenFixture, token: &str) -> Client {
 }
 
 async fn wait_peer_closed(client: &Client, expected: u16) {
+    wait_peer_closed_with_marks(client, expected, |_| {}).await;
+}
+
+/// `wait_peer_closed` with failure-only diagnostics: `on_event` receives the
+/// decisive observations (each NEW error seen while waiting, the observed
+/// peer close code, or the deadline hit with the last error) so the guard's
+/// report names the code or error received. Assertion, deadline and sleep
+/// behaviour are identical to `wait_peer_closed`.
+async fn wait_peer_closed_with_marks(
+    client: &Client,
+    expected: u16,
+    mut on_event: impl FnMut(&str),
+) {
     let started = Instant::now();
     let mut last = String::from("no failure observed");
     while started.elapsed() < DEADLINE {
         match client.ping().await {
             Ok(_) => {}
             Err(ClientError::ConnectionClosed(CloseCause::PeerClosed { code, .. })) => {
+                on_event(&format!(
+                    "peer closed with code {code} after {:?}",
+                    started.elapsed()
+                ));
                 assert_eq!(code, expected);
                 return;
             }
-            Err(other) => last = format!("{other:?}"),
+            Err(other) => {
+                let rendered = format!("{other:?}");
+                if rendered != last {
+                    on_event(&format!("error observed: {rendered}"));
+                    last = rendered;
+                }
+            }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+    on_event(&format!(
+        "no close with {expected} within deadline; last: {last}"
+    ));
     panic!("session was not closed with {expected} in time, last: {last}");
 }
 
@@ -135,12 +163,24 @@ async fn token_ws_revoked_token_closes_with_4011() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn token_ws_expired_token_closes_with_4012() {
+    let guard = FlakeGuard::new("token_ws_expired_token_closes_with_4012");
+    // Flake #490: the client saw a RST instead of the 4012 close code. The
+    // client and the in-process server both emit `tracing` — capture both
+    // into the report ring so the close-handshake decisions are in the
+    // failure output. Graceful no-op if a dispatch is already installed.
+    try_install_global_tracing_ring();
     let fixture = boot().await;
+    guard.mark("server fixture booted");
     let token = fixture.issue_ws("ws-expire", TokenMode::ReadWrite, 4).await;
+    guard.mark("ws token issued (ttl 4s); expiry window open");
     let client = open(&fixture, &token).await;
-    wait_peer_closed(&client, 4012).await;
+    guard.mark("ws connected");
+    wait_peer_closed_with_marks(&client, 4012, |event| guard.mark(event)).await;
+    guard.mark("peer close observed with code 4012");
     client.close().await;
+    guard.mark("client closed");
     fixture.shutdown().await;
+    guard.mark("fixture shut down");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

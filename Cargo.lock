@@ -3442,6 +3442,7 @@ dependencies = [
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-server",
+ "shamir-test-diag",
  "shamir-transport-ipc",
  "shamir-transport-tcp",
  "shamir-types",
@@ -3540,6 +3541,7 @@ dependencies = [
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-storage",
+ "shamir-test-diag",
  "shamir-tx",
  "shamir-types",
  "tempfile",
@@ -3584,6 +3586,7 @@ dependencies = [
  "shamir-query-builder",
  "shamir-query-types",
  "shamir-storage",
+ "shamir-test-diag",
  "shamir-tunables",
  "shamir-tx",
  "shamir-types",
@@ -3704,6 +3707,7 @@ dependencies = [
  "shamir-numa",
  "shamir-query-types",
  "shamir-storage",
+ "shamir-test-diag",
  "shamir-tunables",
  "shamir-tx",
  "shamir-types",
@@ -3848,6 +3852,7 @@ dependencies = [
  "shamir-db",
  "shamir-query-builder",
  "shamir-query-types",
+ "shamir-test-diag",
  "shamir-transport-http",
  "shamir-transport-ipc",
  "shamir-transport-tcp",
@@ -3899,6 +3904,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-test-diag"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "log",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "shamir-transport-http"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -3908,6 +3922,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "shamir-test-diag",
  "shamir-transport-tcp",
  "thiserror 2.0.21",
  "tokio",

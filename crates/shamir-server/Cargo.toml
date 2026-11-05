@@ -169,6 +169,9 @@ bench-scale-tool = { workspace = true, features = ["async"] }
 # Used by subscription_hot_paths bench to construct `shamir_tx::RecordChange`
 # instances (its `key`/`value` fields are `bytes::Bytes`).
 bytes = "1.11.0"
+# Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
+# — dev-only crate; the `tracing` feature enables the tracing ring layer.
+shamir-test-diag = { path = "../shamir-test-diag", features = ["tracing"] }
 
 [[bench]]
 name = "db_handler_rps"

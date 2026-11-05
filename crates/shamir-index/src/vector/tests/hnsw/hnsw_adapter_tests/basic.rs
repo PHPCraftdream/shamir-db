@@ -5,8 +5,10 @@
 use crate::kind::VectorMetric;
 use crate::vector::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::vector::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist};
+use crate::vector::tests::quant::quantized_graph_tests::runner::note_recall_stats;
 use hnsw_rs::prelude::Distance;
 use shamir_collections::TFxSet;
+use shamir_test_diag::FlakeGuard;
 use shamir_types::types::record_id::RecordId;
 
 pub(in crate::vector::tests) fn rid(n: u8) -> RecordId {
@@ -174,6 +176,11 @@ async fn upsert_replaces() {
 
 #[tokio::test]
 async fn recall_at_10_on_1k_vectors() {
+    // Failure-only flake diagnostics (design:
+    // docs/dev-artifacts/design/flake-failure-logs.md): the report prints
+    // ONLY while the test is panicking; `note_recall_stats` below records
+    // the exact statistical setup so a miss is reproducible from the log.
+    let guard = FlakeGuard::new("recall_at_10_on_1k_vectors");
     // `hnsw_rs` 0.3.4 has no public seed API — `Hnsw::new` calls
     // `StdRng::from_os_rng()` internally, so the graph topology is
     // non-deterministic between runs. To keep this test stable while
@@ -203,6 +210,7 @@ async fn recall_at_10_on_1k_vectors() {
     // before adjusting this floor again.
     let dim = 32;
     let n = 1000;
+    guard.note("rng seed base (random_vec, LCG)", "i + 42 per vector");
     let adapter = HnswAdapter::new(
         dim as u32,
         VectorMetric::L2,
@@ -228,6 +236,7 @@ async fn recall_at_10_on_1k_vectors() {
         adapter.upsert(r, &v).await.unwrap();
         vecs.push((r, v));
     }
+    guard.mark("1000 vectors upserted");
 
     // Brute-force ground truth for query = vecs[0].
     let query = &vecs[0].1;
@@ -253,6 +262,7 @@ async fn recall_at_10_on_1k_vectors() {
     let hnsw_top10: TFxSet<RecordId> = hnsw_results.iter().map(|(r, _)| *r).collect();
 
     let recall = gt_top10.intersection(&hnsw_top10).count() as f64 / 10.0;
+    note_recall_stats(&guard, n, 10, 400, recall, 0.75);
     // #1070: machine-parseable line for the cross-platform recall-matrix
     // workflow (`.github/workflows/hnsw-recall-matrix.yml`) to grep out of
     // CI logs.

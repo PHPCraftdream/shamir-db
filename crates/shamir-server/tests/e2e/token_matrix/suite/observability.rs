@@ -7,6 +7,7 @@ use crate::http_rest::common::{assert_pong, ping_body, request, Harness};
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use shamir_connect::server::token::{parse_token, TokenChannels, TokenMode};
+use shamir_test_diag::{tracing_ring_layer, FlakeGuard};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{
     HeaderValue, AUTHORIZATION, SEC_WEBSOCKET_PROTOCOL,
@@ -69,12 +70,14 @@ impl<'a> MakeWriter<'a> for Capture {
 
 fn subscriber(capture: Capture) -> tracing::Dispatch {
     tracing::Dispatch::new(
-        tracing_subscriber::registry().with(
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .without_time()
-                .with_writer(capture),
-        ),
+        tracing_subscriber::registry()
+            .with(tracing_ring_layer())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .without_time()
+                    .with_writer(capture),
+            ),
     )
 }
 
@@ -184,10 +187,14 @@ async fn failed_native_ws(harness: &Harness, token: &str) {
 
 #[tokio::test]
 async fn token_listener_socket_traces_redact_rest_and_native_ws_credentials() {
+    let guard =
+        FlakeGuard::new("token_listener_socket_traces_redact_rest_and_native_ws_credentials");
     let capture = Capture::default();
     let dispatch = subscriber(capture.clone());
     tracing::dispatcher::set_global_default(dispatch).expect("install test tracing subscriber");
+    guard.mark("tracing dispatch installed (ring layer composed in)");
     let harness = Harness::launch_with_native_seed().await;
+    guard.mark("harness launched with native seed");
     let created = harness
         .token_with_options(
             "observability-redaction",
@@ -201,13 +208,18 @@ async fn token_listener_socket_traces_redact_rest_and_native_ws_credentials() {
     let mut invalid = valid.as_bytes().to_vec();
     invalid[28] = if invalid[28] == b'A' { b'B' } else { b'A' };
     let invalid = String::from_utf8(invalid).expect("token ASCII");
+    guard.mark("read-only token created; invalid variant derived");
 
     let (status, _, body) = request(harness.addr(), Some(&valid), &ping_body()).await;
     assert_pong(status, &body);
+    guard.mark("rest ping with valid token ok");
     let (status, _, _) = request(harness.addr(), Some(&invalid), &ping_body()).await;
     assert_eq!(status, 401);
+    guard.mark("rest ping with invalid token rejected 401");
     native_ws(&harness, &valid).await;
+    guard.mark("native ws: upgrade + binding + pong + close ok");
     failed_native_ws(&harness, &invalid).await;
+    guard.mark("native ws with invalid bearer rejected 401");
 
     let parsed = parse_token(valid.as_bytes()).expect("valid token parses");
     let mac = harness
@@ -223,6 +235,7 @@ async fn token_listener_socket_traces_redact_rest_and_native_ws_credentials() {
         base64::engine::general_purpose::STANDARD.encode(mac),
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac),
     ];
+    guard.mark("token mac variants collected for the leak assertions");
 
     let report = tokio::time::timeout(Duration::from_secs(45), harness.handle.shutdown())
         .await
@@ -231,6 +244,7 @@ async fn token_listener_socket_traces_redact_rest_and_native_ws_credentials() {
         report.errors().is_empty(),
         "server shutdown errors: {report:?}"
     );
+    guard.mark("server shutdown clean");
 
     capture.0.active.store(false, Ordering::Relaxed);
     let logs = text(&capture);
@@ -254,4 +268,5 @@ async fn token_listener_socket_traces_redact_rest_and_native_ws_credentials() {
             "credential MAC leaked into tracing"
         );
     }
+    guard.mark("redaction assertions passed");
 }

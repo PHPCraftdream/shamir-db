@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -492,16 +493,42 @@ async fn body_budget_exhaustion_returns_503_and_releases_reservation() {
 
 #[tokio::test(start_paused = true)]
 async fn incomplete_body_timeout_releases_declared_reservation() {
+    // Failure-only flake diagnostics (macOS timing flake; design:
+    // docs/dev-artifacts/design/flake-failure-logs.md). The report prints
+    // ONLY while the test is panicking; a green run prints nothing. The
+    // tracing ring is installed directly (never through `try_init`) so the
+    // guard's `log` capture stays in place.
+    let guard = FlakeGuard::new("incomplete_body_timeout_releases_declared_reservation");
+    try_install_global_tracing_ring();
     let mut harness = setup_with_body_timeout(GateDecision::Allow(7), Duration::ZERO).await;
+    guard.note("declared content-length", "4");
+    guard.note("body timeout configured", format!("{:?}", Duration::ZERO));
+    guard.note(
+        "budget in_use before the request",
+        harness.budget.in_use().to_string(),
+    );
+    guard.mark("writing the partial request (head + 2 of 4 body bytes)");
     harness.stream.write_all(b"POST /shamir/v1/request HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/msgpack\r\nContent-Length: 4\r\n\r\nab").await.expect("partial body");
+    guard.note("body bytes sent before the pause", "2");
+    guard.mark("partial request written");
     let (head, body) =
         tokio::time::timeout(Duration::from_secs(2), read_response(&mut harness.stream))
             .await
             .expect("timeout response");
+    guard.mark("response head read");
+    guard.note(
+        "response status line",
+        head.lines().next().unwrap_or("").to_string(),
+    );
+    guard.note(
+        "budget in_use after the timeout",
+        harness.budget.in_use().to_string(),
+    );
     assert!(head.starts_with("HTTP/1.1 408"));
     assert!(body.is_empty());
     assert_eq!(harness.budget.in_use(), 0);
     assert_closed(&mut harness.stream).await;
+    guard.mark("connection closed");
     finish(harness).await;
 }
 

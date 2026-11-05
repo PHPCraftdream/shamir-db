@@ -41,6 +41,7 @@ use shamir_query_types::{DurabilityOverride, ReplicationServe};
 use shamir_server::replication::in_process::InProcessReplSource;
 use shamir_server::replication::source::ReplSource;
 use shamir_server::replication_seed::{self, Manifest};
+use shamir_test_diag::{try_install_global_tracing_ring, FlakeGuard};
 
 use super::super::harness::child;
 use super::super::harness::follower;
@@ -238,12 +239,30 @@ async fn seed_e2e_c_resume_refusals_leave_state_unchanged_body() {
 /// retry must converge without replaying rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges() {
-    Box::pin(seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body())
-        .await;
+    let guard = FlakeGuard::new(
+        "seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges",
+    );
+    // The leader runs as a CHILD process here: its log goes to `leader.log`
+    // under the fixture temp dir (see `harness/child.rs`), NOT into this
+    // process's ring. The in-process install library and follower, however,
+    // emit `tracing` — capture those so the boot-gate and retry decisions
+    // land in the report.
+    try_install_global_tracing_ring();
+    guard.note(
+        "leader log",
+        "leader.log under the fixture temp root (child process; not in this ring)",
+    );
+    Box::pin(
+        seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body(&guard),
+    )
+    .await;
 }
 
-async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body() {
+async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges_body(
+    guard: &FlakeGuard,
+) {
     let fx = fixture().await;
+    guard.mark("fixture ready (leader crashed, exported, installed, home open)");
     let home_dir = fx._root.path().join("home-incomplete");
     let port_lease = child::free_addr();
     let addr = port_lease.addr;
@@ -270,6 +289,7 @@ async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_conver
         error.is_err(),
         "boundary-6 injection must interrupt the install",
     );
+    guard.mark("install interrupted at the SEED-3 boundary 6 as injected");
 
     // Boot gate: opening the home never registers or serves the image.
     let home = follower::open_home(&home_dir).await;
@@ -279,11 +299,13 @@ async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_conver
             .is_none(),
         "an interrupted installation must not enter the serving registry",
     );
+    guard.mark("boot gate refused the abandoned staging image");
     drop(home);
 
     // Exact-digest retry finishes the installation without row replay.
     let cfg = child::write_home_config(&home_dir, addr);
     child::cli_install(&cfg, &fx.artifact, &fx.digest, &upstream).await;
+    guard.mark("exact-digest retry install complete");
     let home = Arc::new(follower::open_home(&home_dir).await);
     let entry = follower::status_of(&home, "sub").await.expect("status");
     assert_eq!(
@@ -291,12 +313,14 @@ async fn seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_conver
         "complete"
     );
     assert_eq!(follower::str_field(&entry, "artifact_digest"), fx.digest);
+    guard.mark("subscription state complete with the exact digest");
     for table in wire::TABLES {
         assert!(
             !follower::rows(&home, table).await.is_empty(),
             "{table} rows present exactly once after retry",
         );
     }
+    guard.mark("rows present (non-empty) after retry (converged)");
 }
 
 /// Installing over an EXISTING ordinary destination repository is refused

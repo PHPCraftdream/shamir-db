@@ -16,6 +16,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { connect } from '../../../index.js';
 import type { ShamirClient } from '../../../index.js';
+import { FailureRecorder, withFailureDiagnostics } from '../token/support/failure-diagnostics.js';
 
 // ─── server binary path ───────────────────────────────────────────────────────
 
@@ -199,19 +200,17 @@ describe.skipIf(!SERVER_AVAILABLE)(
 
     beforeAll(async () => {
       server = await startServer();
-      try {
-        client = await connect({
-          host: HOST,
-          port: PORT,
-          username: ADMIN_USER,
-          password: ADMIN_PASSWORD,
-          tls: { rejectUnauthorized: false },
-          origin: ORIGIN,
-        });
-      } catch (e) {
-        console.error('[connect.test] connection failed. Server logs:\n' + server.logs());
-        throw e;
-      }
+      const recorder = new FailureRecorder();
+      recorder.mark('admin connect');
+      recorder.note('connect target', `${HOST}:${PORT}`);
+      client = await withFailureDiagnostics(recorder, () => server!.logs(), async () => connect({
+        host: HOST,
+        port: PORT,
+        username: ADMIN_USER,
+        password: ADMIN_PASSWORD,
+        tls: { rejectUnauthorized: false },
+        origin: ORIGIN,
+      }));
     }, 60_000);
 
     afterAll(async () => {
