@@ -1,15 +1,19 @@
-//! [`WasmEngine`] and [`WasmLimits`] — Wasmtime engine configuration.
+//! [`WasmEngine`] and [`WasmLimits`] — Wasmtime engine configuration for the
+//! two-tier compilation pair (fast Winch + optimized Cranelift).
 
-use super::compile_cache::DiskCacheStore;
+use super::{TierOptions, TierStats};
 use crate::runtime::error::{FnResult, FunctionError};
+use crate::wasm::compile_cache::DiskCacheStore;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConfig};
 
 /// Bench-only (cargo feature `bench-strategies`, never enabled by the server build):
 /// `SHAMIR_WASM_STRATEGY` picks the code generator for an A/B run of the same suite -
 /// `cranelift` (default), `winch` (single-pass baseline compiler) or `pulley` (portable
-/// interpreter). Anything else is rejected.
+/// interpreter). Anything else is rejected. The switch applies to the OPTIMIZED engine
+/// only; the fast engine is always Winch.
 #[cfg(feature = "bench-strategies")]
 fn apply_bench_strategy(config: &mut wasmtime::Config) -> FnResult<()> {
     const STRATEGY_ENV: &str = "SHAMIR_WASM_STRATEGY";
@@ -34,18 +38,37 @@ fn apply_bench_strategy(config: &mut wasmtime::Config) -> FnResult<()> {
 
 // ── WasmEngine ────────────────────────────────────────────────────────
 
-/// A configured Wasmtime [`Engine`] with fuel and async support enabled.
+/// A configured pair of Wasmtime [`Engine`]s with fuel and async support
+/// enabled: a **fast** engine (Winch, cheap compile) and an **optimized**
+/// engine (Cranelift, the historical construction including the incremental
+/// compile cache).
 ///
 /// Cheap to clone-share via `Arc` — `Engine` is internally reference-counted.
+/// A failed fast-engine build degrades to single-tier on the optimized
+/// engine (logged at `warn`); everything downstream works with `fast`
+/// absent.
 ///
 /// # Compilation cache
 ///
-/// Incremental compilation entries use the Wasmtime CacheStore API; disk
-/// caching is explicitly enabled only by the caller for a trusted data path.
+/// Incremental compilation entries use the Wasmtime CacheStore API and are a
+/// Cranelift feature: the cache is enabled only on the optimized engine; the
+/// Winch engine compiles without it. Disk caching is explicitly enabled only
+/// by the caller for a trusted data path.
 #[derive(Clone)]
 pub struct WasmEngine {
-    engine: Engine,
+    /// The optimized engine (Cranelift): the historical single engine and
+    /// the upgrade target of the two-tier scheme.
+    optimized: Engine,
+    /// The fast engine (Winch); `None` after a failed fast-engine build
+    /// (single-tier fallback).
+    fast: Option<Engine>,
     pooling_memory_ceiling: Option<usize>,
+    tier_options: TierOptions,
+    /// Bounds concurrently running background upgrade compiles
+    /// (`TierOptions::background_jobs`).
+    upgrade_permits: Arc<Semaphore>,
+    /// Upgrade lifecycle counters shared with the background jobs.
+    stats: Arc<TierStats>,
     /// Test-only handle to observe cache hits through the public constructor.
     #[cfg(test)]
     store: Option<Arc<DiskCacheStore>>,
@@ -56,6 +79,9 @@ pub struct WasmEngine {
 pub struct WasmEngineOptions {
     pub pooling_memory_ceiling: usize,
     pub pooling: bool,
+    /// Two-tier compilation switches (fast Winch tier + optimized Cranelift
+    /// tier, background upgrade scheduling).
+    pub tier: TierOptions,
 }
 
 impl Default for WasmEngineOptions {
@@ -63,6 +89,7 @@ impl Default for WasmEngineOptions {
         Self {
             pooling_memory_ceiling: WasmLimits::default().max_memory_bytes,
             pooling: std::env::var_os("SHAMIR_WASM_NO_POOL").is_none(),
+            tier: TierOptions::default(),
         }
     }
 }
@@ -99,13 +126,17 @@ impl WasmEngine {
         cache_dir: Option<PathBuf>,
         spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
     ) -> FnResult<Self> {
-        Self::build_with_options(cache_dir, WasmEngineOptions::default(), spawn_ticker)
+        Self::build_with_options(
+            cache_dir,
+            WasmEngineOptions::default(),
+            |optimized, _fast| spawn_ticker(optimized),
+        )
     }
 
     fn build_with_options(
         cache_dir: Option<PathBuf>,
         options: WasmEngineOptions,
-        spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
+        spawn_ticker: impl FnOnce(&Engine, Option<&Engine>) -> FnResult<()>,
     ) -> FnResult<Self> {
         Self::build_with_engine_factory(cache_dir, options, spawn_ticker, Engine::new)
     }
@@ -127,10 +158,78 @@ impl WasmEngine {
     fn build_with_engine_factory(
         cache_dir: Option<PathBuf>,
         options: WasmEngineOptions,
-        spawn_ticker: impl FnOnce(&Engine) -> FnResult<()>,
+        spawn_ticker: impl FnOnce(&Engine, Option<&Engine>) -> FnResult<()>,
         mut create_engine: impl FnMut(&wasmtime::Config) -> wasmtime::Result<Engine>,
     ) -> FnResult<Self> {
         let store = cache_dir.map(|dir| Arc::new(DiskCacheStore::new(dir)));
+
+        // ── Optimized engine (Cranelift) ─────────────────────────────
+        // The historical single engine: the bench-strategy switch and the
+        // incremental compile cache live here.
+        #[cfg(feature = "bench-strategies")]
+        let mut optimized_config = Self::base_config();
+        #[cfg(feature = "bench-strategies")]
+        apply_bench_strategy(&mut optimized_config)?;
+        #[cfg(not(feature = "bench-strategies"))]
+        let optimized_config = Self::base_config();
+        let (optimized, optimized_ceiling) = Self::create_configured_engine(
+            optimized_config,
+            options.pooling,
+            options.pooling_memory_ceiling,
+            store.as_ref(),
+            &mut create_engine,
+            "optimized",
+        )?;
+
+        // ── Fast engine (Winch) ──────────────────────────────────────
+        // Single-pass baseline compiler: cheap compile, slower code. No
+        // incremental cache (a Cranelift-only feature). Built only while tiering is enabled,
+        // and with a pool only when the optimized engine got one, so both tiers share the same
+        // allocator semantics. A failed build (unsupported target, resource limits) degrades
+        // this engine to single-tier on the optimized engine - never an error.
+        let fast = if options.tier.enabled {
+            match Self::create_configured_engine(
+                Self::fast_config(),
+                optimized_ceiling.is_some(),
+                options.pooling_memory_ceiling,
+                None,
+                &mut create_engine,
+                "fast",
+            ) {
+                Ok((engine, _)) => Some(engine),
+                Err(error) => {
+                    log::warn!(
+                        "Wasm fast tier (Winch) engine unavailable, \
+                         running single-tier on the optimized engine: {error}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // The pool-derived limit rejection follows the optimized engine: it is the one whose
+        // pool bounds a function on every path (`Now`, upgrades); the fast engine pools with
+        // the same ceiling or not at all.
+        let pooling_memory_ceiling = optimized_ceiling;
+
+        spawn_ticker(&optimized, fast.as_ref())?;
+        Ok(Self {
+            optimized,
+            fast,
+            pooling_memory_ceiling,
+            tier_options: options.tier,
+            upgrade_permits: Arc::new(Semaphore::new(options.tier.background_jobs.max(1))),
+            stats: Arc::new(TierStats::default()),
+            #[cfg(test)]
+            store,
+        })
+    }
+
+    /// Fuel + epoch interruption + CoW memory init — shared by both tier
+    /// engines so a guest is bounded identically on either tier.
+    fn base_config() -> wasmtime::Config {
         let mut config = wasmtime::Config::new();
         config.consume_fuel(true);
 
@@ -148,53 +247,54 @@ impl WasmEngine {
         // linear-memory data segments are mapped from a CoW image
         // instead of being copied byte-by-byte on each instantiation.
         config.memory_init_cow(true);
+        config
+    }
 
-        #[cfg(feature = "bench-strategies")]
-        apply_bench_strategy(&mut config)?;
+    /// Fast-tier config: the single-pass Winch strategy on the shared
+    /// limits configuration. `strategy` itself is infallible; an
+    /// unsupported target fails later at `Engine::new`, which the caller
+    /// maps to single-tier fallback.
+    fn fast_config() -> wasmtime::Config {
+        let mut config = Self::base_config();
+        config.strategy(wasmtime::Strategy::Winch);
+        config
+    }
 
-        // ── Allocator strategy ───────────────────────────────────────
-        //
-        // By default, use the pooling allocator for slot reuse under
-        // concurrency. Set `SHAMIR_WASM_NO_POOL=1` (any value) to
-        // force the on-demand allocator — useful for A/B benchmarking.
-        let use_pooling = options.pooling;
-
-        if use_pooling {
-            // ── Pooling allocator ────────────────────────────────────
-            // Pre-allocate a pool of instance / memory / table / stack
-            // slots so that `instantiate_async` can reuse warm slots
-            // (with CoW-reset) instead of mmap+zero-fill on every call.
-            //
-            // The pool sizes are deliberately modest: virtual address
-            // space is pre-reserved (total_memories × memory_reservation)
-            // but pages are not committed until touched. With 128 slots
-            // × 6 GiB virtual reservation ≈ 768 GiB virtual — well
-            // within a 64-bit address space, and RSS stays near zero
-            // until actual use.
-            //
-            // The configured pool ceiling is checked against each function's limits.
-            let pooling_config = Self::build_pooling_config(options.pooling_memory_ceiling);
-            config.allocation_strategy(InstanceAllocationStrategy::Pooling(pooling_config));
-        }
-
-        if let Some(store) = &store {
+    /// Assemble one tier engine from a prepared config: optional
+    /// incremental cache, pooling-with-fallback allocator, cache bind.
+    /// Returns the engine and its pooling ceiling (`None` = on-demand).
+    fn create_configured_engine(
+        mut config: wasmtime::Config,
+        pooling: bool,
+        ceiling: usize,
+        cache: Option<&Arc<DiskCacheStore>>,
+        create_engine: &mut impl FnMut(&wasmtime::Config) -> wasmtime::Result<Engine>,
+        tier: &str,
+    ) -> FnResult<(Engine, Option<usize>)> {
+        if let Some(store) = cache {
             config
                 .enable_incremental_compilation(store.clone())
                 .map_err(|error| FunctionError::Compute(error.to_string()))?;
         }
 
-        let (engine, pooling_memory_ceiling) = if use_pooling {
+        if pooling {
+            config.allocation_strategy(InstanceAllocationStrategy::Pooling(
+                Self::build_pooling_config(ceiling),
+            ));
+        }
+
+        let (engine, active_ceiling) = if pooling {
             // Try creating the Engine with pooling; on any error (platform
             // constraints, address-space limits, etc.) fall back gracefully
-            // to the default on-demand allocator.
+            // to the default on-demand allocator, per engine.
             match create_engine(&config) {
                 Ok(engine) => {
-                    log::info!("Wasmtime pooling allocator enabled");
-                    (engine, Some(options.pooling_memory_ceiling))
+                    log::info!("Wasmtime pooling allocator enabled ({tier})");
+                    (engine, Some(ceiling))
                 }
                 Err(pool_err) => {
                     log::warn!(
-                        "Wasmtime pooling allocator unavailable, \
+                        "Wasmtime pooling allocator unavailable ({tier}), \
                          falling back to on-demand allocator: {pool_err}"
                     );
                     config.allocation_strategy(InstanceAllocationStrategy::OnDemand);
@@ -206,24 +306,19 @@ impl WasmEngine {
                 }
             }
         } else {
-            log::info!("Wasmtime pooling allocator disabled by engine options");
+            log::info!("Wasmtime pooling allocator disabled by engine options ({tier})");
             (
                 create_engine(&config).map_err(|e| FunctionError::Compute(e.to_string()))?,
                 None,
             )
         };
-        if let Some(store) = &store {
+
+        if let Some(store) = cache {
             if let Err(error) = store.bind(&engine) {
                 log::warn!("Wasm incremental cache disabled: {error}");
             }
         }
-        spawn_ticker(&engine)?;
-        Ok(Self {
-            engine,
-            pooling_memory_ceiling,
-            #[cfg(test)]
-            store,
-        })
+        Ok((engine, active_ceiling))
     }
 
     /// Test-only: cache hits served to this engine's disk store.
@@ -239,8 +334,8 @@ impl WasmEngine {
     /// keeping the background wakeup rate negligible.
     pub const EPOCH_TICK: std::time::Duration = std::time::Duration::from_millis(100);
 
-    /// Spawn a detached OS thread that increments the engine epoch on a fixed
-    /// cadence, driving epoch-based interruption of over-budget guests.
+    /// Spawn a detached OS thread that increments BOTH engines' epochs on a
+    /// fixed cadence, driving epoch-based interruption of over-budget guests.
     ///
     /// This MUST be a dedicated OS thread, NOT a tokio task: a pure-CPU guest
     /// pins its tokio worker for its whole run, so an epoch ticker scheduled on
@@ -249,19 +344,29 @@ impl WasmEngine {
     /// entire point of epoch interruption (it is what lets a CPU-bound guest be
     /// pre-empted when neither fuel nor the cooperative `timeout` can).
     ///
-    /// The thread holds only an `EngineWeak` (wasmtime's documented
-    /// epoch-ticker pattern) and exits on the first tick after the last
-    /// strong `Engine` is dropped, so short-lived engines (tests, benches)
-    /// neither leak a ticker thread nor keep their allocator alive.
-    fn spawn_epoch_ticker(engine: &Engine) -> FnResult<()> {
-        let weak = engine.weak();
+    /// The thread holds only `EngineWeak`s (wasmtime's documented
+    /// epoch-ticker pattern — one thread ticking both engines) and exits on
+    /// the first tick after the last strong `Engine` is gone, so short-lived
+    /// engines (tests, benches) neither leak a ticker thread nor keep their
+    /// allocator alive.
+    fn spawn_epoch_ticker(optimized: &Engine, fast: Option<&Engine>) -> FnResult<()> {
+        let optimized_weak = optimized.weak();
+        let fast_weak = fast.map(Engine::weak);
         let spawn_result = std::thread::Builder::new()
             .name("wasm-epoch-ticker".into())
             .spawn(move || loop {
                 std::thread::sleep(Self::EPOCH_TICK);
-                match weak.upgrade() {
-                    Some(engine) => engine.increment_epoch(),
-                    None => break,
+                let mut alive = false;
+                if let Some(engine) = optimized_weak.upgrade() {
+                    engine.increment_epoch();
+                    alive = true;
+                }
+                if let Some(engine) = fast_weak.as_ref().and_then(|weak| weak.upgrade()) {
+                    engine.increment_epoch();
+                    alive = true;
+                }
+                if !alive {
+                    break;
                 }
             });
         spawn_result.map(|_| ()).map_err(|error| {
@@ -303,7 +408,9 @@ impl WasmEngine {
         pool
     }
 
-    /// Effective pooling ceiling, or `None` for an on-demand allocator.
+    /// Pool-derived ceiling active on EVERY engine of the pair, or `None`
+    /// when any engine runs on-demand (a limit is pool-rejected only when
+    /// every engine that can host the function enforces the same ceiling).
     pub fn pooling_memory_ceiling(&self) -> Option<usize> {
         self.pooling_memory_ceiling
     }
@@ -320,20 +427,66 @@ impl WasmEngine {
         Ok(())
     }
 
-    /// Access the underlying Wasmtime engine.
+    /// Access the optimized Wasmtime engine (the historical single engine).
     pub fn engine(&self) -> &Engine {
-        &self.engine
+        &self.optimized
     }
 
-    /// Compiles sanitized Wasm bytes with this engine.
+    /// Access the optimized (Cranelift) engine.
+    pub fn optimized_engine(&self) -> &Engine {
+        &self.optimized
+    }
+
+    /// Access the fast (Winch) engine, or `None` after a failed fast-engine
+    /// build (single-tier fallback on the optimized engine).
+    pub fn fast_engine(&self) -> Option<&Engine> {
+        self.fast.as_ref()
+    }
+
+    /// Two-tier switches this engine was built with.
+    pub(crate) fn tier_options(&self) -> &TierOptions {
+        &self.tier_options
+    }
+
+    /// Upgrade lifecycle counters shared with the background jobs (tests,
+    /// telemetry).
+    pub fn tier_stats(&self) -> &TierStats {
+        &self.stats
+    }
+
+    /// Permit pool bounding concurrent background upgrade compiles.
+    pub(crate) fn upgrade_permits(&self) -> &Arc<Semaphore> {
+        &self.upgrade_permits
+    }
+
+    /// Compiles sanitized Wasm bytes on the optimized (Cranelift) engine.
+    pub fn compile_optimized(&self, wasm: &[u8]) -> Result<Module, wasmtime::Error> {
+        Module::from_binary(&self.optimized, wasm)
+    }
+
+    /// Compiles sanitized Wasm bytes on the fast (Winch) engine. Errors when
+    /// the fast engine is unavailable (single-tier fallback).
+    pub fn compile_fast(&self, wasm: &[u8]) -> Result<Module, wasmtime::Error> {
+        match &self.fast {
+            Some(engine) => Module::from_binary(engine, wasm),
+            None => Err(wasmtime::Error::msg(
+                "fast tier unavailable: the fast engine failed to initialize",
+            )),
+        }
+    }
+
+    /// Compiles sanitized Wasm bytes on the optimized engine — kept under
+    /// its historical name for the compile-cache test suite (its only
+    /// callers), hence compiled only under `cfg(test)`.
+    #[cfg(test)]
     pub(crate) fn compile(&self, wasm: &[u8]) -> Result<Module, wasmtime::Error> {
-        Module::from_binary(&self.engine, wasm)
+        self.compile_optimized(wasm)
     }
 }
 
 // ── WasmLimits ────────────────────────────────────────────────────────
 
-/// Per-invocation resource limits for a [`WasmFunction`](super::wasm_function::WasmFunction).
+/// Per-invocation resource limits for a function running on either tier.
 #[derive(Debug, Clone)]
 pub struct WasmLimits {
     /// Maximum fuel units the guest may consume.

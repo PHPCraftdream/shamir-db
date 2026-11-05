@@ -22,6 +22,7 @@ fn pooling_ceiling_rejects_both_constructors_before_compilation() {
         WasmEngine::with_options(WasmEngineOptions {
             pooling: true,
             pooling_memory_ceiling: 64 * 1024 * 1024,
+            ..Default::default()
         })
         .unwrap(),
     );
@@ -61,6 +62,7 @@ async fn larger_pool_and_on_demand_allow_growth_above_default() {
             WasmEngine::with_options(WasmEngineOptions {
                 pooling,
                 pooling_memory_ceiling: 80 * 1024 * 1024,
+                ..Default::default()
             })
             .unwrap(),
         );
@@ -90,6 +92,7 @@ fn failed_pool_initialization_falls_back_for_both_constructors() {
         WasmEngine::build_with_failing_pool(WasmEngineOptions {
             pooling: true,
             pooling_memory_ceiling: 1,
+            ..Default::default()
         })
         .unwrap(),
     );
@@ -105,6 +108,7 @@ fn on_demand_ignores_pool_ceiling_for_both_constructors() {
         WasmEngine::with_options(WasmEngineOptions {
             pooling: false,
             pooling_memory_ceiling: 1,
+            ..Default::default()
         })
         .unwrap(),
     );

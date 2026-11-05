@@ -43,8 +43,8 @@ pub use runtime::{
     GlobalsQuota, GlobalsQuotaError, Params, ShamirFunction,
 };
 pub use wasm::{
-    verify_wasm_module, WasmEngine, WasmEngineOptions, WasmFunction, WasmLimits,
-    SANCTIONED_HOST_IMPORTS,
+    verify_wasm_module, Tier, TierMode, TierOptions, TierStats, WasmEngine, WasmEngineOptions,
+    WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS,
 };
 
 #[cfg(test)]

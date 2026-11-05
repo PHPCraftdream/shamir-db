@@ -1,18 +1,21 @@
 //! Wasmtime execution backend for user-defined functions.
 //!
 //! Re-exports the public surface:
-//! * [`WasmEngine`] / [`WasmLimits`] — engine configuration (`wasm_engine`).
+//! * [`WasmEngine`] / [`WasmLimits`] — the two-tier engine configuration (`engine`).
+//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] — two-tier switches (`engine`).
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 //! * [`verify_wasm_module`] / [`SANCTIONED_HOST_IMPORTS`] — module verification.
 
 pub(crate) mod bindings;
 pub(crate) mod compile_cache;
+mod engine;
 mod fuel;
-mod wasm_engine;
 mod wasm_function;
 mod wasm_sanitizer;
 
-pub use wasm_engine::{WasmEngine, WasmEngineOptions, WasmLimits};
+pub use engine::{
+    Tier, TierMode, TierOptions, TierStats, WasmEngine, WasmEngineOptions, WasmLimits,
+};
 #[cfg(test)]
 pub(crate) use wasm_function::encode_params;
 pub use wasm_function::WasmFunction;
