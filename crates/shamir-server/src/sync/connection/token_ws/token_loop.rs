@@ -32,6 +32,9 @@ use shamir_transport_ws::framing::MAX_WS_FRAME_SIZE;
 
 const TOKEN_WS_REVALIDATE_INTERVAL: Duration = Duration::from_secs(1);
 
+/// How long a closed connection keeps draining the peer before its socket is released.
+const CLOSE_LINGER: Duration = Duration::from_secs(1);
+
 /// Context shared with the token WebSocket request loop.
 pub(crate) struct TokenLoopContext {
     pub(crate) service: Arc<TokenService>,
@@ -87,6 +90,28 @@ fn denied_body(code: &'static str) -> Option<Vec<u8>> {
         message: code.to_owned(),
     })
     .ok()
+}
+
+/// Lingering close: after our Close frame went out, keep reading (and discarding) until the
+/// peer answers with its own Close, hangs up, or [`CLOSE_LINGER`] passes.
+///
+/// Releasing a socket that still holds unread peer data makes the OS answer with a reset
+/// (Windows reliably, Linux too), and the reset can destroy the Close frame that is still on
+/// its way to the peer: the client then sees `connection reset` instead of the close code
+/// (`4012 token_expired`, `4011 revoked`). A client that pings while the token expires hits
+/// exactly this.
+pub(super) async fn linger_after_close<R: FrameReader>(reader: &mut R) {
+    let mut frame = Vec::new();
+    let _ = tokio::time::timeout(CLOSE_LINGER, async {
+        while reader
+            .read_frame_into(MAX_WS_FRAME_SIZE, &mut frame)
+            .await
+            .is_ok()
+        {
+            frame.clear();
+        }
+    })
+    .await;
 }
 
 /// RAII supervision: aborts the writer if the loop future unwinds.
@@ -419,6 +444,7 @@ pub(super) async fn run_token_halves<R, W>(
     if !writer_done {
         writer_task.finish().await;
     }
+    linger_after_close(&mut reader).await;
 }
 
 fn unix_now_ns() -> u64 {
