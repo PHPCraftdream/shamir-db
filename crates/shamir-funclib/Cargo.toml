@@ -44,12 +44,12 @@ percent-encoding = "2.3.2"
 serde_json = "1"
 
 # Crypto — pure/deterministic primitives (/crypto scalar subset)
-sha2 = "0.10.9"
+sha2 = "0.11"
 sha3 = "0.12.0"
 # `pure`: no C/assembly build (cc) -- SSE2/SSE4.1/AVX2 stay on Rust intrinsics;
 # only the AVX-512 C/asm path (and NEON C on aarch64) is dropped.
 blake3 = { version = "1.5", features = ["pure"] }
-hmac = "0.12.1"
+hmac = "0.13"
 subtle = "2.6.1"
 # Argon2id KDF — deterministic given (password, salt, params). CPU/memory-bound:
 # callers dispatching it on an async runtime must hand off the worker.

@@ -2,7 +2,7 @@
 #[cfg(test)]
 use super::verify::record_mac_computation;
 use crate::server::auth::token::{TokenId, TokenSecret};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 /// HMAC-SHA256 implementation used for token authentication.
