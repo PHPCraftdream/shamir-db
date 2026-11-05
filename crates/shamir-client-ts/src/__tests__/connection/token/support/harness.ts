@@ -25,6 +25,8 @@ export interface TokenFixtureOptions {
   loginEnabled?: boolean;
   loginAllowReadWrite?: boolean;
   loginAuthorityAllowlist?: readonly string[];
+  /** Server log level (`info` by default); `debug` records the subscription pipeline step by step. */
+  logLevel?: 'info' | 'debug' | 'trace';
 }
 
 export interface TokenServer {
@@ -50,7 +52,7 @@ function writeConfig(dir: string, ipc: string, options: TokenFixtureOptions = {}
   const key = path.join(dir, 'key.pem').replace(/\\/g, '/');
   const cfg = `data_dir: ${dir.replace(/\\/g, '/')}
 logging: {
-    level: info
+    level: ${options.logLevel ?? 'info'}
     slow_query_threshold_ms: 0
 }
 kdf_defaults: {

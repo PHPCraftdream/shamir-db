@@ -9,6 +9,7 @@ import type { TokenServer } from './support/harness.js';
 import { installBrowserSocket } from './support/browser-socket.js';
 import { connect as browserConnect, login as browserLogin } from '../../../browser.js';
 import { installBrowserFetch, preloadBrowserCrypto } from './support/browser-fetch.js';
+import { Timeline, awaitLiveEvent, subscriptionLogLines } from './support/subscription-diagnostics.js';
 
 function withDeadline<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -36,7 +37,7 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
   }, 60000);
 
   it('logs in over HTTP and verified HTTPS and uses batch, WS transaction, and subscription', async () => {
-    const fixture = await setupTokenFixture({ loginAllowReadWrite: true });
+    const fixture = await setupTokenFixture({ loginAllowReadWrite: true, logLevel: 'debug' });
     try {
       const ca = fs.readFileSync(join(fixture.server.dir, 'cert.pem'), 'utf8');
       const origins = [`http://${HOST}:${fixture.server.http}`, `https://127.0.0.1:${fixture.server.https}`] as const;
@@ -57,17 +58,23 @@ describe.skipIf(!SERVER_AVAILABLE)('HTTP password token login e2e', () => {
           expect(transaction.status).toBe('committed');
           const txRead = await ws.execute('default', Batch.create(`login-tx-read-${index}`).add('row', Query.from('items').whereEq('id', txId)).build());
           expect(txRead.results.row!.records).toContainEqual({ id: txId, value: 'committed' });
+          const timeline = new Timeline();
+          timeline.mark('subscribe sent');
           const live = await ws.db('default').runLive(Batch.create(`login-sub-${index}`).add('sub', subscribe({ store: 'main', table: 'items' })));
+          timeline.mark('subscribe acknowledged');
           try {
             const pending = live.subs.sub!.next();
             const pushId = `push-${index}-${process.pid}`;
-            const event = await (async (): Promise<Awaited<typeof pending>> => {
-              let timer: ReturnType<typeof setTimeout> | undefined;
-              try {
-                await ws.execute('default', Batch.create(`login-push-${index}`).add('put', write.insert('items', [{ id: pushId, value: 'push' }])).build());
-                return await Promise.race([pending, new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 10000); })]);
-              } finally { if (timer !== undefined) clearTimeout(timer); }
-            })();
+            timeline.mark(`insert ${pushId} sent`);
+            await ws.execute('default', Batch.create(`login-push-${index}`).add('put', write.insert('items', [{ id: pushId, value: 'push' }])).build());
+            timeline.mark(`insert ${pushId} acknowledged`);
+            const outcome = await awaitLiveEvent(pending, 10000, 20000);
+            timeline.mark(`live wait finished: ${outcome.kind}`);
+            if (outcome.kind !== 'event') {
+              // Diagnose instead of a bare timeout: late (slow delivery) vs lost (never delivered).
+              throw new Error(`subscription event ${outcome.kind} (origin ${index})\n--- timeline ---\n${timeline.render()}\n--- server log (subscription pipeline) ---\n${subscriptionLogLines(fixture.server.logs())}`);
+            }
+            const event = outcome.value;
             expect(event).toBeDefined();
             expect(event!.kind).toBe('event');
             expect(event!.data).toBeInstanceOf(Uint8Array);

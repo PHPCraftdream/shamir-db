@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shamir_connect::server::conn_services::ConnectionServices;
 use shamir_db::access::Actor;
@@ -102,7 +102,7 @@ pub(crate) async fn activate_subscriptions(
                 let Some(ready_rx) = registry.reserve_pending_ready(sub_id) else {
                     continue;
                 };
-                ready_waiters.push(ready_rx);
+                ready_waiters.push((sub_id, ready_rx));
                 // Operator-configured query limits (finding 2b-ii): the batch
                 // limits here are already capped to the operator maximums in
                 // `handler::execute`. Reactive `Batch`/`Call` deliveries run
@@ -127,7 +127,12 @@ pub(crate) async fn activate_subscriptions(
                         map.insert("sub".to_string(), QueryValue::Int(sub_id as i64));
                     }
                 }
-                tracing::info!(sub_id, "subscription activated");
+                tracing::info!(
+                    sub_id,
+                    from_version = ?op.from_version,
+                    initial = op.initial,
+                    "subscription bridge spawned; ack waits for the activation barrier",
+                );
             }
             BatchOp::Unsubscribe(op) => {
                 let removed = registry.remove(op.unsubscribe);
@@ -138,9 +143,26 @@ pub(crate) async fn activate_subscriptions(
             _ => {}
         }
     }
-    for ready_rx in ready_waiters {
-        // Err = the bridge exited (denied/unavailable source) or the wait timed out: the ack goes
-        // out either way, exactly as before the barrier existed.
-        let _ = tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await;
+    for (sub_id, ready_rx) in ready_waiters {
+        // Not ready (bridge exited: denied/unavailable source, or the wait timed out): the ack
+        // goes out either way, exactly as before the barrier existed.
+        let waited = Instant::now();
+        match tokio::time::timeout(ACTIVATION_WAIT, ready_rx).await {
+            Ok(Ok(())) => tracing::info!(
+                sub_id,
+                waited_us = waited.elapsed().as_micros() as u64,
+                "activation barrier released; acknowledging the subscription",
+            ),
+            Ok(Err(_)) => tracing::warn!(
+                sub_id,
+                waited_us = waited.elapsed().as_micros() as u64,
+                "bridge exited before attaching; acknowledging without a live stream",
+            ),
+            Err(_) => tracing::warn!(
+                sub_id,
+                waited_ms = ACTIVATION_WAIT.as_millis() as u64,
+                "activation barrier timed out; acknowledging anyway",
+            ),
+        }
     }
 }
