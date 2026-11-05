@@ -19,6 +19,7 @@ use shamir_query_types::subscribe::deliver_mode::DeliverMode;
 use shamir_query_types::subscribe::event_mask::EventMask;
 use shamir_query_types::subscribe::source::SubscriptionSource;
 use shamir_tx::ChangeOp;
+use tracing::Instrument;
 
 use crate::subscriptions::db_journal_source::DbJournalSource;
 use crate::subscriptions::decode_cache::{cache_evict_up_to, cache_get, cache_insert, CachedBytes};
@@ -105,6 +106,7 @@ pub(crate) async fn bridge_task(
     // before any `.await` so cancellation-unwind fires its `Drop` too.
     let slot_guard = SubscriptionSlotGuard { registry, sub_id };
 
+    let started = std::time::Instant::now();
     let seq = AtomicU64::new(0);
     // Unique per ShamirDb instance -- prevents deliver-cache pollution across
     // distinct in-memory databases in tests.
@@ -208,6 +210,15 @@ pub(crate) async fn bridge_task(
                     // just like resume 1; saturating subtraction preserves both.
                     let cursor = from_version.map_or(w, |fv| fv.saturating_sub(1));
                     states.push(JournalDrain::new(cursor));
+                    tracing::info!(
+                        sub_id,
+                        repo = %repo,
+                        activation_floor = w,
+                        cursor,
+                        from_version = ?from_version,
+                        attach_us = started.elapsed().as_micros() as u64,
+                        "changefeed attached; commits above the cursor are delivered live",
+                    );
                 }
                 // S5c-X PR8b: a quarantined (`resync_required`) repo is
                 // refused (`DbError::ResyncRequired`) — the bridge must NOT
@@ -227,6 +238,11 @@ pub(crate) async fn bridge_task(
         // The changefeed receivers are attached and the activation cut is sampled: from here
         // every commit is delivered live. Release the activation barrier the `Subscribe`
         // handler is waiting on, so the client's ack never precedes the attach.
+        tracing::info!(
+            sub_id,
+            ready_us = started.elapsed().as_micros() as u64,
+            "bridge live; releasing the activation barrier",
+        );
         slot_guard.registry.signal_ready(sub_id);
 
         let terminal_gates = delivery_gates.clone();
@@ -271,6 +287,12 @@ pub(crate) async fn bridge_task(
                 let push = &push;
                 let seq = &seq;
                 async move {
+                    tracing::debug!(
+                        repo = %repo,
+                        commit_version = event.commit_version,
+                        changes = event.changes.len(),
+                        "delivering journal event",
+                    );
                     // Any page may have been read before quarantine. A closed gate
                     // aborts before examining or accepting page contents.
                     if gate.closed_now() {
@@ -286,6 +308,12 @@ pub(crate) async fn bridge_task(
                             &change.table,
                             &change.op,
                         ) {
+                            tracing::trace!(
+                                repo = %repo,
+                                commit_version = event.commit_version,
+                                table = ?change.table,
+                                "change skipped: no interested target",
+                            );
                             continue;
                         }
                         // Cache raw bytes + interner per event across all
@@ -329,6 +357,12 @@ pub(crate) async fn bridge_task(
                             &change.op,
                             bytes_ref,
                         ) {
+                            tracing::debug!(
+                                repo = %repo,
+                                commit_version = event.commit_version,
+                                table = ?change.table,
+                                "change skipped: filtered out by the subscription",
+                            );
                             continue;
                         }
                         // Lazy decode of the interner-encoded value into a
@@ -409,8 +443,21 @@ pub(crate) async fn bridge_task(
                             &owned_buf
                         };
                         if !try_push_event_gated(gate, push, sub_id, seq, data_ref).await {
+                            tracing::warn!(
+                                repo = %repo,
+                                commit_version = event.commit_version,
+                                "event push failed; closing the subscription",
+                            );
                             return false;
                         }
+                        tracing::debug!(
+                            repo = %repo,
+                            commit_version = event.commit_version,
+                            table = ?change.table,
+                            seq = seq.load(Ordering::Relaxed),
+                            bytes = data_ref.len(),
+                            "event pushed",
+                        );
                     }
                     // Eviction is performance-only: slower subscribers rebuild misses
                     // from their own journal pages; cursors need not agree.
@@ -625,7 +672,15 @@ pub(crate) async fn bridge_task(
         }
     };
 
-    run.await;
+    let span = tracing::info_span!("sub_bridge", sub_id);
+    run.instrument(span.clone()).await;
+    span.in_scope(|| {
+        tracing::info!(
+            delivered_frames = seq.load(Ordering::Relaxed),
+            lifetime_ms = started.elapsed().as_millis() as u64,
+            "bridge exited",
+        );
+    });
 
     // Always emit Closed frame (best-effort) on self-exit so the client
     // knows the subscription ended server-side.

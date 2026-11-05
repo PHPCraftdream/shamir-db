@@ -81,6 +81,17 @@ impl JournalDrain {
                 if !page.read.events.is_empty() {
                     bridge_snapshot_cut_tests::pause(3, from).await;
                 }
+                tracing::debug!(
+                    repo = %repos[ri],
+                    from,
+                    events = page.read.events.len(),
+                    gap_at = ?page.read.gap_at,
+                    confirmed = page.confirmed,
+                    bound = page.bound,
+                    sampled_w = page.sampled_w,
+                    hint = state.hint,
+                    "journal page read",
+                );
                 if source.quarantined(&repos[ri]) {
                     return Err("journal repository quarantined".to_owned());
                 }
@@ -92,6 +103,7 @@ impl JournalDrain {
                 for event in page.read.events {
                     let version = event.commit_version;
                     if !deliver(ri, event).await {
+                        tracing::warn!(repo = %repos[ri], version, "journal event delivery rejected");
                         return Err("required event rejected".to_owned());
                     }
                     state.cursor = version;
@@ -103,6 +115,12 @@ impl JournalDrain {
                 if !page.confirmed {
                     // A final consumed hint must not strand persistence confirmation.
                     if empty {
+                        tracing::debug!(
+                            repo = %repos[ri],
+                            cursor = state.cursor,
+                            backoff_ms = state.backoff.as_millis() as u64,
+                            "journal page not yet persistence-confirmed; retrying",
+                        );
                         state.retry = Some(Instant::now() + state.backoff);
                         state.backoff = (state.backoff * 2).min(Duration::from_millis(250));
                     } else {
@@ -121,8 +139,14 @@ impl JournalDrain {
                 // Bound coalescing so a busy producer cannot monopolize this task.
                 for _ in 0..64 {
                     match receiver.try_recv() {
-                        Ok(event) => states[ri].hint(Some(event.commit_version)),
-                        Err(TryRecvError::Lagged(_)) => states[ri].hint(None),
+                        Ok(event) => {
+                            log_hint(&repos[ri], event.commit_version, states[ri].cursor);
+                            states[ri].hint(Some(event.commit_version));
+                        }
+                        Err(TryRecvError::Lagged(skipped)) => {
+                            tracing::debug!(repo = %repos[ri], skipped, "changefeed lagged; re-reading the journal");
+                            states[ri].hint(None);
+                        }
                         Err(TryRecvError::Closed) => return Err("changefeed closed".to_owned()),
                         Err(TryRecvError::Empty) => break,
                     }
@@ -182,12 +206,31 @@ impl JournalDrain {
                 _ = std::future::ready(()), if dirty => {}
                 Some((ri, result)) = hints.next() => {
                     match result {
-                        Ok(event) => states[ri].hint(Some(event.commit_version)),
-                        Err(RecvError::Lagged(_)) => states[ri].hint(None),
+                        Ok(event) => {
+                            log_hint(&repos[ri], event.commit_version, states[ri].cursor);
+                            states[ri].hint(Some(event.commit_version));
+                        }
+                        Err(RecvError::Lagged(skipped)) => {
+                            tracing::debug!(repo = %repos[ri], skipped, "changefeed lagged; re-reading the journal");
+                            states[ri].hint(None);
+                        }
                         Err(RecvError::Closed) => return Err("changefeed closed".to_owned()),
                     }
                 }
             }
         }
     }
+}
+
+/// A changefeed hint at or below the cursor is NOT delivered by design (the commit predates the
+/// activation cut); logging the comparison makes a lost live event distinguishable from a
+/// late one.
+fn log_hint(repo: &str, commit_version: u64, cursor: u64) {
+    tracing::debug!(
+        repo,
+        commit_version,
+        cursor,
+        at_or_below_cursor = commit_version <= cursor,
+        "changefeed hint",
+    );
 }

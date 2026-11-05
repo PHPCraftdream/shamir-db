@@ -94,12 +94,19 @@ pub(crate) async fn push_required_gated(
                 seq.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
+            if attempt == 0 {
+                tracing::debug!(sub_id, "push sink rejected the frame; retrying");
+            }
         } else {
+            tracing::debug!(sub_id, attempt, "delivery gate closed; frame not pushed");
             return false;
         }
         if attempt + 1 < SLOW_CONSUMER_THRESHOLD {
             tokio::select! {
-                _ = gate.closed() => return false,
+                _ = gate.closed() => {
+                    tracing::debug!(sub_id, attempt, "delivery gate closed while retrying a frame");
+                    return false;
+                }
                 () = tokio::time::sleep(PUSH_RETRY_DELAY) => {}
             }
         }
