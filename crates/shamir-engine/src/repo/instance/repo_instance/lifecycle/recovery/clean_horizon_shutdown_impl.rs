@@ -199,7 +199,7 @@ impl RepoInstance {
             }
         }
 
-        match self.tx_info_store().await {
+        match timed_stage(&self.name, "tx_info_store_open", self.tx_info_store()).await {
             Ok(store) => {
                 if let Err(e) = timed_stage(&self.name, "tx_info_store", store.flush_drain()).await
                 {
@@ -219,7 +219,13 @@ impl RepoInstance {
         for table_name in self.list_table_names() {
             // Shutdown flush only reads/flushes a stable frozen source, so it
             // must not fail on a fenced in-doubt name.
-            let table = match self.get_table_unfenced(&table_name).await {
+            let table = match timed_stage(
+                &self.name,
+                &format!("get_table {table_name}"),
+                self.get_table_unfenced(&table_name),
+            )
+            .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     log::warn!(
@@ -274,7 +280,7 @@ impl RepoInstance {
         // shutdown. Previously persistence ran per table; the shared manager
         // now owns the repo-wide namespace, so one persist covers every table.
         // WAL entries whose deltas cover these ids can be truncated on next boot.
-        match self.repo_interner().await {
+        match timed_stage(&self.name, "interner_open", self.repo_interner()).await {
             Ok(repo_interner) => {
                 if let Err(e) =
                     timed_stage(&self.name, "interner_persist", repo_interner.persist()).await
