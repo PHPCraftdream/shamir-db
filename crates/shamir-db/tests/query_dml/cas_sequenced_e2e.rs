@@ -121,7 +121,15 @@ async fn setup_db() -> ShamirDb {
 
 /// Create the native CAS validator bound to `docs` on Update.
 async fn bind_cas_validator(db: &ShamirDb) {
-    let empty_wasm = wat::parse_str("(module)").unwrap();
+    let empty_wasm = wat::parse_str(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 0)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0))
+        "#,
+    )
+    .unwrap();
     let id = db
         .create_validator_from_wasm("v_cas", &empty_wasm, false)
         .await

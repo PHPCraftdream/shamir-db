@@ -142,7 +142,15 @@ async fn setup_with_secrets() -> ShamirDb {
 async fn create_setuid_reader(shamir: &ShamirDb, owner: Actor, mode: u16) {
     // Minimal valid empty WASM module (magic + version) — accepted by the
     // validator, never actually invoked (we replace the live artifact below).
-    let empty_wasm = wat::parse_str("(module)").unwrap();
+    let empty_wasm = wat::parse_str(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 0)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0))
+        "#,
+    )
+    .unwrap();
     shamir
         .create_function_from_wasm_as("read_secrets", &empty_wasm, false, owner.clone())
         .await

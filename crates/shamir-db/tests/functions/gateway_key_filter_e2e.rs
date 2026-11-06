@@ -160,7 +160,15 @@ async fn rv_sdk_f956c637_unsupported_key_shapes_fail_closed() {
         .await
         .unwrap();
 
-    let wasm = wat::parse_str("(module)").unwrap();
+    let wasm = wat::parse_str(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 0)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0))
+        "#,
+    )
+    .unwrap();
     db.create_function_from_wasm("key_probe", &wasm, false)
         .await
         .unwrap();
