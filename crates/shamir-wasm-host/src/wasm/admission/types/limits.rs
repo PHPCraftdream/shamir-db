@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 /// Slack reserved for the rest of a request frame (envelope, names, framing).
 const FRAME_OVERHEAD_BYTES: u128 = 64 * 1024;
 
@@ -46,6 +48,12 @@ pub struct AdmissionLimits {
     /// Rust source size accepted by the compile path (carried here for the
     /// facade; not checked by the module scan).
     pub max_source_bytes: usize,
+    /// Wall-clock cap on one admitted compile (scan plus compile); the job
+    /// cannot be cancelled, see the compile gate. Not applied under the Load
+    /// policy.
+    pub max_compile_time: Duration,
+    /// Compiles running at once across the engine; callers beyond it queue.
+    pub max_concurrent_compiles: usize,
 }
 
 impl Default for AdmissionLimits {
@@ -70,6 +78,10 @@ impl Default for AdmissionLimits {
             max_data_bytes_total: 4 * 1024 * 1024,
             max_memory_min_pages: 1_024,
             max_source_bytes: 1024 * 1024,
+            max_compile_time: Duration::from_secs(10),
+            max_concurrent_compiles: std::thread::available_parallelism()
+                .map_or(1, |cores| cores.get() / 2)
+                .max(1),
         }
     }
 }

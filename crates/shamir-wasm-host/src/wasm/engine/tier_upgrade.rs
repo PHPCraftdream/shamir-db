@@ -10,7 +10,7 @@
 
 #[cfg(test)]
 use super::TierFaults;
-use super::{Tier, TierMode, WasmEngine, WasmLimits};
+use super::{Tier, TierMode, TierReport, UpgradeState, WasmEngine, WasmLimits};
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::wasm::wasm_function::HostState;
 use arc_swap::ArcSwap;
@@ -31,21 +31,6 @@ pub(in crate::wasm) struct FunctionSlot {
     pub(in crate::wasm) engine: Engine,
     pub(in crate::wasm) instance_pre: InstancePre<HostState>,
     pub(in crate::wasm) tier: Tier,
-}
-
-/// Upgrade state machine of a function: at most one upgrade, one retry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpgradeState {
-    /// No upgrade attempted yet.
-    Idle = 0,
-    /// An upgrade job is in flight.
-    Scheduled = 1,
-    /// The first upgrade failed; one 16x-threshold retry remains.
-    Failed = 2,
-    /// An optimized slot was installed.
-    Done = 3,
-    /// The retry failed as well; no further attempts.
-    Exhausted = 4,
 }
 
 /// State shared between a [`WasmFunction`](crate::wasm::wasm_function::WasmFunction)
@@ -100,6 +85,21 @@ impl FunctionShared {
 
     pub(in crate::wasm) fn tier(&self) -> Tier {
         self.slot().tier
+    }
+
+    /// Tier mode fixed at construction.
+    pub(in crate::wasm) fn mode(&self) -> TierMode {
+        self.mode
+    }
+
+    /// Snapshot of the tier, mode, call counter and upgrade state.
+    pub(in crate::wasm) fn report(&self) -> TierReport {
+        TierReport {
+            tier: self.tier(),
+            mode: self.mode,
+            calls_observed: self.calls.load(Ordering::Relaxed),
+            upgrade_state: UpgradeState::from_raw(self.upgrade_state.load(Ordering::Acquire)),
+        }
     }
 
     /// Swaps the optimized slot in. A call that already loaded the old slot

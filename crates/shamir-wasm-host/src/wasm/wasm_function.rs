@@ -71,7 +71,7 @@
 //! Creation compiles the fast tier (Winch); crossing `TierOptions::hot_calls`
 //! swaps in an optimized-tier (Cranelift) slot; in-flight calls keep theirs.
 
-use super::admission::{admit_module, AdmissionPolicy, ModuleReport};
+use super::admission::{admit_module, run_gated_compile, AdmissionPolicy, ModuleReport};
 use super::bindings::batch::{host_batch_get, host_batch_put};
 use super::bindings::call::host_call;
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
@@ -79,7 +79,7 @@ use super::bindings::globals::{host_global_get, host_global_set};
 use super::bindings::http::host_http_fetch;
 use super::bindings::raise::host_raise_error;
 use super::engine::tier_upgrade::{maybe_schedule_upgrade, FunctionShared, FunctionSlot};
-use super::engine::{Tier, TierMode, WasmEngine, WasmLimits};
+use super::engine::{Tier, TierMode, TierReport, WasmEngine, WasmLimits};
 #[cfg(test)]
 use super::fuel::FuelObserver;
 use super::fuel::{pool_refund, FuelLease};
@@ -368,7 +368,9 @@ impl WasmFunction {
     }
 
     /// Admits the bytes under `policy` (returning the [`ModuleReport`]) and
-    /// compiles on the blocking pool, so neither the scan nor the compile
+    /// compiles on the blocking pool under the engine's compile gate
+    /// (concurrency bound, plus the compile time cap under
+    /// [`AdmissionPolicy::Admission`]), so neither the scan nor the compile
     /// runs on an async worker thread.
     pub async fn from_binary_admitted_blocking(
         engine: Arc<WasmEngine>,
@@ -379,7 +381,8 @@ impl WasmFunction {
     ) -> FnResult<(Self, ModuleReport)> {
         engine.validate_limits(&limits)?;
         let wasm = wasm_or_cwasm_bytes.to_vec();
-        run_compile_blocking(move || {
+        let gate = Arc::clone(&engine);
+        run_gated_compile(&gate, &policy, move || {
             let report = admit_module(&wasm, &policy)?;
             let function =
                 Self::from_sanitized(engine, wasm.into(), limits, mode, "WASM compile error")?;
@@ -391,6 +394,16 @@ impl WasmFunction {
     /// The compilation tier the function's live slot is resident on.
     pub fn tier(&self) -> Tier {
         self.shared.tier()
+    }
+
+    /// The tier mode fixed at construction.
+    pub fn mode(&self) -> TierMode {
+        self.shared.mode()
+    }
+
+    /// Snapshot of the live tier, the mode, the upgrade call counter and the upgrade state.
+    pub fn tier_report(&self) -> TierReport {
+        self.shared.report()
     }
 
     /// Assemble the function from already-validated bytes (sanitizer and

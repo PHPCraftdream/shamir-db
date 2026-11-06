@@ -1,4 +1,5 @@
 use crate::{AdmissionLimits, WasmEngineOptions};
+use std::time::Duration;
 
 const MIB: usize = 1024 * 1024;
 const FRAME_CAP: usize = 16 * MIB;
@@ -25,6 +26,13 @@ fn defaults_match_the_documented_table() {
     assert_eq!(l.max_data_bytes_total, 4 * MIB);
     assert_eq!(l.max_memory_min_pages, 1_024);
     assert_eq!(l.max_source_bytes, MIB);
+    assert_eq!(l.max_compile_time, Duration::from_secs(10));
+    assert_eq!(
+        l.max_concurrent_compiles,
+        std::thread::available_parallelism()
+            .map_or(1, |cores| cores.get() / 2)
+            .max(1)
+    );
 }
 
 #[test]

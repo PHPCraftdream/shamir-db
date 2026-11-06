@@ -2,9 +2,10 @@
 //!
 //! Re-exports the public surface:
 //! * [`WasmEngine`] / [`WasmLimits`] — the two-tier engine configuration (`engine`).
-//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] — two-tier switches (`engine`).
+//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] /
+//!   [`TierReport`] / [`UpgradeState`] — two-tier switches (`engine`).
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
-//! * [`admit_module`] / [`AdmissionPolicy`] / [`AdmissionLimits`] / [`ModuleReport`] /
+//! * [`admit_module`] / [`check_module`] / [`AdmissionPolicy`] / [`AdmissionLimits`] / [`ModuleReport`] /
 //!   [`AdmissionError`] / [`ModuleHash`] — module admission (`admission`).
 //! * [`verify_wasm_module`] / [`SANCTIONED_HOST_IMPORTS`] — import allowlist verification.
 
@@ -16,11 +17,12 @@ mod fuel;
 mod wasm_function;
 
 pub use admission::{
-    admit_module, verify_wasm_module, AdmissionError, AdmissionLimits, AdmissionPolicy, ModuleHash,
-    ModuleReport, SANCTIONED_HOST_IMPORTS,
+    admit_module, check_module, verify_wasm_module, AdmissionError, AdmissionLimits,
+    AdmissionPolicy, ModuleHash, ModuleReport, SANCTIONED_HOST_IMPORTS,
 };
 pub use engine::{
-    Tier, TierMode, TierOptions, TierStats, WasmEngine, WasmEngineOptions, WasmLimits,
+    Tier, TierMode, TierOptions, TierReport, TierStats, UpgradeState, WasmEngine,
+    WasmEngineOptions, WasmLimits,
 };
 #[cfg(test)]
 pub(crate) use wasm_function::encode_params;

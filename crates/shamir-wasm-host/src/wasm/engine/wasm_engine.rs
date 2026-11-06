@@ -7,8 +7,8 @@ use crate::wasm::admission::AdmissionLimits;
 use crate::wasm::compile_cache::DiskCacheStore;
 use std::path::PathBuf;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Semaphore;
 use wasmtime::{Engine, InstanceAllocationStrategy, Module, PoolingAllocationConfig};
 
@@ -49,6 +49,9 @@ fn apply_bench_strategy(config: &mut wasmtime::Config) -> FnResult<()> {
 /// * `upgrade_fault` — the background upgrade job fails
 ///   ([`TierFaults::UPGRADE_FAIL`]) or panics ([`TierFaults::UPGRADE_PANIC`])
 ///   instead of compiling, exercising the failure/retry/exhaustion machine.
+/// * `compile_delay_ms`, `compile_active`, `compile_max_active` — the
+///   compile-gate probe: an injected per-job delay plus the current and peak
+///   number of gated compile jobs inside their blocking section.
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TierFaults {
@@ -56,6 +59,13 @@ pub(crate) struct TierFaults {
     pub(crate) fail_fast_compile: AtomicBool,
     /// What the background upgrade job does instead of compiling.
     pub(crate) upgrade_fault: AtomicU8,
+    /// Milliseconds every gated blocking compile job sleeps after taking its
+    /// permit.
+    pub(crate) compile_delay_ms: AtomicU64,
+    /// Gated jobs currently inside their blocking section.
+    pub(crate) compile_active: AtomicUsize,
+    /// Highest value `compile_active` reached.
+    pub(crate) compile_max_active: AtomicUsize,
 }
 
 #[cfg(test)]
@@ -66,6 +76,31 @@ impl TierFaults {
     pub(crate) const UPGRADE_FAIL: u8 = 1;
     /// Upgrade job panics (exercises the `JoinError` failure path).
     pub(crate) const UPGRADE_PANIC: u8 = 2;
+
+    /// Marks a gated compile job's blocking section: counts it active,
+    /// records the peak and sleeps the injected delay; dropping the probe
+    /// leaves the section.
+    pub(crate) fn enter_compile(&self) -> CompileProbe<'_> {
+        let active = self.compile_active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.compile_max_active.fetch_max(active, Ordering::SeqCst);
+        let delay = self.compile_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        CompileProbe(self)
+    }
+}
+
+/// Guard of a gated compile job's blocking section; dropping it leaves the
+/// section.
+#[cfg(test)]
+pub(crate) struct CompileProbe<'a>(&'a TierFaults);
+
+#[cfg(test)]
+impl Drop for CompileProbe<'_> {
+    fn drop(&mut self) {
+        self.0.compile_active.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 // ── WasmEngine ────────────────────────────────────────────────────────
@@ -101,6 +136,13 @@ pub struct WasmEngine {
     upgrade_permits: Arc<Semaphore>,
     /// Upgrade lifecycle counters shared with the background jobs.
     stats: Arc<TierStats>,
+    /// Bounds concurrently running admitted compiles
+    /// (`AdmissionLimits::max_concurrent_compiles`).
+    compile_permits: Arc<Semaphore>,
+    /// Cranelift engine without the incremental disk cache and without
+    /// pooling, built on first use; the dry-run check compiles on it so it
+    /// never writes the cache.
+    uncached_optimized: Arc<OnceLock<Engine>>,
     /// Test-only fault-injection switches (see [`TierFaults`]).
     #[cfg(test)]
     faults: Arc<TierFaults>,
@@ -260,6 +302,10 @@ impl WasmEngine {
             tier_options: options.tier,
             upgrade_permits: Arc::new(Semaphore::new(options.tier.background_jobs.max(1))),
             stats: Arc::new(TierStats::default()),
+            compile_permits: Arc::new(Semaphore::new(
+                options.admission.max_concurrent_compiles.max(1),
+            )),
+            uncached_optimized: Arc::new(OnceLock::new()),
             #[cfg(test)]
             faults: Arc::new(TierFaults::default()),
             #[cfg(test)]
@@ -503,6 +549,29 @@ impl WasmEngine {
     /// Permit pool bounding concurrent background upgrade compiles.
     pub(crate) fn upgrade_permits(&self) -> &Arc<Semaphore> {
         &self.upgrade_permits
+    }
+
+    /// Permit pool bounding concurrently running admitted compiles.
+    pub(crate) fn compile_permits(&self) -> &Arc<Semaphore> {
+        &self.compile_permits
+    }
+
+    /// Engine for the dry-run check: Cranelift without the incremental disk
+    /// cache and without pooling, built on first use, so checking a module
+    /// never writes the cache.
+    pub(crate) fn uncached_optimized_engine(&self) -> FnResult<&Engine> {
+        if let Some(engine) = self.uncached_optimized.get() {
+            return Ok(engine);
+        }
+        #[cfg(feature = "bench-strategies")]
+        let mut config = Self::base_config();
+        #[cfg(feature = "bench-strategies")]
+        apply_bench_strategy(&mut config)?;
+        #[cfg(not(feature = "bench-strategies"))]
+        let config = Self::base_config();
+        let engine =
+            Engine::new(&config).map_err(|error| FunctionError::Compute(error.to_string()))?;
+        Ok(self.uncached_optimized.get_or_init(|| engine))
     }
 
     /// Compiles sanitized Wasm bytes on the optimized (Cranelift) engine.
