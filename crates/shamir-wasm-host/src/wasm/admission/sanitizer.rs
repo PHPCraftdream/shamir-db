@@ -21,7 +21,7 @@
 //! 2. **An explicit, auditable ABI allowlist independent of linker
 //!    wiring.** [`SANCTIONED_HOST_IMPORTS`] is the single source of truth
 //!    both this sanitizer AND `build_instance_pre`'s registrations are
-//!    tested against (see `tests/wasm_sanitizer_tests.rs`), so the two
+//!    tested against (see `tests/wasm/admission/sanitizer_tests.rs`), so the two
 //!    surfaces cannot silently drift apart — a future change that
 //!    broadens the linker's registered surface without a matching,
 //!    deliberate update to this allowlist fails a dedicated sync test.
@@ -77,7 +77,7 @@ use wasmparser::{Encoding, Parser, Payload, TypeRef};
 /// This is the SAME set `build_instance_pre` (in
 /// [`wasm_function`](super::wasm_function)) registers on the
 /// [`wasmtime::Linker`] — kept in sync by a dedicated cross-check test
-/// (`tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`)
+/// (`tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`)
 /// rather than by having one generate the other, since `func_wrap`/
 /// `func_wrap_async` need distinctly-typed Rust closures per import and
 /// cannot be driven from a single generic loop over this array.

@@ -71,6 +71,7 @@
 //! Creation compiles the fast tier (Winch); crossing `TierOptions::hot_calls`
 //! swaps in an optimized-tier (Cranelift) slot; in-flight calls keep theirs.
 
+use super::admission::verify_wasm_module;
 use super::bindings::batch::{host_batch_get, host_batch_put};
 use super::bindings::call::host_call;
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
@@ -82,7 +83,6 @@ use super::engine::{Tier, TierMode, WasmEngine, WasmLimits};
 #[cfg(test)]
 use super::fuel::FuelObserver;
 use super::fuel::{pool_refund, FuelLease};
-use super::wasm_sanitizer::verify_wasm_module;
 use crate::gateway::db_gateway::DbGateway;
 use crate::gateway::net_gateway::NetGateway;
 use crate::runtime::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
@@ -148,10 +148,10 @@ pub(crate) struct HostState {
 
 /// Test-only: build a bare [`Store`] wrapping a minimal [`HostState`] plus
 /// the fully-registered [`Linker`], for
-/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// `tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`
 /// to enumerate the linker's real `(module, name)` surface via
 /// [`Linker::iter`] and cross-check it against
-/// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`]. Never compiled into
+/// [`super::admission::SANCTIONED_HOST_IMPORTS`]. Never compiled into
 /// non-test builds.
 #[cfg(test)]
 pub(crate) fn test_linker_and_store(
@@ -202,10 +202,10 @@ pub struct WasmFunction {
 /// yet against any particular module.
 ///
 /// `pub(crate)` (rather than private) so
-/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// `tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`
 /// can build the real registered [`Linker`] surface and cross-check its
 /// `(module, name)` pairs (via [`Linker::iter`]) against
-/// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`] — this is the
+/// [`super::admission::SANCTIONED_HOST_IMPORTS`] — this is the
 /// mechanism keeping the sanitizer's allowlist and the linker's actual
 /// registrations from silently drifting apart.
 pub(crate) fn build_linker(engine: &Engine) -> FnResult<Linker<HostState>> {
@@ -268,7 +268,7 @@ impl WasmFunction {
     /// Runs the structural pre-instantiation sanitizer
     /// ([`verify_wasm_module`]) on the WAT's binary encoding before
     /// `wasmtime::Module::new`/`instantiate_pre` ever see it — see
-    /// `wasm_sanitizer` module docs for why this is a real, if modest,
+    /// `admission::sanitizer` module docs for why this is a real, if modest,
     /// defense-in-depth control (fail-fast + an explicit auditable
     /// allowlist) rather than a redundant re-check of what the linker
     /// already rejects for free.
