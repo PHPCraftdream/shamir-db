@@ -11,7 +11,7 @@ use shamir_engine::function::{
 };
 use shamir_types::types::value::QueryValue;
 
-use super::super::{ArtifactKind, FunctionSource, ShamirDb};
+use super::super::super::{ArtifactKind, FunctionSource, ShamirDb};
 
 impl ShamirDb {
     // ========================================================================
@@ -251,7 +251,7 @@ impl ShamirDb {
         // it (see `ArtifactKind::from_record`), so this is a no-op for
         // behaviour — purely additive catalogue metadata.
         m.insert(
-            super::super::KIND_FIELD.to_string(),
+            super::super::super::KIND_FIELD.to_string(),
             ArtifactKind::Wasm.as_query_value(),
         );
         let mut record = shamir_types::types::value::QueryValue::Map(m);
@@ -658,8 +658,9 @@ impl ShamirDb {
     /// Default is empty (deny all). Must be called before any function
     /// invocation that uses `ctx.http_fetch()`.
     pub fn set_net_allowlist(&mut self, allowlist: Vec<String>) {
-        self.net_allowlist =
-            Arc::new(super::super::super::gateway::net_grants::NetGrantsCache::new(allowlist));
+        self.net_allowlist = Arc::new(
+            super::super::super::super::gateway::net_grants::NetGrantsCache::new(allowlist),
+        );
     }
 
     /// Invoke a function by name with the given parameters.
@@ -758,7 +759,7 @@ impl ShamirDb {
             .authorize_invocation(name, &caller)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
-        let gateway = Arc::new(super::db_gateway::FacadeDbGateway {
+        let gateway = Arc::new(super::super::db_gateway::FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
             actor: actor.clone(),
@@ -806,7 +807,7 @@ impl ShamirDb {
             .authorize_invocation(name, &caller)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
-        let gateway = Arc::new(super::db_gateway::FacadeDbGateway {
+        let gateway = Arc::new(super::super::db_gateway::FacadeDbGateway {
             shamir: self.clone(),
             db_name: db_name.to_string(),
             actor: actor.clone(),
