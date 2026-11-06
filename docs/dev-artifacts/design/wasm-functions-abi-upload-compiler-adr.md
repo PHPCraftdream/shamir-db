@@ -247,3 +247,20 @@ default.
   reflects tier changes after `alter_function` and after the background upgrade.
 * Bench (second stage, PROC-BENCH-2): compile time at 1 KB to 1 MB, tier-up break-even, p99
   during a background compile, memory per tier, hash cost per MB.
+
+## Implementation notes (PROC-1)
+
+Deviations of this PROC-1 from the text above:
+
+* (a) The contract check runs at admission only; the `Load` policy skips it.
+* (b) Wire ops, builders, client and server changes are deferred to PROC-3b.
+* (c) The server option for `AdmissionLimits` and the frame-cap check
+  (`AdmissionLimits::validate_against_frame`) are deferred to PROC-3b: `shamir-db` cannot see
+  the frame constant.
+* (d) `check_function` returns `ModuleReport`; there is no separate verdict type.
+* (e) Rows now carry `module_hash`, `abi`, `origin` and `optimize`. Legacy `wasm_hash` rows are
+  verified at boot and are never rewritten by boot.
+* (f) An unavailable function (unloadable or corrupt) is registered as a placeholder that fails
+  closed, so `replace: true` repairs it and drop removes it.
+* (g) "Composite hash written on the next write" is satisfied by create/replace; alter changes
+  only `optimize`.

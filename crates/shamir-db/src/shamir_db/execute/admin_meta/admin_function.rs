@@ -61,6 +61,7 @@ impl ShamirAdminExecutor {
             security,
             secret_grants: op.secret_grants.clone(),
             net_grants: op.net_grants.clone(), // task #609: wire surface added
+            ..CreateFunctionOptions::default()
         };
 
         if let Some(ref source) = op.source {

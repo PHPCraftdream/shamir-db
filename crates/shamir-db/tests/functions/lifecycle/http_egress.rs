@@ -97,6 +97,7 @@ async fn wasm_function_http_fetch_allowed() {
         security: Security::Invoker,
         secret_grants: Vec::new(),
         net_grants: vec!["127.0.0.1".to_string()],
+        ..CreateFunctionOptions::default()
     };
     match db
         .create_function_with_opts("fetcher", FunctionSource::Source(HTTP_FETCH_SRC), opts)
@@ -214,6 +215,7 @@ async fn net_grants_narrower_than_db_allowlist_denies_outside_host() {
         // "other.example.com" is DB-allowed but must be denied to THIS
         // function specifically.
         net_grants: vec!["allowed.example.com".to_string()],
+        ..CreateFunctionOptions::default()
     };
     match db
         .create_function_with_opts(

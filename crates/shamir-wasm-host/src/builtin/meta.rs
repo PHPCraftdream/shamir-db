@@ -10,6 +10,8 @@
 
 use shamir_types::types::value::QueryValue;
 
+use crate::wasm::TierMode;
+
 /// Who may see that the function exists.
 ///
 /// Stored in the catalogue; enforcement is deferred to slice 10.
@@ -249,7 +251,8 @@ impl FunctionMeta {
 /// means NO egress for this function (fail-closed, like `secret_grants`);
 /// granting egress requires explicitly listing host patterns, which are then
 /// intersected with the DB-wide `net_allowlist` (a function can never exceed
-/// the DB ceiling). Builtin functions with no catalogue row are a separate
+/// the DB ceiling). `optimize` selects the compilation tier policy for
+/// WASM-backed functions (default `TierMode::Auto`). Builtin functions with no catalogue row are a separate
 /// code path and keep the full allowlist. See [`FunctionMeta::net_grants`]
 /// and `build_net_gateway`.
 #[derive(Debug, Clone)]
@@ -259,6 +262,7 @@ pub struct CreateFunctionOptions {
     pub security: Security,
     pub secret_grants: Vec<String>,
     pub net_grants: Vec<String>,
+    pub optimize: TierMode,
 }
 
 impl Default for CreateFunctionOptions {
@@ -269,6 +273,7 @@ impl Default for CreateFunctionOptions {
             security: Security::Invoker,
             secret_grants: Vec::new(),
             net_grants: Vec::new(),
+            optimize: TierMode::Auto,
         }
     }
 }

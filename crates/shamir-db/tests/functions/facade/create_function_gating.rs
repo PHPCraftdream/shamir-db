@@ -60,6 +60,7 @@ async fn secret_grants_without_root_manage_denied() {
         security: Security::Invoker,
         secret_grants: vec!["ADMIN_DB_PASSWORD".to_string()],
         net_grants: Vec::new(),
+        ..CreateFunctionOptions::default()
     };
     let err = shamir
         .create_function_with_opts_as("exfil_fn", FunctionSource::Wasm(&echo_wasm()), opts, alice)
@@ -99,6 +100,7 @@ async fn plain_create_without_root_manage_succeeds_for_non_system_actor() {
         security: Security::Invoker,
         secret_grants: Vec::new(),
         net_grants: Vec::new(),
+        ..CreateFunctionOptions::default()
     };
     shamir
         .create_function_with_opts_as("plain_fn", FunctionSource::Wasm(&echo_wasm()), opts, alice)

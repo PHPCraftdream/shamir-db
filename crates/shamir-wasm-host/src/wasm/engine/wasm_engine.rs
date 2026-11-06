@@ -139,6 +139,8 @@ pub struct WasmEngine {
     /// Bounds concurrently running admitted compiles
     /// (`AdmissionLimits::max_concurrent_compiles`).
     compile_permits: Arc<Semaphore>,
+    /// Admission gate caps this engine was built with.
+    admission: AdmissionLimits,
     /// Cranelift engine without the incremental disk cache and without
     /// pooling, built on first use; the dry-run check compiles on it so it
     /// never writes the cache.
@@ -159,7 +161,7 @@ pub struct WasmEngineOptions {
     /// Two-tier compilation switches (fast Winch tier + optimized Cranelift
     /// tier, background upgrade scheduling).
     pub tier: TierOptions,
-    /// Caps for the admission gate set; read by the facade in the next stage.
+    /// Caps for the admission gate set; exposed by the engine through `WasmEngine::admission_limits`.
     pub admission: AdmissionLimits,
 }
 
@@ -175,6 +177,11 @@ impl Default for WasmEngineOptions {
 }
 
 impl WasmEngine {
+    /// Admission gate caps this engine was built with.
+    pub fn admission_limits(&self) -> &AdmissionLimits {
+        &self.admission
+    }
+
     /// Creates an engine without a persistent compilation cache.
     pub fn new() -> FnResult<Self> {
         Self::with_options(WasmEngineOptions::default())
@@ -305,6 +312,7 @@ impl WasmEngine {
             compile_permits: Arc::new(Semaphore::new(
                 options.admission.max_concurrent_compiles.max(1),
             )),
+            admission: options.admission,
             uncached_optimized: Arc::new(OnceLock::new()),
             #[cfg(test)]
             faults: Arc::new(TierFaults::default()),

@@ -3,6 +3,7 @@
 use super::context::{FnBatch, FnCtx};
 use super::error::FnResult;
 use super::params::Params;
+use crate::wasm::TierReport;
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 
@@ -22,4 +23,9 @@ use shamir_types::types::value::QueryValue;
 pub trait ShamirFunction: Send + Sync {
     /// Evaluate the function.
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue>;
+
+    /// Per-function tier snapshot; `None` for functions that are not WASM-backed.
+    fn tier_report(&self) -> Option<TierReport> {
+        None
+    }
 }

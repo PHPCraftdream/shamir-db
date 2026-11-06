@@ -20,4 +20,5 @@ pub use shamir_db::ChangelogDeliveryGate;
 pub use shamir_db::ChangelogReceiver;
 pub use shamir_db::FunctionSource;
 pub use shamir_db::ShamirDb;
+pub use shamir_db::{FunctionDescription, FunctionExport, FunctionState};
 pub use system_store::{SystemStore, SystemStoreConfig};

@@ -1,17 +1,16 @@
 use base64::Engine;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    compile_rust_source_blocking, BatchContext, CreateFunctionOptions, FnAdapter, FnBatch, FnCtx,
-    FunctionError, FunctionMeta, FunctionRegistry, GlobalVars, Params, ShamirFunction,
-    WasmFunction, WasmLimits,
+    AdmissionPolicy, BatchContext, CreateFunctionOptions, FnAdapter, FnBatch, FnCtx, FunctionError,
+    FunctionMeta, FunctionRegistry, GlobalVars, Params, ShamirFunction, WasmFunction, WasmLimits,
 };
 use shamir_types::types::value::QueryValue;
 
 use super::super::super::{ArtifactKind, FunctionSource, ShamirDb};
+use super::types::{optimize_name, FunctionState};
 
 impl ShamirDb {
     // ========================================================================
@@ -160,43 +159,20 @@ impl ShamirDb {
                 .await
                 .map_err(|e| DbError::Function(e.to_string()))?;
         }
-        let (wasm, lang_tag, source_str) = match source {
-            FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
-            FunctionSource::Source(src) => {
-                // Task #607: compiling Rust source into WASM runs a host
-                // compiler process — gate it as a separate POSIX-style
-                // permission (Execute bit on the WasmCompiler singleton),
-                // not folded into bare FunctionNamespace Create. Mirrors the
-                // secret_grants escalation pattern above.
-                self.authorize_access(&actor, &ResourcePath::WasmCompiler, Action::Execute)
-                    .await
-                    .map_err(|e| DbError::Function(e.to_string()))?;
-                let compiled = compile_rust_source_blocking(src)
-                    .await
-                    .map_err(|e| match e {
-                        FunctionError::ToolchainUnavailable(msg) => {
-                            DbError::Function(format!("toolchain unavailable: {}", msg))
-                        }
-                        other => DbError::Function(other.to_string()),
-                    })?;
-                (compiled, "rust", Some(src.to_string()))
-            }
-        };
+        let (wasm, lang_tag, source_str) = self.materialize_function_source(source, &actor).await?;
 
         // Validate the wasm by compiling it (on the blocking thread pool).
-        let wf = WasmFunction::from_binary_blocking(
+        let (wf, report) = WasmFunction::from_binary_admitted_blocking(
             self.wasm_engine.clone(),
             &wasm,
             WasmLimits::default(),
+            opts.optimize,
+            AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
         )
         .await
         .map_err(|e| DbError::Function(e.to_string()))?;
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
-        // FxHasher is a noncryptographic diagnostic fingerprint, not integrity protection.
-        let mut hasher = rustc_hash::FxHasher::default();
-        wasm.hash(&mut hasher);
-        let wasm_hash = format!("{:016x}", hasher.finish());
 
         if !opts.replace
             && (self.functions.contains(name)
@@ -227,8 +203,22 @@ impl ShamirDb {
             shamir_types::types::value::QueryValue::Str(wasm_b64),
         );
         m.insert(
-            "wasm_hash".to_string(),
-            shamir_types::types::value::QueryValue::Str(wasm_hash),
+            "module_hash".to_string(),
+            shamir_types::types::value::QueryValue::Str(report.hash.to_hex()),
+        );
+        m.insert(
+            "abi".to_string(),
+            shamir_types::types::value::QueryValue::Int(report.abi_version as i64),
+        );
+        if let Some(origin) = report.origin_claim {
+            m.insert(
+                "origin".to_string(),
+                shamir_types::types::value::QueryValue::Str(origin),
+            );
+        }
+        m.insert(
+            "optimize".to_string(),
+            shamir_types::types::value::QueryValue::Str(optimize_name(opts.optimize).to_string()),
         );
         m.insert(
             "lang".to_string(),
@@ -302,6 +292,9 @@ impl ShamirDb {
 
         // Populate in-memory metadata.
         let _ = self.function_meta.insert(name.to_string(), meta);
+        let _ = self
+            .function_state
+            .insert(name.to_string(), FunctionState::Loaded);
 
         Ok(())
     }
@@ -339,6 +332,7 @@ impl ShamirDb {
         self.system_store.remove_function(name).await?;
         let live_existed = self.functions.remove(name);
         let _ = self.function_meta.remove(name);
+        let _ = self.function_state.remove(name);
         Ok(existed || live_existed)
     }
 
@@ -375,6 +369,9 @@ impl ShamirDb {
         // Migrate in-memory metadata.
         if let Some((_, meta)) = self.function_meta.remove(from) {
             self.function_meta.insert(to.to_string(), meta);
+        }
+        if let Some((_, state)) = self.function_state.remove(from) {
+            self.function_state.insert(to.to_string(), state);
         }
 
         // If there was a durable record, re-key it, preserving the

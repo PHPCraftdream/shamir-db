@@ -24,3 +24,4 @@ pub use core::{FunctionSource, ReplicationControlGuard, ShamirDb};
 #[cfg(test)]
 pub(crate) use db::classify_batch_error;
 pub(crate) use db::schema_management;
+pub use db::{FunctionDescription, FunctionExport, FunctionState};

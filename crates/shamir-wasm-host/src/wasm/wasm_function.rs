@@ -659,6 +659,10 @@ pub(crate) fn encode_params(params: &Params) -> FnResult<Vec<u8>> {
 
 #[async_trait]
 impl ShamirFunction for WasmFunction {
+    fn tier_report(&self) -> Option<TierReport> {
+        Some(WasmFunction::tier_report(self))
+    }
+
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
         maybe_schedule_upgrade(&self.shared);
         let input = encode_params(params)?;
