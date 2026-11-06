@@ -37,6 +37,8 @@ wait-timeout = "0.2.1"
 # version wasmtime 48 pulls transitively (see `Cargo.lock`) so no second
 # copy enters the dependency graph.
 wasmparser = "=0.254.2"
+# XXH3-128 module identity/corruption hash (`ModuleHash`); not for security decisions.
+xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
 # WAT-text -> binary conversion for `WasmFunction::from_wat`.
 wat = "=1.254.2"
 

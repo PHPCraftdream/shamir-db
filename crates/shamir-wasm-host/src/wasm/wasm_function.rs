@@ -71,7 +71,7 @@
 //! Creation compiles the fast tier (Winch); crossing `TierOptions::hot_calls`
 //! swaps in an optimized-tier (Cranelift) slot; in-flight calls keep theirs.
 
-use super::admission::verify_wasm_module;
+use super::admission::{admit_module, AdmissionPolicy, ModuleReport};
 use super::bindings::batch::{host_batch_get, host_batch_put};
 use super::bindings::call::host_call;
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
@@ -265,8 +265,8 @@ fn build_instance_pre(engine: &Engine, module: &Module) -> FnResult<InstancePre<
 impl WasmFunction {
     /// Compile a WAT text module into a `WasmFunction`.
     ///
-    /// Runs the structural pre-instantiation sanitizer
-    /// ([`verify_wasm_module`]) on the WAT's binary encoding before
+    /// Runs the pre-instantiation admission gate
+    /// ([`admit_module`] with [`AdmissionPolicy::Load`]) on the WAT's binary encoding before
     /// `wasmtime::Module::new`/`instantiate_pre` ever see it — see
     /// `admission::sanitizer` module docs for why this is a real, if modest,
     /// defense-in-depth control (fail-fast + an explicit auditable
@@ -287,14 +287,14 @@ impl WasmFunction {
         engine.validate_limits(&limits)?;
         let wasm_bytes = wat::parse_str(wat)
             .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
-        verify_wasm_module(&wasm_bytes)?;
+        admit_module(&wasm_bytes, &AdmissionPolicy::Load)?;
         Self::from_sanitized(engine, wasm_bytes.into(), limits, mode, "WAT compile error")
     }
 
     /// Compile a `.wasm` binary into a `WasmFunction`.
     ///
-    /// Runs the structural pre-instantiation sanitizer
-    /// ([`verify_wasm_module`]) on the raw bytes before
+    /// Runs the pre-instantiation admission gate
+    /// ([`admit_module`] with [`AdmissionPolicy::Load`]) on the raw bytes before
     /// `wasmtime::Module::from_binary`/`instantiate_pre` ever see them —
     /// this is the path both the compile-on-DDL pipeline
     /// (`compile_rust_source`'s output) and durable-catalogue recovery
@@ -330,7 +330,7 @@ impl WasmFunction {
         mode: TierMode,
     ) -> FnResult<Self> {
         engine.validate_limits(&limits)?;
-        verify_wasm_module(wasm_or_cwasm_bytes)?;
+        admit_module(wasm_or_cwasm_bytes, &AdmissionPolicy::Load)?;
         Self::from_sanitized(
             engine,
             wasm_or_cwasm_bytes.into(),
@@ -365,6 +365,27 @@ impl WasmFunction {
     ) -> FnResult<Self> {
         let wasm = wasm_or_cwasm_bytes.to_vec();
         run_compile_blocking(move || Self::from_binary_with_mode(engine, &wasm, limits, mode)).await
+    }
+
+    /// Admits the bytes under `policy` (returning the [`ModuleReport`]) and
+    /// compiles on the blocking pool, so neither the scan nor the compile
+    /// runs on an async worker thread.
+    pub async fn from_binary_admitted_blocking(
+        engine: Arc<WasmEngine>,
+        wasm_or_cwasm_bytes: &[u8],
+        limits: WasmLimits,
+        mode: TierMode,
+        policy: AdmissionPolicy,
+    ) -> FnResult<(Self, ModuleReport)> {
+        engine.validate_limits(&limits)?;
+        let wasm = wasm_or_cwasm_bytes.to_vec();
+        run_compile_blocking(move || {
+            let report = admit_module(&wasm, &policy)?;
+            let function =
+                Self::from_sanitized(engine, wasm.into(), limits, mode, "WASM compile error")?;
+            Ok((function, report))
+        })
+        .await
     }
 
     /// The compilation tier the function's live slot is resident on.

@@ -43,7 +43,8 @@ pub use runtime::{
     GlobalsQuota, GlobalsQuotaError, Params, ShamirFunction,
 };
 pub use wasm::{
-    verify_wasm_module, Tier, TierMode, TierOptions, TierStats, WasmEngine, WasmEngineOptions,
+    admit_module, verify_wasm_module, AdmissionError, AdmissionLimits, AdmissionPolicy, ModuleHash,
+    ModuleReport, Tier, TierMode, TierOptions, TierStats, WasmEngine, WasmEngineOptions,
     WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS,
 };
 

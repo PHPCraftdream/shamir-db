@@ -3,6 +3,7 @@
 
 use super::{TierOptions, TierStats};
 use crate::runtime::error::{FnResult, FunctionError};
+use crate::wasm::admission::AdmissionLimits;
 use crate::wasm::compile_cache::DiskCacheStore;
 use std::path::PathBuf;
 #[cfg(test)]
@@ -116,6 +117,8 @@ pub struct WasmEngineOptions {
     /// Two-tier compilation switches (fast Winch tier + optimized Cranelift
     /// tier, background upgrade scheduling).
     pub tier: TierOptions,
+    /// Caps for the admission gate set; read by the facade in the next stage.
+    pub admission: AdmissionLimits,
 }
 
 impl Default for WasmEngineOptions {
@@ -124,6 +127,7 @@ impl Default for WasmEngineOptions {
             pooling_memory_ceiling: WasmLimits::default().max_memory_bytes,
             pooling: std::env::var_os("SHAMIR_WASM_NO_POOL").is_none(),
             tier: TierOptions::default(),
+            admission: AdmissionLimits::default(),
         }
     }
 }
