@@ -30,8 +30,9 @@ struct UsernameVector {
 fn shared_username_precis_vectors_match_rust() {
     // The shared fixture is JSON, but its scalar strings and booleans are also valid TOML.
     // Use the existing test-only TOML dependency rather than adding a JSON dependency.
-    let fixture = include_str!("../../../../query/shamir-query-types/test-vectors/username_precis.json")
-        .replace("\r\n", "\n");
+    let fixture =
+        include_str!("../../../../query/shamir-query-types/test-vectors/username_precis.json")
+            .replace("\r\n", "\n");
     let metadata = fixture
         .lines()
         .find_map(|line| {

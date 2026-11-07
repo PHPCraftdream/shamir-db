@@ -76,14 +76,7 @@ fn copied_sdk_bundle(root: &Path) -> std::path::PathBuf {
         .parent()
         .unwrap();
     std::fs::create_dir_all(root.join("crates")).unwrap();
-    std::fs::write(root.join("Cargo.toml"), "[workspace]
-members = [\"crates/*/*\"]
-resolver = \"2\"
-[workspace.lints.rust]
-[workspace.lints.clippy]
-[workspace.dependencies]
-bench-scale-tool = \"0.1.0\"
-").unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*/*\"]\nresolver = \"2\"\n[workspace.lints.rust]\n[workspace.lints.clippy]\n[workspace.dependencies]\nbench-scale-tool = \"0.1.0\"\n").unwrap();
     for (group, name) in [
         ("wasm", "shamir-sdk"),
         ("wasm", "shamir-sdk-macros"),

@@ -311,7 +311,8 @@ fn embedded_prefix_boundaries() {
 fn curl_config_disables_environment_proxies() {
     // There is no configuration-builder seam in shamir-db; inspect the actual
     // initialization, rather than a duplicate of the intended config string.
-    let source = include_str!("../../../../../engine/shamir-db/src/shamir_db/gateway/curl_gateway.rs");
+    let source =
+        include_str!("../../../../../engine/shamir-db/src/shamir_db/gateway/curl_gateway.rs");
     assert!(source.contains("let mut cfg = String::from(\"noproxy = \\\"*\\\"\\n\");"));
 }
 
