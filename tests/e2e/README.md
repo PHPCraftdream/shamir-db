@@ -76,7 +76,7 @@ What it does:
 
 For pure-Rust integration tests (in-process `ServerLauncher`, no
 subprocess) see `crates/shamir-server/tests/mvp_e2e.rs` and
-`crates/shamir-client/tests/smoke.rs`.
+`crates/shamir-e2e/tests/smoke.rs`.
 
 ## Connection matrix (`tests/21-connection-matrix.test.js`)
 

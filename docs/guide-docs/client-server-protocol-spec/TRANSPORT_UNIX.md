@@ -175,7 +175,7 @@ starts**, entirely independent of transport or `binding_mode`. It writes
 the admin account directly into the user directory, not through the wire
 protocol at all. This already matches IMPLEMENTATION_GUIDE §2.2's option
 (c) ("Pre-provision admin user через CLI tool, не через wire protocol") —
-and, per `crates/shamir-client/tests/smoke_local.rs` and this spec's own
+and, per `crates/shamir-e2e/tests/smoke_local.rs` and this spec's own
 `connectLocal` e2e coverage, it works over the `unix` transport unmodified:
 no new provisioning code was needed for this transport.
 

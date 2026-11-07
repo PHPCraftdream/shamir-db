@@ -62,7 +62,7 @@ diagnostics stay because the class (timing, ports, OS differences) can recur.
 | test | where | notes |
 |---|---|---|
 | `launcher_shutdown_stops_token_gc_task` | shamir-server `tests/boot/server_tests.rs` | #1802, shutdown flush stall on Windows; watchdog required (28 s stall) |
-| `token_ws_expired_token_closes_with_4012` | shamir-client `tests/matrix/token/ws.rs` | fixed (#490), client sees RST instead of close code |
+| `token_ws_expired_token_closes_with_4012` | shamir-e2e `tests/matrix/token/ws.rs` | fixed (#490), client sees RST instead of close code |
 | `token_listener_socket_traces_redact_rest_and_native_ws_credentials` | shamir-server `tests/e2e/token_matrix/suite/observability.rs` | |
 | `seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges` | shamir-server `tests/seed_recovery_e2e/scenarios/c_refusals.rs` | |
 | `restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched` | shamir-server `tests/admin/ops/backup_restore_e2e/restore_failure.rs` | |

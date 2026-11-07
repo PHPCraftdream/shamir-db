@@ -17,7 +17,7 @@ use shamir_query_builder::ddl;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::insert;
 
-use crate::{Client, ConnectOptions};
+use shamir_client::{Client, ConnectOptions};
 
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,

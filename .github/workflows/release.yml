@@ -137,7 +137,7 @@ jobs:
   # on a PR. This includes the only real fsync-durability-across-restart
   # coverage (`shamir-server/tests/server_meta.rs`, `persistence_e2e.rs`,
   # `backup_restore_e2e.rs`), the in-process server↔client TLS+SCRAM e2e
-  # (`mvp_e2e.rs`, `mvp_ws_e2e.rs`, `shamir-client/tests/smoke.rs`), the
+  # (`mvp_e2e.rs`, `mvp_ws_e2e.rs`, `shamir-e2e/tests/smoke.rs`), the
   # connection-cap / slow-loris defences (`max_connections.rs`,
   # `slow_loris.rs`) and the `shamir-db/tests/query_*.rs` wire-path suite.
   #

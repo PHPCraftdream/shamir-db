@@ -40,7 +40,7 @@
 #   @types    — shamir-types + shamir-collections
 #   @storage  — shamir-storage + shamir-wal
 #   @server   — shamir-server + shamir-connect
-#   @e2e      — shamir-db + shamir-server (forces --full)
+#   @e2e      — shamir-db + shamir-server + shamir-e2e (forces --full)
 #   @all      — every workspace crate (explicit; same as no -p)
 #
 # Power-user: pass `-E '<nextest-filter-expression>'` for arbitrary
@@ -114,7 +114,7 @@ scope_args() {
         @storage)  echo "-p shamir-storage -p shamir-wal" ;;
         @server)   echo "-p shamir-server -p shamir-connect" ;;
         @vector)   echo "-p shamir-index -p shamir-engine" ;;
-        @e2e)      echo "-p shamir-db -p shamir-server" ;;
+        @e2e)      echo "-p shamir-db -p shamir-server -p shamir-e2e" ;;
         @all)      echo "" ;;  # nextest default = workspace
         @*)
             echo "ERROR: unknown scope '$1'. See ./scripts/test.sh --help." >&2
