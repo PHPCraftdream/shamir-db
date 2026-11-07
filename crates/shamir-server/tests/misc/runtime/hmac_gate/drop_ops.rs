@@ -867,6 +867,22 @@ async fn drop_user_requires_hmac_a3d93402() {
 // replace function / validator HMAC gates
 // --------------------------------------------------------------------------
 
+fn replace_op(hmac: Option<String>) -> BatchOp {
+    BatchOp::CreateFunction(CreateFunctionOp {
+        create_function: "fn".into(),
+        source: Some("pub fn shamir_call() {}".into()),
+        wasm: None,
+        replace: true,
+        visibility: None,
+        security: None,
+        secret_grants: vec![],
+        net_grants: vec![],
+        lang: None,
+        optimize: None,
+        hmac,
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn create_function_replace_without_hmac_rejected_a3d93402() {
     let shamir = make_db_with_table("prod", "items").await;
@@ -874,20 +890,7 @@ async fn create_function_replace_without_hmac_rejected_a3d93402() {
     let session = root_session();
     let mut b = Batch::new();
     b.id(1);
-    b.op(
-        "f",
-        BatchOp::CreateFunction(CreateFunctionOp {
-            create_function: "fn".into(),
-            source: Some("pub fn shamir_call() {}".into()),
-            wasm: None,
-            replace: true,
-            visibility: None,
-            security: None,
-            secret_grants: vec![],
-            net_grants: vec![],
-            hmac: None,
-        }),
-    );
+    b.op("f", replace_op(None));
     let res = decode(
         &handler
             .handle(
@@ -909,20 +912,7 @@ async fn create_function_replace_with_wrong_hmac_rejected_a3d93402() {
     let session = root_session();
     let mut b = Batch::new();
     b.id(1);
-    b.op(
-        "f",
-        BatchOp::CreateFunction(CreateFunctionOp {
-            create_function: "fn".into(),
-            source: Some("pub fn shamir_call() {}".into()),
-            wasm: None,
-            replace: true,
-            visibility: None,
-            security: None,
-            secret_grants: vec![],
-            net_grants: vec![],
-            hmac: Some("deadbeef".repeat(8)),
-        }),
-    );
+    b.op("f", replace_op(Some("deadbeef".repeat(8))));
     let res = decode(
         &handler
             .handle(

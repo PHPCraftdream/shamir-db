@@ -32,6 +32,7 @@ export {
   setBufferConfig, getBufferConfig, alterBufferConfig,
   migrationStatus,
   createFunction, dropFunction, renameFunction,
+  describeFunction, exportFunction, checkFunction, alterFunction,
   createValidator, dropValidator, renameValidator,
   bindValidator, unbindValidator, listValidators,
   createFunctionFolder,

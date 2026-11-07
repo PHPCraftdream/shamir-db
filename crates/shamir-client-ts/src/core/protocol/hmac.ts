@@ -52,7 +52,7 @@ export function canonicalBatchOp(db:string,op:BatchCanonicalOp):Uint8Array {
  case'rename_group':{const x=op as RenameGroupOp;writeGroup(e,x.rename_group);e.str(x.to);break;}
  case'add_group_member':{const x=op as AddGroupMemberOp;writeGroup(e,x.add_group_member);e.u64(x.user);break;}
  case'remove_group_member':{const x=op as RemoveGroupMemberOp;writeGroup(e,x.remove_group_member);e.u64(x.user);break;}
- case'create_function':{const x=op as CreateFunctionOp & {net_grants?:string[]};e.str(x.create_function);e.bool(x.replace);e.str(x.security??'invoker');e.opt(x.visibility,v=>e.str(v));e.list(x.secret_grants??[]);e.list(x.net_grants??[]);e.opt(x.source,v=>e.digest(v));e.opt(x.wasm,v=>e.digest(v));break;}
+ case'create_function':{const x=op as CreateFunctionOp & {net_grants?:string[]};e.str(x.create_function);e.bool(x.replace);e.str(x.security??'invoker');e.opt(x.visibility,v=>e.str(v));e.list(x.secret_grants??[]);e.list(x.net_grants??[]);e.opt(x.source,v=>e.digest(v));e.opt(x.wasm,v=>e.digest(v));e.str(x.lang??(x.wasm!==undefined?'wasm':'rust'));e.str(x.optimize??'auto');break;}
  case'drop_function':{const x=op as DropFunctionOp;e.str(x.drop_function);e.bool(Boolean(x.if_exists));break;}
  case'drop_validator':{const x=op as DropValidatorOp;e.str(x.drop_validator);e.bool(Boolean(x.if_exists));break;}
  case'create_validator':{const x=op as CreateValidatorOp;e.str(x.create_validator);e.bool(x.replace);e.opt(x.source,v=>e.digest(v));e.opt(x.wasm,v=>e.digest(v));break;}

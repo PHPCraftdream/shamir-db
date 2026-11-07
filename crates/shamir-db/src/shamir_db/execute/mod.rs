@@ -32,6 +32,9 @@ mod admin_validator;
 #[path = "admin_meta/admin_function.rs"]
 mod admin_function;
 
+#[path = "admin_meta/admin_function_wire.rs"]
+mod admin_function_wire;
+
 #[path = "admin_meta/admin_interner.rs"]
 mod admin_interner;
 

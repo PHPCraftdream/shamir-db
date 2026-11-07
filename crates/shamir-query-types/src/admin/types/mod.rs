@@ -30,8 +30,8 @@ pub use changes_since_response::{
 pub use db_ops::{CreateDbOp, DropDbOp};
 pub use fk_action::FkAction;
 pub use function_ops::{
-    CreateFunctionFolderOp, CreateFunctionOp, DropFunctionOp, RenameFunctionFolderOp,
-    RenameFunctionOp,
+    AlterFunctionOp, CheckFunctionOp, CheckFunctionSpec, CreateFunctionFolderOp, CreateFunctionOp,
+    DescribeFunctionOp, DropFunctionOp, ExportFunctionOp, RenameFunctionFolderOp, RenameFunctionOp,
 };
 pub use index_ops::{CreateIndexOp, DropIndexOp, RenameIndexOp};
 pub use interner_ops::{InternerDumpOp, InternerTouchOp};

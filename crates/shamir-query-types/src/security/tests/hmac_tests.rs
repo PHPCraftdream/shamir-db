@@ -91,6 +91,8 @@ fn rv_query_types_c7aec31f_separator_and_resource_aliases_are_distinct() {
             security: None,
             secret_grants,
             net_grants: vec![],
+            lang: None,
+            optimize: None,
             hmac: None,
         })
     };
@@ -264,7 +266,8 @@ fn rv_query_types_f1dc8e9a_v2_prefix_and_tag_are_pinned() {
     assert_eq!(&b[35..], b"\0\0");
 
     // v2 prefix + CreateFunction(0x0016): name, replace, security,
-    // visibility, secret grants, net grants, source digest, wasm digest.
+    // visibility, secret grants, net grants, source digest, wasm digest,
+    // resolved lang, resolved optimize.
     let create_function = BatchOp::CreateFunction(CreateFunctionOp {
         create_function: "f".into(),
         source: None,
@@ -274,11 +277,13 @@ fn rv_query_types_f1dc8e9a_v2_prefix_and_tag_are_pinned() {
         security: None,
         secret_grants: vec![],
         net_grants: vec![],
+        lang: None,
+        optimize: None,
         hmac: None,
     });
     assert_eq!(
         canonical_batch_op("", &create_function).unwrap(),
-        b"shamir-db hmac canonical v2\0\0\x16\0\0\0\x01f\0\0\0\0\x07invoker\0\0\0\0\0\0\0\0\0\0\0",
+        b"shamir-db hmac canonical v2\0\0\x16\0\0\0\x01f\0\0\0\0\x07invoker\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x04rust\0\0\0\x04auto",
     );
 
     let set_superuser = DbRequest::SetSuperuser {
@@ -446,6 +451,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
                 BatchOp::CreateFunction(CreateFunctionOp {
@@ -457,6 +464,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
                 BatchOp::CreateFunction(CreateFunctionOp {
@@ -468,6 +477,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
             ],
@@ -654,6 +665,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
                 BatchOp::CreateFunction(CreateFunctionOp {
@@ -665,6 +678,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
                 BatchOp::CreateFunction(CreateFunctionOp {
@@ -676,6 +691,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
                 BatchOp::CreateFunction(CreateFunctionOp {
@@ -687,6 +704,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec!["a".into()],
                     net_grants: vec![],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
                 BatchOp::CreateFunction(CreateFunctionOp {
@@ -698,6 +717,8 @@ fn rv_query_types_9cde03ef_required_schema_flag_list_option_flips() {
                     security: None,
                     secret_grants: vec![],
                     net_grants: vec!["a".into()],
+                    lang: None,
+                    optimize: None,
                     hmac: None,
                 }),
             ],
@@ -737,6 +758,8 @@ fn rv_query_types_9cde03ef_remaining_optional_and_boolean_flips_are_bound() {
             security: None,
             secret_grants: vec![],
             net_grants: vec![],
+            lang: None,
+            optimize: None,
             hmac: None,
         })
     };
@@ -757,6 +780,8 @@ fn rv_query_types_9cde03ef_remaining_optional_and_boolean_flips_are_bound() {
                 security: Some("definer".into()),
                 secret_grants: vec![],
                 net_grants: vec![],
+                lang: None,
+                optimize: None,
                 hmac: None,
             })
         )
@@ -807,4 +832,82 @@ fn policy_explicitly_requires_confirmation_for_drop_db() {
         if_exists: false,
     });
     assert_eq!(hmac_policy(&op), HmacPolicy::Required);
+}
+
+fn function_with_lang_optimize(
+    wasm: Option<&str>,
+    lang: Option<&str>,
+    optimize: Option<&str>,
+) -> BatchOp {
+    BatchOp::CreateFunction(CreateFunctionOp {
+        create_function: "f".into(),
+        source: None,
+        wasm: wasm.map(str::to_owned),
+        replace: false,
+        visibility: None,
+        security: None,
+        secret_grants: vec![],
+        net_grants: vec![],
+        lang: lang.map(str::to_owned),
+        optimize: optimize.map(str::to_owned),
+        hmac: None,
+    })
+}
+
+#[test]
+fn create_function_canonical_binds_lang() {
+    assert_ne!(
+        canonical_batch_op("", &function_with_lang_optimize(None, Some("wasm"), None)).unwrap(),
+        canonical_batch_op("", &function_with_lang_optimize(None, Some("rust"), None)).unwrap()
+    );
+}
+
+#[test]
+fn create_function_canonical_binds_optimize() {
+    assert_ne!(
+        canonical_batch_op("", &function_with_lang_optimize(None, None, Some("now"))).unwrap(),
+        canonical_batch_op("", &function_with_lang_optimize(None, None, Some("never"))).unwrap()
+    );
+}
+
+#[test]
+fn create_function_canonical_uses_resolved_lang_and_optimize() {
+    assert_eq!(
+        canonical_batch_op("", &function_with_lang_optimize(Some("w"), None, None)).unwrap(),
+        canonical_batch_op(
+            "",
+            &function_with_lang_optimize(Some("w"), Some("wasm"), None)
+        )
+        .unwrap()
+    );
+    assert_eq!(
+        canonical_batch_op("", &function_with_lang_optimize(None, None, None)).unwrap(),
+        canonical_batch_op("", &function_with_lang_optimize(None, Some("rust"), None)).unwrap()
+    );
+    assert_eq!(
+        canonical_batch_op("", &function_with_lang_optimize(None, None, None)).unwrap(),
+        canonical_batch_op("", &function_with_lang_optimize(None, None, Some("auto"))).unwrap()
+    );
+}
+
+#[test]
+fn new_function_ops_need_no_hmac() {
+    for wire in [
+        serde_json::json!({
+            "describe_function": "f"
+        }),
+        serde_json::json!({
+            "export_function": "f"
+        }),
+        serde_json::json!({
+            "check_function": {}
+        }),
+        serde_json::json!({
+            "alter_function": "f",
+            "optimize": "now"
+        }),
+    ] {
+        let op: BatchOp = serde_json::from_value(wire).unwrap();
+        assert_eq!(hmac_policy(&op), HmacPolicy::NotGated);
+    }
 }

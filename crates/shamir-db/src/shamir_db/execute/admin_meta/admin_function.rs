@@ -7,7 +7,7 @@ use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::FunctionSource;
 use crate::types::value::QueryValue;
-use shamir_engine::function::{CreateFunctionOptions, Security, Visibility};
+use shamir_engine::function::{CreateFunctionOptions, Security, TierMode, Visibility};
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
@@ -55,14 +55,38 @@ impl ShamirAdminExecutor {
             Some(s) => s.parse::<Security>().map_err(|e: String| err(e))?,
             None => Security::Invoker,
         };
+        let optimize = match op.optimize.as_deref() {
+            Some(s) => match super::admin_function_wire::parse_optimize(s) {
+                Some(m) => m,
+                None => {
+                    return Err(err(format!(
+                        "unknown optimize \"{s}\" (must be \"auto\", \"now\" or \"never\")"
+                    )));
+                }
+            },
+            None => TierMode::Auto,
+        };
         let opts = CreateFunctionOptions {
             replace: op.replace,
             visibility,
             security,
             secret_grants: op.secret_grants.clone(),
             net_grants: op.net_grants.clone(), // task #609: wire surface added
-            ..CreateFunctionOptions::default()
+            optimize,
         };
+
+        // PROC-0 D6 rule 1: the explicit `lang` must agree with the payload
+        // field supplied. Only validated against a supplied field — with no
+        // field at all the "requires either 'source' or 'wasm'" error fires.
+        let payload = match (op.source.as_ref(), op.wasm.as_ref()) {
+            (Some(_), _) => Some("source"),
+            (None, Some(_)) => Some("wasm"),
+            (None, None) => None,
+        };
+        if let Some(field) = payload {
+            super::admin_function_wire::validate_lang(op.lang.as_deref(), Some(field))
+                .map_err(err)?;
+        }
 
         if let Some(ref source) = op.source {
             self.shamir

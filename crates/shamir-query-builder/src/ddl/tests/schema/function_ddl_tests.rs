@@ -3,7 +3,13 @@
 use shamir_query_types::WriteOp;
 use shamir_types::mpack;
 
+use shamir_query_types::admin::{
+    AlterFunctionOp, CheckFunctionOp, CheckFunctionSpec, DescribeFunctionOp, ExportFunctionOp,
+};
+use shamir_query_types::batch::BatchOp;
+
 use crate::ddl;
+use crate::write::BuilderError;
 
 use crate::ddl::tests::helpers::roundtrip;
 
@@ -235,4 +241,135 @@ fn builder_composes_with_batch() {
     assert!(req.queries["repo"].op.is_admin());
     assert!(req.queries["tbl"].op.is_admin());
     assert!(req.queries["idx"].op.is_admin());
+}
+
+// ============================================================================
+// Function wire ops — describe / export / alter / check
+// ============================================================================
+
+#[test]
+fn describe_function_produces_op() {
+    let op = ddl::describe_function("my_fn");
+    assert_eq!(
+        op,
+        BatchOp::DescribeFunction(DescribeFunctionOp {
+            describe_function: "my_fn".to_string(),
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn export_function_produces_op() {
+    let op = ddl::export_function("my_fn");
+    assert_eq!(
+        op,
+        BatchOp::ExportFunction(ExportFunctionOp {
+            export_function: "my_fn".to_string(),
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn alter_function_produces_op() {
+    let op = ddl::alter_function("my_fn", "never");
+    assert_eq!(
+        op,
+        BatchOp::AlterFunction(AlterFunctionOp {
+            alter_function: "my_fn".to_string(),
+            optimize: "never".to_string(),
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn check_function_from_wasm_produces_op() {
+    let op = ddl::check_function()
+        .lang("wasm")
+        .wasm("AQIDBA==")
+        .optimize("auto")
+        .build()
+        .unwrap();
+    assert_eq!(
+        op,
+        BatchOp::CheckFunction(CheckFunctionOp {
+            check_function: CheckFunctionSpec {
+                lang: Some("wasm".to_string()),
+                wasm: Some("AQIDBA==".to_string()),
+                source: None,
+                optimize: Some("auto".to_string()),
+            },
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn check_function_from_source_produces_op() {
+    let op = ddl::check_function()
+        .source("pub fn main() {}")
+        .build()
+        .unwrap();
+    assert_eq!(
+        op,
+        BatchOp::CheckFunction(CheckFunctionOp {
+            check_function: CheckFunctionSpec {
+                lang: None,
+                wasm: None,
+                source: Some("pub fn main() {}".to_string()),
+                optimize: None,
+            },
+        })
+    );
+    assert!(op.is_admin());
+}
+
+#[test]
+fn check_function_rejects_both_wasm_and_source() {
+    let err = ddl::check_function()
+        .wasm("AQIDBA==")
+        .source("pub fn main() {}")
+        .build()
+        .unwrap_err();
+    assert_eq!(err, BuilderError::ConflictingFunctionPayload);
+}
+
+#[test]
+fn check_function_rejects_missing_payload() {
+    let err = ddl::check_function().build().unwrap_err();
+    assert_eq!(err, BuilderError::ConflictingFunctionPayload);
+}
+
+#[test]
+fn create_function_lang_and_optimize_set() {
+    let op = ddl::create_function("my_fn")
+        .wasm("AQIDBA==")
+        .lang("wasm")
+        .optimize("never")
+        .build()
+        .unwrap();
+    match op {
+        BatchOp::CreateFunction(op) => {
+            assert_eq!(op.lang, Some("wasm".to_string()));
+            assert_eq!(op.optimize, Some("never".to_string()));
+        }
+        other => panic!("expected CreateFunction, got {other:?}"),
+    }
+}
+
+#[test]
+fn create_function_lang_and_optimize_default_absent() {
+    let op = ddl::create_function("my_fn")
+        .wasm("AQIDBA==")
+        .build()
+        .unwrap();
+    match op {
+        BatchOp::CreateFunction(op) => {
+            assert_eq!(op.lang, None);
+            assert_eq!(op.optimize, None);
+        }
+        other => panic!("expected CreateFunction, got {other:?}"),
+    }
 }

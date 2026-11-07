@@ -415,6 +415,12 @@ impl SessionPermissions {
             BatchOp::CreateFunction(_)
             | BatchOp::DropFunction(_)
             | BatchOp::RenameFunction(_)
+            // Function introspection/alter ops: coarse (Alter, Global) here;
+            // the shamir-db facade does the fine-grained per-function checks.
+            | BatchOp::DescribeFunction(_)
+            | BatchOp::ExportFunction(_)
+            | BatchOp::CheckFunction(_)
+            | BatchOp::AlterFunction(_)
             | BatchOp::CreateValidator(_)
             | BatchOp::DropValidator(_)
             | BatchOp::RenameValidator(_)

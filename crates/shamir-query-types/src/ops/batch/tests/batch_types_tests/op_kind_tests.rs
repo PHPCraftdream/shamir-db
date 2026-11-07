@@ -25,6 +25,8 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::DropGroup
         | OpKind::CreateFunction
         | OpKind::DropFunction
+        | OpKind::DescribeFunction
+        | OpKind::ExportFunction
         | OpKind::CreateValidator
         | OpKind::DropValidator
         | OpKind::GetTableSchema
@@ -69,6 +71,10 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::RenameGroup => json!({
             "to": "renamed"
         }),
+        OpKind::AlterFunction => json!({
+            "optimize": "now"
+        }),
+        OpKind::CheckFunction => json!({}),
         OpKind::CreateIndex => json!({
             "table": "users",
             "fields": [["name"]]
@@ -190,6 +196,7 @@ fn fixture(kind: OpKind, key: &str) -> Value {
             "name": "group"
         }),
         OpKind::CreateFunctionFolder | OpKind::RenameFunctionFolder => json!(["folder"]),
+        OpKind::CheckFunction => json!({}),
         OpKind::AccessTree
         | OpKind::ListPublications
         | OpKind::ListSubscriptions
@@ -234,6 +241,9 @@ fn fixture(kind: OpKind, key: &str) -> Value {
         | OpKind::CreateFunction
         | OpKind::DropFunction
         | OpKind::RenameFunction
+        | OpKind::DescribeFunction
+        | OpKind::ExportFunction
+        | OpKind::AlterFunction
         | OpKind::CreateValidator
         | OpKind::DropValidator
         | OpKind::RenameValidator
@@ -309,6 +319,10 @@ fn variant_kind(op: &BatchOp) -> OpKind {
         BatchOp::CreateFunction(_) => OpKind::CreateFunction,
         BatchOp::DropFunction(_) => OpKind::DropFunction,
         BatchOp::RenameFunction(_) => OpKind::RenameFunction,
+        BatchOp::DescribeFunction(_) => OpKind::DescribeFunction,
+        BatchOp::ExportFunction(_) => OpKind::ExportFunction,
+        BatchOp::CheckFunction(_) => OpKind::CheckFunction,
+        BatchOp::AlterFunction(_) => OpKind::AlterFunction,
         BatchOp::CreateValidator(_) => OpKind::CreateValidator,
         BatchOp::DropValidator(_) => OpKind::DropValidator,
         BatchOp::RenameValidator(_) => OpKind::RenameValidator,

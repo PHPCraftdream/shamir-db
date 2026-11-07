@@ -1,4 +1,5 @@
-//! Stored-function DDL operations: create / drop / rename / folder.
+//! Stored-function DDL operations: create / drop / rename / folder /
+//! describe / export / check / alter.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,6 +58,13 @@ pub struct CreateFunctionOp {
     /// compatibility default, this repo has not released yet).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub net_grants: Vec<String>,
+    /// `"wasm"`, `"rust"` or `"shamir"`. Absent: inferred from which of
+    /// `wasm`/`source` is supplied; present: must agree with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// `"auto"`, `"now"` or `"never"`. Absent means `"auto"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimize: Option<String>,
     /// Hex-encoded HMAC-SHA256 tag, required IFF `security == Some("definer")`
     /// or `secret_grants` is non-empty (conditional — NOT required for
     /// every `CreateFunctionOp`, unlike `chmod`/`drop_db`/etc.).
@@ -92,6 +100,71 @@ pub struct DropFunctionOp {
 pub struct RenameFunctionOp {
     pub rename_function: String,
     pub to: String,
+}
+
+/// Describe a stored function (language, origin, hash, tier, state).
+///
+/// ```text
+/// { "describe_function": "my_fn" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DescribeFunctionOp {
+    pub describe_function: String,
+}
+
+/// Export a stored function's module bytes (base64), source and hash.
+///
+/// ```text
+/// { "export_function": "my_fn" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportFunctionOp {
+    pub export_function: String,
+}
+
+/// Module to check without storing it: exactly one of `wasm`/`source`.
+///
+/// ```text
+/// { "wasm": "<base64>" }
+/// { "lang": "rust", "source": "pub fn shamir_call …", "optimize": "now" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckFunctionSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wasm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimize: Option<String>,
+}
+
+/// Admission-check a module without creating a function.
+///
+/// ```text
+/// { "check_function": { "wasm": "<base64>" } }
+/// { "check_function": { "lang": "rust", "source": "pub fn shamir_call …" } }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckFunctionOp {
+    pub check_function: CheckFunctionSpec,
+}
+
+/// Change a stored function's optimization mode.
+///
+/// ```text
+/// { "alter_function": "my_fn", "optimize": "now" }
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlterFunctionOp {
+    pub alter_function: String,
+    pub optimize: String,
 }
 
 /// Create a function folder by path segments.
