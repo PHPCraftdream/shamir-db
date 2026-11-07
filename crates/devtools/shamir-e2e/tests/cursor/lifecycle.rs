@@ -312,3 +312,158 @@ async fn stream_cursor_per_session_cap_rejects_third_cursor_but_not_other_sessio
     client.close().await;
     handle.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Cursor release observed through the per-session cap (public API only).
+//
+// `max_cursors_per_session = 1`: while a cursor is registered, a second one
+// is rejected with `cursor_limit_exceeded`; once the first is released the
+// slot is free again. This is the public equivalent of the former
+// crate-internal probe (a raw `FetchNext` against the same cursor id), which
+// cannot distinguish "removed" from "owned by another session".
+// ---------------------------------------------------------------------------
+
+/// Poll `stream` once and return the first item's `qty`, or the error code.
+async fn first_item_code_or_qty(
+    stream: &mut shamir_client::CursorStream<'_>,
+) -> Result<i64, String> {
+    match stream.next().await.expect("stream yields an item") {
+        Ok(row) => Ok(row.get_value_i64("qty").expect("qty")),
+        Err(ClientError::Db { code, .. }) => Err(code),
+        Err(other) => panic!("unexpected client error: {other:?}"),
+    }
+}
+
+/// `close()` mid-stream must release the server-side cursor slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_mid_stream_releases_the_cursor_slot() {
+    let (handle, client, _temp) = boot(CursorLimitsConfig {
+        max_cursors_per_session: 1,
+        idle_timeout_secs: 60,
+        max_cursor_page_size: 10_000,
+    })
+    .await;
+
+    // 10 rows / page_size 2 -> 5 pages: the cursor is still open server-side
+    // after the first row.
+    seed_rows(&client, 10).await;
+    let query = || Query::from("items").order_by_asc("qty").build();
+
+    let mut first = client.stream_cursor("prod", query(), 2);
+    assert_eq!(first_item_code_or_qty(&mut first).await, Ok(0));
+
+    // The slot is taken: a second cursor of the same session is rejected.
+    let mut rejected = client.stream_cursor("prod", query(), 2);
+    assert_eq!(
+        first_item_code_or_qty(&mut rejected).await,
+        Err("cursor_limit_exceeded".to_string()),
+        "the open cursor must occupy the only slot"
+    );
+    drop(rejected);
+
+    first.close().await.expect("close must reach the server");
+
+    // After close() the slot is free again.
+    let mut third = client.stream_cursor("prod", query(), 2);
+    assert_eq!(
+        first_item_code_or_qty(&mut third).await,
+        Ok(0),
+        "close() must have released the cursor slot server-side"
+    );
+
+    drop(third);
+    client.close().await;
+    handle.shutdown().await;
+}
+
+/// CR-C1 (R-11): a mid-pagination `FetchNext` failure (here: the table is
+/// dropped between pages) must fire a best-effort `CancelCursor` before the
+/// stream yields the error, so the cursor slot is not left pinned until the
+/// idle-timeout reaper sweeps it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mid_pagination_error_best_effort_cancels_the_cursor() {
+    let (handle, client, _temp) = boot(CursorLimitsConfig {
+        max_cursors_per_session: 1,
+        idle_timeout_secs: 60,
+        max_cursor_page_size: 10_000,
+    })
+    .await;
+
+    seed_rows(&client, 10).await;
+
+    // A second, untouched table to probe the slot with afterwards.
+    let mut mk_probe = Batch::new();
+    mk_probe.id("mk-probe");
+    mk_probe.create_table("tb", ddl::create_table("probe").repo("main"));
+    client
+        .execute("prod", mk_probe.build())
+        .await
+        .expect("create probe table");
+    let mut seed_probe = Batch::new();
+    seed_probe.insert(
+        "p0",
+        insert("probe").row(doc! { "sku" => "p000", "qty" => 0_i64 }),
+    );
+    client
+        .execute("prod", seed_probe.build())
+        .await
+        .expect("seed probe row");
+
+    let mut stream =
+        client.stream_cursor("prod", Query::from("items").order_by_asc("qty").build(), 2);
+    assert_eq!(first_item_code_or_qty(&mut stream).await, Ok(0));
+
+    // Drop the table out from under the still-open cursor. `drop_table` is a
+    // destructive op and needs a confirmation HMAC computed from the client's
+    // own session key (same as `Client::create_scram_user`).
+    let hmac_key = shamir_connect::common::crypto::derive_session_hmac_key(&client.session_id());
+    let op =
+        shamir_query_types::batch::BatchOp::DropTable(shamir_query_types::admin::DropTableOp {
+            drop_table: "items".into(),
+            repo: "main".into(),
+            hmac: None,
+            if_exists: false,
+            cascade: false,
+        });
+    let canonical = shamir_query_types::hmac::canonical_batch_op("prod", &op)
+        .expect("drop-table canonical form");
+    let tag = shamir_query_types::hmac::compute_tag_hex(&hmac_key, &canonical);
+    let mut drop_batch = Batch::new();
+    drop_batch.drop_table(
+        "dt",
+        ddl::drop_table("items")
+            .hmac(&tag)
+            .build()
+            .expect("drop-table op"),
+    );
+    client
+        .execute("prod", drop_batch.build())
+        .await
+        .expect("drop table must succeed");
+
+    // Row qty=1 is still buffered from the first page; the next poll issues the
+    // FetchNext that fails against the dropped table.
+    let second = stream.next().await.expect("second buffered row");
+    second.expect("second row must not error (already fetched)");
+    let err_item = stream.next().await.expect("stream yields the error item");
+    assert!(
+        err_item.is_err(),
+        "FetchNext against a dropped table must surface as an Err item, got {err_item:?}"
+    );
+    assert!(stream.next().await.is_none());
+    drop(stream);
+
+    // The best-effort cancel ran before the error was yielded, so the only
+    // slot is free: a cursor over the intact table opens.
+    let mut probe =
+        client.stream_cursor("prod", Query::from("probe").order_by_asc("qty").build(), 2);
+    assert_eq!(
+        first_item_code_or_qty(&mut probe).await,
+        Ok(0),
+        "the mid-pagination error must have released the cursor slot"
+    );
+
+    drop(probe);
+    client.close().await;
+    handle.shutdown().await;
+}

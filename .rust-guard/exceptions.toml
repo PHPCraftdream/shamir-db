@@ -17,32 +17,3 @@
 #   packages = ["shamir-x"]
 #   owner    = "@team-handle"
 #   reason   = "what the macro generates and why it is safe"
-
-# Four shamir-client in-crate test files moved into shamir-e2e still name
-# crate-private client items and are parked OUTSIDE tests/internals/main.rs
-# (an external crate cannot see them), so they are unreachable from any
-# target root until a public seam exists.
-[[exception]]
-path = "crates/devtools/shamir-e2e/tests/internals/ambient_sync_tests.rs"
-package = "shamir-e2e"
-reason = "needs Client::for_test, client::LifecycleHooks, server_query_version_for_test / set_server_query_version_for_test, should_advertise_interner_epochs — all pub(crate)"
-owner = "@phpcraftdream"
-
-[[exception]]
-path = "crates/devtools/shamir-e2e/tests/internals/cursor_stream_tests.rs"
-package = "shamir-e2e"
-reason = "needs Client::for_test, client::LifecycleHooks, and the pub(crate) Client::roundtrip to drive a raw FetchNext"
-owner = "@phpcraftdream"
-
-[[exception]]
-path = "crates/devtools/shamir-e2e/tests/internals/interner_cache_tests.rs"
-package = "shamir-e2e"
-reason = "needs Client::for_test, client::LifecycleHooks, set_server_query_version_for_test — all pub(crate)"
-owner = "@phpcraftdream"
-
-[[exception]]
-path = "crates/devtools/shamir-e2e/tests/internals/resume_and_scratch_tests.rs"
-package = "shamir-e2e"
-reason = "needs Client::for_test, client::LifecycleHooks, and the request_scratch_*_for_test accessors — all pub(crate)"
-owner = "@phpcraftdream"
-

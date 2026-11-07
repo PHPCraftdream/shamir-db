@@ -3552,6 +3552,7 @@ dependencies = [
  "futures",
  "rustls",
  "shamir-client",
+ "shamir-collections",
  "shamir-connect",
  "shamir-db",
  "shamir-query-builder",

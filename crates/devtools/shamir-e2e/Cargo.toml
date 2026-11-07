@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 
 [dev-dependencies]
 shamir-client        = { path = "../../client/shamir-client" }
+shamir-collections = { path = "../../foundation/shamir-collections" }
 shamir-connect       = { path = "../../net/shamir-connect" }
 shamir-db            = { path = "../../engine/shamir-db" }
 shamir-query-builder = { path = "../../query/shamir-query-builder" }
