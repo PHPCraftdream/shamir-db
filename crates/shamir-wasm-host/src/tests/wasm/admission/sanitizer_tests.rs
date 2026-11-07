@@ -2,7 +2,7 @@ use crate::{
     test_linker_and_store, FnBatch, FnCtx, Params, ShamirFunction, WasmEngine, WasmFunction,
     WasmLimits,
 };
-use crate::{verify_wasm_module, SANCTIONED_HOST_IMPORTS};
+use crate::{verify_wasm_module, AdmissionError, FunctionError, SANCTIONED_HOST_IMPORTS};
 use shamir_collections::TFxSet;
 use std::sync::Arc;
 
@@ -271,5 +271,21 @@ fn sanctioned_list_matches_linker_registrations() {
         extra_in_allowlist.is_empty(),
         "SANCTIONED_HOST_IMPORTS lists import(s) the linker does NOT actually register — stale \
          allowlist entries: {extra_in_allowlist:?}"
+    );
+}
+
+// ── Admission error → FunctionError mapping ─────────────────────────────
+
+/// Moved here with the crate split: the `From<AdmissionError> for FunctionError`
+/// impl now lives in this crate (`wasm::admission::fn_error`), and it must keep
+/// the admission error's Display text as the `Compute` payload.
+#[test]
+fn admission_error_maps_to_compute_error_with_same_message() {
+    let err = AdmissionError::MissingExport { name: "memory" };
+    let message = err.to_string();
+    let mapped = FunctionError::from(err);
+    assert!(
+        matches!(&mapped, FunctionError::Compute(m) if *m == message),
+        "{mapped:?}"
     );
 }

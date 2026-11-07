@@ -1,6 +1,4 @@
-use crate::tests::wasm::admission::support::{
-    admit, limits_with, load, module, narrow, probe, wide,
-};
+use crate::tests::support::{admit, limits_with, load, module, narrow, probe, wide};
 use crate::AdmissionError;
 
 const BATCH_PUT_IMPORT: &str =

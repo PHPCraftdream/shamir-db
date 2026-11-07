@@ -1,5 +1,5 @@
-use super::module_hash::ModuleHash;
 use super::scan::{admitted_validator, CustomSections, Structure};
+use super::types::ModuleHash;
 use super::types::{AdmissionError, AdmissionPolicy, ModuleReport};
 use wasmparser::{Encoding, Error, FuncValidatorAllocations, Parser, Payload, ValidPayload};
 

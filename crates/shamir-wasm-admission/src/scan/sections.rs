@@ -1,13 +1,6 @@
-use crate::wasm::admission::types::AdmissionError;
+use crate::abi::{ABI_SECTION, MAX_ORIGIN_BYTES, ORIGIN_SECTION, SUPPORTED_ABI_VERSION};
+use crate::types::AdmissionError;
 use wasmparser::CustomSectionReader;
-
-/// ABI version assumed when `shamir.abi` is absent, and the only one accepted.
-const SUPPORTED_ABI_VERSION: u32 = 1;
-/// Longest accepted `shamir.origin` payload in bytes.
-const MAX_ORIGIN_BYTES: usize = 64;
-
-const ABI_SECTION: &str = "shamir.abi";
-const ORIGIN_SECTION: &str = "shamir.origin";
 
 /// Parsed `shamir.abi` / `shamir.origin` custom sections.
 #[derive(Debug, Default)]

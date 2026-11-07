@@ -1,4 +1,4 @@
-use crate::wasm::admission::module_hash::ModuleHash;
+use super::module_hash::ModuleHash;
 
 /// What the admission scan observed about an accepted module.
 ///

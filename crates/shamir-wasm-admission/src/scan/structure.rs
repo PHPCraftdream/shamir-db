@@ -1,8 +1,8 @@
 use super::contract::{check_contract, ExportEntry};
 use super::imports::scan_imports;
 use super::operators::scan_operators;
-use crate::wasm::admission::module_hash::ModuleHash;
-use crate::wasm::admission::types::{AdmissionError, AdmissionLimits, ModuleReport};
+use crate::types::ModuleHash;
+use crate::types::{AdmissionError, AdmissionLimits, ModuleReport};
 use wasmparser::{
     DataSectionReader, ElementItems, ElementSectionReader, Error, ExportSectionReader, FuncType,
     FunctionBody, FunctionSectionReader, GlobalSectionReader, ImportSectionReader,

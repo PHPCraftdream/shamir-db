@@ -4069,6 +4069,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-wasm-admission"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "thiserror 2.0.21",
+ "wasmparser",
+ "wat",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "shamir-wasm-host"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -4085,14 +4095,13 @@ dependencies = [
  "shamir-private-dir",
  "shamir-proc-tree",
  "shamir-types",
+ "shamir-wasm-admission",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "wait-timeout",
- "wasmparser",
  "wasmtime",
  "wat",
- "xxhash-rust",
 ]
 
 [[package]]

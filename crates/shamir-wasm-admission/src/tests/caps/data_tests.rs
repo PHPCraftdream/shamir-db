@@ -1,6 +1,4 @@
-use crate::tests::wasm::admission::support::{
-    admit, limits_with, module, module_with_pages, narrow, probe, wide,
-};
+use crate::tests::support::{admit, limits_with, module, module_with_pages, narrow, probe, wide};
 use crate::AdmissionError;
 
 /// One function plus `n` passive element segments naming it.

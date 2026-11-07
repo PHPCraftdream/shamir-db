@@ -1,12 +1,7 @@
 //! Shared fixtures for the admission tests: contract-valid WAT modules with
-//! spliced extras, `admit`/`load` wrappers, custom-section appending and the
-//! build-and-run helper used by the allowed-feature tests.
+//! spliced extras, `admit`/`load` wrappers and custom-section appending.
 
-use crate::{
-    admit_module, AdmissionError, AdmissionLimits, AdmissionPolicy, FnBatch, FnCtx, ModuleReport,
-    Params, ShamirFunction, Tier, TierMode, WasmEngine, WasmFunction, WasmLimits,
-};
-use std::sync::Arc;
+use crate::{admit_module, AdmissionError, AdmissionLimits, AdmissionPolicy, ModuleReport};
 
 /// Assembles WAT text to a binary module.
 pub(crate) fn assemble(wat: &str) -> Vec<u8> {
@@ -102,23 +97,4 @@ pub(crate) fn append_custom_section(bytes: &[u8], name: &str, payload: &[u8]) ->
     push_leb128(&mut out, section.len());
     out.extend_from_slice(&section);
     out
-}
-
-/// Admits, compiles under `mode` and calls the module once; returns its tier.
-pub(crate) async fn build_and_run(bytes: &[u8], mode: TierMode) -> Tier {
-    let engine = Arc::new(WasmEngine::new().unwrap());
-    let (function, _report) = WasmFunction::from_binary_admitted_blocking(
-        engine,
-        bytes,
-        WasmLimits::default(),
-        mode,
-        AdmissionPolicy::Admission(AdmissionLimits::default()),
-    )
-    .await
-    .unwrap();
-    let result = function
-        .call(&FnCtx::new(), &FnBatch::new(), &Params::new())
-        .await;
-    assert!(result.is_ok(), "call failed: {result:?}");
-    function.tier()
 }

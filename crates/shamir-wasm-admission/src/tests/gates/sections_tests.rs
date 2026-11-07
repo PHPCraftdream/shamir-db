@@ -1,6 +1,4 @@
-use crate::tests::wasm::admission::support::{
-    admit, append_custom_section, limits_with, load, module,
-};
+use crate::tests::support::{admit, append_custom_section, limits_with, load, module};
 use crate::AdmissionError;
 
 const ABI: &str = "shamir.abi";

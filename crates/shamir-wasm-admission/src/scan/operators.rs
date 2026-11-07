@@ -1,4 +1,4 @@
-use crate::wasm::admission::types::{AdmissionError, AdmissionLimits};
+use crate::types::{AdmissionError, AdmissionLimits};
 use wasmparser::{FunctionBody, Operator};
 
 fn wide(n: usize) -> u64 {

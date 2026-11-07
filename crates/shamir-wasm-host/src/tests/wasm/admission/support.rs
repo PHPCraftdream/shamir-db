@@ -1,6 +1,6 @@
 //! Shared fixtures for the admission tests: contract-valid WAT modules with
-//! spliced extras, `admit`/`load` wrappers, custom-section appending and the
-//! build-and-run helper used by the allowed-feature tests.
+//! spliced extras, the `admit` wrapper and the build-and-run helper used by
+//! the allowed-feature tests.
 
 use crate::{
     admit_module, AdmissionError, AdmissionLimits, AdmissionPolicy, FnBatch, FnCtx, ModuleReport,
@@ -42,19 +42,9 @@ pub(crate) fn module_with_call_body(extra_items: &str, call_body: &str) -> Vec<u
     assemble(&wat_text(extra_items, call_body, 1))
 }
 
-/// Valid contract module whose memory declares `pages` initial pages.
-pub(crate) fn module_with_pages(pages: u32) -> Vec<u8> {
-    assemble(&wat_text("", "", pages))
-}
-
 /// Admission under the given limits.
 pub(crate) fn admit(bytes: &[u8], limits: AdmissionLimits) -> Result<ModuleReport, AdmissionError> {
     admit_module(bytes, &AdmissionPolicy::Admission(limits))
-}
-
-/// Admission under the `Load` policy.
-pub(crate) fn load(bytes: &[u8]) -> Result<ModuleReport, AdmissionError> {
-    admit_module(bytes, &AdmissionPolicy::Load)
 }
 
 /// Default limits adjusted by `f`.
@@ -62,46 +52,6 @@ pub(crate) fn limits_with(f: impl FnOnce(&mut AdmissionLimits)) -> AdmissionLimi
     let mut limits = AdmissionLimits::default();
     f(&mut limits);
     limits
-}
-
-/// Report of the bare contract module under the default limits.
-pub(crate) fn probe() -> ModuleReport {
-    admit(&module(""), AdmissionLimits::default()).unwrap()
-}
-
-/// `usize` to `u64` for comparing against error fields.
-pub(crate) fn wide(n: usize) -> u64 {
-    u64::try_from(n).unwrap()
-}
-
-/// `u64` report count to `usize` for building limits.
-pub(crate) fn narrow(n: u64) -> usize {
-    usize::try_from(n).unwrap()
-}
-
-fn push_leb128(out: &mut Vec<u8>, mut value: usize) {
-    loop {
-        let byte = u8::try_from(value & 0x7f).unwrap();
-        value >>= 7;
-        if value == 0 {
-            out.push(byte);
-            return;
-        }
-        out.push(byte | 0x80);
-    }
-}
-
-/// Appends a custom section (id 0, LEB128 size, name, payload) to a module.
-pub(crate) fn append_custom_section(bytes: &[u8], name: &str, payload: &[u8]) -> Vec<u8> {
-    let mut section = Vec::new();
-    push_leb128(&mut section, name.len());
-    section.extend_from_slice(name.as_bytes());
-    section.extend_from_slice(payload);
-    let mut out = bytes.to_vec();
-    out.push(0);
-    push_leb128(&mut out, section.len());
-    out.extend_from_slice(&section);
-    out
 }
 
 /// Admits, compiles under `mode` and calls the module once; returns its tier.

@@ -1,4 +1,4 @@
-use crate::tests::wasm::admission::support::{admit, limits_with, module};
+use crate::tests::support::{admit, limits_with, module};
 use crate::ModuleHash;
 use xxhash_rust::xxh3::xxh3_128;
 

@@ -1,4 +1,3 @@
-use crate::runtime::error::FunctionError;
 use thiserror::Error;
 
 /// Why a module was rejected; one variant per rejection class.
@@ -136,10 +135,4 @@ pub enum AdmissionError {
     DataTooLarge { limit: u64, observed: u64 },
     #[error("wasm admission: memory minimum too large: {observed} pages (limit {limit})")]
     MemoryTooLarge { limit: u64, observed: u64 },
-}
-
-impl From<AdmissionError> for FunctionError {
-    fn from(err: AdmissionError) -> Self {
-        FunctionError::Compute(err.to_string())
-    }
 }

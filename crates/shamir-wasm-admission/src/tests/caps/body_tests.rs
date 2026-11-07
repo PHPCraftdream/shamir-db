@@ -1,4 +1,4 @@
-use crate::tests::wasm::admission::support::{
+use crate::tests::support::{
     admit, limits_with, module, module_with_call_body, narrow, probe, wide,
 };
 use crate::AdmissionError;

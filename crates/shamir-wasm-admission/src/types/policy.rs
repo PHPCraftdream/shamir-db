@@ -1,6 +1,6 @@
 use super::limits::AdmissionLimits;
 
-/// Which gates [`admit_module`](crate::wasm::admit_module) applies.
+/// Which gates [`admit_module`](crate::admit_module) applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdmissionPolicy {
     /// Every gate: the deterministic ones plus the numeric caps and the

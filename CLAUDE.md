@@ -30,7 +30,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
 `shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*` glob doesn't try to load it). The default workspace ships
-**32 crates** under `crates/` (including the `shamir-client-node` napi-rs
+**33 crates** under `crates/` (including the `shamir-client-node` napi-rs
 binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
@@ -39,7 +39,7 @@ binding, a regular member; MSVC-only on Windows) plus the vendored
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
 `shamir-server`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-e2e`, `shamir-sdk`,
-`shamir-sdk-macros`, `shamir-tunables`, `shamir-test-diag`, `shamir-wasm-host`, `shamir-index`,
+`shamir-sdk-macros`, `shamir-tunables`, `shamir-test-diag`, `shamir-wasm-host`, `shamir-wasm-admission`, `shamir-index`,
 `shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`.
 
 `shamir-test-diag` is dev-only (`publish = false`): failure-only flake
@@ -48,6 +48,11 @@ design in `docs/dev-artifacts/design/flake-failure-logs.md`) — adopted
 per-test as a `[dev-dependencies]` entry, never a production dependency.
 
 `shamir-e2e` is test-only (`publish = false`): the client tests that boot a real server live there, so `shamir-client` carries no upward dev-dependencies.
+
+`shamir-wasm-admission` (`publish = false`) owns the runtime-free module admission
+pipeline — `admit_module`, the policy/limits/error/report types, `ModuleHash`, the
+import allowlist and the ABI constants — with no `wasmtime`/`tokio`/`shamir-*`
+dependencies; the wasm host re-exports its public surface.
 
 Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
 scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
