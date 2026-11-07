@@ -6,7 +6,7 @@
  *   - `hmac_mismatch` — present but doesn't match canonical input
  *
  * v2 canonical inputs and key derivation are defined in
- * `crates/shamir-query-types/src/hmac.rs` and mirrored by
+ * `crates/query/shamir-query-types/src/hmac.rs` and mirrored by
  * `tests/e2e/helpers/hmac.js` (used here for the "happy path").
  */
 

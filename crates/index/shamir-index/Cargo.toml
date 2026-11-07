@@ -1,0 +1,80 @@
+[package]
+name = "shamir-index"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "ShamirDB index system — FTS / Functional / Vector backends."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+shamir-types       = { path = "../../foundation/shamir-types" }
+shamir-collections = { path = "../../foundation/shamir-collections" }
+shamir-funclib     = { path = "../../query/shamir-funclib" }
+shamir-storage     = { path = "../../storage/shamir-storage", default-features = false }
+shamir-tx          = { path = "../../storage/shamir-tx" }
+shamir-tunables    = { path = "../../foundation/shamir-tunables" }
+shamir-query-types = { path = "../../query/shamir-query-types" }
+shamir-index-core = { path = "../shamir-index-core" }
+shamir-vector     = { path = "../shamir-vector" }
+dashmap         = "6.1.0"
+
+# Async / runtime
+tokio       = { version = "1.49.0", features = ["full"] }
+async-trait = "0.1.81"
+bytes       = "1.11.0"
+futures     = "0.3"
+
+# Data
+serde      = { version = "1.0.217", features = ["derive"] }
+bincode    = "1.3.3"
+rmp-serde  = "1.3"
+smallvec   = { version = "1.11", features = ["serde"] }
+rustc-hash = "2.1"
+
+# Logging
+log = "0.4"
+
+# FTS
+rust-stemmers = "1.2"
+
+# Concurrency
+scc        = "3.8"
+arc-swap   = "1.7"
+shamir-numa = { path = "../../foundation/shamir-numa" }
+
+[dev-dependencies]
+shamir-storage = { path = "../../storage/shamir-storage" }
+rust_decimal = { version = "1.40.0", features = ["serde"] }
+num-bigint = { version = "0.4", features = ["serde"] }
+shamir-bench-utils = { path = "../../devtools/shamir-bench-utils" }
+bench-scale-tool = { workspace = true, features = ["async"] }
+
+[[bench]]
+name = "posting_cache_hit"
+harness = false
+
+[[bench]]
+name = "posting_repr_iterate"
+harness = false
+
+[[bench]]
+name = "create_index_streaming"
+harness = false
+
+[[bench]]
+name = "reader_drain_gate"
+harness = false
+
+[lib]
+doctest = false
+
+[features]
+# F-1103 (#1103): the `ReaderDrainGate` loom model lives in `shamir-index-core`
+# now (with its own `loom` optional dependency and `build.rs`); this feature
+# only forwards so `--features loom` on this crate keeps enabling the model:
+#   cargo test -p shamir-index-core --features loom --lib \
+#       reader_drain_gate::loom_model
+loom = ["shamir-index-core/loom"]
+
+[lints]
+workspace = true

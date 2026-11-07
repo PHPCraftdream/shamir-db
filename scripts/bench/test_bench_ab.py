@@ -202,10 +202,10 @@ class MetadataResolutionTests(unittest.TestCase):
     def test_nested_bench_paths_resolved_from_metadata(self):
         meta = {"packages": [{"name": "shamir-engine", "targets": [
             {"name": "group_by_keys", "kind": ["bench"],
-             "src_path": "/r/crates/shamir-engine/benches/query_reads/selection/group_by_keys.rs"},
+             "src_path": "/r/crates/engine/shamir-engine/benches/query_reads/selection/group_by_keys.rs"},
             {"name": "lib", "kind": ["lib"], "src_path": "/r/src/lib.rs"}]}]}
         targets = ab.bench_targets_from_metadata(json.dumps(meta))
-        src = "/r/crates/shamir-engine/benches/query_reads/selection/group_by_keys.rs"
+        src = "/r/crates/engine/shamir-engine/benches/query_reads/selection/group_by_keys.rs"
         self.assertEqual(targets[("shamir-engine", "group_by_keys")], Path(src))
         self.assertNotIn(("shamir-engine", "lib"), targets)
 

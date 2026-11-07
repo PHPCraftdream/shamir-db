@@ -36,7 +36,7 @@ Why
 
 CLI
     ``features_matrix_check.py --expected <cell-id>
-    [--manifest-path crates/shamir-engine/Cargo.toml] [--flags "<flags>"]``
+    [--manifest-path crates/engine/shamir-engine/Cargo.toml] [--flags "<flags>"]``
 
     ``--flags`` takes the same feature flags the CI cell passes to cargo
     (``--no-default-features``, ``--features a,b``); they shape the probe
@@ -252,7 +252,7 @@ def main(
     )
     parser.add_argument(
         "--manifest-path",
-        default="crates/shamir-engine/Cargo.toml",
+        default="crates/engine/shamir-engine/Cargo.toml",
         help="path to the engine manifest",
     )
     parser.add_argument(

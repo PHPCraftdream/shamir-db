@@ -59,7 +59,7 @@
 - **[diagrams/](diagrams/)** — Mermaid sequence + state diagrams для всех flows. Renders на GitHub inline.
 
 ### Test vectors
-- `crates/shamir-connect/test-vectors/` — per-vector JSON+TOML pairs, **fulfilled**
+- `crates/net/shamir-connect/test-vectors/` — per-vector JSON+TOML pairs, **fulfilled**
   for v1 (release blocker). See AUTH_PROTOCOL §16 for the real location/format
   and the full file list. (The historically-referenced `test-vectors/auth_v1.msgpack`
   never existed; the JSON+TOML convention is the real, working one.)
@@ -73,4 +73,4 @@
 
 ## Статус
 
-**v1 — draft, не заморожен.** Wire-формат может меняться несовместимо до первого стабильного релиза. Test vectors — `crates/shamir-connect/test-vectors/`.
+**v1 — draft, не заморожен.** Wire-формат может меняться несовместимо до первого стабильного релиза. Test vectors — `crates/net/shamir-connect/test-vectors/`.

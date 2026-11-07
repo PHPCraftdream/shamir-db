@@ -60,13 +60,13 @@
 ### Network changefeed (pull API over wire) — реализовано
 
 `ReplRequest::Pull` is an implemented wire operation
-(`crates/shamir-query-types/src/wire/repl.rs`). An authorized follower
+(`crates/query/shamir-query-types/src/wire/repl.rs`). An authorized follower
 requests changelog events for one repo from `from_version`, optionally
 using long-poll (`wait_ms`). `ReplResponse::Pull` carries `leader_epoch`
 (VR-style fencing), msgpack-encoded `events`, optional `gap_at` for a
 reported journal gap, and `current_version` for lag calculation. A missing
 `gap_at` does not prove a complete journal; no snapshot/reseed is available.
-Dispatcher: `crates/shamir-server/src/db_handler/repl_handler.rs`.
+Dispatcher: `crates/server/shamir-server/src/db_handler/repl_handler.rs`.
 
 ### PR1: локальный WAL и replication lag
 
@@ -99,14 +99,14 @@ PR1 не превращает экспериментальную реплика�
 ### Leader-follower репликация — реализовано (Experimental)
 
 Follower-цикл, супервизор и источники (`InProcess`/`Wire`) живут в
-`crates/shamir-server/src/replication/`: `follower_loop.rs`,
+`crates/server/shamir-server/src/replication/`: `follower_loop.rs`,
 `supervisor.rs`, `source.rs`, `wire_source.rs`, `in_process.rs`,
 `prod_factory.rs`. Follower подключается к leader'у через
 `ReplRequest::Hello` (handshake — версия протокола, epoch, список
 реплицируемых репо) и затем циклически тянет `Pull`, применяя события
 локально. Тесты:
 `replication::tests::{follower_loop_tests, supervisor_tests}` (lib),
-плюс e2e-сьюты `crates/shamir-server/tests/repl_pull_e2e.rs`,
+плюс e2e-сьюты `crates/server/shamir-server/tests/repl_pull_e2e.rs`,
 `repl_convergence_e2e.rs`, `repl_supervisor_boot.rs`,
 `set_replicator_wire.rs`.
 
@@ -164,13 +164,13 @@ runbook and real process-crash acceptance scenario belong to SEED-5.
 
 ### Live subscriptions (server-push) — реализовано
 
-`crates/shamir-server/src/subscriptions/` (`bridge.rs`, `registry.rs`,
+`crates/server/shamir-server/src/subscriptions/` (`bridge.rs`, `registry.rs`,
 `target_match.rs`, `filter_eval.rs`, `reactive.rs`, `push.rs`,
 `decode_cache.rs`, `deliver_cache.rs`, `payload.rs`) — сервер держит
 живое соединение и отправляет unsolicited push-фреймы с изменениями,
 матчащими подписку клиента. На wire-уровне это `BatchOp::Subscribe`
 (`SubscribeOp`) / `BatchOp::Unsubscribe` (`UnsubscribeOp`)
-(`crates/shamir-query-types/src/batch/batch_op.rs`), Не путать с DDL
+(`crates/query/shamir-query-types/src/batch/batch_op.rs`), Не путать с DDL
 `CreateSubscription`/`DropSubscription`/`AlterSubscription`/`ListSubscriptions`:
 это подписки **репликации** (follower → leader, `REPLICATION.md §5.5`), а
 не клиентский push. Тесты:
@@ -214,7 +214,7 @@ cache_eviction_tests, cache_depth_probe_tests, reactive_limits_tests}`
 ### Шаг 1: Network changefeed — реализовано
 
 Wire-запрос поверх существующего durable journal:
-`ReplRequest::Pull` (`crates/shamir-query-types/src/wire/repl.rs`).
+`ReplRequest::Pull` (`crates/query/shamir-query-types/src/wire/repl.rs`).
 Реальные поля (не иллюстративный набросок) —
 
 ```
@@ -232,12 +232,12 @@ gap stops replication; recovery is manual, not a snapshot/reseed API
 ### Шаг 2: Live subscriptions (server-push) — реализовано
 
 Транспортный механизм для server→client push:
-`crates/shamir-server/src/subscriptions/`. Design doc (история задачи):
+`crates/server/shamir-server/src/subscriptions/`. Design doc (история задачи):
 `docs/dev-artifacts/roadmap/LIVE_SUBSCRIPTIONS.md`.
 
 * Wire-операции: `BatchOp::Subscribe(SubscribeOp)` /
   `BatchOp::Unsubscribe(UnsubscribeOp)`
-  (`crates/shamir-query-types/src/batch/batch_op.rs`).
+  (`crates/query/shamir-query-types/src/batch/batch_op.rs`).
 * Сервер отправляет unsolicited push-фреймы с change-событиями,
   матчащими зарегистрированную подписку (`registry.rs`,
   `target_match.rs`, `filter_eval.rs`, `reactive.rs`, `push.rs`).
@@ -260,7 +260,7 @@ Follower  ──apply changes───────►  Local store
 The intended result is a single-leader async read replica, **not a
 clustering/HA solution and not for production data**. The follower pulls
 and applies changes through
-`crates/shamir-server/src/replication/follower_loop.rs` and `supervisor.rs`.
+`crates/server/shamir-server/src/replication/follower_loop.rs` and `supervisor.rs`.
 VR-style epoch fencing protects against events from a stale leader, but
 **`ReplMode::ReadOnly` is not enforced: followers accept local writes**.
 

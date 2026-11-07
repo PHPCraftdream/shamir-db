@@ -33,15 +33,15 @@ anyone with raw read access to the data directory can decode every record.
 
 | Claim | Verification |
 |---|---|
-| `shamir-storage` performs no encryption | `rg -i 'encrypt\|decrypt\|cipher\|aes\|chacha\|tde\|data_encryption_key' crates/shamir-storage/src` → **zero matches** in the storage write/read paths. The only "at rest" mentions are about *password* hashing, not record data. |
-| `shamir-storage`'s `fjall` backend writes values verbatim | `crates/shamir-storage/src/storage_fjall.rs:121-123` — `keyspace.insert(&key[..], &*value)`; the `Bytes` returned by `Store::get` (`:159-166`) is a direct `copy_from_slice` of what fjall returns. No transform layer. |
+| `shamir-storage` performs no encryption | `rg -i 'encrypt\|decrypt\|cipher\|aes\|chacha\|tde\|data_encryption_key' crates/storage/shamir-storage/src` → **zero matches** in the storage write/read paths. The only "at rest" mentions are about *password* hashing, not record data. |
+| `shamir-storage`'s `fjall` backend writes values verbatim | `crates/storage/shamir-storage/src/storage_fjall.rs:121-123` — `keyspace.insert(&key[..], &*value)`; the `Bytes` returned by `Store::get` (`:159-166`) is a direct `copy_from_slice` of what fjall returns. No transform layer. |
 | `fjall` itself has no encryption feature | `rg -i 'encrypt\|cipher\|aes\|chacha\|tls\|crypt'` against the vendored `fjall-3.0.1` and `lsm-tree-3.0.1` source → **zero matches**. `fjall/src/lib.rs:12` advertises "Built-in compression (default = `LZ4`)" — compression, not encryption. `fjall/src/journal/entry.rs:77-79` does `writer.write_all(key)` then `writer.write_all(&compressed_value)` — no cipher in the write path. |
-| No AES/ChaCha dep is wired into the storage path | `crates/shamir-storage/Cargo.toml` has no `aes-gcm`/`chacha20poly1305`/`ring`/`rustls` dependency. The `aes-gcm` crate **is** in the workspace, but only as a transitive of `shamir-connect` (used for the in-memory resumption **ticket** and the SCRAM handshake) — not of `shamir-storage`. |
+| No AES/ChaCha dep is wired into the storage path | `crates/storage/shamir-storage/Cargo.toml` has no `aes-gcm`/`chacha20poly1305`/`ring`/`rustls` dependency. The `aes-gcm` crate **is** in the workspace, but only as a transitive of `shamir-connect` (used for the in-memory resumption **ticket** and the SCRAM handshake) — not of `shamir-storage`. |
 
 The only cryptography that touches *storage-adjacent* state is unrelated to
 record confidentiality:
 
-* **Password hashing** — `crates/shamir-db/src/shamir_db/execute/helpers.rs:124-143`
+* **Password hashing** — `crates/engine/shamir-db/src/shamir_db/execute/helpers.rs:124-143`
   (`hash_password`) hashes admin/RBAC passwords with Argon2id before they reach
   the `users` table. This is credential storage hygiene, not record
   encryption; it protects exactly one column of one system table.
@@ -144,7 +144,7 @@ residuals that remain even after a correct erasure.
 #### `SetRetention` — change a table's history-retention policy
 
 Wire shape and semantics live in
-`crates/shamir-query-types/src/admin/types/retention.rs:110-116`:
+`crates/query/shamir-query-types/src/admin/types/retention.rs:110-116`:
 
 ```text
 { "set_retention": "users", "repo": "main", "retention": { "max_count": 5 } }
@@ -152,12 +152,12 @@ Wire shape and semantics live in
 
 * **Scope:** per-table, per-repo. Applies to one `(db, repo, table)` triple.
 * **Auth:** `Action::Manage` on `ResourcePath::table(db, repo, table)`
-  (`crates/shamir-db/src/shamir_db/execute/admin_retention.rs:35-46`). I.e.
+  (`crates/engine/shamir-db/src/shamir_db/execute/admin_retention.rs:35-46`). I.e.
   any client (human or service) holding `Manage` on the table can issue it —
   this is a **wire-protocol** operation, not a server-operator-only action.
 * **Effect:** swaps the table's `Retention` via a lock-free `ArcSwap`
-  (`crates/shamir-tx/src/mvcc_store/mod.rs:411-...`, `apply_table_retention`
-  in `crates/shamir-db/src/shamir_db/execute/helpers.rs:152-182`). **No data
+  (`crates/storage/shamir-tx/src/mvcc_store/mod.rs:411-...`, `apply_table_retention`
+  in `crates/engine/shamir-db/src/shamir_db/execute/helpers.rs:152-182`). **No data
   migration, no immediate reclaim.** The new policy governs subsequent
   `vacuum_key` calls (which run inline on each write/update/delete). Old
   versions that are now over-retention are reclaimed lazily on the next
@@ -168,7 +168,7 @@ Wire shape and semantics live in
 
 #### `PurgeHistory` — imperative one-shot history purge by *time*
 
-Wire shape: `crates/shamir-query-types/src/admin/types/retention.rs:72-78`:
+Wire shape: `crates/query/shamir-query-types/src/admin/types/retention.rs:72-78`:
 
 ```text
 { "purge_history": "users", "repo": "main",
@@ -182,7 +182,7 @@ Wire shape: `crates/shamir-query-types/src/admin/types/retention.rs:72-78`:
 * **Auth:** `Action::Manage` on the table
   (`admin_retention.rs:92-103`) — wire-protocol, not operator-only.
 * **Effect** (`admin_retention.rs:107-146` → `MvccStore::purge_below_ts` at
-  `crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:375-450`):
+  `crates/storage/shamir-tx/src/mvcc_store/mvcc_gc.rs:375-450`):
   1. **Drain first.** `repo.drainer().drain_all(&repo)` is forced
      (`admin_retention.rs:114-126`) so that any committed-but-not-yet-drained
      versions sitting in the in-memory overlay are flushed to `history` before
@@ -204,7 +204,7 @@ Wire shape: `crates/shamir-query-types/src/admin/types/retention.rs:72-78`:
 `PurgeHistory` **never** reclaims the current version of a key
 (`mvcc_gc.rs:419-421` — `C1 SACRED: never reclaim the current version`). To
 remove a data subject's *current* record you must `Delete` it. A `Delete`
-(`MvccStore::delete_versioned`, `crates/shamir-tx/src/mvcc_store/mod.rs:912-…`)
+(`MvccStore::delete_versioned`, `crates/storage/shamir-tx/src/mvcc_store/mod.rs:912-…`)
 does **not** erase the prior value; it appends a new version carrying a
 **tombstone** (empty value) to the same history log. The prior value remains
 in the log until `vacuum_key` (inline, on the next write to that key, under
@@ -213,7 +213,7 @@ the prevailing retention policy) or an explicit `PurgeHistory` reclaims it.
 #### `DropTable` / `store_delete` — remove an entire table
 
 `DropTable` (wire op) → `ShamirDb::drop_table` → eventually
-`Repo::store_delete(name)` (`crates/shamir-storage/src/types.rs:348-…`,
+`Repo::store_delete(name)` (`crates/storage/shamir-storage/src/types.rs:348-…`,
 `storage_fjall.rs:50-65`) → `fjall::Database::delete_keyspace`. This removes
 the keyspace (LSM tree) from the catalogue; the underlying SST files are
 deleted by fjall. This is the strongest per-table erasure primitive — but it
@@ -263,7 +263,7 @@ each reclaim before the bytes are gone:
 | Layer | What survives after `PurgeHistory` returns | When it is reclaimed |
 |---|---|---|
 | **MVCC `history` log (logical)** | Reclaimed versions are removed from `history` synchronously inside `purge_below_ts` (`mvcc_gc.rs:438-440` — `self.history.remove(phys_key)` and `self.history.remove(ts_key(version))` run inline, in the same call, before the count is returned). | **Same call.** The `purged` count returned to the client reflects versions already removed from `history`. |
-| **In-memory overlay** | Reclaimed versions `≤ durable_watermark` are dropped synchronously (`mvcc_gc.rs:445-447`). Versions `> durable_watermark` (not yet drained into `history`) are **left in place** — they are the only copy until the drainer lands them. | Versions above the watermark are dropped on the next `gc_overlay_to(durable)` sweep inside the drainer (`crates/shamir-engine/src/tx/drainer.rs:608-611`). Because step (1) of `handle_purge_history` forces `drain_all` first, in practice the post-purge watermark is already caught up and the overlay is empty or near-empty. |
+| **In-memory overlay** | Reclaimed versions `≤ durable_watermark` are dropped synchronously (`mvcc_gc.rs:445-447`). Versions `> durable_watermark` (not yet drained into `history`) are **left in place** — they are the only copy until the drainer lands them. | Versions above the watermark are dropped on the next `gc_overlay_to(durable)` sweep inside the drainer (`crates/engine/shamir-engine/src/tx/drainer.rs:608-611`). Because step (1) of `handle_purge_history` forces `drain_all` first, in practice the post-purge watermark is already caught up and the overlay is empty or near-empty. |
 | **WAL sealed segments** | The WAL is **append-only by version**; `purge_below_ts` does **not** truncate it. A purged version's bytes still live in any sealed WAL segment whose `max_version ≥` that version until the segment is unlinked. | Truncated by the drainer's `settle_and_truncate` (`drainer.rs:644-719`), which calls `wal.truncate_below(ceiling)` where `ceiling = min(durable_watermark, min(pending_unsafe) − 1)`. The truncation is gated on (a) the version being durable in `history` AND (b) the A5 interner-hwm gate being satisfied for any interner delta the segment carries. Truncation runs on the **background drainer cadence**, not inline with the purge. So: a window exists where the purged data is logically gone from `history` but physically present in a sealed WAL segment on disk. The window closes on the next drainer pass that crosses the segment's `max_version`. |
 | **fjall LSM-tree (SST files)** | `history.remove(phys_key)` writes a fjall **tombstone** into the LSM memtable; it does **not** unlink the SST file that holds the original key. The original bytes survive in level-0/level-N SST files until fjall's background compaction rewrites them. | Reclaimed by fjall's compaction strategy (default: size-tiered). The tombstone propagates through compaction levels; once a compaction at or above the original level drops the original entry, the bytes are physically gone. **The database has no API to force a full compaction** — compaction runs on fjall's own schedule, governed by memtable flush and tier thresholds. |
 
@@ -294,13 +294,13 @@ because the residual bytes are ciphertext to anyone without the volume key.
 
 The database interns field names to `u64` ids for compression: every record's
 field **names** (e.g. `"email"`, `"created_at"`) are stored once in a
-per-repo interner (`crates/shamir-engine/src/table/interner_manager.rs`), and
+per-repo interner (`crates/engine/shamir-engine/src/table/interner_manager.rs`), and
 records reference them by id. The interner is:
 
 * **Per-repo, shared across all tables in the repo**
   (`repo_instance.rs:496-509` — `repo_interner()`, a single
   `Arc<OnceCell<InternerManager>>` per `RepoInstance`).
-* **Append-only.** `Interner` (`crates/shamir-types/src/core/interner/interner.rs`)
+* **Append-only.** `Interner` (`crates/foundation/shamir-types/src/core/interner/interner.rs`)
   exposes `touch_ind` / `touch_with_id` / `get_*` / `make_key` but **no
   remove/delete API.** The manager persists incrementally as chunks
   (`interner_manager.rs:21-37`), each chunk only **adding** entries; nothing
@@ -325,7 +325,7 @@ real.
 In the typical S.H.A.M.I.R. DB workload, field names are **schema-like and
 generic** — `"email"`, `"name"`, `"created_at"`, `"address"`, `"user_id"`.
 This is true by construction: the database has a declarative-schema feature
-(`CreateTableOp.schema`, `crates/shamir-query-types/src/admin/types/table_ops.rs:31`
+(`CreateTableOp.schema`, `crates/query/shamir-query-types/src/admin/types/table_ops.rs:31`
 — `Vec<FieldRuleDto>`) that encourages fixed schema field names per table;
 the query-builder (`shamir-query-builder`) and the validators
 (`docs/dev-artifacts/roadmap/VALIDATORS.md`) are built around a small, stable set of
@@ -376,7 +376,7 @@ differently — an operator must understand both.
 #### Vector index (HNSW) — soft-delete tombstones, persisted into the snapshot
 
 Vector deletion is a **soft-delete tombstone**, not a removal. The HNSW adapter
-(`crates/shamir-vector/src/hnsw_adapter/`) documents this in its module
+(`crates/index/shamir-vector/src/hnsw_adapter/`) documents this in its module
 header (`:7-8` — "Deletion via soft-delete tombstone set; search over-scans ×2
 to compensate"). The `delete` path (`:2689-2725`) inserts a tombstone into the
 `deleted` set and drops the brute-force / quantized side-copies, **but the graph
@@ -388,7 +388,7 @@ node itself stays** — verbatim from the code (`:2708`):
 "Invisible" means **excluded from live query results** — it does **not** mean
 "gone from disk." The tombstoned vector embedding is physically present in the
 HNSW graph and is **persisted into the on-disk index snapshot**: the snapshot
-codec (`crates/shamir-vector/src/snapshot/`) serialises the graph dump
+codec (`crates/index/shamir-vector/src/snapshot/`) serialises the graph dump
 (`.hnsw.graph` / `.hnsw.data` chunk files — `:14-20`) which carry **all** nodes
 including tombstoned ones (the graph has no notion of deletion), and the sidecar
 (`:22-24`) explicitly persists the adapter's maps including the `tombstones`
@@ -400,7 +400,7 @@ compaction rebuilds the graph from the live (non-tombstoned) set**. Compaction
 is triggered by `VectorBackend::trigger_compaction_check`
 (`vector_backend.rs:982-1009`) when the tombstone ratio crosses the threshold
 (`deleted_ratio() >= 0.3` **AND** `live_count >= 1000` — constants at
-`crates/shamir-tunables/src/lib.rs:155,159`; gating at `vector_backend.rs:993`).
+`crates/foundation/shamir-tunables/src/lib.rs:155,159`; gating at `vector_backend.rs:993`).
 The rebuild writes a **new generation** of the snapshot and **removes the old
 generation's chunk files** (`snapshot.rs:1298-1316` — `KvOp::Remove` for each
 old `graph`/`data`/`sidecar` chunk). Only after that flip are the tombstoned
@@ -413,7 +413,7 @@ the ratio to cross 30 %.
 
 #### Full-text-search index (FTS) — postings live in the regular data store
 
-The FTS backend (`crates/shamir-index/src/fts_backend.rs`) stores postings as
+The FTS backend (`crates/index/shamir-index/src/fts_backend.rs`) stores postings as
 type-tagged keys in the **regular data `Store`** (LSM), not in a separate
 structure. Its `plan_delete` (`:177-191`) emits `IndexWriteOp::RemovePosting`
 ops that delete the posting keys from the store. A posting deletion therefore
@@ -444,7 +444,7 @@ posting-in-store model.)
 
 **This is the residual the audit specifically flagged, documented honestly.**
 
-Replication is a **leader-side pull API** (`crates/shamir-server/src/db_handler/repl_handler.rs:1-15`,
+Replication is a **leader-side pull API** (`crates/server/shamir-server/src/db_handler/repl_handler.rs:1-15`,
 :42-77): a follower holding the `replicator` capability (or a superuser — gate at
 `:50`) calls `Hello` to discover readable repos, then `Pull` to read a batch of
 **commit changelog events** for one repo (`handle_pull` →
@@ -453,8 +453,8 @@ carries **committed data writes** (insert/update/delete of row versions) — it 
 the replication transport, and it records nothing else.
 
 `PurgeHistory` and delete-vacuum are **garbage-collection operations**, not
-commits. `PurgeHistory` (`crates/shamir-db/src/shamir_db/execute/admin_retention.rs:138-139`)
-calls `MvccStore::purge_below_ts` (`crates/shamir-tx/src/mvcc_store/mvcc_gc.rs:396`),
+commits. `PurgeHistory` (`crates/engine/shamir-db/src/shamir_db/execute/admin_retention.rs:138-139`)
+calls `MvccStore::purge_below_ts` (`crates/storage/shamir-tx/src/mvcc_store/mvcc_gc.rs:396`),
 which reclaims history versions **directly** out of the leader's `history` log.
 This reclamation does **not** emit a changelog event — the changefeed records
 commits, not GC — so a follower that has **already pulled** copies of the
@@ -494,21 +494,21 @@ privacy-favorable end of the spectrum.
 
 Verified at:
 
-* `crates/shamir-tx/src/mvcc_store/mod.rs:200` —
+* `crates/storage/shamir-tx/src/mvcc_store/mod.rs:200` —
   `retention: ArcSwap::new(Arc::new(Retention::current_only()))` in
   `MvccStore::new`.
-* `crates/shamir-tx/src/mvcc_store/mod.rs:191` (doc) — "Defaults to
+* `crates/storage/shamir-tx/src/mvcc_store/mod.rs:191` (doc) — "Defaults to
   `Retention::current_only` (eager vacuum)".
-* `crates/shamir-query-types/src/admin/types/table_ops.rs:23-25` (doc) —
+* `crates/query/shamir-query-types/src/admin/types/table_ops.rs:23-25` (doc) —
   `CreateTableOp.retention`: "`None` (absent on the wire) = CurrentOnly —
   today's default behaviour (no history retained)".
-* `crates/shamir-tx/src/mvcc_store/retention.rs:2` (doc) — "Default =
+* `crates/storage/shamir-tx/src/mvcc_store/retention.rs:2` (doc) — "Default =
   CurrentOnly (`max_count: Some(0)`): keep only [the current version]".
-* `crates/shamir-db/src/shamir_db/execute/helpers.rs:151` (doc) — "the next
+* `crates/engine/shamir-db/src/shamir_db/execute/helpers.rs:151` (doc) — "the next
   instantiation will pick up CurrentOnly (the `MvccStore::new` default)".
-* Behavioural test: `crates/shamir-tx/src/tests/mvcc_store_tests/retention_tests.rs:536-537`
+* Behavioural test: `crates/storage/shamir-tx/src/tests/mvcc_store_tests/retention_tests.rs:536-537`
   — "Default is CurrentOnly (max_count: Some(0))".
-* E2E test: `crates/shamir-db/tests/schema_ddl/retention_ddl.rs:91-106` —
+* E2E test: `crates/engine/shamir-db/tests/schema_ddl/retention_ddl.rs:91-106` —
   `create_table_without_retention_is_current_only` asserts `max_count ==
   Some(0)` after a `CreateTable` with no `retention` field.
 

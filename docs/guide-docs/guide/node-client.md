@@ -2,7 +2,7 @@
 
 # Node.js-клиент (`shamir-client`, napi)
 
-Как подключиться к серверу из Node.js нативным биндингом `shamir-client` (крейт `crates/shamir-client-node`). Какие способы входа и транспорты вообще есть — в [`client-matrix.md`](./client-matrix.md); про токены и вход по паролю на стороне сервера — в [`token-api.md`](./token-api.md).
+Как подключиться к серверу из Node.js нативным биндингом `shamir-client` (крейт `crates/client/shamir-client-node`). Какие способы входа и транспорты вообще есть — в [`client-matrix.md`](./client-matrix.md); про токены и вход по паролю на стороне сервера — в [`token-api.md`](./token-api.md).
 
 Батчи собираются билдерами из `@shamir/client` (`Batch`, `ddl`, `write`, `Query`, `filter`): `Batch.create(id).add(alias, операция)....build()`. Объект `{ id, queries }` руками не пишется.
 

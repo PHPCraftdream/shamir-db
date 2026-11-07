@@ -199,13 +199,13 @@ class NearestManifestMappingTest(unittest.TestCase):
 class ClientTsFlagTest(unittest.TestCase):
     def test_client_ts_change_selects_no_crates(self):
         self.assertEqual(
-            ac.select_crates(["crates/shamir-client-ts/src/core/query.ts"], METADATA),
+            ac.select_crates(["crates/client/shamir-client-ts/src/core/query.ts"], METADATA),
             [],
         )
 
     def test_client_ts_plus_real_crate(self):
         changed = [
-            "crates/shamir-client-ts/src/core/query.ts",
+            "crates/client/shamir-client-ts/src/core/query.ts",
             "crates/shamir-types/src/lib.rs",
         ]
         crates = ac.select_crates(changed, METADATA)
@@ -217,7 +217,7 @@ class ClientTsFlagTest(unittest.TestCase):
         self.assertTrue(flags["ts"])
 
     def test_client_ts_only_flags(self):
-        changed = ["crates/shamir-client-ts/src/main.ts"]
+        changed = ["crates/client/shamir-client-ts/src/main.ts"]
         crates = ac.select_crates(changed, METADATA)
         flags = ac.compute_flags(crates, changed)
         self.assertTrue(flags["ts"])

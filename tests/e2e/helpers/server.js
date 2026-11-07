@@ -118,7 +118,7 @@ ${replicationBlock}`.trim();
  * `stop()` is async — kills the subprocess and removes the tempdir.
  *
  * `replication` (optional) — follower-side `[replication]` ktav block
- * (`crates/shamir-server/src/config.rs::ReplicationConfig`):
+ * (`crates/server/shamir-server/src/config.rs::ReplicationConfig`):
  *   { nodeId, replicatorUser, replicatorPassword, serverName }
  * `replicatorUser`/`replicatorPassword` MUST be the credentials of a
  * `replicator`-role account already created on the leader (see

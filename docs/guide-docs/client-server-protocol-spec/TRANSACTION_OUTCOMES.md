@@ -10,8 +10,8 @@ Transactional `Execute` returns `BatchResponse.transaction`; `TxExecute` leaves
 it absent because the transaction remains open. `TxCommit` returns
 `TxCommitted.transaction`, including when the commit outcome is aborted.
 The response variant alone is not proof of success: inspect `status`, then
-`error` (sources: `crates/shamir-db/src/shamir_db/execute/db_tx.rs`,
-`crates/shamir-engine/src/query/batch/batch_execute.rs`).
+`error` (sources: `crates/engine/shamir-db/src/shamir_db/execute/db_tx.rs`,
+`crates/engine/shamir-engine/src/query/batch/batch_execute.rs`).
 
 | Field | Contract |
 |---|---|
@@ -23,7 +23,7 @@ The response variant alone is not proof of success: inspect `status`, then
 | `commit_version` | Published version for committed outcomes; the ATTEMPTED version (no success claim) for indeterminate outcomes; absent for aborted outcomes. |
 | `materialized` | Inline projection outcome, independent of visibility and WAL durability. Neither timeout nor reopen observation changes it. Only meaningful for committed outcomes. |
 
-(Source: `crates/shamir-query-types/src/batch/transaction_info.rs`.)
+(Source: `crates/query/shamir-query-types/src/batch/transaction_info.rs`.)
 
 ### Published commit with a durability error
 
@@ -45,7 +45,7 @@ these writes** as if they had failed: reconcile using the returned transaction
 and version. `wal_completion` distinguishes written-but-not-durable from
 not-written and indeterminate WAL outcomes; the commit pipeline reports
 `WalDurability` after publication/materialization, and `into_transaction_info`
-retains committed status (source: `crates/shamir-engine/src/tx/commit.rs`).
+retains committed status (source: `crates/engine/shamir-engine/src/tx/commit.rs`).
 
 The TS `db.tx()` helper resolves this committed outcome as a receipt containing
 `value`, `transaction` (the entire metadata object), and discriminated
@@ -62,7 +62,7 @@ claim) and the `snapshot_version`, with no claimed materialization or
 visibility; an indeterminate status is NOT evidence the
 write is absent on disk. WAL replay after reopen decides (CRC-valid frame =
 committed at that version; missing/torn = never written); clients reconcile by reading, never
-auto-retry (source: `crates/shamir-engine/src/tx/commit.rs`, `wal_completion`
+auto-retry (source: `crates/engine/shamir-engine/src/tx/commit.rs`, `wal_completion`
 and the commit-entry reopen gates). A `wal_requires_reopen` refusal BEFORE
 admission (repository already stopped, nothing queued) is `status: "aborted"`.
 
@@ -260,10 +260,10 @@ next-open-only or bounded visibility guarantee. Do not replay the transaction
 to repair it. A
 `wal_durability` error remains a durability warning regardless of this flag;
 do not infer guaranteed crash recovery from `materialized` alone. Sources:
-`crates/shamir-engine/src/tx/materialize.rs:255-273`,
-`crates/shamir-engine/src/tx/drainer.rs:1190-1211`,
-`crates/shamir-engine/src/tx/recovery.rs:413-430`,
-`crates/shamir-engine/src/tx/commit.rs`.
+`crates/engine/shamir-engine/src/tx/materialize.rs:255-273`,
+`crates/engine/shamir-engine/src/tx/drainer.rs:1190-1211`,
+`crates/engine/shamir-engine/src/tx/recovery.rs:413-430`,
+`crates/engine/shamir-engine/src/tx/commit.rs`.
 
 For commits that allocate a version, Strict acknowledgement waits for the
 contiguous completion watermark W to reach it (all versions through it must
@@ -271,22 +271,22 @@ materialize or abort). Read-only/empty commits skip this wait. A stuck lower
 version can delay Strict acknowledgements indefinitely. Bounded expiry or
 reopen returns Pending, not Deferred or proof of visibility. Embedded direct
 writes now expose receipts or explicit Strict exceptional outcomes as described
-above. Sources: `crates/shamir-engine/src/tx/ack/`,
-`crates/shamir-engine/src/table/write_receipt/`,
-`crates/shamir-tx/src/mvcc_store/write_receipt/`.
+above. Sources: `crates/engine/shamir-engine/src/tx/ack/`,
+`crates/engine/shamir-engine/src/table/write_receipt/`,
+`crates/storage/shamir-tx/src/mvcc_store/write_receipt/`.
 
 `requires_reopen` is repository state, **not a generic wire error code or a
 TransactionInfo field**. The commit-entry metadata reason is
 `wal_requires_reopen` (documented above); a pending AsOf read instead maps to
 `as_of_reopen_required` (below). Sources:
-`crates/shamir-engine/src/tx/commit.rs:389,814-829`,
-`crates/shamir-query-types/src/batch/transaction_info.rs:7-48`,
-`crates/shamir-storage/src/error.rs:117-118`.
+`crates/engine/shamir-engine/src/tx/commit.rs:389,814-829`,
+`crates/query/shamir-query-types/src/batch/transaction_info.rs:7-48`,
+`crates/storage/shamir-storage/src/error.rs:117-118`.
 
 ## BatchError → DbResponse.Error.code
 
 This table exhausts the fixed mapping in
-`crates/shamir-server/src/db_handler/handler.rs::error_code`. Structured
+`crates/server/shamir-server/src/db_handler/handler.rs::error_code`. Structured
 `QueryError.code` values are forwarded verbatim, so this is not a closed
 allowlist of every operation-specific DDL/query code.
 
@@ -321,8 +321,8 @@ writes and discard the transaction metadata: **it is not proof of rollback and
 not a blind-retry guarantee**. Reconcile the outcome before issuing writes
 again. Serialized cursor page rejection is `cursor_page_too_large`, not
 `result_too_large`. Sources:
-`crates/shamir-server/src/db_handler/handler.rs:595-605,631-642,747`,
-`crates/shamir-server/src/db_handler/cursor_handlers.rs:315-322`.
+`crates/server/shamir-server/src/db_handler/handler.rs:595-605,631-642,747`,
+`crates/server/shamir-server/src/db_handler/cursor_handlers.rs:315-322`.
 
 ### AsOf read errors (forwarded QueryError.code)
 
@@ -337,10 +337,10 @@ all versions through the requested position materialize or abort, bounded by
 budget; expiry returns `as_of_visibility_timeout` without settling a version
 or changing the requested position. Positions at or below the watermark do not
 wait, even when reopening is required. Sources:
-`crates/shamir-engine/src/table/read_temporal.rs`,
-`crates/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
-`crates/shamir-storage/src/error.rs:117-118`,
-`crates/shamir-server/src/db_handler/handler.rs:711-719`.
+`crates/engine/shamir-engine/src/table/read_temporal.rs`,
+`crates/storage/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
+`crates/storage/shamir-storage/src/error.rs:117-118`,
+`crates/server/shamir-server/src/db_handler/handler.rs:711-719`.
 
 ### Interactive handle lifecycle
 
@@ -349,7 +349,7 @@ wait, even when reopening is required. Sources:
 (absolute lifetime exhausted) and `tx_too_large` (staged bytes above the server
 transaction cap). Removal initiates rollback/RAII cleanup, not a commit.
 Do not continue using the handle; start a new transaction after correcting the
-cause (source: `crates/shamir-server/src/db_handler/tx_handlers.rs`).
+cause (source: `crates/server/shamir-server/src/db_handler/tx_handlers.rs`).
 
 Classification uses the **variant**, not merely the wire string. Legacy
 `TooManyQueries`/`TooDeep` also map to `limits`, but are not in the handle-removal
@@ -367,15 +367,15 @@ codes are forwarded. These gates do not apply the budget-error removal rule.
 commit, regardless of Visible, Pending, aborted or error outcome, including an
 invalid commit policy. Pending releases snapshot ownership normally and never
 re-registers the handle. Version/ownership/address gates still precede removal.
-Rollback also removes it (source: `crates/shamir-server/src/db_handler/tx_handlers.rs`).
+Rollback also removes it (source: `crates/server/shamir-server/src/db_handler/tx_handlers.rs`).
 
 ## Commit outcome reasons and retry decisions
 
 Commit errors are mapped to transaction metadata, not necessarily to a top-level
 `DbResponse.Error`. Single-batch execution and interactive commit use the same
 `TxError::into_transaction_info` mapping
-(`crates/shamir-engine/src/tx/commit.rs`,
-`crates/shamir-db/src/shamir_db/execute/db_tx.rs`).
+(`crates/engine/shamir-engine/src/tx/commit.rs`,
+`crates/engine/shamir-db/src/shamir_db/execute/db_tx.rs`).
 
 | Metadata value | Meaning / action |
 |---|---|
@@ -392,8 +392,8 @@ Commit errors are mapped to transaction metadata, not necessarily to a top-level
 Migration freeze can also surface `table_migrating` as a structured query error
 on a direct write. Preparation raises the freeze bit, drains writers, then
 fences the write lock; transactional commit checks the bit too
-(`crates/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
-`crates/shamir-engine/src/tx/pre_commit.rs`).
+(`crates/engine/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
+`crates/engine/shamir-engine/src/tx/pre_commit.rs`).
 
 ## Read-only visibility reconciliation (protocol v4)
 
@@ -437,7 +437,7 @@ Commit acknowledgements default to Strict and support explicit Strict or Bounded
 The admin read `changes_since { repo, cursor, limit }` returns `events`,
 `gap_at`, and — since VIS-4c — `visible_through`: the settled prefix W sampled
 once, before the journal read (source:
-`crates/shamir-db/src/shamir_db/execute/admin_retention.rs`). The field is
+`crates/engine/shamir-db/src/shamir_db/execute/admin_retention.rs`). The field is
 additive and omitted when the repository's visibility gate is not initialized;
 old payloads and old clients are unaffected.
 

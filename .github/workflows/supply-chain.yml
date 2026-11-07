@@ -90,14 +90,14 @@ jobs:
       # one `<crate-name>.cdx.json` per workspace member (per-crate
       # dependency trees), placed adjacent to each crate's `Cargo.toml` —
       # verified locally against this workspace: 23 files, one per member
-      # crate declared in the root Cargo.toml's `members = ["crates/*"]`.
+      # crate declared in the root Cargo.toml's `members = ["crates/*/*"]`.
       - name: Generate CycloneDX SBOM
         run: cargo cyclonedx -f json --spec-version 1.5
       - name: Upload SBOM artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sbom-cyclonedx-${{ github.run_id }}
-          path: crates/*/*.cdx.json
+          path: crates/*/*/*.cdx.json
           if-no-files-found: error
 
   # Weekly reconciliation of the cooldown exceptions (cooldown-exceptions.toml):

@@ -17,7 +17,7 @@ WORKDIR /build
 # Copy the workspace metadata first so layer caching kicks in even when
 # only crate sources change (not Cargo.lock / Cargo.toml).
 # This is a virtual workspace ([workspace] with no [package] in the root
-# Cargo.toml, members = ["crates/*"]) -- there is no root `src/` to copy.
+# Cargo.toml, members = ["crates/*/*"]) -- there is no root `src/` to copy.
 COPY Cargo.toml Cargo.lock ./
 COPY .cargo ./.cargo
 COPY crates ./crates

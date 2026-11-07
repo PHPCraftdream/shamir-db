@@ -7,15 +7,15 @@
     "node": ">=22.12"
   },
   "scripts": {
-    "build:client-ts": "cd ../../crates/shamir-client-ts && npm ci && npm run build",
+    "build:client-ts": "cd ../../crates/client/shamir-client-ts && npm ci && npm run build",
     "build:server": "cd ../.. && cargo build --release -p shamir-server",
-    "build:binding": "cd ../../crates/shamir-client-node && npm ci && npm run build",
+    "build:binding": "cd ../../crates/client/shamir-client-node && npm ci && npm run build",
     "build": "npm run build:client-ts && npm run build:server && npm run build:binding",
     "test": "node e2e.test.js"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.0.0",
-    "@shamir/client": "file:../../crates/shamir-client-ts",
-    "shamir-client": "file:../../crates/shamir-client-node"
+    "@shamir/client": "file:../../crates/client/shamir-client-ts",
+    "shamir-client": "file:../../crates/client/shamir-client-node"
   }
 }

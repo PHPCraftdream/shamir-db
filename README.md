@@ -80,21 +80,20 @@ S.H.A.M.I.R. — однонодовая база данных на Rust в ст�
 
 ## 🏗️ Architecture
 
-Cargo workspace, layered from foundation upward. The default workspace currently contains 25 Rust crates (including the `shamir-client-node` napi-rs binding) and the TypeScript client is managed by npm.
+Cargo workspace, layered from foundation upward. The default workspace currently contains 35 Rust crates (including the `shamir-client-node` napi-rs binding) and the TypeScript client is managed by npm.
 
 ```
 crates/
-├── shamir-types/         # Value model, identifiers, codecs, interner
-├── shamir-storage/       # Store/Repo traits and storage backends
-├── shamir-engine/        # Table engine, query language, and batch executor
-├── shamir-query-types/   # Wire-shareable query DTOs
-├── shamir-query-builder/ # Client-side typed query builder and macros
-├── shamir-db/            # Top-level database facade
-├── shamir-connect/       # Authenticated connection protocol
-├── shamir-transport-*/   # TCP, WebSocket and local IPC transports
-├── shamir-server/        # Server binary, listeners, access control, audit
-├── shamir-sdk/           # WASM-facing SDK and macros
-└── shamir-wasm-host/     # WASM compilation and execution boundary
+├── foundation/   # shamir-types, shamir-collections, tunables, numa, private-dir, proc-tree
+├── storage/      # shamir-storage (Store/Repo traits and backends), shamir-wal, shamir-tx
+├── query/        # shamir-query-types (wire DTOs), shamir-query-builder (+ macros), shamir-funclib
+├── index/        # shamir-index-core, shamir-index, shamir-vector
+├── engine/       # shamir-engine (+ query, validator), shamir-db (top-level facade)
+├── wasm/         # shamir-wasm-host, shamir-wasm-admission, shamir-sdk (+ macros)
+├── net/          # shamir-connect, shamir-transport-* (TCP, WebSocket, HTTP, local IPC)
+├── server/       # shamir-server: binary, listeners, access control, audit
+├── client/       # shamir-client, shamir-client-node (napi), shamir-client-ts
+└── devtools/     # shamir-bench-utils, shamir-test-diag, shamir-e2e
 ```
 
 Documentation:
@@ -139,7 +138,7 @@ The repository's required pre-commit checks are documented in [CONTRIBUTING.md](
 
 ## 📊 Performance
 
-- **Benchmarks**: no comparative benchmarks against other databases have been published; internal benchmarks live under `crates/*/benches/` and are host-specific, not a performance claim
+- **Benchmarks**: no comparative benchmarks against other databases have been published; internal benchmarks live under `crates/*/*/benches/` and are host-specific, not a performance claim
 - **Interning**: field names are stored as interned `u64` ids (size reduction depends on the schema; not yet measured)
 - **Streaming**: bounds wire/client-side memory for unsorted result streams; `ORDER BY`/`GROUP BY`/`DISTINCT` queries and cursor bookmarks still materialize/sort the full matching set server-side before the first page returns (see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md#6-results))
 - **Scale envelope**: unique/sorted/FTS/functional/vector `CREATE INDEX` blocks writers for the whole backfill (~140–160 s at 100k rows) and FTS/functional indexes are rebuilt on every restart — see [`docs/guide-docs/KNOWN_LIMITATIONS.md`](docs/guide-docs/KNOWN_LIMITATIONS.md) §11

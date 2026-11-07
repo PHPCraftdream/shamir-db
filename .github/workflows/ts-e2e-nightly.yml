@@ -10,7 +10,7 @@ name: ts-e2e-nightly
 # cadence — see each job's header for why it lives here rather than in its
 # own workflow:
 #
-#  - `ts-e2e`   : the pure-TypeScript client (`crates/shamir-client-ts`,
+#  - `ts-e2e`   : the pure-TypeScript client (`crates/client/shamir-client-ts`,
 #                 `src/__tests__/**/e2e-*.test.ts`, ~25 suites). Drives a real
 #                 `shamir-server` over TCP/WS using the pure-TS client — NO
 #                 native binding involved. In per-PR `ci.yml`'s `ts-unit`
@@ -77,18 +77,18 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+          cache-dependency-path: crates/client/shamir-client-ts/package-lock.json
       - name: Install TypeScript client dependencies
         run: npm ci
-        working-directory: crates/shamir-client-ts
+        working-directory: crates/client/shamir-client-ts
       - name: TS client typecheck
         run: npm run typecheck
-        working-directory: crates/shamir-client-ts
+        working-directory: crates/client/shamir-client-ts
       # `SERVER_AVAILABLE` is now true via the explicit SHAMIR_SERVER_BIN above;
       # a non-zero exit (any failed test) fails the job.
       - name: TS client e2e (vitest)
         run: npm test
-        working-directory: crates/shamir-client-ts
+        working-directory: crates/client/shamir-client-ts
   # ── Node napi e2e (native binding, tests/e2e/) ────────────────────────────
   #
   # WHY WINDOWS, NOT UBUNTU: napi-rs IS cross-platform in principle
@@ -137,7 +137,7 @@ jobs:
       # (`.gitignore` line ~30, added in `0b9bced2`'s commit message: "the
       # lockfile churns on every binding rebuild and carries no useful
       # information" — `tests/e2e`'s only real dependency is
-      # `shamir-client: file:../../crates/shamir-client-node`, a local path
+      # `shamir-client: file:../../crates/client/shamir-client-node`, a local path
       # dependency with no registry version to pin; the lockfile mostly just
       # records `@msgpack/msgpack`'s resolved tarball). In a clean CI
       # checkout that path never exists, so `setup-node`'s cache step failed
@@ -150,10 +150,10 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
-      # `npm run build` = build:client-ts (`cd ../../crates/shamir-client-ts
+      # `npm run build` = build:client-ts (`cd ../../crates/client/shamir-client-ts
       # && npm ci && npm run build`, producing that package's gitignored
       # `dist/` -- tests/e2e depends on `@shamir/client` (file:../../
-      # crates/shamir-client-ts, task #919) for its query-builder helpers;
+      # crates/client/shamir-client-ts, task #919) for its query-builder helpers;
       # a fresh checkout has no dist/ until this runs, otherwise
       # `require('@shamir/client')` fails with MODULE_NOT_FOUND) +
       # build:server (`cargo build --release -p shamir-server`, producing

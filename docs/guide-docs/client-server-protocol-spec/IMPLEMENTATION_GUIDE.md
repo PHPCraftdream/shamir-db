@@ -227,7 +227,7 @@ allowed_origins = ["https://admin.example.com"]
 > the mode(s) marked DONE exist in the tree today.
 
 - `file:<path>` — **✅ DONE.** The only output mode implemented today.
-  `shamir-server` (`crates/shamir-server/src/bootstrap.rs`,
+  `shamir-server` (`crates/server/shamir-server/src/bootstrap.rs`,
   `server_launcher.rs`) writes the token to `data_dir/bootstrap_token.txt`
   by default, `chmod 600` on Unix. The path is configurable via the CLI
   flag `--bootstrap-token-path <PATH>` (recommend a tmpfs path, e.g.
@@ -264,7 +264,7 @@ build_request, run_local_bootstrap_with}` (client side) are fully
 implemented and unit-tested in `shamir-connect`, but **neither side is
 wired into any live dispatch path**: zero references to
 `BootstrapState`/`BootstrapHello`/`BootstrapChallenge`/
-`make_bootstrap_challenge` exist in `crates/shamir-server` or
+`make_bootstrap_challenge` exist in `crates/server/shamir-server` or
 `shamir-query-types`'s wire-message enum, and no client connection path
 ever calls the client-side helpers. The operationally-reachable bootstrap
 flow today is entirely CLI-flag + local-file-based
@@ -364,7 +364,7 @@ Audit-line (одна запись на строку, no inner whitespace в prod
 
 ### 3.2. Минимум v1 events
 
-> **Состояние реализации:** набор ниже — целевой v1-минимум. На сегодня в durable HMAC-chained audit-лог (`AuditChainWriter`) wired **только категория Auth lifecycle** (единственный append call site — `crates/shamir-server/src/connection/handshake.rs`). Остальные категории (Bootstrap, Lockout, User management, Sessions, Resumption, Rotation, Revocation) durable-аудит пока не попадают — для них существует только эфемерный `log`/`tracing` и in-memory `AuditSink` (`InMemoryAuditSink`, используется в тестах). Мост `AuditSink` → `AuditChainWriter` и append call sites для этих категорий — planned improvement (P1); см. release-audit report 03 (capability-matrix row 1b).
+> **Состояние реализации:** набор ниже — целевой v1-минимум. На сегодня в durable HMAC-chained audit-лог (`AuditChainWriter`) wired **только категория Auth lifecycle** (единственный append call site — `crates/server/shamir-server/src/connection/handshake.rs`). Остальные категории (Bootstrap, Lockout, User management, Sessions, Resumption, Rotation, Revocation) durable-аудит пока не попадают — для них существует только эфемерный `log`/`tracing` и in-memory `AuditSink` (`InMemoryAuditSink`, используется в тестах). Мост `AuditSink` → `AuditChainWriter` и append call sites для этих категорий — planned improvement (P1); см. release-audit report 03 (capability-matrix row 1b).
 
 **Auth lifecycle:** `auth_success` (sampled), `auth_failed` (rate-limited 1/мин per (subnet, user)), `auth_aborted` (sampled).
 
@@ -768,7 +768,7 @@ TOKEN_API.md версионируется независимо (v1, `format_vers
 >   longer v1 release blockers — they are tracked as follow-up work.
 
 11.1. **Test vectors** — ✅ **DONE.** The full fixed, byte-exact, cross-language
-vector suite lives in `crates/shamir-connect/test-vectors/` as per-vector
+vector suite lives in `crates/net/shamir-connect/test-vectors/` as per-vector
 JSON+TOML pairs (NOT the historically-referenced `auth_v1.msgpack`, which never
 existed — see AUTH §16 for the real location/format). Seven categories are
 pinned: `kdf_canonical_string`, `argon2id`, `scram_flow` (client_proof +
@@ -788,8 +788,8 @@ individual entries exist as dedicated integration tests where applicable:
 - Anti-downgrade resumption rejection
 - Bootstrap: **✅ DONE** for `file:<path>` mode — token TTL (24h boot-time
   sweep) and file/record cleanup on first successful login are covered by
-  `crates/shamir-server/tests/bootstrap_token_lifecycle_e2e.rs` (e2e) plus
-  `crates/shamir-server/src/tests/server_meta_tests.rs` and
+  `crates/server/shamir-server/tests/bootstrap_token_lifecycle_e2e.rs` (e2e) plus
+  `crates/server/shamir-server/src/tests/server_meta_tests.rs` and
   `bootstrap_tests.rs` (unit). CAS race under parallel bootstrap attempts,
   and `command:<cmd>` output mode: **🔵 ROADMAP** — no `command:<cmd>` mode
   exists to race against (see §2.1), and no test exercises concurrent
@@ -845,7 +845,7 @@ handshake flows (§11.2).
 **Why deferred:** this requires a subprocess-kill harness (spawn a real server
 process, SIGKILL at random points during fsync, restart, verify recovery) — a
 substantial testing-infrastructure investment, not a documentation or
-vector-generation task. `crates/shamir-engine/src/tx/tests/recovery_tests.rs:364`
+vector-generation task. `crates/engine/shamir-engine/src/tx/tests/recovery_tests.rs:364`
 already documents this as a Stage-7.rest TODO for the existing crash-recovery
 test. Explicitly out of scope; tracked as dedicated follow-up.
 

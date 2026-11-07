@@ -5,7 +5,7 @@
 Normative description of the on-disk artifact produced by
 `replication-seed-export` and consumed by `replication-seed-verify` /
 `replication-seed-install`, as implemented in
-`crates/shamir-server/src/replication_seed/`. The structs of record are
+`crates/server/shamir-server/src/replication_seed/`. The structs of record are
 `Manifest`, `TableRecord` and `FileRecord` in that module; this document
 describes what is there, not aspirations.
 

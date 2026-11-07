@@ -21,19 +21,19 @@ limiting cargo / ./scripts/test.sh to the crates a change can affect:
     fast tier then runs only ``cargo fmt`` and this script's unit tests;
   * an unknown folder (no workspace package manifest in any ancestor)
     falls back to the ``WORKSPACE`` sentinel;
-  * a change under ``crates/shamir-client-ts/`` affects NO Rust crate (no
+  * a change under ``crates/client/shamir-client-ts/`` affects NO Rust crate (no
     workspace fallback) but sets the ``ts`` flag.
 
 The full CI tier calls the same selector with ``--format github-output``,
 which additionally prints four boolean flags:
 
   * ``engine``   — the workspace or the crate set includes ``shamir-engine``;
-  * ``ts``       — the workspace, a ``crates/shamir-client-ts/`` change, or
+  * ``ts``       — the workspace, a ``crates/client/shamir-client-ts/`` change, or
     the crate set includes ``shamir-query-types``;
   * ``node``     — the workspace or the crate set includes ``shamir-client``
     or ``shamir-client-node``;
   * ``docs_only`` — a bounded diff that selected no crates and touched no
-    ``crates/shamir-client-ts/`` file (false in workspace mode).
+    ``crates/client/shamir-client-ts/`` file (false in workspace mode).
 
 Event rule: ``pull_request`` diffs ``origin/master...HEAD``;
 ``push`` / ``workflow_dispatch`` / ``schedule`` always select the whole
@@ -55,7 +55,7 @@ from pathlib import PurePosixPath
 
 WORKSPACE = "--workspace"
 
-CLIENT_TS_DIR = "crates/shamir-client-ts"
+CLIENT_TS_DIR = "crates/client/shamir-client-ts"
 
 WORKSPACE_EVENTS = frozenset(("push", "workflow_dispatch", "schedule"))
 

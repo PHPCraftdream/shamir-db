@@ -2,7 +2,7 @@
  * Replication pull-API end-to-end (REPLICATION §5).
  *
  * Exercises the privileged `client.repl(Buffer)` napi method (added in
- * `crates/shamir-client-node/src/lib.rs`) against a live `shamir-server`:
+ * `crates/client/shamir-client-node/src/lib.rs`) against a live `shamir-server`:
  *
  *   1. Setup — as the bootstrap admin (superuser): create `app/main/items`,
  *      write rows (each commit emits a changelog event), OPEN the access
@@ -18,7 +18,7 @@
  *   4. Deny-by-default — a plain user (no `replicator` role) sends
  *      ReplHello and gets `repl_kind === "error"`, `code === "bad_role"`.
  *
- * Wire shapes (`crates/shamir-query-types/src/wire/repl.rs`):
+ * Wire shapes (`crates/query/shamir-query-types/src/wire/repl.rs`):
  *   ReplRequest  — internally tagged on `repl_op`  (snake_case).
  *   ReplResponse — internally tagged on `repl_kind` (snake_case).
  * The `events` field in `Pull` is `serde_bytes` — a raw byte blob.
@@ -259,10 +259,10 @@ module.exports = async function ({ client, server, fixtures, test, assert, asser
   // Unlike ReplHello/ReplPull above (the privileged `client.repl(Buffer)`
   // napi method), these are ordinary `BatchOp`s sent through
   // `client.execute()` — built exclusively via the `replication` builder
-  // namespace (`crates/shamir-client-ts/src/core/builders/stream/replication.ts`),
+  // namespace (`crates/client/shamir-client-ts/src/core/builders/stream/replication.ts`),
   // never hand-assembled wire objects (repo-wide rule, CLAUDE.md).
   //
-  // Response shapes are per `crates/shamir-db/src/shamir_db/execute/
+  // Response shapes are per `crates/engine/shamir-db/src/shamir_db/execute/
   // admin_replication.rs`:
   //   create_publication          → { created_publication: name }
   //   list_publications           → { publications: [{ name, scopes }, ...] }

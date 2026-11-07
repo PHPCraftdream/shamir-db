@@ -2,7 +2,7 @@
 //!
 //! Sources: `cargo metadata --no-deps` workspace members (with explicit
 //! filtering of vendored packages) plus hand-parsed manifests of
-//! workspace-excluded packages (`crates/shamir-client-node`, `tools/*`).
+//! workspace-excluded packages (`crates/client/shamir-client-node`, `tools/*`).
 //! Manifest target sections and auto-discovery flags are honored; files
 //! under `tests/` beyond the cargo roots (`tests/*.rs`, `tests/*/main.rs`)
 //! are never roots.
@@ -273,7 +273,7 @@ fn manifest_paths(
     }
 
     // Workspace-excluded packages that still ship Rust sources.
-    for candidate in ["crates/shamir-client-node/Cargo.toml"] {
+    for candidate in ["crates/client/shamir-client-node/Cargo.toml"] {
         if fs.exists(candidate) {
             push(candidate.to_owned());
         }

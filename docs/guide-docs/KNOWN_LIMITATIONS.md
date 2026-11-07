@@ -20,7 +20,7 @@ Table catalogue records may contain an optional node-local `store_id`, and table
 
 ## P34-03e — rename-in-doubt fence has no clean rollback exit
 
-Once a rename attempt ends in doubt, the rename fence stays raised and there is no "known rolled back" exit from it short of a process restart: a fenced retry that the catalogue answers `NotCommitted` transfers back into doubt (the fence is re-raised), so the pair can never be proven rolled back from inside the running process. Additionally, every fenced retry copies the source table's three stores again, and each failed attempt leaves those copies behind; orphaned store copies accumulate until cleanup runs. Sources: `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_attempt.rs`, `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs`, `crates/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs`.
+Once a rename attempt ends in doubt, the rename fence stays raised and there is no "known rolled back" exit from it short of a process restart: a fenced retry that the catalogue answers `NotCommitted` transfers back into doubt (the fence is re-raised), so the pair can never be proven rolled back from inside the running process. Additionally, every fenced retry copies the source table's three stores again, and each failed attempt leaves those copies behind; orphaned store copies accumulate until cleanup runs. Sources: `crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_attempt.rs`, `crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_fence.rs`, `crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs`.
 
 ## 1. Transactions
 
@@ -31,9 +31,9 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   that allocate nothing skip this wait. One stuck lower version can indefinitely
   delay every higher acknowledgement in the same repository; the five-second
   warning and 50 ms recheck are not give-up timeouts. Sources:
-  `crates/shamir-engine/src/tx/commit.rs:587-604`,
-  `crates/shamir-tx/src/repo_tx_gate.rs:1049-1116`,
-  `crates/shamir-tx/src/mvcc_store/mod.rs:788-790,865-866,995-996`.
+  `crates/engine/shamir-engine/src/tx/commit.rs:587-604`,
+  `crates/storage/shamir-tx/src/repo_tx_gate.rs:1049-1116`,
+  `crates/storage/shamir-tx/src/mvcc_store/mod.rs:788-790,865-866,995-996`.
 - **Post-WAL projection failures wait for online orphan replay.** Failed
   visibility projections leave the version unsettled and wake the drainer;
   acknowledgement waits for replay and contiguous W progress, rather than
@@ -42,18 +42,18 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `Deferred` (`materialized: false`), but the non-transactional acknowledgement
   helper only logs and returns normally without establishing visibility. Neither
   is permission to blindly retry committed writes. Sources:
-  `crates/shamir-engine/src/tx/materialize.rs:255-273`,
-  `crates/shamir-engine/src/tx/drainer.rs:1190-1211`,
-  `crates/shamir-engine/src/tx/commit.rs:597-603,619-629`,
-  `crates/shamir-tx/src/repo_tx_gate.rs:1110-1116`.
+  `crates/engine/shamir-engine/src/tx/materialize.rs:255-273`,
+  `crates/engine/shamir-engine/src/tx/drainer.rs:1190-1211`,
+  `crates/engine/shamir-engine/src/tx/commit.rs:597-603,619-629`,
+  `crates/storage/shamir-tx/src/repo_tx_gate.rs:1110-1116`.
 - **`AsOf(v)` can wait indefinitely for an allocated, unsettled version.**
   Callers must cancel the read if they need a bounded wait; cancellation does
   not settle a version or substitute Latest. An unallocated future version is
   rejected (`as_of_future_version`); a pending position requiring reopen yields
   `as_of_reopen_required`. Positions already at/below W do not wait. Sources:
-  `crates/shamir-engine/src/table/read_temporal.rs:85-101`,
-  `crates/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
-  `crates/shamir-storage/src/error.rs:117-118`.
+  `crates/engine/shamir-engine/src/table/read_temporal.rs:85-101`,
+  `crates/storage/shamir-tx/src/repo_tx_gate.rs:1055-1107`,
+  `crates/storage/shamir-storage/src/error.rs:117-118`.
 - **Snapshot/Serializable table reads trade shortcuts for correctness.**
   Latest-state counter, secondary-index, MIN/MAX and sorted-order shortcuts
   are bypassed inside these transactions: reads scan the pinned MVCC snapshot
@@ -61,27 +61,27 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   Pessimistic reads retain latest-committed state with locks; non-transactional
   reads retain their applicable shortcuts. This describes ordinary latest-mode
   table reads, not explicit temporal reads or EXPLAIN. Sources:
-  `crates/shamir-engine/src/table/read_exec.rs:341-365`,
-  `crates/shamir-engine/src/table/table_manager_streaming.rs:375-401,651-735`.
+  `crates/engine/shamir-engine/src/table/read_exec.rs:341-365`,
+  `crates/engine/shamir-engine/src/table/table_manager_streaming.rs:375-401,651-735`.
 - **Snapshot/Serializable vector similarity trades ANN for exact ranking.**
   Bare vector similarity and a single vector conjunct with residual predicates
   rank over the pinned snapshot plus staged overlay, not the latest ANN graph:
   O(N*d) distance work plus sorting. `_id` ordering and keyset pagination also
   use the snapshot-aware scan. Sources:
-  `crates/shamir-engine/src/table/filtered_vector.rs:101-121`,
-  `crates/shamir-engine/src/table/read_exec.rs:344-379,1965-2012,947-967,1021-1025,1053-1074`,
-  `crates/shamir-engine/src/table/table_manager_streaming.rs:357-402`.
+  `crates/engine/shamir-engine/src/table/filtered_vector.rs:101-121`,
+  `crates/engine/shamir-engine/src/table/read_exec.rs:344-379,1965-2012,947-967,1021-1025,1053-1074`,
+  `crates/engine/shamir-engine/src/table/table_manager_streaming.rs:357-402`.
 - **Index-only transactions are outside the writer-drain protocol.** Commit
   enters table drain guards by iterating `tx.write_set.keys()`, not
   `index_write_set`; an index-only transaction therefore does not participate
   in that drain/fence mechanism. Do not generalize data-writer drain guarantees
-  to index-only commits (`crates/shamir-engine/src/tx/pre_commit.rs:504-527`).
+  to index-only commits (`crates/engine/shamir-engine/src/tx/pre_commit.rs:504-527`).
 - **Execution time budgets are cooperative, not preemptive.** A stalled
   operation is not interrupted at its deadline. Checks stop subsequent dispatch
   and run before a transactional batch's commit decision; once commit starts it
   is not cancelled by the execution timeout
-  (`crates/shamir-engine/src/query/batch/exec_scope.rs:151-161`,
-  `crates/shamir-engine/src/query/batch/batch_execute.rs:806-819`). Runtime work
+  (`crates/engine/shamir-engine/src/query/batch/exec_scope.rs:151-161`,
+  `crates/engine/shamir-engine/src/query/batch/batch_execute.rs:806-819`). Runtime work
   is enforced across nested/dynamic dispatch, but counts aliases, not rows or
   instructions (`exec_scope.rs:85-115`, `batch_execute.rs:560,687`).
 - **Runtime materialization byte enforcement is ON by default in the server**
@@ -92,56 +92,56 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   request/server-clamped `max_result_size`. Cursor pages have a separate
   serialized cap. Intermediates and nested/ForEach containers consume one root
   budget, with no give-back when results are dropped
-  (`crates/shamir-server/src/db_handler/config.rs`,
-  `crates/shamir-query-types/src/batch/exec_policy.rs`,
-  `crates/shamir-engine/src/query/batch/result_size.rs:12-18,143-145`).
+  (`crates/server/shamir-server/src/db_handler/config.rs`,
+  `crates/query/shamir-query-types/src/batch/exec_policy.rs`,
+  `crates/engine/shamir-engine/src/query/batch/result_size.rs:12-18,143-145`).
 - **A post-execution `result_too_large` is not proof of rollback.** Encoded
   response enforcement runs after execution and subscription activation, so
   rejection can follow a committed write and omit its transaction metadata.
   Reconcile the outcome; do not blindly retry. Serialized cursor pages instead
   use `cursor_page_too_large`, not `result_too_large`. Sources:
-  `crates/shamir-server/src/db_handler/handler.rs:595-605,631-642,747`,
-  `crates/shamir-server/src/db_handler/cursor_handlers.rs:315-322`.
+  `crates/server/shamir-server/src/db_handler/handler.rs:595-605,631-642,747`,
+  `crates/server/shamir-server/src/db_handler/cursor_handlers.rs:315-322`.
 - **Nested string_agg inherits the root accumulator cap.** A smaller nested
   batch `max_result_size` does not lower this cap. Each group's accumulator is
   capped separately (root result-size cap, at most 100 MiB); separator is capped
   at 1024 bytes. Accumulator overflow is a query error with a
   `result_too_large: ResultBytes …` diagnostic, **not** `LimitExceeded`, so it
   does not invoke the TxExecute budget-error handle-removal rule
-  (`crates/shamir-engine/src/query/batch/query_runner.rs:1193-1196`,
-  `crates/shamir-engine/src/query/read/aggregate.rs:936-1008`,
-  `crates/shamir-server/src/db_handler/tx_handlers.rs:211-218`).
+  (`crates/engine/shamir-engine/src/query/batch/query_runner.rs:1193-1196`,
+  `crates/engine/shamir-engine/src/query/read/aggregate.rs:936-1008`,
+  `crates/server/shamir-server/src/db_handler/tx_handlers.rs:211-218`).
 - **Explicit NULL aggregate input is distinct from absent input on the wire.**
   For both aggregate variants, present JSON null / MessagePack nil becomes
   `Some(FilterValue::Null)` and is evaluated as a per-row literal NULL;
   absence retains the legacy `field`/All source. Literal-NULL SUM returns NULL,
   without changing the legacy field-input SUM identity. Sources:
-  `crates/shamir-query-types/src/read/select.rs:8-16,76-85,109-118`,
-  `crates/shamir-engine/src/query/read/aggregate.rs:1382-1408,1414-1424`.
+  `crates/query/shamir-query-types/src/read/select.rs:8-16,76-85,109-118`,
+  `crates/engine/shamir-engine/src/query/read/aggregate.rs:1382-1408,1414-1424`.
 
 - **One repository per transaction.** A transactional batch (or an
   interactive/open transaction) whose queries span more than one repo is
   rejected with `BatchError::CrossRepoNotSupported`. See the guard in
-  `crates/shamir-engine/src/query/batch/batch_execute.rs:126-132`
+  `crates/engine/shamir-engine/src/query/batch/batch_execute.rs:126-132`
   (one-shot transactional batches) and the mirrored guard in
-  `crates/shamir-engine/src/query/batch/interactive_tx.rs:80-87`
+  `crates/engine/shamir-engine/src/query/batch/interactive_tx.rs:80-87`
   (interactive/open transactions).
 - **No savepoints / nested transactions.** A transactional sub-batch (a
   `Batch` op with `transactional: true`) nested inside an already-open
   transaction is rejected (`nested_tx_not_supported`). See
-  `crates/shamir-engine/src/query/batch/query_runner.rs:330-341`.
+  `crates/engine/shamir-engine/src/query/batch/query_runner.rs:330-341`.
 - **A WASM `Call` inside an open transaction is rejected.** A `Call`
   operation delegates to the `FunctionInvoker` with autocommit semantics —
   its writes would commit independently of the enclosing transaction,
   silently breaking atomicity. This is rejected explicitly
   (`call_in_tx_not_supported`) rather than allowed to run. See
-  `crates/shamir-engine/src/query/batch/query_runner.rs:709-736`
+  `crates/engine/shamir-engine/src/query/batch/query_runner.rs:709-736`
   (guard at lines 720-727).
 - **Transactional DDL is not supported.** Admin operations (create
   table/index, schema changes, etc.) are always delegated to the
   `AdminExecutor` outside of any `TxContext` — they never run inside an
   open transaction's commit pipeline, transactional or not. See
-  `crates/shamir-engine/src/query/batch/query_runner.rs:697-698`
+  `crates/engine/shamir-engine/src/query/batch/query_runner.rs:697-698`
   ("Admin ops — delegate to AdminExecutor (no tx)").
 - **Read-your-own-writes (RYOW), current behavior.** Streaming scans
   (`list_stream_tx`/`filter_stream_tx`) and the match-scans behind
@@ -150,21 +150,21 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   insert made earlier in the SAME transaction is visible mid-scan, a
   staged update yields the staged (new) bytes, and a staged delete is
   hidden even though the committed store still has the row. See the doc
-  comments in `crates/shamir-engine/src/table/table_manager_streaming.rs:170-186`
-  and the merge algorithm in `crates/shamir-engine/src/table/tx_scan_overlay.rs:1-29`.
+  comments in `crates/engine/shamir-engine/src/table/table_manager_streaming.rs:170-186`
+  and the merge algorithm in `crates/engine/shamir-engine/src/table/tx_scan_overlay.rs:1-29`.
   - **Residual limitation: no SSI predicate/range locking over streams.**
     A concurrent OTHER transaction's phantom insert into a range this
     transaction is scanning is NOT detected — full SSI predicate/range
     locking over a stream is a separate, harder problem and remains out
     of scope. See the "Streaming-scan SSI scope" doc comment at
-    `crates/shamir-engine/src/table/table_manager_streaming.rs:163-168`.
+    `crates/engine/shamir-engine/src/table/table_manager_streaming.rs:163-168`.
     (One specific instance of this general gap — a concurrent insert
     racing a reverse-FK RESTRICT/CASCADE/SET NULL/ON UPDATE check — is
     now closed for the implicit/autocommit path via targeted Serializable
     isolation + footprint widening; see the `foreign_key` bullet in §2
     "Schemas" below for the closure and its residual scope.)
   - **`AsOf`/`History` temporal reads do not get the transaction overlay.**
-    `read_as_of`/`read_history` in `crates/shamir-engine/src/table/read_temporal.rs:45,209`
+    `read_as_of`/`read_history` in `crates/engine/shamir-engine/src/table/read_temporal.rs:45,209`
     take no `TxContext` parameter at all — point-in-time historical views
     are exempt from RYOW by design (they answer "what did this look like
     at version/timestamp X", not "what does the current transaction see
@@ -178,18 +178,18 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   (`apply_defaults`/`apply_transforms`) only ever honors single-segment
   paths, so this DDL-time guard prevents a rule from being silently
   accepted and then silently ignored on every write. See
-  `crates/shamir-db/src/shamir_db/execute/admin_schema.rs:164-199`.
+  `crates/engine/shamir-db/src/shamir_db/execute/admin_schema.rs:164-199`.
 - **`unique` constraint: single field only.** `unique` is a per-field
   boolean rule (`Option<bool>`); there is no composite/multi-field unique
   constraint. See
-  `crates/shamir-query-types/src/admin/types/schema_ops.rs:108-112`.
+  `crates/query/shamir-query-types/src/admin/types/schema_ops.rs:108-112`.
 - **`foreign_key`: single field, same-repo target only.** A foreign key
   references exactly one field in one parent table, and that parent table
   must live in the same repo — there is no cross-repo foreign key. See
   `ForeignKeyDto` in
-  `crates/shamir-query-types/src/admin/types/schema_ops.rs:143-151`
+  `crates/query/shamir-query-types/src/admin/types/schema_ops.rs:143-151`
   ("The parent table name (flat, same repo)"), and the FK semi-join
-  primitive in `crates/shamir-engine/src/validator/validator_db.rs:176-215`.
+  primitive in `crates/engine/shamir-engine/src/validator/validator_db.rs:176-215`.
   No composite FK, no deferred constraints, and no self-referential
   cascade exist either.
   - **The reverse-FK check TOCTOU (RESTRICT/CASCADE/SET NULL/ON UPDATE
@@ -230,7 +230,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
       bounded internal retry for the common case), and no interleaving
       can leave "delete succeeded AND a dangling child reference exists."
       Proven via deterministic end-to-end tests in
-      `crates/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs`.
+      `crates/engine/shamir-engine/src/query/batch/tests/fk_race_closure_tests.rs`.
     - **Two additional, independent bugs found and fixed along the way:**
       D2 (F-28 Step 1, #828) — autocommit inserts/updates into an
       FK-constrained table were wrongly rejected because the implicit-tx
@@ -251,7 +251,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
       `on_update` specifically; `ReverseFkEntry` now tracks `on_delete` and
       `on_update` independently, and the isolation-upgrade hook is split
       per operation kind (see
-      `crates/shamir-engine/src/repo/fk_reverse_cache.rs`). (2) F-36 (#844,
+      `crates/engine/shamir-engine/src/repo/fk_reverse_cache.rs`). (2) F-36 (#844,
       commit `d3d06c82`) — `get_or_build_by_parent` unconditionally
       published a scan's result even if a concurrent `invalidate` (from
       FK-schema DDL) raced it, so a scan started before a DDL could finish
@@ -269,7 +269,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
       `5679edfa`) the two hooks that gate it
       (`require_footprint_if_fk_child` /
       `implicit_tx_isolation_for_fk_parent` in
-      `crates/shamir-engine/src/query/batch/query_runner.rs`) now fail
+      `crates/engine/shamir-engine/src/query/batch/query_runner.rs`) now fail
       CLOSED on a discovery error — a `resolve_repo` or cache-build
       failure widens the footprint / upgrades to Serializable instead of
       silently falling back to the permissive behavior the pre-F-40 code
@@ -304,7 +304,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
       all four actions (RESTRICT / CASCADE / SET NULL / ON UPDATE), plus
       F-46's `concurrent_child_publish_during_parent_commit_window_is_serialized_on_delete_{restrict,cascade,set_null}`
       / `..._on_update` tests proving the mutual-serialization direction, in
-      `crates/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs`.
+      `crates/engine/shamir-engine/src/query/batch/tests/fk_ri_barrier_tests.rs`.
       The two memos that scoped and proved the mechanism are
       `docs/dev-artifacts/research/f40-explicit-snapshot-ri-gap-memo.md`
       (rejects a mid-flight isolation upgrade as unsound, scopes the RI
@@ -316,15 +316,15 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
       lifecycle); the wire code is already the standard `"tx_conflict"`
       every SSI-class conflict uses.
     - See the "TOCTOU caveat" / "Cross-transaction race — CLOSED" doc
-      comments in `crates/shamir-engine/src/query/batch/fk_restrict.rs`
+      comments in `crates/engine/shamir-engine/src/query/batch/fk_restrict.rs`
       for the full mechanism writeup this summary is drawn from.
 - **Renaming a table with a bound declarative schema is rejected.** The
   auto-bound schema validator is registered under a name that embeds the
   table path, so a rename would orphan it; the guard refuses up-front. See
-  `crates/shamir-db/tests/rename_migration/renames/rename_table_e2e.rs:139-144`.
+  `crates/engine/shamir-db/tests/rename_migration/renames/rename_table_e2e.rs:139-144`.
 - **A failed schema activation no longer leaks an in-memory validator —
   CLOSED (F-24, #817).** `ShamirDb::compile_table_schema`
-  (`crates/shamir-db/src/shamir_db/shamir_db/schema_management.rs`)
+  (`crates/engine/shamir-db/src/shamir_db/shamir_db/schema_management.rs`)
   registers the schema validator as its FIRST side effect, then resolves the
   table and binds the validator. Before F-24, a failure in a LATER step
   (`get_table` / `add_validator_binding`) returned `Err` while leaving the
@@ -340,7 +340,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `ValidatorRegistry::by_id`. **Investigated + corrected severity:** this is
   NOT the "silent schema-validation bypass" a first read suggests — the write
   path's main validator gate (`run_validators_loop` in
-  `crates/shamir-engine/src/table/table_manager_validators.rs`) is
+  `crates/engine/shamir-engine/src/table/table_manager_validators.rs`) is
   FAIL-CLOSED on a `get_by_id` miss, surfacing as
   `DbError::ValidatorInvalid("validator <id> not found in registry
   (fail-closed)")` and rejecting the write; so the practical impact was an
@@ -353,7 +353,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   restoring the registry to its pre-call state; and `replace_artifact`'s
   return value is now checked so any future path that could recreate a stale
   name collision fails loudly. See
-  `crates/shamir-db/src/shamir_db/shamir_db/tests/schema_rollback_tests.rs`.
+  `crates/engine/shamir-db/src/shamir_db/shamir_db/tests/schema_rollback_tests.rs`.
   **The ALTER-path counterpart is now ALSO closed — CLOSED (F-27b, #827).**
   F-24 deliberately left an ALTER's `replace_artifact` never undone on later
   failure, reasoning that the catalogue-level `rec_prev` rollback (still
@@ -373,7 +373,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `dst_engine`/`dst_repo` — this is storage-engine migration (e.g. moving
   a table to a different backend), not schema evolution (there is no
   column add/rename/drop-with-data-transform facility here). See
-  `crates/shamir-db/src/shamir_db/execute/admin_migration.rs:19` (entry
+  `crates/engine/shamir-db/src/shamir_db/execute/admin_migration.rs:19` (entry
   point) and the `dst_engine` resolution at lines 90-98.
 - **The migration API is experimental, opt-in only, and DISABLED BY
   DEFAULT.** `StartMigration` is rejected with a structured
@@ -410,25 +410,25 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   - **No list-all-migrations / user-facing post-commit history API.**
     Persisted completion receipts support idempotent Commit retries, not
     a migration-history listing.
-  See `crates/shamir-db/src/shamir_db/shamir_db/core.rs`
+  See `crates/engine/shamir-db/src/shamir_db/shamir_db/core.rs`
   (`enable_experimental_migration_api` / `experimental_migration_enabled`)
-  for the gate and `crates/shamir-db/src/shamir_db/execute/admin_migration.rs`
+  for the gate and `crates/engine/shamir-db/src/shamir_db/execute/admin_migration.rs`
   for the entry-point check. The live-server opt-in added by F-15 (#808)
-  lives in `crates/shamir-server/src/config.rs`'s
+  lives in `crates/server/shamir-server/src/config.rs`'s
   `SecurityConfig::enable_experimental_migration_api` (default `false`)
   and is wired at boot in
-  `crates/shamir-server/src/server/server_launcher.rs` (the
+  `crates/server/shamir-server/src/server/server_launcher.rs` (the
   `if config.security.enable_experimental_migration_api { ... }` block).
 
 ## 3. Indexes
 
-- Persisted vector descriptors support the in-process HNSW backend only. Legacy metadata using removed backend ordinal 1 fails decoding; the engine create path writes only `InProcessHnsw` (`crates/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_index_admitted.rs`).
+- Persisted vector descriptors support the in-process HNSW backend only. Legacy metadata using removed backend ordinal 1 fails decoding; the engine create path writes only `InProcessHnsw` (`crates/engine/shamir-engine/src/table/table_manager/admission/domain/index_admission/write_domain_index_admitted.rs`).
 
 - **Index identity is canonical bytes (identity v2); older binaries cannot
   open FTS or functional indexes written by it.** Regular and unique
   postings, FTS token postings and functional postings identify a value by
   its canonical encoding (the frozen codec in
-  `crates/shamir-index/src/model/identity/`): the encoding itself when it is
+  `crates/index/shamir-index/src/model/identity/`): the encoding itself when it is
   at most 256 bytes, otherwise `0xFF || BLAKE3-256(encoding)` with the
   encoding kept in the posting value. Every equality decision is made on the
   canonical bytes, so a crafted hash collision can no longer produce a false
@@ -454,15 +454,15 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   stamps the legacy marker, which makes the next new open migrate again.
   A functional index over a user scalar that is not registered at open ends
   `Failed` with a persisted reason; register the scalar and call `repair()`.
-  Sources: `crates/shamir-index/src/base_index/infra/index_keys.rs`,
-  `crates/shamir-index/src/fts/tokenizer.rs`,
-  `crates/shamir-index/src/backends/functional_backend.rs`,
-  `crates/shamir-index/src/model/meta/persistence.rs`.
+  Sources: `crates/index/shamir-index/src/base_index/infra/index_keys.rs`,
+  `crates/index/shamir-index/src/fts/tokenizer.rs`,
+  `crates/index/shamir-index/src/backends/functional_backend.rs`,
+  `crates/index/shamir-index/src/model/meta/persistence.rs`.
 
 - **`unique` and `sorted` are mutually exclusive on the same index.**
   Creating an index with both `unique: true` and `sorted: true` is
   rejected. See
-  `crates/shamir-query-types/src/admin/types/index_ops.rs:12-21`.
+  `crates/query/shamir-query-types/src/admin/types/index_ops.rs:12-21`.
 - **One vector index per table.** DDL refuses to create a second vector
   index on a table that already has one, regardless of field or
   dimension — `staged_vectors` in `TxContext` keys by table token (not
@@ -495,7 +495,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `docs/dev-artifacts/research/f50-step3-crash-restart-spike.md` §2 for the
   full restart-vs-resume reasoning, and `IndexState` /
   `IndexDescriptor.state` / `IndexRegistry::set_state` in
-  `crates/shamir-index/src/` for the lifecycle-state implementation. This
+  `crates/index/shamir-index/src/` for the lifecycle-state implementation. This
   O(N) rebuild applies to EVERY `index2` open, not just post-crash
   recovery — see `docs/dev-artifacts/ops/CAPACITY_PLANNING.md`'s "Index &
   cursor sizing" section for measured/extrapolated per-index rebuild
@@ -519,7 +519,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   slower than 5k for 20× the rows — so the stall grows faster than linearly
   with table size; at 1M rows the extrapolation is hours.) See
   `create_unique_index_body`/`create_sorted_index_with_include`/
-  `create_index_v2` in `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`
+  `create_index_v2` in `crates/engine/shamir-engine/src/table/table_manager_index_mgmt.rs`
   for the still-current whole-barrier implementations, and the P1-4
   operational-decision brief in
   `docs/dev-artifacts/research/2026-08-03-new-wave-readonly-review.md` §P1-4
@@ -530,7 +530,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     materializes the whole table (`Vec`) before one `set_many` — duplicate
     detection needs global knowledge, and a sound bounded-memory rewrite is a
     separately-scoped task. See `create_unique_index_body`'s F-78 deferral
-    comment in `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`.
+    comment in `crates/engine/shamir-engine/src/table/table_manager_index_mgmt.rs`.
   - **Operational recommendation: run `CREATE INDEX` (unique/sorted/index2) on
     large tables during a maintenance window.** For TS/JS client callers, pass
     a generous `requestTimeoutMs` (or `0` to disable) on the `execute`/
@@ -538,7 +538,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     `create_sorted_index` op — the default 35 s client timeout will abort the
     request long before a 100k-row build completes. There is NO server-side
     per-DDL timeout, so the only timeout that can fire is the client's. See
-    the JSDoc on `createIndex` in `crates/shamir-client-ts/src/core/builders/ddl/`.
+    the JSDoc on `createIndex` in `crates/client/shamir-client-ts/src/core/builders/ddl/`.
   - **Progress visibility + post-crash recovery.** The backfill now emits
     periodic `log::info!` progress lines (rows processed so far, elapsed time)
     so an operator watching logs can confirm the DDL is progressing, not hung.
@@ -576,7 +576,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   a crash at any point leaves the index safely `Building` (never falsely
   `Ready`) but does NOT resume — the same manual `TableManager::repair()`
   recovery as before. See `docs/dev-artifacts/research/2026-08-07-online-index-build-rfc.md`
-  for the full design and `crates/shamir-engine/benches/f78_writer_latency.rs`
+  for the full design and `crates/engine/shamir-engine/benches/f78_writer_latency.rs`
   for the bench and its complete measured numbers.
 
 ## 4. Subscriptions
@@ -611,8 +611,8 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   exhaustion the bridge attempts `slow_consumer`, then `closed` (both
   best-effort), and tears the subscription down; the client must reconcile
   out-of-band and re-subscribe. See
-  `crates/shamir-server/src/subscriptions/push.rs:76-117` (bounded retry)
-  and `crates/shamir-server/src/subscriptions/bridge.rs:588-600`
+  `crates/server/shamir-server/src/subscriptions/push.rs:76-117` (bounded retry)
+  and `crates/server/shamir-server/src/subscriptions/bridge.rs:588-600`
   (best-effort terminal notification).
 
 ## 5. Replication
@@ -625,12 +625,12 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   Pull envelopes carry per-event id-to-name bindings; apply preflights referenced
   ids, persists follower-local bindings, and rewrites Put payloads before apply.
   Missing or conflicting bindings are rejected rather than decoded under wrong
-  names. Sources: `crates/shamir-engine/src/tx/replicated_event.rs:7-12`,
-  `crates/shamir-engine/src/tx/apply_replicated.rs:148-198,272-297`.
+  names. Sources: `crates/engine/shamir-engine/src/tx/replicated_event.rs:7-12`,
+  `crates/engine/shamir-engine/src/tx/apply_replicated.rs:148-198,272-297`.
   Existing cross-interner/next-hop coverage:
-  `crates/shamir-engine/src/tx/tests/replication_interner_tests.rs:97-148`
+  `crates/engine/shamir-engine/src/tx/tests/replication_interner_tests.rs:97-148`
   (source inspected, not executed here).
-- **Upstream identity pinning.** `[replication].upstream_pins` maps a normalized upstream address (so `tcp://`, `tls://` and bare `host:port` identify the same key) to a list of 64-hex SHA256 hashes of the leader Ed25519 public key. Configured pins are the only durable, verified enrollment. Without one, the first successful connection in each process is trusted (TOFU), logged at `warn` with a ready-to-paste enrollment line, then enforced for the rest of that process; learned pins are not persisted and must be re-learned after every restart. The leader logs its own identity pin at `info` on boot for out-of-band comparison. During leader-key rotation, add the new pin alongside the old one during the 7-day overlap; otherwise the subscription stops with `upstream_key_mismatch`. Sources: `crates/shamir-server/src/sync/replication/transport/prod_factory.rs` and `crates/shamir-server/src/sync/replication/transport/replication_config.rs`.
+- **Upstream identity pinning.** `[replication].upstream_pins` maps a normalized upstream address (so `tcp://`, `tls://` and bare `host:port` identify the same key) to a list of 64-hex SHA256 hashes of the leader Ed25519 public key. Configured pins are the only durable, verified enrollment. Without one, the first successful connection in each process is trusted (TOFU), logged at `warn` with a ready-to-paste enrollment line, then enforced for the rest of that process; learned pins are not persisted and must be re-learned after every restart. The leader logs its own identity pin at `info` on boot for out-of-band comparison. During leader-key rotation, add the new pin alongside the old one during the 7-day overlap; otherwise the subscription stops with `upstream_key_mismatch`. Sources: `crates/server/shamir-server/src/sync/replication/transport/prod_factory.rs` and `crates/server/shamir-server/src/sync/replication/transport/replication_config.rs`.
 - **Follower secondary indexes are unsupported and fail closed.** An event
   touching a table with any index (hash, unique, sorted, FTS, functional or
   vector) is rejected before any data or version is applied; the typed
@@ -645,20 +645,20 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   writes are.** Create the same databases, repos and tables on the follower
   first; **do not create secondary indexes there**. A missing follower repo
   causes backoff with `ReplError::UnknownFollowerRepo`
-  (`crates/shamir-server/src/replication/follower_loop.rs:198-210`). An
+  (`crates/server/shamir-server/src/replication/follower_loop.rs:198-210`). An
   event touching a missing table is rejected with `UnknownTable` before version
   allocation; the follower loop stops with `ApplyRejected` without advancing
   the bookmark across that event. Sources:
-  `crates/shamir-engine/src/tx/apply_replicated.rs:138-146,209-213`,
-  `crates/shamir-server/src/replication/follower_loop.rs:389-393`.
+  `crates/engine/shamir-engine/src/tx/apply_replicated.rs:138-146,209-213`,
+  `crates/server/shamir-server/src/replication/follower_loop.rs:389-393`.
 - **Journal pulls preserve settled version order; cold recovery reconciles
   events from surviving WAL before serving.** Pulls capture the contiguous
   completion watermark W and confirm a writer barrier before returning
   ascending events `<= W`; a stalled writer can return an older safe prefix
-  (`crates/shamir-engine/src/repo/repo_instance.rs:1587-1604`). The persisted
+  (`crates/engine/shamir-engine/src/repo/repo_instance.rs:1587-1604`). The persisted
   clean horizon J is loaded from `__changelog__`; absent J is treated as zero,
   while read/decode errors fail the open
-  (`crates/shamir-engine/src/repo/changelog_store.rs:26-37`). For each
+  (`crates/engine/shamir-engine/src/repo/changelog_store.rs:26-37`). For each
   surviving v3 WAL entry above J, cold reconciliation inserts its derived
   event if absent; identical persisted bytes are idempotent, while differing
   bytes fail closed. A v3 entry with an event header that derives no event is
@@ -672,9 +672,9 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   Therefore an unclean stop alone does not certify `[J + 1, H]` or require a
   reseed. Successful clean shutdown quiesces commits, flushes data and records
   J only after W = H
-  (`crates/shamir-engine/src/repo/repo_instance.rs:1852-1877`). GAP and J
+  (`crates/engine/shamir-engine/src/repo/repo_instance.rs:1852-1877`). GAP and J
   writes cross an explicit flush boundary; recording J first flushes earlier
-  journal writes (`crates/shamir-engine/src/repo/changelog_store.rs:64-85`).
+  journal writes (`crates/engine/shamir-engine/src/repo/changelog_store.rs:64-85`).
   During runtime, before each local sealed-WAL truncation, the drainer samples
   settled W, reserves and flushes a recovery allocation floor at least J, then
   flushes events/gaps and advances J. A checkpoint error prevents unlink. The
@@ -711,7 +711,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   subscriptions deliver from this same journal
   (broadcast is only a wake-up hint); a certified gap terminates a subscription
   (see the live-ordering bullet in section 4 and
-  `crates/shamir-server/src/subscriptions/bridge.rs`).
+  `crates/server/shamir-server/src/subscriptions/bridge.rs`).
 - **Follower applies are receipt-protected (PR6b-2c), with residual limits.**
   Retry convergence: an ordinary I/O failure pauses the batch (keeping its
   paused write reservation) and the NEXT PULL RESUMES THE SAME RECEIPT with the
@@ -741,15 +741,15 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `confirmed_through` race note is inherited from the barrier contract; the
   index/vector rejection above (and no posting/vector exactly-once claim) is
   unchanged. See `docs/guide-docs/follower-journal-durability.md` and
-  `crates/shamir-engine/src/tx/follower_durability/receipt/`.
+  `crates/engine/shamir-engine/src/tx/follower_durability/receipt/`.
 - **Detected gaps stop replication, but `Resume` does not repair data.**
   When the leader reports a `gap_at` at or after the requested `from_version`,
   the loop stops before applying the response's events with
   `ReplError::JournalGap`; the supervisor marks the subscription
   `resync_required`, visible via `ReplicationStatus`/`ListSubscriptions`.
-  See `crates/shamir-server/src/replication/follower_loop.rs:311-325`,
-  `crates/shamir-server/src/replication/supervisor.rs:309-334` and
-  `crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`.
+  See `crates/server/shamir-server/src/replication/follower_loop.rs:311-325`,
+  `crates/server/shamir-server/src/replication/supervisor.rs:309-334` and
+  `crates/engine/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`.
   There is **no automatic snapshot/reseed**. While the subscription is
   quarantined (`resync_required`), the destination is also EXCLUDED FROM
   ORDINARY READS (S5c-X PR8b): client reads (get/query/scan, including
@@ -856,9 +856,9 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   changefeed pulls of the destination fail with `resync_required` while it
   lasts); legacy peers omitting lineage/epoch
   identity are refused (`MissingIdentity`) and never adopted. Sources:
-  `crates/shamir-server/src/replication/identity_fence/mod.rs`,
-  `crates/shamir-engine/src/repo/meta/repo_identity.rs`,
-  `crates/shamir-engine/src/repo/durability_policy/`.
+  `crates/server/shamir-server/src/replication/identity_fence/mod.rs`,
+  `crates/engine/shamir-engine/src/repo/meta/repo_identity.rs`,
+  `crates/engine/shamir-engine/src/repo/durability_policy/`.
 - **Duplicate loops and bookmark crash risk.** Two subscriptions for the
   same `(db, repo)` start two loops; bookmark advancement is not atomic.
   The bookmark is stored in `__tx__` without flush ordering against follower
@@ -866,8 +866,8 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   is **not verified on the on-disk engine**.
 - **No on/off switch.** The follower `SubscriptionSupervisor` always boots and
   the leader-side `ReplRequest::Pull` is served to any superuser/replicator
-  session (`crates/shamir-server/src/config.rs:99-106`,
-  `crates/shamir-server/src/db_handler/repl_handler.rs:52`). Replication is
+  session (`crates/server/shamir-server/src/config.rs:99-106`,
+  `crates/server/shamir-server/src/db_handler/repl_handler.rs:52`). Replication is
   inactive until subscriptions and replicator credentials exist — it is not
   disabled by a flag.
 
@@ -876,7 +876,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
 - **Query results materialize fully into a `Vec`; no true server-side
   streaming to the client yet.** `QueryResult.records` is a
   `Vec<QueryRecord>` built and returned in one shot. See
-  `crates/shamir-query-types/src/read/query_result.rs:64-66`. This is now
+  `crates/query/shamir-query-types/src/read/query_result.rs:64-66`. This is now
   mitigated on the wire/client side by server-side cursors (`CreateCursor`/
   `FetchNext`/`CancelCursor`, see
   [`client-server-protocol-spec/CURSORS.md`](client-server-protocol-spec/CURSORS.md)),
@@ -907,7 +907,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   response is clamped to `max_result_size_bytes` (default **64 MiB**),
   and the server enforces a global `max_active_connections` cap (default
   **1000**, with a per-source-IP sub-cap default of 100). See
-  `crates/shamir-server/src/config.rs:288-318` (`max_result_size_bytes`
+  `crates/server/shamir-server/src/config.rs:288-318` (`max_result_size_bytes`
   default) and `:330-366` (`max_active_connections`/
   `max_active_connections_per_ip` defaults).
 - **`max_inflight_response_bytes` (RI-15's global in-flight response-byte
@@ -917,7 +917,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `4 * max_result_size_bytes`'s own default (256 MiB), not unbounded — this
   matches the shipped `server.medium.example.ktav`/
   `server.small.example.ktav` profiles' own convention. `ByteBudget::acquire`
-  (`crates/shamir-server/src/byte_budget.rs`) never hard-errors when the
+  (`crates/server/shamir-server/src/byte_budget.rs`) never hard-errors when the
   budget is exhausted — it waits (bounded, wakes on release) — so a
   deployment relying on the old unbounded default gets bounded backpressure
   under sustained saturation, not a new rejection path, after upgrading. An
@@ -929,16 +929,16 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   only runs when the key is absent, not when it is present-but-null); the
   server logs a `tracing::warn!` at boot whenever it observes this resolved
   `None`, since it is now a deliberate escape hatch rather than an
-  unexamined default. See `crates/shamir-server/src/config.rs`'s
+  unexamined default. See `crates/server/shamir-server/src/config.rs`'s
   `default_max_inflight_response_bytes` and
-  `crates/shamir-server/src/server/server_launcher.rs`'s boot-time
+  `crates/server/shamir-server/src/server/server_launcher.rs`'s boot-time
   `ByteBudget::new` construction.
 - **Cursors only support `Temporal::Latest` reads.** `AsOf`/`History`
   queries are rejected outright at `CreateCursor` with
   `cursor_temporal_not_supported`, not silently downgraded to `Latest`. See
-  `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+  `crates/server/shamir-server/src/db_handler/cursor_handlers.rs`'s
   `create_cursor` and
-  `crates/shamir-query-types/src/batch/batch_error.rs`'s
+  `crates/query/shamir-query-types/src/batch/batch_error.rs`'s
   `BatchError::CursorTemporalNotSupported`.
 - **Cursors do not support `with_version: true`.** CR-B5: `CreateCursor`
   rejects `query.with_version == true` outright with
@@ -948,9 +948,9 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   and that read path does not attach per-record versions, so honoring the
   flag would silently produce no versions instead of the real per-record
   stamps a plain (non-cursor) `with_version: true` read returns. See
-  `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+  `crates/server/shamir-server/src/db_handler/cursor_handlers.rs`'s
   `create_cursor` and
-  `crates/shamir-query-types/src/batch/batch_error.rs`'s
+  `crates/query/shamir-query-types/src/batch/batch_error.rs`'s
   `BatchError::CursorWithVersionNotSupported`.
 - **Keyset-mode cursors: `Null`/missing and `Bin`/`List`/`Dec`/`Big` `ORDER BY`
   values are handled; mixed-type `ORDER BY` values are handled for
@@ -969,7 +969,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     page. If it finds any row, the WHOLE cursor is pinned to row-count-offset
     pagination from creation, instead of keyset mode — closing this case
     unconditionally. See
-    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+    `crates/server/shamir-server/src/db_handler/cursor_handlers.rs`'s
     `order_by_column_contains_null` and `create_cursor`.
   - **`Dec`/`Big` value — CLOSED (W-3, #789).** These have no `FilterValue`
     equivalent, so the boundary filter could not even be built — before this
@@ -979,7 +979,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     `CreateCursor` and at each `FetchNext` bookmark refresh): an unconvertible
     value is treated exactly like the pre-existing "no seek_key" case, and the
     cursor degrades to row-count-offset pagination for that call only. See
-    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
+    `crates/server/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
   - **`Bin`/`List` value — CLOSED (W-2, #789).** Unlike `Dec`/`Big`, these DO
     convert to a `FilterValue` (`Binary`/`Array`), so the boundary filter looked
     valid but could never match anything (`compare_values` has no comparison
@@ -1016,7 +1016,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     `String`/`Bin`, narrowed by F-18 #811 to `Int`/`Bool`/`String` — see the
     `Bin`/`List` bullet above) as proof of column homogeneity — but
     `add_schema_rule`/
-    `set_table_schema` (`crates/shamir-db/src/shamir_db/execute/
+    `set_table_schema` (`crates/engine/shamir-db/src/shamir_db/execute/
     admin_schema.rs`) validate a new rule's SHAPE only and never
     backfill-validate the table's EXISTING rows, so a schemaless table
     with mixed-type data that later got a schema rule bound after the
@@ -1038,13 +1038,13 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     rule is proven safe some other way — a full retroactive
     backfill-validation scan is out of scope for this task, tracked
     separately if ever needed. See
-    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s
+    `crates/server/shamir-server/src/db_handler/cursor_handlers.rs`'s
     `order_by_column_is_schema_typed_scalar` and
-    `crates/shamir-db/src/shamir_db/execute/admin_schema.rs`'s
+    `crates/engine/shamir-db/src/shamir_db/execute/admin_schema.rs`'s
     `stamp_keyset_safe`.
   - **`NaN` in an `F64` `ORDER BY` column — STILL OPEN, but MITIGATED (no
     keyset attempt at all), schema or not.** Checked `FieldRule::check_f64`
-    (`crates/shamir-engine/src/validator/schema/field_rule.rs`): the schema
+    (`crates/engine/shamir-engine/src/validator/schema/field_rule.rs`): the schema
     validator's `F64` type check does NOT reject `NaN`, so schema enforcement
     cannot close this gap the way it closes the mixed-type gap above — even a
     schema-declared `F64` field can still hold a `NaN` value. `NaN`'s
@@ -1063,7 +1063,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     NaN-detection fix (a new cheap primitive, or a two-phase scan design: a
     keyset phase over comparable values plus an offset-bookmarked tail phase
     for the rest) remains explicitly out of scope. See
-    `crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`'s
+    `crates/server/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`'s
     `nan_order_by_value_forces_offset_mode_no_loss` for the regression test
     covering this mitigation.
   - **W-7 (#789): the residual mixed-type/`NaN` gap can also DUPLICATE
@@ -1089,7 +1089,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
 - **Idle-cursor reaper could reap a cursor mid-`FetchNext` — CLOSED (F-9
   #799, residual fully closed by F-20 #813).** The reaper evicts a cursor
   once it has been idle past `idle_ttl`
-  (`crates/shamir-server/src/cursor_registry.rs`), but `bump_activity()`
+  (`crates/server/shamir-server/src/cursor_registry.rs`), but `bump_activity()`
   (the only thing that advances a cursor's idle clock) fires exactly once,
   at the very END of a successful `FetchNext` — so a `FetchNext` whose own
   execution time (large `page_size`, an expensive scan, a slow keyset
@@ -1119,7 +1119,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   no window for a new fetch to land in between "decided expired" and
   "removed". `try_lock()` was removed as a reap-gate (superseded by
   `in_flight`, which covers a strict superset of its window) rather than
-  kept alongside it. See `crates/shamir-server/src/cursor_registry.rs`'s
+  kept alongside it. See `crates/server/shamir-server/src/cursor_registry.rs`'s
   `sweep_and_reap`/`get_owned_for_fetch`/`FetchLease` doc comments for the
   full ordering argument.
 - **`max_inflight_response_bytes` missing from the base
@@ -1143,7 +1143,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   otherwise-successful query over millions of good rows would be worse
   than a documented gap): it is skipped from `QueryResult.records`
   (unchanged) and reported via `QueryResult.corrupt_records:
-  Vec<CorruptRecordRef>` (`crates/shamir-query-types/src/read/
+  Vec<CorruptRecordRef>` (`crates/query/shamir-query-types/src/read/
   query_result.rs`) instead of silently vanishing from the result count.
   Each entry is a `{ table, id }` pair — the id is still resolvable even
   though the value failed to decode, since ids are read independently of
@@ -1152,7 +1152,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   peer that doesn't know about it never observes it, and a new peer
   reading an old response gets an empty `Vec` by default.
   - **F-10 (#800):** all ~14 decode-failure sites in
-    `crates/shamir-engine/src/table/read_exec.rs` (`read_collecting`,
+    `crates/engine/shamir-engine/src/table/read_exec.rs` (`read_collecting`,
     `read_counting`, `read_streaming`, the index2 fast path, and the
     filtered-vector-scan / `merge_staged_filtered` /
     `build_filtered_vector_result` trio).
@@ -1163,13 +1163,13 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     in scope — now take a `&mut Vec<CorruptRecordRef>` accumulator
     parameter (mirroring F-10's own convention) that each of their ~10
     real call sites populates and threads to its own eventual
-    `QueryResult` construction: `crates/shamir-engine/src/table/
+    `QueryResult` construction: `crates/engine/shamir-engine/src/table/
     read_index_scan.rs` (`read_sorted_index_scan`, `read_order_limit_fast`,
     `read_keyset_seek`, `read_index_scan`'s plain-SELECT branch) and
-    `crates/shamir-engine/src/table/read_temporal.rs` (`read_as_of`,
+    `crates/engine/shamir-engine/src/table/read_temporal.rs` (`read_as_of`,
     `read_history`).
   - **Still NOT wired, and expected to stay that way:**
-    `crates/shamir-engine/src/table/table_manager_streaming.rs`'s
+    `crates/engine/shamir-engine/src/table/table_manager_streaming.rs`'s
     `filter_stream` (malformed-`RecordView` skip, `Err(_) => false`) and
     `filter_stream_tx` (its ~line 321-323 counterpart, `Err(_) => false`).
     These return a raw `Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>>`,
@@ -1177,15 +1177,15 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     without changing the stream's item type to carry corrupt markers
     alongside matched rows, a real API redesign, not a small fix.
     `filter_stream_tx` has no production caller (only
-    `crates/shamir-engine/src/table/tests/filter_stream_tests.rs` and
-    `crates/shamir-engine/src/tx/tests/ssi_phantom_tests/
+    `crates/engine/shamir-engine/src/table/tests/filter_stream_tests.rs` and
+    `crates/engine/shamir-engine/src/tx/tests/ssi_phantom_tests/
     predicate_capture_tests.rs` reach it) — genuinely dead code, so this is
     moot for it today. `filter_stream` itself, however, DOES have a real
     caller: `TableManager::lock_query_reads`
     (`table_manager_streaming.rs`), the Pessimistic-isolation lock-acquisition
     pre-pass invoked from `read_tx_with_encoding` for any WHERE-bearing
     SELECT run under `IsolationLevel::Pessimistic` (reachable in production
-    via `crates/shamir-engine/src/query/batch/query_runner.rs`'s tx-scoped
+    via `crates/engine/shamir-engine/src/query/batch/query_runner.rs`'s tx-scoped
     SELECT handling) — correcting an earlier investigation that had judged
     both methods unreached. This does not leave a silent reporting gap in
     practice: `lock_query_reads` only uses `filter_stream`'s output to
@@ -1196,7 +1196,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     branch it takes. Widening `filter_stream`'s stream item type so the
     lock-acquisition pre-pass can *also* report independently is tracked as
     its own future follow-up if ever needed, not done speculatively here.
-  `crates/shamir-engine/src/table/table_manager_index_mgmt.rs`
+  `crates/engine/shamir-engine/src/table/table_manager_index_mgmt.rs`
   does NOT have this pattern (re-verified for F-20/#813: its one `continue`,
   ~line 854 inside the sorted-index rename-migration helper, is a
   malformed-KEY length guard — `if key.len() < 9 { continue; }` — on a
@@ -1207,7 +1207,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   correction removes).
   **SDK surface (F-22, #815, closed):** `corrupt_records` is now typed on
   the TS side too — `CorruptRecordRef` / `QueryResult.corrupt_records?` in
-  `crates/shamir-client-ts/src/core/types/write/batch.ts`. Also fixed as part of
+  `crates/client/shamir-client-ts/src/core/types/write/batch.ts`. Also fixed as part of
   F-22: `CorruptRecordRef.id` now serializes as a base58 string on the
   wire (matching every other `RecordId` on the wire, e.g.
   `InsertedRecord`'s `_id`), not raw msgpack bytes — an F-10-era oversight.
@@ -1217,11 +1217,11 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
 - **`SelectItem::Expression` (computed SELECT fields) is REJECTED at
   execution time, not silently ignored (F-26, #819, closed).** The variant
   is accepted at every layer of the contract — wire DTO
-  (`crates/shamir-query-types/src/read/select_expr.rs`), parser
-  (`crates/shamir-engine/src/query/read/parser.rs`), and the public TS type
-  (`crates/shamir-client-ts/src/core/types/read/query.ts`) — but no evaluator
+  (`crates/query/shamir-query-types/src/read/select_expr.rs`), parser
+  (`crates/engine/shamir-engine/src/query/read/parser.rs`), and the public TS type
+  (`crates/client/shamir-client-ts/src/core/types/read/query.ts`) — but no evaluator
   exists yet. Before F-26, `SelectProjection::new`
-  (`crates/shamir-engine/src/query/read/select_projection.rs`) silently
+  (`crates/engine/shamir-engine/src/query/read/select_projection.rs`) silently
   dropped the item from the projected output via a bare `_ => {}` catch-all
   — a syntactically valid query with a computed field in its `SELECT`
   returned a result set with that field simply absent, no error. Fixed by
@@ -1230,7 +1230,7 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   through: `SelectProjection::new` (full scan, index2, temporal, and
   cursor read plans — a cursor's every internal read routes through the
   temporal AsOf path) and `validate_aggregate_select`
-  (`crates/shamir-engine/src/query/read/aggregate.rs`, covering GROUP BY /
+  (`crates/engine/shamir-engine/src/query/read/aggregate.rs`, covering GROUP BY /
   aggregate-all queries). The wire shape is kept intact for a future real
   expression-evaluator implementation — only execution-time rejection was
   added.
@@ -1255,8 +1255,8 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   `i64::MAX - 1`) onto the same `f64`, corrupting `Eq`/`Gt`/`Gte`/`Lt`/`Lte`
   filters and `ORDER BY` over columns like nanosecond timestamps or
   63-bit ids/hashes. Fixed in both `compare_values`
-  (`crates/shamir-engine/src/query/filter/resolve.rs`) and `ORDER BY`'s
-  `QvSortKey` ordering (`crates/shamir-engine/src/query/read/order.rs`) via
+  (`crates/engine/shamir-engine/src/query/filter/resolve.rs`) and `ORDER BY`'s
+  `QvSortKey` ordering (`crates/engine/shamir-engine/src/query/read/order.rs`) via
   an exact bounds-check + `floor`/`fract` technique — no `BigInt` needed:
   `f64`'s 11-bit exponent already covers every integer magnitude up to
   `2^63` exactly at the boundaries (`i64::MIN`/`i64::MAX` bound-check
@@ -1271,11 +1271,11 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
 
 - **`ttl_ms` governs the in-memory write-back buffer, not
   data-expiration.** `MemBufferConfig::ttl_ms` (in
-  `crates/shamir-storage/src/storage_membuffer.rs:104-105`) controls how
+  `crates/storage/shamir-storage/src/storage_membuffer.rs:104-105`) controls how
   long an entry stays in the RAM cache in front of the durable backend
   before `moka`'s eviction listener flushes it to the inner store — see
   the durability/eviction contract documented at
-  `crates/shamir-storage/src/storage_membuffer.rs:48-60`. It is **not** a
+  `crates/storage/shamir-storage/src/storage_membuffer.rs:48-60`. It is **not** a
   data-expiration/TTL-eviction feature: there is no automatic deletion of
   "expired" records: an evicted entry is written to the durable backend,
   never dropped.
@@ -1347,14 +1347,14 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
   - **True power-loss crash injection is outside what a portable unit test
     can exercise** (there is no way to truncate the OS page cache
     mid-syscall from a `#[test]`); the regression guards are the
-    interrupted-copy test in `crates/shamir-server/src/tests/
+    interrupted-copy test in `crates/server/shamir-server/src/tests/
     restore_tests.rs` (`copy_step_failure_propagates_and_leaves_data_dir_
     untouched`) and the happy-path `backup()`-destination-directory-fsync
-    tests in `crates/shamir-server/src/tests/backup_tests.rs` — both verify
+    tests in `crates/server/shamir-server/src/tests/backup_tests.rs` — both verify
     the closest portable proxy (a failure propagates cleanly / a success
     path with directory-fsync engaged completes without error), not actual
-    crash survival. See `crates/shamir-server/src/restore.rs`'s
-    `fsync_dir` and `crates/shamir-server/src/backup.rs`'s `backup`,
+    crash survival. See `crates/server/shamir-server/src/restore.rs`'s
+    `fsync_dir` and `crates/server/shamir-server/src/backup.rs`'s `backup`,
     `copy_dir_recursive`, and `write_manifest`.
 
 ## 10. Repo engines
@@ -1370,16 +1370,16 @@ Once a rename attempt ends in doubt, the rename fence stays raised and there is 
     `"in_memory"`; a request for `dst_engine: "hybrid"` is rejected with
     *"Migration dst_engine 'hybrid' not yet supported. Supported:
     in_memory"* (same catch-all that rejects every other non-`in_memory`
-    engine). See `crates/shamir-db/src/shamir_db/execute/admin_migration.rs:112-120`.
+    engine). See `crates/engine/shamir-db/src/shamir_db/execute/admin_migration.rs:112-120`.
   - **Requires the `fjall` cargo feature (same as the durable default).**
     The `Some("hybrid")` arm in `create_repo` and the `"hybrid"` arm in
     `factory_from_meta` are both gated by `#[cfg(feature = "fjall")]`.
     A build with `default-features = false` and `fjall` excluded cannot
     create a hybrid repo: `ENGINE 'hybrid'` falls into the
     unsupported-engine error path in that configuration, same as `fjall`
-    itself would. See `crates/shamir-db/src/shamir_db/execute/admin_db_repo.rs:223-254`
+    itself would. See `crates/engine/shamir-db/src/shamir_db/execute/admin_db_repo.rs:223-254`
     (create-time arm, including the `data_root`-required guard) and
-    `crates/shamir-db/src/shamir_db/shamir_db/core.rs:700-707`
+    `crates/engine/shamir-db/src/shamir_db/shamir_db/core.rs:700-707`
     (restart-reattach arm).
 
 ## 11. Scale and performance envelope
@@ -1397,7 +1397,7 @@ measurements on one development host and are a floor, not a promise.
 - `ORDER BY` / `GROUP BY` / `DISTINCT` materialize the full matching set
   server-side before the first page.
 - `$cond` / `$expr` are ~29×–190× slower than a flat comparison
-  (`crates/shamir-engine/benches/cond_expr_eval.rs`).
+  (`crates/engine/shamir-engine/benches/cond_expr_eval.rs`).
 - Benchmarks in the repository go up to 100k rows per table; larger tables
   have no published measurements (`docs/dev-artifacts/ops/CAPACITY_PLANNING.md`).
 
@@ -1411,22 +1411,22 @@ The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and passwo
 
 ### Credential lifecycle
 
-- **Bearer tokens are plaintext credentials.** A stolen token can be used until expiry or revocation. The remote-plaintext write rail (`allow_plaintext_write: false`) does not keep a `read_write` secret safe: the secret is exposed before the server rejects it with 403 and emits `api_token_exposed`. Protect tokens as secrets, use TLS outside loopback, and avoid URLs. Query-string token authentication is ignored; a valid `Authorization` header still works alongside a query string. Creation returns the secret once; listings omit it. Sources: `crates/shamir-server/src/security/tokens/cli/secret_output.rs`, `crates/shamir-server/src/security/perimeter/`.
-- **`kick_session` is not a supported API-token revocation mechanism.** TOKEN_API §5 specifies no token effect. The legacy connect helper at `crates/shamir-connect/src/server/ops/admin.rs:154-170` bumps the shared credential floor, but only integration-test callers were found and runtime behavior is unverified. Explicit token revocation is supported.
-- **Shared credential invalidation has a strict timestamp boundary.** Tokens are invalidated when `created_at_ns <= tickets_invalid_before_ns`; validity requires `created_at_ns > floor`. Password changes, actual role/flag changes, and `revoke_user_tickets` advance the shared floor; user deletion removes the owner's identity from the cache, while restore advances the floor. A `kick_session` helper also bumps the shared floor, but production callers were not found and runtime behavior is unverified; do not rely on it for API-token revocation. Sources: `crates/shamir-server/src/security/tokens/service/token_service.rs:544-557`, `crates/shamir-server/src/sync/durability/restore.rs:394-398`, `crates/shamir-connect/src/server/ops/admin.rs:154-170`.
+- **Bearer tokens are plaintext credentials.** A stolen token can be used until expiry or revocation. The remote-plaintext write rail (`allow_plaintext_write: false`) does not keep a `read_write` secret safe: the secret is exposed before the server rejects it with 403 and emits `api_token_exposed`. Protect tokens as secrets, use TLS outside loopback, and avoid URLs. Query-string token authentication is ignored; a valid `Authorization` header still works alongside a query string. Creation returns the secret once; listings omit it. Sources: `crates/server/shamir-server/src/security/tokens/cli/secret_output.rs`, `crates/server/shamir-server/src/security/perimeter/`.
+- **`kick_session` is not a supported API-token revocation mechanism.** TOKEN_API §5 specifies no token effect. The legacy connect helper at `crates/net/shamir-connect/src/server/ops/admin.rs:154-170` bumps the shared credential floor, but only integration-test callers were found and runtime behavior is unverified. Explicit token revocation is supported.
+- **Shared credential invalidation has a strict timestamp boundary.** Tokens are invalidated when `created_at_ns <= tickets_invalid_before_ns`; validity requires `created_at_ns > floor`. Password changes, actual role/flag changes, and `revoke_user_tickets` advance the shared floor; user deletion removes the owner's identity from the cache, while restore advances the floor. A `kick_session` helper also bumps the shared floor, but production callers were not found and runtime behavior is unverified; do not rely on it for API-token revocation. Sources: `crates/server/shamir-server/src/security/tokens/service/token_service.rs:544-557`, `crates/server/shamir-server/src/sync/durability/restore.rs:394-398`, `crates/net/shamir-connect/src/server/ops/admin.rs:154-170`.
 - **A lost login response can leave a token active.** If issuance completes but the response is lost, the client may not know the secret while the server-side credential remains valid until TTL or administrative revocation. Treat uncertain issuance as a credential-cleanup incident; no client acknowledgement protocol is claimed here.
 
 ### Protocol and policy boundaries
 
-- **REST is request/response only.** Interactive multi-request transactions, cursors and subscriptions are unsupported over REST (`not_supported_over_rest`). Single-request transactional Execute batches remain available; use token WebSocket for interactive/session features. Source: `crates/shamir-server/src/security/perimeter/http_rest/scope.rs:63-75,97-105,185-187`.
-- **No cross-origin browser REST/CORS support in v1.** The token listener does not provide CORS headers. Same-origin access is an implementation/deployment possibility without CORS, not a verified runtime claim. Browser WebSocket has Host/Origin policy controls. Sources: `docs/guide-docs/client-server-protocol-spec/ADMIN_UI_HOSTING.md:86,123`, `crates/shamir-server/src/security/perimeter/http_ws/browser/`.
-- **Scoped-token global listing interpretation remains BLOCKED SPEC.** The implementation denies top-level `ListDatabases` and `ListUsers` for tokens with a non-null `databases` list (including an empty one), while `databases: null` tokens may use them; (`crates/shamir-server/src/security/perimeter/http_rest/scope.rs:157-164`); `AccessTree` allows an explicitly allowlisted database and denies absent/out-of-scope databases (165-178). Do not present unresolved global-list interpretation as normative permission.
+- **REST is request/response only.** Interactive multi-request transactions, cursors and subscriptions are unsupported over REST (`not_supported_over_rest`). Single-request transactional Execute batches remain available; use token WebSocket for interactive/session features. Source: `crates/server/shamir-server/src/security/perimeter/http_rest/scope.rs:63-75,97-105,185-187`.
+- **No cross-origin browser REST/CORS support in v1.** The token listener does not provide CORS headers. Same-origin access is an implementation/deployment possibility without CORS, not a verified runtime claim. Browser WebSocket has Host/Origin policy controls. Sources: `docs/guide-docs/client-server-protocol-spec/ADMIN_UI_HOSTING.md:86,123`, `crates/server/shamir-server/src/security/perimeter/http_ws/browser/`.
+- **Scoped-token global listing interpretation remains BLOCKED SPEC.** The implementation denies top-level `ListDatabases` and `ListUsers` for tokens with a non-null `databases` list (including an empty one), while `databases: null` tokens may use them; (`crates/server/shamir-server/src/security/perimeter/http_rest/scope.rs:157-164`); `AccessTree` allows an explicitly allowlisted database and denies absent/out-of-scope databases (165-178). Do not present unresolved global-list interpretation as normative permission.
 
 ### Shutdown and evidence limits
 
-- **Shutdown is not a request-completion guarantee.** The observed bounds are 5 seconds for connections, `min(request_timeout, 7s)` for workers, and 2 seconds for audit, subject to an outer 10-second deadline; these are not a guaranteed additive grace period. Forced shutdown can interrupt work. Sources: `crates/shamir-server/src/boot/config/http_mapping.rs:30`, `crates/shamir-transport-http/src/server/accept.rs:368-398`, `crates/shamir-server/src/engine/server/server_launcher/http/launcher.rs:432-445`, `crates/shamir-server/src/engine/server/server_handle.rs:192-218`.
+- **Shutdown is not a request-completion guarantee.** The observed bounds are 5 seconds for connections, `min(request_timeout, 7s)` for workers, and 2 seconds for audit, subject to an outer 10-second deadline; these are not a guaranteed additive grace period. Forced shutdown can interrupt work. Sources: `crates/server/shamir-server/src/boot/config/http_mapping.rs:30`, `crates/net/shamir-transport-http/src/server/accept.rs:368-398`, `crates/server/shamir-server/src/engine/server/server_launcher/http/launcher.rs:432-445`, `crates/server/shamir-server/src/engine/server/server_handle.rs:192-218`.
 - **T7 evidence gaps are not proven runtime failures.** Its BLOCKED response-byte-guard row means no real-socket assertion/counter seam demonstrated permit ownership through body write; SCRAM-store absence is likewise unproven because no public store/seam permits direct proof. T7 DONE/PARTIAL entries indicate source assertions, not that tests compiled or passed. Linux and Windows CI were not observed there.
-- **Audit and memory guarantees are limited.** Response-write permit ownership through actual body completion, credential redaction in blocking threads, per-listener audit queues, and a full measured memory bound remain unresolved or unproven. A global process-audit event semaphore bounds logical events; it does not remove per-listener queue allocations or establish a full-memory bound. Sources: `crates/shamir-server/src/security/perimeter/http_login/service/audit.rs:11-22,76`; see `docs/dev-artifacts/audits/2026-11-02-token-auth1/DESIGN.md`.
+- **Audit and memory guarantees are limited.** Response-write permit ownership through actual body completion, credential redaction in blocking threads, per-listener audit queues, and a full measured memory bound remain unresolved or unproven. A global process-audit event semaphore bounds logical events; it does not remove per-listener queue allocations or establish a full-memory bound. Sources: `crates/server/shamir-server/src/security/perimeter/http_login/service/audit.rs:11-22,76`; see `docs/dev-artifacts/audits/2026-11-02-token-auth1/DESIGN.md`.
 
 ### Other status
 
@@ -1436,15 +1436,15 @@ The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and passwo
 ## 12. Security defaults
 
 - New resources are open (`0o777`) until `chmod`-ed
-  (`crates/shamir-types/src/access.rs:135-136`).
+  (`crates/foundation/shamir-types/src/access.rs:135-136`).
 - Server-side Rust→WASM compilation (`compiler://`, default `0o755`) is
   available to every authenticated user and runs `cargo` on the host; the
   forbidden-macro guard is a lexical scan, not a sandbox
-  (`crates/shamir-wasm-host/src/compile.rs:8-47`,
-  `crates/shamir-db/src/shamir_db/shamir_db/access_control.rs:163-173`).
+  (`crates/wasm/shamir-wasm-host/src/compile.rs:8-47`,
+  `crates/engine/shamir-db/src/shamir_db/shamir_db/access_control.rs:163-173`).
 - The TypeScript client neither verifies the server's Ed25519 identity nor
   uses TLS channel binding
-  (`crates/shamir-client-ts/src/core/types/connection.ts:43-49`); use a
+  (`crates/client/shamir-client-ts/src/core/types/connection.ts:43-49`); use a
   CA-verified certificate outside local development.
 - No at-rest encryption (`security/data-protection.md`); the audit log covers
   authentication events only.
@@ -1458,18 +1458,18 @@ The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and passwo
   (function/validator DDL create and replace, catalogue recovery at startup)
   uses the default `Auto` mode and default options, so there is no
   per-function DDL or OQL knob yet. Sources:
-  `crates/shamir-wasm-host/src/wasm/engine/tier_options.rs:5-24`,
-  `crates/shamir-db/src/shamir_db/shamir_db/db/function_management.rs:187`,
-  `crates/shamir-db/src/shamir_db/shamir_db/db/validator_management.rs:234`,
-  `crates/shamir-db/src/shamir_db/shamir_db/core.rs:466,570`.
+  `crates/wasm/shamir-wasm-host/src/wasm/engine/tier_options.rs:5-24`,
+  `crates/engine/shamir-db/src/shamir_db/shamir_db/db/function_management.rs:187`,
+  `crates/engine/shamir-db/src/shamir_db/shamir_db/db/validator_management.rs:234`,
+  `crates/engine/shamir-db/src/shamir_db/shamir_db/core.rs:466,570`.
 - **Tier state is not persisted; every start recompiles on the fast tier.**
   The catalogue stores the `.wasm` bytes only; the compiled slot (engine,
   `InstancePre`, tier) lives in an in-memory `ArcSwap` and the call counter
   resets with the process, so after a restart every function is recreated on
   the fast (Winch) tier (on the optimized tier when its fast compile fails or the engine
   has no fast tier) and re-earns its upgrade after `hot_calls` calls.
-  Sources: `crates/shamir-wasm-host/src/wasm/wasm_function.rs:377-395`,
-  `crates/shamir-wasm-host/src/wasm/engine/tier_upgrade.rs:51-64`.
+  Sources: `crates/wasm/shamir-wasm-host/src/wasm/wasm_function.rs:377-395`,
+  `crates/wasm/shamir-wasm-host/src/wasm/engine/tier_upgrade.rs:51-64`.
 - **Two-tier engines reserve pooling address space twice.** With tiering
   enabled and the pooling allocator active, both engines of the pair get
   their own pooling instance-allocation strategy (128 memory slots at the
@@ -1477,4 +1477,4 @@ The v1 token API adds HTTP REST, native WebSocket, browser WebSocket, and passwo
   twice; it is virtual address space, not resident memory. The pool-derived
   memory-limit rejection follows the optimized engine: the fast engine pools
   with the same ceiling or not at all. Sources:
-  `crates/shamir-wasm-host/src/wasm/engine/wasm_engine.rs:166-215,378-409`.
+  `crates/wasm/shamir-wasm-host/src/wasm/engine/wasm_engine.rs:166-215,378-409`.

@@ -66,9 +66,9 @@ tls: {
 и подключи локально (клиент сам проводит TLS 1.3 + SCRAM-Argon2id):
 
 ```bash
-cd crates/shamir-client-ts && npm ci && npm run build
+cd crates/client/shamir-client-ts && npm ci && npm run build
 # в своём проекте:
-npm i /path/to/shamir-db/crates/shamir-client-ts
+npm i /path/to/shamir-db/crates/client/shamir-client-ts
 ```
 
 ```ts

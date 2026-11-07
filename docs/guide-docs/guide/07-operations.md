@@ -147,15 +147,15 @@ identity запрещает даже первый контакт; отключе
    snapshot-plus-bookmark seed command и автоматического reseed нет; такой
    image требует отдельного проверенного tooling/procedure.
 
-Источники: `crates/shamir-engine/src/repo/repo_instance.rs:1829-1877`,
-`crates/shamir-server/src/replication/follower_loop.rs:311-325`,
-`crates/shamir-server/src/replication/supervisor.rs:309-334`,
-`crates/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`,
-`crates/shamir-server/src/backup.rs:3-32`.
+Источники: `crates/engine/shamir-engine/src/repo/repo_instance.rs:1829-1877`,
+`crates/server/shamir-server/src/replication/follower_loop.rs:311-325`,
+`crates/server/shamir-server/src/replication/supervisor.rs:309-334`,
+`crates/engine/shamir-db/src/shamir_db/execute/admin_replication.rs:413-467`,
+`crates/server/shamir-server/src/backup.rs:3-32`.
 
 ## API token listener operations
 
-Bearer APIs and HTTP password login are served by the configured HTTP listener. See [the TypeScript token guide](../../../crates/shamir-client-ts/docs/TOKENS.md) for client usage. The examples there assume an HTTPS endpoint at `https://db.example.test`, port 443, with the UI served same-origin (or through a same-origin reverse proxy); token requests do not provide CORS headers.
+Bearer APIs and HTTP password login are served by the configured HTTP listener. See [the TypeScript token guide](../../../crates/client/shamir-client-ts/docs/TOKENS.md) for client usage. The examples there assume an HTTPS endpoint at `https://db.example.test`, port 443, with the UI served same-origin (or through a same-origin reverse proxy); token requests do not provide CORS headers.
 
 A minimal illustrative example of **one `listeners[]` entry** for that deployment is:
 
@@ -199,7 +199,7 @@ During shutdown, login workers receive `min(request_timeout_ms, 7s)` and the aud
 
 `login_enumeration_hardening` is under the actual `security` namespace, not a top-level key. `kdf_override` is forbidden on login-enabled listeners. Login's BEGIN/FINISH body caps (4096/256 bytes) and admission/store capacities are fixed, not tunable; server request body and timeout settings are separate. Actual proxy TLS requires `tls: false`, loopback bind, nonempty `trusted_proxies`, nonempty authority, and nonempty canonical HTTPS origins; combining actual TLS with `external_tls` is invalid. Login head timeout must be <=5000 ms. HSTS is enabled for login over direct TLS; with proxy TLS the external HTTPS edge must provide HSTS. The internal HTTP backend does not itself establish browser HTTPS security.
 
-These names/defaults and profile constraints are defined by `crates/shamir-server/src/boot/config/login_listener.rs`, `http_listener.rs`, `boot/config.rs`, `boot/config/tokens.rs`, and enforced by `engine/server/server_launcher/http/launcher.rs`.
+These names/defaults and profile constraints are defined by `crates/server/shamir-server/src/boot/config/login_listener.rs`, `http_listener.rs`, `boot/config.rs`, `boot/config/tokens.rs`, and enforced by `engine/server/server_launcher/http/launcher.rs`.
 
 For full listener setup, token administration, browser constraints, limits and troubleshooting, see the [token API operator guide](./token-api.md).
 
@@ -258,8 +258,8 @@ Production-конфиг — `deploy/server.example.ktav` (все поля с
 оператора и жёсткого `BatchLimits::CEILING` движка; вложенные батчи не могут
 поднять его. Потолки движка: 100 MiB / 1000 queries / 3600 s; это caps,
 а не defaults запроса (у клиента defaults 10 MiB / 50 / 30 s).
-Источники: `crates/shamir-server/src/db_handler/config.rs::policy`,
-`crates/shamir-query-types/src/batch/batch_limits.rs`.
+Источники: `crates/server/shamir-server/src/db_handler/config.rs::policy`,
+`crates/query/shamir-query-types/src/batch/batch_limits.rs`.
 
 || Поле | Default | Максимум при старте |
 ||---|---|---|
@@ -274,8 +274,8 @@ Production-конфиг — `deploy/server.example.ktav` (все поля с
 || `max_page_size` | 100000 | 100000 |
 || `max_offset` | 1000000 | 1000000 |
 
-Defaults и startup validation: `crates/shamir-server/src/config.rs:456-487,768-777`;
-engine caps: `crates/shamir-query-types/src/batch/batch_limits.rs:109-120`.
+Defaults и startup validation: `crates/server/shamir-server/src/config.rs:456-487,768-777`;
+engine caps: `crates/query/shamir-query-types/src/batch/batch_limits.rs:109-120`.
 
 `max_total_queries` ограничивает число узлов всего дерева батча;
 `max_total_work` ограничивает и статическую оценку вложенных батчей/циклов,
@@ -285,7 +285,7 @@ engine caps: `crates/shamir-query-types/src/batch/batch_limits.rs:109-120`.
 Динамические повторения тоже учитываются; все вложенные исполнения делят
 один root counter, предварительный `check_work` не резервирует работу.
 Это счётчик dispatch, не строк, CPU-инструкций или времени сканирования
-(`crates/shamir-engine/src/query/batch/exec_scope.rs`, `batch_execute.rs`,
+(`crates/engine/shamir-engine/src/query/batch/exec_scope.rs`, `batch_execute.rs`,
 `query_runner.rs`). `max_page_size` и
 `max_offset` ограничивают пагинацию query, отдельно от `security.cursors`.
 Превышение запрошенной страницы/offset возвращает `pagination_too_large`,
@@ -311,9 +311,9 @@ upfront-резерва RI-15 сохраняется. Embedded API остаётс
 на сериализованный ответ.
 Embedded `ExecPolicy::EMBEDDED` и WASM `FacadeDbGateway` → `execute_as`
 оставляют enforcement OFF (флаг серверный:
-`crates/shamir-server/src/db_handler/config.rs`,
-`crates/shamir-query-types/src/batch/exec_policy.rs`,
-`crates/shamir-db/src/shamir_db/shamir_db/db_gateway.rs`).
+`crates/server/shamir-server/src/db_handler/config.rs`,
+`crates/query/shamir-query-types/src/batch/exec_policy.rs`,
+`crates/engine/shamir-db/src/shamir_db/shamir_db/db_gateway.rs`).
 
 Embedded direct CRUD: `TableManager::{insert, insert_many, delete, set}_with_receipt`
 принимает explicit `VisibilityWait` и возвращает must-use `WriteOutcome<T>`:
@@ -342,7 +342,7 @@ MessagePack, allocator capacity или live RSS. `ResultSize` детермини
 повторно при его сборке. Превышение возвращает `LimitExceeded(ResultBytes)`
 → `result_too_large` до решения о commit; уже выполненные non-transactional
 операции этим не откатываются. Источники:
-`crates/shamir-engine/src/query/batch/exec_scope.rs::charge_bytes`,
+`crates/engine/shamir-engine/src/query/batch/exec_scope.rs::charge_bytes`,
 `result_size.rs`, `batch_execute.rs`, `query_runner.rs`.
 
 ### Время TxExecute и string_agg
@@ -351,9 +351,9 @@ MessagePack, allocator capacity или live RSS. `ResultSize` детермини
 минимум effective request/policy time и оставшегося срока handle **с полной
 точностью `Duration`**, без округления до секунд и без продления на каждый
 вызов. Остаток берётся **после** захвата context lock; authorization тоже
-вычитается из него (`crates/shamir-server/src/db_handler/tx_handlers.rs:169-181`,
-`crates/shamir-db/src/shamir_db/execute/db_tx.rs:158-165`,
-`crates/shamir-engine/src/query/batch/exec_scope.rs`). Deadline cooperative:
+вычитается из него (`crates/server/shamir-server/src/db_handler/tx_handlers.rs:169-181`,
+`crates/engine/shamir-db/src/shamir_db/execute/db_tx.rs:158-165`,
+`crates/engine/shamir-engine/src/query/batch/exec_scope.rs`). Deadline cooperative:
 застрявшая операция не прерывается таймером; перед commit проверяется deadline
 и work budget, а начатый commit не отменяется по timeout.
 
@@ -366,9 +366,9 @@ separator ≤ **1024 bytes** (не символов), default separator `,`;
 локальный `max_result_size` меньше. Превышение идёт как **query error** с
 диагностикой `result_too_large: ResultBytes …`, не `LimitExceeded`, и само по
 себе не удаляет interactive handle. Источники:
-`crates/shamir-engine/src/query/read/aggregate.rs::CappedStringAgg`,
-`crates/shamir-engine/src/query/filter/eval_context.rs`,
-`crates/shamir-engine/src/query/batch/query_runner.rs:1194`.
+`crates/engine/shamir-engine/src/query/read/aggregate.rs::CappedStringAgg`,
+`crates/engine/shamir-engine/src/query/filter/eval_context.rs`,
+`crates/engine/shamir-engine/src/query/batch/query_runner.rs:1194`.
 
 ### Migration source freeze и исход commit
 
@@ -378,9 +378,9 @@ raise freeze bit → drain writers → write-lock fence. Freeze guard живёт
 DDL admission на весь срок: DDL остаётся разрешённым. Direct writes и commit
 транзакции, попавшие на freeze, получают `table_migrating`; не делайте busy
 retry, дождитесь завершения/отмены и заново разрешите активную таблицу
-(`crates/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
-`table_manager_crud.rs`, `crates/shamir-engine/src/tx/pre_commit.rs`,
-`crates/shamir-db/src/shamir_db/execute/admin_migration.rs`).
+(`crates/engine/shamir-engine/src/table/table_manager.rs::begin_migration_freeze`,
+`table_manager_crud.rs`, `crates/engine/shamir-engine/src/tx/pre_commit.rs`,
+`crates/engine/shamir-db/src/shamir_db/execute/admin_migration.rs`).
 
 `wal_requires_reopen` требует reopen/reconciliation, новые commits отказаны.
 Попытка commit с неизвестным исходом WAL (frame уже поставлен в очередь)
@@ -851,7 +851,7 @@ audit: {
 
 Audit-лог в audit-line-формате с HMAC-chain (каждая запись включает HMAC от предыдущей).
 Ротация по размеру; устаревшие файлы удаляются автоматически.
-Покрытие (состояние реализации): в durable HMAC-chained audit-лог сегодня попадают **только события аутентификации** (успех/сбой/прерывание рукопожатия — это единственный append call site, `crates/shamir-server/src/connection/handshake.rs`). DDL, ACL-изменения (chmod/chown) и admin-операции (`CreateScramUser`, `SetSuperuser`, retention/purge, drop и т.п.) durable-следа **не оставляют** — для них существует только эфемерный вывод `log`/`tracing`, который не персистируется и не является enforcement-gate (см. `shamir-types::access::trace_access`). Расширение покрытия (мост `AuditSink` → `AuditChainWriter` + append call sites на DDL/ACL/admin-операциях) — запланированное улучшение, пока не реализовано (P1).
+Покрытие (состояние реализации): в durable HMAC-chained audit-лог сегодня попадают **только события аутентификации** (успех/сбой/прерывание рукопожатия — это единственный append call site, `crates/server/shamir-server/src/connection/handshake.rs`). DDL, ACL-изменения (chmod/chown) и admin-операции (`CreateScramUser`, `SetSuperuser`, retention/purge, drop и т.п.) durable-следа **не оставляют** — для них существует только эфемерный вывод `log`/`tracing`, который не персистируется и не является enforcement-gate (см. `shamir-types::access::trace_access`). Расширение покрытия (мост `AuditSink` → `AuditChainWriter` + append call sites на DDL/ACL/admin-операциях) — запланированное улучшение, пока не реализовано (P1).
 
 ## 8. Backup
 
@@ -870,7 +870,7 @@ shamir-server --config db.ktav backup --to /backup/shamir
 audit-лог и его ротации, TLS PEM) в каталог `<to>/YYYYMMDD_HHMMSS/`; существующий
 целевой каталог перезаписываться отказывается. Источник (`data_dir`) задаётся
 файлом `--config`, отдельного флага источника нет; реальная точка входа —
-`crates/shamir-server/src/main.rs` (`Subcmd::Backup { to }` → `backup::backup`).
+`crates/server/shamir-server/src/main.rs` (`Subcmd::Backup { to }` → `backup::backup`).
 
 > ⚠ **Нельзя запускать `backup` против живого (запущенного) сервера.**
 > Никакой блокировки или quiesce-механизма нет: фразы вроде «блокирует данные
@@ -882,7 +882,7 @@ audit-лог и его ротации, TLS PEM) в каталог `<to>/YYYYMMDD
 
 In-process online-snapshot без downtime — запланированное улучшение **P2**,
 пока не реализовано
-(см. комментарий-модуля `crates/shamir-server/src/backup.rs`, «Future enhancement
+(см. комментарий-модуля `crates/server/shamir-server/src/backup.rs`, «Future enhancement
 (P2)»).
 
 **Scheduled backup** — cron / systemd timer, но задание **обязано** сначала

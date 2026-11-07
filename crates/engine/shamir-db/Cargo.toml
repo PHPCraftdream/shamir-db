@@ -1,0 +1,144 @@
+[package]
+name = "shamir-db"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+description = "ShamirDB facade — re-exports types/storage/engine/query and provides ShamirDb + SystemStore."
+license = "MIT OR Apache-2.0"
+
+[features]
+# Test-only raw TableManager handles are exposed through this opt-in feature
+# for integration tests/fixtures; never enable it in production dependencies.
+test-util = ["shamir-engine/test-util"]
+# Cascade backend feature flags from shamir-storage / shamir-engine all
+# the way through the facade. Default = all backends, so consumers
+# that didn't pick features explicitly see no change. Embedded
+# minimal builds: `default-features = false, features = ["fjall"]`.
+#
+# `all-backends` lists per-backend features explicitly, mirroring
+# shamir-engine — needed because the facade's own re-exports go through
+# engine's BoxRepoFactory which is gated by engine's own features.
+default = ["all-backends"]
+all-backends = ["fjall"]
+fjall  = ["shamir-storage/fjall",  "shamir-engine/fjall"]
+
+# ── Bench allocator switch ────────────────────────────────────────
+# Exactly ONE of these may be active at a time. Without any — system
+# default (Windows HeapAlloc / glibc malloc). Each bench file uses
+# cfg(feature) to pick the #[global_allocator] static.
+#
+#   cargo bench -p shamir-db --features bench-sefer          # sefer defaults
+#   cargo bench -p shamir-db --features bench-sefer-tuned    # sefer + LargeCacheConfig
+#   cargo bench -p shamir-db                                 # system
+bench-sefer       = ["dep:sefer-alloc"]
+bench-sefer-tuned = ["dep:sefer-alloc"]
+
+[dependencies]
+# StreamExt for the migration finalisation scan (admin_migration.rs); already in the
+# lockfile as a dependency of other workspace crates, no new version.
+futures = "0.3"
+# Foundation crates re-exported under `shamir_db::*` so callers stay
+# stable. The split is purely organisational; nothing about the public
+# surface changed when these moved out.
+shamir-query-types   = { path = "../../query/shamir-query-types" }
+shamir-types       = { path = "../../foundation/shamir-types" }
+shamir-collections = { path = "../../foundation/shamir-collections" }
+shamir-storage     = { path = "../../storage/shamir-storage", default-features = false }
+shamir-engine      = { path = "../shamir-engine",  default-features = false }
+shamir-funclib     = { path = "../../query/shamir-funclib" }
+shamir-query-builder = { path = "../../query/shamir-query-builder" }
+# T4-purge: the execute arm resolves the per-table MvccStore directly
+# (per_table_mvcc) to call purge_below_ts / read its clock. Already a
+# transitive build dep via shamir-engine; declared explicitly so the
+# facade can name `shamir_tx::MvccStore`.
+shamir-tx      = { path = "../../storage/shamir-tx" }
+
+# Direct deps for what's still here: the `db::shamir_db` facade
+# (ShamirDb + SystemStore + execute) and the small `api/` shim.
+serde       = { version = "1.0.217", features = ["derive"] }
+tokio       = { version = "1.49.0", features = ["full"] }
+dashmap     = "6.1.0"
+log         = "0.4"            # log!/info!/warn! macros across the facade
+async-trait = "0.1.81"         # AdminExecutor / TableResolver trait impls
+rmp-serde   = "1.3.0"          # facade encodes audit / system-store records
+rand        = "0.9.2"          # facade rng for record-id allocation
+arc-swap    = "1.7"            # RCU snapshot for the quarantine cache
+base64      = "0.22"           # function wasm binary persistence
+rustc-hash  = "2.1"            # function content hash (fxhash's maintained successor)
+tempfile    = "3.10.1"         # curl gateway temp files for secrets
+
+# Bench allocator options (optional — gated by bench-sefer features).
+sefer-alloc = { version = "0.2.1", features = ["production"], optional = true }
+captrack = { workspace = true }
+
+[dev-dependencies]
+bytes       = "1"
+tempfile    = "3.10.1"
+serial_test = "3.3.1"
+# F-68 (#895) cluster D / task #124: test-only diagnostic-instrumentation
+# visibility. `log = "0.4"` (already a direct dependency above) is the
+# macro facade every `log::debug!`/`log::warn!` call site in shamir-engine
+# and shamir-db uses, but with no logger installed those calls are silent
+# no-ops — nextest does not wire one up by default. `env_logger` is already
+# present in Cargo.lock (transitive dep of another crate) at 0.11.10, so
+# this pulls in no new version; `rename_table_durability.rs` calls
+# `env_logger::try_init()` once so the new instrumentation actually reaches
+# nextest's captured stdout on a hang. Dev-only — no production/library
+# code depends on this.
+env_logger  = "0.11.10"
+# Unifies in the `test-util` feature so `RepoInstance::install_table_for_test`
+# (audit #540 fault-injection seam) exists when shamir-db's own tests compile.
+shamir-engine = { path = "../shamir-engine", default-features = false, features = ["test-util"] }
+# #1065 round 4: `BackfillPauseHook` (the deterministic pause-hook test seam
+# `set_drop_index_pause_hook`/`set_drop_index_status_pause_hook` take) lives
+# in shamir-index and is only transitively available via shamir-engine —
+# Cargo requires it be a direct dependency to `use` it from shamir-db's own
+# tests. Dev-only; no production code in this crate depends on shamir-index.
+shamir-index = { path = "../../index/shamir-index" }
+bench-scale-tool = { workspace = true, features = ["async"] }
+# CAS sequenced-write e2e: canonical record hash shared by the validator and
+# the test (so both sides compute the prev-hash identically).
+shamir-funclib = { path = "../../query/shamir-funclib" }
+# WASM test modules: many unit/integration test files compile inline
+# `wat` text to wasm binaries for function-management tests.
+wat = "1.226"
+
+# Failure-only flake diagnostics (design: docs/dev-artifacts/design/flake-failure-logs.md)
+# — dev-only crate; adopted by the rename-restart, FK on-delete and native-parity
+# flaky tests. No `tracing` feature: the facade emits `log` records only.
+shamir-test-diag = { path = "../../devtools/shamir-test-diag" }
+
+[[bench]]
+name = "engine_perf"
+harness = false
+
+[[bench]]
+name = "wasm_db_calls"
+path = "benches/engine_perf/wasm_db_calls.rs"
+harness = false
+
+[[bench]]
+name = "authorize_gate"
+harness = false
+
+[[bench]]
+name = "changelog_read"
+harness = false
+
+[[bench]]
+name = "record_size_axis"
+harness = false
+
+[[bench]]
+name = "durability_axis"
+harness = false
+required-features = ["fjall"]
+
+
+[lib]
+# Doctests are banned project-wide (slow: recompile-per-example). Examples
+# live as illustration; behavioural coverage is in unit/integration tests.
+doctest = false
+
+[lints]
+workspace = true

@@ -25,14 +25,14 @@
  *   3. Poll the follower via its own client (`SELECT` over `items`) until it
  *      reports the same row count as the leader, within a window that
  *      comfortably covers the 10s `SubscriptionSupervisor` reconcile-tick
- *      (`crates/shamir-server/src/server/server_launcher.rs` —
+ *      (`crates/server/shamir-server/src/server/server_launcher.rs` —
  *      `REPL_RECONCILE_INTERVAL = Duration::from_secs(10)`) plus pull-loop
  *      latency.
  *   4. Increment: write more rows on the leader, confirm the follower catches
  *      up again.
  *
  * NodeMode (ReadOnly) gate on the follower is NOT exercised here: as of
- * 386-c, `ReplicationConfig` (`crates/shamir-server/src/config.rs`) has no
+ * 386-c, `ReplicationConfig` (`crates/server/shamir-server/src/config.rs`) has no
  * `node_mode` field yet — only `node_id` / `replicator_user` /
  * `replicator_password` / `server_name`. Left for a future task (see the
  * brief's Part B step 5 and this file's final comment block).
@@ -44,7 +44,7 @@
  * before `npm test` can execute it. It has not been run in this sandbox
  * (non-MSVC); it was written and reviewed against
  * `helpers/server.js`/`16-replication.test.js` conventions and the current
- * `crates/shamir-query-types/src/admin/types/repl_ops.rs` wire shapes.
+ * `crates/query/shamir-query-types/src/admin/types/repl_ops.rs` wire shapes.
  */
 
 'use strict';
@@ -257,7 +257,7 @@ module.exports = async function ({ client: leaderClient, server: leaderServer, t
 
   // ---------------------------------------------------------------------
   // NOTE — read-only gate (brief Part B step 5): NOT exercised here.
-  // `ReplicationConfig` (crates/shamir-server/src/config.rs, as of 386-c)
+  // `ReplicationConfig` (crates/server/shamir-server/src/config.rs, as of 386-c)
   // has no `node_mode` field — only node_id/replicator_user/
   // replicator_password/server_name. Wiring `NodeMode::ReadOnly` into the
   // follower's ktav config (and asserting a client write on the follower

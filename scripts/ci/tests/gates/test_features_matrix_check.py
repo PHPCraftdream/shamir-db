@@ -159,24 +159,24 @@ class ProbeManifestTests(unittest.TestCase):
     """The generated throwaway consumer manifest shapes the cell flags."""
 
     def test_manifest_plain_dependency_without_flags(self):
-        text = fmc.probe_manifest("/abs/crates/shamir-engine", [])
+        text = fmc.probe_manifest("/abs/crates/engine/shamir-engine", [])
         self.assertIn('name = "shamir-engine-feature-probe"', text)
         self.assertIn("edition = \"2021\"", text)
         self.assertIn("[workspace]", text)
-        self.assertIn("path = '/abs/crates/shamir-engine'", text)
+        self.assertIn("path = '/abs/crates/engine/shamir-engine'", text)
         self.assertNotIn("default-features", text)
         self.assertNotIn("features = [", text)
 
     def test_manifest_no_default_features_flag(self):
         text = fmc.probe_manifest(
-            "/abs/crates/shamir-engine", ["--no-default-features"]
+            "/abs/crates/engine/shamir-engine", ["--no-default-features"]
         )
         self.assertIn("default-features = false", text)
         self.assertNotIn("features = [", text)
 
     def test_manifest_features_list(self):
         text = fmc.probe_manifest(
-            "/abs/crates/shamir-engine",
+            "/abs/crates/engine/shamir-engine",
             ["--no-default-features", "--features", "fjall,test-util"],
         )
         self.assertIn("default-features = false", text)
@@ -195,7 +195,7 @@ class ProbeManifestTests(unittest.TestCase):
                 "--expected",
                 "fjall-test-util",
                 "--manifest-path",
-                os.path.join(os.path.abspath("crates"), "shamir-engine", "Cargo.toml"),
+                os.path.join(os.path.abspath("crates"), "engine", "shamir-engine", "Cargo.toml"),
                 "--flags=--no-default-features --features fjall,test-util",
             ],
             runner=runner_ok(["fjall", "test-util"], captured=captured),

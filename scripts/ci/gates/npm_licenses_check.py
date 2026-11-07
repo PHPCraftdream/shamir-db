@@ -3,7 +3,7 @@
 
 Why
     ``cargo deny check`` (deny.toml) gates the licenses of the Rust graph; the
-    npm dependencies of the TypeScript client (``crates/shamir-client-ts``)
+    npm dependencies of the TypeScript client (``crates/client/shamir-client-ts``)
     had no license gate at all.  This script reads the committed
     ``package-lock.json`` files only (lockfileVersion 2/3 ``packages`` map): no
     ``npm install``, no network, hermetic like ``cargo deny`` -- the lockfile
@@ -67,7 +67,7 @@ ALLOWED = (
 # entry needs a comment naming the package, the license and why it is fine.
 EXCEPTIONS: dict[str, tuple[str, ...]] = {
     # argparse 2.x (js-yaml dependency of the @napi-rs/cli build tooling in
-    # crates/shamir-client-node): `Python-2.0`, the permissive OSI-approved PSF
+    # crates/client/shamir-client-node): `Python-2.0`, the permissive OSI-approved PSF
     # license. Dev-only (never shipped in the published package); no runtime use.
     "argparse": ("Python-2.0",),
 }

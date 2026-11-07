@@ -39,20 +39,20 @@
 
 | # | Рукопожатие × транспорт | Rust `shamir-client` | napi `shamir-client-node` | TS в Node | TS в браузере |
 |---|---|---|---|---|---|
-| 1 | сессия × TCP+TLS | да | да | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет TCP |
-| 1b | сессия × TCP без TLS (loopback) | да (тест: crates/shamir-e2e/tests/matrix/session/plain_session.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-plain-ipc.test.ts) | невозможно |
-| 2 | сессия × WS native (`tls_exporter`) | да (тест: crates/shamir-e2e/tests/matrix/session/ws_session.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет exporter |
-| 3 | сессия × WS, браузерный профиль (`tls_no_export`) | да (тест: crates/shamir-e2e/tests/matrix/browser/ws_browser_session.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
+| 1 | сессия × TCP+TLS | да | да | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет TCP |
+| 1b | сессия × TCP без TLS (loopback) | да (тест: crates/devtools/shamir-e2e/tests/matrix/session/plain_session.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-plain-ipc.test.ts) | невозможно |
+| 2 | сессия × WS native (`tls_exporter`) | да (тест: crates/devtools/shamir-e2e/tests/matrix/session/ws_session.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно: нет exporter |
+| 3 | сессия × WS, браузерный профиль (`tls_no_export`) | да (тест: crates/devtools/shamir-e2e/tests/matrix/browser/ws_browser_session.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
 | 4 | сессия × IPC | да | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (смена пароля по IPC: исправление S4) | невозможно |
-| 6a | resume × TCP+TLS | да | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
-| 6b | resume × WS native | да (тест: crates/shamir-e2e/tests/matrix/session/ws_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
-| 6c | resume × WS, браузерный профиль | да (тест: crates/shamir-e2e/tests/matrix/browser/ws_browser_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (без resume_proof) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-browser-resume.test.ts) |
-| 6d | resume × TCP без TLS | да (тест: crates/shamir-e2e/tests/matrix/session/plain_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-plain-ipc.test.ts) | невозможно |
-| 6e | resume × IPC | да (тест: crates/shamir-e2e/tests/smoke_local.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/shamir-client-ts/src/__tests__/connection/session/e2e-plain-ipc.test.ts) | невозможно |
-| 7 | токен × REST | да (тест: crates/shamir-e2e/tests/matrix/token/http.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
-| 8 | токен × WS native (`/shamir/v1/ws`) | да (тест: crates/shamir-e2e/tests/matrix/token/ws.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | невозможно: у WebSocket нет заголовка |
+| 6a | resume × TCP+TLS | да | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
+| 6b | resume × WS native | да (тест: crates/devtools/shamir-e2e/tests/matrix/session/ws_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-native-transports.test.ts) | невозможно |
+| 6c | resume × WS, браузерный профиль | да (тест: crates/devtools/shamir-e2e/tests/matrix/browser/ws_browser_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (без resume_proof) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-browser-resume.test.ts) |
+| 6d | resume × TCP без TLS | да (тест: crates/devtools/shamir-e2e/tests/matrix/session/plain_resume.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-plain-ipc.test.ts) | невозможно |
+| 6e | resume × IPC | да (тест: crates/devtools/shamir-e2e/tests/smoke_local.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да (тест: crates/client/shamir-client-ts/src/__tests__/connection/session/e2e-plain-ipc.test.ts) | невозможно |
+| 7 | токен × REST | да (тест: crates/devtools/shamir-e2e/tests/matrix/token/http.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
+| 8 | токен × WS native (`/shamir/v1/ws`) | да (тест: crates/devtools/shamir-e2e/tests/matrix/token/ws.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | невозможно: у WebSocket нет заголовка |
 | 9 | токен × WS браузерный (`/shamir/v1/ws/browser`) | не требуется | не требуется | не требуется | да |
-| 10 | вход по паролю → токен | да (тест: crates/shamir-e2e/tests/matrix/token/login.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
+| 10 | вход по паролю → токен | да (тест: crates/devtools/shamir-e2e/tests/matrix/token/login.rs) | да (тест: tests/e2e/tests/21-connection-matrix.test.js) | да | да |
 
 Примечания:
 - Строка 9: нативному клиенту браузерный маршрут ничего не даёт, у него есть заголовок Authorization.

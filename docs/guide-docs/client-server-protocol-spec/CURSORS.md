@@ -64,7 +64,7 @@ client                                              server
 ```
 
 Idle-timeout eviction (implicit close with no client-initiated request) is enforced
-by a background reaper task (`crates/shamir-server/src/cursor_registry.rs`,
+by a background reaper task (`crates/server/shamir-server/src/cursor_registry.rs`,
 `spawn_reaper_task`): a cursor idle longer than `security.cursors.idle_timeout_secs`
 (default 60s) is evicted on the next sweep (default interval 5s), releasing its
 pinned MVCC snapshot. A `FetchNext` racing the reaper against a just-evicted cursor
@@ -135,7 +135,7 @@ checks (and does not check) before committing to keyset mode.
     "no seek_key" case: the cursor degrades to the row-count-offset bookmark
     for that call, the same documented, degraded-but-correct behavior CR-A4's
     safety net already provides. See
-    `crates/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
+    `crates/server/shamir-server/src/db_handler/cursor_handlers.rs`'s `safe_seek_key`.
 - **Mixed-`QueryValue`-type `ORDER BY` column (CLOSED for schema-typed scalar
   columns, F-1 #792; STILL OPEN for schemaless columns):** a column holding
   more than one `QueryValue` variant (e.g. some rows `Int`, some `Str`) makes
@@ -323,8 +323,8 @@ a placeholder:
 - **TS SDK ergonomic streaming** (an async iterator wrapper) —
   `ShamirClient.streamCursor` / `Db.cursor`, shipped.
 - **End-to-end tests** covering idle-timeout, cancel, and per-session cap behavior —
-  shipped; see `crates/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`
-  and `crates/shamir-server/src/tests/cursor_registry_tests.rs`.
+  shipped; see `crates/server/shamir-server/src/db_handler/tests/cursor_handler_tests.rs`
+  and `crates/server/shamir-server/src/tests/cursor_registry_tests.rs`.
 
 ---
 
@@ -332,33 +332,33 @@ a placeholder:
 
 Rust types (wire DTOs):
 
-- `crates/shamir-query-types/src/wire/db_message.rs` — `DbRequest::{CreateCursor,
+- `crates/query/shamir-query-types/src/wire/db_message.rs` — `DbRequest::{CreateCursor,
   FetchNext, CancelCursor}`, `DbResponse::{CursorPage, CursorClosed}`.
-- `crates/shamir-query-types/src/wire/cursor_id.rs` — `CursorId` (opaque `u64`
+- `crates/query/shamir-query-types/src/wire/cursor_id.rs` — `CursorId` (opaque `u64`
   newtype, `#[serde(transparent)]` — round-trips as a bare integer, not a wrapped
   object).
-- `crates/shamir-query-types/src/batch/batch_error.rs` — `BatchError::{CursorNotFound,
+- `crates/query/shamir-query-types/src/batch/batch_error.rs` — `BatchError::{CursorNotFound,
   CursorExpired, CursorLimitExceeded, CursorTemporalNotSupported, InvalidPageSize,
   CursorPageTooLarge}`.
-- `crates/shamir-query-types/src/read/query_result.rs` — `QueryResult` (reused
+- `crates/query/shamir-query-types/src/read/query_result.rs` — `QueryResult` (reused
   verbatim as `CursorPage.page`).
 
 Server implementation:
 
-- `crates/shamir-server/src/db_handler/cursor_handlers.rs` — `ShamirDbHandler::{
+- `crates/server/shamir-server/src/db_handler/cursor_handlers.rs` — `ShamirDbHandler::{
   create_cursor, fetch_next, cancel_cursor}`, the real dispatch for all three
   requests (ACL check, registry lookup/registration, pinned-snapshot `AsOf` read,
   byte-budget/size-cap enforcement).
-- `crates/shamir-server/src/cursor_registry.rs` — `CursorRegistry`/`Cursor`/
+- `crates/server/shamir-server/src/cursor_registry.rs` — `CursorRegistry`/`Cursor`/
   `CursorState`, the per-session cursor table, idle-timeout reaper, and
   `cursor_expired` tombstone mechanism.
 
 Reference client builders (produce the shapes above — see "Query construction —
 builder only" in `CLAUDE.md`):
 
-- Rust: `crates/shamir-query-builder/src/cursor.rs` — `create_cursor`, `fetch_next`,
+- Rust: `crates/query/shamir-query-builder/src/cursor.rs` — `create_cursor`, `fetch_next`,
   `cancel_cursor` free functions (cursor ops are top-level `DbRequest`s, the same
   tier as `TxBegin`/`TxCommit`, not `Batch` entries — see that module's doc comment).
-- TypeScript: `crates/shamir-client-ts/src/core/builders/cursor.ts` — `createCursor`,
+- TypeScript: `crates/client/shamir-client-ts/src/core/builders/cursor.ts` — `createCursor`,
   `fetchNext`, `cancelCursor`, also exposed as `Batch.createCursor` / `Batch.fetchNext`
   / `Batch.cancelCursor` static helpers.
