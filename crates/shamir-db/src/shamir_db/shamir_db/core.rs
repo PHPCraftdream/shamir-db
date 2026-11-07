@@ -28,6 +28,7 @@ use crate::shamir_db::system_store::table_config_from_catalogue_record;
 use super::super::ports::{PrincipalResolver, UserAdminPort};
 use super::super::repo_durability::durability_from_record;
 use super::super::system_store::{SystemStore, SystemStoreConfig};
+use super::db::FunctionState;
 
 /// Input source for [`ShamirDb::create_function_with_opts`].
 pub enum FunctionSource<'a> {
@@ -105,6 +106,10 @@ pub struct ShamirDb {
     /// Wrapped in `Arc` so all clones share one map — function metadata
     /// is process-global, exactly like `functions`/`globals`.
     pub(super) function_meta: Arc<DashMap<String, FunctionMeta, THasher>>,
+    /// Runtime availability per function (loaded, unloadable, corrupt).
+    /// Inserted at create/boot, moved on rename, removed on drop: same
+    /// lifecycle as `function_meta`.
+    pub(super) function_state: Arc<DashMap<String, FunctionState, THasher>>,
     /// Serialises group-id allocation so concurrent create_group calls
     /// can't read-modify-write the same `next_group_id`. Group creation is
     /// rare, so holding this across the (bounded) await sequence is fine.
@@ -291,6 +296,7 @@ impl ShamirDb {
                 Vec::new(),
             )),
             function_meta: Arc::new(DashMap::with_hasher(THasher::default())),
+            function_state: Arc::new(DashMap::with_hasher(THasher::default())),
             group_id_lock: Arc::new(Mutex::new(())),
             db_create_lock: Arc::new(Mutex::new(())),
             repo_create_locks: Arc::new(DashMap::with_hasher(THasher::default())),
@@ -417,80 +423,8 @@ impl ShamirDb {
                 )));
             }
         }
-        // Decode all metadata before registering recovered functions.
         let fn_records = shamir.system_store.load_functions().await?;
-        super::catalog::with_checked_function_metadata(&fn_records, |metadata| async {
-        for (rec, meta) in fn_records.iter().zip(metadata) {
-            let name = match rec["name"].as_str() {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            if shamir.functions.contains(&name) {
-                return Err(DbError::Function(format!(
-                    "catalogue function '{}' collides with a builtin or registered function",
-                    name
-                )));
-            }
-            // Dispatch on artifact kind: Native rows have no WASM bytes —
-            // skip materialisation. The embedder re-registers the native
-            // artifact at startup; until then the function is absent and any
-            // invocation fails closed ("function not found").
-            if super::ArtifactKind::from_record(rec) == super::ArtifactKind::Native {
-                log::info!(
-                    "shamir_db::init: skipping native function '{}' — re-register at startup",
-                    name
-                );
-                continue;
-            }
-            let wasm_b64 = match rec["wasm_b64"].as_str() {
-                Some(b) => b,
-                None => {
-                    log::warn!(
-                        "shamir_db::init: skipping function '{}' — no wasm_b64 field",
-                        name
-                    );
-                    continue;
-                }
-            };
-            let wasm_bytes = match base64::engine::general_purpose::STANDARD.decode(wasm_b64) {
-                Ok(b) => b,
-                Err(e) => {
-                    log::warn!(
-                        "shamir_db::init: skipping function '{}' — base64 decode error: {}",
-                        name,
-                        e
-                    );
-                    continue;
-                }
-            };
-            match WasmFunction::from_binary_blocking(
-                shamir.wasm_engine.clone(),
-                &wasm_bytes,
-                WasmLimits::default(),
-            )
-            .await
-            {
-                Ok(wf) => {
-                    if shamir.functions.register(&name, Arc::new(wf)).is_err() {
-                        return Err(DbError::Function(format!(
-                            "catalogue function '{}' collides with a builtin or registered function",
-                            name
-                        )));
-                    }
-                    // Publish metadata after registration succeeds.
-                    let _ = shamir.function_meta.insert(name.clone(), meta);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "shamir_db::init: failed to compile WASM for function '{}': {}",
-                        name,
-                        e
-                    );
-                }
-            }
-        }
-        Ok::<(), DbError>(())
-        }).await??;
+        shamir.load_functions_at_boot(&fn_records).await?;
 
         // Load persisted WASM validators from the validator catalogue and
         // register them (S1). Mirrors the function loading block above.

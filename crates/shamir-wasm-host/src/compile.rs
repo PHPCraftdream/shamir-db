@@ -52,7 +52,7 @@
 //! network access *inside the function body*, not just the compile-time
 //! macros above. Analysis (2026-07-14) found this is already structurally
 //! closed by two independent facts, confirmed by reading this module and
-//! [`super::wasm_sanitizer`]:
+//! [`super::wasm::verify_wasm_module`]:
 //!
 //! 1. **The guest crate cannot declare its own dependencies.** `Cargo.toml`
 //!    below (see `write_cargo_toml`-equivalent code further down) is
@@ -69,7 +69,7 @@
 //!    `wasm32-unknown-unknown` (bare, not WASI) — these modules exist in
 //!    libstd as stubs with no OS binding on this target; calling them
 //!    returns an `io::Error`/panics, generating no host import at all.
-//!    Even if one did, [`super::wasm_sanitizer`] structurally verifies the
+//!    Even if one did, [`super::wasm::verify_wasm_module`] structurally verifies the
 //!    compiled module's import section against
 //!    `SANCTIONED_HOST_IMPORTS` — "no WASI or any other import namespace
 //!    is ever registered" — before the module is ever instantiated.

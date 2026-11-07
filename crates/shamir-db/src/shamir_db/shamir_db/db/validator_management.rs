@@ -1,11 +1,11 @@
 use base64::Engine;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    compile_rust_source_blocking, FunctionError, WasmFunction, WasmLimits,
+    compile_rust_source_blocking, AdmissionPolicy, FunctionError, TierMode, WasmFunction,
+    WasmLimits,
 };
 use shamir_engine::validator::{
     NativeRecordValidator, RecordFields, RecordValidator, Validation, ValidatorBinding,
@@ -101,7 +101,7 @@ impl ShamirDb {
             "_id".to_string(),
             shamir_types::types::value::QueryValue::Str(id.to_string()),
         );
-        // Native rows have no wasm bytes; omit wasm_b64 / wasm_hash entirely.
+        // Native rows have no wasm bytes; omit wasm_b64 / module_hash entirely.
         m.insert(
             "lang".to_string(),
             shamir_types::types::value::QueryValue::Str("rust".to_string()),
@@ -218,6 +218,15 @@ impl ShamirDb {
                 self.authorize_access(&actor, &ResourcePath::WasmCompiler, Action::Execute)
                     .await
                     .map_err(|e| DbError::Validation(e.to_string()))?;
+                // Reject oversize source before spawning the compiler.
+                let limit = self.wasm_engine.admission_limits().max_source_bytes;
+                if src.len() > limit {
+                    return Err(DbError::Validation(format!(
+                        "source is {} bytes, limit is {}",
+                        src.len(),
+                        limit
+                    )));
+                }
                 let compiled = compile_rust_source_blocking(src)
                     .await
                     .map_err(|e| match e {
@@ -231,19 +240,17 @@ impl ShamirDb {
         };
 
         // Validate the wasm by compiling it (on the blocking thread pool).
-        let wf = WasmFunction::from_binary_blocking(
+        let (wf, report) = WasmFunction::from_binary_admitted_blocking(
             self.wasm_engine.clone(),
             &wasm,
             WasmLimits::default(),
+            TierMode::Auto,
+            AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
         )
         .await
         .map_err(|e| DbError::Validation(e.to_string()))?;
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
-        // FxHasher is a noncryptographic diagnostic fingerprint, not integrity protection.
-        let mut hasher = rustc_hash::FxHasher::default();
-        wasm.hash(&mut hasher);
-        let wasm_hash = format!("{:016x}", hasher.finish());
 
         if !replace && self.validators.id_for_name(name).is_some() {
             return Err(DbError::Validation(format!(
@@ -269,8 +276,8 @@ impl ShamirDb {
             shamir_types::types::value::QueryValue::Str(wasm_b64),
         );
         m.insert(
-            "wasm_hash".to_string(),
-            shamir_types::types::value::QueryValue::Str(wasm_hash),
+            "module_hash".to_string(),
+            shamir_types::types::value::QueryValue::Str(report.hash.to_hex()),
         );
         m.insert(
             "lang".to_string(),

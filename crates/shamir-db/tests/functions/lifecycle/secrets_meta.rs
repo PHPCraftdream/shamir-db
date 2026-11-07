@@ -107,6 +107,7 @@ async fn secret_grant_gates_env_read() {
         security: Security::Invoker,
         secret_grants: vec!["SHAMIR_S9_SECRET".to_string()],
         net_grants: Vec::new(),
+        ..CreateFunctionOptions::default()
     };
     db.create_function_with_opts("reader", FunctionSource::Source(ENV_READER_SRC), opts)
         .await
@@ -162,6 +163,7 @@ async fn global_set_cannot_overwrite_seeded_env_value() {
         security: Security::Invoker,
         secret_grants: vec!["SHAMIR_S9_WRITE_SECRET".to_string()],
         net_grants: Vec::new(),
+        ..CreateFunctionOptions::default()
     };
     match db
         .create_function_with_opts("writer", FunctionSource::Source(ENV_WRITER_SRC), opts)
@@ -220,6 +222,7 @@ async fn function_meta_roundtrip() {
             security: Security::Definer,
             secret_grants: vec!["FOO".to_string(), "BAR".to_string()],
             net_grants: Vec::new(),
+            ..CreateFunctionOptions::default()
         };
         db.create_function_with_opts("echo", FunctionSource::Wasm(&echo_wasm()), opts)
             .await

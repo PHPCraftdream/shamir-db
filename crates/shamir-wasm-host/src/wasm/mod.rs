@@ -2,27 +2,34 @@
 //!
 //! Re-exports the public surface:
 //! * [`WasmEngine`] / [`WasmLimits`] — the two-tier engine configuration (`engine`).
-//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] — two-tier switches (`engine`).
+//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] /
+//!   [`TierReport`] / [`UpgradeState`] — two-tier switches (`engine`).
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
-//! * [`verify_wasm_module`] / [`SANCTIONED_HOST_IMPORTS`] — module verification.
+//! * [`admit_module`] / [`check_module`] / [`AdmissionPolicy`] / [`AdmissionLimits`] / [`ModuleReport`] /
+//!   [`AdmissionError`] / [`ModuleHash`] — module admission (`admission`).
+//! * [`verify_wasm_module`] / [`SANCTIONED_HOST_IMPORTS`] — import allowlist verification.
 
+mod admission;
 pub(crate) mod bindings;
 pub(crate) mod compile_cache;
 mod engine;
 mod fuel;
 mod wasm_function;
-mod wasm_sanitizer;
 
+pub use admission::{
+    admit_module, check_module, verify_wasm_module, AdmissionError, AdmissionLimits,
+    AdmissionPolicy, ModuleHash, ModuleReport, SANCTIONED_HOST_IMPORTS,
+};
 pub use engine::{
-    Tier, TierMode, TierOptions, TierStats, WasmEngine, WasmEngineOptions, WasmLimits,
+    Tier, TierMode, TierOptions, TierReport, TierStats, UpgradeState, WasmEngine,
+    WasmEngineOptions, WasmLimits,
 };
 #[cfg(test)]
 pub(crate) use wasm_function::encode_params;
 pub use wasm_function::WasmFunction;
-pub use wasm_sanitizer::{verify_wasm_module, SANCTIONED_HOST_IMPORTS};
 
 /// Test-only re-export: lets
-/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// `tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`
 /// build the real registered [`wasmtime::Linker`] surface (see
 /// `wasm_function::test_linker_and_store` for why) and enumerate it via
 /// [`wasmtime::Linker::iter`].

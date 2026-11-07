@@ -89,7 +89,15 @@ async fn setup_shamir() -> ShamirDb {
 
 /// Register a native function with a catalogue entry.
 async fn register_native_fn(shamir: &ShamirDb, name: &str, f: Arc<dyn ShamirFunction>) {
-    let empty_wasm = wat::parse_str("(module)").unwrap();
+    let empty_wasm = wat::parse_str(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "shamir_alloc") (param i32) (result i32) i32.const 0)
+            (func (export "shamir_call") (param i32 i32) (result i64) i64.const 0))
+        "#,
+    )
+    .unwrap();
     shamir
         .create_function_from_wasm_as(name, &empty_wasm, false, Actor::System)
         .await

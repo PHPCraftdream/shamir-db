@@ -3,7 +3,8 @@
 //! Re-exports the module surface:
 //! * [`WasmEngine`] / [`WasmEngineOptions`] / [`WasmLimits`] — engine configuration
 //!   (`wasm_engine`).
-//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] — two-tier switches.
+//! * [`TierOptions`] / [`Tier`] / [`TierMode`] / [`TierStats`] / [`TierReport`] / [`UpgradeState`] —
+//!   two-tier switches and upgrade bookkeeping.
 
 pub(crate) mod tier;
 pub(crate) mod tier_mode;
@@ -15,7 +16,7 @@ mod wasm_engine;
 pub use tier::Tier;
 pub use tier_mode::TierMode;
 pub use tier_options::TierOptions;
-pub use tier_stats::TierStats;
+pub use tier_stats::{TierReport, TierStats, UpgradeState};
 pub use wasm_engine::{WasmEngine, WasmEngineOptions, WasmLimits};
 
 /// Test-only re-export: the two-tier fault-injection switches (see

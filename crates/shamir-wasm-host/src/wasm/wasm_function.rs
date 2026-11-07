@@ -71,6 +71,7 @@
 //! Creation compiles the fast tier (Winch); crossing `TierOptions::hot_calls`
 //! swaps in an optimized-tier (Cranelift) slot; in-flight calls keep theirs.
 
+use super::admission::{admit_module, run_gated_compile, AdmissionPolicy, ModuleReport};
 use super::bindings::batch::{host_batch_get, host_batch_put};
 use super::bindings::call::host_call;
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
@@ -78,11 +79,10 @@ use super::bindings::globals::{host_global_get, host_global_set};
 use super::bindings::http::host_http_fetch;
 use super::bindings::raise::host_raise_error;
 use super::engine::tier_upgrade::{maybe_schedule_upgrade, FunctionShared, FunctionSlot};
-use super::engine::{Tier, TierMode, WasmEngine, WasmLimits};
+use super::engine::{Tier, TierMode, TierReport, WasmEngine, WasmLimits};
 #[cfg(test)]
 use super::fuel::FuelObserver;
 use super::fuel::{pool_refund, FuelLease};
-use super::wasm_sanitizer::verify_wasm_module;
 use crate::gateway::db_gateway::DbGateway;
 use crate::gateway::net_gateway::NetGateway;
 use crate::runtime::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
@@ -148,10 +148,10 @@ pub(crate) struct HostState {
 
 /// Test-only: build a bare [`Store`] wrapping a minimal [`HostState`] plus
 /// the fully-registered [`Linker`], for
-/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// `tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`
 /// to enumerate the linker's real `(module, name)` surface via
 /// [`Linker::iter`] and cross-check it against
-/// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`]. Never compiled into
+/// [`super::admission::SANCTIONED_HOST_IMPORTS`]. Never compiled into
 /// non-test builds.
 #[cfg(test)]
 pub(crate) fn test_linker_and_store(
@@ -202,10 +202,10 @@ pub struct WasmFunction {
 /// yet against any particular module.
 ///
 /// `pub(crate)` (rather than private) so
-/// `tests::wasm_sanitizer_tests::sanctioned_list_matches_linker_registrations`
+/// `tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`
 /// can build the real registered [`Linker`] surface and cross-check its
 /// `(module, name)` pairs (via [`Linker::iter`]) against
-/// [`super::wasm_sanitizer::SANCTIONED_HOST_IMPORTS`] — this is the
+/// [`super::admission::SANCTIONED_HOST_IMPORTS`] — this is the
 /// mechanism keeping the sanitizer's allowlist and the linker's actual
 /// registrations from silently drifting apart.
 pub(crate) fn build_linker(engine: &Engine) -> FnResult<Linker<HostState>> {
@@ -265,10 +265,10 @@ fn build_instance_pre(engine: &Engine, module: &Module) -> FnResult<InstancePre<
 impl WasmFunction {
     /// Compile a WAT text module into a `WasmFunction`.
     ///
-    /// Runs the structural pre-instantiation sanitizer
-    /// ([`verify_wasm_module`]) on the WAT's binary encoding before
+    /// Runs the pre-instantiation admission gate
+    /// ([`admit_module`] with [`AdmissionPolicy::Load`]) on the WAT's binary encoding before
     /// `wasmtime::Module::new`/`instantiate_pre` ever see it — see
-    /// `wasm_sanitizer` module docs for why this is a real, if modest,
+    /// `admission::sanitizer` module docs for why this is a real, if modest,
     /// defense-in-depth control (fail-fast + an explicit auditable
     /// allowlist) rather than a redundant re-check of what the linker
     /// already rejects for free.
@@ -287,14 +287,14 @@ impl WasmFunction {
         engine.validate_limits(&limits)?;
         let wasm_bytes = wat::parse_str(wat)
             .map_err(|e| FunctionError::Compute(format!("WAT parse error: {e}")))?;
-        verify_wasm_module(&wasm_bytes)?;
+        admit_module(&wasm_bytes, &AdmissionPolicy::Load)?;
         Self::from_sanitized(engine, wasm_bytes.into(), limits, mode, "WAT compile error")
     }
 
     /// Compile a `.wasm` binary into a `WasmFunction`.
     ///
-    /// Runs the structural pre-instantiation sanitizer
-    /// ([`verify_wasm_module`]) on the raw bytes before
+    /// Runs the pre-instantiation admission gate
+    /// ([`admit_module`] with [`AdmissionPolicy::Load`]) on the raw bytes before
     /// `wasmtime::Module::from_binary`/`instantiate_pre` ever see them —
     /// this is the path both the compile-on-DDL pipeline
     /// (`compile_rust_source`'s output) and durable-catalogue recovery
@@ -330,7 +330,7 @@ impl WasmFunction {
         mode: TierMode,
     ) -> FnResult<Self> {
         engine.validate_limits(&limits)?;
-        verify_wasm_module(wasm_or_cwasm_bytes)?;
+        admit_module(wasm_or_cwasm_bytes, &AdmissionPolicy::Load)?;
         Self::from_sanitized(
             engine,
             wasm_or_cwasm_bytes.into(),
@@ -367,9 +367,43 @@ impl WasmFunction {
         run_compile_blocking(move || Self::from_binary_with_mode(engine, &wasm, limits, mode)).await
     }
 
+    /// Admits the bytes under `policy` (returning the [`ModuleReport`]) and
+    /// compiles on the blocking pool under the engine's compile gate
+    /// (concurrency bound, plus the compile time cap under
+    /// [`AdmissionPolicy::Admission`]), so neither the scan nor the compile
+    /// runs on an async worker thread.
+    pub async fn from_binary_admitted_blocking(
+        engine: Arc<WasmEngine>,
+        wasm_or_cwasm_bytes: &[u8],
+        limits: WasmLimits,
+        mode: TierMode,
+        policy: AdmissionPolicy,
+    ) -> FnResult<(Self, ModuleReport)> {
+        engine.validate_limits(&limits)?;
+        let wasm = wasm_or_cwasm_bytes.to_vec();
+        let gate = Arc::clone(&engine);
+        run_gated_compile(&gate, &policy, move || {
+            let report = admit_module(&wasm, &policy)?;
+            let function =
+                Self::from_sanitized(engine, wasm.into(), limits, mode, "WASM compile error")?;
+            Ok((function, report))
+        })
+        .await
+    }
+
     /// The compilation tier the function's live slot is resident on.
     pub fn tier(&self) -> Tier {
         self.shared.tier()
+    }
+
+    /// The tier mode fixed at construction.
+    pub fn mode(&self) -> TierMode {
+        self.shared.mode()
+    }
+
+    /// Snapshot of the live tier, the mode, the upgrade call counter and the upgrade state.
+    pub fn tier_report(&self) -> TierReport {
+        self.shared.report()
     }
 
     /// Assemble the function from already-validated bytes (sanitizer and
@@ -625,6 +659,10 @@ pub(crate) fn encode_params(params: &Params) -> FnResult<Vec<u8>> {
 
 #[async_trait]
 impl ShamirFunction for WasmFunction {
+    fn tier_report(&self) -> Option<TierReport> {
+        Some(WasmFunction::tier_report(self))
+    }
+
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
         maybe_schedule_upgrade(&self.shared);
         let input = encode_params(params)?;
