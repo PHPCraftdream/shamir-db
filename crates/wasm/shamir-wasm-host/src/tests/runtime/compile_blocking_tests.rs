@@ -13,20 +13,21 @@ use std::time::Duration;
 #[test]
 fn sdk_resolution_precedence_and_invalid_explicit() {
     let root = tempfile::tempdir().unwrap();
-    let sdk = root.path().join("shamir-sdk");
+    let sdk = root.path().join("wasm").join("shamir-sdk");
     std::fs::create_dir_all(sdk.join("src")).unwrap();
     std::fs::write(sdk.join("Cargo.toml"), "").unwrap();
     std::fs::write(sdk.join("src/lib.rs"), "").unwrap();
-    for sibling in [
-        "shamir-sdk-macros",
-        "shamir-query-builder",
-        "shamir-query-builder-macros",
-        "shamir-query-types",
-        "shamir-collections",
-        "shamir-types",
+    for (group, sibling) in [
+        ("wasm", "shamir-sdk-macros"),
+        ("query", "shamir-query-builder"),
+        ("query", "shamir-query-builder-macros"),
+        ("query", "shamir-query-types"),
+        ("foundation", "shamir-collections"),
+        ("foundation", "shamir-types"),
     ] {
-        std::fs::create_dir_all(root.path().join(sibling)).unwrap();
-        std::fs::write(root.path().join(sibling).join("Cargo.toml"), "").unwrap();
+        let dir = root.path().join(group).join(sibling);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "").unwrap();
     }
     let defaults = RustCompileOptions::default();
     assert_eq!(
@@ -49,7 +50,7 @@ fn sdk_resolution_precedence_and_invalid_explicit() {
         sdk_dir: Some(root.path().join("invalid")),
     };
     assert!(resolve_sdk_dir(&invalid, Some(sdk.clone().into_os_string())).is_err());
-    std::fs::remove_file(root.path().join("shamir-types/Cargo.toml")).unwrap();
+    std::fs::remove_file(root.path().join("foundation/shamir-types/Cargo.toml")).unwrap();
     let error = resolve_sdk_dir(&options, None).unwrap_err().to_string();
     assert!(error.contains("shamir-types"), "{error}");
 }
