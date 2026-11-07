@@ -42,6 +42,7 @@ def NEEDS(**results):
 
 FULL_OK = NEEDS(
     plan="success",
+    affected="success",
     fast="skipped",
     fmt="success",
     clippy="success",
@@ -62,6 +63,7 @@ FULL_OK = NEEDS(
 
 DRAFT_OK = NEEDS(
     plan="success",
+    affected="skipped",
     fast="success",
     fmt="skipped",
     clippy="skipped",
@@ -215,9 +217,29 @@ class EvaluateTests(unittest.TestCase):
 
     def test_required_jobs_list_excludes_fast_tier_only_job(self):
         self.assertNotIn("engine-features-fast", mgc.REQUIRED_JOBS)
-        self.assertEqual(len(mgc.REQUIRED_JOBS), 17)
+        self.assertEqual(len(mgc.REQUIRED_JOBS), 18)
         self.assertIn("plan", mgc.REQUIRED_JOBS)
         self.assertIn("deny", mgc.REQUIRED_JOBS)
+        self.assertIn("affected", mgc.REQUIRED_JOBS)
+        self.assertLess(
+            mgc.REQUIRED_JOBS.index("plan"), mgc.REQUIRED_JOBS.index("affected")
+        )
+
+    def test_affected_missing_required_job_fails(self):
+        data = {k: v for k, v in FULL_OK.items() if k != "affected"}
+        self.assertEqual(
+            mgc.evaluate(data, **READY), ["missing required job: affected"]
+        )
+
+    def test_affected_unexpectedly_skipped_in_full_tier_fails(self):
+        data = dict(FULL_OK)
+        data["affected"] = {"result": "skipped", "outcome": "skipped"}
+        reasons = mgc.evaluate(data, **READY)
+        self.assertIn("job affected unexpectedly skipped", reasons)
+
+    def test_affected_skipped_in_fast_tier_is_by_design(self):
+        reasons = mgc.evaluate(DRAFT_OK, **DRAFT)
+        self.assertNotIn("job affected unexpectedly skipped", reasons)
 
 
 class MainTests(unittest.TestCase):
