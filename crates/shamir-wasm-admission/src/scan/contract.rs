@@ -1,4 +1,5 @@
-use crate::wasm::admission::types::AdmissionError;
+use crate::abi::{EXPORT_ALLOC, EXPORT_CALL, EXPORT_MEMORY};
+use crate::types::AdmissionError;
 use wasmparser::{ExternalKind, FuncType, ValType};
 
 /// One export as `(name, kind, index)`.
@@ -76,11 +77,12 @@ pub(super) fn check_contract(
     func_type_indices: &[u32],
     types: &[FuncType],
 ) -> Result<(), AdmissionError> {
-    let &(_, kind, _) =
-        find(exports, "memory").ok_or(AdmissionError::MissingExport { name: "memory" })?;
+    let &(_, kind, _) = find(exports, EXPORT_MEMORY).ok_or(AdmissionError::MissingExport {
+        name: EXPORT_MEMORY,
+    })?;
     if kind != ExternalKind::Memory {
         return Err(AdmissionError::WrongExportKind {
-            name: "memory",
+            name: EXPORT_MEMORY,
             expected: "memory",
             found: kind_name(kind).to_string(),
         });
@@ -89,7 +91,7 @@ pub(super) fn check_contract(
         exports,
         func_type_indices,
         types,
-        "shamir_alloc",
+        EXPORT_ALLOC,
         (&[ValType::I32], &[ValType::I32]),
         "(i32) -> i32",
     )?;
@@ -97,7 +99,7 @@ pub(super) fn check_contract(
         exports,
         func_type_indices,
         types,
-        "shamir_call",
+        EXPORT_CALL,
         (&[ValType::I32, ValType::I32], &[ValType::I64]),
         "(i32, i32) -> i64",
     )

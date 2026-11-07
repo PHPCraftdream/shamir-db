@@ -1,4 +1,4 @@
-use crate::tests::wasm::admission::support::{admit, assemble, limits_with};
+use crate::tests::support::{admit, assemble, limits_with};
 use crate::AdmissionError;
 
 const MEMORY: &str = r#"(memory (export "memory") 1)"#;

@@ -1,5 +1,5 @@
-use crate::tests::wasm::admission::support::{admit, assemble, limits_with, load, module};
-use crate::{verify_wasm_module, AdmissionError, FunctionError};
+use crate::tests::support::{admit, assemble, limits_with, load, module};
+use crate::{verify_wasm_module, AdmissionError};
 
 #[test]
 fn operator_cap_applies_to_admission_but_not_load() {
@@ -80,17 +80,6 @@ fn empty_input_rejected_under_both_policies() {
             "{err}"
         );
     }
-}
-
-#[test]
-fn admission_error_maps_to_compute_error_with_same_message() {
-    let err = AdmissionError::MissingExport { name: "memory" };
-    let message = err.to_string();
-    let mapped = FunctionError::from(err);
-    assert!(
-        matches!(&mapped, FunctionError::Compute(m) if *m == message),
-        "{mapped:?}"
-    );
 }
 
 #[test]

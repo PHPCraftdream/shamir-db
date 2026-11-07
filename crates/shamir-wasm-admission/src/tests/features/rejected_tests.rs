@@ -1,6 +1,4 @@
-use crate::tests::wasm::admission::support::{
-    admit, assemble, limits_with, load, module, module_with_call_body,
-};
+use crate::tests::support::{admit, assemble, limits_with, load, module, module_with_call_body};
 use crate::AdmissionError;
 
 const TABLE: &str = "(table 2 funcref)";

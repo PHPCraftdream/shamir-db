@@ -10,6 +10,7 @@ shamir-types = { path = "../shamir-types" }
 shamir-collections = { path = "../shamir-collections" }
 shamir-funclib = { path = "../shamir-funclib" }
 shamir-proc-tree = { path = "../shamir-proc-tree" }
+shamir-wasm-admission = { path = "../shamir-wasm-admission" }
 # Lock-free RCU slot holding a function's live compiled form (two-tier swap).
 arc-swap = "1.7"
 tokio = { version = "1.49.0", features = ["full"] }
@@ -33,12 +34,6 @@ scc = "3.8"
 # guest `cargo build` (CRIT-6 / audit #440 part A). Already a transitive dep
 # in the workspace `Cargo.lock`; pinned here as a direct dependency.
 wait-timeout = "0.2.1"
-# Structural pre-instantiation sanitizer (task #545). Pinned to the exact
-# version wasmtime 48 pulls transitively (see `Cargo.lock`) so no second
-# copy enters the dependency graph.
-wasmparser = "=0.254.2"
-# XXH3-128 module identity/corruption hash (`ModuleHash`); not for security decisions.
-xxhash-rust = { version = "0.8.15", default-features = false, features = ["xxh3"] }
 # WAT-text -> binary conversion for `WasmFunction::from_wat`.
 wat = "=1.254.2"
 

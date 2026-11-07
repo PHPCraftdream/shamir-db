@@ -5,7 +5,7 @@
 //! full write-up)
 //!
 //! `wasmtime::Linker::instantiate_pre` (used by
-//! [`build_instance_pre`](super::wasm_function)) ALREADY rejects a module
+//! (build_instance_pre in shamir-wasm-host's `wasm_function.rs`)) ALREADY rejects a module
 //! that imports anything outside the linker's registered
 //! `("shamir_host", <name>)` surface — confirmed empirically: a WAT module
 //! importing `("evil", "syscall")` fails at `instantiate_pre` with
@@ -21,7 +21,7 @@
 //! 2. **An explicit, auditable ABI allowlist independent of linker
 //!    wiring.** [`SANCTIONED_HOST_IMPORTS`] is the single source of truth
 //!    both this sanitizer AND `build_instance_pre`'s registrations are
-//!    tested against (see `tests/wasm/admission/sanitizer_tests.rs`), so the two
+//!    tested against (see the host crate's `src/tests/wasm/admission/sanitizer_tests.rs`), so the two
 //!    surfaces cannot silently drift apart — a future change that
 //!    broadens the linker's registered surface without a matching,
 //!    deliberate update to this allowlist fails a dedicated sync test.
@@ -69,15 +69,15 @@
 //! itself, so the sanitizer's own `Ok(())` never silently no-ops on an
 //! encoding it wasn't designed to scan.
 
-use crate::runtime::error::{FnResult, FunctionError};
+use crate::types::AdmissionError;
 use wasmparser::{Encoding, Parser, Payload, TypeRef};
 
 /// The host-import ABI a compiled guest module is permitted to use.
 ///
-/// This is the SAME set `build_instance_pre` (in
-/// [`wasm_function`](super::wasm_function)) registers on the
+/// This is the SAME set `build_instance_pre` (in shamir-wasm-host's
+/// `wasm_function.rs`) registers on the
 /// [`wasmtime::Linker`] — kept in sync by a dedicated cross-check test
-/// (`tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`)
+/// (in the host crate: `tests::wasm::admission::sanitizer_tests::sanctioned_list_matches_linker_registrations`)
 /// rather than by having one generate the other, since `func_wrap`/
 /// `func_wrap_async` need distinctly-typed Rust closures per import and
 /// cannot be driven from a single generic loop over this array.
@@ -115,10 +115,9 @@ pub const SANCTIONED_HOST_IMPORTS: &[(&str, &str)] = &[
 /// or on a `.wasm` byte stream that fails to parse structurally (the
 /// caller's subsequent `wasmtime::Module::new`/`from_binary` call would
 /// reject the same bytes anyway, just after paying for full validation).
-pub fn verify_wasm_module(bytes: &[u8]) -> FnResult<()> {
+pub fn verify_wasm_module(bytes: &[u8]) -> Result<(), AdmissionError> {
     for payload in Parser::new(0).parse_all(bytes) {
-        let payload = payload
-            .map_err(|e| FunctionError::Compute(format!("wasm sanitizer: parse error: {e}")))?;
+        let payload = payload.map_err(|e| AdmissionError::Parse(e.to_string()))?;
         // Explicitly reject the WASM *component* encoding rather than
         // silently falling through the `ImportSection` match below.
         // `wasmparser`'s `component-model` feature (on by default, and
@@ -138,19 +137,14 @@ pub fn verify_wasm_module(bytes: &[u8]) -> FnResult<()> {
             ..
         } = payload
         {
-            return Err(FunctionError::Compute(
-                "wasm sanitizer: component-encoded artifact rejected — only core WebAssembly \
-                 modules are permitted"
-                    .to_string(),
-            ));
+            return Err(AdmissionError::ComponentEncoding);
         }
         let Payload::ImportSection(reader) = payload else {
             continue;
         };
         for import in reader.into_imports() {
-            let import = import.map_err(|e| {
-                FunctionError::Compute(format!("wasm sanitizer: malformed import: {e}"))
-            })?;
+            let import =
+                import.map_err(|e| AdmissionError::Parse(format!("malformed import: {e}")))?;
             // Only function imports carry the `shamir_host` ABI; a
             // memory/global/table/tag import under any name is not part
             // of the sanctioned surface either, so it is rejected the
@@ -169,11 +163,11 @@ pub fn verify_wasm_module(bytes: &[u8]) -> FnResult<()> {
                     TypeRef::Global(_) => "global",
                     TypeRef::Tag(_) => "tag",
                 };
-                return Err(FunctionError::Compute(format!(
-                    "wasm sanitizer: unsanctioned import `{}::{}` ({kind}) — only the \
-                     shamir_host host ABI is permitted",
-                    import.module, import.name
-                )));
+                return Err(AdmissionError::UnsanctionedImport {
+                    module: import.module.to_string(),
+                    name: import.name.to_string(),
+                    kind,
+                });
             }
         }
     }

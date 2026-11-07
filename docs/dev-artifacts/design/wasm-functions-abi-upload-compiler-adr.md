@@ -264,3 +264,5 @@ Deviations of this PROC-1 from the text above:
   closed, so `replace: true` repairs it and drop removes it.
 * (g) "Composite hash written on the next write" is satisfied by create/replace; alter changes
   only `optimize`.
+* (h) Admission now lives in its own runtime-free crate (`shamir-wasm-admission`, no
+  wasmtime/tokio); the host re-exports the same public surface.

@@ -1,5 +1,5 @@
-use crate::wasm::admission::sanitizer::SANCTIONED_HOST_IMPORTS;
-use crate::wasm::admission::types::AdmissionError;
+use crate::sanitizer::SANCTIONED_HOST_IMPORTS;
+use crate::types::AdmissionError;
 use wasmparser::{ImportSectionReader, TypeRef};
 
 /// Rejects any import outside [`SANCTIONED_HOST_IMPORTS`] or not a function.
