@@ -287,6 +287,8 @@ async fn create_function_with_empty_net_grants_via_wire_gets_no_egress() {
             security: None,
             secret_grants: Vec::new(),
             net_grants: Vec::new(), // default — must deny all egress (task #609)
+            lang: None,
+            optimize: None,
             hmac: None,
         }),
     );

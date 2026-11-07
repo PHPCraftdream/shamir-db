@@ -1,6 +1,6 @@
 use shamir_query_types::admin::{
-    CreateFunctionFolderOp, CreateFunctionOp, DropFunctionOp, RenameFunctionFolderOp,
-    RenameFunctionOp,
+    AlterFunctionOp, CheckFunctionOp, CheckFunctionSpec, CreateFunctionFolderOp, CreateFunctionOp,
+    DescribeFunctionOp, DropFunctionOp, ExportFunctionOp, RenameFunctionFolderOp, RenameFunctionOp,
 };
 use shamir_query_types::batch::BatchOp;
 
@@ -18,6 +18,8 @@ pub fn create_function(name: impl Into<String>) -> CreateFunction {
         security: None,
         secret_grants: Vec::new(),
         net_grants: Vec::new(),
+        lang: None,
+        optimize: None,
         hmac: None,
     }
 }
@@ -32,6 +34,8 @@ pub struct CreateFunction {
     security: Option<String>,
     secret_grants: Vec<String>,
     net_grants: Vec<String>,
+    lang: Option<String>,
+    optimize: Option<String>,
     hmac: Option<String>,
 }
 
@@ -84,6 +88,29 @@ impl CreateFunction {
         self
     }
 
+    /// Override the language (`"wasm" | "rust"`). Absent: inferred from
+    /// which of `wasm`/`source` is supplied. `"shamir"` is reserved and
+    /// rejected server-side.
+    ///
+    /// ```text
+    /// create_function("f").wasm("AQ==").lang("wasm")
+    /// ```
+    pub fn lang(mut self, lang: impl Into<String>) -> Self {
+        self.lang = Some(lang.into());
+        self
+    }
+
+    /// Set the optimization mode (`"auto" | "now" | "never"`). Absent
+    /// means `"auto"`.
+    ///
+    /// ```text
+    /// create_function("f").source("pub fn main() {}").optimize("never")
+    /// ```
+    pub fn optimize(mut self, optimize: impl Into<String>) -> Self {
+        self.optimize = Some(optimize.into());
+        self
+    }
+
     /// Attach the hex-encoded HMAC tag.
     /// canonical = the complete CreateFunctionOp v2 DTO except `hmac`.
     /// Required iff `security == "definer"`, `replace` is true, or `secret_grants` is non-empty.
@@ -113,6 +140,8 @@ impl CreateFunction {
             security: self.security,
             secret_grants: self.secret_grants,
             net_grants: self.net_grants,
+            lang: self.lang,
+            optimize: self.optimize,
             hmac: self.hmac,
         }))
     }
@@ -180,6 +209,109 @@ pub fn rename_function(from: impl Into<String>, to: impl Into<String>) -> BatchO
         rename_function: from.into(),
         to: to.into(),
     })
+}
+
+/// Describe a stored function.
+///
+/// ```text
+/// describe_function("my_fn") → { "describe_function": "my_fn" }
+/// ```
+pub fn describe_function(name: impl Into<String>) -> BatchOp {
+    BatchOp::DescribeFunction(DescribeFunctionOp {
+        describe_function: name.into(),
+    })
+}
+
+/// Export a stored function's module bytes, source and hash.
+///
+/// ```text
+/// export_function("my_fn") → { "export_function": "my_fn" }
+/// ```
+pub fn export_function(name: impl Into<String>) -> BatchOp {
+    BatchOp::ExportFunction(ExportFunctionOp {
+        export_function: name.into(),
+    })
+}
+
+/// Change a stored function's optimization mode.
+///
+/// ```text
+/// alter_function("my_fn", "never") → { "alter_function": "my_fn", "optimize": "never" }
+/// ```
+pub fn alter_function(name: impl Into<String>, optimize: impl Into<String>) -> BatchOp {
+    BatchOp::AlterFunction(AlterFunctionOp {
+        alter_function: name.into(),
+        optimize: optimize.into(),
+    })
+}
+
+/// Start an admission check of a module without storing it. Returns a
+/// builder — exactly one of `.wasm()` / `.source()` is required.
+pub fn check_function() -> CheckFunction {
+    CheckFunction {
+        lang: None,
+        wasm: None,
+        source: None,
+        optimize: None,
+    }
+}
+
+/// Builder for [`CheckFunctionOp`].
+pub struct CheckFunction {
+    lang: Option<String>,
+    wasm: Option<String>,
+    source: Option<String>,
+    optimize: Option<String>,
+}
+
+impl CheckFunction {
+    /// Set the language (`"wasm" | "rust"`). Absent: inferred from which
+    /// of `wasm`/`source` is supplied.
+    pub fn lang(mut self, lang: impl Into<String>) -> Self {
+        self.lang = Some(lang.into());
+        self
+    }
+
+    /// Set the pre-compiled WASM bytes (base64-encoded).
+    pub fn wasm(mut self, wasm: impl Into<String>) -> Self {
+        self.wasm = Some(wasm.into());
+        self
+    }
+
+    /// Set the Rust source code to compile.
+    pub fn source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    /// Set the optimization mode (`"auto" | "now" | "never"`).
+    pub fn optimize(mut self, optimize: impl Into<String>) -> Self {
+        self.optimize = Some(optimize.into());
+        self
+    }
+
+    /// Finalize into a [`BatchOp`]. Fails with
+    /// [`BuilderError::ConflictingFunctionPayload`] unless exactly one of
+    /// `wasm`/`source` was set.
+    pub fn build(self) -> Result<BatchOp, BuilderError> {
+        if self.wasm.is_some() == self.source.is_some() {
+            return Err(BuilderError::ConflictingFunctionPayload);
+        }
+        Ok(BatchOp::CheckFunction(CheckFunctionOp {
+            check_function: CheckFunctionSpec {
+                lang: self.lang,
+                wasm: self.wasm,
+                source: self.source,
+                optimize: self.optimize,
+            },
+        }))
+    }
+}
+
+impl TryIntoBatchOp for CheckFunction {
+    fn try_into_batch_op(self) -> Result<BatchOp, BuilderError> {
+        self.build()
+    }
 }
 
 /// Create a function folder by path segments.

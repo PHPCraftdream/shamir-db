@@ -256,6 +256,8 @@ fn batch_op(v: &Vector) -> BatchOp {
             security: opt_string(f, "security"),
             secret_grants: strings(f, "secret_grants"),
             net_grants: strings(f, "net_grants"),
+            lang: opt_string(f, "lang"),
+            optimize: opt_string(f, "optimize"),
             hmac: None,
         }),
         "create_validator" => BatchOp::CreateValidator(CreateValidatorOp {

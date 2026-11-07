@@ -53,6 +53,8 @@ async fn create_function_replace_with_valid_hmac_executes_a3d93402() {
             security: None,
             secret_grants: vec![],
             net_grants: vec![],
+            lang: None,
+            optimize: None,
             hmac: None,
         },
     );
@@ -89,6 +91,8 @@ async fn create_function_replace_with_valid_hmac_executes_a3d93402() {
                 security: None,
                 secret_grants: vec![],
                 net_grants: vec![],
+                lang: None,
+                optimize: None,
                 hmac: None,
             },
         ),
@@ -116,6 +120,8 @@ async fn create_function_replace_with_valid_hmac_executes_a3d93402() {
             security: None,
             secret_grants: vec![],
             net_grants: vec![],
+            lang: None,
+            optimize: None,
             hmac: None,
         },
     );

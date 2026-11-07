@@ -59,4 +59,11 @@ pub enum BuilderError {
     /// the builder now fails closed client-side (RV-QUERY-BUILDER-E6F53E38).
     #[error("this op is HMAC-gated — call .hmac(tag) before .build()")]
     MissingHmac,
+    /// [`crate::ddl::check_function().build()`] was called with both (or
+    /// neither) of `wasm`/`source` set. The wire contract requires exactly
+    /// one module payload (`CheckFunctionSpec`).
+    #[error(
+        "check_function requires exactly one of .wasm(..) / .source(..) — got both or neither"
+    )]
+    ConflictingFunctionPayload,
 }

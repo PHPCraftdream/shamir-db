@@ -8,14 +8,14 @@ use shamir_types::types::common::TMap;
 use shamir_types::types::value::{QueryValue, Value};
 
 use crate::admin::{
-    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterRepoOp,
-    AlterSubscriptionOp, BindValidatorOp, ChangesSinceOp, ChgrpOp, ChmodOp, ChownOp,
-    CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp, CreateGroupOp,
-    CreateIndexOp, CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp,
-    CreateSubscriptionOp, CreateTableOp, CreateValidatorOp, DescribeRepoOp, DescribeTableOp,
-    DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
+    AccessTreeOp, AddGroupMemberOp, AddSchemaRuleOp, AlterBufferConfigOp, AlterFunctionOp,
+    AlterRepoOp, AlterSubscriptionOp, BindValidatorOp, ChangesSinceOp, CheckFunctionOp, ChgrpOp,
+    ChmodOp, ChownOp, CommitMigrationOp, CreateDbOp, CreateFunctionFolderOp, CreateFunctionOp,
+    CreateGroupOp, CreateIndexOp, CreatePublicationOp, CreateReplicationProfileOp, CreateRepoOp,
+    CreateSubscriptionOp, CreateTableOp, CreateValidatorOp, DescribeFunctionOp, DescribeRepoOp,
+    DescribeTableOp, DropDbOp, DropFunctionOp, DropGroupOp, DropIndexOp, DropPublicationOp,
     DropReplicationProfileOp, DropRepoOp, DropSubscriptionOp, DropTableOp, DropValidatorOp,
-    GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
+    ExportFunctionOp, GetBufferConfigOp, GetTableSchemaOp, InternerDumpOp, InternerTouchOp, ListOp,
     ListPublicationsOp, ListSubscriptionsOp, ListValidatorsOp, MigrationStatusOp, PurgeHistoryOp,
     RemoveGroupMemberOp, RemoveSchemaRuleOp, RenameDbOp, RenameFunctionFolderOp, RenameFunctionOp,
     RenameGroupOp, RenameIndexOp, RenameRepoOp, RenameTableOp, RenameValidatorOp,
@@ -114,6 +114,10 @@ pub enum BatchOp {
     CreateFunction(CreateFunctionOp),
     DropFunction(DropFunctionOp),
     RenameFunction(RenameFunctionOp),
+    DescribeFunction(DescribeFunctionOp),
+    ExportFunction(ExportFunctionOp),
+    CheckFunction(CheckFunctionOp),
+    AlterFunction(AlterFunctionOp),
 
     // Validator DDL (DDL-A)
     CreateValidator(CreateValidatorOp),
@@ -233,6 +237,10 @@ impl Serialize for BatchOp {
             BatchOp::CreateFunction(op) => op.serialize(serializer),
             BatchOp::DropFunction(op) => op.serialize(serializer),
             BatchOp::RenameFunction(op) => op.serialize(serializer),
+            BatchOp::DescribeFunction(op) => op.serialize(serializer),
+            BatchOp::ExportFunction(op) => op.serialize(serializer),
+            BatchOp::CheckFunction(op) => op.serialize(serializer),
+            BatchOp::AlterFunction(op) => op.serialize(serializer),
             BatchOp::CreateValidator(op) => op.serialize(serializer),
             BatchOp::DropValidator(op) => op.serialize(serializer),
             BatchOp::RenameValidator(op) => op.serialize(serializer),
@@ -378,6 +386,18 @@ impl<'de> Deserialize<'de> for BatchOp {
                     }
                     OpKind::RenameFunction => {
                         RenameFunctionOp::deserialize(value).map(BatchOp::RenameFunction)
+                    }
+                    OpKind::DescribeFunction => {
+                        DescribeFunctionOp::deserialize(value).map(BatchOp::DescribeFunction)
+                    }
+                    OpKind::ExportFunction => {
+                        ExportFunctionOp::deserialize(value).map(BatchOp::ExportFunction)
+                    }
+                    OpKind::CheckFunction => {
+                        CheckFunctionOp::deserialize(value).map(BatchOp::CheckFunction)
+                    }
+                    OpKind::AlterFunction => {
+                        AlterFunctionOp::deserialize(value).map(BatchOp::AlterFunction)
                     }
                     OpKind::CreateValidator => {
                         CreateValidatorOp::deserialize(value).map(BatchOp::CreateValidator)
@@ -555,6 +575,10 @@ impl BatchOp {
             | BatchOp::CreateFunction(_)
             | BatchOp::DropFunction(_)
             | BatchOp::RenameFunction(_)
+            | BatchOp::DescribeFunction(_)
+            | BatchOp::ExportFunction(_)
+            | BatchOp::CheckFunction(_)
+            | BatchOp::AlterFunction(_)
             | BatchOp::CreateValidator(_)
             | BatchOp::DropValidator(_)
             | BatchOp::RenameValidator(_)
@@ -665,6 +689,10 @@ impl BatchOp {
                 | BatchOp::CreateFunction(_)
                 | BatchOp::DropFunction(_)
                 | BatchOp::RenameFunction(_)
+                | BatchOp::DescribeFunction(_)
+                | BatchOp::ExportFunction(_)
+                | BatchOp::CheckFunction(_)
+                | BatchOp::AlterFunction(_)
                 | BatchOp::CreateValidator(_)
                 | BatchOp::DropValidator(_)
                 | BatchOp::RenameValidator(_)
@@ -728,6 +756,9 @@ impl BatchOp {
             BatchOp::GetTableSchema(_) => false,
             BatchOp::DescribeTable(_) => false,
             BatchOp::DescribeRepo(_) => false,
+            BatchOp::DescribeFunction(_) => false,
+            BatchOp::ExportFunction(_) => false,
+            BatchOp::CheckFunction(_) => false,
             BatchOp::InternerDump(_) => false,
             BatchOp::ChangesSince(_) => false,
             BatchOp::Subscribe(_) => false,
@@ -784,6 +815,7 @@ impl BatchOp {
             BatchOp::CreateFunction(_) => true,
             BatchOp::DropFunction(_) => true,
             BatchOp::RenameFunction(_) => true,
+            BatchOp::AlterFunction(_) => true,
             BatchOp::CreateValidator(_) => true,
             BatchOp::DropValidator(_) => true,
             BatchOp::RenameValidator(_) => true,

@@ -9,6 +9,12 @@ import type {
   CreateFunctionOp,
   DropFunctionOp,
   RenameFunctionOp,
+  DescribeFunctionOp,
+  ExportFunctionOp,
+  CheckFunctionOp,
+  AlterFunctionOp,
+  FunctionLang,
+  FunctionOptimize,
   CreateValidatorOp,
   DropValidatorOp,
   RenameValidatorOp,
@@ -28,6 +34,10 @@ export function createFunction(
   opts?: {
     source?: string;
     wasm?: string;
+    /** Source language; set on the op only when defined. */
+    lang?: FunctionLang;
+    /** Optimization policy; set on the op only when defined. */
+    optimize?: FunctionOptimize;
     replace?: boolean;
     /** `"public"` or `"private"` (absent → `"private"`). */
     visibility?: string;
@@ -47,6 +57,8 @@ export function createFunction(
   };
   if (opts?.source !== undefined) op.source = opts.source;
   if (opts?.wasm !== undefined) op.wasm = opts.wasm;
+  if (opts?.lang !== undefined) op.lang = opts.lang;
+  if (opts?.optimize !== undefined) op.optimize = opts.optimize;
   if (opts?.visibility !== undefined) op.visibility = opts.visibility;
   if (opts?.security !== undefined) op.security = opts.security;
   if (opts?.secret_grants !== undefined && opts.secret_grants.length > 0) op.secret_grants = opts.secret_grants;
@@ -76,6 +88,46 @@ export function renameFunction(
   newName: string,
 ): RenameFunctionOp {
   return { rename_function: oldName, to: newName };
+}
+
+/** Describe a stored function (lang, hash, tier, state). */
+export function describeFunction(name: string): DescribeFunctionOp {
+  return { describe_function: name };
+}
+
+/** Export a stored function's wasm (base64) and source. */
+export function exportFunction(name: string): ExportFunctionOp {
+  return { export_function: name };
+}
+
+/** Validate a function without storing it; exactly one of `wasm` or `source`. */
+export function checkFunction(opts: {
+  lang?: FunctionLang;
+  /** Base64-encoded wasm module. */
+  wasm?: string;
+  source?: string;
+  optimize?: FunctionOptimize;
+}): CheckFunctionOp {
+  if (opts.wasm === undefined && opts.source === undefined) {
+    throw new TypeError('check_function requires exactly one of wasm or source');
+  }
+  if (opts.wasm !== undefined && opts.source !== undefined) {
+    throw new TypeError('check_function requires exactly one of wasm or source');
+  }
+  const check: CheckFunctionOp['check_function'] = {};
+  if (opts.lang !== undefined) check.lang = opts.lang;
+  if (opts.wasm !== undefined) check.wasm = opts.wasm;
+  if (opts.source !== undefined) check.source = opts.source;
+  if (opts.optimize !== undefined) check.optimize = opts.optimize;
+  return { check_function: check };
+}
+
+/** Change a stored function's optimization policy. */
+export function alterFunction(
+  name: string,
+  optimize: FunctionOptimize,
+): AlterFunctionOp {
+  return { alter_function: name, optimize };
 }
 
 /** Create (or replace) a validator. */

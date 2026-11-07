@@ -351,10 +351,17 @@ export interface MigrationStatusOp {
   migration_status: string;
 }
 
+export type FunctionLang = 'wasm' | 'rust' | 'shamir';
+export type FunctionOptimize = 'auto' | 'now' | 'never';
+
 export interface CreateFunctionOp {
   create_function: string;
   source?: string;
   wasm?: string;
+  /** Source language (absent → inferred by the server). */
+  lang?: FunctionLang;
+  /** Optimization policy (absent → `"auto"`). */
+  optimize?: FunctionOptimize;
   replace: boolean;
   /**
    * `"public"` or `"private"` (absent → `"private"`, the default).
@@ -385,6 +392,77 @@ export interface DropFunctionOp {
 export interface RenameFunctionOp {
   rename_function: string;
   to: string;
+}
+
+export interface DescribeFunctionOp {
+  describe_function: string;
+}
+
+export interface ExportFunctionOp {
+  export_function: string;
+}
+
+export interface CheckFunctionOp {
+  check_function: {
+    lang?: FunctionLang;
+    /** Base64-encoded wasm module. */
+    wasm?: string;
+    source?: string;
+    optimize?: FunctionOptimize;
+  };
+}
+
+export interface AlterFunctionOp {
+  alter_function: string;
+  optimize: FunctionOptimize;
+}
+
+/** Tiering state of a function (null in the record when not tiered). */
+export interface FunctionTierInfo {
+  tier: 'fast' | 'optimized';
+  mode: string;
+  calls_observed: number;
+  upgrade_state: 'idle' | 'scheduled' | 'failed' | 'done' | 'exhausted';
+}
+
+export type FunctionState =
+  | { kind: 'loaded' }
+  | { kind: 'unloadable'; reason: string }
+  | { kind: 'corrupt'; expected: string; actual: string };
+
+/** Result record of `describe_function`. */
+export interface DescribeFunctionRecord {
+  name: string;
+  lang: FunctionLang;
+  origin: string | null;
+  abi: number | null;
+  hash: string | null;
+  size: number | null;
+  optimize: FunctionOptimize;
+  tier: FunctionTierInfo | null;
+  state: FunctionState;
+}
+
+/** Result record of `export_function`. */
+export interface ExportFunctionRecord {
+  /** Base64-encoded wasm module. */
+  wasm: string;
+  source: string | null;
+  /** 32-char lowercase hex. */
+  hash: string;
+}
+
+/** Result record of a successful `check_function`. */
+export interface CheckFunctionRecord {
+  ok: true;
+  size: number;
+  abi: number;
+  origin: string | null;
+  /** 32-char lowercase hex. */
+  hash: string;
+  functions: number;
+  imports: number;
+  exports: number;
 }
 
 export interface CreateValidatorOp {
@@ -606,6 +684,10 @@ export type DdlOp =
   | CreateFunctionOp
   | DropFunctionOp
   | RenameFunctionOp
+  | DescribeFunctionOp
+  | ExportFunctionOp
+  | CheckFunctionOp
+  | AlterFunctionOp
   | CreateValidatorOp
   | DropValidatorOp
   | RenameValidatorOp

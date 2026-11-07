@@ -283,6 +283,10 @@ pub fn hmac_policy(op: &BatchOp) -> HmacPolicy {
         | AccessTree(_)
         | CreateFunction(_)
         | RenameFunction(_)
+        | DescribeFunction(_)
+        | ExportFunction(_)
+        | CheckFunction(_)
+        | AlterFunction(_)
         | CreateValidator(_)
         | RenameValidator(_)
         | BindValidator(_)
@@ -579,6 +583,8 @@ pub fn canonical_batch_op(db: &str, op: &BatchOp) -> Result<Vec<u8>, CanonicalOp
                 security,
                 secret_grants,
                 net_grants,
+                lang,
+                optimize,
                 hmac: _,
             } = x;
             e = Encoder::new(OpTag::CreateFunction);
@@ -596,6 +602,11 @@ pub fn canonical_batch_op(db: &str, op: &BatchOp) -> Result<Vec<u8>, CanonicalOp
                 e.digest(v);
                 Ok(())
             })?;
+            let resolved_lang =
+                lang.as_deref()
+                    .unwrap_or(if wasm.is_some() { "wasm" } else { "rust" });
+            e.str(resolved_lang)?;
+            e.str(optimize.as_deref().unwrap_or("auto"))?;
         }
         CreateValidator(x) => {
             let crate::admin::CreateValidatorOp {

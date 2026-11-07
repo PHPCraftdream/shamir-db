@@ -182,6 +182,8 @@ async fn create_function_security_definer_without_hmac_rejected_a3d93402() {
             security: Some("definer".into()),
             secret_grants: Vec::new(),
             net_grants: Vec::new(),
+            lang: None,
+            optimize: None,
             hmac: None,
         },
     );
@@ -214,6 +216,8 @@ async fn create_function_security_definer_with_correct_hmac_succeeds_a3d93402() 
             security: Some("definer".into()),
             secret_grants: Vec::new(),
             net_grants: Vec::new(),
+            lang: None,
+            optimize: None,
             hmac: None,
         },
     );
@@ -259,6 +263,8 @@ async fn create_function_security_definer_with_wrong_hmac_rejected_a3d93402() {
             security: Some("definer".into()),
             secret_grants: Vec::new(),
             net_grants: Vec::new(),
+            lang: None,
+            optimize: None,
             hmac: Some("deadbeef".repeat(8)), // 64 hex chars but bogus
         },
     );
@@ -294,6 +300,8 @@ async fn create_function_secret_grants_without_hmac_rejected_a3d93402() {
             security: None,
             secret_grants: vec!["ADMIN_DB_PASSWORD".into()],
             net_grants: Vec::new(),
+            lang: None,
+            optimize: None,
             hmac: None,
         },
     );
@@ -328,6 +336,8 @@ async fn create_function_secret_grants_with_correct_hmac_succeeds_a3d93402() {
             security: None,
             secret_grants: grants.clone(),
             net_grants: Vec::new(),
+            lang: None,
+            optimize: None,
             hmac: None,
         },
     );

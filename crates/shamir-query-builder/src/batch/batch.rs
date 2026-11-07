@@ -464,6 +464,31 @@ impl Batch {
         self.add_entry(alias, op.into_batch_op(), true)
     }
 
+    /// Describe a stored function.
+    pub fn describe_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Export a stored function's module bytes, source and hash.
+    pub fn export_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
+    /// Fallible admission-check insertion; requires exactly one of
+    /// `wasm`/`source` on the builder.
+    pub fn try_check_function(
+        &mut self,
+        alias: impl Into<String>,
+        op: impl TryIntoBatchOp,
+    ) -> Result<Handle, BuilderError> {
+        Ok(self.add_entry(alias, op.try_into_batch_op()?, true))
+    }
+
+    /// Change a stored function's optimization mode.
+    pub fn alter_function(&mut self, alias: impl Into<String>, op: impl IntoBatchOp) -> Handle {
+        self.add_entry(alias, op.into_batch_op(), true)
+    }
+
     /// Create a function folder.
     pub fn create_function_folder(
         &mut self,

@@ -86,6 +86,10 @@ impl AdminExecutor for ShamirAdminExecutor {
             op @ BatchOp::CreateFunction(_) => self.handle_create_function(op).await,
             op @ BatchOp::DropFunction(_) => self.handle_drop_function(op).await,
             op @ BatchOp::RenameFunction(_) => self.handle_rename_function(op).await,
+            op @ BatchOp::DescribeFunction(_) => self.handle_describe_function(op).await,
+            op @ BatchOp::ExportFunction(_) => self.handle_export_function(op).await,
+            op @ BatchOp::CheckFunction(_) => self.handle_check_function(op).await,
+            op @ BatchOp::AlterFunction(_) => self.handle_alter_function(op).await,
             op @ BatchOp::CreateFunctionFolder(_) => self.handle_create_function_folder(op).await,
             op @ BatchOp::RenameFunctionFolder(_) => self.handle_rename_function_folder(op).await,
 
