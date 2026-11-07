@@ -72,6 +72,47 @@ jobs:
           [ -f "$message" ] || : > "$message"
           python3 -I scripts/ci/gates/full_tier_plan.py --event "$EVENT_NAME" --draft "$DRAFT" --message-file "$message"
 
+  # AFFECTED-CRATES PLANNER (full tier). Runs the same selector the fast
+  # tier uses (scripts/ci/affected_crates.py) and publishes the dependency
+  # closure as job outputs; every heavy full-tier step below is gated on
+  # them, so the merge-gate matrix tests only what a change can affect.
+  # Event rule (decided inside the script): pull_request diffs
+  # origin/master...HEAD; push / workflow_dispatch / schedule always select
+  # --workspace (the full matrix stays whole for master, manual runs and
+  # the weekly schedule with macOS). Global-path sentinels (Cargo.lock,
+  # root Cargo.toml, toolchain files, deny.toml, .cargo/, .config/,
+  # scripts/, .github/, any non-crates//docs/ non-*.md file) also force
+  # --workspace; a docs-only diff yields empty args (jobs then skip their
+  # heavy steps with a ::notice::, and stay green).
+  # Python-only: no toolchain action, no cache — the selector's read-only
+  # `cargo metadata` uses the runner's preinstalled cargo, and any failure
+  # fails the job (the merge gate fails closed).
+  affected:
+    name: affected crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
+    outputs:
+      args: ${{ steps.select.outputs.args }}
+      engine: ${{ steps.select.outputs.engine }}
+      ts: ${{ steps.select.outputs.ts }}
+      node: ${{ steps.select.outputs.node }}
+      docs_only: ${{ steps.select.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # full history: the selector diffs against origin/master
+          fetch-depth: 0
+      - name: Select the affected crates
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/affected_crates.py --base origin/master --event "$EVENT_NAME" --format github-output >> "$GITHUB_OUTPUT"
+
   # FAST tier — draft pull requests only. ONE ubuntu job with a shared
   # cargo cache: cargo fmt, the affected-crates selector's unit tests, then
   # clippy + lib tests limited to the crates the PR can affect
@@ -115,23 +156,12 @@ jobs:
         run: python3 -I scripts/ci/check_layout.py
       - name: Determine affected crates
         id: affected
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
         run: |
           set -euo pipefail
-          args="$(python3 scripts/ci/affected_crates.py --base origin/master)"
-          if [ -n "$args" ] && [ "$args" != "--workspace" ]; then
-            set -- $args
-            if [ $(( $# % 2 )) -ne 0 ]; then
-              echo "affected_crates.py produced unexpected output: $args" >&2
-              exit 1
-            fi
-            while [ $# -gt 0 ]; do
-              if [ "$1" != "-p" ]; then
-                echo "affected_crates.py produced unexpected token: $1" >&2
-                exit 1
-              fi
-              shift 2
-            done
-          fi
+          args="$(python3 scripts/ci/affected_crates.py --base origin/master --event "$EVENT_NAME")"
           echo "args=$args" >> "$GITHUB_OUTPUT"
           if [ -z "$args" ]; then
             echo "::notice::docs-only diff: clippy and lib tests are deliberately skipped in the fast tier"
@@ -233,7 +263,7 @@ jobs:
     name: cargo clippy (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
@@ -253,7 +283,20 @@ jobs:
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: cargo clippy (affected crates)
+        env:
+          AFFECTED: ${{ needs.affected.outputs.args }}
+        shell: bash
+        run: |
+          if [ -z "$AFFECTED" ]; then
+            echo "::notice::docs-only diff: clippy skipped"
+            exit 0
+          fi
+          if [ "$AFFECTED" = "--workspace" ]; then
+            cargo clippy --workspace --all-targets --locked -- -D warnings
+          else
+            cargo clippy --locked --all-targets $AFFECTED -- -D warnings
+          fi
 
   # CI-03b: rustdoc gate. Docs are code: a broken intra-doc link or an
   # accidentally-private documented item fails CI like any other compile
@@ -267,7 +310,7 @@ jobs:
     name: cargo doc (shamir-engine)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -281,25 +324,35 @@ jobs:
         run: |
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-      - env:
+      - if: needs.affected.outputs.engine == 'true'
+        env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine --no-deps --document-private-items --locked
-      - env:
+      - if: needs.affected.outputs.engine == 'true'
+        env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine --no-deps --document-private-items --locked --no-default-features
 
-      - env:
+      - if: needs.affected.outputs.engine == 'true'
+        env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine-query --no-deps --document-private-items --locked
-      - env:
+      - if: needs.affected.outputs.engine == 'true'
+        env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine-query --no-deps --document-private-items --locked --features test-util
-      - env:
+      - if: needs.affected.outputs.engine == 'true'
+        env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine-validator --no-deps --document-private-items --locked
-      - env:
+      - if: needs.affected.outputs.engine == 'true'
+        env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
         run: cargo doc -p shamir-engine-validator --no-deps --document-private-items --locked --features test-util
+      - name: engine scope notice
+        if: needs.affected.outputs.engine != 'true'
+        shell: bash
+        run: 'echo "::notice::shamir-engine not affected: rustdoc gate skipped"'
 
   # CI-03b: engine feature matrix. Each cell compiles shamir-engine in
   # ISOLATION (`-p shamir-engine --lib`, never a workspace invocation that
@@ -322,7 +375,7 @@ jobs:
     name: engine features (${{ matrix.cell.id }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
@@ -350,24 +403,31 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: feature-resolution assertion
+        if: needs.affected.outputs.engine == 'true'
         run: python3 -I scripts/ci/gates/features_matrix_check.py --expected ${{ matrix.cell.id }} --flags="${{ matrix.cell.flags }}"
-      - run: cargo check -p shamir-engine --lib --locked ${{ matrix.cell.flags }}
-      - run: cargo clippy -p shamir-engine --lib --locked ${{ matrix.cell.flags }} -- -D warnings
+      - if: needs.affected.outputs.engine == 'true'
+        run: cargo check -p shamir-engine --lib --locked ${{ matrix.cell.flags }}
+      - if: needs.affected.outputs.engine == 'true'
+        run: cargo clippy -p shamir-engine --lib --locked ${{ matrix.cell.flags }} -- -D warnings
       - run: cargo clippy -p shamir-engine-query --lib --locked -- -D warnings
-        if: matrix.cell.id == 'no-default'
+        if: matrix.cell.id == 'no-default' && needs.affected.outputs.engine == 'true'
       - run: cargo clippy -p shamir-engine-query --lib --locked --features test-util -- -D warnings
-        if: matrix.cell.id == 'test-util'
+        if: matrix.cell.id == 'test-util' && needs.affected.outputs.engine == 'true'
       - run: cargo clippy -p shamir-engine-validator --lib --locked -- -D warnings
-        if: matrix.cell.id == 'no-default'
+        if: matrix.cell.id == 'no-default' && needs.affected.outputs.engine == 'true'
       - run: cargo clippy -p shamir-engine-validator --lib --locked --features test-util -- -D warnings
-        if: matrix.cell.id == 'test-util'
+        if: matrix.cell.id == 'test-util' && needs.affected.outputs.engine == 'true'
       # --all-targets ONLY here: under dev-dependency/workspace unification
       # it would falsely enable features in the reduced cells (see CI
       # evidence above); in default-plus the resolution equals the label.
       - run: cargo check -p shamir-engine --all-targets --locked ${{ matrix.cell.flags }}
-        if: matrix.cell.id == 'default-plus'
+        if: matrix.cell.id == 'default-plus' && needs.affected.outputs.engine == 'true'
       - run: cargo clippy -p shamir-engine --all-targets --locked ${{ matrix.cell.flags }} -- -D warnings
-        if: matrix.cell.id == 'default-plus'
+        if: matrix.cell.id == 'default-plus' && needs.affected.outputs.engine == 'true'
+      - name: engine scope notice
+        if: needs.affected.outputs.engine != 'true'
+        shell: bash
+        run: 'echo "::notice::shamir-engine not affected: engine feature cells skipped"'
 
   # CI-03b: fast-tier shadow of `engine-features` — cells 1 and 5 on
   # ubuntu, only while the PR is a draft AND shamir-engine is affected
@@ -436,7 +496,7 @@ jobs:
     name: test build archive (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
@@ -448,6 +508,7 @@ jobs:
         with:
           upload: 'true'
           artifact-name: test-archive-${{ matrix.os }}
+          packages: ${{ needs.affected.outputs.args }}
 
   # Fast primary signal: the ~2700 library unit tests, on every OS. Matches
   # the project's stated pre-commit gate in CLAUDE.md ("Code quality
@@ -461,7 +522,7 @@ jobs:
     name: cargo test lib (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    needs: [plan, test-build]
+    needs: [plan, affected, test-build]
     if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
@@ -494,6 +555,7 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - name: download test archive
+        if: needs.affected.outputs.args != ''
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: test-archive-${{ matrix.os }}
@@ -503,6 +565,7 @@ jobs:
       # to PowerShell on windows-latest, which cannot execute it directly.
       # Parity with the `integration` job's own `shell: bash` below.
       - name: lib tests from archive (timed)
+        if: needs.affected.outputs.args != ''
         shell: bash
         run: |
           set -euo pipefail
@@ -515,8 +578,19 @@ jobs:
       # enough; the fast-tier affected step covers the rest).
       - name: doctests (shamir-engine compile-fail gate)
         if: matrix.os == 'ubuntu-latest'
+        env:
+          ENGINE: ${{ needs.affected.outputs.engine }}
         shell: bash
-        run: cargo test --doc -p shamir-engine --locked
+        run: |
+          if [ "$ENGINE" != "true" ]; then
+            echo "::notice::shamir-engine not affected: doctests skipped"
+            exit 0
+          fi
+          cargo test --doc -p shamir-engine --locked
+      - name: affected scope notice
+        if: needs.affected.outputs.args == ''
+        shell: bash
+        run: 'echo "::notice::docs-only diff: archive download, lib tests and doctests skipped"'
 
   # Integration gate: the test files under `crates/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
@@ -562,7 +636,7 @@ jobs:
     name: cargo test integration (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     strategy:
       fail-fast: false
@@ -605,9 +679,18 @@ jobs:
       # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
       # filterset equivalent of cargo's `--test '*'` target selector; it
       # deliberately excludes `kind(lib)` (covered by the `test` job above)
-      # and `kind(bench)` (never a correctness gate).
-      - run: ./scripts/test.sh --full --locked -E 'kind(test)'
+      # and `kind(bench)` (never a correctness gate). $AFFECTED narrows the
+      # packages to those affected by the diff.
+      - name: integration tests (affected crates)
+        env:
+          AFFECTED: ${{ needs.affected.outputs.args }}
         shell: bash
+        run: |
+          if [ -z "$AFFECTED" ]; then
+            echo "::notice::docs-only diff: integration tests skipped"
+            exit 0
+          fi
+          ./scripts/test.sh --full --locked $AFFECTED -E 'kind(test)'
       - name: disk usage after the run
         if: always() && runner.os != 'Windows'
         shell: bash
@@ -634,30 +717,15 @@ jobs:
     name: ts unit (shamir-client-ts)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          fetch-depth: 0
-      # Path gate: on pull_request, run the payload steps only when the TS
-      # package (or this workflow) changed. Non-PR events always run (the
-      # output is empty then). No third-party action needed.
-      - name: Did the TS package change?
-        id: ts_changes
-        if: github.event_name == 'pull_request'
-        run: |
-          set -euo pipefail
-          base="${{ github.event.pull_request.base.sha }}"
-          changed=true
-          if files="$(git diff --name-only "$base...HEAD" -- crates/shamir-client-ts .github/workflows/ci.yml)"; then
-            if [ -z "$files" ]; then
-              changed=false
-            fi
-          fi
-          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+      # Gate: the `affected` planner job's `ts` flag — true when the TS
+      # package changed, `shamir-query-types` is in the closure, or the
+      # selection is the whole workspace.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
-        if: steps.ts_changes.outputs.changed != 'false'
+        if: needs.affected.outputs.ts == 'true'
         with:
           # Node 22 = active LTS. `shamir-client-ts/package.json` declares
           # no `engines` floor; `shamir-client-node`'s is `>=18`, so 22
@@ -666,8 +734,12 @@ jobs:
           cache: npm
           cache-dependency-path: crates/shamir-client-ts/package-lock.json
       - run: npm ci && npm run typecheck && npm test
-        if: steps.ts_changes.outputs.changed != 'false'
+        if: needs.affected.outputs.ts == 'true'
         working-directory: crates/shamir-client-ts
+      - name: ts scope notice
+        if: needs.affected.outputs.ts != 'true'
+        shell: bash
+        run: 'echo "::notice::TS package not affected: ts unit tests skipped"'
 
   # Dependency admission gate (RFC 3923 cooldown, fail-closed; policy:
   # /cooldown.toml, DEC-3 Q4). Fails the PR when it admits a registry version
@@ -804,7 +876,7 @@ jobs:
     name: loom model (writer_drain_barrier)
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -831,13 +903,30 @@ jobs:
       # `--no-tests=fail` (supported since 0.9.x, and by the pinned
       # 0.9.137) backs the same rule at run time.
       - name: discover loom model tests (must be non-empty)
+        env:
+          ENGINE: ${{ needs.affected.outputs.engine }}
+          AFFECTED: ${{ needs.affected.outputs.args }}
         shell: bash
         run: |
+          if [ "$ENGINE" != "true" ] && [ "$AFFECTED" != "--workspace" ]; then
+            echo "::notice::shamir-engine not affected and not a workspace diff: loom model skipped"
+            exit 0
+          fi
           set -euo pipefail
           cargo nextest list -p shamir-engine --features loom --lib -E 'test(loom_model)' --message-format json > loom_list.json
           python3 -I scripts/ci/gates/loom_preflight_check.py --list-file loom_list.json --name-filter loom_model
           rm -f loom_list.json
-      - run: cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture --no-tests=fail
+      - name: loom model (affected crates)
+        env:
+          ENGINE: ${{ needs.affected.outputs.engine }}
+          AFFECTED: ${{ needs.affected.outputs.args }}
+        shell: bash
+        run: |
+          if [ "$ENGINE" != "true" ] && [ "$AFFECTED" != "--workspace" ]; then
+            echo "::notice::shamir-engine not affected and not a workspace diff: loom model skipped"
+            exit 0
+          fi
+          cargo nextest run -p shamir-engine --features loom --lib -E 'test(loom_model)' --nocapture --no-tests=fail
 
   # rust-guard source-integrity gates (CI-03a). Runs the workspace-excluded
   # `tools/rust-guard` binary against the whole repo: `modules` (every
@@ -1223,12 +1312,14 @@ jobs:
     name: node binding (shamir-client)
     runs-on: windows-latest
     timeout-minutes: 30
-    needs: plan
+    needs: [plan, affected]
     if: needs.plan.outputs.full == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: dtolnay/rust-toolchain@eb0a44f258ec94ab9ee0f14f998f4cf332c25d3a  # 1.95.0
+        if: needs.affected.outputs.node == 'true'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        if: needs.affected.outputs.node == 'true'
         with:
           # Node 22 = active LTS; satisfies the binding's `>=18` engines
           # floor (same pin as the ts-unit job). npm cache keyed on the
@@ -1237,12 +1328,15 @@ jobs:
           cache: npm
           cache-dependency-path: crates/shamir-client-node/package-lock.json
       - name: npm ci (binding)
+        if: needs.affected.outputs.node == 'true'
         working-directory: crates/shamir-client-node
         run: npm ci
       - name: napi build (debug)
+        if: needs.affected.outputs.node == 'true'
         working-directory: crates/shamir-client-node
         run: npm run build:debug
       - name: generated-file drift check
+        if: needs.affected.outputs.node == 'true'
         id: napi-drift
         working-directory: crates/shamir-client-node
         run: git diff --exit-code -- native/index.js native/index.d.ts
@@ -1260,6 +1354,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: npm pack (tarball into runner temp)
+        if: needs.affected.outputs.node == 'true'
         working-directory: crates/shamir-client-node
         shell: bash
         run: npm pack --pack-destination "$RUNNER_TEMP"
@@ -1272,6 +1367,7 @@ jobs:
       # from THIS node_modules, which only an install beside the sources
       # achieves (see the tsc step below).
       - name: install tarball + consumer smoke
+        if: needs.affected.outputs.node == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1283,6 +1379,7 @@ jobs:
       # node_modules so Node16 module resolution finds the installed
       # 'shamir-client' — then typecheck with `tsc --noEmit`.
       - name: tsc --noEmit (packaging consumer)
+        if: needs.affected.outputs.node == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -1290,6 +1387,10 @@ jobs:
           cp tests/e2e/packaging/consumer.ts tests/e2e/packaging/tsconfig.json "$RUNNER_TEMP/consumer/pkg/"
           cd "$RUNNER_TEMP/consumer"
           npx tsc --noEmit -p pkg/tsconfig.json
+      - name: node scope notice
+        if: needs.affected.outputs.node != 'true'
+        shell: bash
+        run: 'echo "::notice::node binding not affected: node-binding steps skipped"'
 
 # CI-03b deliverable 4: the aggregate merge gate — the ONE required check.
 # `if: always()` + full `needs:` so it evaluates even when jobs were
@@ -1308,7 +1409,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     if: always()
-    needs: [plan, fast, fmt, clippy, test-build, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
+    needs: [plan, affected, fast, fmt, clippy, test-build, test, integration, ts-unit, cooldown, deny, loom-model, source-integrity, rust-guard-selftest, rustdoc, engine-features, test-discovery, node-binding]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - env:

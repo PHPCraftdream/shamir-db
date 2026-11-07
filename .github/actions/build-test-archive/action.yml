@@ -3,6 +3,7 @@ description: >
   Shared build steps for the archive consumed only by the lib `test` job;
   `integration` builds in place. Uses rust-cache and sccache, then
   ./scripts/test.sh --archive-to. Optionally uploads the archive artifact.
+  `packages` narrows the build (default `--workspace`; empty skips the build and the upload).
 
 inputs:
   shared-key:
@@ -17,6 +18,10 @@ inputs:
     description: 'artifact name when upload is true'
     required: false
     default: 'test-archive'
+  packages:
+    description: 'package selection passed to ./scripts/test.sh --archive-to; "--workspace", "-p a -p b", or empty to skip the build+upload'
+    required: false
+    default: '--workspace'
 
 runs:
   using: composite
@@ -36,14 +41,20 @@ runs:
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
     - name: build test archive (timed)
       shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
+        if [ -z "$PACKAGES" ]; then
+          echo "::notice::empty package selection (docs-only diff): test archive build skipped"
+          exit 0
+        fi
         start=$(date +%s)
-        ./scripts/test.sh --archive-to "$RUNNER_TEMP/test-archive.tar.zst" --locked
+        ./scripts/test.sh --archive-to "$RUNNER_TEMP/test-archive.tar.zst" --locked $PACKAGES
         end=$(date +%s)
         echo "test archive built in $((end - start))s" >> "$GITHUB_STEP_SUMMARY"
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-      if: inputs.upload == 'true'
+      if: inputs.upload == 'true' && inputs.packages != ''
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/test-archive.tar.zst

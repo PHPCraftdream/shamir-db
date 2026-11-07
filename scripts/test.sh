@@ -27,9 +27,10 @@
 #   ./scripts/test.sh --from-archive <file.tar.zst> # run tests from a nextest archive (CI)
 #
 # CI archive modes:
-#   --archive-to builds `cargo nextest archive --workspace --lib --locked`
+#   --archive-to builds `cargo nextest archive [--workspace | -p ...] --locked`
 #   by default; `--full` omits --lib (nextest default target selection).
 #   Only the lib `test` job consumes the archive; `integration` builds in place.
+#   Explicit `-p` args archive just those crates (affected-crate runs).
 #   --from-archive runs archived tests, omitting only --lib and --locked while
 #   forwarding every other argument unchanged; CI auto-selects profile ci.
 #
@@ -204,10 +205,23 @@ fi
 # target selection.
 # ---------------------------------------------------------------------------
 if [[ -n "$archive_to" ]]; then
-    archive_args=(--workspace --locked)
+    # Target selection: explicit -p args when given (affected-crate
+    # archives), otherwise the whole workspace. --locked is re-added
+    # below; --workspace is the default and never passed twice.
+    pkg_args=()
+    for a in ${extra_args[@]+"${extra_args[@]}"}; do
+        [[ "$a" == "--workspace" || "$a" == "--locked" ]] && continue
+        pkg_args+=("$a")
+    done
+    archive_args=()
+    if [[ ${#pkg_args[@]} -eq 0 ]]; then
+        archive_args+=(--workspace)
+    fi
+    archive_args+=(--locked)
     if [[ "$mode" == "lib" ]]; then
         archive_args+=(--lib)
     fi
+    archive_args+=(${pkg_args[@]+"${pkg_args[@]}"})
     echo "» cargo nextest archive ${archive_args[*]} --archive-file $archive_to" >&2
     exec cargo nextest archive "${archive_args[@]}" --archive-file "$archive_to"
 fi

@@ -16,7 +16,9 @@ Semantics (implemented exactly)
       full_tier_plan.py) has no ``if`` and is NEVER skipped by design.
       - FAST tier (``--event pull_request --draft true``): every
         ``REQUIRED_JOBS`` entry except ``plan`` and ``fast`` is skipped by
-        design.  Even in the only-passing shape (``fast`` == success,
+        design — including the full-tier-required ``affected`` planner job
+        (like ``clippy``/``test``/etc.).  Even in the only-passing shape
+        (``fast`` == success,
         everything else skipped) the gate still FAILS with
         "draft PR: full matrix not run, not merge-ready" — draft success
         never authorises a merge.
@@ -47,6 +49,7 @@ import sys
 
 REQUIRED_JOBS = [
     "plan",
+    "affected",
     "fast",
     "fmt",
     "clippy",
