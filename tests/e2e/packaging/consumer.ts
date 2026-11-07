@@ -2,7 +2,7 @@
  * Type-level consumer check for the published `shamir-client` package.
  *
  * Compiled with `tsc --noEmit` in CI (`node-binding` job): exercises the
- * package's `.d.ts` (`crates/shamir-client-node/js/wrapper.d.ts`) exactly as
+ * package's `.d.ts` (`crates/client/shamir-client-node/js/wrapper.d.ts`) exactly as
  * an external consumer would see it. This file is never executed.
  */
 

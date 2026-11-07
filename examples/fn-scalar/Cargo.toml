@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-shamir-sdk = { path = "../../crates/shamir-sdk" }
+shamir-sdk = { path = "../../crates/wasm/shamir-sdk" }
 
 [profile.release]
 opt-level = "z"

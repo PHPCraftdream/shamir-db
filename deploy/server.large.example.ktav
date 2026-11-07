@@ -18,7 +18,7 @@
 ## this profile is sized for. On a smaller host, pick a smaller profile or
 ## derive your own argon2_concurrent_max from the formula above.
 ##
-## Schema is documented in `crates/shamir-server/src/config.rs`.
+## Schema is documented in `crates/server/shamir-server/src/config.rs`.
 
 data_dir: /var/lib/shamir-db
 

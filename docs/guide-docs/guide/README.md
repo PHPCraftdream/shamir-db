@@ -50,4 +50,4 @@ WAL. На каждом этаже это всплывает по-новому, �
 по мере подъёма.
 
 > Все этажи 0–8 написаны. При расхождении TS-примеров с
-> `crates/shamir-client-ts/src/core/builders/` прав код.
+> `crates/client/shamir-client-ts/src/core/builders/` прав код.

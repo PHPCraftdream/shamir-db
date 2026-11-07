@@ -301,7 +301,7 @@ byte string; decoding is per-`DeliverMode`.
 | `event`         | A change has been delivered. `data` carries the payload per the negotiated `DeliverMode`.                             |
 | `ready`         | The initial snapshot is complete. Emitted **only** when the grant was issued with `initial: true`. Live events follow. |
 | `gap`           | Events between `gap_at` (or "unknown" if absent) and the current cursor were missed. Consumer SHOULD reconcile out-of-band. |
-| `slow_consumer` | A required Event, Ready, or Gap frame could not be accepted after `SLOW_CONSUMER_THRESHOLD` attempts (default `100`), separated by 5 ms delays (495 ms total retry sleep, plus scheduling latency). The subscription closes; no event is silently dropped while it stays open. This notification and the following `closed` are best-effort. See `crates/shamir-server/src/subscriptions/push.rs:76-117` and `crates/shamir-server/src/subscriptions/bridge.rs:588-600`. |
+| `slow_consumer` | A required Event, Ready, or Gap frame could not be accepted after `SLOW_CONSUMER_THRESHOLD` attempts (default `100`), separated by 5 ms delays (495 ms total retry sleep, plus scheduling latency). The subscription closes; no event is silently dropped while it stays open. This notification and the following `closed` are best-effort. See `crates/server/shamir-server/src/subscriptions/push.rs:76-117` and `crates/server/shamir-server/src/subscriptions/bridge.rs:588-600`. |
 | `closed`        | Terminal. The subscription is gone server-side; no further pushes will arrive. Consumer SHOULD release local state.   |
 
 `gap` is emitted in two situations:
@@ -421,33 +421,33 @@ Semantics:
 
 Rust types (wire DTOs):
 
-- `crates/shamir-query-types/src/subscribe/subscribe_op.rs` — `SubscribeOp`
-- `crates/shamir-query-types/src/subscribe/source.rs` — `SubscriptionSource`
-- `crates/shamir-query-types/src/subscribe/deliver_mode.rs` — `DeliverMode`
-- `crates/shamir-query-types/src/subscribe/event_mask.rs` — `EventMask`
-- `crates/shamir-query-types/src/subscribe/unsubscribe_op.rs` — `UnsubscribeOp`
-- `crates/shamir-query-types/src/table_ref.rs` — `TableRef`
-- `crates/shamir-connect/src/common/push_envelope.rs` — `PushEnvelope`, `PushKind`
+- `crates/query/shamir-query-types/src/subscribe/subscribe_op.rs` — `SubscribeOp`
+- `crates/query/shamir-query-types/src/subscribe/source.rs` — `SubscriptionSource`
+- `crates/query/shamir-query-types/src/subscribe/deliver_mode.rs` — `DeliverMode`
+- `crates/query/shamir-query-types/src/subscribe/event_mask.rs` — `EventMask`
+- `crates/query/shamir-query-types/src/subscribe/unsubscribe_op.rs` — `UnsubscribeOp`
+- `crates/query/shamir-query-types/src/table_ref.rs` — `TableRef`
+- `crates/net/shamir-connect/src/common/push_envelope.rs` — `PushEnvelope`, `PushKind`
 
 Server implementation:
 
-- `crates/shamir-engine/src/query/batch/query_runner.rs` — grant validation,
+- `crates/engine/shamir-engine/src/query/batch/query_runner.rs` — grant validation,
   `find_unsupported_subscription_filter`.
-- `crates/shamir-server/src/db_handler/subscribe_handler.rs` — `activate_subscriptions`,
+- `crates/server/shamir-server/src/db_handler/subscribe_handler.rs` — `activate_subscriptions`,
   `sub` assignment.
-- `crates/shamir-server/src/subscriptions/bridge.rs` — `bridge_task`, filter
+- `crates/server/shamir-server/src/subscriptions/bridge.rs` — `bridge_task`, filter
   evaluation, watermarking, slow-consumer detection.
 
 Tunables:
 
-- `crates/shamir-tunables/src/lib.rs` — `SLOW_CONSUMER_THRESHOLD` (default `100`),
+- `crates/foundation/shamir-tunables/src/lib.rs` — `SLOW_CONSUMER_THRESHOLD` (default `100`),
   `JOURNAL_BACKFILL_LIMIT` (default `10_000`).
 
 Reference client builders (produce the shapes above — see "Query construction —
 builder only" in `CLAUDE.md`):
 
-- Rust: `crates/shamir-query-builder` (Batch / subscribe builder).
-- TypeScript: `crates/shamir-client-ts/src/core/subscription-router.ts` (push routing
+- Rust: `crates/query/shamir-query-builder` (Batch / subscribe builder).
+- TypeScript: `crates/client/shamir-client-ts/src/core/subscription-router.ts` (push routing
   + early buffer) and the typed query builder in the same crate.
-- Rust client early buffer: `crates/shamir-client/src/subscription.rs`
+- Rust client early buffer: `crates/client/shamir-client/src/subscription.rs`
   (`EARLY_BUFFER_CAP`).

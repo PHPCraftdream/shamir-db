@@ -1,0 +1,987 @@
+//! Per-transaction state bundle.
+//!
+//! Created at tx begin, consumed at commit (by the executor), or
+//! dropped at abort. Drop = RAII rollback: all staged state is lost,
+//! no storage side-effects.
+
+use bytes::Bytes;
+use scc::hash_map::Entry::{self, Occupied, Vacant};
+use shamir_collections::{TFxMap, TFxSet, THasher};
+use shamir_types::access::Actor;
+use shamir_types::types::record_id::RecordId;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use crate::staging_store::StagingStore;
+use crate::types::{IsolationLevel, TxId};
+use crate::version_provider::VersionProvider;
+use crate::IndexWriteOp;
+
+/// Opt-in commit visibility / ack policy.
+///
+/// Default is [`Synchronous`](CommitVisibility::Synchronous) — the historical
+/// behaviour: `commit_tx` returns to the caller only after EVERY phase of the
+/// commit pipeline has completed (data, index, recovery markers, WAL marker
+/// removal, HNSW promote). Nothing about the on-disk image or in-memory state
+/// differs from the pre-async-mode code path.
+///
+/// [`AsyncIndex`](CommitVisibility::AsyncIndex) is the OPT-IN relaxation
+/// described in the async-commit design:
+///   * The Phase-4 WAL fsync (the commit point) ALWAYS happens before the
+///     client ack — durability is NOT relaxed.
+///   * Data is applied to MvccStore (Phase 5a) and the version is published
+///     (Phase 6) BEFORE the ack — read-your-own-writes on DATA holds.
+///   * Index posting application (Phase 5c), durable recovery markers
+///     (Phase 6.5), WAL marker removal (Phase 7), and the HNSW promote
+///     (Phase 5d, post-lock) are moved to a `tokio::task` that runs after
+///     the client returns. A query served by a SECONDARY INDEX may briefly
+///     miss the just-committed row; the row is immediately visible via a
+///     data scan.
+///   * Crash safety is preserved by the existing recovery machinery: if
+///     the process dies after ack but before the background task finishes,
+///     the inflight WAL marker survives and `recover_v2_inflight` replays
+///     the entry on the next open — the same path that backs the
+///     `MaterializationState::Deferred` contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitVisibility {
+    /// Default. `commit_tx` returns only after the whole pipeline has run.
+    #[default]
+    Synchronous,
+    /// Opt-in. `commit_tx` returns once WAL durability + data application +
+    /// MVCC publish are done; index apply / markers / WAL cleanup / HNSW
+    /// promote run on a background task.
+    AsyncIndex,
+}
+
+/// A promise this tx makes about a unique-index posting: at stage time
+/// the deterministic unique key `index_key` was free (or owned by this
+/// tx's `owner`). Re-validated under `commit_lock` (closes the
+/// tx-concurrent unique-violation hole) — two concurrent txs claiming
+/// the same value produce the BYTE-IDENTICAL `index_key`, so a single
+/// `info_store.get(index_key)` settles ownership decisively.
+///
+/// Layer note: `index_key` is built engine-side
+/// (`build_index_key(true, name, values).to_bytes()`) and handed in as
+/// raw `Bytes`; shamir-tx stays ignorant of how the key is composed.
+#[derive(Debug, Clone)]
+pub struct UniqueGuard {
+    /// Owning table token (engine `table_token()`), used to resolve the
+    /// table's `info_store` at commit time.
+    pub table_token: u64,
+    /// The deterministic 25-byte unique-index key this tx intends to own.
+    pub index_key: Bytes,
+    /// The rid claiming the value. An update re-writing its own value is
+    /// not a self-conflict (`existing == owner` → OK).
+    pub owner: RecordId,
+}
+
+/// #1108: incrementally-maintained live/released bookkeeping for ONE table's
+/// unique-family postings, mirroring `shamir-engine`'s
+/// `released_unique_keys_in_tx` walk (which itself mirrors
+/// `pre_commit.rs`'s Step 1 owner-aware `RemovePosting` handling — see that
+/// function's doc for the exact semantics this must preserve).
+///
+/// `walked_len` is the length of `TxContext::index_write_set` (the single
+/// Vec shared across every table) as of the last fold — since that Vec is
+/// APPEND-ONLY during staging (nothing removes/reorders entries until
+/// `pre_commit.rs` runs at commit time, strictly after all staging is done),
+/// re-folding only needs to walk the NEW suffix `[walked_len..]` on each
+/// call, filtering by this cache's own `table_token` exactly like the old
+/// full walk did. This makes the total work across N staging calls on the
+/// same tx `O(final |index_write_set|)` instead of `O(N * |index_write_set|)`.
+#[derive(Debug, Default, Clone)]
+pub struct ReleasedUniqueCache {
+    /// (index_key → current owner) as of `walked_len` entries folded in.
+    pub live: TFxMap<Vec<u8>, RecordId>,
+    /// Keys vacated by a `RemovePosting` and not yet reclaimed.
+    pub released: TFxSet<Vec<u8>>,
+    /// How many entries of `index_write_set` have been folded into `live`/
+    /// `released` so far (global index, not per-table).
+    pub walked_len: usize,
+}
+
+/// P0 delta-prune (brief 164): a queued graph-promote acknowledgement. The
+/// engine's Phase 5d DELTA half records one per appended delta chunk; the
+/// GRAPH half (`promote_vectors`) calls it only after the chunk's mutations
+/// reached the live graph. The callee advances the vector backend's
+/// contiguous applied prefix (`IndexBackend::mark_delta_applied`) — the only
+/// boundary that authorises snapshot delta pruning.
+pub type VectorDeltaAck = std::sync::Arc<dyn Fn() + Send + Sync>;
+
+/// Per-transaction state bundle.
+///
+/// Holds all mutable state accumulated during a transaction:
+/// - **write_set** — per-table `StagingStore` buffers (set/remove ops).
+/// - **index_write_set** — accumulated `IndexWriteOp`s across all tables.
+/// - **staged_vectors** — per-table HNSW vectors awaiting commit.
+/// - **staged_vector_deletes** — per-table HNSW rids awaiting commit-time
+///   tombstone + `DeltaOp::Delete` (gap#1).
+/// - **interner_overlay** — new `(key_name → id)` mappings for this tx.
+/// - **counter_deltas** — per-table row-count adjustments.
+/// - **read_set** — SSI read tracking `(table_id, key) → version_seen`.
+/// - **released_unique_cache** — per-table incremental live/released
+///   unique-posting bookkeeping (#1108), keyed by table_token.
+///
+/// Drop = RAII rollback: all staged state is simply lost, no I/O.
+pub struct TxContext {
+    /// Unique transaction identifier.
+    pub tx_id: TxId,
+
+    /// Interned repo identifier (from the engine's interner).
+    pub repo_id: u64,
+
+    /// MVCC snapshot version — reads see only committed versions
+    /// ≤ this value.
+    pub snapshot_version: u64,
+
+    /// Requested isolation level.
+    pub isolation: IsolationLevel,
+
+    /// Per-table write staging. Key = table name (interned u64).
+    /// Each `StagingStore` buffers set/remove ops for that table.
+    pub write_set: TFxMap<u64, StagingStore>,
+
+    /// Accumulated index write ops across all tables, with per-op table
+    /// attribution. Each entry is `(table_token, op)`. Applied atomically
+    /// during commit (via `apply_index_ops`).
+    pub index_write_set: Vec<(u64, IndexWriteOp)>,
+
+    /// F-50 (#869, spike): per-table index2 registry generation captured at
+    /// STAGE time (after the stage-time `all_backends()` snapshot), to gate
+    /// commit-time ops-plan re-derivation. A tx that staged before a new
+    /// index2 backend was registered would otherwise commit with zero ops
+    /// for it (the "guaranteed miss" — `backfill_index2_backend`'s doc §Part
+    /// B). At commit, if a table's current generation exceeds the captured
+    /// value, the commit pipeline re-derives posting ops for just the
+    /// newly-registered backends. Plain (non-`Mutex`) map: every capture /
+    /// read site holds the tx by `&mut` (the staging methods and the commit
+    /// pipeline's `pre_commit_prelock`), so no interior mutability is needed
+    /// (unlike `ri_barrier_tokens`, which is recorded through a shared
+    /// `&TxContext` by the FK scan path). Empty for txs that never stage an
+    /// index2-bearing table write — the single zero-overhead gate.
+    pub index2_stage_gens: TFxMap<u64, u64>,
+
+    /// F-50 Step 2 (#870, Part D): per-table `SortedIndexManager` generation
+    /// captured at STAGE time (after the stage-time `iter_indexes()` snapshot),
+    /// to gate commit-time sorted-index ops-plan re-derivation. Mirrors
+    /// [`index2_stage_gens`](Self::index2_stage_gens) for the base_index sorted
+    /// index path: a tx that staged before a new sorted index was registered
+    /// would otherwise commit with zero sorted ops for the new index. At
+    /// commit, if a table's current sorted generation exceeds the captured
+    /// value, the commit pipeline re-derives sorted posting ops against all
+    /// current defs (idempotent — `SetPosting` overwrites, `RemovePosting` is
+    /// a no-op on absent keys). Plain (non-`Mutex`) map: every capture / read
+    /// site holds the tx by `&mut`. Empty for txs that never stage a write —
+    /// the single zero-overhead gate.
+    pub sorted_stage_gens: TFxMap<u64, u64>,
+
+    /// P0-2 (#958): per-table base_index `IndexManager` (regular + unique)
+    /// generation captured at STAGE time, to gate commit-time base_index
+    /// ops-plan re-derivation. Mirrors
+    /// [`index2_stage_gens`](Self::index2_stage_gens) and
+    /// [`sorted_stage_gens`](Self::sorted_stage_gens) for the base_index
+    /// index path: a tx that staged before a new regular or unique index
+    /// was created would otherwise commit with zero ops for the new
+    /// index — a permanently missing posting (regular) or an
+    /// unconstrained duplicate (unique). At commit, if a table's current
+    /// base_index generation exceeds the captured value, the commit pipeline
+    /// re-derives base_index posting ops against all current defs and, for
+    /// unique defs, records fresh `UniqueGuard`s so the existing Phase 2.6
+    /// re-validation covers them. Plain (non-`Mutex`) map: every capture /
+    /// read site holds the tx by `&mut`. Empty for txs that never stage a
+    /// write — the single zero-overhead gate.
+    pub base_index_stage_gens: TFxMap<u64, u64>,
+
+    /// Per-table HNSW staged vectors. Key = table token (interned table
+    /// name). Each entry is a `(RecordId, embedding)` pair routed here by
+    /// the executor instead of into the live HNSW graph. Promoted into the
+    /// graph atomically at commit (Phase 5d); discarded by RAII drop on
+    /// abort — exactly like every other tx-local field. This is the home
+    /// for vector staging: nothing lives outside the `TxContext` anymore.
+    pub staged_vectors: TFxMap<u64, Vec<(RecordId, Vec<f32>)>>,
+
+    /// Per-table HNSW staged vector deletes. Key = table token (interned
+    /// table name). Each entry is a `RecordId` whose vector-backed row this
+    /// tx intends to delete, routed here by the executor's delete path
+    /// instead of into the live HNSW graph. Promoted into the graph
+    /// (adapter tombstone) + the durable delta log (`DeltaOp::Delete`)
+    /// atomically at commit (Phase 5d); discarded by RAII drop on abort —
+    /// the live graph is never touched until commit (gap#1 / HIGH-6).
+    /// Mirrors [`staged_vectors`](Self::staged_vectors) exactly, for the
+    /// delete side of the contract.
+    pub staged_vector_deletes: TFxMap<u64, Vec<RecordId>>,
+
+    /// Interner overlay: new `(key_name → id)` mappings created during
+    /// this tx. Merged into base interner on commit; dropped on abort.
+    pub interner_overlay: scc::HashMap<String, u64, THasher>,
+
+    /// Next id to hand out from the overlay.  Starts at
+    /// [`OVERLAY_ID_BASE`](crate::layered_interner::OVERLAY_ID_BASE)
+    /// so overlay ids never clash with base ids.
+    pub next_overlay_id: AtomicU64,
+
+    /// Per-table counter delta. Applied at commit:
+    /// `counter.add(delta)` for each table.
+    pub counter_deltas: TFxMap<u64, i64>,
+
+    /// SSI read-set: `(table_id, key) → version_seen`. Only populated
+    /// when `isolation == Serializable`. Validated at commit:
+    /// `current_version(key)` must equal `version_seen`, else abort.
+    ///
+    /// `scc::HashMap` (not `std::HashMap`) so [`record_read`](Self::record_read)
+    /// can take `&self` instead of `&mut self`. This is load-bearing for
+    /// HIGH-C: the engine's tx-aware point read `TableManager::read_one_tx`
+    /// holds the tx by shared reference (`Option<&TxContext>`) — the executor
+    /// reborrows `&*tx` from a `&mut TxContext` — so an `&mut`-taking
+    /// `record_read` could not be called from inside the read path without a
+    /// signature break rippling into out-of-crate call sites. Interior
+    /// mutability lets `read_one_tx` populate the read-set in place, which is
+    /// what makes Serializable isolation actually detect write-skew (before
+    /// this, `record_read` was wired only from unit tests, so the read-set
+    /// was always empty in production and SSI silently degraded to Snapshot).
+    pub read_set: scc::HashMap<(u64, Bytes), u64, THasher>,
+
+    /// FG-7: keys this tx staged an `expected_version` CAS check against,
+    /// independent of `read_set`/SSI. Validated at commit UNCONDITIONALLY
+    /// (any isolation level) — see `pre_commit_locked_validate`. Kept
+    /// separate from `read_set` so a CAS-specific commit-time failure maps
+    /// to `version_conflict`, distinct from a generic SSI `tx_conflict`.
+    pub cas_set: scc::HashMap<(u64, Bytes), u64, THasher>,
+
+    /// Token → original table name. Populated alongside `write_set`
+    /// entries. Used at commit time to look up table names for WAL
+    /// emission and interner merge (Stage 5).
+    pub table_tokens: TFxMap<u64, String>,
+
+    /// Per-repo interner delta (Stage I — collapsed from per-table): entries
+    /// genuinely new to the BASE interner that were merged during commit
+    /// Phase 1. Each entry is `(field_name, base_id)`. Populated by
+    /// `pre_commit` Phase 1 (and the C5 implicit path in `write_exec`) and
+    /// threaded into the `WalEntryV2.interner_delta` field so recovery can
+    /// replay them via `touch_with_id` BEFORE replaying data ops.
+    ///
+    /// Stage I: the interner is now per-REPO (one id-namespace shared across
+    /// every table), so there is no per-table key — a single flat `Vec`
+    /// replaces the old `HashMap<table_token, Vec<...>>`. The repo owns ONE
+    /// interner, so all deltas target it.
+    pub interner_deltas: Vec<(String, u64)>,
+
+    /// #1205 (A8 amortization): `InternerKey` ids referenced (as map keys,
+    /// recursively) by this tx's staged record bodies, captured AT STAGE
+    /// TIME by the wire write paths in `write_exec.rs`
+    /// (`execute_insert_tx`/`execute_update_tx`/`execute_set_tx`) —
+    /// mirroring the traversal
+    /// [`shamir_tx::collect_referenced_ids`](crate::collect_referenced_ids)
+    /// performs, but folded into the encode/tree-build that already happens
+    /// there (an interning closure invoked per map key while streaming
+    /// `QueryValue` straight to storage bytes, or an already-built
+    /// `InnerValue`/`Map` tree) instead of paying a separate decode pass.
+    ///
+    /// `pre_commit_prelock`'s A8 scan used to re-decode every staged value
+    /// (`InnerValue::from_bytes` per row) purely to rebuild this same set —
+    /// 2-3 full decode passes per commit on a large batch. Consuming this
+    /// pre-captured set instead amortizes that to near-zero FOR TABLES
+    /// staged via the above paths — see
+    /// `StagingStore::referenced_ids_captured` for the per-table flag that
+    /// gates this: any table staged via a path that does NOT populate this
+    /// field (e.g. the tree-API `insert_tx`/`insert_tx_many`/`update_tx`,
+    /// used only by tests/benches, or an FK-cascade action in
+    /// `query/batch/fk_actions.rs`/`fk_on_update.rs`) stays correct via
+    /// `pre_commit_prelock`'s decode-based fallback, scoped to just that
+    /// table's bytes.
+    pub referenced_interner_ids: TFxMap<u64, ()>,
+
+    /// Optional version provider for SSI read-set validation.
+    /// When `None`, commit_tx Phase 2 falls back to a stub provider
+    /// `|_, _| 0` that trivially passes — Snapshot and Serializable
+    /// behave identically.
+    pub version_provider: Option<std::sync::Arc<dyn VersionProvider>>,
+
+    /// Wall-clock instant when this transaction was opened.
+    /// Used for max-lifetime enforcement at commit time.
+    pub started_at: std::time::Instant,
+
+    /// Unique-index guards recorded at stage time, re-validated under
+    /// `commit_lock` (closes the tx-concurrent unique-violation hole).
+    /// Each entry: the deterministic unique-index key this tx intends to
+    /// own, plus the owning rid (so an update re-writing its own value is
+    /// not a self-conflict). Discarded by RAII on abort like all other
+    /// tx-local state. Not gated in [`is_empty`](Self::is_empty): a guard
+    /// only ever accompanies a staged write, so it is never the sole
+    /// occupant of the tx.
+    pub unique_guards: Vec<UniqueGuard>,
+
+    /// Predicate / range read-set for SSI phantom detection (Phase C).
+    /// Populated ONLY when `isolation == Serializable`, exactly like
+    /// [`read_set`](Self::read_set). Interior-mutable so the engine's
+    /// scan path can append through a shared `&TxContext`.
+    pub predicate_set: crate::predicate_set::PredicateSet,
+
+    /// F-28 Step 5 (S3-C): table tokens this tx wants its commit footprint
+    /// published for, REGARDLESS of isolation level. Populated via
+    /// [`require_footprint_for`](Self::require_footprint_for) — the engine
+    /// calls this at insert/update staging time when the target table is
+    /// flagged (via `FkReverseCache::is_fk_child`) as an FK child, so a
+    /// concurrent Serializable FK-parent-delete's Phase 2-bis predicate
+    /// check has a footprint to conflict against even though this writer
+    /// itself is plain Snapshot isolation (see `build_footprint_from_tx`'s
+    /// widened gate in `repo_tx_gate.rs`).
+    ///
+    /// Empty for the overwhelming majority of txs (any table never flagged
+    /// as an FK child) — `TFxSet::is_empty()` is the single check that keeps
+    /// `build_footprint_from_tx` zero-overhead off this path.
+    pub footprint_tokens: TFxSet<u64>,
+
+    /// F-40b (RI barrier): child-table tokens recorded by an FK reverse-check
+    /// scan (`fk_restrict.rs::child_has_reference`, and — in Step 2 — the
+    /// cascade/on-update probes), **regardless of isolation level**. At
+    /// commit time, `pre_commit.rs` Phase 2-bis runs a targeted
+    /// `predicate_conflicts_batch` over these tokens (as
+    /// `PredicateDep::TableScan { table_token }`) so an EXPLICIT
+    /// `Snapshot`-isolation parent delete/update — which never records a
+    /// Serializable `predicate_set` entry — still aborts when a concurrent
+    /// committer touched one of these child tables in the commit window.
+    ///
+    /// This is the S3-C `footprint_tokens` pattern applied to the VALIDATION
+    /// direction: `footprint_tokens` widened what a Snapshot WRITER publishes;
+    /// `ri_barrier_tokens` widens what a Snapshot parent-side MUTATION checks.
+    ///
+    /// Interior-mutable (`scc::HashSet<u64, THasher>`, not a bare
+    /// `TFxSet<u64>` like `footprint_tokens`) because the recording site
+    /// (`child_has_reference`) holds the tx by shared reference
+    /// (`&TxContext`) — same access pattern as `predicate_set`'s own
+    /// interior-mutable container. Lock-free (pillar 5 / pillar 1: no
+    /// `std::sync::Mutex` on this hot path, and no poisoning risk from a
+    /// panic under a held guard) instead of a `std::sync::Mutex<TFxSet<u64>>`
+    /// — the FK reverse-check scan is a hot path, and a `std::sync::Mutex`
+    /// poisoned by a panic anywhere under the guard would permanently break
+    /// every later commit sharing this `TxContext` (2026-07-29 readonly
+    /// review, P1-2). `insert_sync` is idempotent (a duplicate token is a
+    /// no-op `Err`, discarded) and `is_empty()` resolves via a bucket-array
+    /// occupancy check (`scc::HashMap::has_entry`), not a full traversal —
+    /// same O(1)-ish cost as the old `Mutex<TFxSet<u64>>::lock().is_empty()`.
+    /// Empty for the overwhelming majority of txs;
+    /// `ri_barrier_tokens_is_empty()` is the single zero-overhead gate on the
+    /// commit path.
+    pub ri_barrier_tokens: scc::HashSet<u64, THasher>,
+
+    /// Commit visibility / ack policy. Default `Synchronous` (no behaviour
+    /// change). When set to `AsyncIndex`, the engine's `commit_tx` returns
+    /// to the caller right after WAL durability + data apply + publish; the
+    /// remaining materialization runs on a background `tokio::task`. See
+    /// [`CommitVisibility`] for the full contract.
+    pub visibility: CommitVisibility,
+
+    /// Async-mode only book-keeping: set by the ack-path Phase-5a (data)
+    /// helper if a per-table data write persistently failed. The background
+    /// tail picks this up and forces a `Deferred` outcome so the inflight
+    /// WAL marker is left for recovery. Never set in sync mode (the sync
+    /// `materialize` path tracks `ok` on its own stack).
+    pub async_prefix_failed: bool,
+
+    /// The actor that initiated the transaction (R2).
+    /// Defaults to `Actor::System`; set from the facade when a real
+    /// principal is available.
+    pub actor: Actor,
+
+    /// Level-3 wound-wait abort flag. Set to `true` by an OLDER
+    /// (higher-priority) tx that wounded this one during `lock_key`.
+    /// Shared (`Arc`) so a tx blocked inside `lock_key` can observe a
+    /// wound issued by another task. Stays `false` for Snapshot /
+    /// Serializable txs (never wounded — they do not take locks).
+    pub wounded: Arc<AtomicBool>,
+
+    /// Level-3 wound wake notify. Paired with [`wounded`](Self::wounded):
+    /// a wounder sets the flag AND triggers this notify so a holder parked
+    /// in `lock_key` on a DIFFERENT key wakes up and observes the wound.
+    /// Load-bearing for deadlock-freedom (a wound on key Y must wake a tx
+    /// parked on key X). Stays unused for Snapshot / Serializable.
+    pub wound_notify: Arc<tokio::sync::Notify>,
+
+    /// True when this tx was opened by the engine's IMPLICIT batch-tx path
+    /// (a non-tx write routed through the tx commit pipeline — F4b-1
+    /// "everything is a transaction"). The INTERNAL `tx_id` stays real
+    /// (nonzero) — the WAL entry and crash-injection seams gate on it — but
+    /// the projected changefeed EVENT reports `tx_id = 0` to preserve the
+    /// EXTERNAL "0 = non-tx write" subscription contract
+    /// (`docs/dev-artifacts/roadmap/LIVE_SUBSCRIPTIONS.md`). Default `false`.
+    pub implicit: bool,
+
+    /// Level-3 locked-key registry: every key this tx has acquired a
+    /// pessimistic lock on (across all tables). Populated ONLY for
+    /// `Pessimistic` txs; stays empty otherwise. Released as a batch on
+    /// commit AND on abort via `MvccStore::release_locks`. Each entry key
+    /// is `(table_token, key)` so release can route to the right table's
+    /// `MvccStore`. Interior-mutable (`scc::HashMap`) so the read path
+    /// (which holds `&TxContext`) can record locks without `&mut`.
+    ///
+    /// Keyed on [`RecordKey`](shamir_storage::types::RecordKey) (task #532):
+    /// the pessimistic-lock cell registry (`MvccStore::locks`) is
+    /// `RecordKey`-keyed, so recording / releasing a lock passes the key
+    /// straight through with no `Bytes` round-trip.
+    pub locked_keys: scc::HashMap<(u64, shamir_storage::types::RecordKey), (), THasher>,
+
+    /// #1108: per-table incremental live/released unique-posting cache — see
+    /// [`ReleasedUniqueCache`]'s doc. Populated/refreshed on demand by
+    /// `shamir-engine`'s `released_unique_keys_in_tx` (the only reader/
+    /// writer of this field); empty for txs that never call it (e.g. no
+    /// unique indexes touched — the `has_unique_indexes()` gate at every
+    /// call site keeps this a zero-overhead field otherwise).
+    pub released_unique_cache: TFxMap<u64, ReleasedUniqueCache>,
+
+    /// P0 delta-prune (brief 164): per-table pending vector-delta
+    /// acknowledgements, recorded by the Phase 5d DELTA half (one
+    /// [`VectorDeltaAck`] per successfully appended chunk) and drained by the
+    /// GRAPH half (`promote_vectors`) only after
+    /// `apply_staged_vector_deletes` + `apply_staged_vectors` succeeded for
+    /// that table. A tx whose graph promote never runs (or fails) leaves its
+    /// chunk un-acked → the chunk stays replayable and is never pruned.
+    /// Interior-mutable (`scc::HashMap`) because `promote_vectors` holds
+    /// `&TxContext`; empty for txs that never touch vector indexes.
+    pub vector_delta_acks: scc::HashMap<u64, Vec<VectorDeltaAck>, THasher>,
+
+    /// P0 index promote order (stage L3b): per-table promote-turnstile
+    /// tickets, one per successfully appended delta chunk (per backend).
+    /// Created by the Phase 5d DELTA half, awaited + consumed by the GRAPH
+    /// half (`promote_vectors`): each ticket waits for its chunk's turn,
+    /// applies the batch ordered, and — critically — RELEASES the turn on
+    /// `Drop`, covering failed promotes and cancelled commit futures.
+    /// Interior-mutable (`scc::HashMap`) because `promote_vectors` holds
+    /// `&TxContext`; empty for txs that never touch vector indexes.
+    pub vector_promote_tickets:
+        scc::HashMap<u64, Vec<crate::promote_ticket::VectorPromoteTicket>, THasher>,
+}
+
+impl TxContext {
+    pub fn new(
+        tx_id: TxId,
+        repo_id: u64,
+        snapshot_version: u64,
+        isolation: IsolationLevel,
+    ) -> Self {
+        Self {
+            tx_id,
+            repo_id,
+            snapshot_version,
+            isolation,
+            write_set: TFxMap::default(),
+            index_write_set: Vec::new(),
+            index2_stage_gens: TFxMap::default(),
+            sorted_stage_gens: TFxMap::default(),
+            base_index_stage_gens: TFxMap::default(),
+            staged_vectors: TFxMap::default(),
+            staged_vector_deletes: TFxMap::default(),
+            interner_overlay: scc::HashMap::with_hasher(THasher::default()),
+            next_overlay_id: AtomicU64::new(crate::layered_interner::OVERLAY_ID_BASE),
+            counter_deltas: TFxMap::default(),
+            read_set: scc::HashMap::with_hasher(THasher::default()),
+            cas_set: scc::HashMap::with_hasher(THasher::default()),
+            table_tokens: TFxMap::default(),
+            interner_deltas: Vec::new(),
+            referenced_interner_ids: TFxMap::default(),
+            version_provider: None,
+            started_at: std::time::Instant::now(),
+            unique_guards: Vec::new(),
+            predicate_set: crate::predicate_set::PredicateSet::new(),
+            footprint_tokens: TFxSet::default(),
+            ri_barrier_tokens: scc::HashSet::with_hasher(THasher::default()),
+            visibility: CommitVisibility::default(),
+            async_prefix_failed: false,
+            actor: Actor::System,
+            wounded: Arc::new(AtomicBool::new(false)),
+            wound_notify: Arc::new(tokio::sync::Notify::new()),
+            implicit: false,
+            locked_keys: scc::HashMap::with_hasher(THasher::default()),
+            released_unique_cache: TFxMap::default(),
+            vector_delta_acks: scc::HashMap::with_hasher(THasher::default()),
+            vector_promote_tickets: scc::HashMap::with_hasher(THasher::default()),
+        }
+    }
+
+    /// Mark this tx as an implicit batch tx (F4b-1). See [`implicit`](Self::implicit).
+    /// Returns `&mut Self` for builder-style chaining.
+    pub fn set_implicit(&mut self, implicit: bool) -> &mut Self {
+        self.implicit = implicit;
+        self
+    }
+
+    /// Opt into async-index commit visibility (see [`CommitVisibility`]).
+    /// Returns `&mut Self` for builder-style chaining.
+    pub fn set_visibility(&mut self, visibility: CommitVisibility) -> &mut Self {
+        self.visibility = visibility;
+        self
+    }
+
+    /// Set the actor that initiated this transaction (R2).
+    /// Returns `&mut Self` for builder-style chaining.
+    pub fn set_actor(&mut self, actor: Actor) -> &mut Self {
+        self.actor = actor;
+        self
+    }
+
+    /// The actor that initiated this transaction.
+    pub fn actor(&self) -> &Actor {
+        &self.actor
+    }
+
+    /// Clone of this tx's wound-wait abort flag. Pass this into
+    /// [`MvccStore::lock_key`](crate::mvcc_store::MvccStore::lock_key) so an
+    /// older (higher-priority) tx can wound this one by setting the flag.
+    pub fn wounded_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.wounded)
+    }
+
+    /// Clone of this tx's wound wake notify. Pass this into
+    /// [`MvccStore::lock_key`](crate::mvcc_store::MvccStore::lock_key) so a
+    /// wounder can wake this tx when it is parked waiting on a different key.
+    pub fn wound_notify(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.wound_notify)
+    }
+
+    /// True if this tx was wounded by an older tx (Level-3 wound-wait).
+    /// Stays `false` for Snapshot / Serializable txs.
+    pub fn is_wounded(&self) -> bool {
+        self.wounded.load(Ordering::Acquire)
+    }
+
+    /// Abort if this tx was wounded. Called (a) at the top of each Level-3
+    /// lock acquisition and (b) at commit entry, so a wounded tx that
+    /// finished its statements still aborts instead of committing.
+    ///
+    /// Returns the tx's monotonic id on abort so the engine can wrap it into
+    /// a clear `CommitError::Wounded { tx_version }`.
+    pub fn ensure_not_wounded(&self) -> Result<(), u64> {
+        if self.wounded.load(Ordering::Acquire) {
+            Err(self.tx_id.0)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Record that this tx acquired a Level-3 lock on `key` for `table_token`,
+    /// so the lock is released on commit / abort. Takes `&self` via interior
+    /// mutability (`locked_keys` is an `scc::HashMap`) so the engine's
+    /// tx-aware read path (which holds `&TxContext`) can record locks without
+    /// `&mut`. The map's dedup (same `(token, key)` inserted twice is a
+    /// no-op) mirrors `lock_key`'s re-entrant idempotency.
+    pub fn record_locked_key(&self, table_token: u64, key: shamir_storage::types::RecordKey) {
+        // entry_async requires await; use the sync entry on a non-async
+        // context. scc 2.x HashIndex/HashMap both expose a sync `entry` for
+        // the unconditional insert path.
+        match self.locked_keys.entry_sync((table_token, key)) {
+            Entry::Occupied(_) => {}
+            Entry::Vacant(e) => {
+                e.insert_entry(());
+            }
+        }
+    }
+
+    /// Record a unique-index guard for commit-time re-validation.
+    pub fn record_unique_guard(&mut self, g: UniqueGuard) {
+        self.unique_guards.push(g);
+    }
+
+    /// How long this transaction has been open.
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.started_at.elapsed()
+    }
+
+    /// Whether this transaction has exceeded the given max lifetime.
+    pub fn is_expired(&self, max_lifetime: std::time::Duration) -> bool {
+        self.started_at.elapsed() > max_lifetime
+    }
+
+    /// Approximate byte footprint of everything this tx has staged.
+    ///
+    /// Mirrors the per-field set that `wal_ops_from_tx`
+    /// (`crates/engine/shamir-engine/src/tx/commit.rs:236`) materialises into the
+    /// WAL entry: per-table staging (`write_set`), accumulated index ops
+    /// (`index_write_set`), and tx-buffered HNSW vectors (`staged_vectors` +
+    /// `staged_vector_deletes`).
+    /// Counters, interner overlay, read-set, table tokens and unique guards
+    /// are bounded bookkeeping and intentionally excluded — the cap is there
+    /// to protect the *payload* dimension.
+    ///
+    /// Note: this measures the in-memory staging footprint, not the eventual
+    /// `WalEntryV2` serialized length. The cap will trip somewhat earlier
+    /// than the actual on-disk WAL size — fine for a protective budget.
+    ///
+    /// `O(N)` over staged entries; called once per `TxExecute` from the
+    /// server's interactive-tx handler. Saturating arithmetic so a degenerate
+    /// caller can never wrap.
+    pub fn staged_bytes(&self) -> usize {
+        let mut total: usize = 0;
+        for staging in self.write_set.values() {
+            total = total.saturating_add(staging.staged_bytes());
+        }
+        for (_token, op) in &self.index_write_set {
+            match op {
+                crate::IndexWriteOp::SetPosting { key, value, .. } => {
+                    total = total.saturating_add(key.len()).saturating_add(value.len());
+                }
+                crate::IndexWriteOp::RemovePosting { key, .. } => {
+                    total = total.saturating_add(key.len());
+                }
+                crate::IndexWriteOp::BumpFtsStats { .. } => {} // counter-only, no payload
+            }
+        }
+        for vecs in self.staged_vectors.values() {
+            for (_rid, embedding) in vecs {
+                // 16 bytes of RecordId + 4 bytes per f32 lane.
+                total = total
+                    .saturating_add(16)
+                    .saturating_add(embedding.len().saturating_mul(4));
+            }
+        }
+        for dels in self.staged_vector_deletes.values() {
+            // 16 bytes of RecordId per staged vector delete (gap#1).
+            total = total.saturating_add(dels.len().saturating_mul(16));
+        }
+        total
+    }
+
+    /// True if the tx has no pending writes / index ops / staging at all.
+    pub fn is_empty(&self) -> bool {
+        self.write_set.is_empty()
+            && self.index_write_set.is_empty()
+            && self.staged_vectors.is_empty()
+            && self.staged_vector_deletes.is_empty()
+            && self.interner_overlay.is_empty()
+            && self.counter_deltas.is_empty()
+    }
+
+    /// Record a counter change for a table (e.g. +N for insert_many).
+    pub fn bump_counter(&mut self, table_id: u64, delta: i64) {
+        *self.counter_deltas.entry(table_id).or_insert(0) += delta;
+    }
+
+    /// F-50 (#869, spike): capture `table_token`'s index2 registry generation
+    /// at stage time. The caller MUST invoke this AFTER its stage-time
+    /// `all_backends()` snapshot (so every backend in that snapshot has
+    /// insertion-generation ≤ `gen`, guaranteeing the commit-time
+    /// `backends_newer_than(gen)` diff excludes already-planned backends and
+    /// never double-applies their ops). `or_insert` makes a re-capture in the
+    /// same tx (a second staged mutation to the same table) a no-op: the
+    /// EARLIEST generation is the most stale, so it is the one the commit-time
+    /// gate must compare against.
+    pub fn note_index2_stage_gen(&mut self, table_token: u64, gen: u64) {
+        self.index2_stage_gens.entry(table_token).or_insert(gen);
+    }
+
+    /// F-50 Step 2 (#870, Part D): capture `table_token`'s
+    /// `SortedIndexManager` generation at stage time. Mirrors
+    /// [`note_index2_stage_gen`](Self::note_index2_stage_gen) for the base_index
+    /// sorted-index path. The caller MUST invoke this AFTER its stage-time
+    /// `iter_indexes()` snapshot (so every def in that snapshot has
+    /// registration-generation ≤ `gen`, guaranteeing the commit-time
+    /// re-derivation never double-applies). `or_insert` makes a re-capture in
+    /// the same tx a no-op: the EARLIEST generation is the most stale.
+    pub fn note_sorted_stage_gen(&mut self, table_token: u64, gen: u64) {
+        self.sorted_stage_gens.entry(table_token).or_insert(gen);
+    }
+
+    /// P0-2 (#958): capture `table_token`'s base_index `IndexManager` generation
+    /// at stage time. Mirrors
+    /// [`note_index2_stage_gen`](Self::note_index2_stage_gen) /
+    /// [`note_sorted_stage_gen`](Self::note_sorted_stage_gen) for the base_index
+    /// (regular + unique) index path. `or_insert` makes a re-capture in the
+    /// same tx a no-op: the EARLIEST generation is the most stale.
+    pub fn note_base_index_stage_gen(&mut self, table_token: u64, gen: u64) {
+        self.base_index_stage_gens.entry(table_token).or_insert(gen);
+    }
+
+    /// Record a read for SSI validation (only if Serializable).
+    ///
+    /// `&mut self` overload, kept for existing call sites that hold the tx
+    /// mutably (tests, benches, manually-driven read tracking). Delegates to
+    /// [`record_read_shared`](Self::record_read_shared); both write the same
+    /// interior-mutable `read_set`.
+    pub fn record_read(&mut self, table_id: u64, key: Bytes, version: u64) {
+        self.record_read_shared(table_id, key, version);
+    }
+
+    /// Record a read for SSI validation (only if Serializable), taking
+    /// `&self` via interior mutability (`read_set` is an `scc::HashMap`).
+    ///
+    /// This is the entry point the engine's tx-aware read path uses:
+    /// `TableManager::read_one_tx` holds the tx by shared reference
+    /// (`Option<&TxContext>`), so it cannot call the `&mut self` overload.
+    /// Wiring this in is what makes Serializable isolation actually populate
+    /// the read-set in production (HIGH-C) — previously `record_read` was
+    /// reachable only from unit tests, so `read_set` was always empty at
+    /// commit and SSI silently degraded to Snapshot isolation.
+    ///
+    /// No-op under Snapshot isolation.
+    ///
+    /// **First-read-wins**: the version recorded for a key is the one observed
+    /// at the *first* read; a later re-read of the same key does NOT overwrite
+    /// it. This is the load-bearing SSI semantic. Versions are monotonic, so
+    /// the first read captures the lowest (earliest) version the tx ever saw —
+    /// the conservative bound for conflict detection. Overwriting with a newer
+    /// version (last-write-wins, the previous `HashMap::insert` behaviour, fine
+    /// only while reads were recorded once from unit tests) would mask a real
+    /// conflict: e.g. an update's internal old-value read runs AFTER a
+    /// concurrent committer bumped the key, and last-write-wins would re-record
+    /// the key at the post-commit version, defeating the abort.
+    pub fn record_read_shared(&self, table_id: u64, key: Bytes, version: u64) {
+        if self.isolation == IsolationLevel::Serializable {
+            match self.read_set.entry_sync((table_id, key)) {
+                // First-read-wins: keep the earliest observed version.
+                Occupied(_) => {}
+                Vacant(ve) => {
+                    ve.insert_entry(version);
+                }
+            }
+        }
+    }
+
+    /// FG-7: record a CAS check unconditionally (any isolation). Overwrite
+    /// semantics (last write wins) — unlike `read_set`'s first-read-wins,
+    /// there is no monotonic-conservative-bound concern here: `expected`
+    /// IS the exact version this specific check demands, not an observed
+    /// read version. (If the SAME key is CAS-checked twice in one tx with
+    /// two different `expected` values, that is almost certainly a caller
+    /// bug — the later check's `expected` is what commit validates.)
+    pub fn record_cas(&self, table_id: u64, key: Bytes, expected: u64) {
+        self.cas_set.upsert_sync((table_id, key), expected);
+    }
+
+    /// Record a predicate dependency for SSI phantom detection.
+    ///
+    /// No-op under Snapshot isolation — zero-overhead invariant: the
+    /// isolation gate runs BEFORE any work. Takes `&self` via interior
+    /// mutability so engine scan paths can append through `&TxContext`.
+    pub fn record_predicate_shared(&self, dep: crate::predicate_set::PredicateDep) {
+        if self.isolation == IsolationLevel::Serializable {
+            self.predicate_set.push(dep);
+        }
+    }
+
+    /// F-28 Step 5 (S3-C): require this tx's commit footprint to be
+    /// published for `table_token`, regardless of isolation level.
+    ///
+    /// Called by the engine's insert/update/set staging path when the
+    /// target table is flagged as an FK child (`FkReverseCache::is_fk_child`)
+    /// — a plain Snapshot writer into such a table still needs its footprint
+    /// recorded in the commit-write log so a concurrent Serializable
+    /// FK-parent-delete's phantom check (Phase 2-bis) has something to
+    /// conflict against. Idempotent (a `TFxSet` insert of an already-present
+    /// token is a no-op). Returns `&mut Self` for builder-style chaining.
+    pub fn require_footprint_for(&mut self, table_token: u64) -> &mut Self {
+        self.footprint_tokens.insert(table_token);
+        self
+    }
+
+    /// F-40b (RI barrier): record that this tx performed an FK reverse-check
+    /// scan of `table_token` (a child table), **regardless of isolation
+    /// level**. Called from `fk_restrict.rs::child_has_reference` (and, in
+    /// Step 2, the cascade / on-update probes). At commit time, Phase 2-bis
+    /// re-checks every recorded token against the commit-write log so a
+    /// concurrent committer that touched the child table aborts this tx —
+    /// closing the cross-transaction FK TOCTOU race for EXPLICIT
+    /// `Snapshot`-isolation parent mutations (which never record a
+    /// Serializable `predicate_set` entry).
+    ///
+    /// Takes `&self` via interior mutability so the FK scan path (which holds
+    /// the tx by shared reference) can record without a signature break.
+    /// Idempotent — inserting an already-present token is a no-op (the
+    /// `Err` from `scc::HashSet::insert_sync` on a duplicate is discarded).
+    pub fn record_ri_barrier(&self, table_token: u64) {
+        let _ = self.ri_barrier_tokens.insert_sync(table_token);
+    }
+
+    /// F-40b: true when no RI barrier tokens have been recorded. The
+    /// zero-overhead gate on the commit path (Phase 2-bis and the
+    /// commit-lock acquisition both check this before doing any work).
+    pub fn ri_barrier_tokens_is_empty(&self) -> bool {
+        self.ri_barrier_tokens.is_empty()
+    }
+
+    /// F-40b: append one `PredicateDep::TableScan { table_token }` per
+    /// recorded barrier token into `deps`. Used by Phase 2-bis to build the
+    /// unified predicate-deps slice passed to `predicate_conflicts_batch`.
+    /// The caller has already verified non-emptiness via
+    /// [`ri_barrier_tokens_is_empty`](Self::ri_barrier_tokens_is_empty).
+    pub fn append_ri_barrier_deps(&self, deps: &mut Vec<crate::predicate_set::PredicateDep>) {
+        self.ri_barrier_tokens.iter_sync(|&token| {
+            deps.push(crate::predicate_set::PredicateDep::TableScan { table_token: token });
+            true
+        });
+    }
+
+    /// Validate the read-set against current committed versions.
+    ///
+    /// For Serializable Snapshot Isolation: every key the tx read must
+    /// still be at the same version when we're about to commit. If any
+    /// key has advanced, another tx wrote there → abort with the
+    /// offending key.
+    ///
+    /// `version_provider(table_id, key) -> Option<u64>` is supplied by
+    /// the caller. `None` = unknown table → conflict. `Some(0)` is the
+    /// safe default for registered tables where the key has never been
+    /// written (0 <= any version_seen → passes).
+    pub fn validate_read_set<F>(&self, mut version_provider: F) -> Result<(), (u64, Bytes)>
+    where
+        F: FnMut(u64, &Bytes) -> Option<u64>,
+    {
+        // `iter_sync` short-circuits: the visitor returns `false` once the
+        // first conflict is recorded, so at most one conflict is captured.
+        // Iteration order is unspecified (it was already with
+        // `std::HashMap`), so which key surfaces on a multi-key conflict is
+        // not contractual — callers test single-key scenarios.
+        let mut conflict: Option<(u64, Bytes)> = None;
+        self.read_set.iter_sync(|(table_id, key), version_seen| {
+            if conflict.is_some() {
+                return false;
+            }
+            match version_provider(*table_id, key) {
+                None => conflict = Some((*table_id, key.clone())),
+                Some(current) if current > *version_seen => {
+                    conflict = Some((*table_id, key.clone()));
+                }
+                Some(_) => {}
+            }
+            true
+        });
+        match conflict {
+            Some(c) => Err(c),
+            None => Ok(()),
+        }
+    }
+
+    /// Iterate `(table_token, &RecordKey)` for every staged write across all tables.
+    pub fn write_set_keys(
+        &self,
+    ) -> impl Iterator<Item = (u64, &shamir_storage::types::RecordKey)> + '_ {
+        self.write_set
+            .iter()
+            .flat_map(|(token, staging)| staging.keys().map(move |k| (*token, k)))
+    }
+
+    /// Total number of staged write-keys across all tables.
+    // Added for Stage D (group-commit conflict detection).
+    #[allow(dead_code)]
+    fn write_set_size(&self) -> usize {
+        self.write_set.values().map(|s| s.len()).sum()
+    }
+
+    /// Returns `true` if `self` and `other` write to any common `(table, key)` pair.
+    ///
+    /// The group-commit leader calls this to reject a follower whose write-set
+    /// conflicts with the leader's. O(min(|self|, |other|)) HashSet build +
+    /// O(max) scan.
+    // Added for Stage D (group-commit conflict detection).
+    #[allow(dead_code)]
+    pub fn conflicts_with(&self, other: &TxContext) -> bool {
+        let (smaller, larger) = if self.write_set_size() <= other.write_set_size() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let smaller_set: TFxSet<(u64, &shamir_storage::types::RecordKey)> =
+            smaller.write_set_keys().collect();
+        larger.write_set_keys().any(|k| smaller_set.contains(&k))
+    }
+
+    /// Get-or-create a StagingStore for the given table token.
+    ///
+    /// Also records the human-readable table name in `table_tokens`
+    /// so commit-time WAL emission can look it up.
+    pub fn ensure_table_staging(
+        &mut self,
+        token: u64,
+        name: &str,
+        base: std::sync::Arc<dyn shamir_storage::types::Store>,
+    ) -> &mut crate::staging_store::StagingStore {
+        self.table_tokens
+            .entry(token)
+            .or_insert_with(|| name.to_string());
+        self.write_set
+            .entry(token)
+            .or_insert_with(|| crate::staging_store::StagingStore::new(base))
+    }
+
+    /// Stage an HNSW vector under this tx for the given table token.
+    ///
+    /// The pair is buffered tx-locally and applied to the live graph at
+    /// commit (Phase 5d). A dropped/aborted tx discards it (RAII) — the
+    /// live graph is never touched until commit.
+    pub fn stage_vector(&mut self, table_token: u64, rid: RecordId, vec: Vec<f32>) {
+        self.staged_vectors
+            .entry(table_token)
+            .or_default()
+            .push((rid, vec));
+    }
+
+    /// Vectors staged under this tx for `table_token`, for in-tx search
+    /// merge. `None` when the table has no staged vectors.
+    pub fn staged_vectors_for(&self, table_token: u64) -> Option<&[(RecordId, Vec<f32>)]> {
+        self.staged_vectors.get(&table_token).map(Vec::as_slice)
+    }
+
+    /// Stage a vector delete under this tx for the given table token
+    /// (gap#1 / HIGH-6). The rid is buffered tx-locally and applied to the
+    /// live graph (adapter tombstone) + the durable delta log
+    /// (`DeltaOp::Delete`) at commit (Phase 5d). A dropped/aborted tx
+    /// discards it (RAII) — the live graph is never touched until commit,
+    /// so no ghost appears. Mirrors [`stage_vector`](Self::stage_vector)
+    /// for the delete side of the contract.
+    pub fn stage_vector_delete(&mut self, table_token: u64, rid: RecordId) {
+        self.staged_vector_deletes
+            .entry(table_token)
+            .or_default()
+            .push(rid);
+    }
+
+    /// Vector deletes staged under this tx for `table_token`. `None` when
+    /// the table has no staged vector deletes. Used by Phase 5d to promote
+    /// the tombstones + delta ops.
+    pub fn staged_vector_deletes_for(&self, table_token: u64) -> Option<&[RecordId]> {
+        self.staged_vector_deletes
+            .get(&table_token)
+            .map(Vec::as_slice)
+    }
+
+    /// Attach a version provider used by commit_tx Phase 2 for SSI
+    /// validation. Returns `&mut Self` for builder-style chaining.
+    pub fn set_version_provider(
+        &mut self,
+        provider: std::sync::Arc<dyn VersionProvider>,
+    ) -> &mut Self {
+        self.version_provider = Some(provider);
+        self
+    }
+
+    /// cancel-safe: NO — iterates `write_set` and invokes
+    /// `rewrite_set_bytes` on each per-table StagingStore. Cancellation
+    /// mid-iteration leaves a subset of tables remapped and the rest
+    /// holding overlay ids — the tx must be aborted on error / cancel.
+    ///
+    /// Apply an overlay-id → base-id remap across all staged writes.
+    ///
+    /// Called during commit phase 1, immediately after
+    /// `commit_interner_overlay`, so subsequent flush phases see
+    /// stable base ids only.
+    ///
+    /// Errors if any staged value fails to decode/re-encode. Caller
+    /// should abort the transaction on error.
+    // hasher-generic boundary: caller supplies the hasher (THasher at every call site)
+    #[allow(clippy::disallowed_types)]
+    pub async fn apply_id_remap<S: std::hash::BuildHasher>(
+        &mut self,
+        remap: &std::collections::HashMap<u64, u64, S>,
+    ) -> Result<(), String> {
+        if remap.is_empty() {
+            return Ok(());
+        }
+        for staging in self.write_set.values_mut() {
+            staging
+                .rewrite_set_bytes(|b| {
+                    crate::id_remap::remap_inner_value_bytes(b.clone(), remap)
+                        .map_err(|e| format!("remap: {e}"))
+                })
+                .await?;
+        }
+        Ok(())
+    }
+}

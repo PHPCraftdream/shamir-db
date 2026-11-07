@@ -1,7 +1,7 @@
 /**
  * SELECT projections + aggregations + GROUP BY.
  *
- * SelectItem schema (from `crates/shamir-query-types/src/read/select.rs`):
+ * SelectItem schema (from `crates/query/shamir-query-types/src/read/select.rs`):
  *   { type: 'all' }
  *   { type: 'field',     path: ['user'], alias?: '...' }
  *   { type: 'aggregate', func: 'count'|'sum'|'avg'|'min'|'max',

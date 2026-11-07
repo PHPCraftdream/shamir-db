@@ -2,7 +2,7 @@
  * Typed wire-error surface — the napi binding's wrapper maps every
  * `DbResponse::Error { code, message }` the server returns into a
  * `ShamirDbError` carrying `.code` and `.retryable` (see
- * `crates/shamir-client-node/js/wrapper.js`).
+ * `crates/client/shamir-client-node/js/wrapper.js`).
  *
  * These assertions go through the PUBLIC `shamir-client` package: the shared
  * `ctx.client` connected by the orchestrator (`e2e.test.js`) IS a

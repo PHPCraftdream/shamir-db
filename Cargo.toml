@@ -1,7 +1,7 @@
 [workspace]
 # `vendor/hnsw_rs` is a patched copy of the crates.io crate (see its VENDORED.md);
 # it is a member so its own unit tests (incl. the lock-order regression) run in CI.
-members = ["crates/*", "vendor/hnsw_rs"]
+members = ["crates/*/*", "vendor/hnsw_rs"]
 resolver = "2"
 
 # `shamir-client-node` (napi-rs cdylib) needs the MSVC toolchain on Windows
@@ -10,8 +10,8 @@ resolver = "2"
 # running the `windows-gnu` toolchain, build it explicitly via
 # `cargo build -p shamir-client-node` or `napi build` from `npm`.
 # `shamir-client-ts` is a pure-TypeScript package (no Cargo.toml); exclude it
-# so the `crates/*` glob doesn't try to load it as a workspace member.
-exclude = ["crates/shamir-client-ts", "tools/rust-guard"]
+# so the `crates/*/*` glob does not try to load it as a workspace member.
+exclude = ["crates/client/shamir-client-ts", "tools/rust-guard"]
 
 [workspace.dependencies]
 # Published on crates.io (https://crates.io/crates/captrack, repo
@@ -156,7 +156,7 @@ opt-level = 1
 # holds a read lock on the new point's neighbour list while taking write locks on its
 # neighbours (lock-order inversion). The vendored copy releases the read lock first; see
 # vendor/hnsw_rs/VENDORED.md. The version stays 0.3.5, so the exact pin in
-# crates/shamir-index/Cargo.toml and the dump-format guard HNSW_RS_VERSION are unchanged.
+# crates/index/shamir-index/Cargo.toml and the dump-format guard HNSW_RS_VERSION are unchanged.
 # Drop this entry (and the member + directory) once an upstream release has the fix and
 # has passed the dependency cooldown (3 days).
 [patch.crates-io]

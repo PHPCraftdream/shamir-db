@@ -4,7 +4,7 @@ tools/rust-guard/target/
 .flamegraphs
 /test_data/
 /captrack-pgo-runs/
-/crates/shamir-db/test_data/
+/crates/engine/shamir-db/test_data/
 # Match test_data anywhere in the workspace (each crate's tests
 # materialise their own fixture dirs).
 **/test_data/
@@ -21,12 +21,12 @@ tools/rust-guard/target/
 .tmp-*
 /web/server-cert.pem
 
-# `**/` — match at any depth (covers web/, crates/shamir-client-node/,
+# `**/` — match at any depth (covers web/, crates/client/shamir-client-node/,
 # tests/e2e/, …). Single `*/node_modules/*` only matched 1-level paths.
 **/node_modules/
 
 # Node binding build artefacts
-crates/shamir-client-node/native/*.node
+crates/client/shamir-client-node/native/*.node
 tests/e2e/package-lock.json
 examples/*/target/
 examples/*/Cargo.lock

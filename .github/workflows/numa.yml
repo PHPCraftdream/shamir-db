@@ -7,8 +7,8 @@ on:
     # these jobs (a filtered push/PR does not start the workflow at all —
     # intended).
     paths:
-      - 'crates/shamir-numa/**'
-      - 'crates/shamir-tunables/**'
+      - 'crates/foundation/shamir-numa/**'
+      - 'crates/foundation/shamir-tunables/**'
       - 'scripts/runners/ci-qemu-numa-test.sh'
       - 'scripts/runners/numa-smoke-oracle.sh'
       - 'scripts/runners/test-numa-smoke-oracle.sh'
@@ -19,8 +19,8 @@ on:
     # ready_for_review starts the run when a draft is promoted.
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - 'crates/shamir-numa/**'
-      - 'crates/shamir-tunables/**'
+      - 'crates/foundation/shamir-numa/**'
+      - 'crates/foundation/shamir-tunables/**'
       - 'scripts/runners/ci-qemu-numa-test.sh'
       - 'scripts/runners/numa-smoke-oracle.sh'
       - 'scripts/runners/test-numa-smoke-oracle.sh'

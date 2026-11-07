@@ -27,20 +27,30 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 
 ### 📦 Workspace
 
-`Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
-`shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
-`crates/*` glob doesn't try to load it). The default workspace ships
-**35 crates** under `crates/` (including the `shamir-client-node` napi-rs
-binding, a regular member; MSVC-only on Windows) plus the vendored
+`Cargo.toml` declares `members = ["crates/*/*", "vendor/hnsw_rs"]` and excludes
+`crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
+`crates/*/*` glob doesn't try to load it). Crates live in layer folders
+`crates/<group>/<crate>/` (names do not change; at most 7 crates per group). The
+default workspace ships **35 crates** (including the `shamir-client-node`
+napi-rs binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
-`shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
-`shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`,
-`shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
-`shamir-server`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`,
-`shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-e2e`, `shamir-sdk`,
-`shamir-sdk-macros`, `shamir-tunables`, `shamir-test-diag`, `shamir-wasm-host`, `shamir-wasm-admission`, `shamir-index-core`, `shamir-vector`, `shamir-index`,
-`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`.
+| Group | Crates |
+|---|---|
+| `foundation` | `shamir-collections`, `shamir-types`, `shamir-tunables`, `shamir-numa`, `shamir-private-dir`, `shamir-proc-tree` |
+| `storage` | `shamir-storage`, `shamir-wal`, `shamir-tx` |
+| `query` | `shamir-query-types`, `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-funclib` |
+| `index` | `shamir-index-core`, `shamir-index`, `shamir-vector` |
+| `engine` | `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`, `shamir-db` |
+| `wasm` | `shamir-wasm-host`, `shamir-wasm-admission`, `shamir-sdk`, `shamir-sdk-macros` |
+| `net` | `shamir-connect`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`, `shamir-transport-ws` |
+| `server` | `shamir-server` |
+| `client` | `shamir-client`, `shamir-client-node` (and the TypeScript package `shamir-client-ts`) |
+| `devtools` | `shamir-bench-utils`, `shamir-test-diag`, `shamir-e2e` |
+
+A new crate goes into the group of its layer; a group that would pass 7 crates is
+split by topic, not allowed to grow. CI selects crates by the nearest `Cargo.toml`,
+so regrouping never changes package names or `-p` flags.
 
 `shamir-test-diag` is dev-only (`publish = false`): failure-only flake
 diagnostics (`FlakeGuard` timeline + bounded `log`/`tracing` capture ring,
@@ -351,10 +361,10 @@ to carry — removed once the last consumer migrated off Criterion; do NOT
 reach for it). The `shamir-bench-utils` crate itself is NOT gone: it still
 exists, narrowed to what `bench_scale_tool::Harness` doesn't provide —
 shared vector fixture generation (`vector_data`) and optional peak-RSS
-sampling (`peak_mem`), used by several `crates/*/benches/*.rs` files today.
-Every bench file in `crates/*/benches/` today uses `bench_scale_tool::Harness`
+sampling (`peak_mem`), used by several `crates/*/*/benches/*.rs` files today.
+Every bench file in `crates/*/*/benches/` today uses `bench_scale_tool::Harness`
 + `bench_batched_async` (or the sync `bench` variant) — copy an existing
-file (e.g. `crates/shamir-engine/benches/tx_pipeline.rs`) as the template
+file (e.g. `crates/engine/shamir-engine/benches/tx_pipeline.rs`) as the template
 for a new one; do NOT reach for Criterion APIs from memory/training data,
 they no longer apply to this repo.
 
@@ -526,7 +536,7 @@ at the top of the script.
 `source-integrity` CI job (runs on draft AND ready PRs and master pushes;
 self-tests run in the `rust-guard self-test` job, CI only):
 
-* `modules` — every tracked `.rs` under `crates/*/` and `tools/*/` must be
+* `modules` — every tracked `.rs` under `crates/` and `tools/*/` must be
   reachable from a target root or listed in `.rust-guard/exceptions.toml`
   (the lost-test case).
 * `structure` — AST rules on the PR's changed files: no logic in
@@ -670,7 +680,7 @@ from another instance as its own justification.
 
 1. **Dead scaffolding.**
    `RepoTxGate::pending_commits: std::sync::Mutex<Vec<PendingCommit>>`
-   (`crates/shamir-tx/src/repo_tx_gate.rs`) — the group-commit
+   (`crates/storage/shamir-tx/src/repo_tx_gate.rs`) — the group-commit
    leader/follower path (`tx/group_commit.rs`) that drove it was removed in
    F-54 (#865), and `enqueue_pending` / `drain_pending` have zero live
    callers. The contention model is nonexistent (never locked on any path).
@@ -699,7 +709,7 @@ from another instance as its own justification.
 
 3. **First-touch-only population, never on the read-hot path.**
    `Interner::reverse_write_lock: std::sync::Mutex<()>`
-   (`crates/shamir-types/src/core/interner/interner.rs`) serializes reverse-
+   (`crates/foundation/shamir-types/src/core/interner/interner.rs`) serializes reverse-
    spine WRITES only (first-touch population of a distinct field NAME,
    never repeated for a name already seen) — every read
    (`get_str`/`with_str`/`reverse_snapshot`/etc.) stays 100% lock-free via
@@ -863,8 +873,8 @@ server code, benches) → builder.
 Modules with tests follow a strict layout:
 
 1. **One `tests/` directory per module.** Examples:
-   `crates/shamir-types/src/types/tests/`,
-   `crates/shamir-engine/src/table/tests/`.
+   `crates/foundation/shamir-types/src/types/tests/`,
+   `crates/engine/shamir-engine/src/table/tests/`.
 
 2. **Split tests by topic.** One file per logically related group:
    `value_tests.rs`, `record_id_tests.rs`, `config_tests.rs`.
@@ -890,7 +900,7 @@ Modules with tests follow a strict layout:
 Example layout:
 
 ```
-crates/shamir-types/src/types/
+crates/foundation/shamir-types/src/types/
 ├── mod.rs            # contains #[cfg(test)] mod tests;
 ├── value.rs          # implementation only
 ├── record_id.rs      # implementation only

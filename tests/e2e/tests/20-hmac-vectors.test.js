@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const hmac = require('../helpers/hmac');
 const { ddl, createApiToken } = require('@shamir/client');
-const vectorsPath = path.resolve(__dirname, '../../../crates/shamir-query-types/test-vectors/admin_hmac_v2.json');
+const vectorsPath = path.resolve(__dirname, '../../../crates/query/shamir-query-types/test-vectors/admin_hmac_v2.json');
 const vectors = JSON.parse(fs.readFileSync(vectorsPath, 'utf8'));
 
 module.exports = async function ({ test, assertEq }) {

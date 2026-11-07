@@ -10,7 +10,7 @@ origin, not the modified tree (`Cargo.toml:136-137`,
 `vendor/hnsw_rs/Cargo.toml:8-9`).
 
 Wired in through `[patch.crates-io]` in the workspace `Cargo.toml`; the exact pin
-`hnsw_rs = "=0.3.5"` in `crates/shamir-index/Cargo.toml` and the dump-format guard
+`hnsw_rs = "=0.3.5"` in `crates/index/shamir-vector/Cargo.toml` and the dump-format guard
 `HNSW_RS_VERSION` stay unchanged because the vendored version is still 0.3.5.
 
 ## Why

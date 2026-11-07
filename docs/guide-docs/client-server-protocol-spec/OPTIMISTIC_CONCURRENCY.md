@@ -100,9 +100,9 @@ boundary is unrelated to isolation level and is not changed by the
 commit-time CAS re-validation above.
 
 Proven correct on every entry path:
-`crates/shamir-engine/src/table/tests/version_cas_tests.rs`'s
+`crates/engine/shamir-engine/src/table/tests/version_cas_tests.rs`'s
 `concurrent_cas_exactly_one_wins` (direct engine `begin_tx(Serializable)`)
-and `crates/shamir-server/tests/version_cas_e2e.rs`'s
+and `crates/server/shamir-server/tests/version_cas_e2e.rs`'s
 `concurrent_cas_via_real_server_exactly_one_wins` (real server + real
 `shamir_client::Client`, plain non-transactional AND explicit-Snapshot AND
 explicit-Serializable).

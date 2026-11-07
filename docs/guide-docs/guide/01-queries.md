@@ -232,7 +232,7 @@ write-значений (`INSERT`/`UPDATE`/`SET`) тоже.
 дороже плоского сравнения на каждой вычисляемой строке — резолвер
 сегодня перекомпилирует условие фильтра (`compile_filter`) на каждую
 эвалюацию, а не один раз на запрос. Измеренные числа (микробенч
-`crates/shamir-engine/benches/cond_expr_eval.rs`, 1000 записей/итерация,
+`crates/engine/shamir-engine/benches/cond_expr_eval.rs`, 1000 записей/итерация,
 QUICK-калибровка):
 
 ```text
@@ -435,7 +435,7 @@ const handles = db.batch()
 
 Пример с `isNull`/`isNotNull`-guard'ами (presence-check вместо сравнения
 значений) — см. `switch_three_branches_executes_exactly_one_over_real_wire`
-в `crates/shamir-e2e/tests/batch/when.rs`.
+в `crates/devtools/shamir-e2e/tests/batch/when.rs`.
 
 ### Каскадный skip
 
@@ -488,7 +488,7 @@ Decision 2.
 
 Рабочий пример (канонический сценарий, `$query`-колонка-реф как `over`) —
 лифтован из `for_each_over_query_column_ref_inserts_one_audit_row_per_order_over_real_wire`
-в `crates/shamir-e2e/tests/batch/for_each.rs`:
+в `crates/devtools/shamir-e2e/tests/batch/for_each.rs`:
 
 ```ts
 import { write, Query } from '@shamir/client';

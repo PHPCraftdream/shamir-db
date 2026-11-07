@@ -27,9 +27,10 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 
 ### 📦 Workspace
 
-`Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
-`shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*` glob
-must not try to load it). The default workspace ships **29 crates** under `crates/` (including
+`Cargo.toml` declares `members = ["crates/*/*", "vendor/hnsw_rs"]` and excludes
+`crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*/*` glob
+must not try to load it). Crates live in layer folders `crates/<group>/<crate>/`
+(see CLAUDE.md for the group table). The default workspace ships **29 crates** under `crates/` (including
 the `shamir-client-node` napi-rs binding, a regular member; MSVC-only on
 Windows) plus the vendored `vendor/hnsw_rs` member:
 
@@ -192,8 +193,8 @@ the fix); do not run the suite locally to watch them — see "Compile / build
 Modules with tests follow a strict layout:
 
 1. **One `tests/` directory per module.** Examples:
-   `crates/shamir-types/src/types/tests/`,
-   `crates/shamir-engine/src/table/tests/`.
+   `crates/foundation/shamir-types/src/types/tests/`,
+   `crates/engine/shamir-engine/src/table/tests/`.
 
 2. **Split tests by topic.** One file per logically related group:
    `value_tests.rs`, `record_id_tests.rs`, `config_tests.rs`.
@@ -219,7 +220,7 @@ Modules with tests follow a strict layout:
 Example layout:
 
 ```
-crates/shamir-types/src/types/
+crates/foundation/shamir-types/src/types/
 ├── mod.rs            # contains #[cfg(test)] mod tests;
 ├── value.rs          # implementation only
 ├── record_id.rs      # implementation only

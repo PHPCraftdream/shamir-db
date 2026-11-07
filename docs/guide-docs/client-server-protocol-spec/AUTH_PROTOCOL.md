@@ -946,7 +946,7 @@ Server clock drift acceptable если `< 5s` (см. §8.7). Implementations **M
 
 ### 16.1. Расположение и формат
 
-Векторы живут в `crates/shamir-connect/test-vectors/` в виде **per-vector
+Векторы живут в `crates/net/shamir-connect/test-vectors/` в виде **per-vector
 JSON+TOML пар** (git-diffable, human-readable, по одному файлу на категорию):
 
 - `.json` — canonical cross-language source of truth (browser/TS SDK грузит эти
@@ -1004,7 +1004,7 @@ Total auth_message length: 14 + 2 + 5 + 32 + 32 + 16 + 4+4+4+1 + 1+1+32 + 1 = 14
 
 Закреплён в `auth_message_default.{json,toml}`.
 
-### 16.3. Полный набор векторов (файлы в `crates/shamir-connect/test-vectors/`)
+### 16.3. Полный набор векторов (файлы в `crates/net/shamir-connect/test-vectors/`)
 
 | Файл | Категория | Что pinned |
 |---|---|---|

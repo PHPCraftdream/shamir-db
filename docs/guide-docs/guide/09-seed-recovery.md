@@ -237,7 +237,7 @@ Refusal codes (they appear in admin errors, terminal
 
 ## 6. Process crash vs power loss — honesty
 
-The CI certification (`crates/shamir-server/tests/seed_recovery_e2e/`)
+The CI certification (`crates/server/shamir-server/tests/seed_recovery_e2e/`)
 kills the leader PROCESS (SIGKILL) and proves the scenarios covered there:
 crash-recovery behavior, `resync_required` without payload applied when a
 certified gap is encountered, and export→install→Resume→convergence for the

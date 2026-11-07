@@ -592,7 +592,7 @@ jobs:
         shell: bash
         run: 'echo "::notice::docs-only diff: archive download, lib tests and doctests skipped"'
 
-  # Integration gate: the test files under `crates/*/tests/`. Before this
+  # Integration gate: the test files under `crates/*/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
   # on a PR. This includes the only real fsync-durability-across-restart
   # coverage (`shamir-server/tests/server_meta.rs`, `persistence_e2e.rs`,
@@ -620,7 +620,7 @@ jobs:
   # forcing `--test-threads=1` on the whole suite.
   #
   # NOTE: the Node.js napi e2e suite under `tests/e2e/` AND the TS client
-  # e2e suite (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
+  # e2e suite (`crates/client/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
   # intentionally NOT wired into this per-PR gate — both require a release
   # `shamir-server` build (and the napi one needs the MSVC-built
   # `shamir-client-node` binding, a regular workspace member), too heavy
@@ -676,7 +676,7 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
-      # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
+      # ONLY integration test binaries (crates/*/*/tests/*.rs) — the nextest
       # filterset equivalent of cargo's `--test '*'` target selector; it
       # deliberately excludes `kind(lib)` (covered by the `test` job above)
       # and `kind(bench)` (never a correctness gate). $AFFECTED narrows the
@@ -696,7 +696,7 @@ jobs:
         shell: bash
         run: df -h / && du -sh target 2>/dev/null || true
 
-  # Pure-TypeScript unit tests for `crates/shamir-client-ts` (query
+  # Pure-TypeScript unit tests for `crates/client/shamir-client-ts` (query
   # builders, framing, hmac, msgpack round-trips — the
   # `src/core/**/__tests__/*.test.ts` surface). Cheap (seconds), no Rust
   # toolchain and no server binary needed.
@@ -732,10 +732,10 @@ jobs:
           # satisfies both. Pinned for reproducibility.
           node-version: '22'
           cache: npm
-          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+          cache-dependency-path: crates/client/shamir-client-ts/package-lock.json
       - run: npm ci && npm run typecheck && npm test
         if: needs.affected.outputs.ts == 'true'
-        working-directory: crates/shamir-client-ts
+        working-directory: crates/client/shamir-client-ts
       - name: ts scope notice
         if: needs.affected.outputs.ts != 'true'
         shell: bash
@@ -1125,7 +1125,7 @@ jobs:
       # proves the discovery tool round-trips REAL `cargo nextest list`
       # output on the default config (ubuntu only). shamir-collections has
       # no lib tests; shamir-types is the smallest crate that clearly does
-      # (#[test] modules under crates/shamir-types/src/**/tests/).
+      # (#[test] modules under crates/foundation/shamir-types/src/**/tests/).
       - name: format smoke (real nextest output must round-trip)
         if: matrix.os == 'ubuntu-latest' && matrix.config.id == 'default' && (github.event.pull_request.draft != true || needs.plan.outputs.full == 'true')
         shell: bash
@@ -1295,7 +1295,7 @@ jobs:
       - run: cargo clippy --manifest-path tools/rust-guard/Cargo.toml --all-targets --locked -- -D warnings
 
   # DEC-3 Q2-b: the Node native binding (`shamir-client`, napi-rs cdylib in
-  # crates/shamir-client-node). Proves the package BUILD is reproducible and
+  # crates/client/shamir-client-node). Proves the package BUILD is reproducible and
   # CONSUMABLE: `npm ci` + `npm run build:debug` (napi build --platform
   # --output-dir native --js index.js --dts index.d.ts) must not
   # drift the generated `native/index.js` / `native/index.d.ts`, the packed
@@ -1326,19 +1326,19 @@ jobs:
           # binding lockfile so `npm ci` below stays reproducible.
           node-version: '22'
           cache: npm
-          cache-dependency-path: crates/shamir-client-node/package-lock.json
+          cache-dependency-path: crates/client/shamir-client-node/package-lock.json
       - name: npm ci (binding)
         if: needs.affected.outputs.node == 'true'
-        working-directory: crates/shamir-client-node
+        working-directory: crates/client/shamir-client-node
         run: npm ci
       - name: napi build (debug)
         if: needs.affected.outputs.node == 'true'
-        working-directory: crates/shamir-client-node
+        working-directory: crates/client/shamir-client-node
         run: npm run build:debug
       - name: generated-file drift check
         if: needs.affected.outputs.node == 'true'
         id: napi-drift
-        working-directory: crates/shamir-client-node
+        working-directory: crates/client/shamir-client-node
         run: git diff --exit-code -- native/index.js native/index.d.ts
       # Local napi builds are banned, so the committed generated files are
       # taken from this artifact when the drift check above fails.
@@ -1349,13 +1349,13 @@ jobs:
           overwrite: true
           name: napi-generated-files
           path: |
-            crates/shamir-client-node/native/index.js
-            crates/shamir-client-node/native/index.d.ts
+            crates/client/shamir-client-node/native/index.js
+            crates/client/shamir-client-node/native/index.d.ts
           if-no-files-found: error
           retention-days: 7
       - name: npm pack (tarball into runner temp)
         if: needs.affected.outputs.node == 'true'
-        working-directory: crates/shamir-client-node
+        working-directory: crates/client/shamir-client-node
         shell: bash
         run: npm pack --pack-destination "$RUNNER_TEMP"
       # Consume the packed tarball exactly like an external user: fresh

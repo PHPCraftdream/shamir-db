@@ -20,15 +20,15 @@
  *      top-k (soft recall: own vector in top-3).
  *
  * Wire field reference (confirmed by reading the Rust source):
- *   CreateIndexOp (crates/shamir-query-types/src/admin/types/index_ops.rs):
+ *   CreateIndexOp (crates/query/shamir-query-types/src/admin/types/index_ops.rs):
  *     index_type: "vector"
  *     vector_dim: u32
  *     vector_metric: "cosine" | "l2" | "dot"
  *     vector_quantization: "sq8"   (V5.2 #411, Option<String>, omitted when None)
- *   Filter::VectorSimilarity (crates/shamir-query-types/src/filter/filter_enum.rs):
+ *   Filter::VectorSimilarity (crates/query/shamir-query-types/src/filter/filter_enum.rs):
  *     { op: "vector_similarity", field, query: [f32...], k: u32,
  *       ef_search?: u32, oversample?: f32 }   (ef_search/oversample omitted when None)
- *   Filtered ANN shape (crates/shamir-engine/src/table/filtered_vector.rs):
+ *   Filtered ANN shape (crates/engine/shamir-engine/src/table/filtered_vector.rs):
  *     { op: "and", filters: [ {vector_similarity op}, {residual predicate} ] }
  *   index_used labels:
  *     bare VectorSimilarity → "index2_ranked"
@@ -606,7 +606,7 @@ module.exports = async function ({ client, fixtures, test, assert, assertEq, ass
       },
     });
 
-    // The fit threshold is 256 (crates/shamir-index/src/vector/hnsw_adapter.rs,
+    // The fit threshold is 256 (crates/index/shamir-index/src/vector/hnsw_adapter.rs,
     // FIT_THRESHOLD == BRUTE_FORCE_MAX == 256). Insert 280 to cross it and
     // trigger the u8-graph fit.
     const total = 280;

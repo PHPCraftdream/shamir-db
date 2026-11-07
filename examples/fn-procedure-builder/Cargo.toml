@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-shamir-sdk = { path = "../../crates/shamir-sdk", features = ["query-builder"] }
+shamir-sdk = { path = "../../crates/wasm/shamir-sdk", features = ["query-builder"] }
 
 [profile.release]
 opt-level = "z"

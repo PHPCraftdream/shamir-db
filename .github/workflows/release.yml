@@ -31,7 +31,7 @@ name: release
 # to "latest".
 #
 # CR-B9: the gate was widened from fmt+clippy+test to also require
-# `integration` (ci.yml's `crates/*/tests/*.rs` suite, copied in verbatim),
+# `integration` (ci.yml's `crates/*/*/tests/*.rs` suite, copied in verbatim),
 # `ts-unit` (ci.yml's TS builder/type unit tests, copied in verbatim), a new
 # `ts-e2e` job (the real TS e2e suite against a freshly-built release
 # binary, mirroring ts-e2e-nightly.yml's `ts-e2e` job), and a new
@@ -132,7 +132,7 @@ jobs:
       - run: ./scripts/test.sh --locked
         shell: bash
 
-  # Integration gate: the test files under `crates/*/tests/`. Before this
+  # Integration gate: the test files under `crates/*/*/tests/`. Before this
   # job these only had to COMPILE (clippy --all-targets) — they never RAN
   # on a PR. This includes the only real fsync-durability-across-restart
   # coverage (`shamir-server/tests/server_meta.rs`, `persistence_e2e.rs`,
@@ -160,7 +160,7 @@ jobs:
   # forcing `--test-threads=1` on the whole suite.
   #
   # NOTE: the Node.js napi e2e suite under `tests/e2e/` AND the TS client
-  # e2e suite (`crates/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
+  # e2e suite (`crates/client/shamir-client-ts/src/__tests__/**/e2e-*.test.ts`) are
   # intentionally NOT wired into this per-PR gate — both require a release
   # `shamir-server` build (and the napi one needs the MSVC-built
   # `shamir-client-node` binding, a regular workspace member), too heavy
@@ -202,14 +202,14 @@ jobs:
           tool: nextest@0.9.137
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31  # v2
       # bash on every runner (Git Bash on Windows). `-E 'kind(test)'` selects
-      # ONLY integration test binaries (crates/*/tests/*.rs) — the nextest
+      # ONLY integration test binaries (crates/*/*/tests/*.rs) — the nextest
       # filterset equivalent of cargo's `--test '*'` target selector; it
       # deliberately excludes `kind(lib)` (covered by the `test` job above)
       # and `kind(bench)` (never a correctness gate).
       - run: ./scripts/test.sh --full --locked -E 'kind(test)'
         shell: bash
 
-  # Pure-TypeScript unit tests for `crates/shamir-client-ts` (query
+  # Pure-TypeScript unit tests for `crates/client/shamir-client-ts` (query
   # builders, framing, hmac, msgpack round-trips — the
   # `src/core/**/__tests__/*.test.ts` surface). Cheap (seconds), no Rust
   # toolchain and no server binary needed.
@@ -242,9 +242,9 @@ jobs:
           # satisfies both. Pinned for reproducibility.
           node-version: '22'
           cache: npm
-          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+          cache-dependency-path: crates/client/shamir-client-ts/package-lock.json
       - run: npm ci && npm run typecheck && npm test
-        working-directory: crates/shamir-client-ts
+        working-directory: crates/client/shamir-client-ts
 
   # TS client e2e against a freshly-built release binary (CR-B9). Mirrors
   # `ts-e2e-nightly.yml`'s `ts-e2e` job recipe exactly: a self-contained
@@ -282,14 +282,14 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: crates/shamir-client-ts/package-lock.json
+          cache-dependency-path: crates/client/shamir-client-ts/package-lock.json
       # `SERVER_AVAILABLE` is now true (the binary exists at
       # target/release/shamir-server), so the full `e2e-*.test.ts` suite
       # executes instead of self-skipping. `npm test` = `vitest run`; a
       # non-zero exit (any failed test) fails the job.
       - name: TS client e2e (vitest)
         run: npm ci && npm test
-        working-directory: crates/shamir-client-ts
+        working-directory: crates/client/shamir-client-ts
 
   # --------------------------------------------------------------------------
   # tag <-> version consistency check (CR-B9)
@@ -342,7 +342,7 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           echo "tag=${GITHUB_REF_NAME} -> expected crate version=${TAG_VERSION}"
 
-          VERSIONS="$(grep -rn '^version' crates/*/Cargo.toml | sed -E 's/.*version = "([^"]+)".*/\1/' | sort -u)"
+          VERSIONS="$(grep -rn '^version' crates/*/*/Cargo.toml | sed -E 's/.*version = "([^"]+)".*/\1/' | sort -u)"
           COUNT="$(printf '%s\n' "${VERSIONS}" | grep -c . || true)"
 
           echo "--- distinct crate versions found ---"
@@ -368,7 +368,7 @@ jobs:
           # workspace (root Cargo.toml `exclude` — napi-rs cdylib, MSVC-only,
           # built separately per CLAUDE.md), uses a different manifest format
           # (Node package.json, not Cargo.toml — never matched by the
-          # `crates/*/Cargo.toml` grep above), and is versioned/released on its
+          # `crates/*/*/Cargo.toml` grep above), and is versioned/released on its
           # own cadence. Its "version": "0.1.0" therefore legitimately differs
           # from the workspace's 0.1.0-alpha.1 and is OUT OF SCOPE here by
           # design — do NOT "fix" it by bumping the package.json version. There
