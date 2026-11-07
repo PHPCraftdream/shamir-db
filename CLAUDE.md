@@ -30,7 +30,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*", "vendor/hnsw_rs"]` and excludes
 `shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*` glob doesn't try to load it). The default workspace ships
-**31 crates** under `crates/` (including the `shamir-client-node` napi-rs
+**32 crates** under `crates/` (including the `shamir-client-node` napi-rs
 binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
@@ -38,7 +38,7 @@ binding, a regular member; MSVC-only on Windows) plus the vendored
 `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
 `shamir-server`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`,
-`shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
+`shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-e2e`, `shamir-sdk`,
 `shamir-sdk-macros`, `shamir-tunables`, `shamir-test-diag`, `shamir-wasm-host`, `shamir-index`,
 `shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`.
 
@@ -46,6 +46,8 @@ binding, a regular member; MSVC-only on Windows) plus the vendored
 diagnostics (`FlakeGuard` timeline + bounded `log`/`tracing` capture ring,
 design in `docs/dev-artifacts/design/flake-failure-logs.md`) — adopted
 per-test as a `[dev-dependencies]` entry, never a production dependency.
+
+`shamir-e2e` is test-only (`publish = false`): the client tests that boot a real server live there, so `shamir-client` carries no upward dev-dependencies.
 
 Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
 scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
@@ -229,7 +231,7 @@ cargo tl -p shamir-tx                      # one-crate lib
 ./scripts/test.sh @types                   # shamir-types + shamir-collections
 ./scripts/test.sh @storage                 # shamir-storage + shamir-wal
 ./scripts/test.sh @server                  # shamir-server + shamir-connect
-./scripts/test.sh @e2e                     # shamir-db + shamir-server (forces --full)
+./scripts/test.sh @e2e                     # shamir-db + shamir-server + shamir-e2e (forces --full)
 ./scripts/test.sh @all                     # explicit workspace
 ./scripts/test.sh @oracle @types           # combine scopes
 ./scripts/test.sh @oracle -- watermark     # scope + name filter

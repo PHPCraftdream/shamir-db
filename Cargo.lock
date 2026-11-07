@@ -3437,12 +3437,8 @@ dependencies = [
  "serde_bytes",
  "shamir-collections",
  "shamir-connect",
- "shamir-db",
- "shamir-engine",
  "shamir-query-builder",
  "shamir-query-types",
- "shamir-server",
- "shamir-test-diag",
  "shamir-transport-ipc",
  "shamir-transport-tcp",
  "shamir-types",
@@ -3547,6 +3543,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "wat",
+]
+
+[[package]]
+name = "shamir-e2e"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "futures",
+ "rustls",
+ "shamir-client",
+ "shamir-connect",
+ "shamir-db",
+ "shamir-query-builder",
+ "shamir-query-types",
+ "shamir-server",
+ "shamir-test-diag",
+ "shamir-types",
+ "tempfile",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

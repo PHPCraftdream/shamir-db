@@ -259,7 +259,7 @@ impl<'a> CursorStream<'a> {
     /// has never been polled, or the very first poll is still in flight).
     /// Exposed primarily for tests that need to drive a raw follow-up
     /// request against the same id (see
-    /// `src/tests/cursor_stream_tests.rs`); ordinary callers don't need it —
+    /// `crates/shamir-e2e/tests/internals/cursor_stream_tests.rs`); ordinary callers don't need it —
     /// `close()` already knows it internally.
     pub fn cursor_id(&self) -> Option<CursorId> {
         self.cursor_id.get().copied()

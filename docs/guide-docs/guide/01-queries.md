@@ -435,7 +435,7 @@ const handles = db.batch()
 
 Пример с `isNull`/`isNotNull`-guard'ами (presence-check вместо сравнения
 значений) — см. `switch_three_branches_executes_exactly_one_over_real_wire`
-в `crates/shamir-client/tests/batch_when_e2e.rs`.
+в `crates/shamir-e2e/tests/batch/when.rs`.
 
 ### Каскадный skip
 
@@ -488,7 +488,7 @@ Decision 2.
 
 Рабочий пример (канонический сценарий, `$query`-колонка-реф как `over`) —
 лифтован из `for_each_over_query_column_ref_inserts_one_audit_row_per_order_over_real_wire`
-в `crates/shamir-client/tests/batch_for_each_e2e.rs`:
+в `crates/shamir-e2e/tests/batch/for_each.rs`:
 
 ```ts
 import { write, Query } from '@shamir/client';

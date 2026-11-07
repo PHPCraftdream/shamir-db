@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
-use crate::{Client, ConnectOptions};
+use shamir_client::{Client, ConnectOptions};
 use shamir_server::config::{
     Config, KdfConfig, ListenerConfig, ListenerKind, LoggingConfig, ProfileKind, TlsConfig,
 };
@@ -83,7 +83,7 @@ async fn rv_client_2d0142dd_trusted_pin_rejects_substituted_identity() {
     assert!(
         matches!(
             result,
-            Err(crate::ClientError::Handshake { ref source, .. })
+            Err(shamir_client::ClientError::Handshake { ref source, .. })
                 if source.as_ref().is_some_and(|err| {
                     err.to_string().contains("server_identity_changed")
                 })
