@@ -10,10 +10,10 @@
 //! Back-compat (non-quant compaction stays f32) is also asserted.
 
 use super::{random_vec, rid};
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use shamir_collections::TFxSet;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 
@@ -208,10 +208,10 @@ async fn vr6_sq8_compaction_recall_smoke() {
 /// deferred-fit in backfill) before dumping.
 #[tokio::test]
 async fn vr6_sq8_compaction_snapshot_is_v2() {
-    use shamir_index_core::meta_envelope::MetaEnvelope;
     use crate::snapshot::{
         self, dump_snapshot, load_snapshot, SnapshotSidecar, SNAPSHOT_FORMAT_VERSION,
     };
+    use shamir_index_core::meta_envelope::MetaEnvelope;
     use shamir_storage::storage_in_memory::InMemoryStore;
     use shamir_storage::types::Store;
 

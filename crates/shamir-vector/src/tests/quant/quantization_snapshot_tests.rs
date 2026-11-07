@@ -14,8 +14,6 @@
 //! would serialise only the u8 codes + quantizer and rebuild the graph on
 //! load; the spike makes plan B unnecessary.
 
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::quantized_dist::ShamirDistU8;
@@ -26,6 +24,8 @@ use crate::snapshot::{
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

@@ -1,6 +1,6 @@
-use shamir_index_core::kind::VectorMetric;
 use crate::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::brute_force::BruteForceAdapter;
+use shamir_index_core::kind::VectorMetric;
 use shamir_types::types::record_id::RecordId;
 
 fn rid(n: u8) -> RecordId {

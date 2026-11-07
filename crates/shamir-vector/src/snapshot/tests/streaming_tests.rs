@@ -1,17 +1,15 @@
 //! Streaming snapshot chunk, metadata-failure, and corruption regressions.
 
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{await_fitted, HnswAdapter, HnswConfig};
 use crate::snapshot::codec::{chunk_key, manifest_key, sidecar_key, ChunkHeader};
 use crate::snapshot::manifest::{integrity_bytes, integrity_key};
-use crate::snapshot::{
-    dump_snapshot_with_gen, load_snapshot, SnapshotError, SnapshotManifest,
-};
+use crate::snapshot::{dump_snapshot_with_gen, load_snapshot, SnapshotError, SnapshotManifest};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};

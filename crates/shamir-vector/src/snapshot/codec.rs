@@ -3,12 +3,12 @@
 //! [`super::load`].
 
 use super::manifest::{integrity_bytes, integrity_key, sweep_orphan_generations};
-use shamir_index_core::kind::VectorMetric;
-use shamir_index_core::meta_envelope::{MetaEnvelope, MetaError};
 use crate::hnsw_adapter::HnswAdapter;
 use bytes::Bytes;
 use hnsw_rs::api::AnnT;
 use serde::{Deserialize, Serialize};
+use shamir_index_core::kind::VectorMetric;
+use shamir_index_core::meta_envelope::{MetaEnvelope, MetaError};
 use shamir_storage::error::DbError;
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_types::types::record_id::RecordId;

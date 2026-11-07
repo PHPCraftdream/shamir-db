@@ -1,5 +1,4 @@
 use crate::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
-use crate::build_index2_backend;
 use crate::descriptor::IndexDescriptor;
 use crate::expr::IndexExpr;
 use crate::kind::{
@@ -333,9 +332,10 @@ async fn remove_drops_both_maps() {
 // name. `all_descriptors()` — the persistence path — only overrode `.state`
 // from the tuple, so `save_index2_metadata` wrote the OLD name to disk. After a
 // restart the registry reloaded the persisted blob with the old name: the
-// rename was silently reverted. These tests prove the fix for all three
-// index2 kinds (FTS / functional / vector), since each backend's construction
-// path is exercised by the reopen rebuild.
+// rename was silently reverted. These registry-level tests cover the
+// persistence round-trip with a stand-in backend; the real FTS / functional /
+// vector construction paths are covered in `shamir-index`
+// (`tests/registry_reopen_tests.rs`).
 
 /// Full rename → save → reload → reopen round-trip for one index2 kind.
 ///
@@ -354,11 +354,15 @@ async fn assert_rename_survives_reopen(kind: IndexKind, kind_label: &str) {
     let old_ni = 1000_u64;
     let new_ni = 2000_u64;
 
-    // Build + insert a real backend under the OLD name.
-    let backend = build_index2_backend(
-        IndexDescriptor::new(1, "orig_name", old_ni, SmallVec::new(), kind),
-        &store,
-    );
+    // Insert a stand-in backend under the OLD name (the real FTS / functional /
+    // vector backends are exercised in shamir-index `registry_reopen_tests`).
+    let backend = Arc::new(DummyBackend(IndexDescriptor::new(
+        1,
+        "orig_name",
+        old_ni,
+        SmallVec::new(),
+        kind,
+    )));
     reg.insert(backend).await.unwrap();
 
     // ── (3) Live in-memory rename still works ─────────────────────────────
@@ -400,7 +404,7 @@ async fn assert_rename_survives_reopen(kind: IndexKind, kind_label: &str) {
     // ── (1) Reopen into a fresh registry: lookup by new/old name ──────────
     let fresh = IndexRegistry::new();
     for d in &loaded.descriptors {
-        let b = build_index2_backend(d.clone(), &store);
+        let b = Arc::new(DummyBackend(d.clone()));
         fresh.insert(b).await.unwrap();
     }
     assert!(

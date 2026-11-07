@@ -14,12 +14,12 @@
 //! negative probe — never as synchronization. Each test documents its
 //! revert-claim: the single production change whose revert makes it red.
 
-use shamir_index_core::backend::IndexBackend;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::{self, SnapshotError};
 use crate::vector_backend::{AdapterSlot, CompactionTarget, VectorBackend};
+use shamir_index_core::backend::IndexBackend;
+use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::InternerKey;

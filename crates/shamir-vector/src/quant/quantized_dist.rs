@@ -123,10 +123,10 @@
 //! (`benches/sq8_hot_path.rs`) pins the current Cosine throughput so the
 //! follow-up can show its improvement.
 
-use shamir_index_core::kind::VectorMetric;
 use crate::simd::dot_product;
 use crate::sq8::Sq8Quantizer;
 use hnsw_rs::anndists::dist::distances::Distance;
+use shamir_index_core::kind::VectorMetric;
 use std::cell::RefCell;
 use std::sync::Arc;
 

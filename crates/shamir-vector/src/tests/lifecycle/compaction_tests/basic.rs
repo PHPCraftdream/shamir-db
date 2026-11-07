@@ -1,10 +1,10 @@
 //! V4.2 (#408) — HNSW compaction tests: unit, integration, stress.
 
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::vector_backend::AdapterSlot;
 use shamir_collections::TFxSet;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -310,8 +310,7 @@ async fn stress_concurrent_mutations_during_compaction() {
     let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
 
     // Arm double-write (Step 2): an armed routing slot
-    let armed_target =
-        crate::vector_backend::CompactionTarget::new(Arc::clone(&new_adapter_arc));
+    let armed_target = crate::vector_backend::CompactionTarget::new(Arc::clone(&new_adapter_arc));
     adapter_swap.store(Arc::new(AdapterSlot::armed(
         old_adapter.clone() as Arc<dyn VectorAdapter>,
         Arc::clone(&armed_target),
@@ -524,8 +523,7 @@ async fn stress_concurrent_mutations_during_quantized_compaction() {
     );
     let new_adapter_arc: Arc<dyn VectorAdapter> = Arc::new(new_adapter);
 
-    let armed_target =
-        crate::vector_backend::CompactionTarget::new(Arc::clone(&new_adapter_arc));
+    let armed_target = crate::vector_backend::CompactionTarget::new(Arc::clone(&new_adapter_arc));
     adapter_swap.store(Arc::new(AdapterSlot::armed(
         old_adapter.clone() as Arc<dyn VectorAdapter>,
         Arc::clone(&armed_target),

@@ -4,9 +4,9 @@
 //! Shared runner/RNG helpers live in `runner.rs`.
 
 use super::{clustered, note_recall_stats, phase, recall_at_k, rid, run_graph_test};
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_test_diag::FlakeGuard;
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;

@@ -12,12 +12,12 @@
 //! Search: top-k is computed with a bounded `BinaryHeap` of size k
 //! (O(N log k)) instead of a full sort over all N entries (O(N log N)).
 
-use shamir_index_core::kind::VectorMetric;
 use crate::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::simd::{dot_product, l2_squared};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use shamir_collections::TFxMap;
+use shamir_index_core::kind::VectorMetric;
 use shamir_types::types::record_id::RecordId;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

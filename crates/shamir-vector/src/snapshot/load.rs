@@ -1,7 +1,6 @@
 //! Load path (manifest → chunks → sidecar → `HnswIo`) and the V2.3
 //! delta-log (append / replay / generation flip) of the snapshot codec.
 
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{HnswAdapter, ShamirDist};
 use crate::quantized_dist::ShamirDistU8;
@@ -11,6 +10,7 @@ use futures::StreamExt;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
 use serde::{Deserialize, Serialize};
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::types::{KvOp, RecordKey, Store};
 use shamir_tunables::store_defaults::MAINT_SCAN_BATCH;
 use shamir_types::types::common::THasher;

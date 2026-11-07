@@ -11,8 +11,8 @@
 //! 4. Equivalence: pre-filter result matches brute-force ground truth.
 //! 5. Sorted allow-list invariant: Vec<usize> FilterT requires sorted input.
 
-use shamir_index_core::kind::VectorMetric;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig, CO_FILTER_EF_MULTIPLIER};
+use shamir_index_core::kind::VectorMetric;
 use shamir_types::types::record_id::RecordId;
 
 /// Create a RecordId from a u64 by embedding it as big-endian in the last 8 bytes.

@@ -20,9 +20,9 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use hnsw_rs::anndists::dist::distances::Distance;
 use shamir_bench_utils::vector_data::clustered_vectors;
-use shamir_index::kind::VectorMetric;
-use shamir_index::vector::quantized_dist::{RescoreCtx, ShamirDistU8};
-use shamir_index::vector::sq8::Sq8Quantizer;
+use shamir_index_core::kind::VectorMetric;
+use shamir_vector::quantized_dist::{RescoreCtx, ShamirDistU8};
+use shamir_vector::sq8::Sq8Quantizer;
 
 /// Embedding dimensionality for the bench (typical small-model shape).
 const DIM: usize = 128;

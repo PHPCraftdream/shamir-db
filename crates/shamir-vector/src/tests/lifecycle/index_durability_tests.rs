@@ -10,9 +10,6 @@
 //!   watermark; the old code seeded `next_delta_idx = 1` on scan failure,
 //!   letting the next `append_delta` overwrite surviving unabsorbed chunks.
 
-use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
-use shamir_index_core::descriptor::IndexDescriptor;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::{self, DeltaOp, SnapshotManifest};
@@ -20,6 +17,9 @@ use crate::vector_backend::VectorBackend;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
+use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};

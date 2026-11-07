@@ -1,10 +1,10 @@
-use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
-use shamir_index_core::descriptor::IndexDescriptor;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use crate::adapter::VectorAdapter;
 use crate::brute_force::BruteForceAdapter;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::vector_backend::VectorBackend;
+use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::{Interner, InternerKey, TouchInd};
@@ -511,12 +511,7 @@ async fn apply_staged_vector_deletes_double_writes_to_compaction_target() {
     // double-written, so a subsequent generation flip will not resurrect
     // the ghost).
     let target_hits = target_adapter
-        .search(
-            &[1.0, 0.0, 0.0],
-            10,
-            crate::SearchOpts::default(),
-            None,
-        )
+        .search(&[1.0, 0.0, 0.0], 10, crate::SearchOpts::default(), None)
         .await
         .unwrap();
     assert!(

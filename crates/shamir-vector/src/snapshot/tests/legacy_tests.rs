@@ -1,12 +1,12 @@
 use super::{decode_manifest, decode_sidecar, ManifestV1, SidecarV1};
-use shamir_index_core::kind::VectorMetric;
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::codec::{manifest_key, sidecar_key};
 use crate::snapshot::manifest::{integrity_bytes, integrity_key};
 use crate::snapshot::SnapshotError;
 use crate::snapshot::{dump_snapshot, load_snapshot, SnapshotManifest, SnapshotSidecar};
+use shamir_index_core::kind::VectorMetric;
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

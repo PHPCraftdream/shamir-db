@@ -15,11 +15,11 @@
 //! join from completing and the timeout fires deterministically (no
 //! racy `is_finished()` polling).
 
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{
     clear_fit_test_hook, install_fit_test_hook, wait_for_fit, HnswAdapter, HnswConfig,
 };
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 use std::time::Duration;

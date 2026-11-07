@@ -2,12 +2,12 @@
 //! behaviour (`batch` + `ef_search` + `deleted_count` sections live in
 //! `batch_ef.rs`).
 
-use shamir_index_core::kind::VectorMetric;
 use crate::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist};
 use crate::tests::quant::quantized_graph_tests::runner::note_recall_stats;
 use hnsw_rs::prelude::Distance;
 use shamir_collections::TFxSet;
+use shamir_index_core::kind::VectorMetric;
 use shamir_test_diag::FlakeGuard;
 use shamir_types::types::record_id::RecordId;
 

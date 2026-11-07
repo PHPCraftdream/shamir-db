@@ -2,16 +2,16 @@
 //! `IndexBackend` trait impl. Background snapshot / compaction task bodies
 //! live in [`super::maintenance`].
 
-use shamir_index_core::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
-use shamir_index_core::descriptor::IndexDescriptor;
 use crate::adapter::VectorAdapter;
 use crate::snapshot::{self, SnapshotError, SnapshotManifest};
 use crate::vector_backend::maintenance::ve;
 use crate::vector_backend::slot::AdapterSlot;
-use shamir_index_core::write_ops::IndexWriteOp;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use async_trait::async_trait;
 use futures::StreamExt;
+use shamir_index_core::backend::{IndexBackend, IndexError, IndexQuery, IndexResult};
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::write_ops::IndexWriteOp;
 use shamir_storage::types::Store;
 use shamir_tunables::instance_defaults::{
     vector_snapshot_delta_threshold, VECTOR_COMPACTION_MIN_LIVE, VECTOR_COMPACTION_RATIO_THRESHOLD,

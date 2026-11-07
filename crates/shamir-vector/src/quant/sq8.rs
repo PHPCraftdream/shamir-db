@@ -353,8 +353,7 @@ impl Sq8Quantizer {
             q.len(),
             self.dim
         );
-        self.min_sq_sum
-            + crate::simd::weighted_bilinear_f32(&self.min_scale, &self.scales_sq, q, q)
+        self.min_sq_sum + crate::simd::weighted_bilinear_f32(&self.min_scale, &self.scales_sq, q, q)
     }
 
     /// Per-dimension lower bounds (training minima). Read-only access for

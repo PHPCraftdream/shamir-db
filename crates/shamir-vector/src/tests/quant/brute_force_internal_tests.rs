@@ -1,6 +1,6 @@
 use super::{apply_op, BruteForceAdapter, BruteWork, WriteOp, CHUNK_LEN};
-use shamir_index_core::kind::VectorMetric;
 use crate::adapter::{SearchOpts, VectorAdapter, VectorError};
+use shamir_index_core::kind::VectorMetric;
 use shamir_types::types::record_id::RecordId;
 use std::sync::{Arc, Mutex};
 

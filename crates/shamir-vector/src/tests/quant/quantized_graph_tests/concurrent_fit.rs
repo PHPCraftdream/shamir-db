@@ -4,10 +4,10 @@
 //! regression. Shared runner/RNG helpers live in `runner.rs`.
 
 use super::{clustered, random_vec, rid, run_graph_test};
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{install_test_search_f32_gate, HnswAdapter, HnswConfig};
 use crate::quantized_dist::RescoreCtx;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::record_id::RecordId;
 use std::sync::Arc;
 

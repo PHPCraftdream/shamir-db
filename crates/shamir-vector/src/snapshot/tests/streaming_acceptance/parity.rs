@@ -1,5 +1,3 @@
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{await_fitted, HnswAdapter, HnswConfig};
 use crate::snapshot::codec::{
@@ -7,12 +5,12 @@ use crate::snapshot::codec::{
 };
 use crate::snapshot::manifest::{integrity_bytes, integrity_key};
 use crate::snapshot::HNSW_RS_VERSION;
-use crate::snapshot::{
-    dump_snapshot_with_gen, QuantMeta, SnapshotManifest, SnapshotSidecar,
-};
+use crate::snapshot::{dump_snapshot_with_gen, QuantMeta, SnapshotManifest, SnapshotSidecar};
 use bytes::Bytes;
 use futures::StreamExt;
 use hnsw_rs::api::AnnT;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::types::record_id::RecordId;

@@ -1,5 +1,11 @@
-//! Vector similarity index — adapter trait + in-process
-//! brute-force implementation (HNSW upgrade path planned).
+//! Vector similarity backends for the ShamirDB index system.
+//!
+//! Owns the concrete vector backends: the `VectorAdapter` trait,
+//! in-process brute force, the HNSW adapter (`hnsw_rs`), SQ8
+//! quantization with SIMD kernels, snapshots, and the `VectorBackend`
+//! facade. The backend-agnostic model and the `IndexBackend` trait
+//! live in `shamir-index-core`; `shamir-index` re-exports this crate
+//! as its `vector` module.
 
 pub mod hnsw_adapter;
 pub mod quant;

@@ -8,8 +8,6 @@
 //! These are the codec's contract tests; the startup integration (#401) and
 //! the delta-log / generation flip (#402) are out of scope.
 
-use shamir_index_core::kind::VectorMetric;
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::{
@@ -18,6 +16,8 @@ use crate::snapshot::{
 };
 use bytes::Bytes;
 use shamir_collections::TFxSet;
+use shamir_index_core::kind::VectorMetric;
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

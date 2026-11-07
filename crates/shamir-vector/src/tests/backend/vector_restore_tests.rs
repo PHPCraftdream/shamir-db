@@ -24,10 +24,6 @@
 //! caller-driven action that #402 will wire up; only the LOAD happens
 //! automatically on open).
 
-use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
-use shamir_index_core::descriptor::IndexDescriptor;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization};
-use shamir_index_core::persistence::{load_index2_metadata, save_index2_metadata};
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{await_fitted, HnswAdapter, HnswConfig};
 use crate::snapshot;
@@ -35,6 +31,12 @@ use crate::vector_backend::VectorBackend;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::Stream;
+use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::kind::{
+    IndexKind, VectorBackendRef, VectorConfig, VectorMetric, VectorQuantization,
+};
+use shamir_index_core::persistence::{load_index2_metadata, save_index2_metadata};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
@@ -480,13 +482,14 @@ async fn restore_on_open_version_mismatch_warns_and_rebuilds() {
     // this build will never accept (u16::MAX), mirroring what a real
     // format bump does.
     let manifest_key = format!("{}.manifest", keyspace);
-    let manifest: snapshot::SnapshotManifest = shamir_index_core::meta_envelope::MetaEnvelope::open(
-        &info_store
-            .get(bytes::Bytes::from(manifest_key).into())
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let manifest: snapshot::SnapshotManifest =
+        shamir_index_core::meta_envelope::MetaEnvelope::open(
+            &info_store
+                .get(bytes::Bytes::from(manifest_key).into())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
     let gen = manifest.gen;
     let sidecar_key = format!("{}.g{}.sidecar", keyspace, gen);
     let sidecar: snapshot::SnapshotSidecar = shamir_index_core::meta_envelope::MetaEnvelope::open(
@@ -550,11 +553,36 @@ async fn persisted_vector(
     if let IndexKind::Vector(config) = &mut descriptor.kind {
         config.quantization = mode;
     }
-    let registry = crate::IndexRegistry::new();
-    registry
-        .insert(crate::build_index2_backend(descriptor, info))
-        .await
-        .unwrap();
+    let first_path = descriptor.paths.first().cloned().unwrap_or_default();
+    let cfg = match descriptor.kind.clone() {
+        IndexKind::Vector(cfg) => cfg,
+        _ => unreachable!("vector descriptor expected"),
+    };
+    let (m, ef_construction) = match &cfg.backend {
+        VectorBackendRef::InProcessHnsw { m, ef_construct } => {
+            (*m as usize, *ef_construct as usize)
+        }
+    };
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        cfg.dim,
+        cfg.metric,
+        HnswConfig {
+            max_elements: 100_000,
+            m,
+            ef_construction,
+            ef_search: 50,
+            ..Default::default()
+        },
+        cfg.quantization,
+    ));
+    let backend: Arc<dyn IndexBackend> = Arc::new(VectorBackend::new(
+        descriptor,
+        first_path,
+        adapter,
+        Some(Arc::clone(info)),
+    ));
+    let registry = shamir_index_core::IndexRegistry::new();
+    registry.insert(backend).await.unwrap();
     save_index2_metadata(&registry, info).await.unwrap();
 }
 
@@ -566,7 +594,34 @@ async fn reopen_vector(info: &Arc<dyn Store>, data: &Arc<dyn Store>) -> Arc<dyn 
         .1
         .descriptors
         .remove(0);
-    let backend = crate::build_index2_backend(descriptor, info);
+    let first_path = descriptor.paths.first().cloned().unwrap_or_default();
+    let cfg = match descriptor.kind.clone() {
+        IndexKind::Vector(cfg) => cfg,
+        _ => unreachable!("vector descriptor expected"),
+    };
+    let (m, ef_construction) = match &cfg.backend {
+        VectorBackendRef::InProcessHnsw { m, ef_construct } => {
+            (*m as usize, *ef_construct as usize)
+        }
+    };
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        cfg.dim,
+        cfg.metric,
+        HnswConfig {
+            max_elements: 100_000,
+            m,
+            ef_construction,
+            ef_search: 50,
+            ..Default::default()
+        },
+        cfg.quantization,
+    ));
+    let backend: Arc<dyn IndexBackend> = Arc::new(VectorBackend::new(
+        descriptor,
+        first_path,
+        adapter,
+        Some(Arc::clone(info)),
+    ));
     backend
         .restore_on_open(Arc::clone(info), Arc::clone(data))
         .await
@@ -742,7 +797,7 @@ async fn legacy_fitted_snapshot_self_heals_options() {
         .unwrap()
         .adapter_for_test();
     assert!(adapter.as_hnsw_adapter().unwrap().is_quantized());
-    let registry = crate::IndexRegistry::new();
+    let registry = shamir_index_core::IndexRegistry::new();
     registry.insert(backend).await.unwrap();
     save_index2_metadata(&registry, &info).await.unwrap();
     let descriptor = load_index2_metadata(&info)
@@ -756,7 +811,34 @@ async fn legacy_fitted_snapshot_self_heals_options() {
     assert!(
         matches!(&descriptor.kind, IndexKind::Vector(config) if config.quantization == Some(VectorQuantization::Sq8))
     );
-    let reopened = crate::build_index2_backend(descriptor, &info);
+    let first_path = descriptor.paths.first().cloned().unwrap_or_default();
+    let cfg = match descriptor.kind.clone() {
+        IndexKind::Vector(cfg) => cfg,
+        _ => unreachable!("vector descriptor expected"),
+    };
+    let (m, ef_construction) = match &cfg.backend {
+        VectorBackendRef::InProcessHnsw { m, ef_construct } => {
+            (*m as usize, *ef_construct as usize)
+        }
+    };
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        cfg.dim,
+        cfg.metric,
+        HnswConfig {
+            max_elements: 100_000,
+            m,
+            ef_construction,
+            ef_search: 50,
+            ..Default::default()
+        },
+        cfg.quantization,
+    ));
+    let reopened: Arc<dyn IndexBackend> = Arc::new(VectorBackend::new(
+        descriptor,
+        first_path,
+        adapter,
+        Some(Arc::clone(&info)),
+    ));
     reopened
         .restore_on_open(Arc::clone(&info), data)
         .await

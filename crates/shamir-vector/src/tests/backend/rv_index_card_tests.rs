@@ -8,18 +8,17 @@
 //! `rv_index_ab9403d5` — a staged vector whose declared dimension mismatches
 //! the index descriptor must be rejected (staged_vector returns None).
 //!
-//! `rv_index_fab4e4e5` — `build_index2_backend` must propagate the
-//! descriptor's HNSW tuning (`m`, `ef_construct`) into the built adapter
-//! instead of hardcoded defaults.
+//! `rv_index_fab4e4e5` — the descriptor's HNSW tuning (`m`, `ef_construct`)
+//! must reach the built `HnswAdapter` instead of hardcoded defaults.
 
-use shamir_index_core::backend::IndexBackend;
-use crate::backends::build_backend::build_index2_backend;
-use shamir_index_core::descriptor::IndexDescriptor;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use crate::brute_force::BruteForceAdapter;
+use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::{chunk_key_for_test, manifest_key_for_test, sidecar_key_for_test};
 use crate::vector_backend::VectorBackend;
 use bytes::Bytes;
+use shamir_index_core::backend::IndexBackend;
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::{RecordKey, Store};
 use shamir_types::core::interner::{Interner, TouchInd};
@@ -118,14 +117,40 @@ async fn rv_index_ab9403d5_staged_vector_rejects_wrong_dimension() {
         .is_none());
 }
 
-// RV-INDEX-FAB4E4E5: build_index2_backend must propagate the descriptor's
-// HNSW tuning (m, ef_construct) into the built adapter — not hardcoded
-// m:16 / ef_construction:200 defaults.
+// RV-INDEX-FAB4E4E5: the descriptor's HNSW tuning must propagate into the
+// built adapter, not hardcoded m:16 / ef_construction:200 defaults.
 #[test]
 fn rv_index_fab4e4e5_builder_preserves_backend_tuning() {
     let desc = vector_desc_tuned(917, "ix", 2, 8, 77);
     let store: Arc<dyn Store> = Arc::new(InMemoryStore::new());
-    let backend = build_index2_backend(desc, &store);
+    let first_path = desc.paths.first().cloned().unwrap_or_default();
+    let cfg = match desc.kind.clone() {
+        IndexKind::Vector(cfg) => cfg,
+        _ => unreachable!("vector descriptor expected"),
+    };
+    let (m, ef_construction) = match &cfg.backend {
+        VectorBackendRef::InProcessHnsw { m, ef_construct } => {
+            (*m as usize, *ef_construct as usize)
+        }
+    };
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        cfg.dim,
+        cfg.metric,
+        HnswConfig {
+            max_elements: 100_000,
+            m,
+            ef_construction,
+            ef_search: 50,
+            ..Default::default()
+        },
+        cfg.quantization,
+    ));
+    let backend: Arc<dyn IndexBackend> = Arc::new(VectorBackend::new(
+        desc,
+        first_path,
+        adapter,
+        Some(Arc::clone(&store)),
+    ));
     let vb = backend
         .as_any()
         .downcast_ref::<crate::VectorBackend>()
@@ -178,7 +203,34 @@ async fn rv_index_0b756318_create_then_drop_without_reopen() {
     for k in [mkey(920), skey(920, 0)] {
         store.set(k, Bytes::from_static(b"data")).await.unwrap();
     }
-    let backend = build_index2_backend(desc, &store);
+    let first_path = desc.paths.first().cloned().unwrap_or_default();
+    let cfg = match desc.kind.clone() {
+        IndexKind::Vector(cfg) => cfg,
+        _ => unreachable!("vector descriptor expected"),
+    };
+    let (m, ef_construction) = match &cfg.backend {
+        VectorBackendRef::InProcessHnsw { m, ef_construct } => {
+            (*m as usize, *ef_construct as usize)
+        }
+    };
+    let adapter = Arc::new(HnswAdapter::new_with_quantization(
+        cfg.dim,
+        cfg.metric,
+        HnswConfig {
+            max_elements: 100_000,
+            m,
+            ef_construction,
+            ef_search: 50,
+            ..Default::default()
+        },
+        cfg.quantization,
+    ));
+    let backend: Arc<dyn IndexBackend> = Arc::new(VectorBackend::new(
+        desc,
+        first_path,
+        adapter,
+        Some(Arc::clone(&store)),
+    ));
     let vb = backend
         .as_any()
         .downcast_ref::<crate::VectorBackend>()

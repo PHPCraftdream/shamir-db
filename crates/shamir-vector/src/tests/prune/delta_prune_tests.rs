@@ -11,13 +11,13 @@
 //! captures the index returned by `append_vector_delta` and the prefix
 //! captured at setup, and asserts relative to them.
 
-use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
-use shamir_index_core::descriptor::IndexDescriptor;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::{self, SnapshotManifest};
 use crate::vector_backend::{run_background_compaction, VectorBackend};
+use shamir_index_core::backend::{IndexBackend, IndexQuery, IndexResult};
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::{Interner, TouchInd};

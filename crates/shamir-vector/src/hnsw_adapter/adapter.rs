@@ -18,11 +18,11 @@
 //! the scheduled fit's error branch so tests assert the *diagnosed* phase.
 
 use super::config::{HnswConfig, ShamirDist};
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::quantized_dist::ShamirDistU8;
 use crate::sq8::Sq8Quantizer;
 use arc_swap::ArcSwapOption;
 use hnsw_rs::hnsw::Hnsw;
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

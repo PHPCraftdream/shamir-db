@@ -3,12 +3,12 @@
 //! V4.2 (#408) background HNSW compaction, and the P0 index promote-order
 //! turnstile (stage L3b) — promotion IS maintenance.
 
-use shamir_index_core::backend::IndexError;
 use crate::adapter::{VectorAdapter, VectorError};
 use crate::hnsw_adapter::HnswAdapter;
 use crate::snapshot::{self, SnapshotError, SnapshotManifest};
 use crate::vector_backend::backend::VectorBackend;
 use crate::vector_backend::cutover::{disarm_publish, publish_slot, seal_and_drain};
+use shamir_index_core::backend::IndexError;
 
 #[cfg(test)]
 use crate::vector_backend::cutover::CompactionHooks;

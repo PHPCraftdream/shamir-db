@@ -1,6 +1,6 @@
-use shamir_index_core::kind::VectorMetric;
 use crate::simd::{dot_product, l2_squared};
 use hnsw_rs::anndists::dist::distances::Distance;
+use shamir_index_core::kind::VectorMetric;
 
 /// Maximum allowed top-k value. Untrusted `k` near `u32::MAX` would drive
 /// `overscan*2+10` and `Vec::with_capacity(k+16)` to multi-GB allocation.

@@ -1,9 +1,9 @@
-use shamir_index_core::kind::VectorMetric;
 use crate::quantized_dist::ShamirDistU8;
 use crate::snapshot::quantized_load::load_quantized_graph;
 use crate::sq8::Sq8Quantizer;
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::Hnsw;
+use shamir_index_core::kind::VectorMetric;
 use std::sync::Arc;
 
 fn dumped_u8_graph() -> (String, Vec<u8>, Vec<u8>, Arc<Sq8Quantizer>) {

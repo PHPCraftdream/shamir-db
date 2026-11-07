@@ -4,11 +4,11 @@ use super::{
     append_delta, replay_delta, replay_delta_with_adapter, DeltaOp, SnapshotError,
     REPLAY_BATCH_LIMIT,
 };
-use shamir_index_core::kind::VectorMetric;
 use crate::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use async_trait::async_trait;
 use shamir_collections::TFxMap;
+use shamir_index_core::kind::VectorMetric;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

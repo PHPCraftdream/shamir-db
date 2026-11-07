@@ -1,12 +1,12 @@
-use shamir_index_core::kind::VectorMetric;
-use shamir_index_core::meta_envelope::MetaEnvelope;
-use crate::tests::support::allocation_counter::LargestWindow;
+use super::allocation_counter::LargestWindow;
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist};
 use crate::snapshot::codec::{chunk_key, manifest_key, sidecar_key, ChunkHeader};
 use crate::snapshot::SnapshotManifest;
 use crate::snapshot::{dump_snapshot_with_gen, load_snapshot};
 use hnsw_rs::api::AnnT;
+use shamir_index_core::kind::VectorMetric;
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

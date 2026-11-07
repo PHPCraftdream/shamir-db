@@ -21,14 +21,14 @@
 //! `replay_delta`, `flip_generation`) and the backend's
 //! `append_vector_delta` / `trigger_snapshot_check` surface directly.
 
-use shamir_index_core::backend::IndexBackend;
-use shamir_index_core::descriptor::IndexDescriptor;
-use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
-use shamir_index_core::meta_envelope::MetaEnvelope;
 use crate::adapter::VectorAdapter;
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
 use crate::snapshot::{self, DeltaOp, SnapshotManifest};
 use crate::vector_backend::VectorBackend;
+use shamir_index_core::backend::IndexBackend;
+use shamir_index_core::descriptor::IndexDescriptor;
+use shamir_index_core::kind::{IndexKind, VectorBackendRef, VectorConfig, VectorMetric};
+use shamir_index_core::meta_envelope::MetaEnvelope;
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::core::interner::{Interner, TouchInd};

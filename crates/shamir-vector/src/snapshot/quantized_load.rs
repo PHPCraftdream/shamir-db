@@ -2,11 +2,11 @@
 
 use super::manifest::validate_basename;
 use super::SnapshotError;
-use shamir_index_core::kind::VectorMetric;
 use crate::quantized_dist::ShamirDistU8;
 use crate::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
 use hnsw_rs::hnswio::HnswIo;
+use shamir_index_core::kind::VectorMetric;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;

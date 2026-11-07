@@ -1,11 +1,11 @@
 use super::adapter::HnswAdapter;
 use super::config::{HnswConfig, FIT_THRESHOLD};
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::VectorError;
 use crate::quantized_dist::ShamirDistU8;
 use crate::sq8::Sq8Quantizer;
 use hnsw_rs::hnsw::Hnsw;
 use scc::hash_map::Entry::{Occupied, Vacant};
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::common::THasher;
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -125,8 +125,8 @@ impl HnswAdapter {
                     vac.insert_entry(internal);
 
                     // VR-9 follow-up (discovered by the final 10x stress
-                    // gate, crates/shamir-index/src/vector/tests/
-                    // compaction_tests.rs::stress_concurrent_mutations_during_quantized_compaction) —
+                    // gate, crates/shamir-vector/src/tests/lifecycle/
+                    // compaction_tests/basic.rs::stress_concurrent_mutations_during_quantized_compaction) —
                     // the OLD comment here claimed "the target is ALWAYS
                     // un-fitted during this loop; the deferred-fit check
                     // below fires AFTER the loop" — WRONG when a concurrent

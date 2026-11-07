@@ -12,12 +12,12 @@
 //!  * **rescore_f32** matches `ShamirDist::eval` on the dequantized vector
 //!    (the rescore path used after a quantized graph traversal).
 
-use shamir_index_core::kind::VectorMetric;
 use crate::hnsw_adapter::ShamirDist;
 use crate::quantized_dist::{rescore_f32, RescoreCtx, ShamirDistU8};
 use crate::simd::{dot_product, l2_squared};
 use crate::sq8::Sq8Quantizer;
 use hnsw_rs::anndists::dist::distances::Distance;
+use shamir_index_core::kind::VectorMetric;
 use std::sync::Arc;
 
 // ----- deterministic RNG (historical high-32 fixture mapping) --------------

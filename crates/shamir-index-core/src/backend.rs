@@ -80,7 +80,7 @@ pub enum IndexQuery {
     Vector {
         vec: Vec<f32>,
         k: u32,
-        opts: crate::vector::SearchOpts,
+        opts: crate::search_opts::SearchOpts,
     },
 }
 

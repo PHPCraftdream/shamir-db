@@ -3,10 +3,10 @@
 //! `basic.rs` (`rid` / `random_vec` are shared from there).
 
 use super::{random_vec, rid};
-use shamir_index_core::kind::VectorMetric;
 use crate::adapter::{SearchOpts, VectorAdapter, VectorError};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig, ShamirDist, MAX_EF_SEARCH};
 use shamir_collections::TFxSet;
+use shamir_index_core::kind::VectorMetric;
 use shamir_types::types::record_id::RecordId;
 
 // ============================================================================

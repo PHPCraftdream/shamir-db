@@ -69,9 +69,9 @@
 //! is this test's own guard against a real regression hanging the whole
 //! suite (cf. `quantized_graph_tests.rs:1630`).
 
-use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use crate::adapter::{SearchOpts, VectorAdapter};
 use crate::hnsw_adapter::{HnswAdapter, HnswConfig};
+use shamir_index_core::kind::{VectorMetric, VectorQuantization};
 use shamir_types::types::record_id::RecordId;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

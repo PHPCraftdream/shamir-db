@@ -4,9 +4,9 @@
 //!
 //! Layouts mirror `3ed3069b^:crates/shamir-index/src/vector/snapshot.rs`.
 
+use serde::{Deserialize, Serialize};
 use shamir_index_core::kind::VectorMetric;
 use shamir_index_core::meta_envelope::MetaEnvelope;
-use serde::{Deserialize, Serialize};
 use shamir_types::types::record_id::RecordId;
 
 use super::codec::{map_meta_err, SNAPSHOT_SUPPORTED_VERSIONS};

@@ -21,13 +21,13 @@
 //!
 //! `DataId = usize` (point origin id supplied by the client at insert time).
 
-use shamir_index_core::kind::VectorMetric;
 use crate::hnsw_adapter::ShamirDist;
 use hnsw_rs::anndists::dist::distances::Distance;
 use hnsw_rs::api::AnnT;
 use hnsw_rs::hnsw::{Hnsw, Neighbour, Point, PointId};
 use hnsw_rs::hnswio::HnswIo;
 use shamir_collections::TFxSet;
+use shamir_index_core::kind::VectorMetric;
 use std::sync::Arc;
 
 /// Deterministic LCG pseudo-random vector generator (mirrors the helper in

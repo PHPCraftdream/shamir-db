@@ -91,22 +91,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
 
-fn begin_window() {
-    ACTIVE.with(|active| {
-        assert!(!active.get(), "nested allocation-counting window");
-        ALLOCS.with(|allocs| allocs.set(0));
-        BYTES.with(|bytes| bytes.set(0));
-        active.set(true);
-    });
-}
-
-fn read_and_close_window() -> (usize, usize) {
-    let _ = ACTIVE.try_with(|active| active.set(false));
-    let count = ALLOCS.with(Cell::get);
-    let bytes = BYTES.with(Cell::get);
-    (count, bytes)
-}
-
 pub(crate) struct LargestWindow;
 
 impl LargestWindow {
@@ -132,33 +116,5 @@ impl LargestWindow {
 impl Drop for LargestWindow {
     fn drop(&mut self) {
         MEASURE_LARGEST.store(0, Ordering::SeqCst);
-    }
-}
-
-/// An allocation-measuring window that may span `.await` points. Call
-/// [`Window::finish`] to close it and read `(allocation count, total bytes)`;
-/// dropping the guard without finishing disables counting (unwind safety).
-pub(crate) struct Window {
-    finished: bool,
-}
-
-impl Window {
-    pub(crate) fn start() -> Self {
-        begin_window();
-        Self { finished: false }
-    }
-
-    pub(crate) fn finish(mut self) -> usize {
-        self.finished = true;
-        let (_count, bytes) = read_and_close_window();
-        bytes
-    }
-}
-
-impl Drop for Window {
-    fn drop(&mut self) {
-        if !self.finished {
-            let _ = read_and_close_window();
-        }
     }
 }
