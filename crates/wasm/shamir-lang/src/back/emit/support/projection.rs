@@ -859,7 +859,7 @@ fn emit_field(
         function.instruction(&Instruction::I32Add);
         function.instruction(&Instruction::LocalSet(frame.iter));
         function.instruction(&Instruction::LocalGet(frame.iter));
-        function.instruction(&Instruction::I32Const(spec.null_cell as i32));
+        function.instruction(&Instruction::I32Const(TAG_NULL));
         function.instruction(&Instruction::I32Store(mem32(0)));
         function.instruction(&Instruction::LocalGet(frame.iter));
         function.instruction(&Instruction::I32Const(0));

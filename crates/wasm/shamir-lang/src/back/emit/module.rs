@@ -896,16 +896,17 @@ pub(crate) fn emit_compiled_module(
 
     let error_raiser = emit_error_raiser(0, workspace.context_base);
     let allocator = emit_allocator(workspace.layout, 0, 0);
-    // the compiled path always carries a scalar entry (the compile
-    // pipeline's entry gate rejects every other entry kind), so the
-    // M1 pass-through wrapper is replaced by the scalar wrapper
+    // Scalar and validator entries both compile; the wrapper choice is the
+    // only difference (the validator wrapper adds the Validation-contract
+    // checks on top of the shared scalar envelope). Procedures stay rejected
+    // by the compile pipeline's entry gate.
     charge_work(budget, 1)?;
     let wrapper = {
         let entry_index = plan
             .users_base
             .checked_add(ir.entry)
             .ok_or(EmitError::Internal("entry index overflow"))?;
-        emit_scalar_wrapper(WrapperInputs {
+        let inputs = WrapperInputs {
             decode_index: plan.decode_index,
             encode_index: plan.encode_index,
             alloc_index: plan.alloc_index,
@@ -917,7 +918,12 @@ pub(crate) fn emit_compiled_module(
             result_projection: entry.result_projection,
             param_names: &baked.names,
             param_helper: &param_helper,
-        })?
+        };
+        if ir.entry_is_validator {
+            super::support::validator::emit_validator_wrapper(inputs)?
+        } else {
+            emit_scalar_wrapper(inputs)?
+        }
     };
     charge_work(budget, body_bytes(&wrapper))?;
     // finding 20: raiser + allocator + wrapper complete the runtime portion

@@ -51,8 +51,9 @@ pub fn compile(source: &str, options: &CompileOptions) -> Result<CompiledModule,
         .map_err(|diagnostic| CompileError::Diagnostics(vec![diagnostic]))?;
     let typed = sem::check_scoped(&module, &normalized, options.stage, &mut budget)
         .map_err(CompileError::Diagnostics)?;
-    // Entry gate: only the scalar facade has a wrapper in this build.
-    if typed.entry_kind != EntryKind::Scalar {
+    // Entry gate: scalar and validator entries have wrappers in this build;
+    // procedures stay rejected until the stage-2 milestone (design section 3).
+    if typed.entry_kind != EntryKind::Scalar && typed.entry_kind != EntryKind::Validator {
         let span = typed
             .function(typed.entry)
             .map(|function| function.span)

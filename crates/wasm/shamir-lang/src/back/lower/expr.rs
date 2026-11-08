@@ -776,6 +776,14 @@ fn lower_builtin(
     arguments: &[ExprId],
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
+    // Validator verdict constructors lower outside the single-argument path.
+    if is_validator_ctor(builtin) {
+        let mut lowered = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            lowered.push(lower_expr(ctx, *argument)?);
+        }
+        return super::types::lower_ctor(ctx, builtin, &lowered, span);
+    }
     if arguments.len() != 1 {
         return Err(IrError::Internal("lower: builtin arity mismatch"));
     }
@@ -830,6 +838,20 @@ fn lower_builtin(
         }
     };
     ctx.builder.append(kind, span)
+}
+
+/// True iff `builtin` is one of the seven validator verdict constructors.
+fn is_validator_ctor(builtin: BuiltinId) -> bool {
+    matches!(
+        builtin,
+        BuiltinId::Accept
+            | BuiltinId::Reject
+            | BuiltinId::RejectPath
+            | BuiltinId::RecordError
+            | BuiltinId::WithError
+            | BuiltinId::WithRecordError
+            | BuiltinId::Stop
+    )
 }
 
 /// Field access: `base` is the record (or optional-record) cell pointer.

@@ -3652,6 +3652,7 @@ dependencies = [
  "serde",
  "shamir-collections",
  "shamir-funclib",
+ "shamir-lang",
  "shamir-query-types",
  "shamir-storage",
  "shamir-types",

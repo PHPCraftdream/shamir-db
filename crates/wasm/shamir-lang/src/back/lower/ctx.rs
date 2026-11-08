@@ -42,6 +42,14 @@ pub(crate) struct LowerCtx<'a, 'b> {
     pub(crate) result_ty: Option<TypeId>,
     /// Entry wrapper projections per finished function, in call order.
     pub(crate) projections: Vec<(Vec<ParamProjection>, Option<ParamProjection>)>,
+    /// Cached absolute validation-record descriptor address, baked at most once.
+    pub(crate) validation_descriptor: Option<u32>,
+    /// Cached absolute field-error descriptor address, baked at most once.
+    pub(crate) field_error_descriptor: Option<u32>,
+    /// Cached absolute code-error descriptor address, baked at most once.
+    pub(crate) code_error_descriptor: Option<u32>,
+    /// Cached absolute error-cap list-cell address, baked at most once.
+    pub(crate) error_cap_cell: Option<u32>,
 }
 
 impl<'a, 'b> LowerCtx<'a, 'b> {

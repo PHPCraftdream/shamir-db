@@ -5,6 +5,7 @@ use crate::back::ir::{
     IrBuilder, IrError, IrLimits, IrModule, ParamProjection, RecordField, TypeNode, TypeNodeKind,
 };
 use crate::front::budget::CompileBudget;
+use crate::front::EntryKind;
 use crate::front::Module;
 use crate::sem::{TypeData, TypeId, TypedFunction, TypedModule};
 
@@ -49,6 +50,10 @@ pub(crate) fn lower(
         local_mutable: Vec::new(),
         result_ty: None,
         projections: Vec::new(),
+        validation_descriptor: None,
+        field_error_descriptor: None,
+        code_error_descriptor: None,
+        error_cap_cell: None,
     };
     for fid in &typed.call_order {
         let function = typed
@@ -57,6 +62,9 @@ pub(crate) fn lower(
         lower_function(&mut ctx, function)?;
     }
     let mut ir = ctx.builder.finish()?;
+    // Validator entries share the scalar emission path; the wrapper selects
+    // the validator contract when this flag is set.
+    ir.entry_is_validator = typed.entry_kind == EntryKind::Validator;
     for (index, function) in ir.functions.iter_mut().enumerate() {
         if let Some((params, result)) = ctx.projections.get(index) {
             function.param_projections = params.clone();

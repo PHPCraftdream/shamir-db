@@ -421,6 +421,12 @@ impl<'b> IrBuilder<'b> {
         Ok(offset)
     }
 
+    /// Bakes one static LIST cell with aux = `cap` and a zero payload; the
+    /// validation lowering uses it solely as the bounds-check base.
+    pub fn list_cap_cell(&mut self, cap: u32) -> Result<u32, IrError> {
+        self.append_cell(cell_tag::LIST, cap, 0)
+    }
+
     /// Raw message bytes; only `max_static_bytes` applies.
     pub fn message_bytes(&mut self, bytes: &[u8]) -> Result<u32, IrError> {
         self.reserve_image(bytes.len())?;
@@ -501,6 +507,7 @@ impl<'b> IrBuilder<'b> {
         Ok(IrModule {
             functions: self.functions,
             entry: 0,
+            entry_is_validator: false,
             static_bytes: self.static_bytes,
             eq_shapes: shape_values,
             type_nodes: Vec::new(),
