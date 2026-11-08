@@ -547,8 +547,21 @@ fn reserved_comparison_and_mixed_arenas_have_exact_node_counts_and_caps() {
     );
 }
 
+/// Worker stack size the compiler runs on (design section 6): the nesting
+/// tests mirror it instead of the 2 MiB default test thread.
+const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 #[test]
 fn grouped_unary_and_nested_list_expressions_obey_ast_depth_boundaries() {
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK_BYTES)
+        .spawn(grouped_unary_and_nested_list_boundaries)
+        .expect("worker thread starts")
+        .join()
+        .expect("depth boundaries hold on the worker stack");
+}
+
+fn grouped_unary_and_nested_list_boundaries() {
     let exact_groups = format!(
         "@entry scalar f() -> i64 {{ return {}1{}; }}",
         "(".repeat(124),
