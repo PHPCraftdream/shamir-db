@@ -75,6 +75,22 @@ pub(crate) fn convert(
     }
 }
 
+/// Prepares a value for a list element or record field slot: every slot
+/// holds a 16-byte cell, so a scalar is boxed by its own type and a cell
+/// pointer (aggregate, optional or null) passes through unchanged.
+pub(crate) fn to_slot(
+    ctx: &mut LowerCtx,
+    value_ty: TypeId,
+    value: InstId,
+    span: Span,
+) -> Result<InstId, IrError> {
+    if is_scalar(ctx.type_data(value_ty)?) {
+        box_value(ctx, value_ty, value, span)
+    } else {
+        Ok(value)
+    }
+}
+
 /// Interns the equality shape of `ty`, bottom-up and depth-guarded.
 pub(crate) fn eq_shape_for(ctx: &mut LowerCtx, ty: TypeId, depth: u32) -> Result<u32, IrError> {
     if depth > ctx.limits.max_type_depth as u32 {

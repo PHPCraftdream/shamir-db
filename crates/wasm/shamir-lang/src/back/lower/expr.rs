@@ -5,7 +5,7 @@ use crate::front::{BinaryOp, ExprId, ExprKind, UnaryOp};
 use crate::sem::{BuiltinId, ResolvedTarget, TypeData, TypeId};
 
 use super::ctx::LowerCtx;
-use super::types::{convert, eq_shape_for, is_scalar, value_kind};
+use super::types::{convert, eq_shape_for, is_scalar, to_slot, value_kind};
 
 /// Magnitude of 2^63: the `negative_min_candidate` literal for i64::MIN.
 const MAGNITUDE_I64_MIN: u64 = 9_223_372_036_854_775_808;
@@ -109,10 +109,9 @@ fn lower_list(
     items: &[ExprId],
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
-    let elem = match ctx.type_data(ctx.expr_type(id)?)? {
-        TypeData::List(elem) => elem,
-        _ => return Err(IrError::Internal("lower: list literal with non-list type")),
-    };
+    if !matches!(ctx.type_data(ctx.expr_type(id)?)?, TypeData::List(_)) {
+        return Err(IrError::Internal("lower: list literal with non-list type"));
+    }
     let count =
         u32::try_from(items.len()).map_err(|_| IrError::Internal("lower: list length overflow"))?;
     let count_i32 = i32::try_from(count)
@@ -125,13 +124,7 @@ fn lower_list(
         let index_i32 = i32::try_from(index)
             .map_err(|_| IrError::Internal("lower: element index out of i32 range"))?;
         let value = lower_expr(ctx, *item)?;
-        let boxed = convert(
-            ctx,
-            elem,
-            ctx.expr_type(*item)?,
-            value,
-            ctx.expr_span(*item),
-        )?;
+        let boxed = to_slot(ctx, ctx.expr_type(*item)?, value, ctx.expr_span(*item))?;
         let index_inst = ctx.builder.append(InstKind::ConstI32(index_i32), span)?;
         let dest = ctx.builder.append(
             InstKind::CellSlot {
@@ -201,7 +194,7 @@ fn lower_record(
         .builder
         .append(InstKind::ConstI32(field_count_i32), span)?;
     let region = ctx.builder.append(InstKind::CellsAlloc(count_inst), span)?;
-    for (position, (name, field_ty)) in shape.fields.iter().enumerate() {
+    for (position, (name, _)) in shape.fields.iter().enumerate() {
         let field = fields
             .iter()
             .find_map(|field_id| {
@@ -214,9 +207,8 @@ fn lower_record(
             })
             .ok_or(IrError::Internal("lower: record literal misses a field"))?;
         let value = lower_expr(ctx, field.value)?;
-        let boxed = convert(
+        let boxed = to_slot(
             ctx,
-            *field_ty,
             ctx.expr_type(field.value)?,
             value,
             ctx.expr_span(field.value),

@@ -249,7 +249,11 @@ fn one_budget_rejects_oversized_comment_source() {
         ..default_options()
     };
     match compile(&source, &options) {
+        // The scanner reports fuel exhaustion as a B001 diagnostic.
+        Err(CompileError::Diagnostics(diagnostics)) => {
+            assert_eq!(diagnostics.first().map(|diag| diag.code), Some("B001"));
+        }
         Err(CompileError::LimitExceeded { code, .. }) => assert_eq!(code, "B001"),
-        other => panic!("expected LimitExceeded B001, got {other:?}"),
+        other => panic!("expected B001, got {other:?}"),
     }
 }

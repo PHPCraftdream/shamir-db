@@ -199,6 +199,15 @@ fn load_offset(bytes: u32) -> MemArg {
     store_offset(bytes)
 }
 
+/// 8-bit accesses must declare byte alignment.
+fn byte_offset(bytes: u32) -> MemArg {
+    MemArg {
+        offset: u64::from(bytes),
+        align: 0,
+        memory_index: 0,
+    }
+}
+
 fn load64_offset(bytes: u32) -> MemArg {
     MemArg {
         offset: u64::from(bytes),
@@ -499,7 +508,7 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     function.instruction(&Instruction::I32Eq);
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::LocalGet(kaddr));
-    function.instruction(&Instruction::I32Load8U(load_offset(0)));
+    function.instruction(&Instruction::I32Load8U(byte_offset(0)));
     function.instruction(&Instruction::LocalTee(bbyte));
     function.instruction(&Instruction::I32Const(0x30));
     function.instruction(&Instruction::I32GeU);
@@ -517,11 +526,11 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     function.instruction(&Instruction::I32Eq);
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::LocalGet(kaddr));
-    function.instruction(&Instruction::I32Load8U(load_offset(0)));
+    function.instruction(&Instruction::I32Load8U(byte_offset(0)));
     function.instruction(&Instruction::LocalSet(bbyte));
     // `scratch` is reused as the second key byte here (dead until boxing)
     function.instruction(&Instruction::LocalGet(kaddr));
-    function.instruction(&Instruction::I32Load8U(load_offset(1)));
+    function.instruction(&Instruction::I32Load8U(byte_offset(1)));
     function.instruction(&Instruction::LocalSet(scratch));
     function.instruction(&Instruction::LocalGet(bbyte));
     function.instruction(&Instruction::I32Const(0x31));
@@ -636,11 +645,11 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
             function.instruction(&Instruction::LocalGet(kaddr));
             function.instruction(&Instruction::I32Const(byte_index as i32));
             function.instruction(&Instruction::I32Add);
-            function.instruction(&Instruction::I32Load8U(load_offset(0)));
+            function.instruction(&Instruction::I32Load8U(byte_offset(0)));
             function.instruction(&Instruction::I32Const(*name_addr as i32));
             function.instruction(&Instruction::I32Const(byte_index as i32));
             function.instruction(&Instruction::I32Add);
-            function.instruction(&Instruction::I32Load8U(load_offset(0)));
+            function.instruction(&Instruction::I32Load8U(byte_offset(0)));
             function.instruction(&Instruction::I32Eq);
             function.instruction(&Instruction::I32And);
             function.instruction(&Instruction::LocalSet(bbyte));

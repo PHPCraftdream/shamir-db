@@ -73,6 +73,15 @@ fn mem32(offset: u32) -> MemArg {
     }
 }
 
+/// 8-bit accesses must declare byte alignment.
+fn byte_mem(offset: u32) -> MemArg {
+    MemArg {
+        offset: u64::from(offset),
+        align: 0,
+        memory_index: 0,
+    }
+}
+
 fn mem64(offset: u32) -> MemArg {
     MemArg {
         offset: u64::from(offset),
@@ -782,7 +791,7 @@ fn emit_field(
         function.instruction(&Instruction::I32WrapI64);
         function.instruction(&Instruction::I32Const(byte_index as i32));
         function.instruction(&Instruction::I32Add);
-        function.instruction(&Instruction::I32Load8U(mem32(0)));
+        function.instruction(&Instruction::I32Load8U(byte_mem(0)));
         function.instruction(&Instruction::I32Const(i32::from(*byte)));
         function.instruction(&Instruction::I32Eq);
         function.instruction(&Instruction::I32And);
