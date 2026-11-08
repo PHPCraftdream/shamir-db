@@ -16,6 +16,9 @@ pub mod api;
 /// Unstable language front end, until the milestone 4 compile API is available.
 #[doc(hidden)]
 pub mod front;
+/// Unstable semantic analysis, until the milestone 4 compile API is available.
+#[doc(hidden)]
+pub mod sem;
 
 #[cfg(feature = "testsupport")]
 #[doc(hidden)]
