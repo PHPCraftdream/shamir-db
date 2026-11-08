@@ -436,7 +436,7 @@ pub fn emit_runtime_module(
 /// stores the null cell at the cell base, decodes the input envelope (codec
 /// rejections surface through the error bridge), allocates the output buffer,
 /// runs the iterative encoder over the decoded root cell and returns the
-/// envelope as `(len << 32) | ptr`.
+/// envelope as `(ptr << 32) | len`.
 struct WrapperBases {
     context: u32,
     frame: u32,
@@ -584,17 +584,17 @@ fn emit_call_wrapper(
     // encode the decoded root cell into the output buffer
     function.instruction(&Instruction::LocalGet(4));
     function.instruction(&Instruction::Call(encode_index));
-    // result = (len << 32) | ptr, both read back from the context
+    // result = (ptr << 32) | len, both read back from the context
     function.instruction(&Instruction::LocalGet(4));
     function.instruction(&Instruction::I32Load(store_offset(
-        CONTEXT_OUTPUT_LEN_OFFSET,
+        CONTEXT_OUTPUT_PTR_OFFSET,
     )));
     function.instruction(&Instruction::I64ExtendI32U);
     function.instruction(&Instruction::I64Const(32));
     function.instruction(&Instruction::I64Shl);
     function.instruction(&Instruction::LocalGet(4));
     function.instruction(&Instruction::I32Load(store_offset(
-        CONTEXT_OUTPUT_PTR_OFFSET,
+        CONTEXT_OUTPUT_LEN_OFFSET,
     )));
     function.instruction(&Instruction::I64ExtendI32U);
     function.instruction(&Instruction::I64Or);
