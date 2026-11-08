@@ -42,7 +42,7 @@ Windows) plus the vendored `vendor/hnsw_rs` member:
 `shamir-sdk-macros`, `shamir-tunables`, `shamir-wasm-host`, `shamir-index`,
 `shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`,
 `shamir-lang` (its `testsupport` module is behind the `testsupport` feature,
-enabled only by the host dev-dependency). Milestone 4 adds the typed IR (`back/ir`), the lowering (`back/lower`), scalar emission with the named/positional call envelope, and the public `compile` entry returning a self-admitted `CompiledModule`.
+enabled only by the host dev-dependency). Milestone 4 adds the typed IR (`back/ir`), the lowering (`back/lower`), scalar emission with the named/positional call envelope, and the public `compile` entry returning a self-admitted `CompiledModule`. Milestone 5 adds validator entries and their ABI (`back/emit/support/validator.rs`, the in-guest `Validation` record and the seven constructor lowerings).
 
 Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
 scoped to the touched crates (`-p <crate>`) — see "Compile / build / test

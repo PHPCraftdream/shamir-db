@@ -155,6 +155,18 @@ pub(super) fn emit_inst(
             function.instruction(&Instruction::Call(env.plan.alloc_index));
             store_result(env, function, position)?;
         }
+        InstKind::CellsCopy {
+            dest,
+            source,
+            count,
+        } => {
+            // Runtime copy helper signature `(dest, source, count) -> ()`; it
+            // copies `count * 16` bytes (`emit_copy_cells`).
+            function.instruction(&Instruction::LocalGet(env.local_of(*dest)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*source)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*count)?));
+            function.instruction(&Instruction::Call(env.plan.copy_cells_index));
+        }
         InstKind::CellLoadPayload(value) => {
             function.instruction(&Instruction::LocalGet(env.local_of(*value)?));
             function.instruction(&Instruction::I64Load(mem64(8)));

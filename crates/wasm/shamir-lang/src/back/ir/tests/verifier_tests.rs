@@ -76,6 +76,7 @@ fn module(functions: Vec<IrFunction>) -> IrModule {
     IrModule {
         functions,
         entry: 0,
+        entry_is_validator: false,
         static_bytes: Vec::new(),
         eq_shapes: Vec::new(),
         type_nodes: Vec::new(),

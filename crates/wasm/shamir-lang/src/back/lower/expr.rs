@@ -776,6 +776,26 @@ fn lower_builtin(
     arguments: &[ExprId],
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
+    // Validator verdict constructors lower outside the single-argument path.
+    // Each argument is spilled to a fresh local right after it is lowered: a
+    // later argument may open new blocks (`?:`, `&&`, `||`), and the
+    // constructor's operands must live in the block the lowering ends in
+    // (the verifier requires same-block, strictly-earlier operands).
+    if is_validator_ctor(builtin) {
+        let mut slots = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            lower_expr(ctx, *argument)?;
+            let tmp = ctx.builder.declare_local(ValueKind::I32)?;
+            ctx.builder
+                .append(InstKind::LocalSet(tmp), ctx.expr_span(*argument))?;
+            slots.push(tmp);
+        }
+        let mut lowered = Vec::with_capacity(slots.len());
+        for slot in slots {
+            lowered.push(ctx.builder.append(InstKind::LocalGet(slot), span)?);
+        }
+        return super::types::lower_ctor(ctx, builtin, &lowered, span);
+    }
     if arguments.len() != 1 {
         return Err(IrError::Internal("lower: builtin arity mismatch"));
     }
@@ -830,6 +850,20 @@ fn lower_builtin(
         }
     };
     ctx.builder.append(kind, span)
+}
+
+/// True iff `builtin` is one of the seven validator verdict constructors.
+fn is_validator_ctor(builtin: BuiltinId) -> bool {
+    matches!(
+        builtin,
+        BuiltinId::Accept
+            | BuiltinId::Reject
+            | BuiltinId::RejectPath
+            | BuiltinId::RecordError
+            | BuiltinId::WithError
+            | BuiltinId::WithRecordError
+            | BuiltinId::Stop
+    )
 }
 
 /// Field access: `base` is the record (or optional-record) cell pointer.

@@ -5,6 +5,7 @@ use crate::back::ir::{
     IrBuilder, IrError, IrLimits, IrModule, ParamProjection, RecordField, TypeNode, TypeNodeKind,
 };
 use crate::front::budget::CompileBudget;
+use crate::front::EntryKind;
 use crate::front::Module;
 use crate::sem::{TypeData, TypeId, TypedFunction, TypedModule};
 
@@ -49,6 +50,10 @@ pub(crate) fn lower(
         local_mutable: Vec::new(),
         result_ty: None,
         projections: Vec::new(),
+        validation_descriptor: None,
+        field_error_descriptor: None,
+        code_error_descriptor: None,
+        error_cap_cell: None,
     };
     for fid in &typed.call_order {
         let function = typed
@@ -57,15 +62,25 @@ pub(crate) fn lower(
         lower_function(&mut ctx, function)?;
     }
     let mut ir = ctx.builder.finish()?;
+    // Validator entries share the scalar emission path; the wrapper selects
+    // the validator contract when this flag is set.
+    ir.entry_is_validator = typed.entry_kind == EntryKind::Validator;
     for (index, function) in ir.functions.iter_mut().enumerate() {
         if let Some((params, result)) = ctx.projections.get(index) {
             function.param_projections = params.clone();
             function.result_projection = *result;
         }
     }
-    // Structural parameter type nodes (finding 15): interned per parameter in
-    // call order, patched with the same indexing as the projections patch.
-    let (type_nodes, param_node_lists) = build_type_nodes(typed, limits.max_type_depth)?;
+    let entry_position = typed
+        .call_order
+        .iter()
+        .position(|fid| *fid == typed.entry)
+        .ok_or(IrError::Internal("lower: entry not in call order"))?;
+    // Structural parameter type nodes (finding 15): interned for the ENTRY's
+    // parameters only, patched with the same indexing as the projections
+    // patch.
+    let (type_nodes, param_node_lists) =
+        build_type_nodes(typed, limits.max_type_depth, entry_position)?;
     for (index, nodes) in param_node_lists.into_iter().enumerate() {
         let function = ir.functions.get_mut(index).ok_or(IrError::Internal(
             "lower: call order exceeds emitted functions",
@@ -88,11 +103,6 @@ pub(crate) fn lower(
             .map(|parameter| parameter.name.clone())
             .collect();
     }
-    let entry_position = typed
-        .call_order
-        .iter()
-        .position(|fid| *fid == typed.entry)
-        .ok_or(IrError::Internal("lower: entry not in call order"))?;
     ir.entry = u32::try_from(entry_position)
         .map_err(|_| IrError::Internal("lower: entry index overflow"))?;
     Ok(ir)
@@ -234,22 +244,31 @@ fn node_for(
     children.pop().ok_or_else(missing)
 }
 
-/// Structural type nodes for every function's parameters (call order).
+/// Structural type nodes for the ENTRY function's parameters (finding 15).
+/// The wrapper projects only the entry's parameters; helper functions are
+/// never projected at a wire boundary, so their parameters get no nodes —
+/// this is also what keeps `Validation` helper parameters (no node exists
+/// for the opaque type) compilable.
 fn build_type_nodes(
     typed: &TypedModule,
     max_depth: usize,
+    entry: usize,
 ) -> Result<(Vec<TypeNode>, Vec<Vec<u32>>), IrError> {
     let mut nodes = Vec::new();
-    let mut lists = Vec::with_capacity(typed.call_order.len());
-    for fid in &typed.call_order {
-        let function = typed
-            .function(*fid)
-            .ok_or(IrError::Internal("lower: missing typed function"))?;
-        let mut list = Vec::with_capacity(function.parameters.len());
-        for parameter in &function.parameters {
-            list.push(node_for(typed, parameter.ty, &mut nodes, max_depth)?);
-        }
-        lists.push(list);
+    let mut lists = vec![Vec::new(); typed.call_order.len()];
+    let fid = *typed
+        .call_order
+        .get(entry)
+        .ok_or(IrError::Internal("lower: entry not in call order"))?;
+    let function = typed
+        .function(fid)
+        .ok_or(IrError::Internal("lower: missing typed function"))?;
+    let mut list = Vec::with_capacity(function.parameters.len());
+    for parameter in &function.parameters {
+        list.push(node_for(typed, parameter.ty, &mut nodes, max_depth)?);
+    }
+    if let Some(slot) = lists.get_mut(entry) {
+        *slot = list;
     }
     Ok((nodes, lists))
 }

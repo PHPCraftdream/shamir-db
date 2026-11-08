@@ -38,22 +38,6 @@ fn diagnostics_variant_reachable_from_source() {
 }
 
 #[test]
-fn validator_entry_gives_t007() {
-    let source =
-        "@entry validator v(record: { a: i64 }?, old_record: { a: i64 }?) -> Validation { return accept(); }";
-    let error = compile(source, &default_options()).expect_err("validator entry is rejected");
-    match error {
-        CompileError::Diagnostics(diagnostics) => {
-            // Exactly one diagnostic: the T007 entry-kind rejection.
-            assert_eq!(diagnostics.len(), 1);
-            // T007 is the stable code for an unsupported entry kind.
-            assert_eq!(diagnostics[0].code, "T007");
-        }
-        other => panic!("expected Diagnostics, got {other:?}"),
-    }
-}
-
-#[test]
 fn procedure_entry_gives_t007() {
     let source = "@entry procedure p(a: i64) -> i64 { return a; }";
     let error = compile(source, &default_options()).expect_err("procedure entry is rejected");
@@ -299,4 +283,113 @@ fn one_budget_rejects_oversized_comment_source() {
         Err(CompileError::LimitExceeded { code, .. }) => assert_eq!(code, "B001"),
         other => panic!("expected B001, got {other:?}"),
     }
+}
+
+/// Fixture: the milestone-5 validator worked example.
+const VALIDATOR: &str = r#"
+@entry validator require_name(
+  record: { name: string }?,
+  old_record: { name: string }?
+) -> Validation {
+  if (is_null(record)) {
+    return record_error("record_required");
+  }
+  let current: { name: string } = unwrap(record);
+  if (current.name == "") {
+    return reject("name", "name_empty");
+  }
+  return accept();
+}
+"#;
+
+#[test]
+fn compile_accepts_validator_entries() {
+    let module = compile(VALIDATOR, &default_options()).expect("validator entry compiles");
+    // The admission report counts the emitted module, so it must equal its length.
+    assert_eq!(module.report.byte_size, module.wasm.len());
+}
+
+#[test]
+fn compile_still_rejects_procedures_with_t007() {
+    let source = "@entry procedure p(a: i64) -> i64 { return a; }";
+    let options = CompileOptions {
+        stage: crate::api::Stage::Procedures,
+        ..default_options()
+    };
+    // Derivation: procedures are rejected at the entry-kind gate (T007), not
+    // by the stage switch — both the default and Procedures stages fail.
+    for options in [default_options(), options] {
+        let error = compile(source, &options).expect_err("procedure entry is rejected");
+        match error {
+            CompileError::Diagnostics(diagnostics) => {
+                assert_eq!(diagnostics.len(), 1);
+                assert_eq!(diagnostics[0].code, "T007");
+            }
+            other => panic!("expected Diagnostics, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn compile_validator_limits_are_enforced() {
+    // Derivation: parse rejects sources over max_source_bytes with B001
+    // before any lowering, so a 16-byte cap rejects the worked example.
+    let options = CompileOptions {
+        limits: CompileLimits {
+            max_source_bytes: 16,
+            ..CompileLimits::default()
+        },
+        ..default_options()
+    };
+    let error = compile(VALIDATOR, &options).expect_err("oversized source must fail");
+    match error {
+        CompileError::Diagnostics(diagnostics) => {
+            assert_eq!(diagnostics.first().map(|diag| diag.code), Some("B001"));
+        }
+        CompileError::LimitExceeded { code, .. } => assert_eq!(code, "B001"),
+        other => panic!("expected B001, got {other:?}"),
+    }
+}
+
+#[test]
+fn compile_validator_is_deterministic() {
+    let first = compile(VALIDATOR, &default_options()).expect("validator entry compiles");
+    let second = compile(VALIDATOR, &default_options()).expect("validator entry compiles");
+    // Determinism: identical inputs must produce identical output bytes.
+    assert_eq!(first.wasm, second.wasm);
+}
+
+/// Fixture: a `Validation` helper parameter, an entry-only aggregate
+/// projection, a conditional constructor argument (`?:`) and branching
+/// `Validation` lets, all in one module.
+const VALIDATOR_BRANCHING: &str = r#"
+fn add(v: Validation) -> Validation {
+  return with_record_error(v, "extra");
+}
+@entry validator v(
+  record: { name: string, nick: string? }?,
+  old_record: { name: string, nick: string? }?
+) -> Validation {
+  let base = accept();
+  let left = with_error(base, "f", "left");
+  let right = with_error(base, "f", "right");
+  let current: { name: string, nick: string? } = unwrap(record);
+  if (is_null(current.nick)) {
+    return add(left);
+  }
+  return add(with_error(right, is_null(old_record) ? "a" : "b", "code"));
+}
+"#;
+
+#[test]
+fn compile_accepts_validation_helpers_branching_and_optional_fields() {
+    let module = compile(VALIDATOR_BRANCHING, &default_options());
+    // Derivation: Ok means the IR verifier accepted the new CellsCopy
+    // instruction, the entry-only type-node policy (a `Validation` helper
+    // parameter), the spilled conditional constructor argument, and the
+    // branching `Validation` lets; self-admission then passed on the emitted
+    // module.
+    let module = module.expect("branching validator module compiles");
+    // The admission report counts the emitted module, so it must equal its length.
+    assert_eq!(module.report.byte_size, module.wasm.len());
 }

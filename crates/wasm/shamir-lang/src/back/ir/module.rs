@@ -94,8 +94,8 @@ pub struct IrFunction {
     /// Declared parameter names in order (filled by the lowering driver;
     /// empty in hand-built test IR).
     pub param_names: Vec<String>,
-    /// Structural type node index per parameter (filled by the lowering
-    /// driver; empty in hand-built test IR).
+    /// Structural type node index per ENTRY parameter (filled by the
+    /// lowering driver; empty for helpers and hand-built test IR).
     pub param_type_nodes: Vec<u32>,
 }
 
@@ -122,6 +122,8 @@ pub struct IrModule {
     pub functions: Vec<IrFunction>,
     /// Index into `functions`.
     pub entry: u32,
+    /// True iff the entry is a validator entry (the wrapper emits the validator contract).
+    pub entry_is_validator: bool,
     /// The finished static image; u32 static ids are byte offsets into it.
     pub static_bytes: Vec<u8>,
     /// Shape index space for `StructEq`.

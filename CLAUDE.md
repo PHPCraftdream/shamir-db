@@ -74,7 +74,7 @@ allocator, the iterative MessagePack codec over 16-byte tagged cells, the
 `wat`/`wasmparser` are test-only. Its `testsupport` module is hidden
 test-only API consumed by the host crate's dev-dependency execution tests;
 it ships behind the `testsupport` Cargo feature, enabled only by the host
-dev-dependency. Milestone 4 adds the typed IR (`back/ir`), the lowering (`back/lower`), scalar emission with the named/positional call envelope, and the public `compile` entry returning a self-admitted `CompiledModule`.
+dev-dependency. Milestone 4 adds the typed IR (`back/ir`), the lowering (`back/lower`), scalar emission with the named/positional call envelope, and the public `compile` entry returning a self-admitted `CompiledModule`. Milestone 5 adds validator entries and their ABI (`back/emit/support/validator.rs`, the in-guest `Validation` record and the seven constructor lowerings).
 
 `shamir-index-core` is the backend-agnostic index model (descriptors, kinds,
 meta envelopes, persistence, expressions, runtime, IDV2 identity, the
