@@ -460,7 +460,7 @@ Admission feature profile allows MVP, mutable globals, saturating float conversi
 | block depth / tables / elements / start | 256 / 0 / 0 / absent | before emission/admission |
 | literals: single / total | 65,536 / 4 MiB | before growth/append |
 | static data / output / runtime code / body | 4 MiB / 8 MiB / 64 KiB / 1 MiB | before layout/write/emission |
-| operators per function / IR nodes / call chain | 500,000 / 200,000 / 64 | before append; recursion rejected |
+| operators per function / IR nodes / call chain | 500,000 / 200,000 / 64 | IR nodes and per-function IR nodes (`max_ir_nodes_per_function`) before append (`B001`); emitted operators by self-admission (`B002`); recursion rejected |
 | decoder depth / cells / containers / entries | 32 / 1,000,000 / 100,000 / 100,000 | before allocation/frame |
 | string/bin / map-key bytes | 1 MiB / 64 KiB | before allocation |
 | codec input/output / guest memory | 8 MiB each / 64 MiB | before allocation/write/growth |

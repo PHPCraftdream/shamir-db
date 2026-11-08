@@ -189,6 +189,7 @@ fn ordered_helper_functions(
     scratch: u32,
     sort_base: u32,
     caps: RuntimeCaps,
+    records: bool,
 ) -> Result<OrderedHelpers, RuntimeError> {
     const TYPE_RANGE: u32 = 0;
     const TYPE_SMALL: u32 = 1;
@@ -251,6 +252,7 @@ fn ordered_helper_functions(
         append_index: index_of(append)?,
         compare_index: index_of(compare)?,
         caps,
+        records,
     };
 
     let mut functions: Vec<(u32, Function)> = Vec::with_capacity(order.len());
@@ -459,7 +461,7 @@ pub fn emit_runtime_module(
     let workspace = compute_workspace(static_len, &caps)?;
 
     let (helper_functions, decode_index, encode_index, _compare_index) =
-        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps)?;
+        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, false)?;
     let helper_count = helper_functions.len() as u32;
     let error_raiser_index = 1 + helper_count;
     let alloc_index = error_raiser_index + 1;
@@ -656,7 +658,7 @@ pub(crate) fn emit_compiled_module(
 
     let workspace = compute_workspace(observed, &caps)?;
     let (helper_functions, decode_index, encode_index, compare_index) =
-        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps)?;
+        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, true)?;
     // finding 20: the ten ordered runtime helpers are not controlled by user
     // code, so their bytes count against `max_runtime_bytes`; user code is
     // bounded by `max_function_body_bytes` per body and the module by the

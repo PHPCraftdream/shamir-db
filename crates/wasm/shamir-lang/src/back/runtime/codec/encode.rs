@@ -23,6 +23,9 @@ pub(crate) struct EncodeEmit {
     pub append_index: u32,
     pub compare_index: u32,
     pub caps: RuntimeCaps,
+    /// Emit typed-record dispatch and traversal; off keeps the M1 runtime
+    /// module byte-for-byte unchanged.
+    pub records: bool,
 }
 
 const TAG_NULL: i32 = 1;
@@ -720,25 +723,27 @@ fn emit_cell_dispatch(function: &mut Function, params: &EncodeEmit, exit_depth: 
     emit_map_value(function, params);
     function.instruction(&Instruction::Br(exit_depth));
     function.instruction(&Instruction::End);
-    lg(function, L_TAG);
-    ic(function, TAG_RECORD);
-    function.instruction(&Instruction::I32Eq);
-    function.instruction(&Instruction::If(BlockType::Empty));
-    // aux = field count, payload low = field-cell region, payload high =
-    // descriptor offset (parked in L_SEQ, free while the record is open)
-    lg(function, L_AUX);
-    st(function, L_COUNT);
-    lg(function, L_PAYLOAD);
-    function.instruction(&Instruction::I32WrapI64);
-    st(function, L_CELL);
-    lg(function, L_PAYLOAD);
-    function.instruction(&Instruction::I64Const(32));
-    function.instruction(&Instruction::I64ShrU);
-    function.instruction(&Instruction::I32WrapI64);
-    st(function, L_SEQ);
-    emit_record_value(function, params);
-    function.instruction(&Instruction::Br(exit_depth));
-    function.instruction(&Instruction::End);
+    if params.records {
+        lg(function, L_TAG);
+        ic(function, TAG_RECORD);
+        function.instruction(&Instruction::I32Eq);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        // aux = field count, payload low = field-cell region, payload high =
+        // descriptor offset (parked in L_SEQ, free while the record is open)
+        lg(function, L_AUX);
+        st(function, L_COUNT);
+        lg(function, L_PAYLOAD);
+        function.instruction(&Instruction::I32WrapI64);
+        st(function, L_CELL);
+        lg(function, L_PAYLOAD);
+        function.instruction(&Instruction::I64Const(32));
+        function.instruction(&Instruction::I64ShrU);
+        function.instruction(&Instruction::I32WrapI64);
+        st(function, L_SEQ);
+        emit_record_value(function, params);
+        function.instruction(&Instruction::Br(exit_depth));
+        function.instruction(&Instruction::End);
+    }
     function.instruction(&Instruction::Unreachable);
 }
 
@@ -882,77 +887,79 @@ pub(crate) fn emit_encode_root(params: &EncodeEmit) -> Function {
     dispatch_child(&mut function, params);
     function.instruction(&Instruction::End);
     function.instruction(&Instruction::End);
-    // record frame: the cursor walks field cells; each step emits the field
-    // name (read from the static descriptor) then dispatches the field cell
-    lg(&mut function, L_KIND);
-    ic(&mut function, KIND_RECORD);
-    function.instruction(&Instruction::I32Eq);
-    function.instruction(&Instruction::If(BlockType::Empty));
-    lg(&mut function, L_FRAME);
-    function.instruction(&Instruction::I32Load(mem32(E_COUNT)));
-    st(&mut function, L_COUNT);
-    lg(&mut function, L_COUNT);
-    function.instruction(&Instruction::I32Eqz);
-    function.instruction(&Instruction::If(BlockType::Empty));
-    lg(&mut function, L_DEPTH);
-    ic(&mut function, 1);
-    function.instruction(&Instruction::I32Sub);
-    st(&mut function, L_DEPTH);
-    function.instruction(&Instruction::Br(2)); // countIf(0) kindIf(1) $step(2)
-    function.instruction(&Instruction::Else);
-    // field index = fields emitted so far (E_TOTAL counts up)
-    lg(&mut function, L_FRAME);
-    function.instruction(&Instruction::I32Load(mem32(E_TOTAL)));
-    st(&mut function, L_J);
-    lg(&mut function, L_FRAME);
-    lg(&mut function, L_J);
-    ic(&mut function, 1);
-    function.instruction(&Instruction::I32Add);
-    function.instruction(&Instruction::I32Store(mem32(E_TOTAL)));
-    lg(&mut function, L_FRAME);
-    lg(&mut function, L_COUNT);
-    ic(&mut function, 1);
-    function.instruction(&Instruction::I32Sub);
-    function.instruction(&Instruction::I32Store(mem32(E_COUNT)));
-    // descriptor offset parked at frame[E_DESC]
-    lg(&mut function, L_FRAME);
-    function.instruction(&Instruction::I32Load(mem32(E_DESC)));
-    st(&mut function, L_SEQ);
-    // name length at descriptor + 4 + i*8, name offset at +8 (one add chain;
-    // descriptor and name offsets are ABSOLUTE per the builder)
-    lg(&mut function, L_SEQ);
-    lg(&mut function, L_J);
-    ic(&mut function, 8);
-    function.instruction(&Instruction::I32Mul);
-    ic(&mut function, 4);
-    function.instruction(&Instruction::I32Add);
-    function.instruction(&Instruction::I32Add);
-    function.instruction(&Instruction::I32Load(mem32(0)));
-    st(&mut function, L_LEN);
-    lg(&mut function, L_SEQ);
-    lg(&mut function, L_J);
-    ic(&mut function, 8);
-    function.instruction(&Instruction::I32Mul);
-    ic(&mut function, 8);
-    function.instruction(&Instruction::I32Add);
-    function.instruction(&Instruction::I32Add);
-    function.instruction(&Instruction::I32Load(mem32(0)));
-    st(&mut function, L_PTR);
-    budget_blob(&mut function, params, 0);
-    emit_str_header(&mut function, params);
-    emit_name_bytes(&mut function, params);
-    // dispatch the field cell and advance the cursor
-    lg(&mut function, L_FRAME);
-    function.instruction(&Instruction::I32Load(mem32(E_CURSOR)));
-    st(&mut function, L_CELL);
-    lg(&mut function, L_FRAME);
-    lg(&mut function, L_CELL);
-    ic(&mut function, 16);
-    function.instruction(&Instruction::I32Add);
-    function.instruction(&Instruction::I32Store(mem32(E_CURSOR)));
-    dispatch_child(&mut function, params);
-    function.instruction(&Instruction::End);
-    function.instruction(&Instruction::End);
+    if params.records {
+        // record frame: the cursor walks field cells; each step emits the field
+        // name (read from the static descriptor) then dispatches the field cell
+        lg(&mut function, L_KIND);
+        ic(&mut function, KIND_RECORD);
+        function.instruction(&Instruction::I32Eq);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        lg(&mut function, L_FRAME);
+        function.instruction(&Instruction::I32Load(mem32(E_COUNT)));
+        st(&mut function, L_COUNT);
+        lg(&mut function, L_COUNT);
+        function.instruction(&Instruction::I32Eqz);
+        function.instruction(&Instruction::If(BlockType::Empty));
+        lg(&mut function, L_DEPTH);
+        ic(&mut function, 1);
+        function.instruction(&Instruction::I32Sub);
+        st(&mut function, L_DEPTH);
+        function.instruction(&Instruction::Br(2)); // countIf(0) kindIf(1) $step(2)
+        function.instruction(&Instruction::Else);
+        // field index = fields emitted so far (E_TOTAL counts up)
+        lg(&mut function, L_FRAME);
+        function.instruction(&Instruction::I32Load(mem32(E_TOTAL)));
+        st(&mut function, L_J);
+        lg(&mut function, L_FRAME);
+        lg(&mut function, L_J);
+        ic(&mut function, 1);
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Store(mem32(E_TOTAL)));
+        lg(&mut function, L_FRAME);
+        lg(&mut function, L_COUNT);
+        ic(&mut function, 1);
+        function.instruction(&Instruction::I32Sub);
+        function.instruction(&Instruction::I32Store(mem32(E_COUNT)));
+        // descriptor offset parked at frame[E_DESC]
+        lg(&mut function, L_FRAME);
+        function.instruction(&Instruction::I32Load(mem32(E_DESC)));
+        st(&mut function, L_SEQ);
+        // name length at descriptor + 4 + i*8, name offset at +8 (one add chain;
+        // descriptor and name offsets are ABSOLUTE per the builder)
+        lg(&mut function, L_SEQ);
+        lg(&mut function, L_J);
+        ic(&mut function, 8);
+        function.instruction(&Instruction::I32Mul);
+        ic(&mut function, 4);
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Load(mem32(0)));
+        st(&mut function, L_LEN);
+        lg(&mut function, L_SEQ);
+        lg(&mut function, L_J);
+        ic(&mut function, 8);
+        function.instruction(&Instruction::I32Mul);
+        ic(&mut function, 8);
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Load(mem32(0)));
+        st(&mut function, L_PTR);
+        budget_blob(&mut function, params, 0);
+        emit_str_header(&mut function, params);
+        emit_name_bytes(&mut function, params);
+        // dispatch the field cell and advance the cursor
+        lg(&mut function, L_FRAME);
+        function.instruction(&Instruction::I32Load(mem32(E_CURSOR)));
+        st(&mut function, L_CELL);
+        lg(&mut function, L_FRAME);
+        lg(&mut function, L_CELL);
+        ic(&mut function, 16);
+        function.instruction(&Instruction::I32Add);
+        function.instruction(&Instruction::I32Store(mem32(E_CURSOR)));
+        dispatch_child(&mut function, params);
+        function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+    }
     // unknown frame kinds are an impossible emitter invariant; every branch
     // above exits through an explicit br, so only unknown kinds arrive here
     function.instruction(&Instruction::Unreachable);

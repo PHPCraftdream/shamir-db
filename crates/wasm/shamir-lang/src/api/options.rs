@@ -28,6 +28,8 @@ pub struct CompileLimits {
     pub max_output_bytes: usize,
     pub max_runtime_bytes: usize,
     pub max_function_body_bytes: usize,
+    /// Per-function IR node cap (`B001`); emitted Wasm operators are capped by
+    /// `CompileOptions::admission` during self-admission (`B002`).
     pub max_ir_nodes_per_function: usize,
     pub max_ir_nodes: usize,
     pub max_call_chain: usize,

@@ -565,15 +565,52 @@ async fn list_literal_indexing_returns_element() {
     );
 }
 
-/// An out-of-bounds index raises kind 2 "bound" (insts.rs: bounds check
-/// raises `b"bound"`).
+/// An index equal to the length raises kind 2 "bound" (insts.rs: bounds check
+/// raises `b"bound"`); `index == length` is the off-by-one boundary.
 #[tokio::test]
-async fn list_out_of_bounds_index_raises_bound_marker() {
-    let function = compiled("@entry scalar probe(xs: [i64]) -> i64 { return xs[5]; }\n").await;
+async fn list_index_equal_to_length_raises_bound_marker() {
+    let function = compiled(
+        "@entry scalar probe(xs: [i64]) -> i64 { return xs[1]; }
+",
+    )
+    .await;
     let error = call_once(&function, &params_from(&[("xs", list_value(&[int(1)]))]))
         .await
-        .expect_err("out-of-bounds index must raise");
+        .expect_err("index == length must raise");
     assert_invalid_argument(&error, "bound");
+}
+
+/// Index zero of an empty list is out of bounds too.
+#[tokio::test]
+async fn empty_list_index_zero_raises_bound_marker() {
+    let function = compiled(
+        "@entry scalar probe(xs: [i64]) -> i64 { return xs[0]; }
+",
+    )
+    .await;
+    let error = call_once(&function, &params_from(&[("xs", list_value(&[]))]))
+        .await
+        .expect_err("empty list index 0 must raise");
+    assert_invalid_argument(&error, "bound");
+}
+
+/// The last valid index (length - 1) still reads.
+#[tokio::test]
+async fn list_last_valid_index_reads() {
+    let function = compiled(
+        "@entry scalar probe(xs: [i64]) -> i64 { return xs[1]; }
+",
+    )
+    .await;
+    assert_eq!(
+        call_once(
+            &function,
+            &params_from(&[("xs", list_value(&[int(7), int(9)]))])
+        )
+        .await
+        .expect("last index succeeds"),
+        int(9)
+    );
 }
 
 /// for-in sums the elements; len returns the list length as i32.

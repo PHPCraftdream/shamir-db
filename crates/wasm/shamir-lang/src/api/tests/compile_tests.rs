@@ -85,6 +85,23 @@ fn admission_variant_reachable() {
     }
 }
 
+#[test]
+fn emitted_operator_cap_enforced_by_self_admission() {
+    // Three operators per function cannot hold the fixture's bodies.
+    let options = CompileOptions {
+        admission: AdmissionLimits {
+            max_operators_per_function: 3,
+            ..Default::default()
+        },
+        ..default_options()
+    };
+    let error = compile(FIXTURE, &options).expect_err("operator cap must reject the module");
+    match error {
+        CompileError::Admission(_) => {}
+        other => panic!("expected Admission, got {other:?}"),
+    }
+}
+
 /// Compiles the fixture with a single limit set; used by the boundary tests.
 fn compile_with_usize(field: fn(&mut CompileLimits) -> &mut usize, value: usize) -> Result<(), ()> {
     // The variant is intentionally erased: only Ok/Err drives the search.

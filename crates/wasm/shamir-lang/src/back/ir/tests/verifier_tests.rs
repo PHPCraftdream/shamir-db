@@ -504,3 +504,98 @@ fn accepts_add_and_while_loop_shapes() {
     let built = builder.finish().expect("module");
     verify(&built).expect("while-loop shape verifies");
 }
+
+#[test]
+fn rejects_instruction_that_references_itself() {
+    let function = function(
+        vec![],
+        None,
+        vec![],
+        vec![block(
+            BlockKind::Plain,
+            0,
+            1,
+            Terminator::Return(None),
+            None,
+        )],
+        vec![inst(InstKind::BoolNot(InstId(0)))],
+    );
+    let error = verify(&module(vec![function])).expect_err("self reference");
+    expect_variant(
+        error,
+        VerifierError::OperandNotInBlock {
+            function: 0,
+            block: 0,
+            inst: 0,
+            detail: String::new(),
+        },
+        "self reference",
+    );
+}
+
+#[test]
+fn rejects_instruction_that_references_a_later_one() {
+    let function = function(
+        vec![],
+        None,
+        vec![],
+        vec![block(
+            BlockKind::Plain,
+            0,
+            2,
+            Terminator::Return(None),
+            None,
+        )],
+        vec![
+            inst(InstKind::BoolNot(InstId(1))),
+            inst(InstKind::ConstI32(1)),
+        ],
+    );
+    let error = verify(&module(vec![function])).expect_err("forward reference");
+    expect_variant(
+        error,
+        VerifierError::OperandNotInBlock {
+            function: 0,
+            block: 0,
+            inst: 0,
+            detail: String::new(),
+        },
+        "forward reference",
+    );
+}
+
+#[test]
+fn accepts_local_set_in_both_arms_before_the_join_read() {
+    // Slot 0 is initialised on both arms of the branch, so the join read is
+    // dominated by a set on every path.
+    let function = function(
+        vec![],
+        None,
+        vec![ValueKind::I32],
+        vec![
+            block(
+                BlockKind::Plain,
+                0,
+                1,
+                Terminator::BranchIf {
+                    cond: InstId(0),
+                    then: BlockId(1),
+                    else_: BlockId(2),
+                },
+                None,
+            ),
+            block(BlockKind::Plain, 1, 2, Terminator::Branch(BlockId(3)), None),
+            block(BlockKind::Plain, 3, 2, Terminator::Branch(BlockId(3)), None),
+            block(BlockKind::Plain, 5, 1, Terminator::Return(None), None),
+        ],
+        vec![
+            inst(InstKind::ConstI32(1)),
+            inst(InstKind::ConstI32(5)),
+            inst(InstKind::LocalSet(0)),
+            inst(InstKind::ConstI32(6)),
+            inst(InstKind::LocalSet(0)),
+            inst(InstKind::LocalGet(0)),
+        ],
+    );
+    verify(&module(vec![function])).expect("both arms initialise the slot");
+}
