@@ -4,7 +4,7 @@ mod flow;
 mod tables;
 mod types;
 
-pub use check::check;
+pub use check::{check, check_scoped};
 pub use effects::{BuiltinCategory, BuiltinId, Capability, EffectSet};
 pub use tables::{
     Callee, ResolvedCall, ResolvedTarget, TypedFunction, TypedLocal, TypedModule, TypedParameter,

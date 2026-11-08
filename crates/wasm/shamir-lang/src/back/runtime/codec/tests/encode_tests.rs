@@ -13,6 +13,7 @@ fn fixture() -> EncodeEmit {
         append_index: 2,
         compare_index: 3,
         caps: RuntimeCaps::default(),
+        records: false,
     }
 }
 
@@ -57,4 +58,19 @@ fn encoder_local_types_match_the_documented_layout() {
     assert_eq!(LOCAL_TYPES[22], ValType::I32);
     assert_eq!(LOCAL_TYPES[23], ValType::I64);
     assert_eq!(LOCAL_TYPES[24], ValType::I64);
+}
+
+/// Typed-record traversal is an additive M4 feature: with it off the runtime
+/// encoder is the M1 one, with it on the body strictly grows.
+#[test]
+fn record_traversal_is_emitted_only_when_enabled() {
+    let mut without = Vec::new();
+    emit_encode_root(&fixture()).encode(&mut without);
+    let mut with = Vec::new();
+    emit_encode_root(&EncodeEmit {
+        records: true,
+        ..fixture()
+    })
+    .encode(&mut with);
+    assert!(with.len() > without.len());
 }

@@ -10,7 +10,7 @@ pub use ast::{
 };
 pub use budget::CompileBudget;
 pub use lexer::{
-    scan, IntegerLiteral, IntegerRadix, IntegerSuffix, Keyword, Operator, Punctuation, Token,
-    TokenKind,
+    scan, scan_with_budget, IntegerLiteral, IntegerRadix, IntegerSuffix, Keyword, Operator,
+    Punctuation, Token, TokenKind,
 };
-pub use parser::{parse, parse_tokens};
+pub use parser::{parse, parse_scoped, parse_tokens};
