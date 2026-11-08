@@ -140,6 +140,13 @@ pub enum InstKind {
         dest: InstId,
         source: InstId,
     },
+    /// Copies `count` 16-byte cells from the `source` region to the `dest`
+    /// region through the M1 runtime copy helper; void.
+    CellsCopy {
+        dest: InstId,
+        source: InstId,
+        count: InstId,
+    },
     /// -> I32 0/1 (tag == NULL).
     CellIsNull(InstId),
     /// Explicit value id for aggregate bindings: re-yields `value` (I32 cell
@@ -244,6 +251,7 @@ pub(crate) fn inst_result_kind(
         | InstKind::CellStoreAux { .. }
         | InstKind::CellStorePayload { .. }
         | InstKind::CellCopyTo { .. }
+        | InstKind::CellsCopy { .. }
         | InstKind::Drop(_) => None,
     }
 }
@@ -291,6 +299,15 @@ pub(crate) fn inst_operands(kind: &InstKind, out: &mut Vec<InstId>) {
         InstKind::CellCopyTo { dest, source } => {
             out.push(*dest);
             out.push(*source);
+        }
+        InstKind::CellsCopy {
+            dest,
+            source,
+            count,
+        } => {
+            out.push(*dest);
+            out.push(*source);
+            out.push(*count);
         }
         InstKind::CellElemPtr { base, index } | InstKind::CellSlot { base, index } => {
             out.push(*base);

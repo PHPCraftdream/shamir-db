@@ -293,6 +293,19 @@ fn check_inst_kinds(
                 String::from("source operand"),
             )?;
         }
+        InstKind::CellsCopy {
+            dest,
+            source,
+            count,
+        } => {
+            want(kind(*dest), ValueKind::I32, String::from("dest operand"))?;
+            want(
+                kind(*source),
+                ValueKind::I32,
+                String::from("source operand"),
+            )?;
+            want(kind(*count), ValueKind::I32, String::from("count operand"))?;
+        }
         InstKind::CellElemPtr { base, index } | InstKind::CellSlot { base, index } => {
             want(kind(*base), ValueKind::I32, String::from("base operand"))?;
             want(kind(*index), ValueKind::I32, String::from("index operand"))?;

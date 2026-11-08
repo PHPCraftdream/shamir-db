@@ -49,8 +49,8 @@ fn accept_lowers_to_empty_list_and_stop_false() {
         "@entry validator v(record: { a: i64 }?, old_record: { a: i64 }?) -> Validation { return accept(); }\n",
     );
     let function = &ir.functions[ir.entry as usize];
-    // Derivation: accept builds one CAP-sized errors region (CellsAlloc), one
-    // LIST cell (CellAlloc), then one 2-slot validation record (RecordCell
+    // Derivation: accept builds the empty errors list cell (count 0, zero
+    // payload — no region), then one 2-slot validation record (RecordCell
     // field_count 2) and one false stop bool cell (CellAllocBool); no append
     // happens, so no CellElemPtr bounds check appears.
     let validation_records = function
@@ -114,7 +114,7 @@ fn reject_path_keeps_the_path_list() {
     // (lower_list, CellsAlloc #1; the two string cells are static, so no
     // extra region); field_error_cell allocates the 2-slot error region
     // (CellsAlloc #2, RecordCell ["code","field"]); errors_list_single
-    // allocates the CAP-sized errors region (CellsAlloc #3); validation_cell
+    // allocates the one-cell errors region (CellsAlloc #3); validation_cell
     // allocates the 2-slot validation region (CellsAlloc #4, RecordCell
     // ["errors","stop"]).
     let region_allocs = function
@@ -170,6 +170,41 @@ fn with_error_chain_checks_cap_twice() {
         })
         .count();
     assert_eq!(grows, 2);
+    // Derivation: each with_error append copies the old cells once via the
+    // runtime copy helper (the first copies 0 cells, the second copies the
+    // first error's 1 cell); the instruction count is 2 either way.
+    let copies = function
+        .insts
+        .iter()
+        .filter(|inst| matches!(inst.kind, InstKind::CellsCopy { .. }))
+        .count();
+    assert_eq!(copies, 2);
+}
+
+#[test]
+fn append_copies_into_a_fresh_region() {
+    let ir = lower_source(
+        "@entry validator v(record: { a: i64 }?, old_record: { a: i64 }?) -> Validation { return with_error(accept(), \"f\", \"c\"); }\n",
+    );
+    let function = &ir.functions[ir.entry as usize];
+    // Derivation: one append performs exactly one CellsCopy — of accept's
+    // zero old cells (zero-length memory.copy no-op).
+    let copies = function
+        .insts
+        .iter()
+        .filter(|inst| matches!(inst.kind, InstKind::CellsCopy { .. }))
+        .count();
+    assert_eq!(copies, 1);
+    // Derivation: accept allocates no list region but still builds a two-slot
+    // validation record; the five regions are accept's validation record, the
+    // one-slot field list, the two-slot field-error record, the one-slot fresh
+    // append region, and the final two-slot validation record.
+    let region_allocs = function
+        .insts
+        .iter()
+        .filter(|inst| matches!(inst.kind, InstKind::CellsAlloc(_)))
+        .count();
+    assert_eq!(region_allocs, 5);
 }
 
 #[test]

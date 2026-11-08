@@ -94,8 +94,8 @@ pub struct IrFunction {
     /// Declared parameter names in order (filled by the lowering driver;
     /// empty in hand-built test IR).
     pub param_names: Vec<String>,
-    /// Structural type node index per parameter (filled by the lowering
-    /// driver; empty in hand-built test IR).
+    /// Structural type node index per ENTRY parameter (filled by the
+    /// lowering driver; empty for helpers and hand-built test IR).
     pub param_type_nodes: Vec<u32>,
 }
 

@@ -358,3 +358,38 @@ fn compile_validator_is_deterministic() {
     // Determinism: identical inputs must produce identical output bytes.
     assert_eq!(first.wasm, second.wasm);
 }
+
+/// Fixture: a `Validation` helper parameter, an entry-only aggregate
+/// projection, a conditional constructor argument (`?:`) and branching
+/// `Validation` lets, all in one module.
+const VALIDATOR_BRANCHING: &str = r#"
+fn add(v: Validation) -> Validation {
+  return with_record_error(v, "extra");
+}
+@entry validator v(
+  record: { name: string, nick: string? }?,
+  old_record: { name: string, nick: string? }?
+) -> Validation {
+  let base = accept();
+  let left = with_error(base, "f", "left");
+  let right = with_error(base, "f", "right");
+  let current: { name: string, nick: string? } = unwrap(record);
+  if (is_null(current.nick)) {
+    return add(left);
+  }
+  return add(with_error(right, is_null(old_record) ? "a" : "b", "code"));
+}
+"#;
+
+#[test]
+fn compile_accepts_validation_helpers_branching_and_optional_fields() {
+    let module = compile(VALIDATOR_BRANCHING, &default_options());
+    // Derivation: Ok means the IR verifier accepted the new CellsCopy
+    // instruction, the entry-only type-node policy (a `Validation` helper
+    // parameter), the spilled conditional constructor argument, and the
+    // branching `Validation` lets; self-admission then passed on the emitted
+    // module.
+    let module = module.expect("branching validator module compiles");
+    // The admission report counts the emitted module, so it must equal its length.
+    assert_eq!(module.report.byte_size, module.wasm.len());
+}

@@ -55,7 +55,7 @@ const MAX_ARITY: u64 = 33;
 /// code, so their length is bounded before generation.
 pub(crate) const MAX_UNROLLED_NAME_BYTES: usize = 64;
 
-type OrderedHelpers = (Vec<(u32, Function)>, u32, u32, u32);
+type OrderedHelpers = (Vec<(u32, Function)>, u32, u32, u32, u32);
 
 /// Every cell tag must survive an encode/decode round trip before the wrapper
 /// embeds the null-cell constants, keeping the cell codec exercised in
@@ -122,6 +122,8 @@ pub(crate) struct EmissionPlan {
     pub eq_count: u32,
     /// Runtime byte-compare helper index.
     pub compare_index: u32,
+    /// Runtime cell-copy helper index (M1 graph root), called by `CellsCopy`.
+    pub copy_cells_index: u32,
     /// Type index shared by every equality helper (`[i32,i32] -> [i32]`).
     pub eq_type_index: u32,
     /// Type index shared by projection helpers (`[i32] -> [i32]`).
@@ -275,7 +277,14 @@ fn ordered_helper_functions(
     let decode_index = index_of(decode)?;
     let encode_index = index_of(encode)?;
     let compare_index = index_of(compare)?;
-    Ok((functions, decode_index, encode_index, compare_index))
+    let copy_cells_index = index_of(copy)?;
+    Ok((
+        functions,
+        decode_index,
+        encode_index,
+        compare_index,
+        copy_cells_index,
+    ))
 }
 
 const TYPE_VOID_THREE_I32: u32 = 4;
@@ -460,7 +469,7 @@ pub fn emit_runtime_module(
     let static_len = u64::try_from(static_bytes.len()).unwrap_or(u64::MAX);
     let workspace = compute_workspace(static_len, &caps)?;
 
-    let (helper_functions, decode_index, encode_index, _compare_index) =
+    let (helper_functions, decode_index, encode_index, _compare_index, _copy_cells_index) =
         ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, false)?;
     let helper_count = helper_functions.len() as u32;
     let error_raiser_index = 1 + helper_count;
@@ -657,7 +666,7 @@ pub(crate) fn emit_compiled_module(
     };
 
     let workspace = compute_workspace(observed, &caps)?;
-    let (helper_functions, decode_index, encode_index, compare_index) =
+    let (helper_functions, decode_index, encode_index, compare_index, copy_cells_index) =
         ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, true)?;
     // finding 20: the ten ordered runtime helpers are not controlled by user
     // code, so their bytes count against `max_runtime_bytes`; user code is
@@ -779,6 +788,7 @@ pub(crate) fn emit_compiled_module(
             .map_err(|_| EmitError::Internal("user function count overflow"))?,
         eq_count,
         compare_index,
+        copy_cells_index,
         eq_type_index,
         projection_type_index,
         user_type_indices,

@@ -142,12 +142,9 @@ pub(crate) fn lower_ctor(
     match builtin {
         BuiltinId::Accept => {
             expect_arity(args, 0)?;
-            // The empty errors list still gets a CAP-sized region so later
-            // `with_error`/`with_record_error` appends work without copying.
-            let cap = ctx
-                .builder
-                .append(InstKind::ConstI32(VALIDATION_ERROR_CAP as i32), span)?;
-            let region = ctx.builder.append(InstKind::CellsAlloc(cap), span)?;
+            // The empty errors list carries count 0 and a zero payload; the
+            // encoder never dereferences a zero-count list, and a later
+            // append copies zero cells into a fresh region.
             let empty = ctx.builder.append(
                 InstKind::CellAlloc {
                     tag: cell_tag::LIST,
@@ -162,12 +159,11 @@ pub(crate) fn lower_ctor(
                 },
                 span,
             )?;
-            // Addresses are < 2^31, so SExtend64 zero-extends the region offset.
-            let payload = ctx.builder.append(InstKind::SExtend64(region), span)?;
+            let zero_payload = ctx.builder.append(InstKind::ConstI64(0), span)?;
             ctx.builder.append(
                 InstKind::CellStorePayload {
                     cell: empty,
-                    value: payload,
+                    value: zero_payload,
                 },
                 span,
             )?;
@@ -301,16 +297,15 @@ fn error_cap_cell(ctx: &mut LowerCtx) -> Result<u32, IrError> {
     Ok(offset)
 }
 
-/// A one-error list cell over a fresh CAP-sized region holding `error_cell`.
+/// A one-error list cell over a fresh ONE-cell region holding `error_cell`;
+/// appends never grow in place, so a single slot suffices.
 fn errors_list_single(
     ctx: &mut LowerCtx,
     error_cell: InstId,
     span: Span,
 ) -> Result<InstId, IrError> {
-    let cap = ctx
-        .builder
-        .append(InstKind::ConstI32(VALIDATION_ERROR_CAP as i32), span)?;
-    let region = ctx.builder.append(InstKind::CellsAlloc(cap), span)?;
+    let one = ctx.builder.append(InstKind::ConstI32(1), span)?;
+    let region = ctx.builder.append(InstKind::CellsAlloc(one), span)?;
     let dest = slot(ctx, region, 0, span)?;
     ctx.builder.append(
         InstKind::CellCopyTo {
@@ -461,11 +456,10 @@ fn single_string_list(ctx: &mut LowerCtx, item: InstId, span: Span) -> Result<In
     list_cell(ctx, region, 1, span)
 }
 
-/// Returns `old_validation` with `error_cell` appended to its errors list.
-/// The SAME list region is reused (aliasing is safe: slot `count` is only
-/// written once, when the list grows from `count` to `count+1`; shorter
-/// lists' slots are never rewritten) and a NEW list cell carries the grown
-/// count, so the append is O(1) without copying.
+/// Returns `old_validation` with `error_cell` appended. A FRESH region of
+/// `count + 1` cells is allocated, the old cells are copied with one
+/// `CellsCopy` (the M1 runtime copy helper), and the new error is written at
+/// index `count`; the input value is never mutated.
 fn append_error(
     ctx: &mut LowerCtx,
     old_validation: InstId,
@@ -487,8 +481,7 @@ fn append_error(
         .append(InstKind::I32WrapI64(list_payload), span)?;
     // Bounds check via the static cap cell: `CellElemPtr` raises kind 2
     // ("bound") exactly when count >= VALIDATION_ERROR_CAP, before the
-    // (meaningless) element pointer is computed and dropped. Every errors
-    // list region is CAP-sized, so index `count` is in range afterwards.
+    // (meaningless) element pointer is computed and dropped.
     let cap_addr = error_cap_cell(ctx)?;
     let cap = ctx.builder.append(InstKind::StaticCell(cap_addr), span)?;
     let elem = ctx.builder.append(
@@ -509,12 +502,27 @@ fn append_error(
         },
         span,
     )?;
+    // The fresh region holds exactly the grown list (`count + 1` cells).
+    let new_region = ctx.builder.append(InstKind::CellsAlloc(new_count), span)?;
+    // Copy-on-append: the runtime copy helper (memory.copy of count * 16
+    // bytes) duplicates the old cells, so the input Validation value is never
+    // mutated (design: records/lists and all aggregate descendants are
+    // immutable). A zero count is a zero-length memory.copy — a no-op — which
+    // is how appends onto the empty `accept()` list (payload 0) work.
+    ctx.builder.append(
+        InstKind::CellsCopy {
+            dest: new_region,
+            source: region_list,
+            count,
+        },
+        span,
+    )?;
     // Runtime index `count` is proven in range: the cap check above raised
-    // kind 2 when count >= VALIDATION_ERROR_CAP, and the list region has
-    // VALIDATION_ERROR_CAP slots.
+    // kind 2 when count >= VALIDATION_ERROR_CAP, and the fresh region has
+    // `count + 1 >= count + 1` slots, so index `count` is in range.
     let dest = ctx.builder.append(
         InstKind::CellSlot {
-            base: region_list,
+            base: new_region,
             index: count,
         },
         span,
@@ -526,8 +534,14 @@ fn append_error(
         },
         span,
     )?;
-    let new_list = list_cell(ctx, region_list, 0, span)?;
-    // Overwrite the fresh cell's aux with the CHECKED grown count.
+    // A NEW list cell over the fresh region (built inline: `list_cell`'s
+    // count is a compile-time constant, this one is `new_count`).
+    let new_list = ctx.builder.append(
+        InstKind::CellAlloc {
+            tag: cell_tag::LIST,
+        },
+        span,
+    )?;
     ctx.builder.append(
         InstKind::CellStoreAux {
             cell: new_list,
@@ -535,5 +549,15 @@ fn append_error(
         },
         span,
     )?;
-    validation_cell(ctx, new_list, old_stop, span)
+    // Addresses are < 2^31, so SExtend64 zero-extends the region offset.
+    let p = ctx.builder.append(InstKind::SExtend64(new_region), span)?;
+    ctx.builder.append(
+        InstKind::CellStorePayload {
+            cell: new_list,
+            value: p,
+        },
+        span,
+    )?;
+    let list = ctx.builder.append(InstKind::CellPass(new_list), span)?;
+    validation_cell(ctx, list, old_stop, span)
 }

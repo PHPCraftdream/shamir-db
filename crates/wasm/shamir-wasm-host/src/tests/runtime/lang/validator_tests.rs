@@ -628,18 +628,21 @@ async fn wrongly_typed_field_is_kind_2() {
 /// The validation-error list cap: `VALIDATION_ERROR_CAP = 64`
 /// (types.rs) — appending the 65th error trips the kind-2 `bound` marker
 /// (derivation: append_error's CellElemPtr cap check raises b"bound" when
-/// count >= 64), while a 64-deep chain SUCCEEDS with exactly 64 errors
+/// count >= 64), while 64 appends in a loop SUCCEED with exactly 64 errors
 /// (cap check passes when count < 64).
 #[tokio::test]
 async fn error_cap_growth_raises_kind_2_bound() {
+    // A loop keeps the code small: a 64-deep nested expression exceeds the
+    // 64 KiB code budget because every constructor call is emitted inline.
     let build_source = |depth: usize| {
-        let mut expr = String::from("accept()");
-        for _ in 0..depth {
-            expr = format!("with_error({expr}, \"f\", \"c\")");
-        }
         format!(
-            "@entry validator v(record: {{ name: string }}?, \
-             old_record: {{ name: string }}?) -> Validation {{ return {expr}; }}\n"
+            "@entry validator v(record: {{ name: string }}?,              old_record: {{ name: string }}?) -> Validation {{
+             let acc = accept();
+             let i = 0;
+             while (i < {depth}) {{ acc = with_error(acc, \"f\", \"c\"); i = i + 1; }}
+             return acc;
+}}
+"
         )
     };
 
@@ -664,4 +667,172 @@ async fn error_cap_growth_raises_kind_2_bound() {
         .await
         .expect_err("65th append must raise the cap error");
     assert_invalid_argument(&error, "bound");
+}
+
+/// Two `with_error` values branching from one zero-error base keep their own
+/// error regions (copy-on-append), so returning `left` shows only "left"
+/// even though `right` was appended after it.
+#[tokio::test]
+async fn branching_from_one_base_keeps_values_independent() {
+    let function = compiled(
+        r#"@entry validator v(
+  record: { name: string }?,
+  old_record: { name: string }?
+) -> Validation {
+  let base = accept();
+  let left = with_error(base, "f", "left");
+  let right = with_error(base, "f", "right");
+  if (is_null(record)) {
+    return left;
+  }
+  return right;
+}
+"#,
+    )
+    .await;
+    let null_params = params_from(&[
+        ("record", QueryValue::Null),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &null_params)
+            .await
+            .expect("null-record call succeeds"),
+        // derivation: both appends copy the base cells into fresh regions,
+        // so the later `right` append cannot leak into `left`.
+        validation_result(vec![field_error("left", &["f"])], false)
+    );
+    let named_params = params_from(&[
+        ("record", map_of(&[("name", str_value("Ada"))])),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &named_params)
+            .await
+            .expect("named-record call succeeds"),
+        // derivation: `right` appends after `left` on its own fresh region
+        // (pre-fix shared-region lowering would have shown "right" here).
+        validation_result(vec![field_error("right", &["f"])], false)
+    );
+}
+
+/// A helper taking and returning `Validation` compiles (entry-only type
+/// nodes skip opaque helper parameters) and appends its code-only error
+/// after the entry's field error.
+#[tokio::test]
+async fn validation_helper_composes_errors() {
+    let function = compiled(
+        r#"fn add(v: Validation) -> Validation {
+  return with_record_error(v, "extra");
+}
+@entry validator v(
+  record: { name: string }?,
+  old_record: { name: string }?
+) -> Validation {
+  return add(with_error(accept(), "f", "c1"));
+}
+"#,
+    )
+    .await;
+    let params = params_from(&[
+        ("record", QueryValue::Null),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &params)
+            .await
+            .expect("helper call succeeds"),
+        // derivation: with_error appends the field error first, then the
+        // helper's with_record_error appends the code-only error in order.
+        validation_result(vec![field_error("c1", &["f"]), code_error("extra")], false)
+    );
+}
+
+/// A conditional `?:` argument to a result constructor lowers through a
+/// spill local, so the chosen string becomes the field path depending on
+/// the record's nullness.
+#[tokio::test]
+async fn conditional_argument_selects_field_name() {
+    let function = compiled(
+        r#"@entry validator v(
+  record: { name: string }?,
+  old_record: { name: string }?
+) -> Validation {
+  return with_error(accept(), is_null(record) ? "absent" : "present", "code");
+}
+"#,
+    )
+    .await;
+    let null_params = params_from(&[
+        ("record", QueryValue::Null),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &null_params)
+            .await
+            .expect("null-record call succeeds"),
+        // derivation: is_null(record) selects the "absent" arm via the
+        // spilled conditional argument.
+        validation_result(vec![field_error("code", &["absent"])], false)
+    );
+    let named_params = params_from(&[
+        ("record", map_of(&[("name", str_value("Ada"))])),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &named_params)
+            .await
+            .expect("named-record call succeeds"),
+        // derivation: constructor reads both arguments in its own block
+        // after the spill, so the "present" arm reaches the field path.
+        validation_result(vec![field_error("code", &["present"])], false)
+    );
+}
+
+/// An omitted optional declared field null-fills at projection (the
+/// projection stores the null TAG), so `is_null(current.nick)` is true;
+/// a present nick takes the reject branch.
+#[tokio::test]
+async fn omitted_optional_record_field_reads_null() {
+    let function = compiled(
+        r#"@entry validator v(
+  record: { name: string, nick: string? }?,
+  old_record: { name: string, nick: string? }?
+) -> Validation {
+  let current: { name: string, nick: string? } = unwrap(record);
+  if (is_null(current.nick)) {
+    return record_error("nick_absent");
+  }
+  return reject("nick", "nick_present");
+}
+"#,
+    )
+    .await;
+    let absent = params_from(&[
+        ("record", map_of(&[("name", str_value("Ada"))])),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &absent)
+            .await
+            .expect("omitted-nick call succeeds"),
+        // derivation: projection null-fills the omitted optional field with
+        // a NULL-tagged cell, so the is_null branch returns the code error.
+        validation_result(vec![code_error("nick_absent")], false)
+    );
+    let present = params_from(&[
+        (
+            "record",
+            map_of(&[("name", str_value("Ada")), ("nick", str_value("N"))]),
+        ),
+        ("old_record", QueryValue::Null),
+    ]);
+    assert_eq!(
+        call_once(&function, &present)
+            .await
+            .expect("present-nick call succeeds"),
+        // derivation: a present nick reads non-null, taking the reject
+        // branch with the one-segment ["nick"] path.
+        validation_result(vec![field_error("nick_present", &["nick"])], false)
+    );
 }

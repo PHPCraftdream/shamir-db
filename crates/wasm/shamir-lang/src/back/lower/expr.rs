@@ -777,10 +777,22 @@ fn lower_builtin(
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
     // Validator verdict constructors lower outside the single-argument path.
+    // Each argument is spilled to a fresh local right after it is lowered: a
+    // later argument may open new blocks (`?:`, `&&`, `||`), and the
+    // constructor's operands must live in the block the lowering ends in
+    // (the verifier requires same-block, strictly-earlier operands).
     if is_validator_ctor(builtin) {
-        let mut lowered = Vec::with_capacity(arguments.len());
+        let mut slots = Vec::with_capacity(arguments.len());
         for argument in arguments {
-            lowered.push(lower_expr(ctx, *argument)?);
+            lower_expr(ctx, *argument)?;
+            let tmp = ctx.builder.declare_local(ValueKind::I32)?;
+            ctx.builder
+                .append(InstKind::LocalSet(tmp), ctx.expr_span(*argument))?;
+            slots.push(tmp);
+        }
+        let mut lowered = Vec::with_capacity(slots.len());
+        for slot in slots {
+            lowered.push(ctx.builder.append(InstKind::LocalGet(slot), span)?);
         }
         return super::types::lower_ctor(ctx, builtin, &lowered, span);
     }
