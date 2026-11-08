@@ -165,6 +165,7 @@ pub fn check(
         resolved,
         calls,
         expr_types,
+        binding_slots,
         ..
     } = checker;
     let typed = TypedModule {
@@ -176,6 +177,7 @@ pub fn check(
         expr_types,
         resolved,
         calls,
+        binding_slots,
         span,
     };
     let mut diags = finish(diags);
