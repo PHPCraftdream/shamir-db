@@ -94,12 +94,13 @@ pub enum IrError {
 }
 
 /// Block under construction; converted to `IrBlock` at `finish_function`.
-/// Starts are assigned at `finish_function` (running sum of `inst_count`),
+/// Each block OWNS its instruction list; starts are assigned at
+/// `finish_function` (concatenation of the per-block lists in block order),
 /// so tiling always matches the block append order regardless of the order
 /// in which blocks were opened and filled.
 struct PendingBlock {
     kind: BlockKind,
-    inst_count: u32,
+    insts: Vec<Inst>,
     region: Option<u32>,
     terminator: Option<Terminator>,
 }
@@ -109,7 +110,9 @@ struct CurrentFunction {
     params: Vec<ValueKind>,
     result: Option<ValueKind>,
     locals: Vec<ValueKind>,
-    insts: Vec<Inst>,
+    /// Total instructions appended across all blocks (the arena size the
+    /// concatenation in `finish_function` must reproduce).
+    inst_len: u32,
     blocks: Vec<PendingBlock>,
     operator_count: u64,
     current: Option<u32>,
@@ -161,7 +164,7 @@ impl<'b> IrBuilder<'b> {
             params,
             result,
             locals,
-            insts: Vec::new(),
+            inst_len: 0,
             blocks: Vec::new(),
             operator_count: 0,
             current: None,
@@ -170,7 +173,7 @@ impl<'b> IrBuilder<'b> {
     }
 
     /// Appends one instruction to the current block, charging 1 fuel and
-    /// counting 1 IR node and 1 operator.
+    /// counting 1 IR node; the per-function limit counts appended IR nodes.
     pub fn append(&mut self, kind: InstKind, span: Span) -> Result<InstId, IrError> {
         let limit = self.limits.max_ir_nodes as u64;
         let next_nodes = self
@@ -185,7 +188,7 @@ impl<'b> IrBuilder<'b> {
                 observed: next_nodes,
             });
         }
-        let operator_limit = self.limits.max_operators_per_function as u64;
+        let operator_limit = self.limits.max_ir_nodes_per_function as u64;
         let operator_count = self.operator_count()?;
         if operator_count + 1 > operator_limit {
             return Err(IrError::LimitExceeded {
@@ -197,17 +200,20 @@ impl<'b> IrBuilder<'b> {
         }
         self.charge_fuel(span)?;
         let function = self.current.as_mut().ok_or(IrError::Internal(E_APPEND))?;
-        let id = u32::try_from(function.insts.len()).map_err(|_| IrError::Internal(E_NODE_ID))?;
-        function.insts.push(Inst { kind, span });
+        let id =
+            u32::try_from(function.inst_len as usize).map_err(|_| IrError::Internal(E_NODE_ID))?;
+        // The inst is owned by its CURRENT block; the arena is assembled by
+        // concatenation in `finish_function`, so the id stays the global index.
         let block = function.current.ok_or(IrError::Internal(E_APPEND))?;
         let pending = function
             .blocks
             .get_mut(block as usize)
             .ok_or(IrError::Internal(E_BLOCK))?;
-        pending.inst_count = pending
-            .inst_count
+        pending.insts.push(Inst { kind, span });
+        function.inst_len = function
+            .inst_len
             .checked_add(1)
-            .ok_or(IrError::Internal(E_BLOCK))?;
+            .ok_or(IrError::Internal(E_NODE_ID))?;
         function.operator_count = function
             .operator_count
             .checked_add(1)
@@ -284,6 +290,17 @@ impl<'b> IrBuilder<'b> {
         Ok(())
     }
 
+    /// Terminates the current block with a conditional branch whose THEN
+    /// target is known but whose ELSE target is not; `patch_branch_if`
+    /// names it before the function finishes.
+    pub fn terminate_branch_if_then(&mut self, cond: InstId, then: BlockId) -> Result<(), IrError> {
+        self.terminate(Terminator::BranchIf {
+            cond,
+            then,
+            else_: BlockId(PENDING_BRANCH_TARGET),
+        })
+    }
+
     pub fn terminate_branch_if(
         &mut self,
         cond: InstId,
@@ -291,6 +308,31 @@ impl<'b> IrBuilder<'b> {
         else_: BlockId,
     ) -> Result<(), IrError> {
         self.terminate(Terminator::BranchIf { cond, then, else_ })
+    }
+
+    /// Names the else target of one pending conditional-branch terminator.
+    pub fn patch_branch_if(&mut self, block: BlockId, else_target: BlockId) -> Result<(), IrError> {
+        let function = self
+            .current
+            .as_mut()
+            .ok_or(IrError::Internal(E_NO_FUNCTION))?;
+        let pending = function
+            .blocks
+            .get_mut(block.index())
+            .ok_or(IrError::Internal(E_BLOCK))?;
+        match &pending.terminator {
+            Some(Terminator::BranchIf { else_, .. }) if else_.0 == PENDING_BRANCH_TARGET => {}
+            _ => return Err(IrError::Internal("patch on a non-pending branch if")),
+        }
+        let Some(Terminator::BranchIf { cond, then, .. }) = pending.terminator.take() else {
+            return Err(IrError::Internal("patch on a non-pending branch if"));
+        };
+        pending.terminator = Some(Terminator::BranchIf {
+            cond,
+            then,
+            else_: else_target,
+        });
+        Ok(())
     }
 
     pub fn terminate_unreachable(&mut self) -> Result<(), IrError> {
@@ -312,6 +354,7 @@ impl<'b> IrBuilder<'b> {
         }
         let mut start = 0u32;
         let mut blocks = Vec::with_capacity(function.blocks.len());
+        let mut insts = Vec::new();
         for pending in function.blocks {
             let terminator = match pending.terminator {
                 Some(Terminator::Branch(target)) if target.0 == PENDING_BRANCH_TARGET => {
@@ -319,18 +362,28 @@ impl<'b> IrBuilder<'b> {
                         "finish_function with an unresolved pending branch",
                     ));
                 }
+                Some(Terminator::BranchIf { then, else_, .. })
+                    if then.0 == PENDING_BRANCH_TARGET || else_.0 == PENDING_BRANCH_TARGET =>
+                {
+                    return Err(IrError::Internal(
+                        "finish_function with an unresolved pending branch if",
+                    ));
+                }
                 Some(terminator) => terminator,
                 None => return Err(IrError::Internal("finish_function with unterminated block")),
             };
+            let count =
+                u32::try_from(pending.insts.len()).map_err(|_| IrError::Internal(E_NODE_ID))?;
             blocks.push(IrBlock {
                 kind: pending.kind,
                 start: InstId(start),
-                inst_count: pending.inst_count,
+                inst_count: count,
                 terminator,
                 region: pending.region,
             });
+            insts.extend(pending.insts);
             start = start
-                .checked_add(pending.inst_count)
+                .checked_add(count)
                 .ok_or(IrError::Internal(E_NODE_ID))?;
         }
         self.functions.push(IrFunction {
@@ -338,10 +391,11 @@ impl<'b> IrBuilder<'b> {
             result: function.result,
             locals: function.locals,
             blocks,
-            insts: function.insts,
+            insts,
             param_projections: Vec::new(),
             result_projection: None,
             param_names: Vec::new(),
+            param_type_nodes: Vec::new(),
         });
         Ok(())
     }
@@ -449,6 +503,7 @@ impl<'b> IrBuilder<'b> {
             entry: 0,
             static_bytes: self.static_bytes,
             eq_shapes: shape_values,
+            type_nodes: Vec::new(),
         })
     }
 
@@ -464,7 +519,7 @@ impl<'b> IrBuilder<'b> {
         let index = u32::try_from(function.blocks.len()).map_err(|_| IrError::Internal(E_BLOCK))?;
         function.blocks.push(PendingBlock {
             kind,
-            inst_count: 0,
+            insts: Vec::new(),
             region,
             terminator: None,
         });

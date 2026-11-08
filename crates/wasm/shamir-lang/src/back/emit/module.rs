@@ -10,21 +10,24 @@ use shamir_wasm_admission::{
 
 use thiserror::Error;
 
-use super::abi::{
-    emit_call_wrapper, emit_scalar_wrapper, NullCell, WrapperBases, WrapperInputs, WrapperMessages,
-};
-use super::eq::{emit_bytes_compare, emit_eq_helper};
+use super::abi::{emit_call_wrapper, emit_scalar_wrapper, NullCell, WrapperBases, WrapperInputs};
 use super::helpers::{emit_helper_order, HelperGraph, HelperId};
-use super::scalar::{emit_user_function, RAISE_MESSAGES};
-use crate::api::CompileLimits;
-use crate::back::ir::{inst_result_kind, IrModule, ValueKind};
+use super::scalar::emit_user_function;
+use super::support::eq::{emit_bytes_compare, emit_eq_helper};
+use super::support::projection::{
+    append_raise_messages, append_record_descriptors, collect_projection_nodes,
+    emit_projection_helper, projection_signature, ProjectionSpec,
+};
+use super::support::workspace::compute_workspace;
+use crate::api::{CompileLimits, Span};
+use crate::back::ir::{inst_result_kind, IrModule, ParamProjection, ValueKind};
 use crate::back::runtime::{
     emit_allocator, emit_append_byte, emit_check_range, emit_compare_bytes, emit_copy_cells,
     emit_decode_root, emit_encode_root, emit_error_raiser, emit_read_be, emit_read_byte,
     emit_store_cell, emit_validate_utf8, Cell, CellTag, DecodeEmit, EncodeEmit, Layout,
-    RuntimeCaps, RuntimeError, CONTEXT_HEADER_BYTES, FRAME_BYTES, FRAME_COUNT, MAX_ADDRESS,
-    MAX_STATIC_BYTES, PAGE_BYTES, STATIC_START,
+    RuntimeCaps, RuntimeError, MAX_ADDRESS, STATIC_START,
 };
+use crate::front::CompileBudget;
 
 /// Design hard ceilings; exceeding any of them is a caller bug (the cap
 /// values themselves are the supported envelope), rejected before layout.
@@ -39,12 +42,6 @@ const MAX_DEPTH: u64 = 32;
 /// Emitted code-section budget (design's runtime-code cap; static data has
 /// its own 4 MiB cap below).
 const CODE_BUDGET_BYTES: u64 = 64 * 1_024;
-/// Bytes occupied by one runtime cell.
-const CELL_SLOT_BYTES: u64 = 16;
-/// Bytes occupied by one encoder pair-index slot.
-const SORT_INDEX_BYTES: u64 = 4;
-/// Bytes of the shared codec reject-message scratch slot.
-const SCRATCH_BYTES: u64 = 16;
 /// Hard ceiling on defined functions (import excluded) per the design.
 const MAX_DEFINED_FUNCTIONS: u64 = 384;
 /// Hard ceiling on function types per the design.
@@ -54,6 +51,9 @@ const MAX_TYPES: u64 = 512;
 const MAX_LOCALS: u64 = 4096;
 /// Hard ceiling on signature arity (params + result) per user function.
 const MAX_ARITY: u64 = 33;
+/// Parameter/field names are unrolled byte-by-byte into wrapper/projection
+/// code, so their length is bounded before generation.
+pub(crate) const MAX_UNROLLED_NAME_BYTES: usize = 64;
 
 type OrderedHelpers = (Vec<(u32, Function)>, u32, u32, u32);
 
@@ -124,8 +124,14 @@ pub(crate) struct EmissionPlan {
     pub compare_index: u32,
     /// Type index shared by every equality helper (`[i32,i32] -> [i32]`).
     pub eq_type_index: u32,
+    /// Type index shared by projection helpers (`[i32] -> [i32]`).
+    pub projection_type_index: u32,
     /// Type index per user function, in IR order.
     pub user_type_indices: Vec<u32>,
+    /// First generated projection helper (`eq_base + 1 + eq_count`).
+    /// Projection helper per distinct type node: `(node index, fn index)` in
+    /// the deterministic first-use order of the nodes.
+    pub projection_indices: Vec<(u32, u32)>,
     bases: WrapperBases,
 }
 impl EmissionPlan {
@@ -173,82 +179,6 @@ fn validate_cell_codec() -> Result<[u8; 16], RuntimeError> {
         }
     }
     Ok(Cell::new(CellTag::Null, 0, 0).encode())
-}
-
-fn workspace_address(value: u64, memory_bytes: u64) -> Result<u32, RuntimeError> {
-    if value > memory_bytes {
-        return Err(RuntimeError::RuntimeTooLarge {
-            limit: memory_bytes,
-            observed: value,
-        });
-    }
-    match i32::try_from(value) {
-        Ok(address) => Ok(address as u32),
-        Err(_) => Err(RuntimeError::RuntimeTooLarge {
-            limit: memory_bytes,
-            observed: value,
-        }),
-    }
-}
-
-/// Static image length plus the workspace addresses derived from the caps.
-struct Workspace {
-    layout: Layout,
-    context_base: u32,
-    frame_base: u32,
-    cell_base: u32,
-    sort_base: u32,
-    scratch: u32,
-}
-
-/// Layout math shared by the M1 runtime path and the compiled path.
-fn compute_workspace(static_len: u64, caps: &RuntimeCaps) -> Result<Workspace, RuntimeError> {
-    if static_len > MAX_STATIC_BYTES {
-        return Err(RuntimeError::RuntimeTooLarge {
-            limit: MAX_STATIC_BYTES,
-            observed: static_len,
-        });
-    }
-    // Workspace budget above the 64 KiB frame stack: decoder cell slots, the
-    // encoder pair-index window and the reject scratch, all below the heap.
-    let cell_slot_total = caps
-        .cells
-        .checked_mul(CELL_SLOT_BYTES)
-        .ok_or(RuntimeError::CapsBeyondAddressSpace)?;
-    let sort_slot_total = caps
-        .entries
-        .checked_mul(SORT_INDEX_BYTES)
-        .ok_or(RuntimeError::CapsBeyondAddressSpace)?;
-    let cell_bytes = cell_slot_total
-        .checked_add(sort_slot_total)
-        .and_then(|total| total.checked_add(SCRATCH_BYTES))
-        .ok_or(RuntimeError::CapsBeyondAddressSpace)?;
-    let layout = Layout::calculate(static_len, cell_bytes)?;
-    let memory_bytes = layout.maximum_pages * PAGE_BYTES;
-    let cell_base = layout
-        .workspace_start
-        .checked_add(u64::from(FRAME_COUNT * FRAME_BYTES))
-        .ok_or(RuntimeError::CapsBeyondAddressSpace)?;
-    let sort_base = cell_base
-        .checked_add(cell_slot_total)
-        .ok_or(RuntimeError::CapsBeyondAddressSpace)?;
-    let scratch = sort_base
-        .checked_add(sort_slot_total)
-        .ok_or(RuntimeError::CapsBeyondAddressSpace)?;
-    let context_base = workspace_address(layout.workspace_start, memory_bytes)?;
-    // frame 0 sits one FRAME_BYTES below this base, above the context header
-    let frame_base = context_base + CONTEXT_HEADER_BYTES;
-    let cell_base = workspace_address(cell_base, memory_bytes)?;
-    let sort_base = workspace_address(sort_base, memory_bytes)?;
-    let scratch = workspace_address(scratch, memory_bytes)?;
-    Ok(Workspace {
-        layout,
-        context_base,
-        frame_base,
-        cell_base,
-        sort_base,
-        scratch,
-    })
 }
 
 /// Registers each codec primitive plus the iterative decoder as a
@@ -361,6 +291,8 @@ struct ModuleImage {
     wrapper: Function,
     user_functions: Vec<(u32, Function)>,
     eq_functions: Vec<(u32, Function)>,
+    /// Generated projection helpers, appended after the eq helpers.
+    projection_functions: Vec<(u32, Function)>,
     alloc_index: u32,
     call_index: u32,
     /// Extra function types beyond the ten runtime ones (user + eq).
@@ -421,6 +353,9 @@ fn assemble(image: &ModuleImage) -> Result<(Vec<u8>, u64), RuntimeError> {
     for (type_index, _) in &image.eq_functions {
         functions.function(*type_index);
     }
+    for (type_index, _) in &image.projection_functions {
+        functions.function(*type_index);
+    }
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
@@ -471,6 +406,9 @@ fn assemble(image: &ModuleImage) -> Result<(Vec<u8>, u64), RuntimeError> {
         code.function(function);
     }
     for (_, function) in &image.eq_functions {
+        code.function(function);
+    }
+    for (_, function) in &image.projection_functions {
         code.function(function);
     }
 
@@ -567,6 +505,7 @@ pub fn emit_runtime_module(
         ),
         user_functions: Vec::new(),
         eq_functions: Vec::new(),
+        projection_functions: Vec::new(),
         alloc_index,
         call_index,
         extra_types: Vec::new(),
@@ -591,117 +530,29 @@ fn body_bytes(function: &Function) -> u64 {
     u64::try_from(bytes.len()).unwrap_or(u64::MAX)
 }
 
-/// Appends one fixed message block to a copy of the static image (fixed
-/// order at the end) and returns the image with their absolute addresses.
-fn append_message_block(
-    image: &mut Vec<u8>,
-    messages: &[&[u8]],
-    limit: u64,
-) -> Result<Vec<u32>, EmitError> {
-    let mut addrs = Vec::with_capacity(messages.len());
-    for message in messages {
-        let offset = u64::try_from(image.len())
-            .map_err(|_| EmitError::Internal("static image offset overflow"))?;
-        let observed = offset
-            .checked_add(message.len() as u64)
-            .ok_or(EmitError::Internal("static image length overflow"))?;
-        if observed > limit {
-            return Err(EmitError::LimitExceeded {
-                code: "B001",
-                limit,
-                observed,
-            });
-        }
-        let addr = STATIC_START
-            .checked_add(offset)
-            .ok_or(EmitError::Internal("static address overflow"))?;
-        if addr > i32::MAX as u64 {
-            return Err(EmitError::Internal("static address exceeds i32"));
-        }
-        addrs.push(addr as u32);
-        image.extend_from_slice(message);
+/// Charges work against the shared pipeline budget, mapping a fuel overflow
+/// onto the emission limit error (finding 19).
+fn charge_work(budget: &mut CompileBudget, amount: u64) -> Result<(), EmitError> {
+    if budget.charge(amount, Span::source_start()).is_err() {
+        return Err(EmitError::LimitExceeded {
+            code: "B001",
+            limit: budget.limit(),
+            observed: budget.spent().saturating_add(amount),
+        });
     }
-    Ok(addrs)
+    Ok(())
 }
 
-/// Fixed wrapper raise messages, appended in a second fixed block after the
-/// scalar messages (`deep` is reserved for deep projection, a later
-/// milestone, and is emitted but unreferenced).
-const WRAPPER_MESSAGES: [&[u8]; 5] = [b"arg", b"mixed", b"arity", b"i32", b"deep"];
-
-/// Static addresses baked into the wrapper: scalar raise messages, wrapper
-/// raise messages, and entry parameter-name (address, length) pairs.
-pub(crate) struct BakedMessages {
-    pub scalar: [u32; 5],
-    pub wrapper: WrapperMessages,
-    pub names: Vec<(u32, u32)>,
-}
-
-/// Appends the scalar raise messages, the wrapper message block and the
-/// entry function's parameter-name block (raw UTF-8 bytes, in order); returns
-/// the finished image with the baked message addresses.
-fn append_raise_messages(
-    static_bytes: &[u8],
-    param_names: &[String],
-    limits: &CompileLimits,
-) -> Result<(Vec<u8>, BakedMessages), EmitError> {
-    let limit = limits.max_static_bytes as u64;
-    let mut image = static_bytes.to_vec();
-    let scalar = append_message_block(&mut image, &RAISE_MESSAGES, limit)?;
-    let wrapper = append_message_block(&mut image, &WRAPPER_MESSAGES, limit)?;
-    let addresses = [
-        *scalar
-            .first()
-            .ok_or(EmitError::Internal("missing raise message"))?,
-        *scalar
-            .get(1)
-            .ok_or(EmitError::Internal("missing raise message"))?,
-        *scalar
-            .get(2)
-            .ok_or(EmitError::Internal("missing raise message"))?,
-        *scalar
-            .get(3)
-            .ok_or(EmitError::Internal("missing raise message"))?,
-        *scalar
-            .get(4)
-            .ok_or(EmitError::Internal("missing raise message"))?,
-    ];
-    let wrapper_messages = WrapperMessages {
-        arg: *wrapper
-            .first()
-            .ok_or(EmitError::Internal("missing wrapper message"))?,
-        mixed: *wrapper
-            .get(1)
-            .ok_or(EmitError::Internal("missing wrapper message"))?,
-        arity: *wrapper
-            .get(2)
-            .ok_or(EmitError::Internal("missing wrapper message"))?,
-        i32: *wrapper
-            .get(3)
-            .ok_or(EmitError::Internal("missing wrapper message"))?,
-    };
-    let mut name_addrs = Vec::with_capacity(param_names.len());
-    for name in param_names {
-        if name.is_empty() {
-            return Err(EmitError::Internal("empty parameter name"));
-        }
-        let bytes = name.as_bytes();
-        let addr = append_message_block(&mut image, &[bytes], limit)?;
-        let addr = *addr
-            .first()
-            .ok_or(EmitError::Internal("missing parameter name"))?;
-        let len = u32::try_from(bytes.len())
-            .map_err(|_| EmitError::Internal("parameter name length overflow"))?;
-        name_addrs.push((addr, len));
+/// ABSOLUTE static address of one image offset (`STATIC_START + offset`);
+/// shared with the projection module's baking helpers.
+pub(crate) fn static_address(offset: u64) -> Result<u32, EmitError> {
+    let addr = STATIC_START
+        .checked_add(offset)
+        .ok_or(EmitError::Internal("static address overflow"))?;
+    if addr > i32::MAX as u64 {
+        return Err(EmitError::Internal("static address exceeds i32"));
     }
-    Ok((
-        image,
-        BakedMessages {
-            scalar: addresses,
-            wrapper: wrapper_messages,
-            names: name_addrs,
-        },
-    ))
+    u32::try_from(addr).map_err(|_| EmitError::Internal("static address exceeds i32"))
 }
 
 /// Deduplicates one signature by linear scan over the extra types
@@ -753,6 +604,7 @@ fn val_type(kind: ValueKind) -> ValType {
 pub(crate) fn emit_compiled_module(
     ir: &IrModule,
     limits: &CompileLimits,
+    budget: &mut CompileBudget,
 ) -> Result<Vec<u8>, EmitError> {
     let caps = RuntimeCaps::default();
     validate_caps(&caps)?;
@@ -762,11 +614,16 @@ pub(crate) fn emit_compiled_module(
         .functions
         .get(ir.entry as usize)
         .ok_or(EmitError::Internal("missing entry function"))?;
-    let (static_bytes, baked) =
+    let (mut static_bytes, baked) =
         append_raise_messages(&ir.static_bytes, &entry.param_names, limits)?;
+    // finding 15: distinct projection nodes for the entry's aggregate
+    // parameters, in deterministic first-use order (limits checked inside)
+    let distinct = collect_projection_nodes(ir, entry)?;
+    let static_limit = limits.max_static_bytes as u64;
+    let descriptor_addrs =
+        append_record_descriptors(&mut static_bytes, &ir.type_nodes, &distinct, static_limit)?;
     let observed = u64::try_from(static_bytes.len())
         .map_err(|_| EmitError::Internal("static image length overflow"))?;
-    let static_limit = limits.max_static_bytes as u64;
     if observed > static_limit {
         return Err(EmitError::LimitExceeded {
             code: "B001",
@@ -785,6 +642,22 @@ pub(crate) fn emit_compiled_module(
     let workspace = compute_workspace(observed, &caps)?;
     let (helper_functions, decode_index, encode_index, compare_index) =
         ordered_helper_functions(workspace.scratch, workspace.sort_base, caps)?;
+    // finding 20: the ten ordered runtime helpers are not controlled by user
+    // code, so their bytes count against `max_runtime_bytes`; user code is
+    // bounded by `max_function_body_bytes` per body and the module by the
+    // output cap.
+    let helper_bytes: u64 = helper_functions
+        .iter()
+        .map(|(_, function)| body_bytes(function))
+        .sum();
+    let runtime_limit = limits.max_runtime_bytes as u64;
+    if helper_bytes > runtime_limit {
+        return Err(EmitError::LimitExceeded {
+            code: "B001",
+            limit: runtime_limit,
+            observed: helper_bytes,
+        });
+    }
 
     // user types appended after the ten runtime types; eq helpers share the
     // dedicated equality signature
@@ -826,11 +699,15 @@ pub(crate) fn emit_compiled_module(
         let result = func.result.map(val_type);
         user_type_indices.push(intern_type(&mut extra_types, params, result)?);
     }
+    // eq helpers take two i32 scalars and return an i32
     let eq_type_index = intern_type(
         &mut extra_types,
         vec![ValType::I32, ValType::I32],
         Some(ValType::I32),
     )?;
+    // projection helpers take one i32 and return an i32
+    let (proj_params, proj_result) = projection_signature();
+    let projection_type_index = intern_type(&mut extra_types, proj_params, proj_result)?;
     let output_cap = i32::try_from(caps.output_bytes).map_err(|_| EmitError::LimitExceeded {
         code: "B001",
         limit: i32::MAX as u64,
@@ -851,6 +728,26 @@ pub(crate) fn emit_compiled_module(
                 .map_err(|_| EmitError::Internal("user function count overflow"))?,
         )
         .ok_or(EmitError::Internal("function index overflow"))?;
+    let eq_count = u32::try_from(ir.eq_shapes.len())
+        .map_err(|_| EmitError::Internal("shape count overflow"))?;
+    // projection helpers follow the eq helpers (bytes compare first, then
+    // one per shape); helper indices follow the distinct-node order
+    let proj_base = eq_base
+        .checked_add(
+            1u32.checked_add(eq_count)
+                .ok_or(EmitError::Internal("function index overflow"))?,
+        )
+        .ok_or(EmitError::Internal("function index overflow"))?;
+    let mut projection_indices: Vec<(u32, u32)> = Vec::with_capacity(distinct.len());
+    for (position, node_index) in distinct.iter().enumerate() {
+        let fn_index = proj_base
+            .checked_add(
+                u32::try_from(position)
+                    .map_err(|_| EmitError::Internal("projection index overflow"))?,
+            )
+            .ok_or(EmitError::Internal("function index overflow"))?;
+        projection_indices.push((*node_index, fn_index));
+    }
     let plan = EmissionPlan {
         helper_count,
         raise_index: 1 + helper_count,
@@ -862,19 +759,23 @@ pub(crate) fn emit_compiled_module(
         eq_base,
         user_count: u32::try_from(ir.functions.len())
             .map_err(|_| EmitError::Internal("user function count overflow"))?,
-        eq_count: u32::try_from(ir.eq_shapes.len())
-            .map_err(|_| EmitError::Internal("shape count overflow"))?,
+        eq_count,
         compare_index,
         eq_type_index,
+        projection_type_index,
         user_type_indices,
+        projection_indices,
         bases,
     };
 
     // function-count ceiling before any body emission
     let runtime_count = u64::from(plan.helper_count) + 3; // raise, alloc, wrapper
+    let projection_count = u64::try_from(plan.projection_indices.len())
+        .map_err(|_| EmitError::Internal("projection count overflow"))?;
     let total_functions = runtime_count
         .checked_add(u64::from(plan.user_count))
         .and_then(|total| total.checked_add(u64::from(plan.eq_count)))
+        .and_then(|total| total.checked_add(projection_count))
         .ok_or(EmitError::Internal("function count overflow"))?;
     if total_functions > MAX_DEFINED_FUNCTIONS {
         return Err(EmitError::LimitExceeded {
@@ -888,6 +789,7 @@ pub(crate) fn emit_compiled_module(
     let mut user_functions = Vec::with_capacity(plan.user_count as usize);
     for (index, func) in ir.functions.iter().enumerate() {
         let fn_index = plan.users_base as usize + index;
+        charge_work(budget, 1)?;
         let function = emit_user_function(&plan, &ctx, fn_index, func, &ir.functions)?;
         let observed = body_bytes(&function);
         if observed > body_limit {
@@ -897,12 +799,17 @@ pub(crate) fn emit_compiled_module(
                 observed,
             });
         }
+        charge_work(budget, observed)?;
         user_functions.push((plan.user_type_indices[index], function));
     }
 
     let mut eq_functions = Vec::with_capacity(plan.eq_count as usize + 1);
-    eq_functions.push((plan.eq_type_index, emit_bytes_compare(&plan)));
+    charge_work(budget, 1)?;
+    let bytes_compare = emit_bytes_compare(&plan);
+    charge_work(budget, body_bytes(&bytes_compare))?;
+    eq_functions.push((plan.eq_type_index, bytes_compare));
     for shape_index in 0..plan.eq_count as usize {
+        charge_work(budget, 1)?;
         let function = emit_eq_helper(&plan, &ir.eq_shapes, shape_index)?;
         let observed = body_bytes(&function);
         if observed > body_limit {
@@ -912,8 +819,56 @@ pub(crate) fn emit_compiled_module(
                 observed,
             });
         }
+        charge_work(budget, observed)?;
         eq_functions.push((plan.eq_type_index, function));
     }
+
+    // projection helpers: one per distinct aggregate parameter type (finding
+    // 15); record descriptors were baked above in the same node order
+    let mut projection_functions = Vec::with_capacity(plan.projection_indices.len());
+    let spec = ProjectionSpec {
+        nodes: &ir.type_nodes,
+        alloc_index: plan.alloc_index,
+        raise_index: plan.raise_index,
+        null_cell: workspace.cell_base,
+        arg_msg_addr: baked.wrapper.arg,
+        i32_msg_addr: baked.wrapper.i32,
+        field_msg_addr: baked.wrapper.field,
+    };
+    for (position, &(node_index, _fn_index)) in plan.projection_indices.iter().enumerate() {
+        // None for non-record nodes (the helper ignores it); Some for records
+        let descriptor_addr = descriptor_addrs.get(position).copied().flatten();
+        charge_work(budget, 1)?;
+        let function = emit_projection_helper(&spec, &ir.type_nodes, node_index, descriptor_addr)?;
+        let observed = body_bytes(&function);
+        if observed > body_limit {
+            return Err(EmitError::LimitExceeded {
+                code: "B001",
+                limit: body_limit,
+                observed,
+            });
+        }
+        charge_work(budget, observed)?;
+        projection_functions.push((plan.projection_type_index, function));
+    }
+
+    // per-parameter projection helper indices for the wrapper (None = the
+    // inline pass-through for hand-built IR without nodes)
+    let param_helper: Vec<Option<u32>> = entry
+        .param_projections
+        .iter()
+        .enumerate()
+        .map(|(slot, kind)| {
+            if !matches!(kind, ParamProjection::Cell | ParamProjection::OptionalCell) {
+                return None;
+            }
+            let node_index = *entry.param_type_nodes.get(slot)?;
+            plan.projection_indices
+                .iter()
+                .find(|&&(node, _)| node == node_index)
+                .map(|&(_, fn_index)| fn_index)
+        })
+        .collect();
 
     let mut tag_bytes = [0; 4];
     tag_bytes.copy_from_slice(&null_cell[0..4]);
@@ -922,39 +877,62 @@ pub(crate) fn emit_compiled_module(
     let mut payload_bytes = [0; 8];
     payload_bytes.copy_from_slice(&null_cell[8..16]);
 
+    let error_raiser = emit_error_raiser(0, workspace.context_base);
+    let allocator = emit_allocator(workspace.layout, 0, 0);
+    // the compiled path always carries a scalar entry (the compile
+    // pipeline's entry gate rejects every other entry kind), so the
+    // M1 pass-through wrapper is replaced by the scalar wrapper
+    charge_work(budget, 1)?;
+    let wrapper = {
+        let entry_index = plan
+            .users_base
+            .checked_add(ir.entry)
+            .ok_or(EmitError::Internal("entry index overflow"))?;
+        emit_scalar_wrapper(WrapperInputs {
+            decode_index: plan.decode_index,
+            encode_index: plan.encode_index,
+            alloc_index: plan.alloc_index,
+            raise_index: plan.raise_index,
+            entry_index,
+            bases: plan.wrapper_bases(),
+            null_cell: NullCell {
+                tag: u32::from_le_bytes(tag_bytes) as i32,
+                aux: u32::from_le_bytes(aux_bytes) as i32,
+                payload: i64::from_le_bytes(payload_bytes),
+            },
+            messages: baked.wrapper,
+            param_kinds: &entry.param_projections,
+            result_projection: entry.result_projection,
+            param_names: &baked.names,
+            param_helper: &param_helper,
+        })?
+    };
+    charge_work(budget, body_bytes(&wrapper))?;
+    // finding 20: raiser + allocator + wrapper complete the runtime portion
+    // (helpers + wrapper count against `max_runtime_bytes`; user code against
+    // `max_function_body_bytes` and the output cap).
+    let runtime_total = helper_bytes
+        .checked_add(body_bytes(&error_raiser))
+        .and_then(|total| total.checked_add(body_bytes(&allocator)))
+        .and_then(|total| total.checked_add(body_bytes(&wrapper)))
+        .ok_or(EmitError::Internal("runtime byte count overflow"))?;
+    if runtime_total > runtime_limit {
+        return Err(EmitError::LimitExceeded {
+            code: "B001",
+            limit: runtime_limit,
+            observed: runtime_total,
+        });
+    }
+
     let image = ModuleImage {
         static_bytes,
         helper_functions,
-        error_raiser: emit_error_raiser(0, workspace.context_base),
-        allocator: emit_allocator(workspace.layout, 0, 0),
-        // the compiled path always carries a scalar entry (the compile
-        // pipeline's entry gate rejects every other entry kind), so the
-        // M1 pass-through wrapper is replaced by the scalar wrapper
-        wrapper: {
-            let entry_index = plan
-                .users_base
-                .checked_add(ir.entry)
-                .ok_or(EmitError::Internal("entry index overflow"))?;
-            emit_scalar_wrapper(WrapperInputs {
-                decode_index: plan.decode_index,
-                encode_index: plan.encode_index,
-                alloc_index: plan.alloc_index,
-                raise_index: plan.raise_index,
-                entry_index,
-                bases: plan.wrapper_bases(),
-                null_cell: NullCell {
-                    tag: u32::from_le_bytes(tag_bytes) as i32,
-                    aux: u32::from_le_bytes(aux_bytes) as i32,
-                    payload: i64::from_le_bytes(payload_bytes),
-                },
-                messages: baked.wrapper,
-                param_kinds: &entry.param_projections,
-                result_projection: entry.result_projection,
-                param_names: &baked.names,
-            })
-        },
+        error_raiser,
+        allocator,
+        wrapper,
         user_functions,
         eq_functions,
+        projection_functions,
         alloc_index: plan.alloc_index,
         call_index: plan.wrapper_index,
         extra_types,

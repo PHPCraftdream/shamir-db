@@ -189,8 +189,18 @@ pub(crate) fn emit_user_function(
         func,
         base,
         inst_local,
+        max_local: std::cell::Cell::new(0),
     };
     control::drive(&env, &mut function)?;
+    // Binding invariant: every emitted local index must stay inside the
+    // declared locals (params + locals + 6 scratch + one dense per value inst).
+    let dense_count = env.inst_local.iter().flatten().count() as u32;
+    let declared = base + 6 + dense_count;
+    if env.max_local.get() >= declared {
+        return Err(EmitError::Internal(
+            "emitted local index exceeds declared locals",
+        ));
+    }
     // The function body's final `End`.
     function.instruction(&Instruction::End);
     Ok(function)

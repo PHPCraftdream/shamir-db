@@ -58,15 +58,17 @@ pub(super) fn emit_inst(
             width,
             left,
             right,
-        } => emit_checked_arith(
-            env,
-            function,
-            *op,
-            *width,
-            env.local_of(*left)?,
-            env.local_of(*right)?,
-            env.base as usize,
-        )?,
+        } => {
+            emit_checked_arith(
+                env,
+                function,
+                *op,
+                *width,
+                env.local_of(*left)?,
+                env.local_of(*right)?,
+            )?;
+            store_result(env, function, position)?;
+        }
         InstKind::FloatArith { op, left, right } => {
             function.instruction(&Instruction::LocalGet(env.local_of(*left)?));
             function.instruction(&Instruction::LocalGet(env.local_of(*right)?));
@@ -99,14 +101,7 @@ pub(super) fn emit_inst(
             store_result(env, function, position)?;
         }
         InstKind::Cast { op, value } => {
-            emit_cast(
-                env.plan,
-                env.ctx,
-                function,
-                *op,
-                env.local_of(*value)?,
-                env.base as usize,
-            )?;
+            emit_cast(env, function, *op, env.local_of(*value)?)?;
             store_result(env, function, position)?;
         }
         InstKind::BoolNot(value) => {
@@ -176,6 +171,11 @@ pub(super) fn emit_inst(
             function.instruction(&Instruction::I64Store(mem64(8)));
         }
         InstKind::CellCopyTo { dest, source } => emit_cell_copy(env, function, *dest, *source)?,
+        // Explicit value id for aggregate bindings: re-yield the cell operand.
+        InstKind::CellPass(value) => {
+            function.instruction(&Instruction::LocalGet(env.local_of(*value)?));
+            store_result(env, function, position)?;
+        }
         InstKind::CellIsNull(value) => {
             function.instruction(&Instruction::LocalGet(env.local_of(*value)?));
             function.instruction(&Instruction::I32Load(mem32(0)));
@@ -256,6 +256,7 @@ pub(super) fn emit_inst(
 /// (no-op for non-value instructions).
 fn store_result(env: &EmitEnv, function: &mut Function, position: usize) -> Result<(), EmitError> {
     if let Some(local) = env.result_local(position) {
+        env.note_local(local);
         function.instruction(&Instruction::LocalSet(local));
     }
     Ok(())

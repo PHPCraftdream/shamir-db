@@ -28,16 +28,28 @@ pub(super) struct EmitEnv<'a> {
     pub(super) base: u32,
     /// `InstId -> Option<value local>`; `None` for non-value instructions.
     pub(super) inst_local: Vec<Option<u32>>,
+    /// Highest emitted local index seen so far (binding invariant).
+    pub(super) max_local: std::cell::Cell<u32>,
 }
 
 impl EmitEnv<'_> {
     /// The value local of one operand instruction.
     pub(super) fn local_of(&self, id: InstId) -> Result<u32, EmitError> {
-        self.inst_local
+        let local = self
+            .inst_local
             .get(id.index())
             .copied()
             .flatten()
-            .ok_or(EmitError::Internal("operand without a result local"))
+            .ok_or(EmitError::Internal("operand without a result local"))?;
+        self.note_local(local);
+        Ok(local)
+    }
+
+    /// Tracks the highest emitted local index for the declared-locals check.
+    pub(super) fn note_local(&self, index: u32) {
+        if index > self.max_local.get() {
+            self.max_local.set(index);
+        }
     }
 
     /// The wasm local holding one instruction's own result.
@@ -47,11 +59,15 @@ impl EmitEnv<'_> {
 
     /// i32 scratch locals (s0 at `base`, s1 at `base + 1`).
     pub(super) fn s0(&self) -> u32 {
-        self.base
+        let index = self.base;
+        self.note_local(index);
+        index
     }
 
     pub(super) fn s1(&self) -> u32 {
-        self.base.saturating_add(1)
+        let index = self.base.saturating_add(1);
+        self.note_local(index);
+        index
     }
 }
 
@@ -100,6 +116,11 @@ pub(super) fn drive(env: &EmitEnv, function: &mut Function) -> Result<(), EmitEr
                 let frame = labels.pop().ok_or(EmitError::Internal("label underflow"))?;
                 if frame.loop_header.is_none() {
                     return Err(EmitError::Internal("loop end over an if frame"));
+                }
+                if frame.join.is_none() {
+                    return Err(EmitError::Internal(
+                        "loop closed without an exit conditional",
+                    ));
                 }
                 function.instruction(&Instruction::End);
                 function.instruction(&Instruction::End);
@@ -189,7 +210,7 @@ fn emit_chain(
             check_depth(labels)?;
             function.instruction(&Instruction::Block(BlockType::Empty));
             function.instruction(&Instruction::Loop(BlockType::Empty));
-            tasks.push(Task::LoopEnds);
+            // open_loop_exit pushes the only LoopEnds (after Task::Block(exit))
         }
         emit_block_insts(env, function, block)?;
         match terminator {
@@ -227,6 +248,26 @@ fn emit_chain(
                     let exit = if then.0 > else_.0 { *then } else { *else_ };
                     current = Some(if exit == *then { *else_ } else { *then });
                 } else {
+                    // No-else lowering: BranchIf(cond, then, join) where the
+                    // then arm's own terminator branches to the join (the
+                    // else arm). Emit `cond; if (void)` with only the then
+                    // arm; IfEnd schedules the join after the `end`.
+                    let then_term = &block_parts(env.func, *then)?.3;
+                    if matches!(then_term, Terminator::Branch(t) if *t == *else_)
+                        && loop_target_depth(labels, *else_).is_none()
+                    {
+                        labels.push(LabelFrame {
+                            loop_header: None,
+                            join: None,
+                            fallthrough: Some(*else_),
+                        });
+                        check_depth(labels)?;
+                        function.instruction(&Instruction::LocalGet(env.local_of(*cond)?));
+                        function.instruction(&Instruction::If(BlockType::Empty));
+                        tasks.push(Task::IfEnd);
+                        tasks.push(Task::Arm(*then));
+                        return Ok(());
+                    }
                     open_if(env, function, labels, tasks, *cond, *then, *else_)?;
                     return Ok(());
                 }
@@ -258,6 +299,12 @@ fn open_loop_exit(
         .ok_or(EmitError::Internal("missing loop frame"))?;
     frame.join = Some(exit);
     function.instruction(&Instruction::LocalGet(env.local_of(cond)?));
+    // BranchIf branches on TRUE: for-range lowering has then=exit (cond true
+    // -> exit), so plain br_if is right; while lowering has else=exit (cond
+    // true -> body), so the condition must be negated first.
+    if exit == else_ {
+        function.instruction(&Instruction::I32Eqz);
+    }
     function.instruction(&Instruction::BrIf(1)); // 1 = the loop's outer `block`
     tasks.push(Task::Block(exit));
     tasks.push(Task::LoopEnds);

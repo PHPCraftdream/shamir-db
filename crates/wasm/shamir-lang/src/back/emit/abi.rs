@@ -4,6 +4,8 @@
 
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
+use super::support::projection::WrapperMessages;
+use crate::back::emit::module::EmitError;
 use crate::back::ir::ParamProjection;
 use crate::back::runtime::{
     CONTEXT_OUTPUT_LEN_OFFSET, CONTEXT_OUTPUT_PTR_OFFSET, CONTEXT_SCRATCH_OFFSET,
@@ -205,20 +207,6 @@ fn load64_offset(bytes: u32) -> MemArg {
     }
 }
 
-/// Addresses (inside the static image) of the wrapper raise messages
-/// appended in a fixed second block after the scalar messages.
-pub(crate) struct WrapperMessages {
-    /// Unknown or out-of-range envelope key.
-    pub arg: u32,
-    /// Positional and named carriers combined (numeric keys or `args` with
-    /// named keys, or `args` with named keys).
-    pub mixed: u32,
-    /// Argument count does not match the entry arity.
-    pub arity: u32,
-    /// i32 parameter value out of range.
-    pub i32: u32,
-}
-
 /// Stable cell tags the wrapper reads (mirrors `runtime::CellTag`).
 const TAG_BOOL: i32 = 2;
 const TAG_I32: i32 = 3;
@@ -253,22 +241,28 @@ pub(crate) struct WrapperInputs<'a> {
     /// Entry parameter names as `(static address, byte length)` pairs, in
     /// declaration order; baked into the named-key scan.
     pub param_names: &'a [(u32, u32)],
+    /// Projection helper fn index per entry parameter (finding 15); `None`
+    /// keeps the inline pass-through (hand-built IR without type nodes).
+    pub param_helper: &'a [Option<u32>],
 }
 
 /// Emits the compiled-module `shamir_call` wrapper: after the M1 prologue
 /// (bounds checks, re-entry guard, context init, null cell, decode, output
 /// buffer) it scans the decoded `DynamicMap` envelope for positional keys
-/// `"0".."9"`, the `args` list or declared parameter names. Numeric keys are
+/// `"0".."99"`, the `args` list or declared parameter names. Numeric keys are
 /// authoritative when present (`args` alongside them is redundant and
 /// ignored); without numeric keys, matching declared names select named
 /// parameters (omitted optional parameters read as null). Each argument cell
-/// is projected into the entry parameter space, the result is boxed back into
-/// the context scratch cell and encoded.
+/// is projected into the entry parameter space — aggregate parameters run
+/// through their generated structural projection helper when the lowering
+/// produced type nodes (finding 15); hand-built IR without nodes keeps the
+/// old pass-through — the result is boxed back into the context scratch cell
+/// and encoded.
 ///
 /// Locals: 0/1 are the wrapper params, 2 `memory_bytes`, 3 scratch, 4
 /// context, 5 output pointer, then one i32 per entry parameter, then the
 /// scan/box temps, then one i64 payload temp.
-pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
+pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, EmitError> {
     let WrapperInputs {
         decode_index,
         encode_index,
@@ -281,13 +275,17 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
         param_kinds,
         result_projection,
         param_names,
+        param_helper,
     } = inputs;
     let param_count = param_kinds.len();
     let param0: u32 = 6;
     let temp: u32 = param0.saturating_add(param_count as u32);
     // scan/box temps: i, count, seen, args_present, args, pair, vcell,
     // klen, kaddr, bbyte (also the name-compare flag), matched, boxed,
-    // scratch, bool value, named_seen, mask, kcell.
+    // scratch (also the second key byte), bool value, named_seen, mask,
+    // kcell, payload64. NOTE: payload64 is an i64 local placed after the
+    // 19-slot i32 group, so payload64 = temp + 19 and kcell = temp + 17
+    // stays inside the i32 group.
     let i = temp;
     let count = temp + 1;
     let seen = temp + 2;
@@ -304,14 +302,20 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
     let bool_value = temp + 13;
     let named_seen = temp + 14;
     let mask = temp + 15;
-    let payload64: u32 = temp + 16;
     let kcell = temp + 17;
+    let payload64: u32 = temp + 19;
+    // scratch locals must stay inside the i32 group; the i64 payload is last
+    if payload64 != temp + 19 || kcell >= temp + 19 {
+        return Err(EmitError::Internal(
+            "wrapper scratch locals overlap the i64 payload local",
+        ));
+    }
 
     let mut groups = vec![(4u32, ValType::I32)];
     if param_count > 0 {
         groups.push((param_count as u32, ValType::I32));
     }
-    groups.push((17, ValType::I32));
+    groups.push((19, ValType::I32));
     groups.push((1, ValType::I64));
     let mut function = Function::new(groups);
 
@@ -483,11 +487,17 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
     function.instruction(&Instruction::I32WrapI64);
     // decoder payloads are absolute heap addresses; use as-is
     function.instruction(&Instruction::LocalSet(kaddr));
-    // numeric keys: one ASCII digit selects a positional slot; a 1-byte key
-    // that is NOT a digit falls through to the named-matching branch below
+    // numeric keys select positional slots: one ASCII digit, or a canonical
+    // two-decimal key ("10".."99"; a leading zero is NOT canonical — such a
+    // key falls to named/unknown handling below). The numeric flag lives in
+    // `matched` until the branch is taken.
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalSet(matched));
+    // single ASCII digit
     function.instruction(&Instruction::LocalGet(klen));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::LocalGet(kaddr));
     function.instruction(&Instruction::I32Load8U(load_offset(0)));
     function.instruction(&Instruction::LocalTee(bbyte));
@@ -497,13 +507,66 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
     function.instruction(&Instruction::I32Const(0x39));
     function.instruction(&Instruction::I32LeU);
     function.instruction(&Instruction::I32And);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::LocalSet(matched));
+    function.instruction(&Instruction::End);
+    // canonical two-decimal key: first byte '1'..='9', second '0'..='9'
+    function.instruction(&Instruction::LocalGet(klen));
+    function.instruction(&Instruction::I32Const(2));
+    function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(kaddr));
+    function.instruction(&Instruction::I32Load8U(load_offset(0)));
+    function.instruction(&Instruction::LocalSet(bbyte));
+    // `scratch` is reused as the second key byte here (dead until boxing)
+    function.instruction(&Instruction::LocalGet(kaddr));
+    function.instruction(&Instruction::I32Load8U(load_offset(1)));
+    function.instruction(&Instruction::LocalSet(scratch));
+    function.instruction(&Instruction::LocalGet(bbyte));
+    function.instruction(&Instruction::I32Const(0x31));
+    function.instruction(&Instruction::I32GeU);
+    function.instruction(&Instruction::LocalGet(bbyte));
+    function.instruction(&Instruction::I32Const(0x39));
+    function.instruction(&Instruction::I32LeU);
     function.instruction(&Instruction::I32And);
+    function.instruction(&Instruction::LocalGet(scratch));
+    function.instruction(&Instruction::I32Const(0x30));
+    function.instruction(&Instruction::I32GeU);
+    function.instruction(&Instruction::LocalGet(scratch));
+    function.instruction(&Instruction::I32Const(0x39));
+    function.instruction(&Instruction::I32LeU);
+    function.instruction(&Instruction::I32And);
+    function.instruction(&Instruction::I32And);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::LocalSet(matched));
+    function.instruction(&Instruction::End);
+    // a 1-byte key that is NOT a digit and a 2-byte key that is not a
+    // canonical decimal fall through to the named-matching branch below
+    function.instruction(&Instruction::LocalGet(matched));
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::LocalSet(matched));
-    for digit in 0..param_count {
-        function.instruction(&Instruction::LocalGet(bbyte));
-        function.instruction(&Instruction::I32Const(0x30 + digit as i32));
+    // two-decimal keys select slot v = (b0 - 0x30) * 10 + (b1 - 0x30);
+    // runtime values cannot index locals, so slot selection is the unrolled
+    // compare chain below (slot indices are generation-time constants)
+    function.instruction(&Instruction::LocalGet(klen));
+    function.instruction(&Instruction::I32Const(2));
+    function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(bbyte));
+    function.instruction(&Instruction::I32Const(10));
+    function.instruction(&Instruction::I32Mul);
+    function.instruction(&Instruction::LocalGet(scratch));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::I32Const(0x30 * 11));
+    function.instruction(&Instruction::I32Sub);
+    function.instruction(&Instruction::LocalSet(scratch));
+    function.instruction(&Instruction::End);
+    for slot in 0..param_count {
+        function.instruction(&Instruction::LocalGet(scratch));
+        function.instruction(&Instruction::I32Const(slot as i32));
         function.instruction(&Instruction::I32Eq);
         function.instruction(&Instruction::If(BlockType::Empty));
         // mixing positional keys with named keys rejects (`args` alongside
@@ -515,17 +578,17 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
         raise(&mut function, raise_index, messages.mixed, 5);
         function.instruction(&Instruction::End);
         function.instruction(&Instruction::LocalGet(vcell));
-        function.instruction(&Instruction::LocalSet(param0 + digit as u32));
+        function.instruction(&Instruction::LocalSet(param0 + slot as u32));
         function.instruction(&Instruction::LocalGet(seen));
         function.instruction(&Instruction::I32Const(1));
         function.instruction(&Instruction::I32Add);
         function.instruction(&Instruction::LocalSet(seen));
         function.instruction(&Instruction::I32Const(1));
         function.instruction(&Instruction::LocalSet(matched));
-        if digit < 32 {
+        if slot < 32 {
             function.instruction(&Instruction::LocalGet(mask));
             function.instruction(&Instruction::I32Const(
-                1i32.checked_shl(digit as u32).unwrap_or(0),
+                1i32.checked_shl(slot as u32).unwrap_or(0),
             ));
             function.instruction(&Instruction::I32Or);
             function.instruction(&Instruction::LocalSet(mask));
@@ -629,12 +692,14 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
     // argument resolution: named keys never combine with the `args` list;
     // numeric keys are authoritative (`args` is redundant and ignored), then
     // named-complete, then named-partial with optional fills, then the args
-    // list; anything else rejects
+    // list; anything else rejects. The mixing check is two nested ifs (a
+    // logical AND): a bitwise and would let an even named count evade it.
     function.instruction(&Instruction::LocalGet(named_seen));
+    function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::LocalGet(args_present));
-    function.instruction(&Instruction::I32And);
     function.instruction(&Instruction::If(BlockType::Empty));
     raise(&mut function, raise_index, messages.mixed, 5);
+    function.instruction(&Instruction::End);
     function.instruction(&Instruction::End);
     function.instruction(&Instruction::LocalGet(seen));
     function.instruction(&Instruction::I32Const(param_count as i32));
@@ -666,7 +731,10 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
                 1i32.checked_shl(slot as u32).unwrap_or(0),
             ));
             function.instruction(&Instruction::I32And);
-            function.instruction(&Instruction::BrIf(1));
+            // `BrIf(0)` exits only this parameter's block, skipping the
+            // missing-field handling but never the later parameters' checks
+            // (the surrounding conditional must keep running)
+            function.instruction(&Instruction::BrIf(0));
         }
         if *kind == ParamProjection::OptionalCell {
             function.instruction(&Instruction::I32Const(bases.cell as i32));
@@ -720,9 +788,21 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
         let cell = param0 + slot as u32;
         match kind {
             ParamProjection::Cell | ParamProjection::OptionalCell => {
-                // string/bytes/list/record/DynamicMap pass-through; deep
-                // projection is a later-milestone scope
-                function.instruction(&Instruction::LocalGet(cell));
+                // structural deep projection against the static type node
+                // when the lowering produced one (finding 15); hand-built
+                // IR without nodes keeps the pass-through
+                match param_helper.get(slot).copied().flatten() {
+                    Some(helper) => {
+                        function.instruction(&Instruction::LocalGet(cell));
+                        function.instruction(&Instruction::Call(helper));
+                        function.instruction(&Instruction::LocalSet(cell));
+                        function.instruction(&Instruction::LocalGet(cell));
+                    }
+                    // string/bytes/list/record/DynamicMap pass-through
+                    None => {
+                        function.instruction(&Instruction::LocalGet(cell));
+                    }
+                }
             }
             ParamProjection::I32 => {
                 // decoded MessagePack ints are I64-tagged
@@ -884,5 +964,5 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Function {
     function.instruction(&Instruction::I64ExtendI32U);
     function.instruction(&Instruction::I64Or);
     function.instruction(&Instruction::End);
-    function
+    Ok(function)
 }

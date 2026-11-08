@@ -5,7 +5,7 @@ use crate::front::{BinaryOp, ExprId, ExprKind, UnaryOp};
 use crate::sem::{BuiltinId, ResolvedTarget, TypeData, TypeId};
 
 use super::ctx::LowerCtx;
-use super::types::{box_value, eq_shape_for, is_scalar, value_kind};
+use super::types::{convert, eq_shape_for, is_scalar, value_kind};
 
 /// Magnitude of 2^63: the `negative_min_candidate` literal for i64::MIN.
 const MAGNITUDE_I64_MIN: u64 = 9_223_372_036_854_775_808;
@@ -125,7 +125,13 @@ fn lower_list(
         let index_i32 = i32::try_from(index)
             .map_err(|_| IrError::Internal("lower: element index out of i32 range"))?;
         let value = lower_expr(ctx, *item)?;
-        let boxed = box_value(ctx, elem, value, ctx.expr_span(*item))?;
+        let boxed = convert(
+            ctx,
+            elem,
+            ctx.expr_type(*item)?,
+            value,
+            ctx.expr_span(*item),
+        )?;
         let index_inst = ctx.builder.append(InstKind::ConstI32(index_i32), span)?;
         let dest = ctx.builder.append(
             InstKind::CellSlot {
@@ -160,7 +166,10 @@ fn lower_list(
         },
         span,
     )?;
-    Ok(cell)
+    // Explicit value id — LocalSet reads the immediately preceding
+    // instruction, and the stores above are value-less: re-yield the cell.
+    let yielded = ctx.builder.append(InstKind::CellPass(cell), span)?;
+    Ok(yielded)
 }
 
 fn lower_record(
@@ -205,7 +214,13 @@ fn lower_record(
             })
             .ok_or(IrError::Internal("lower: record literal misses a field"))?;
         let value = lower_expr(ctx, field.value)?;
-        let boxed = box_value(ctx, *field_ty, value, ctx.expr_span(field.value))?;
+        let boxed = convert(
+            ctx,
+            *field_ty,
+            ctx.expr_type(field.value)?,
+            value,
+            ctx.expr_span(field.value),
+        )?;
         let index = u32::try_from(position)
             .map_err(|_| IrError::Internal("lower: field index overflow"))?;
         let index_i32 = i32::try_from(index)
@@ -427,8 +442,11 @@ fn cmp_op(op: BinaryOp) -> Result<CmpOp, IrError> {
     }
 }
 
-/// Short-circuit `&&`/`||` through a temp local; the join block is opened
-/// LAST so both arms are forward targets and the arms tile before it.
+/// Short-circuit `&&`/`||` through a temp local. The join block is opened
+/// LAST (after both arms are filled), so both arms are forward targets and
+/// the branch condition is the lowered left value directly (no temp
+/// round-trip) — `lower_expr(left)` leaves `current_block()` on the
+/// unterminated block the BranchIf terminates.
 fn short_circuit(
     ctx: &mut LowerCtx,
     is_and: bool,
@@ -437,19 +455,15 @@ fn short_circuit(
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
     let tmp = ctx.builder.declare_local(ValueKind::I32)?;
-    let entry = ctx
+    let cond = lower_expr(ctx, left)?;
+    let current = ctx
         .builder
         .current_block()
         .ok_or(IrError::Internal("lower: short-circuit outside a block"))?;
-    let _lhs = lower_expr(ctx, left)?;
-    ctx.builder
-        .append(InstKind::LocalSet(tmp), ctx.expr_span(left))?;
     let region = ctx.block_region();
     let eval = ctx.builder.open_block(region)?;
     let constant = ctx.builder.open_block(region)?;
-    let join = ctx.builder.open_block(region)?;
-    ctx.builder.set_current(entry)?;
-    let cond = ctx.builder.append(InstKind::LocalGet(tmp), span)?;
+    ctx.builder.set_current(current)?;
     if is_and {
         ctx.builder.terminate_branch_if(cond, eval, constant)?;
     } else {
@@ -459,13 +473,23 @@ fn short_circuit(
     let _rhs = lower_expr(ctx, right)?;
     ctx.builder
         .append(InstKind::LocalSet(tmp), ctx.expr_span(right))?;
-    ctx.builder.terminate_branch(join)?;
+    // The join does not exist yet; patch after it is created. The holder is
+    // wherever the right operand left the current block (a nested arm may
+    // have terminated `eval` itself); captured before the pending terminate
+    // clears `current`.
+    let eval_join = ctx.builder.current_block().ok_or(IrError::Internal(
+        "lower: short-circuit without a pending arm",
+    ))?;
+    ctx.builder.terminate_pending_branch()?;
     ctx.builder.set_current(constant)?;
     let _value = ctx
         .builder
         .append(InstKind::ConstI32(if is_and { 0 } else { 1 }), span)?;
     ctx.builder.append(InstKind::LocalSet(tmp), span)?;
-    ctx.builder.terminate_branch(join)?;
+    ctx.builder.terminate_pending_branch()?;
+    let join = ctx.builder.open_block(region)?;
+    ctx.builder.patch_pending_branch(eval_join, join)?;
+    ctx.builder.patch_pending_branch(constant, join)?;
     ctx.builder.set_current(join)?;
     ctx.builder.append(InstKind::LocalGet(tmp), span)
 }
@@ -640,29 +664,58 @@ fn lower_conditional(
     else_value: ExprId,
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
-    let data = ctx.type_data(ctx.expr_type(id)?)?;
+    let result_ty = ctx.expr_type(id)?;
+    let data = ctx.type_data(result_ty)?;
     let tmp = ctx.builder.declare_local(value_kind(data))?;
-    let entry = ctx
+    let cond = lower_expr(ctx, condition)?;
+    let current = ctx
         .builder
         .current_block()
         .ok_or(IrError::Internal("lower: conditional outside a block"))?;
-    let cond = lower_expr(ctx, condition)?;
     let region = ctx.block_region();
     let then_b = ctx.builder.open_block(region)?;
     let else_b = ctx.builder.open_block(region)?;
-    let join = ctx.builder.open_block(region)?;
-    ctx.builder.set_current(entry)?;
+    ctx.builder.set_current(current)?;
     ctx.builder.terminate_branch_if(cond, then_b, else_b)?;
     ctx.builder.set_current(then_b)?;
-    let _then_inst = lower_expr(ctx, then_value)?;
+    let then_inst = lower_expr(ctx, then_value)?;
+    // The converted value is the last appended inst; LocalSet reads it.
+    convert(
+        ctx,
+        result_ty,
+        ctx.expr_type(then_value)?,
+        then_inst,
+        ctx.expr_span(then_value),
+    )?;
     ctx.builder
         .append(InstKind::LocalSet(tmp), ctx.expr_span(then_value))?;
-    ctx.builder.terminate_branch(join)?;
+    // The join does not exist yet; patch after both arms are filled so the
+    // nested arms' own blocks are created first (all targets stay forward).
+    // The holder is wherever the arm left the current block — a nested
+    // conditional may have terminated `then_b` itself; captured before the
+    // pending terminate clears `current`.
+    let then_join = ctx.builder.current_block().ok_or(IrError::Internal(
+        "lower: conditional without a pending arm",
+    ))?;
+    ctx.builder.terminate_pending_branch()?;
     ctx.builder.set_current(else_b)?;
-    let _else_inst = lower_expr(ctx, else_value)?;
+    let else_inst = lower_expr(ctx, else_value)?;
+    convert(
+        ctx,
+        result_ty,
+        ctx.expr_type(else_value)?,
+        else_inst,
+        ctx.expr_span(else_value),
+    )?;
     ctx.builder
         .append(InstKind::LocalSet(tmp), ctx.expr_span(else_value))?;
-    ctx.builder.terminate_branch(join)?;
+    let else_join = ctx.builder.current_block().ok_or(IrError::Internal(
+        "lower: conditional without a pending arm",
+    ))?;
+    ctx.builder.terminate_pending_branch()?;
+    let join = ctx.builder.open_block(region)?;
+    ctx.builder.patch_pending_branch(then_join, join)?;
+    ctx.builder.patch_pending_branch(else_join, join)?;
     ctx.builder.set_current(join)?;
     ctx.builder.append(InstKind::LocalGet(tmp), span)
 }
@@ -709,11 +762,13 @@ fn lower_call(
                 {
                     return Err(IrError::Internal("lower: argument kind mismatch"));
                 }
-                let converted = if is_scalar(parameter_data) {
-                    value
-                } else {
-                    box_value(ctx, parameter.ty, value, ctx.expr_span(*argument))?
-                };
+                let converted = convert(
+                    ctx,
+                    parameter.ty,
+                    ctx.expr_type(*argument)?,
+                    value,
+                    ctx.expr_span(*argument),
+                )?;
                 args.push(converted);
             }
             ctx.builder.append(InstKind::Call { callee, args }, span)

@@ -5,4 +5,4 @@ mod expression;
 mod resolve;
 mod statement;
 
-pub use entry::check;
+pub use entry::{check, check_scoped};

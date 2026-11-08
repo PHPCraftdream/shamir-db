@@ -18,7 +18,7 @@ fn every_limit_clamps_oversized_values_to_its_hard_ceiling() {
         max_output_bytes: usize::MAX,
         max_runtime_bytes: usize::MAX,
         max_function_body_bytes: usize::MAX,
-        max_operators_per_function: usize::MAX,
+        max_ir_nodes_per_function: usize::MAX,
         max_ir_nodes: usize::MAX,
         max_call_chain: usize::MAX,
         compile_fuel: u64::MAX,
@@ -43,7 +43,7 @@ fn every_limit_clamps_oversized_values_to_its_hard_ceiling() {
             max_output_bytes: 8_388_608,
             max_runtime_bytes: 65_536,
             max_function_body_bytes: 1_048_576,
-            max_operators_per_function: 500_000,
+            max_ir_nodes_per_function: 500_000,
             max_ir_nodes: 200_000,
             max_call_chain: 64,
             compile_fuel: 20_000_000,
@@ -135,7 +135,7 @@ fn each_limit_field_rejects_zero_in_production_configuration() {
             ..defaults
         },
         CompileLimits {
-            max_operators_per_function: 0,
+            max_ir_nodes_per_function: 0,
             ..defaults
         },
         CompileLimits {

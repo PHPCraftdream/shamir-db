@@ -6,7 +6,7 @@
 
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
-use super::module::{EmissionPlan, EmitError};
+use crate::back::emit::module::{EmissionPlan, EmitError};
 use crate::back::ir::EqShape;
 
 fn mem32(offset: u32) -> MemArg {
@@ -64,7 +64,9 @@ pub(crate) fn emit_bytes_compare(plan: &EmissionPlan) -> Function {
     function.instruction(&Instruction::LocalGet(6));
     function.instruction(&Instruction::Call(plan.compare_index));
     function.instruction(&Instruction::LocalSet(7));
-    // result = c != 0 ? c : la - lb; one i32 left for the final `End`
+    // result = c != 0 ? c : la - lb; select pops (v1, v2, cond) and yields
+    // v1 when cond is true, so push c first (one i32 left for the final `End`)
+    function.instruction(&Instruction::LocalGet(7));
     function.instruction(&Instruction::LocalGet(2));
     function.instruction(&Instruction::LocalGet(3));
     function.instruction(&Instruction::I32Sub);
@@ -270,6 +272,14 @@ fn list_eq(function: &mut Function, child_index: u32) -> Result<(), EmitError> {
     function.instruction(&Instruction::I64Load(mem64(8)));
     function.instruction(&Instruction::I32WrapI64);
     function.instruction(&Instruction::LocalSet(7));
+    // unequal lengths are unequal without touching any elements
+    function.instruction(&Instruction::LocalGet(4));
+    function.instruction(&Instruction::LocalGet(5));
+    function.instruction(&Instruction::I32Ne);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::Return);
+    function.instruction(&Instruction::End);
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::LocalSet(11)); // r = all-equal flag
     function.instruction(&Instruction::I32Const(0));

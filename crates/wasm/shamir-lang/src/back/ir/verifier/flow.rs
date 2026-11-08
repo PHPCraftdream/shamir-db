@@ -304,6 +304,22 @@ pub(crate) fn check_local_domination(
     let order = reverse_postorder(function, block_count)?;
     let mut init_in: Vec<Vec<bool>> = vec![vec![false; slot_count as usize]; block_count];
     let mut init_out: Vec<Vec<bool>> = vec![vec![false; slot_count as usize]; block_count];
+    // Greatest fixpoint for the must-analysis: entry locals are NOT born
+    // initialized, so the entry out-set starts params-only and every other
+    // block starts all-true; loop-carried defs stay valid.
+    let mut params_only = vec![false; slot_count as usize];
+    for slot in params_only.iter_mut().take(params as usize) {
+        *slot = true;
+    }
+    for (block_index, out) in init_out.iter_mut().enumerate() {
+        if block_index == 0 {
+            *out = params_only.clone();
+        } else {
+            for cell in out.iter_mut() {
+                *cell = true;
+            }
+        }
+    }
     let mut work: u64 = 0;
     let mut changed = true;
     while changed {
@@ -316,7 +332,13 @@ pub(crate) fn check_local_domination(
                     function: function_index,
                     detail: String::from("predecessor table missing a block"),
                 })?;
-            let mut next = vec![true; slot_count as usize];
+            // The entry block's in-set is the params-only set regardless of
+            // predecessors (entry locals have no defs before block 0).
+            let mut next = if block_index == 0 {
+                params_only.clone()
+            } else {
+                vec![true; slot_count as usize]
+            };
             for pred in preds {
                 work += slot_count as u64;
                 let pred_out = init_out.get(*pred).ok_or_else(|| VerifierError::Internal {
@@ -327,10 +349,8 @@ pub(crate) fn check_local_domination(
                     *cell = *cell && *pred_bit;
                 }
             }
-            // A block with no predecessors (other than the entry) starts
-            // empty; unreachable blocks are rejected elsewhere. `next` is
-            // the in-set; snapshot it, then add this block's LocalSets for
-            // the out-set.
+            // `next` is the in-set; snapshot it, then add this block's
+            // LocalSets for the out-set.
             let mut out = next.clone();
             for slot in set_slots
                 .get(block_index)

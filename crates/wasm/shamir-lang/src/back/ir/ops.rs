@@ -142,6 +142,9 @@ pub enum InstKind {
     },
     /// -> I32 0/1 (tag == NULL).
     CellIsNull(InstId),
+    /// Explicit value id for aggregate bindings: re-yields `value` (I32 cell
+    /// id) after intervening value-less stores.
+    CellPass(InstId),
     /// -> I32 (same pointer); runtime raises kind 2 when null.
     CellUnwrap(InstId),
     /// Bounds-checked against aux; runtime raises kind 2; -> I32.
@@ -211,6 +214,7 @@ pub(crate) fn inst_result_kind(
         | InstKind::CellAlloc { .. }
         | InstKind::CellsAlloc(_)
         | InstKind::CellIsNull(_)
+        | InstKind::CellPass(_)
         | InstKind::CellUnwrap(_)
         | InstKind::CellElemPtr { .. }
         | InstKind::CellSlot { .. }
@@ -276,6 +280,7 @@ pub(crate) fn inst_operands(kind: &InstKind, out: &mut Vec<InstId>) {
         | InstKind::CellsAlloc(value)
         | InstKind::CellLoadPayload(value)
         | InstKind::CellIsNull(value)
+        | InstKind::CellPass(value)
         | InstKind::CellUnwrap(value)
         | InstKind::CellLen(value)
         | InstKind::Drop(value) => out.push(*value),

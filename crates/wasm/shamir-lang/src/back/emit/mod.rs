@@ -1,8 +1,10 @@
 mod abi;
-mod eq;
+
 mod helpers;
 mod module;
+
 mod scalar;
+mod support;
 #[cfg(test)]
 mod tests;
 

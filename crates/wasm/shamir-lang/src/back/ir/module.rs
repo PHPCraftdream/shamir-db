@@ -46,6 +46,36 @@ pub enum ParamProjection {
     OptionalCell,
 }
 
+/// One field of a record type node; fields are sorted by name (the same
+/// canonical order the lowering uses for record cells).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordField {
+    pub name: String,
+    pub ty: u32,
+}
+
+/// Structural type of one entry parameter, flattened into `IrModule::type_nodes`
+/// (children are node indices; no boxed trees).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeNodeKind {
+    I32,
+    I64,
+    F64,
+    Bool,
+    String,
+    Bytes,
+    Null,
+    Optional(u32),
+    List(u32),
+    Record(Vec<RecordField>),
+}
+
+/// One interned structural type node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeNode {
+    pub kind: TypeNodeKind,
+}
+
 /// One lowered function; block 0 is the entry block.
 #[derive(Clone, Debug)]
 pub struct IrFunction {
@@ -64,6 +94,9 @@ pub struct IrFunction {
     /// Declared parameter names in order (filled by the lowering driver;
     /// empty in hand-built test IR).
     pub param_names: Vec<String>,
+    /// Structural type node index per parameter (filled by the lowering
+    /// driver; empty in hand-built test IR).
+    pub param_type_nodes: Vec<u32>,
 }
 
 /// Structural equality shape; children are shape indices into
@@ -93,13 +126,15 @@ pub struct IrModule {
     pub static_bytes: Vec<u8>,
     /// Shape index space for `StructEq`.
     pub eq_shapes: Vec<EqShape>,
+    /// Interned structural type nodes for entry projection.
+    pub type_nodes: Vec<TypeNode>,
 }
 
 /// Lowering bounds, enforced by `IrBuilder` before growth.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IrLimits {
     pub max_ir_nodes: usize,
-    pub max_operators_per_function: usize,
+    pub max_ir_nodes_per_function: usize,
     pub max_single_literal_bytes: usize,
     pub max_total_literal_bytes: usize,
     pub max_static_bytes: usize,

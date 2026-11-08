@@ -1,21 +1,27 @@
 use wasm_encoder::{BlockType, Function, Ieee64, Instruction};
 
-use crate::back::emit::module::{EmissionPlan, EmitContext, EmitError};
+use crate::back::emit::module::EmitError;
 use crate::back::ir::{ArithOp, CastOp, CmpOp, ValueKind};
 
 use super::control::EmitEnv;
 use super::raise_static;
 
-pub(crate) fn i32_scratch(base: usize, which: usize) -> u32 {
-    (base + which) as u32
+pub(crate) fn i32_scratch(env: &EmitEnv, which: usize) -> u32 {
+    let index = env.base + which as u32;
+    env.note_local(index);
+    index
 }
 
-pub(crate) fn i64_scratch(base: usize, which: usize) -> u32 {
-    (base + 2 + which) as u32
+pub(crate) fn i64_scratch(env: &EmitEnv, which: usize) -> u32 {
+    let index = env.base + 2 + which as u32;
+    env.note_local(index);
+    index
 }
 
-pub(super) fn f64_scratch(base: usize) -> u32 {
-    (base + 5) as u32
+pub(super) fn f64_scratch(env: &EmitEnv) -> u32 {
+    let index = env.base + 5;
+    env.note_local(index);
+    index
 }
 
 /// Checked add/sub over the operand locals (finding 5): the wrapping result
@@ -29,19 +35,18 @@ fn emit_wrapping_arith(
     wide: bool,
     left: u32,
     right: u32,
-    base: usize,
 ) -> Result<(), EmitError> {
     let (a, b, s) = if wide {
         (
-            i64_scratch(base, 0),
-            i64_scratch(base, 1),
-            i64_scratch(base, 2),
+            i64_scratch(env, 0),
+            i64_scratch(env, 1),
+            i64_scratch(env, 2),
         )
     } else {
         (
-            i32_scratch(base, 0),
-            i32_scratch(base, 1),
-            i32_scratch(base, 1),
+            i32_scratch(env, 0),
+            i32_scratch(env, 1),
+            i32_scratch(env, 1),
         )
     };
     function.instruction(&Instruction::LocalGet(left));
@@ -125,16 +130,15 @@ pub(crate) fn emit_checked_arith(
     width: ValueKind,
     left: u32,
     right: u32,
-    base: usize,
 ) -> Result<(), EmitError> {
     let wide = width == ValueKind::I64;
     match op {
         ArithOp::Add | ArithOp::Sub => {
-            emit_wrapping_arith(env, function, op == ArithOp::Add, wide, left, right, base)
+            emit_wrapping_arith(env, function, op == ArithOp::Add, wide, left, right)
         }
         ArithOp::Mul => {
             if wide {
-                emit_i64_mul(env, function, left, right, base)
+                emit_i64_mul(env, function, left, right)
             } else {
                 // p = (i64)a * b, range-checked, wrapped back (finding 5)
                 function.instruction(&Instruction::LocalGet(left));
@@ -142,11 +146,11 @@ pub(crate) fn emit_checked_arith(
                 function.instruction(&Instruction::LocalGet(right));
                 function.instruction(&Instruction::I64ExtendI32S);
                 function.instruction(&Instruction::I64Mul);
-                function.instruction(&Instruction::LocalTee(i64_scratch(base, 0)));
-                function.instruction(&Instruction::LocalGet(i64_scratch(base, 0)));
+                function.instruction(&Instruction::LocalTee(i64_scratch(env, 0)));
+                function.instruction(&Instruction::LocalGet(i64_scratch(env, 0)));
                 function.instruction(&Instruction::I64Const(i64::from(i32::MIN)));
                 function.instruction(&Instruction::I64LtS);
-                function.instruction(&Instruction::LocalGet(i64_scratch(base, 0)));
+                function.instruction(&Instruction::LocalGet(i64_scratch(env, 0)));
                 function.instruction(&Instruction::I64Const(i64::from(i32::MAX)));
                 function.instruction(&Instruction::I64GtS);
                 function.instruction(&Instruction::I32Or);
@@ -157,7 +161,7 @@ pub(crate) fn emit_checked_arith(
                 Ok(())
             }
         }
-        ArithOp::Div | ArithOp::Rem => emit_div_rem(env, function, op, wide, left, right, base),
+        ArithOp::Div | ArithOp::Rem => emit_div_rem(env, function, op, wide, left, right),
     }
 }
 
@@ -170,12 +174,11 @@ fn emit_div_rem(
     wide: bool,
     left: u32,
     right: u32,
-    base: usize,
 ) -> Result<(), EmitError> {
     let (a, b) = if wide {
-        (i64_scratch(base, 0), i64_scratch(base, 1))
+        (i64_scratch(env, 0), i64_scratch(env, 1))
     } else {
-        (i32_scratch(base, 0), i32_scratch(base, 1))
+        (i32_scratch(env, 0), i32_scratch(env, 1))
     };
     function.instruction(&Instruction::LocalGet(left));
     function.instruction(&Instruction::LocalSet(a));
@@ -238,11 +241,10 @@ fn emit_i64_mul(
     function: &mut Function,
     left: u32,
     right: u32,
-    base: usize,
 ) -> Result<(), EmitError> {
-    let a = i64_scratch(base, 0);
-    let b = i64_scratch(base, 1);
-    let p = i64_scratch(base, 2);
+    let a = i64_scratch(env, 0);
+    let b = i64_scratch(env, 1);
+    let p = i64_scratch(env, 2);
     function.instruction(&Instruction::LocalGet(left));
     function.instruction(&Instruction::LocalSet(a));
     function.instruction(&Instruction::LocalGet(right));
@@ -316,14 +318,12 @@ pub(crate) fn emit_compare(
 /// Range-checked truncation via the f64 scratch temp; NaN, non-integral and
 /// out-of-range inputs raise kind 2 "range".
 fn emit_float_trunc(
-    plan: &EmissionPlan,
-    ctx: &EmitContext,
+    env: &EmitEnv,
     function: &mut Function,
     to_i64: bool,
     value: u32,
-    base: usize,
 ) -> Result<(), EmitError> {
-    let scratch = f64_scratch(base);
+    let scratch = f64_scratch(env);
     let (lo, hi) = if to_i64 {
         (-9223372036854775808.0f64, 9223372036854775808.0f64)
     } else {
@@ -336,7 +336,7 @@ fn emit_float_trunc(
     function.instruction(&Instruction::LocalGet(scratch));
     function.instruction(&Instruction::F64Ne);
     function.instruction(&Instruction::If(BlockType::Empty));
-    raise_static(plan, function, 2, ctx.range_msg_addr, b"range")?;
+    raise_static(env.plan, function, 2, env.ctx.range_msg_addr, b"range")?;
     function.instruction(&Instruction::End);
     // non-integral: trunc(x) != x
     function.instruction(&Instruction::LocalGet(scratch));
@@ -344,7 +344,7 @@ fn emit_float_trunc(
     function.instruction(&Instruction::LocalGet(scratch));
     function.instruction(&Instruction::F64Ne);
     function.instruction(&Instruction::If(BlockType::Empty));
-    raise_static(plan, function, 2, ctx.range_msg_addr, b"range")?;
+    raise_static(env.plan, function, 2, env.ctx.range_msg_addr, b"range")?;
     function.instruction(&Instruction::End);
     function.instruction(&Instruction::LocalGet(scratch));
     function.instruction(&Instruction::F64Trunc);
@@ -358,7 +358,7 @@ fn emit_float_trunc(
     function.instruction(&Instruction::I32And);
     function.instruction(&Instruction::I32Eqz);
     function.instruction(&Instruction::If(BlockType::Empty));
-    raise_static(plan, function, 2, ctx.range_msg_addr, b"range")?;
+    raise_static(env.plan, function, 2, env.ctx.range_msg_addr, b"range")?;
     function.instruction(&Instruction::End);
     function.instruction(&Instruction::LocalGet(scratch));
     if to_i64 {
@@ -372,12 +372,10 @@ fn emit_float_trunc(
 /// Emits one numeric cast from the operand local; the result is left on the
 /// stack.
 pub(crate) fn emit_cast(
-    plan: &EmissionPlan,
-    ctx: &EmitContext,
+    env: &EmitEnv,
     function: &mut Function,
     op: CastOp,
     value: u32,
-    base: usize,
 ) -> Result<(), EmitError> {
     match op {
         CastOp::ToI64FromI32 => {
@@ -394,21 +392,21 @@ pub(crate) fn emit_cast(
         }
         CastOp::ToI32FromI64 => {
             function.instruction(&Instruction::LocalGet(value));
-            function.instruction(&Instruction::LocalTee(i64_scratch(base, 0)));
-            function.instruction(&Instruction::LocalGet(i64_scratch(base, 0)));
+            function.instruction(&Instruction::LocalTee(i64_scratch(env, 0)));
+            function.instruction(&Instruction::LocalGet(i64_scratch(env, 0)));
             function.instruction(&Instruction::I64Const(i64::from(i32::MIN)));
             function.instruction(&Instruction::I64LtS);
-            function.instruction(&Instruction::LocalGet(i64_scratch(base, 0)));
+            function.instruction(&Instruction::LocalGet(i64_scratch(env, 0)));
             function.instruction(&Instruction::I64Const(i64::from(i32::MAX)));
             function.instruction(&Instruction::I64GtS);
             function.instruction(&Instruction::I32Or);
             function.instruction(&Instruction::If(BlockType::Empty));
-            raise_static(plan, function, 2, ctx.range_msg_addr, b"range")?;
+            raise_static(env.plan, function, 2, env.ctx.range_msg_addr, b"range")?;
             function.instruction(&Instruction::End);
             function.instruction(&Instruction::I32WrapI64);
         }
-        CastOp::ToI32FromF64 => emit_float_trunc(plan, ctx, function, false, value, base)?,
-        CastOp::ToI64FromF64 => emit_float_trunc(plan, ctx, function, true, value, base)?,
+        CastOp::ToI32FromF64 => emit_float_trunc(env, function, false, value)?,
+        CastOp::ToI64FromF64 => emit_float_trunc(env, function, true, value)?,
     }
     Ok(())
 }

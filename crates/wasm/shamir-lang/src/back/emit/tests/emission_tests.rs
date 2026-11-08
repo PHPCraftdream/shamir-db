@@ -13,7 +13,8 @@ fn compile(source: &str) -> Vec<u8> {
 }
 
 fn compile_with(source: &str, limits: &CompileLimits) -> Result<Vec<u8>, EmitError> {
-    emit_compiled_module(&lowered_ir(source), limits)
+    let mut budget = CompileBudget::new(limits).expect("configured limits form a compile budget");
+    emit_compiled_module(&lowered_ir(source), limits, &mut budget)
 }
 
 fn lowered_ir(source: &str) -> IrModule {

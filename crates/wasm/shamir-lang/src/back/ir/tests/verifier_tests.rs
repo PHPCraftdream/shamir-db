@@ -25,7 +25,7 @@ fn span() -> Span {
 fn generous_limits() -> IrLimits {
     IrLimits {
         max_ir_nodes: usize::MAX,
-        max_operators_per_function: usize::MAX,
+        max_ir_nodes_per_function: usize::MAX,
         max_single_literal_bytes: usize::MAX,
         max_total_literal_bytes: usize::MAX,
         max_static_bytes: usize::MAX,
@@ -68,6 +68,7 @@ fn function(
         param_projections: Vec::new(),
         result_projection: None,
         param_names: Vec::new(),
+        param_type_nodes: Vec::new(),
     }
 }
 
@@ -77,6 +78,7 @@ fn module(functions: Vec<IrFunction>) -> IrModule {
         entry: 0,
         static_bytes: Vec::new(),
         eq_shapes: Vec::new(),
+        type_nodes: Vec::new(),
     }
 }
 

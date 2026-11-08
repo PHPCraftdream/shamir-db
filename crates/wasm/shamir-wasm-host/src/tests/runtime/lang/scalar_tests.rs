@@ -765,32 +765,32 @@ async fn throw_raises_kind_1_user_error_containing_message() {
 // 11. Short-circuit evaluation
 // ---------------------------------------------------------------------------
 
-/// `&&` short-circuits: (a=0, b=0) returns true without executing `1 / b`,
-/// so no div0 error is raised.
+/// `&&` only skips the right side when the LEFT is false: (a=0, b=0) makes
+/// `a == 0` true, so `1 / b` EXECUTES and raises the kind-2 div0 error.
 #[tokio::test]
-async fn logical_and_short_circuits_avoiding_division_by_zero() {
+async fn logical_and_true_left_executes_right_operand() {
+    let function =
+        compiled("@entry scalar probe(a: i64, b: i64) -> bool { return a == 0 && 1 / b == 1; }\n")
+            .await;
+    let error = call_once(&function, &params_from(&[("a", int(0)), ("b", int(0))]))
+        .await
+        .expect_err("executed right operand must raise div0");
+    assert_invalid_argument(&error, "div0");
+}
+
+/// (a=1, b=0): `a == 0` is false, so the right operand is SKIPPED and `&&`
+/// yields false without touching `1 / b` (no div0 error).
+#[tokio::test]
+async fn logical_and_false_left_short_circuits() {
     let function =
         compiled("@entry scalar probe(a: i64, b: i64) -> bool { return a == 0 && 1 / b == 1; }\n")
             .await;
     assert_eq!(
-        call_once(&function, &params_from(&[("a", int(0)), ("b", int(0))]))
+        call_once(&function, &params_from(&[("a", int(1)), ("b", int(0))]))
             .await
-            .expect("short-circuit avoids div0"),
-        QueryValue::Bool(true)
+            .expect("false left operand short-circuits"),
+        QueryValue::Bool(false)
     );
-}
-
-/// When the left operand is false the right operand IS executed:
-/// (a=1, b=0) raises the kind-2 div0 error.
-#[tokio::test]
-async fn logical_and_evaluates_right_operand_when_left_is_false() {
-    let function =
-        compiled("@entry scalar probe(a: i64, b: i64) -> bool { return a == 0 && 1 / b == 1; }\n")
-            .await;
-    let error = call_once(&function, &params_from(&[("a", int(1)), ("b", int(0))]))
-        .await
-        .expect_err("executed right operand must raise div0");
-    assert_invalid_argument(&error, "div0");
 }
 
 // ---------------------------------------------------------------------------

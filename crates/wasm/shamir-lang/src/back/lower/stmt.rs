@@ -160,45 +160,60 @@ fn lower_return(ctx: &mut LowerCtx, value: Option<ExprId>, _span: Span) -> Resul
     Ok(())
 }
 
-/// Terminates the current block with a branch only when one is open; the
-/// body may already have ended in `return`/`throw`.
-fn ensure_branch(ctx: &mut LowerCtx, target: BlockId) -> Result<(), IrError> {
-    if ctx.builder.current_block().is_some() {
-        ctx.builder.terminate_branch(target)?;
-    }
-    Ok(())
-}
-
 fn lower_if(
     ctx: &mut LowerCtx,
     condition: ExprId,
     then_block: StatementId,
     else_branch: Option<StatementId>,
 ) -> Result<(), IrError> {
-    let entry = ctx
+    let cond = lower_expr(ctx, condition)?;
+    // The condition's value inst lives in the block the BranchIf terminates;
+    // capturing it after the condition leaves the branch block unterminated.
+    let cond_block = ctx
         .builder
         .current_block()
         .ok_or(IrError::Internal("lower: if outside a block"))?;
-    let cond = lower_expr(ctx, condition)?;
     let region = ctx.block_region();
-    // Create the arms first and the join LAST so every branch target is
-    // forward and blocks tile in fill order.
+    // Arms are created BEFORE the BranchIf is emitted, and the join LAST
+    // (after the arms are filled), so every branch target is forward and
+    // blocks tile in fill order.
     let then_b = ctx.builder.open_block(region)?;
     let else_b = match else_branch {
         Some(_) => Some(ctx.builder.open_block(region)?),
         None => None,
     };
-    let join = ctx.builder.open_block(region)?;
-    ctx.builder.set_current(entry)?;
-    ctx.builder
-        .terminate_branch_if(cond, then_b, else_b.unwrap_or(join))?;
+    ctx.builder.set_current(cond_block)?;
+    match else_b {
+        Some(else_b) => ctx.builder.terminate_branch_if(cond, then_b, else_b)?,
+        None => ctx.builder.terminate_branch_if_then(cond, then_b)?,
+    }
     ctx.builder.set_current(then_b)?;
     lower_stmt(ctx, then_block)?;
-    ensure_branch(ctx, join)?;
+    let mut then_pending = None;
+    if let Some(tail) = ctx.builder.current_block() {
+        ctx.builder.terminate_pending_branch()?;
+        then_pending = Some(tail);
+    }
+    let mut else_pending = None;
     if let (Some(branch), Some(else_b)) = (else_branch, else_b) {
         ctx.builder.set_current(else_b)?;
         lower_stmt(ctx, branch)?;
-        ensure_branch(ctx, join)?;
+        if let Some(tail) = ctx.builder.current_block() {
+            ctx.builder.terminate_pending_branch()?;
+            else_pending = Some(tail);
+        }
+    }
+    let join = ctx.builder.open_block(region)?;
+    if let Some(block) = then_pending {
+        ctx.builder.patch_pending_branch(block, join)?;
+    }
+    if let Some(block) = else_pending {
+        ctx.builder.patch_pending_branch(block, join)?;
+    }
+    // No-else if: the BranchIf's else target was pending (the join did not
+    // exist when it was emitted); name it now.
+    if else_b.is_none() {
+        ctx.builder.patch_branch_if(cond_block, join)?;
     }
     ctx.builder.set_current(join)?;
     Ok(())
@@ -410,7 +425,6 @@ fn lower_for_list(
         },
         span,
     )?;
-    ctx.loop_stack.push(LoopFrame { region });
     let body_b = ctx.builder.open_block(Some(region))?;
     // The entry falls into the header unconditionally (forward target), so
     // an empty list never touches an element slot.

@@ -111,18 +111,21 @@ fn short_circuit_and_uses_a_temp_local_and_zero_constant() {
     let ir = lower_source("@entry scalar probe(a: bool, b: bool) -> bool { return a && b; }\n");
     let function = &ir.functions[0];
     // Derivation: params a=0, b=1; the temp local is the next slot (2). The
-    // false arm stores ConstI32(0) into the temp, the constant arm stores 1.
+    // false arm stores ConstI32(0) into the temp; the true arm evaluates b
+    // (LocalGet(1)) into the temp — `a && b` never materialises a constant 1.
     let zero_set = function.insts.windows(2).any(|window| {
         matches!(&window[0].kind, InstKind::ConstI32(0))
             && matches!(&window[1].kind, InstKind::LocalSet(2))
     });
-    let one_set = function.insts.windows(2).any(|window| {
-        matches!(&window[0].kind, InstKind::ConstI32(1))
+    assert!(zero_set);
+    // Eval arm: the right operand b is read into the temp.
+    let eval_set = function.insts.windows(2).any(|window| {
+        matches!(&window[0].kind, InstKind::LocalGet(1))
             && matches!(&window[1].kind, InstKind::LocalSet(2))
     });
-    assert!(zero_set);
-    assert!(one_set);
-    // lhs test: the BranchIf block ends with LocalGet(tmp).
+    assert!(eval_set);
+    // lhs test: the BranchIf tests the lowered left value directly (a is
+    // param slot 0 — no temp round-trip for the condition).
     let branch_block = function
         .blocks
         .iter()
@@ -132,7 +135,7 @@ fn short_circuit_and_uses_a_temp_local_and_zero_constant() {
         .insts
         .get(branch_block.start.index() + branch_block.inst_count as usize - 1)
         .expect("condition inst");
-    assert!(matches!(&cond_inst.kind, InstKind::LocalGet(2)));
+    assert!(matches!(&cond_inst.kind, InstKind::LocalGet(0)));
     assert!(function
         .blocks
         .iter()

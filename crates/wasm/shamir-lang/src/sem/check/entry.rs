@@ -88,13 +88,26 @@ pub fn check(
             )]);
         }
     };
+    check_scoped(module, &normalized, stage, &mut budget)
+}
+
+/// Runs the full milestone-3 semantic check using the CALLER's compile budget
+/// (one pipeline budget; `check` is a thin wrapper creating its own).
+/// Assumes `limits` are normalized and `budget` is ready.
+pub fn check_scoped(
+    module: &front::Module,
+    limits: &CompileLimits,
+    stage: Stage,
+    budget: &mut CompileBudget,
+) -> Result<TypedModule, Vec<Diagnostic>> {
+    let normalized = limits;
     let node_count = u64::try_from(module.node_count()).unwrap_or(u64::MAX);
     if let Err(diag) = budget.charge(node_count, module.span) {
         return Err(vec![diag]);
     }
     let mut checker = Checker {
         module,
-        limits: &normalized,
+        limits: normalized,
         stage,
         types: TypeInterner::new(),
         diags: Vec::new(),
@@ -247,6 +260,15 @@ fn register_functions(c: &mut Checker) {
     }
 }
 
+/// True iff `name` is a canonical decimal string: non-empty, all ASCII
+/// digits, and no leading zero unless the name is exactly "0".
+fn is_canonical_decimal(name: &str) -> bool {
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    name == "0" || !name.starts_with('0')
+}
+
 /// Pass-1 parameter checks: arity cap, duplicate names, reserved names.
 fn check_parameters(c: &mut Checker, fid: FunctionId, span: Span) {
     let Some(func) = c.module.function(fid) else {
@@ -280,6 +302,17 @@ fn check_parameters(c: &mut Checker, fid: FunctionId, span: Span) {
                 param.span,
             );
         } else {
+            // a canonical decimal parameter name would be ambiguous against
+            // the positional envelope keys (design section 3), so entries
+            // reject it at compile time
+            if func.entry_kind.is_some() && is_canonical_decimal(&name) {
+                report(
+                    c,
+                    "T009",
+                    format!("parameter name {name} collides with the positional envelope key"),
+                    param.span,
+                );
+            }
             seen.push(name);
         }
     }

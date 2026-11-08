@@ -15,7 +15,7 @@ use crate::front::CompileBudget;
 fn generous_limits() -> IrLimits {
     IrLimits {
         max_ir_nodes: usize::MAX,
-        max_operators_per_function: usize::MAX,
+        max_ir_nodes_per_function: usize::MAX,
         max_single_literal_bytes: usize::MAX,
         max_total_literal_bytes: usize::MAX,
         max_static_bytes: usize::MAX,

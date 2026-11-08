@@ -42,12 +42,15 @@ pub fn compile(source: &str, options: &CompileOptions) -> Result<CompiledModule,
             Span::source_start(),
         )])
     })?;
-    front::scan(source, &normalized)
+    // finding 19: the scan runs under the shared pipeline budget (parse_scoped
+    // re-scans through the same budget, so scan work is charged exactly once
+    // per pass it performs).
+    front::scan_with_budget(source, &normalized, &mut budget)
         .map_err(|diagnostic| CompileError::Diagnostics(vec![diagnostic]))?;
-    let module = front::parse(source, &normalized)
+    let module = front::parse_scoped(source, &normalized, &mut budget)
         .map_err(|diagnostic| CompileError::Diagnostics(vec![diagnostic]))?;
-    let typed =
-        sem::check(&module, &normalized, options.stage).map_err(CompileError::Diagnostics)?;
+    let typed = sem::check_scoped(&module, &normalized, options.stage, &mut budget)
+        .map_err(CompileError::Diagnostics)?;
     // Entry gate: only the scalar facade has a wrapper in this build.
     if typed.entry_kind != EntryKind::Scalar {
         let span = typed
@@ -76,27 +79,40 @@ pub fn compile(source: &str, options: &CompileOptions) -> Result<CompiledModule,
     })?;
     verify(&ir)
         .map_err(|error| CompileError::InternalInvariant(format!("ir verifier: {error}")))?;
-    let wasm = emit_compiled_module(&ir, &normalized).map_err(|error| match error {
-        EmitError::Runtime(error) => CompileError::InternalInvariant(format!("emission: {error}")),
-        EmitError::HelperOrder(error) => {
-            CompileError::InternalInvariant(format!("helper order: {error}"))
-        }
-        EmitError::LimitExceeded {
-            code,
-            limit,
-            observed,
-        } => CompileError::LimitExceeded {
-            code,
-            span: typed.span,
-            limit,
-            observed,
-        },
-        EmitError::Internal(message) => CompileError::InternalInvariant(message.to_string()),
-    })?;
+    let wasm =
+        emit_compiled_module(&ir, &normalized, &mut budget).map_err(|error| match error {
+            EmitError::Runtime(error) => {
+                CompileError::InternalInvariant(format!("emission: {error}"))
+            }
+            EmitError::HelperOrder(error) => {
+                CompileError::InternalInvariant(format!("helper order: {error}"))
+            }
+            EmitError::LimitExceeded {
+                code,
+                limit,
+                observed,
+            } => CompileError::LimitExceeded {
+                code,
+                span: typed.span,
+                limit,
+                observed,
+            },
+            EmitError::Internal(message) => CompileError::InternalInvariant(message.to_string()),
+        })?;
     let observed_len = u64::try_from(wasm.len()).unwrap_or(u64::MAX);
     let output_limit = normalized.max_output_bytes as u64;
     if observed_len > output_limit {
         return Err(limit_error(typed.span, output_limit, observed_len));
+    }
+    // finding 19: admission precharge — the emitted module length also bills
+    // the single pipeline budget, so total work stays under one fuel ceiling.
+    if let Err(diagnostic) = budget.charge(observed_len, typed.span) {
+        return Err(CompileError::LimitExceeded {
+            code: "B001",
+            span: diagnostic.primary,
+            limit: budget.limit(),
+            observed: budget.spent(),
+        });
     }
     let report = admit_module(&wasm, &AdmissionPolicy::Admission(options.admission))
         .map_err(CompileError::Admission)?;

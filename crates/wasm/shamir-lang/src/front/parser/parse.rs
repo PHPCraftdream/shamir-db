@@ -8,8 +8,20 @@ use super::super::ast::{
 };
 use super::{declarations, expressions, statements};
 
-/// Parses source text through the scanner using one shared compile budget.
+/// Parses source text into a module with its own compile budget.
 pub fn parse(source: &str, limits: &CompileLimits) -> Result<Module, Diagnostic> {
+    let limits = normalized_limits(limits)?;
+    let mut budget = CompileBudget::new(&limits).map_err(invalid_limit)?;
+    parse_scoped(source, &limits, &mut budget)
+}
+
+/// Parses source text through the scanner with the CALLER's compile budget
+/// (one pipeline budget; `parse` is a thin wrapper creating its own).
+pub fn parse_scoped(
+    source: &str,
+    limits: &CompileLimits,
+    budget: &mut CompileBudget,
+) -> Result<Module, Diagnostic> {
     let limits = normalized_limits(limits)?;
     if source.len() > limits.max_source_bytes {
         return Err(Diagnostic::new(
@@ -22,8 +34,7 @@ pub fn parse(source: &str, limits: &CompileLimits) -> Result<Module, Diagnostic>
             Span::source_start(),
         ));
     }
-    let mut budget = CompileBudget::new(&limits).map_err(invalid_limit)?;
-    let tokens = scan_with_budget(source, &limits, &mut budget)?;
+    let tokens = scan_with_budget(source, &limits, budget)?;
     parse_tokens_with_budget(&tokens, limits, budget)
 }
 
@@ -39,8 +50,8 @@ pub fn parse_tokens(tokens: &[Token], limits: &CompileLimits) -> Result<Module, 
                 .map_or(Span::source_start(), |token| token.span),
         ));
     }
-    let budget = CompileBudget::new(&limits).map_err(invalid_limit)?;
-    parse_tokens_with_budget(tokens, limits, budget)
+    let mut budget = CompileBudget::new(&limits).map_err(invalid_limit)?;
+    parse_tokens_with_budget(tokens, limits, &mut budget)
 }
 
 fn normalized_limits(limits: &CompileLimits) -> Result<CompileLimits, Diagnostic> {
@@ -58,7 +69,7 @@ fn invalid_limit(error: crate::api::LimitError) -> Diagnostic {
 fn parse_tokens_with_budget(
     tokens: &[Token],
     limits: CompileLimits,
-    mut budget: CompileBudget,
+    budget: &mut CompileBudget,
 ) -> Result<Module, Diagnostic> {
     if tokens.is_empty() {
         return Err(Diagnostic::new(
@@ -132,7 +143,7 @@ pub(super) struct Parser<'a> {
     pub(super) tokens: &'a [Token],
     pub(super) cursor: usize,
     pub(super) limits: CompileLimits,
-    pub(super) budget: CompileBudget,
+    pub(super) budget: &'a mut CompileBudget,
     pub(super) module: Module,
     pub(super) nodes: usize,
     pub(super) nesting: usize,

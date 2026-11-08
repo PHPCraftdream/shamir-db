@@ -171,9 +171,9 @@ fn max_ir_nodes_boundary() {
 }
 
 #[test]
-fn max_operators_per_function_boundary() {
-    assert_boundary_usize("max_operators_per_function", |limits| {
-        &mut limits.max_operators_per_function
+fn max_ir_nodes_per_function_boundary() {
+    assert_boundary_usize("max_ir_nodes_per_function", |limits| {
+        &mut limits.max_ir_nodes_per_function
     });
 }
 
@@ -231,4 +231,25 @@ fn max_function_body_bytes_boundary() {
 fn internal_invariant_not_reachable() {
     let result = compile(FIXTURE, &default_options()).expect("valid fixture compiles cleanly");
     assert!(matches!(result, CompiledModule { .. }));
+}
+
+#[test]
+fn one_budget_rejects_oversized_comment_source() {
+    // Derivation: scan charges >= 1 fuel per source byte; a 100_000-byte
+    // block comment plus a tiny entry needs > 100_000 fuel under ONE shared
+    // budget, so a 90_000 fuel limit must fail with B001 before parse even
+    // starts. (Pre-fix, scan+parse+check each had separate budgets.)
+    let comment = format!("/*{}*/", "a".repeat(100_000));
+    let source = format!("{comment}\n@entry scalar probe() -> i64 {{ return 1; }}\n");
+    let options = CompileOptions {
+        limits: CompileLimits {
+            compile_fuel: 90_000,
+            ..CompileLimits::default()
+        },
+        ..default_options()
+    };
+    match compile(&source, &options) {
+        Err(CompileError::LimitExceeded { code, .. }) => assert_eq!(code, "B001"),
+        other => panic!("expected LimitExceeded B001, got {other:?}"),
+    }
 }

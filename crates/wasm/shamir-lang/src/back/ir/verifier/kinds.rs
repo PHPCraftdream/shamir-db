@@ -272,6 +272,7 @@ fn check_inst_kinds(
         }
         InstKind::CellLoadPayload(cell)
         | InstKind::CellIsNull(cell)
+        | InstKind::CellPass(cell)
         | InstKind::CellUnwrap(cell)
         | InstKind::CellLen(cell) => {
             want(kind(*cell), ValueKind::I32, String::from("cell operand"))?
