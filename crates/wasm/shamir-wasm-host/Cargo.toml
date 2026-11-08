@@ -53,6 +53,10 @@ bench-scale-tool = { workspace = true, features = ["async"] }
 # package+version as the main dependency — features unify, `Cargo.lock`
 # is unchanged.
 tokio = { version = "1.49.0", features = ["test-util"] }
+# TEST-ONLY: M1 runtime execution tests build the guest runtime module and
+# its codec vectors through `shamir-lang::testsupport` (hidden test API);
+# the dev-dependency enables shamir-lang's `testsupport` feature.
+shamir-lang = { path = "../shamir-lang", features = ["testsupport"] }
 
 # Bench/A-B only: the Winch and Pulley backends plus env-selected engine strategy
 # (`SHAMIR_WASM_STRATEGY`). Off by default and never enabled by the server build.

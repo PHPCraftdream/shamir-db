@@ -31,7 +31,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*/*` glob doesn't try to load it). Crates live in layer folders
 `crates/<group>/<crate>/` (names do not change; at most 7 crates per group). The
-default workspace ships **35 crates** (including the `shamir-client-node`
+default workspace ships **36 crates** (including the `shamir-client-node`
 napi-rs binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
@@ -42,7 +42,7 @@ napi-rs binding, a regular member; MSVC-only on Windows) plus the vendored
 | `query` | `shamir-query-types`, `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-funclib` |
 | `index` | `shamir-index-core`, `shamir-index`, `shamir-vector` |
 | `engine` | `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`, `shamir-db` |
-| `wasm` | `shamir-wasm-host`, `shamir-wasm-admission`, `shamir-sdk`, `shamir-sdk-macros` |
+| `wasm` | `shamir-wasm-host`, `shamir-wasm-admission`, `shamir-lang`, `shamir-sdk`, `shamir-sdk-macros` |
 | `net` | `shamir-connect`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`, `shamir-transport-ws` |
 | `server` | `shamir-server` |
 | `client` | `shamir-client`, `shamir-client-node` (and the TypeScript package `shamir-client-ts`) |
@@ -63,6 +63,18 @@ per-test as a `[dev-dependencies]` entry, never a production dependency.
 pipeline — `admit_module`, the policy/limits/error/report types, `ModuleHash`, the
 import allowlist and the ABI constants — with no `wasmtime`/`tokio`/`shamir-*`
 dependencies; the wasm host re-exports its public surface.
+
+`shamir-lang` (`publish = false`) is the runtime-free compiler crate for the
+in-process `shamir` language (`docs/dev-artifacts/design/shamir-lang-design.md`).
+Milestone 1 emits the guest runtime every compiled module embeds: the bump
+allocator, the iterative MessagePack codec over 16-byte tagged cells, the
+`raise_error` bridge, and admission-valid module emission
+(`emit_runtime_module`). Production dependencies are exactly
+`shamir-wasm-admission`, `wasm-encoder = "=0.254.2"` and `thiserror`;
+`wat`/`wasmparser` are test-only. Its `testsupport` module is hidden
+test-only API consumed by the host crate's dev-dependency execution tests;
+it ships behind the `testsupport` Cargo feature, enabled only by the host
+dev-dependency.
 
 `shamir-index-core` is the backend-agnostic index model (descriptors, kinds,
 meta envelopes, persistence, expressions, runtime, IDV2 identity, the

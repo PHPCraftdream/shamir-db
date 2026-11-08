@@ -1,6 +1,6 @@
 pub mod compile_blocking_tests;
 pub mod compile_tests;
 pub mod context_tests;
-pub mod globals_quota_tests;
+pub mod lang;
+pub mod limits;
 pub mod registry_tests;
-pub mod rust_corpus_admission_tests;

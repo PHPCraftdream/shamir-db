@@ -1,0 +1,28 @@
+[package]
+name = "shamir-lang"
+version = "0.1.0-alpha.1"
+publish = false
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+shamir-wasm-admission = { path = "../shamir-wasm-admission" }
+wasm-encoder = "=0.254.2"
+thiserror = "2.0"
+
+[dev-dependencies]
+wat = "=1.254.2"
+wasmparser = "=0.254.2"
+wasmprinter = "=0.254.2"
+
+# Test-support surface (`src/testsupport`), enabled only by the host crate's
+# dev-dependency; the design's `cfg(test)`-only placement is impossible
+# cross-crate.
+[features]
+testsupport = []
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true

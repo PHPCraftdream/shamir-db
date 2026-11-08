@@ -3756,6 +3756,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-lang"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "shamir-wasm-admission",
+ "thiserror 2.0.21",
+ "wasm-encoder",
+ "wasmparser",
+ "wasmprinter",
+ "wat",
+]
+
+[[package]]
 name = "shamir-numa"
 version = "0.1.0-alpha.1"
 dependencies = [
@@ -4145,6 +4157,7 @@ dependencies = [
  "sha2 0.11.1",
  "shamir-collections",
  "shamir-funclib",
+ "shamir-lang",
  "shamir-private-dir",
  "shamir-proc-tree",
  "shamir-types",

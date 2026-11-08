@@ -600,6 +600,23 @@ No closures, classes, generics, dynamic `Value`/`any`, arbitrary MessagePack dyn
 
 ## Not verified / design-only
 
+### M1 implementation deviations
+
+- The workspace exceeds the fixed 64 KiB by the codec cell/sort budget
+  (decoder cell slots, encoder pair-index window, reject scratch) so the
+  decoded cells stay strictly below the heap base.
+- Error-message sanitation/truncation is host-side per
+  `crates/wasm/shamir-wasm-host/src/wasm/bindings/raise.rs`: the guest
+  validates the full range and forwards the declared length, so the host's
+  1024-byte clamp + `[truncated]` marker is preserved.
+- `testsupport` ships behind the `testsupport` Cargo feature instead of
+  `cfg(test)` — a `cfg(test)` module is invisible to the host crate's
+  dev-dependency, which is the only consumer.
+- Static data is emitted at offset 1088 (64-byte guard + 1024-byte error
+  window) with origin tag "shamir-lang"; the runtime code budget is
+  enforced on the code section (<= 64 KiB) and static data has its own
+  4 MiB cap.
+
 - No `shamir-lang` implementation exists; grammar, compiler API, type rules, runtime layout, caps beyond observed admission defaults and all acceptance tests are proposed, not measured.
 - The selected encoder dependency/version and exact SDK/DTO byte encodings for supported builders remain unverified; golden tests are required before implementation is accepted.
 - Layout gate was run by orchestrator and passed; it checks tracked sources only and excludes documentation; new design remains untracked. No executable tests or builds were run.
