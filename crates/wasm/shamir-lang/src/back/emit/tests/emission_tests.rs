@@ -73,9 +73,51 @@ fn validate(bytes: &[u8]) {
             cm_implements: false,
             cm_canon_names: false,
         }));
-    validator
-        .validate_all(bytes)
-        .expect("emitted module validates");
+    if let Err(error) = validator.validate_all(bytes) {
+        panic!(
+            "emitted module validates: {error}
+{}",
+            describe_failure(bytes, error.offset())
+        );
+    }
+}
+
+/// Names the function whose body contains the failing byte offset and prints
+/// its text form, so a validation failure points at the emitted code.
+fn describe_failure(bytes: &[u8], offset: usize) -> String {
+    let mut imported = 0usize;
+    let mut next_body = 0usize;
+    let mut failing = None;
+    for payload in Parser::new(0).parse_all(bytes).flatten() {
+        match payload {
+            Payload::ImportSection(reader) => imported = reader.count() as usize,
+            Payload::CodeSectionEntry(body) => {
+                let range = body.range();
+                if range.start <= offset && offset < range.end {
+                    failing = Some((imported + next_body, range));
+                }
+                next_body += 1;
+            }
+            _ => {}
+        }
+    }
+    let Some((index, range)) = failing else {
+        return format!("offset {offset} is outside every function body");
+    };
+    let text = wasmprinter::print_bytes(bytes).unwrap_or_default();
+    let marker = format!("(func (;{index};)");
+    let start = text.find(&marker).unwrap_or(0);
+    let end = text[start + marker.len()..]
+        .find("(func (;")
+        .map(|found| start + marker.len() + found)
+        .unwrap_or(text.len());
+    format!(
+        "function index {index}, body bytes {}..{}, offset {offset}
+{}",
+        range.start,
+        range.end,
+        &text[start..end]
+    )
 }
 
 fn exports_of(bytes: &[u8]) -> Vec<(String, ExternalKind)> {
