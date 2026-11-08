@@ -520,6 +520,8 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::LocalSet(matched));
     function.instruction(&Instruction::End);
+    // closes the `klen == 1` conditional
+    function.instruction(&Instruction::End);
     // canonical two-decimal key: first byte '1'..='9', second '0'..='9'
     function.instruction(&Instruction::LocalGet(klen));
     function.instruction(&Instruction::I32Const(2));
@@ -550,6 +552,8 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::LocalSet(matched));
+    function.instruction(&Instruction::End);
+    // closes the `klen == 2` conditional
     function.instruction(&Instruction::End);
     // a 1-byte key that is NOT a digit and a 2-byte key that is not a
     // canonical decimal fall through to the named-matching branch below
@@ -681,6 +685,8 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
         function.instruction(&Instruction::LocalSet(matched));
         function.instruction(&Instruction::Br(1));
         function.instruction(&Instruction::End);
+        function.instruction(&Instruction::End);
+        // closes this name's `Block`
         function.instruction(&Instruction::End);
     }
     function.instruction(&Instruction::LocalGet(matched));
