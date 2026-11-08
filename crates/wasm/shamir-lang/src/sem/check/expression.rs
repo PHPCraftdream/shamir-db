@@ -57,13 +57,8 @@ pub(super) fn check_expression(
             then_value,
             else_value,
         } => check_conditional(c, frame, condition, then_value, else_value, expected, next),
-        ExprKind::Call { target, arguments } => {
-            let error = error_type(c);
-            if let Some(slot) = c.expr_types.get_mut(target.0 as usize) {
-                *slot = Some(error);
-            }
-            check_call(c, frame, id, span, &arguments, depth)
-        }
+        // The callee name is not a value: it keeps no type entry.
+        ExprKind::Call { arguments, .. } => check_call(c, frame, id, span, &arguments, depth),
         ExprKind::Field { target, name } => {
             let target_span = expr_span(c, target);
             let t = check_expression(c, frame, None, target, next);
@@ -809,16 +804,16 @@ pub(super) fn report_mismatch(
     }
     let expected_name = type_name(c, expected);
     let actual_name = type_name(c, actual);
-    let hint = match c.types.data(expected) {
-        Some(TypeData::I32) => " (i32 range -2147483648..=2147483647)",
-        Some(TypeData::I64) => " (i64 range -9223372036854775808..=9223372036854775807)",
-        _ => "",
-    };
     let is_integer_literal = matches!(
         c.module.expression(actual_expr).map(|expr| &expr.kind),
         Some(ExprKind::Integer { .. })
     );
     if c.types.is_numeric(expected) && c.types.is_numeric(actual) && expected != actual {
+        let hint = match c.types.data(expected) {
+            Some(TypeData::I32) => " (i32 range -2147483648..=2147483647)",
+            Some(TypeData::I64) => " (i64 range -9223372036854775808..=9223372036854775807)",
+            _ => "",
+        };
         if is_integer_literal {
             report(
                 c,
@@ -840,7 +835,7 @@ pub(super) fn report_mismatch(
         report(
             c,
             "T001",
-            format!("expected {expected_name}, found {actual_name} ({context}){hint}"),
+            format!("expected {expected_name}, found {actual_name} ({context})"),
             span,
         );
     }

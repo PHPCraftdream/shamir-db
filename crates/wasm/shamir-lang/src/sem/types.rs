@@ -193,6 +193,29 @@ impl TypeInterner {
         }
     }
 
+    /// True iff the suppression type occurs anywhere inside `id`, so a
+    /// boundary check does not repeat a diagnostic already reported for it.
+    /// Recursion is depth-guarded.
+    pub fn contains_error(&self, id: TypeId, depth: u32) -> bool {
+        if depth > MAX_TYPE_TRAVERSAL_DEPTH {
+            return false;
+        }
+        match self.data(id) {
+            Some(TypeData::Error) => true,
+            Some(TypeData::Optional(inner)) | Some(TypeData::List(inner)) => {
+                self.contains_error(inner, depth.saturating_add(1))
+            }
+            Some(TypeData::Record(index)) => match self.record(index) {
+                Some(shape) => shape
+                    .fields
+                    .iter()
+                    .any(|(_, field_ty)| self.contains_error(*field_ty, depth.saturating_add(1))),
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
     /// True iff `id` can cross the host boundary; the `Error` suppression type
     /// reports false so errors stay localized. Recursion is depth-guarded.
     pub fn wire_safe(&self, id: TypeId, depth: u32) -> bool {

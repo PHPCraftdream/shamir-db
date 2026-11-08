@@ -332,7 +332,7 @@ fn check_entry_boundary(
                 );
             }
             for (ty, span) in params {
-                if !c.types.wire_safe(*ty, 0) {
+                if !c.types.wire_safe(*ty, 0) && !c.types.contains_error(*ty, 0) {
                     report(
                         c,
                         "T009",
@@ -341,7 +341,7 @@ fn check_entry_boundary(
                     );
                 }
             }
-            if !c.types.wire_safe(result, 0) {
+            if !c.types.wire_safe(result, 0) && !c.types.contains_error(result, 0) {
                 report(
                     c,
                     "T009",

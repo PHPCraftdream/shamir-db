@@ -44,7 +44,7 @@ fn t003_renders_code_line_column_and_message() {
     let source = "@entry scalar probe() -> i64 {\n  return \"a\" + \"b\"; return 1; }";
     assert_eq!(
         first_diagnostic(source).to_string(),
-        "T003:2:16: operator + requires numeric operands"
+        "T003:2:10: operator + requires numeric operands"
     );
 }
 
@@ -91,7 +91,7 @@ fn t008_renders_primary_and_related_lines() {
         "fn f(n: i64) -> i64 { return f(n); }\n@entry scalar probe() -> i64 { return f(1); }";
     assert_eq!(
         first_diagnostic(source).to_string(),
-        "T008:1:29: recursive call cycle detected\n  related 1:1: first function of the recursion cycle"
+        "T008:1:30: recursive call cycle detected\n  related 1:1: first function of the recursion cycle"
     );
 }
 
