@@ -184,9 +184,35 @@ fn max_static_bytes_boundary() {
 
 #[test]
 fn max_total_literal_bytes_boundary() {
-    assert_boundary_usize("max_total_literal_bytes", |limits| {
-        &mut limits.max_total_literal_bytes
-    });
+    // The shared fixture has no literal, so the limit would never bind there:
+    // this entry returns a string literal, and the exact boundary is searched.
+    let source = "@entry scalar probe() -> string { return \"ab\"; }
+";
+    let compile_with = |limit: usize| -> Result<(), ()> {
+        let options = CompileOptions {
+            limits: CompileLimits {
+                max_total_literal_bytes: limit,
+                ..CompileLimits::default()
+            },
+            ..default_options()
+        };
+        compile(source, &options).map(|_| ()).map_err(|_| ())
+    };
+    assert_eq!(compile_with(0), Err(()), "zero literal bytes must fail");
+    let minimum = (1..=64)
+        .find(|limit| compile_with(*limit) == Ok(()))
+        .expect("a small limit admits the literal");
+    assert_eq!(
+        compile_with(minimum - 1),
+        Err(()),
+        "below the minimum fails"
+    );
+    assert_eq!(compile_with(minimum), Ok(()), "the minimum passes");
+    assert_eq!(
+        compile_with(minimum + 1),
+        Ok(()),
+        "above the minimum passes"
+    );
 }
 
 #[test]

@@ -201,6 +201,9 @@ pub(crate) fn emit_user_function(
             "emitted local index exceeds declared locals",
         ));
     }
+    // Every path returned or trapped inside the structured control above;
+    // the guard keeps the validator from reading the fall-off as reachable.
+    function.instruction(&Instruction::Unreachable);
     // The function body's final `End`.
     function.instruction(&Instruction::End);
     Ok(function)

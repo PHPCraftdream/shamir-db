@@ -696,7 +696,7 @@ async fn nested_helper_calls_compose() {
 }
 
 /// while with break and continue: n=7 skips i==2 and breaks at i==5, so the
-/// total is 1+3+4 = 10.
+/// total is 1+3+4 = 8.
 #[tokio::test]
 async fn while_loop_break_and_continue_compute_value() {
     let function = compiled(
@@ -711,7 +711,7 @@ async fn while_loop_break_and_continue_compute_value() {
         call_once(&function, &params_from(&[("n", int(7))]))
             .await
             .expect("while loop succeeds"),
-        int(10)
+        int(8)
     );
 }
 

@@ -243,6 +243,38 @@ pub(crate) fn append_record_descriptors(
     Ok(addrs)
 }
 
+/// Every node reachable from `roots` (roots included), in first-visit order
+/// (deterministic; iterative over the node arena), so every nested record
+/// gets its own descriptor.
+pub(crate) fn reachable_nodes(nodes: &[TypeNode], roots: &[u32]) -> Result<Vec<u32>, EmitError> {
+    let mut seen = vec![false; nodes.len()];
+    let mut order = Vec::new();
+    let mut stack: Vec<u32> = roots.iter().rev().copied().collect();
+    while let Some(index) = stack.pop() {
+        let slot = seen
+            .get_mut(index as usize)
+            .ok_or(EmitError::Internal("projection node out of range"))?;
+        if *slot {
+            continue;
+        }
+        *slot = true;
+        order.push(index);
+        let node = nodes
+            .get(index as usize)
+            .ok_or(EmitError::Internal("projection node out of range"))?;
+        match &node.kind {
+            TypeNodeKind::Optional(child) | TypeNodeKind::List(child) => stack.push(*child),
+            TypeNodeKind::Record(fields) => {
+                for field in fields.iter().rev() {
+                    stack.push(field.ty);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(order)
+}
+
 /// Distinct type-node indices of the entry's projected aggregate parameters,
 /// in first-use order (deterministic), after validating generation limits.
 pub(crate) fn collect_projection_nodes(
@@ -345,6 +377,8 @@ fn node_depth(nodes: &[TypeNode], root: u32) -> Result<u64, EmitError> {
 /// Everything a projection helper needs besides the node arena.
 pub(crate) struct ProjectionSpec<'a> {
     pub nodes: &'a [TypeNode],
+    /// Absolute descriptor address per record node, parallel to `nodes`.
+    pub descriptors: &'a [Option<u32>],
     pub alloc_index: u32,
     pub raise_index: u32,
     /// Absolute address of the shared null cell.
@@ -384,13 +418,12 @@ pub(crate) fn emit_projection_helper(
     spec: &ProjectionSpec,
     nodes: &[TypeNode],
     node: u32,
-    descriptor_addr: Option<u32>,
 ) -> Result<Function, EmitError> {
     let mut function = Function::new([(projection_local_count(), ValType::I32)]);
     let root = nodes
         .get(node as usize)
         .ok_or(EmitError::Internal("projection node out of range"))?;
-    emit_node(&mut function, spec, root, descriptor_addr, 0, 0)?;
+    emit_node(&mut function, spec, root, 0, 0)?;
     function.instruction(&Instruction::End);
     Ok(function)
 }
@@ -411,7 +444,6 @@ fn emit_node(
     function: &mut Function,
     spec: &ProjectionSpec,
     node: &TypeNode,
-    descriptor_addr: Option<u32>,
     src: u32,
     depth: u32,
 ) -> Result<(), EmitError> {
@@ -481,19 +513,25 @@ fn emit_node(
                 .nodes
                 .get(*child as usize)
                 .ok_or(EmitError::Internal("projection child out of range"))?;
-            emit_node(function, spec, child_node, descriptor_addr, src, depth + 1)?;
+            emit_node(function, spec, child_node, src, depth + 1)?;
             function.instruction(&Instruction::End);
         }
         TypeNodeKind::List(child) => {
             require_tag(function, spec, src, TAG_LIST, spec.arg_msg_addr, 3);
-            emit_list(function, spec, *child, descriptor_addr, src, depth)?;
+            emit_list(function, spec, *child, src, depth)?;
         }
         TypeNodeKind::Record(fields) => {
             // the decoder represents wire maps as dynamic map cells
             require_tag(function, spec, src, TAG_DYNMAP, spec.arg_msg_addr, 3);
-            let descriptor = descriptor_addr.ok_or(EmitError::Internal(
-                "record projection without a baked descriptor",
-            ))?;
+            // the node's position in the arena selects its own descriptor
+            let descriptor = spec
+                .nodes
+                .iter()
+                .position(|candidate| std::ptr::eq(candidate, node))
+                .and_then(|index| spec.descriptors.get(index).copied().flatten())
+                .ok_or(EmitError::Internal(
+                    "record projection without a baked descriptor",
+                ))?;
             emit_record(function, spec, fields, descriptor, src, depth)?;
         }
     }
@@ -555,7 +593,6 @@ fn emit_list(
     function: &mut Function,
     spec: &ProjectionSpec,
     child: u32,
-    descriptor_addr: Option<u32>,
     src: u32,
     depth: u32,
 ) -> Result<(), EmitError> {
@@ -606,14 +643,7 @@ fn emit_list(
     function.instruction(&Instruction::I32Add);
     function.instruction(&Instruction::LocalSet(dst));
     // <inner> leaves the projected element cell; stash it, then copy it
-    emit_node(
-        function,
-        spec,
-        child_node,
-        descriptor_addr,
-        src_elem,
-        depth + 1,
-    )?;
+    emit_node(function, spec, child_node, src_elem, depth + 1)?;
     function.instruction(&Instruction::LocalSet(tmp));
     copy_cell(function, tmp, dst);
     // i += 1 and loop
@@ -729,10 +759,6 @@ fn emit_record(
 /// `pair` holds the pair base, `key`/`value` the current key/value cells,
 /// `flag` the found flag, `iter` the scan counter (reused as the destination
 /// once a match `br`s out — the counter is dead then), `tmp` a scratch cell.
-///
-/// NOTE: nested record fields pass no descriptor of their own; a record
-/// whose fields contain records is rejected loudly at emission this
-/// milestone (`descriptor_addr must be Some` fires as an internal error).
 fn emit_field(
     function: &mut Function,
     spec: &ProjectionSpec,
@@ -802,7 +828,7 @@ fn emit_field(
     // matched: <field.ty with the value cell> -> copy into dst, exit this
     // field's loop (the counter in `iter` is dead once we br out, so `iter`
     // is reused as the destination below)
-    emit_node(function, spec, child_node, None, frame.value, depth + 1)?;
+    emit_node(function, spec, child_node, frame.value, depth + 1)?;
     function.instruction(&Instruction::LocalSet(frame.tmp));
     function.instruction(&Instruction::LocalGet(frame.region));
     function.instruction(&Instruction::I32Const(field_offset));

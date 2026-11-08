@@ -16,7 +16,7 @@ use super::scalar::emit_user_function;
 use super::support::eq::{emit_bytes_compare, emit_eq_helper};
 use super::support::projection::{
     append_raise_messages, append_record_descriptors, collect_projection_nodes,
-    emit_projection_helper, projection_signature, ProjectionSpec,
+    emit_projection_helper, projection_signature, reachable_nodes, ProjectionSpec,
 };
 use super::support::workspace::compute_workspace;
 use crate::api::{CompileLimits, Span};
@@ -494,6 +494,7 @@ pub fn emit_runtime_module(
                 context: workspace.context_base,
                 frame: workspace.frame_base,
                 cell: workspace.cell_base,
+                null: workspace.cell_base,
                 scratch: workspace.scratch,
                 output_cap,
             },
@@ -620,8 +621,22 @@ pub(crate) fn emit_compiled_module(
     // parameters, in deterministic first-use order (limits checked inside)
     let distinct = collect_projection_nodes(ir, entry)?;
     let static_limit = limits.max_static_bytes as u64;
-    let descriptor_addrs =
-        append_record_descriptors(&mut static_bytes, &ir.type_nodes, &distinct, static_limit)?;
+    // every record node reachable from a projected parameter gets a descriptor
+    let reachable = reachable_nodes(&ir.type_nodes, &distinct)?;
+    let reachable_addrs =
+        append_record_descriptors(&mut static_bytes, &ir.type_nodes, &reachable, static_limit)?;
+    let mut descriptors: Vec<Option<u32>> = vec![None; ir.type_nodes.len()];
+    for (node_index, address) in reachable.iter().zip(reachable_addrs) {
+        if let Some(slot) = descriptors.get_mut(*node_index as usize) {
+            *slot = address;
+        }
+    }
+    // the shared null cell lives in the static image, outside the decoder's
+    // cell slots (the decoder overwrites those)
+    let null_cell_offset = u64::try_from(static_bytes.len())
+        .map_err(|_| EmitError::Internal("static image length overflow"))?;
+    static_bytes.extend_from_slice(&null_cell);
+    let null_cell_addr = static_address(null_cell_offset)?;
     let observed = u64::try_from(static_bytes.len())
         .map_err(|_| EmitError::Internal("static image length overflow"))?;
     if observed > static_limit {
@@ -717,6 +732,7 @@ pub(crate) fn emit_compiled_module(
         context: workspace.context_base,
         frame: workspace.frame_base,
         cell: workspace.cell_base,
+        null: null_cell_addr,
         scratch: workspace.scratch,
         output_cap,
     };
@@ -828,18 +844,17 @@ pub(crate) fn emit_compiled_module(
     let mut projection_functions = Vec::with_capacity(plan.projection_indices.len());
     let spec = ProjectionSpec {
         nodes: &ir.type_nodes,
+        descriptors: &descriptors,
         alloc_index: plan.alloc_index,
         raise_index: plan.raise_index,
-        null_cell: workspace.cell_base,
+        null_cell: null_cell_addr,
         arg_msg_addr: baked.wrapper.arg,
         i32_msg_addr: baked.wrapper.i32,
         field_msg_addr: baked.wrapper.field,
     };
-    for (position, &(node_index, _fn_index)) in plan.projection_indices.iter().enumerate() {
-        // None for non-record nodes (the helper ignores it); Some for records
-        let descriptor_addr = descriptor_addrs.get(position).copied().flatten();
+    for &(node_index, _fn_index) in plan.projection_indices.iter() {
         charge_work(budget, 1)?;
-        let function = emit_projection_helper(&spec, &ir.type_nodes, node_index, descriptor_addr)?;
+        let function = emit_projection_helper(&spec, &ir.type_nodes, node_index)?;
         let observed = body_bytes(&function);
         if observed > body_limit {
             return Err(EmitError::LimitExceeded {
@@ -895,11 +910,6 @@ pub(crate) fn emit_compiled_module(
             raise_index: plan.raise_index,
             entry_index,
             bases: plan.wrapper_bases(),
-            null_cell: NullCell {
-                tag: u32::from_le_bytes(tag_bytes) as i32,
-                aux: u32::from_le_bytes(aux_bytes) as i32,
-                payload: i64::from_le_bytes(payload_bytes),
-            },
             messages: baked.wrapper,
             param_kinds: &entry.param_projections,
             result_projection: entry.result_projection,

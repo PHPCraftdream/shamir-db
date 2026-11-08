@@ -20,6 +20,8 @@ pub(crate) struct WrapperBases {
     pub context: u32,
     pub frame: u32,
     pub cell: u32,
+    /// Address of the shared null cell (never inside the decoder cell slots).
+    pub null: u32,
     pub scratch: u32,
     /// Start of the encoder pair-index window inside the workspace.
     /// Output-buffer capacity stored at context offset 52; append_byte reads
@@ -243,7 +245,6 @@ pub(crate) struct WrapperInputs<'a> {
     pub raise_index: u32,
     pub entry_index: u32,
     pub bases: WrapperBases,
-    pub null_cell: NullCell,
     pub messages: WrapperMessages,
     pub param_kinds: &'a [ParamProjection],
     pub result_projection: Option<ParamProjection>,
@@ -279,7 +280,6 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
         raise_index,
         entry_index,
         bases,
-        null_cell,
         messages,
         param_kinds,
         result_projection,
@@ -410,16 +410,6 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
         function.instruction(&Instruction::I32Const(value as i32));
         function.instruction(&Instruction::I32Store(store_offset(field_offset)));
     }
-    // null cell at the cell base (the `-> null` result reads it directly)
-    function.instruction(&Instruction::I32Const(bases.cell as i32));
-    function.instruction(&Instruction::I32Const(null_cell.tag));
-    function.instruction(&Instruction::I32Store(store_offset(0)));
-    function.instruction(&Instruction::I32Const(bases.cell as i32));
-    function.instruction(&Instruction::I32Const(null_cell.aux));
-    function.instruction(&Instruction::I32Store(store_offset(4)));
-    function.instruction(&Instruction::I32Const(bases.cell as i32));
-    function.instruction(&Instruction::I64Const(null_cell.payload));
-    function.instruction(&Instruction::I64Store(store_offset(8)));
     // decode the root envelope (codec rejections raise kind 3 and never
     // return); the DynamicMap cell lands in the context scratch slot
     function.instruction(&Instruction::LocalGet(4));
@@ -446,7 +436,7 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::LocalSet(mask));
     for slot in 0..param_count {
-        function.instruction(&Instruction::I32Const(bases.cell as i32));
+        function.instruction(&Instruction::I32Const(bases.null as i32));
         function.instruction(&Instruction::LocalSet(param0 + slot as u32));
     }
 
@@ -519,6 +509,11 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     function.instruction(&Instruction::If(BlockType::Empty));
     function.instruction(&Instruction::I32Const(1));
     function.instruction(&Instruction::LocalSet(matched));
+    // a single digit is its own slot index
+    function.instruction(&Instruction::LocalGet(bbyte));
+    function.instruction(&Instruction::I32Const(0x30));
+    function.instruction(&Instruction::I32Sub);
+    function.instruction(&Instruction::LocalSet(scratch));
     function.instruction(&Instruction::End);
     // closes the `klen == 1` conditional
     function.instruction(&Instruction::End);
@@ -752,7 +747,7 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
             function.instruction(&Instruction::BrIf(0));
         }
         if *kind == ParamProjection::OptionalCell {
-            function.instruction(&Instruction::I32Const(bases.cell as i32));
+            function.instruction(&Instruction::I32Const(bases.null as i32));
             function.instruction(&Instruction::LocalSet(param0 + slot as u32));
             function.instruction(&Instruction::Br(0));
         }
@@ -895,7 +890,7 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
     // result boxing into the context scratch cell
     match result_projection {
         None => {
-            function.instruction(&Instruction::I32Const(bases.cell as i32));
+            function.instruction(&Instruction::I32Const(bases.null as i32));
             function.instruction(&Instruction::LocalSet(boxed));
         }
         Some(kind) => match kind {
