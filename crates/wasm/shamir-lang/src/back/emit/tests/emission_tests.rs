@@ -5,7 +5,10 @@ use crate::front::{self, CompileBudget};
 
 use shamir_wasm_admission::{admit_module, AdmissionPolicy};
 
-use wasmparser::{ExternalKind, Parser, Payload, Validator, WasmFeatures, WasmFeaturesInflated};
+use wasmparser::{
+    ExternalKind, FuncValidatorAllocations, Parser, Payload, ValidPayload, Validator, WasmFeatures,
+    WasmFeaturesInflated,
+};
 
 /// Parses, checks, lowers, verifies and emits one fixture source.
 fn compile(source: &str) -> Vec<u8> {
@@ -73,11 +76,47 @@ fn validate(bytes: &[u8]) {
             cm_implements: false,
             cm_canon_names: false,
         }));
-    if let Err(error) = validator.validate_all(bytes) {
+    // Validate function by function so one run names every invalid function.
+    let mut failures: Vec<(usize, String)> = Vec::new();
+    let mut module_error = None;
+    for payload in Parser::new(0).parse_all(bytes) {
+        let payload = payload.expect("emitted module parses");
+        match validator.payload(&payload) {
+            Ok(ValidPayload::Func(to_validate, body)) => {
+                let mut function = to_validate.into_validator(FuncValidatorAllocations::default());
+                if let Err(error) = function.validate(&body) {
+                    failures.push((error.offset(), error.to_string()));
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                module_error = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    if module_error.is_some() || !failures.is_empty() {
+        let mut report = format!(
+            "module-level error: {module_error:?}
+"
+        );
+        for (position, (offset, message)) in failures.iter().enumerate() {
+            report.push_str(&format!(
+                "invalid function: {message}
+"
+            ));
+            if position < 3 {
+                report.push_str(&describe_failure(bytes, *offset));
+            } else {
+                report.push_str(&format!(
+                    "(offset {offset})
+"
+                ));
+            }
+        }
         panic!(
-            "emitted module validates: {error}
-{}",
-            describe_failure(bytes, error.offset())
+            "emitted module validates:
+{report}"
         );
     }
 }

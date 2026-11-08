@@ -71,7 +71,6 @@ pub(crate) fn emit_bytes_compare(plan: &EmissionPlan) -> Function {
     function.instruction(&Instruction::LocalGet(3));
     function.instruction(&Instruction::I32Sub);
     function.instruction(&Instruction::LocalGet(7));
-    function.instruction(&Instruction::LocalGet(7));
     function.instruction(&Instruction::I32Const(0));
     function.instruction(&Instruction::I32Ne);
     function.instruction(&Instruction::Select);
@@ -140,7 +139,9 @@ pub(crate) fn emit_eq_helper(
             function.instruction(&Instruction::I32WrapI64);
             function.instruction(&Instruction::LocalSet(7));
             if children.is_empty() {
+                // no fields: always equal; the shared tail reads local 11
                 function.instruction(&Instruction::I32Const(1));
+                function.instruction(&Instruction::LocalSet(11));
             }
             for (field, child) in children.iter().enumerate() {
                 let child_index = eq_index(*child)?;
