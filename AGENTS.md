@@ -30,7 +30,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*/*", "vendor/hnsw_rs"]` and excludes
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*/*` glob
 must not try to load it). Crates live in layer folders `crates/<group>/<crate>/`
-(see CLAUDE.md for the group table). The default workspace ships **29 crates** under `crates/` (including
+(see CLAUDE.md for the group table). The default workspace ships **30 crates** under `crates/` (including
 the `shamir-client-node` napi-rs binding, a regular member; MSVC-only on
 Windows) plus the vendored `vendor/hnsw_rs` member:
 
@@ -40,7 +40,9 @@ Windows) plus the vendored `vendor/hnsw_rs` member:
 `shamir-server`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
 `shamir-sdk-macros`, `shamir-tunables`, `shamir-wasm-host`, `shamir-index`,
-`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`.
+`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`,
+`shamir-lang` (its `testsupport` module is behind the `testsupport` feature,
+enabled only by the host dev-dependency).
 
 Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
 scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
