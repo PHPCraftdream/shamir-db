@@ -82,42 +82,53 @@ fn validate(bytes: &[u8]) {
     }
 }
 
-/// Names the function whose body contains the failing byte offset and prints
-/// its text form, so a validation failure points at the emitted code.
+/// Names the function whose body contains the failing byte offset and lists
+/// its operators with their byte offsets, so a validation failure points at
+/// the emitted code.
 fn describe_failure(bytes: &[u8], offset: usize) -> String {
     let mut imported = 0usize;
     let mut next_body = 0usize;
-    let mut failing = None;
+    let mut report = format!("offset {offset} is outside every function body");
     for payload in Parser::new(0).parse_all(bytes).flatten() {
         match payload {
             Payload::ImportSection(reader) => imported = reader.count() as usize,
             Payload::CodeSectionEntry(body) => {
                 let range = body.range();
                 if range.start <= offset && offset < range.end {
-                    failing = Some((imported + next_body, range));
+                    report = format!(
+                        "function index {}, body bytes {}..{}, offset {offset}
+",
+                        imported + next_body,
+                        range.start,
+                        range.end
+                    );
+                    if let Ok(reader) = body.get_operators_reader() {
+                        for item in reader.into_iter_with_offsets() {
+                            match item {
+                                Ok((operator, at)) => {
+                                    let mark = if at == offset { ">>" } else { "  " };
+                                    report.push_str(&format!(
+                                        "{mark} {at}: {operator:?}
+"
+                                    ));
+                                }
+                                Err(error) => {
+                                    report.push_str(&format!(
+                                        "operator read error: {error}
+"
+                                    ));
+                                    break;
+                                }
+                            }
+                        }
+                    }
                 }
                 next_body += 1;
             }
             _ => {}
         }
     }
-    let Some((index, range)) = failing else {
-        return format!("offset {offset} is outside every function body");
-    };
-    let text = wasmprinter::print_bytes(bytes).unwrap_or_default();
-    let marker = format!("(func (;{index};)");
-    let start = text.find(&marker).unwrap_or(0);
-    let end = text[start + marker.len()..]
-        .find("(func (;")
-        .map(|found| start + marker.len() + found)
-        .unwrap_or(text.len());
-    format!(
-        "function index {index}, body bytes {}..{}, offset {offset}
-{}",
-        range.start,
-        range.end,
-        &text[start..end]
-    )
+    report
 }
 
 fn exports_of(bytes: &[u8]) -> Vec<(String, ExternalKind)> {
