@@ -6,14 +6,13 @@
 //! - Raw-byte rejection vectors (ext/reserved/utf8/dup/trunc/trail/u64 and
 //!   friends) cannot traverse `WasmFunction::call`, which serializes
 //!   `Params` through `QueryValue::to_bytes`; only classes reachable from a
-//!   `QueryValue` encoding are executed here. The raw-byte vectors remain
-//!   asserted as inventory; execution follows once a raw-input host path
-//!   exists.
+//!   `QueryValue` encoding are executed here. The raw-byte vectors and the
+//!   second-call guard are executed against the guest in `raw/codec_tests.rs`
+//!   through the raw wasmtime harness; here they remain asserted as inventory.
 //! - Each `WasmFunction::call` runs on a FRESH Store, so the emitted
-//!   second-call `call_state` guard can never fire through this API; the
-//!   guard is exercised structurally in the crate's module tests (its
-//!   emitted code path) and each call here asserts the fresh-store,
-//!   monotonic-allocator behaviour instead.
+//!   second-call `call_state` guard can never fire through this API; each
+//!   call here asserts the fresh-store, monotonic-allocator behaviour
+//!   instead.
 //! - Memory growth: the 100_000-byte string round trip forces the decoder's
 //!   heap copy (memory.grow through `shamir_alloc`) and the 8 MiB output
 //!   allocation; growth happens per-call on the fresh Store.
@@ -190,9 +189,8 @@ async fn shamir_lang_runtime_rejects_over_cap_values_via_params_encoding() {
 #[test]
 fn shamir_lang_rejection_vector_inventory_is_complete() {
     // Byte-level classes that `WasmFunction::call` cannot inject (see the
-    // module doc) stay asserted as vector inventory; execution happens in
-    // the crate's decoder tests and, once a raw-input host path exists, in
-    // follow-up host tests.
+    // module doc) stay asserted as vector inventory here; they are executed
+    // against the guest in `raw/codec_tests.rs`.
     let vectors = codec_vectors();
     for vector in &vectors {
         match &vector.expectation {
@@ -227,9 +225,9 @@ fn shamir_lang_rejection_vector_inventory_is_complete() {
 async fn shamir_lang_runtime_each_call_runs_on_a_fresh_store_and_succeeds() {
     // Honest framing: `WasmFunction::call` builds a fresh Store per call, so
     // the emitted second-call `call_state` guard can never fire through this
-    // API — the guard is asserted structurally (emitted code path) in the
-    // crate's module tests only. Here each call on the same instance is a
-    // fresh instance store with the monotonic allocator, so both succeed.
+    // API — the guard itself is executed in `raw/codec_tests.rs`. Here each
+    // call on the same instance is a fresh instance store with the monotonic
+    // allocator, so both succeed.
     let function = runtime_function().await;
     let params = params_from(&[("a", QueryValue::Int(1)), ("b", QueryValue::Int(2))]);
     let mut expected = new_map();

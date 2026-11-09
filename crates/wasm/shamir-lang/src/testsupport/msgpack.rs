@@ -42,6 +42,9 @@ pub fn enc_i64(value: i64) -> Vec<u8> {
     } else if (65_536..=i64::from(u32::MAX)).contains(&value) {
         out.push(0xce);
         out.extend_from_slice(&(value as u32).to_be_bytes());
+    } else if value >= 0 {
+        out.push(0xcf);
+        out.extend_from_slice(&(value as u64).to_be_bytes());
     } else {
         out.push(0xd3);
         out.extend_from_slice(&value.to_be_bytes());
