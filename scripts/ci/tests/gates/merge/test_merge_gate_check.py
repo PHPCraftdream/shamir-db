@@ -46,6 +46,7 @@ FULL_OK = NEEDS(
     fast="skipped",
     fmt="success",
     clippy="success",
+    wasm32__guest__check="success",
     test__build="success",
     test="success",
     integration="success",
@@ -67,6 +68,7 @@ DRAFT_OK = NEEDS(
     fast="success",
     fmt="skipped",
     clippy="skipped",
+    wasm32__guest__check="skipped",
     test__build="skipped",
     test="skipped",
     integration="skipped",
@@ -217,7 +219,8 @@ class EvaluateTests(unittest.TestCase):
 
     def test_required_jobs_list_excludes_fast_tier_only_job(self):
         self.assertNotIn("engine-features-fast", mgc.REQUIRED_JOBS)
-        self.assertEqual(len(mgc.REQUIRED_JOBS), 18)
+        self.assertIn("wasm32-guest-check", mgc.REQUIRED_JOBS)
+        self.assertEqual(len(mgc.REQUIRED_JOBS), 19)
         self.assertIn("plan", mgc.REQUIRED_JOBS)
         self.assertIn("deny", mgc.REQUIRED_JOBS)
         self.assertIn("affected", mgc.REQUIRED_JOBS)
@@ -240,6 +243,42 @@ class EvaluateTests(unittest.TestCase):
     def test_affected_skipped_in_fast_tier_is_by_design(self):
         reasons = mgc.evaluate(DRAFT_OK, **DRAFT)
         self.assertNotIn("job affected unexpectedly skipped", reasons)
+
+    def test_wasm32_guest_check_is_a_required_job(self):
+        self.assertIn("wasm32-guest-check", mgc.REQUIRED_JOBS)
+        self.assertIn("wasm32-guest-check", FULL_OK)
+        self.assertIn("wasm32-guest-check", DRAFT_OK)
+
+    def test_wasm32_guest_check_missing_fails(self):
+        data = dict(FULL_OK)
+        del data["wasm32-guest-check"]
+        self.assertEqual(
+            mgc.evaluate(data, **READY),
+            ["missing required job: wasm32-guest-check"],
+        )
+
+    def test_wasm32_guest_check_failure_or_cancellation_fails(self):
+        for result in ("failure", "cancelled"):
+            with self.subTest(result=result):
+                data = dict(FULL_OK)
+                data["wasm32-guest-check"] = {"result": result, "outcome": result}
+                self.assertEqual(
+                    mgc.evaluate(data, **READY),
+                    ["job wasm32-guest-check: %s" % result],
+                )
+
+    def test_wasm32_guest_check_unexpected_full_tier_skip_fails(self):
+        data = dict(FULL_OK)
+        data["wasm32-guest-check"] = {"result": "skipped", "outcome": "skipped"}
+        self.assertEqual(
+            mgc.evaluate(data, **READY),
+            ["job wasm32-guest-check unexpectedly skipped"],
+        )
+
+    def test_wasm32_guest_check_draft_skip_is_by_design_but_not_merge_ready(self):
+        reasons = mgc.evaluate(DRAFT_OK, **DRAFT)
+        self.assertEqual(reasons, [mgc.DRAFT_MESSAGE])
+        self.assertNotIn("job wasm32-guest-check unexpectedly skipped", reasons)
 
 
 class MainTests(unittest.TestCase):

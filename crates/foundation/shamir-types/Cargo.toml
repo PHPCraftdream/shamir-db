@@ -49,6 +49,10 @@ log = "0.4"
 # shamir-query-builder's `default-features = false` and skip it.
 zeroize = { version = "1", features = ["derive"], optional = true }
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# rand 0.9's OS RNG requires getrandom's JS backend on wasm32-unknown-unknown.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 [features]
 default = ["crypto"]
 crypto  = ["dep:zeroize"]
