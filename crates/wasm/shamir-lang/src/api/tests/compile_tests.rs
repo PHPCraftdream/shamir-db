@@ -360,6 +360,23 @@ fn compile_procedure_with_database_calls_imports_the_host_functions() {
 }
 
 #[test]
+fn compile_procedure_with_the_typed_builder_imports_db_execute() {
+    let source = "@entry procedure p() -> i64 {
+         let b = batch_read(batch(), \"u\", \"users\", { role: \"admin\" });
+         let resp = db_execute(request(b));
+         let rows: [{ id: i64 }]? = response_rows(resp, \"u\");
+         if (is_null(rows)) { return 0; }
+         return to_i64(len(unwrap(rows)));
+         }
+";
+    let module = compile(source, &procedure_options()).expect("builder procedure compiles");
+    // Derivation: `raise_error` plus the single `db_execute` import.
+    assert_eq!(module.report.import_count, 2);
+    let again = compile(source, &procedure_options()).expect("second compile");
+    assert_eq!(module.wasm, again.wasm);
+}
+
+#[test]
 fn compile_validator_limits_are_enforced() {
     // Derivation: parse rejects sources over max_source_bytes with B001
     // before any lowering, so a 16-byte cap rejects the worked example.

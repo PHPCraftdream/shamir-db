@@ -329,7 +329,9 @@ pub(crate) fn collect_db_result_nodes(ir: &IrModule) -> Result<Vec<u32>, EmitErr
     let mut distinct: Vec<u32> = Vec::new();
     for function in &ir.functions {
         for inst in &function.insts {
-            let InstKind::DbCall { result, .. } = &inst.kind else {
+            let (InstKind::DbCall { result, .. } | InstKind::ResponseGet { result, .. }) =
+                &inst.kind
+            else {
                 continue;
             };
             let node = ir

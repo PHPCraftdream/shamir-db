@@ -19,24 +19,12 @@ pub(super) fn check_builtin_call(
     depth: u32,
 ) -> TypeId {
     let call_span = expr_span(c, call_id);
-    let name = builtin_name(bid);
     match builtin_category(bid) {
         BuiltinCategory::Stage2 => match bid {
             BuiltinId::DbGet | BuiltinId::DbInsert | BuiltinId::DbQuery => {
                 check_direct_db(c, frame, bid, call_span, args, expected, depth)
             }
-            _ => {
-                report(
-                    c,
-                    "T007",
-                    format!("builtin {name} is not available in this milestone"),
-                    call_span,
-                );
-                for &arg in args {
-                    check_arg(c, frame, None, arg, depth);
-                }
-                error_type(c)
-            }
+            _ => check_batch_family(c, frame, bid, call_span, args, expected, depth),
         },
         BuiltinCategory::ValidatorCtor => {
             let violated = !frame.ceiling.permits(BuiltinCategory::ValidatorCtor);
@@ -479,4 +467,168 @@ fn infer_record_literal(
         typed.push((name, ty));
     }
     Some(c.types.intern_record(typed))
+}
+
+/// Checks the typed builder intrinsics (`batch`, `batch_id`, `batch_read`,
+/// `batch_insert`, `request`, `db_execute`, `response_rows`,
+/// `response_inserted`): fixed opaque signatures, a filter/document argument
+/// following the direct-call rules, and a contextual optional list of records
+/// for the two response projections.
+fn check_batch_family(
+    c: &mut Checker,
+    frame: &mut FunctionFrame,
+    bid: BuiltinId,
+    call_span: Span,
+    args: &[ExprId],
+    expected: Option<TypeId>,
+    depth: u32,
+) -> TypeId {
+    let name = builtin_name(bid);
+    let string = primitive_type(c, "string");
+    let batch = primitive_type(c, "batch");
+    let request = primitive_type(c, "request");
+    let response = primitive_type(c, "response");
+    // (parameter types, result) with `None` for the free filter/document slot
+    let (params, result): (Vec<Option<TypeId>>, Option<TypeId>) = match bid {
+        BuiltinId::Batch => (Vec::new(), Some(batch)),
+        BuiltinId::BatchId => (vec![Some(batch), Some(string)], Some(batch)),
+        BuiltinId::BatchRead | BuiltinId::BatchInsert => (
+            vec![Some(batch), Some(string), Some(string), None],
+            Some(batch),
+        ),
+        BuiltinId::Request => (vec![Some(batch)], Some(request)),
+        BuiltinId::DbExecute => (vec![Some(request)], Some(response)),
+        BuiltinId::ResponseRows | BuiltinId::ResponseInserted => {
+            (vec![Some(response), Some(string)], None)
+        }
+        _ => {
+            report(
+                c,
+                "T007",
+                format!("builtin {name} is not available in this milestone"),
+                call_span,
+            );
+            for &arg in args {
+                check_arg(c, frame, None, arg, depth);
+            }
+            return error_type(c);
+        }
+    };
+    if !check_arity(c, name, args, params.len(), call_span) {
+        for &arg in args {
+            check_arg(c, frame, None, arg, depth);
+        }
+        return error_type(c);
+    }
+    for (position, (&arg, param)) in args.iter().zip(params.iter()).enumerate() {
+        match param {
+            Some(want) => {
+                let actual = check_arg(c, frame, Some(*want), arg, depth);
+                if !c.types.is_error(actual) && !assignable(c, *want, actual) {
+                    report_mismatch(c, *want, actual, arg, expr_span(c, arg), "argument");
+                }
+            }
+            None => {
+                let actual = check_db_second(c, frame, arg, depth);
+                check_batch_free_argument(c, bid, position, actual, arg);
+            }
+        }
+    }
+    if let Some(effects) = c.own_effects.get_mut(frame.fid.0 as usize) {
+        effects.record(BuiltinCategory::Stage2);
+    }
+    if !frame.ceiling.permits(BuiltinCategory::Stage2) {
+        report(
+            c,
+            "T007",
+            format!("builtin {name} requires a procedure entry"),
+            call_span,
+        );
+        return error_type(c);
+    }
+    match result {
+        Some(ty) => ty,
+        None => response_projection_result(c, bid, call_span, expected),
+    }
+}
+
+/// The filter of `batch_read` or the document of `batch_insert` follows the
+/// direct DB rules (null/scalar/scalar record vs. a wire-safe record).
+fn check_batch_free_argument(
+    c: &mut Checker,
+    bid: BuiltinId,
+    _position: usize,
+    actual: TypeId,
+    arg: ExprId,
+) {
+    if c.types.is_error(actual) {
+        return;
+    }
+    let accepted = if bid == BuiltinId::BatchInsert {
+        matches!(c.types.data(actual), Some(TypeData::Record(_))) && c.types.wire_safe(actual, 0)
+    } else {
+        // a batch filter is static: null, a scalar or a scalar record (an
+        // optional filter would need a runtime branch)
+        c.types.data(actual) == Some(TypeData::Null)
+            || is_scalar(c, actual)
+            || is_scalar_record(c, actual)
+    };
+    if !accepted {
+        let rule = if bid == BuiltinId::BatchInsert {
+            "a wire-safe record"
+        } else {
+            "null, a scalar or a scalar-valued record"
+        };
+        let name = builtin_name(bid);
+        report(
+            c,
+            "T001",
+            format!("builtin {name} expects {rule} as its last argument"),
+            expr_span(c, arg),
+        );
+    }
+}
+
+/// The contextual result of `response_rows` / `response_inserted`: an
+/// optional list of records, or `T010`.
+fn response_projection_result(
+    c: &mut Checker,
+    bid: BuiltinId,
+    call_span: Span,
+    expected: Option<TypeId>,
+) -> TypeId {
+    let name = builtin_name(bid);
+    let Some(expected) = expected else {
+        report(
+            c,
+            "T010",
+            format!("builtin {name} needs a contextual result type"),
+            call_span,
+        );
+        return error_type(c);
+    };
+    if c.types.is_error(expected) {
+        return expected;
+    }
+    let shape_ok = match c.types.data(expected) {
+        Some(TypeData::Optional(inner)) => match c.types.data(inner) {
+            Some(TypeData::List(element)) => {
+                matches!(c.types.data(element), Some(TypeData::Record(_)))
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if !shape_ok || !c.types.wire_safe(expected, 0) {
+        report(
+            c,
+            "T010",
+            format!(
+                "builtin {name} needs an optional list of records as its contextual result type"
+            ),
+            call_span,
+        );
+        return error_type(c);
+    }
+    expected
 }

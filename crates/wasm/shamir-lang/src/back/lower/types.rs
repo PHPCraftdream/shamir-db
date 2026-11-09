@@ -757,3 +757,10 @@ pub(crate) fn lower_db_call(
         span,
     )
 }
+
+/// Interns the structural type node of `ty` (a database or response result)
+/// and returns its index in `IrModule::type_nodes`.
+pub(crate) fn result_node(ctx: &mut LowerCtx, ty: TypeId) -> Result<u32, IrError> {
+    let max_depth = ctx.limits.max_type_depth;
+    node_for(ctx.typed, ty, &mut ctx.type_nodes, max_depth)
+}

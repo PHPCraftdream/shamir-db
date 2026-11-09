@@ -55,9 +55,13 @@ pub enum CastOp {
 /// Runtime cell tag numbers (mirror `back::runtime::cell::CellTag` values).
 pub mod cell_tag {
     pub const NULL: u32 = 1;
+    pub const BOOL: u32 = 2;
+    pub const I64: u32 = 4;
     pub const STRING: u32 = 6;
     pub const BYTES: u32 = 7;
     pub const LIST: u32 = 8;
+    pub const RECORD: u32 = 9;
+    pub const DYNAMIC_MAP: u32 = 14;
 }
 
 /// Direct database host operation of a stage-2 intrinsic call.
@@ -198,6 +202,27 @@ pub enum InstKind {
         arg: InstId,
         result: u32,
     },
+    /// Appends one `(alias, entry)` operation to an immutable batch plan and
+    /// returns the new plan (kind-2 failure on an invalid or duplicate alias
+    /// or a 51st operation) -> I32 cell pointer.
+    BatchAppend {
+        batch: InstId,
+        alias: InstId,
+        entry: InstId,
+    },
+    /// Encodes the request plan, calls the host `db_execute` import and
+    /// returns an opaque response cell holding the raw answer bytes -> I32.
+    DbExecute {
+        request: InstId,
+    },
+    /// Looks `alias` up in a response and projects its `records` list through
+    /// `IrModule::type_nodes[result]` with decode-class (kind 3) failures; a
+    /// missing alias reads as null -> I32 cell pointer.
+    ResponseGet {
+        response: InstId,
+        alias: InstId,
+        result: u32,
+    },
     /// `callee` indexes `IrModule::functions`; args in order.
     Call {
         callee: u32,
@@ -256,6 +281,9 @@ pub(crate) fn inst_result_kind(
         | InstKind::CellAllocF64(_)
         | InstKind::RecordCell { .. }
         | InstKind::DbCall { .. }
+        | InstKind::BatchAppend { .. }
+        | InstKind::DbExecute { .. }
+        | InstKind::ResponseGet { .. }
         | InstKind::Compare { .. } => Some(ValueKind::I32),
         // SExtend64 emits I64ExtendI32S, so it produces an I64.
         InstKind::ConstI64(_) | InstKind::CellLoadPayload(_) | InstKind::SExtend64(_) => {
@@ -343,6 +371,22 @@ pub(crate) fn inst_operands(kind: &InstKind, out: &mut Vec<InstId>) {
         InstKind::DbCall { table, arg, .. } => {
             out.push(*table);
             out.push(*arg);
+        }
+        InstKind::BatchAppend {
+            batch,
+            alias,
+            entry,
+        } => {
+            out.push(*batch);
+            out.push(*alias);
+            out.push(*entry);
+        }
+        InstKind::DbExecute { request } => out.push(*request),
+        InstKind::ResponseGet {
+            response, alias, ..
+        } => {
+            out.push(*response);
+            out.push(*alias);
         }
         InstKind::Call { args, .. } => out.extend_from_slice(args),
         // LocalSet pops implicitly; its value check uses the preceding inst.

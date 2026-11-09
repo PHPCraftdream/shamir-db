@@ -12,7 +12,12 @@ use shamir_wasm_admission::{
     ABI_SECTION, EXPORT_ALLOC, EXPORT_CALL, EXPORT_MEMORY, ORIGIN_SECTION, SUPPORTED_ABI_VERSION,
 };
 
+use crate::back::emit::module::EmitError;
+use crate::back::ir::ValueKind;
 use crate::back::runtime::{Layout, RuntimeError, STATIC_START};
+
+/// Design hard ceiling on function types.
+const MAX_TYPES: u64 = 512;
 
 /// Runtime type indices the assembly refers to (positions in the fixed
 /// runtime type list below; mirrors the planner's constants).
@@ -204,4 +209,47 @@ pub(crate) fn assemble(image: &ModuleImage) -> Result<(Vec<u8>, u64), RuntimeErr
     code.encode(&mut code_bytes);
     let code_len = u64::try_from(code_bytes.len()).unwrap_or(u64::MAX);
     Ok((bytes, code_len))
+}
+
+/// Deduplicates one signature by linear scan over the extra types
+/// (first-use order, deterministic); the runtime occupies types 0..=9.
+pub(crate) fn intern_type(
+    extra_types: &mut Vec<(Vec<ValType>, Option<ValType>)>,
+    params: Vec<ValType>,
+    result: Option<ValType>,
+) -> Result<u32, EmitError> {
+    if let Some(position) = extra_types
+        .iter()
+        .position(|(existing, existing_result)| *existing == params && *existing_result == result)
+    {
+        let index =
+            u32::try_from(position).map_err(|_| EmitError::Internal("type index overflow"))?;
+        return 10u32
+            .checked_add(index)
+            .ok_or(EmitError::Internal("type index overflow"));
+    }
+    let position =
+        u32::try_from(extra_types.len()).map_err(|_| EmitError::Internal("type index overflow"))?;
+    extra_types.push((params, result));
+    let observed = 10u64
+        .checked_add(u64::from(position) + 1)
+        .ok_or(EmitError::Internal("type count overflow"))?;
+    if observed > MAX_TYPES {
+        return Err(EmitError::LimitExceeded {
+            code: "B001",
+            limit: MAX_TYPES,
+            observed,
+        });
+    }
+    10u32
+        .checked_add(position)
+        .ok_or(EmitError::Internal("type index overflow"))
+}
+
+pub(crate) fn val_type(kind: ValueKind) -> ValType {
+    match kind {
+        ValueKind::I32 => ValType::I32,
+        ValueKind::I64 => ValType::I64,
+        ValueKind::F64 => ValType::F64,
+    }
 }
