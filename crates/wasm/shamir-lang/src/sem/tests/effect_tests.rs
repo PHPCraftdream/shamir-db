@@ -311,3 +311,93 @@ fn sweep(source: &str) {
         let _ = crate::sem::check(&module, &limits, Stage::Mvp);
     }
 }
+
+fn procedure_codes(source: &str) -> Vec<&'static str> {
+    match check_with_stage(source, &CompileLimits::default(), Stage::Procedures) {
+        Ok(_) => Vec::new(),
+        Err(diags) => diags.iter().map(|diag| diag.code).collect(),
+    }
+}
+
+#[test]
+fn procedures_may_use_direct_db_builtins_with_a_contextual_result() {
+    // Derivation: the annotation `{...}?` is the expected type of the call,
+    // key is a non-null i64 scalar, the table is a string.
+    assert!(procedure_codes(
+        "@entry procedure p(key: i64) -> i64 { let u: { id: i64, name: string }? = db_get(\"users\", key); if (is_null(u)) { return 0; } return unwrap(u).id; }"
+    )
+    .is_empty());
+    assert!(procedure_codes(
+        "@entry procedure p() -> i64 { let rows: [{ id: i64 }] = db_query(\"users\", null); return len(rows) == 0 ? 0 : 1; }"
+    )
+    .is_empty());
+    assert!(procedure_codes(
+        "@entry procedure p(name: string) -> { id: i64 } { let stored: { id: i64 } = db_insert(\"users\", { name: name }); return stored; }"
+    )
+    .is_empty());
+}
+
+#[test]
+fn direct_db_builtins_need_a_contextual_result_type() {
+    // Derivation: an unannotated initializer has no expected type.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p(key: i64) -> i64 { let u = db_get(\"users\", key); return 0; }"
+        ),
+        vec!["T010"]
+    );
+    // An optional-record context is required by db_get, a record by db_insert.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p(key: i64) -> i64 { let u: { id: i64 } = db_get(\"users\", key); return 0; }"
+        ),
+        vec!["T010"]
+    );
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p() -> i64 { let u: { id: i64 }? = db_insert(\"users\", { id: 1 }); return 0; }"
+        ),
+        vec!["T010"]
+    );
+}
+
+#[test]
+fn direct_db_builtin_argument_rules() {
+    // A list-valued predicate field is not a scalar record.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p() -> i64 { let rows: [{ id: i64 }] = db_query(\"users\", { ids: [1] }); return 0; }"
+        ),
+        vec!["T001"]
+    );
+    // The table must be a string.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p() -> i64 { let rows: [{ id: i64 }] = db_query(1, null); return 0; }"
+        ),
+        vec!["T001"]
+    );
+}
+
+#[test]
+fn direct_db_builtins_exceed_scalar_and_validator_ceilings() {
+    let call = "let rows: [{ id: i64 }] = db_query(\"users\", null);";
+    assert_eq!(
+        procedure_codes(&format!(
+            "@entry scalar probe() -> i64 {{ {call} return 1; }}"
+        )),
+        vec!["T007"]
+    );
+    // A helper with database effects is allowed under a procedure entry only.
+    let helper = format!("fn h() -> i64 {{ {call} return to_i64(len(rows)); }}");
+    assert!(procedure_codes(&format!(
+        "{helper}\n@entry procedure p() -> i64 {{ return h(); }}"
+    ))
+    .is_empty());
+    assert_eq!(
+        procedure_codes(&format!(
+            "{helper}\n@entry scalar probe() -> i64 {{ return h(); }}"
+        )),
+        vec!["T007"]
+    );
+}

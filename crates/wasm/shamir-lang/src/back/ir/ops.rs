@@ -60,6 +60,17 @@ pub mod cell_tag {
     pub const LIST: u32 = 8;
 }
 
+/// Direct database host operation of a stage-2 intrinsic call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DbOp {
+    /// `db_get(table, key)`: optional record (missing row is null).
+    Get,
+    /// `db_insert(table, document)`: the stored record.
+    Insert,
+    /// `db_query(table, filter)`: list of records (null filter means all).
+    Query,
+}
+
 /// One typed IR instruction. Operand `InstId`s must live in the same block.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InstKind {
@@ -177,6 +188,16 @@ pub enum InstKind {
         left: InstId,
         right: InstId,
     },
+    /// Stage-2 direct database call: encodes the `arg` cell, calls the host
+    /// import for `op` with the `table` string cell, decodes the answer and
+    /// projects it through `IrModule::type_nodes[result]` with decode-class
+    /// (kind 3) failures -> I32 cell pointer of the typed result.
+    DbCall {
+        op: DbOp,
+        table: InstId,
+        arg: InstId,
+        result: u32,
+    },
     /// `callee` indexes `IrModule::functions`; args in order.
     Call {
         callee: u32,
@@ -234,6 +255,7 @@ pub(crate) fn inst_result_kind(
         | InstKind::CellAllocBool(_)
         | InstKind::CellAllocF64(_)
         | InstKind::RecordCell { .. }
+        | InstKind::DbCall { .. }
         | InstKind::Compare { .. } => Some(ValueKind::I32),
         // SExtend64 emits I64ExtendI32S, so it produces an I64.
         InstKind::ConstI64(_) | InstKind::CellLoadPayload(_) | InstKind::SExtend64(_) => {
@@ -318,6 +340,10 @@ pub(crate) fn inst_operands(kind: &InstKind, out: &mut Vec<InstId>) {
             out.push(*right);
         }
         InstKind::RecordCell { region, .. } => out.push(*region),
+        InstKind::DbCall { table, arg, .. } => {
+            out.push(*table);
+            out.push(*arg);
+        }
         InstKind::Call { args, .. } => out.extend_from_slice(args),
         // LocalSet pops implicitly; its value check uses the preceding inst.
         InstKind::ConstI32(_)

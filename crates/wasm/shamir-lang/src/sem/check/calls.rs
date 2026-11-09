@@ -268,6 +268,21 @@ fn check_entry(
                     "function with validator-constructor effects",
                 );
             }
+            if introduced.stage2() && !ceiling.permits(BuiltinCategory::Stage2) {
+                let related = c
+                    .module
+                    .function(callee)
+                    .map(|func| func.span)
+                    .unwrap_or_else(|| expr_span(c, site));
+                report_related(
+                    c,
+                    "T007",
+                    "helper effects exceed the entry capability".to_string(),
+                    expr_span(c, site),
+                    related,
+                    "function with database effects",
+                );
+            }
             let seen = visited.get(callee.0 as usize).copied().unwrap_or(true);
             if !seen {
                 if let Some(flag) = visited.get_mut(callee.0 as usize) {

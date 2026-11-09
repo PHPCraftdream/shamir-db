@@ -167,6 +167,34 @@ pub(super) fn emit_inst(
             function.instruction(&Instruction::LocalGet(env.local_of(*count)?));
             function.instruction(&Instruction::Call(env.plan.copy_cells_index));
         }
+        InstKind::DbCall {
+            op,
+            table,
+            arg,
+            result,
+        } => {
+            // helper: `(table cell, argument cell) -> decoded root cell`, then
+            // the decode-class projection helper of the result node
+            let helper = env
+                .plan
+                .db_helpers
+                .iter()
+                .find(|(candidate, _)| candidate == op)
+                .map(|(_, index)| *index)
+                .ok_or(EmitError::Internal("missing database helper"))?;
+            let projection = env
+                .plan
+                .db_projection_indices
+                .iter()
+                .find(|(node, _)| node == result)
+                .map(|(_, index)| *index)
+                .ok_or(EmitError::Internal("missing database projection helper"))?;
+            function.instruction(&Instruction::LocalGet(env.local_of(*table)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*arg)?));
+            function.instruction(&Instruction::Call(helper));
+            function.instruction(&Instruction::Call(projection));
+            store_result(env, function, position)?;
+        }
         InstKind::CellLoadPayload(value) => {
             function.instruction(&Instruction::LocalGet(env.local_of(*value)?));
             function.instruction(&Instruction::I64Load(mem64(8)));

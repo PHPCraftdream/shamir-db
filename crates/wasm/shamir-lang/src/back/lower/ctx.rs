@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::api::{CompileLimits, Span};
-use crate::back::ir::{BlockId, IrBuilder, IrError, ParamProjection};
+use crate::back::ir::{BlockId, IrBuilder, IrError, ParamProjection, TypeNode};
 use crate::front::{ExprId, Module, StatementId};
 use crate::sem::{TypeData, TypeId, TypedModule};
 
@@ -50,6 +50,9 @@ pub(crate) struct LowerCtx<'a, 'b> {
     pub(crate) code_error_descriptor: Option<u32>,
     /// Cached absolute error-cap list-cell address, baked at most once.
     pub(crate) error_cap_cell: Option<u32>,
+    /// Structural type nodes interned while lowering (database result types);
+    /// the driver continues interning the entry parameters into this list.
+    pub(crate) type_nodes: Vec<TypeNode>,
 }
 
 impl<'a, 'b> LowerCtx<'a, 'b> {

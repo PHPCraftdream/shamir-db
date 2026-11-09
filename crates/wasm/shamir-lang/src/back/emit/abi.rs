@@ -254,6 +254,10 @@ pub(crate) struct WrapperInputs<'a> {
     /// Projection helper fn index per entry parameter (finding 15); `None`
     /// keeps the inline pass-through (hand-built IR without type nodes).
     pub param_helper: &'a [Option<u32>],
+    /// True for modules that call the database: the runtime context is
+    /// re-initialised before the final encode because the database helpers
+    /// reuse the encoder and decoder state.
+    pub reinit_context: bool,
 }
 
 /// Emits the compiled-module `shamir_call` wrapper: after the M1 prologue
@@ -285,6 +289,7 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
         result_projection,
         param_names,
         param_helper,
+        reinit_context,
     } = inputs;
     let param_count = param_kinds.len();
     let param0: u32 = 6;
@@ -941,6 +946,14 @@ pub(crate) fn emit_scalar_wrapper(inputs: WrapperInputs) -> Result<Function, Emi
                 function.instruction(&Instruction::I64Store(store_offset(8)));
             }
         },
+    }
+    if reinit_context {
+        super::support::db::emit_context_init(&mut function, &bases, bases.output_cap);
+        function.instruction(&Instruction::LocalGet(4));
+        function.instruction(&Instruction::LocalGet(5));
+        function.instruction(&Instruction::I32Store(store_offset(
+            CONTEXT_OUTPUT_PTR_OFFSET,
+        )));
     }
     // copy the boxed cell (or null cell / returned cell ptr) into the
     // context scratch slot the encoder reads the root cell from

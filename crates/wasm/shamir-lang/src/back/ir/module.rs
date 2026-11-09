@@ -142,6 +142,25 @@ pub struct IrLimits {
     pub max_static_bytes: usize,
 }
 
+impl IrModule {
+    /// Distinct database operations the module calls, in `DbOp` order; empty
+    /// for scalar and validator modules, so their emission stays unchanged.
+    pub(crate) fn db_ops(&self) -> Vec<crate::back::ir::ops::DbOp> {
+        let mut found: Vec<crate::back::ir::ops::DbOp> = Vec::new();
+        for function in &self.functions {
+            for inst in &function.insts {
+                if let InstKind::DbCall { op, .. } = &inst.kind {
+                    if !found.contains(op) {
+                        found.push(*op);
+                    }
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+}
+
 impl BlockId {
     pub(crate) fn index(self) -> usize {
         self.0 as usize

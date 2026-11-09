@@ -1,31 +1,26 @@
-use wasm_encoder::{
-    CodeSection, ConstExpr, CustomSection, DataSection, Encode, EntityType, ExportKind,
-    ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
-    MemorySection, MemoryType, Module, TypeSection, ValType,
-};
-
-use shamir_wasm_admission::{
-    ABI_SECTION, EXPORT_ALLOC, EXPORT_CALL, EXPORT_MEMORY, ORIGIN_SECTION, SUPPORTED_ABI_VERSION,
-};
+use wasm_encoder::{Encode, Function, ValType};
 
 use thiserror::Error;
 
 use super::abi::{emit_call_wrapper, emit_scalar_wrapper, NullCell, WrapperBases, WrapperInputs};
 use super::helpers::{emit_helper_order, HelperGraph, HelperId};
 use super::scalar::emit_user_function;
+use super::support::assemble::{assemble, ModuleImage};
+use super::support::db::{emit_db_call_helper, host_import_name};
 use super::support::eq::{emit_bytes_compare, emit_eq_helper};
 use super::support::projection::{
-    append_raise_messages, append_record_descriptors, collect_projection_nodes,
-    emit_projection_helper, projection_signature, reachable_nodes, ProjectionSpec,
+    append_raise_messages, append_record_descriptors, collect_db_result_nodes,
+    collect_projection_nodes, emit_projection_helper, projection_signature, reachable_nodes,
+    ProjectionSpec,
 };
 use super::support::workspace::compute_workspace;
 use crate::api::{CompileLimits, Span};
-use crate::back::ir::{inst_result_kind, IrModule, ParamProjection, ValueKind};
+use crate::back::ir::{inst_result_kind, DbOp, IrModule, ParamProjection, ValueKind};
 use crate::back::runtime::{
     emit_allocator, emit_append_byte, emit_check_range, emit_compare_bytes, emit_copy_cells,
     emit_decode_root, emit_encode_root, emit_error_raiser, emit_read_be, emit_read_byte,
-    emit_store_cell, emit_validate_utf8, Cell, CellTag, DecodeEmit, EncodeEmit, Layout,
-    RuntimeCaps, RuntimeError, MAX_ADDRESS, STATIC_START,
+    emit_store_cell, emit_validate_utf8, Cell, CellTag, DecodeEmit, EncodeEmit, RuntimeCaps,
+    RuntimeError, MAX_ADDRESS, STATIC_START,
 };
 use crate::front::CompileBudget;
 
@@ -130,6 +125,11 @@ pub(crate) struct EmissionPlan {
     pub projection_type_index: u32,
     /// Type index per user function, in IR order.
     pub user_type_indices: Vec<u32>,
+    /// Stage-2 database operations of the module: `(op, helper fn index)`.
+    pub db_helpers: Vec<(DbOp, u32)>,
+    /// Decode-class projection helper per distinct database result node:
+    /// `(node index, fn index)`.
+    pub db_projection_indices: Vec<(u32, u32)>,
     /// First generated projection helper (`eq_base + 1 + eq_count`).
     /// Projection helper per distinct type node: `(node index, fn index)` in
     /// the deterministic first-use order of the nodes.
@@ -192,11 +192,11 @@ fn ordered_helper_functions(
     sort_base: u32,
     caps: RuntimeCaps,
     records: bool,
+    import_count: u32,
 ) -> Result<OrderedHelpers, RuntimeError> {
     const TYPE_RANGE: u32 = 0;
     const TYPE_SMALL: u32 = 1;
     const TYPE_READ_BE: u32 = 3;
-    const TYPE_VOID_THREE_I32: u32 = 4;
     const TYPE_STORE_CELL: u32 = 5;
     const TYPE_APPEND: u32 = 6;
     const TYPE_DECODE: u32 = 9;
@@ -224,7 +224,9 @@ fn ordered_helper_functions(
     let order = emit_helper_order(&graph, &roots)?;
 
     let helper_count = order.len() as u32;
-    let error_raiser_index = 1 + helper_count;
+    // defined functions start after the host imports (`raise_error` plus the
+    // stage-2 database imports of a procedure module)
+    let error_raiser_index = import_count + helper_count;
     let alloc_index = error_raiser_index + 1;
     let index_of = |helper: HelperId| -> Result<u32, RuntimeError> {
         let position = order
@@ -232,7 +234,7 @@ fn ordered_helper_functions(
             .position(|&candidate| candidate == helper)
             .ok_or(RuntimeError::UnknownHelper)?;
         u32::try_from(position)
-            .map(|position| 1 + position)
+            .map(|position| import_count + position)
             .map_err(|_| RuntimeError::UnknownHelper)
     };
     let decode_params = DecodeEmit {
@@ -288,174 +290,8 @@ fn ordered_helper_functions(
 }
 
 const TYPE_VOID_THREE_I32: u32 = 4;
-const TYPE_ALLOC: u32 = 7;
-const TYPE_CALL: u32 = 8;
 /// Runtime byte-compare helper type (`[i32,i32] -> [i32]`, position 2).
 const TYPE_COMPARE: u32 = 2;
-
-/// One fully prepared module ready for section assembly.
-struct ModuleImage {
-    static_bytes: Vec<u8>,
-    helper_functions: Vec<(u32, Function)>,
-    error_raiser: Function,
-    allocator: Function,
-    wrapper: Function,
-    user_functions: Vec<(u32, Function)>,
-    eq_functions: Vec<(u32, Function)>,
-    /// Generated projection helpers, appended after the eq helpers.
-    projection_functions: Vec<(u32, Function)>,
-    alloc_index: u32,
-    call_index: u32,
-    /// Extra function types beyond the ten runtime ones (user + eq).
-    extra_types: Vec<(Vec<ValType>, Option<ValType>)>,
-    heap_base: u64,
-    layout: Layout,
-}
-
-/// Assembles the complete module: custom ABI/origin sections, type, import
-/// (error raiser at index 0), function, memory, global, export and code
-/// sections, plus one active data segment carrying the static bytes. Returns
-/// the module bytes and the encoded code-section length.
-fn assemble(image: &ModuleImage) -> Result<(Vec<u8>, u64), RuntimeError> {
-    let mut types = TypeSection::new();
-    let i = ValType::I32;
-    let l = ValType::I64;
-    for (params, result) in [
-        (vec![i, i, i], vec![i]),
-        (vec![i, i], vec![i]),
-        (vec![i, i, i, i], vec![i]),
-        (vec![i, i, i], vec![l]),
-        (vec![i, i, i], vec![]),
-        (vec![i, i, i, l], vec![]),
-        (vec![i, i], vec![]),
-        (vec![i], vec![i]),
-        (vec![i, i], vec![l]),
-        (vec![i], vec![]),
-    ] {
-        types.ty().function(params, result);
-    }
-    for (params, result) in &image.extra_types {
-        let result: &[ValType] = match result {
-            Some(kind) => std::slice::from_ref(kind),
-            None => &[],
-        };
-        types
-            .ty()
-            .function(params.iter().copied(), result.iter().copied());
-    }
-
-    let mut imports = ImportSection::new();
-    imports.import(
-        "shamir_host",
-        "raise_error",
-        EntityType::Function(TYPE_VOID_THREE_I32),
-    );
-
-    let mut functions = FunctionSection::new();
-    for (type_index, _) in &image.helper_functions {
-        functions.function(*type_index);
-    }
-    functions.function(TYPE_VOID_THREE_I32);
-    functions.function(TYPE_ALLOC);
-    functions.function(TYPE_CALL);
-    for (type_index, _) in &image.user_functions {
-        functions.function(*type_index);
-    }
-    for (type_index, _) in &image.eq_functions {
-        functions.function(*type_index);
-    }
-    for (type_index, _) in &image.projection_functions {
-        functions.function(*type_index);
-    }
-
-    let mut memories = MemorySection::new();
-    memories.memory(MemoryType {
-        minimum: image.layout.minimum_pages,
-        maximum: Some(image.layout.maximum_pages),
-        memory64: false,
-        shared: false,
-        page_size_log2: None,
-    });
-
-    let mut globals = GlobalSection::new();
-    // two mutable i32 globals per design §5: heap_next (index 0) and
-    // call_state (index 1, the wrapper re-entry guard)
-    let heap_const = ConstExpr::i32_const(i32::try_from(image.heap_base).map_err(|_| {
-        RuntimeError::RuntimeTooLarge {
-            limit: i32::MAX as u64,
-            observed: image.heap_base,
-        }
-    })?);
-    let global_type = GlobalType {
-        val_type: ValType::I32,
-        mutable: true,
-        shared: false,
-    };
-    globals.global(global_type, &heap_const);
-    globals.global(
-        GlobalType {
-            val_type: ValType::I32,
-            mutable: true,
-            shared: false,
-        },
-        &ConstExpr::i32_const(0),
-    );
-
-    let mut exports = ExportSection::new();
-    exports.export(EXPORT_MEMORY, ExportKind::Memory, 0);
-    exports.export(EXPORT_ALLOC, ExportKind::Func, image.alloc_index);
-    exports.export(EXPORT_CALL, ExportKind::Func, image.call_index);
-
-    let mut code = CodeSection::new();
-    for (_, function) in &image.helper_functions {
-        code.function(function);
-    }
-    code.function(&image.error_raiser);
-    code.function(&image.allocator);
-    code.function(&image.wrapper);
-    for (_, function) in &image.user_functions {
-        code.function(function);
-    }
-    for (_, function) in &image.eq_functions {
-        code.function(function);
-    }
-    for (_, function) in &image.projection_functions {
-        code.function(function);
-    }
-
-    let mut data = DataSection::new();
-    let static_const = ConstExpr::i32_const(i32::try_from(STATIC_START).map_err(|_| {
-        RuntimeError::RuntimeTooLarge {
-            limit: i32::MAX as u64,
-            observed: STATIC_START,
-        }
-    })?);
-    data.active(0, &static_const, image.static_bytes.to_vec());
-
-    let mut module = Module::new();
-    module.section(&CustomSection {
-        name: ABI_SECTION.into(),
-        data: SUPPORTED_ABI_VERSION.to_le_bytes().to_vec().into(),
-    });
-    module.section(&CustomSection {
-        name: ORIGIN_SECTION.into(),
-        data: b"shamir-lang".to_vec().into(),
-    });
-    module.section(&types);
-    module.section(&imports);
-    module.section(&functions);
-    module.section(&memories);
-    module.section(&globals);
-    module.section(&exports);
-    module.section(&code);
-    module.section(&data);
-
-    let bytes = module.finish();
-    let mut code_bytes = Vec::new();
-    code.encode(&mut code_bytes);
-    let code_len = u64::try_from(code_bytes.len()).unwrap_or(u64::MAX);
-    Ok((bytes, code_len))
-}
 
 /// Assembles the M1 runtime module: no user functions, no generated equality
 /// helpers, no extra types.
@@ -470,7 +306,7 @@ pub fn emit_runtime_module(
     let workspace = compute_workspace(static_len, &caps)?;
 
     let (helper_functions, decode_index, encode_index, _compare_index, _copy_cells_index) =
-        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, false)?;
+        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, false, 1)?;
     let helper_count = helper_functions.len() as u32;
     let error_raiser_index = 1 + helper_count;
     let alloc_index = error_raiser_index + 1;
@@ -523,6 +359,9 @@ pub fn emit_runtime_module(
         extra_types: Vec::new(),
         heap_base: workspace.layout.heap_base,
         layout: workspace.layout,
+        db_imports: Vec::new(),
+        db_projection_functions: Vec::new(),
+        db_call_functions: Vec::new(),
     };
     let (bytes, code_len) = assemble(&image)?;
     if code_len > CODE_BUDGET_BYTES {
@@ -631,9 +470,18 @@ pub(crate) fn emit_compiled_module(
     // finding 15: distinct projection nodes for the entry's aggregate
     // parameters, in deterministic first-use order (limits checked inside)
     let distinct = collect_projection_nodes(ir, entry)?;
+    // stage-2 database calls: distinct result nodes (decode-class projection
+    // helpers) and the host operations the module imports
+    let db_nodes = collect_db_result_nodes(ir)?;
+    let db_ops = ir.db_ops();
+    let import_count = 1 + u32::try_from(db_ops.len())
+        .map_err(|_| EmitError::Internal("database import count overflow"))?;
     let static_limit = limits.max_static_bytes as u64;
-    // every record node reachable from a projected parameter gets a descriptor
-    let reachable = reachable_nodes(&ir.type_nodes, &distinct)?;
+    // every record node reachable from a projected parameter or a database
+    // result gets a descriptor
+    let mut descriptor_roots = distinct.clone();
+    descriptor_roots.extend_from_slice(&db_nodes);
+    let reachable = reachable_nodes(&ir.type_nodes, &descriptor_roots)?;
     let reachable_addrs =
         append_record_descriptors(&mut static_bytes, &ir.type_nodes, &reachable, static_limit)?;
     let mut descriptors: Vec<Option<u32>> = vec![None; ir.type_nodes.len()];
@@ -667,7 +515,13 @@ pub(crate) fn emit_compiled_module(
 
     let workspace = compute_workspace(observed, &caps)?;
     let (helper_functions, decode_index, encode_index, compare_index, copy_cells_index) =
-        ordered_helper_functions(workspace.scratch, workspace.sort_base, caps, true)?;
+        ordered_helper_functions(
+            workspace.scratch,
+            workspace.sort_base,
+            caps,
+            true,
+            import_count,
+        )?;
     // finding 20: the ten ordered runtime helpers are not controlled by user
     // code, so their bytes count against `max_runtime_bytes`; user code is
     // bounded by `max_function_body_bytes` per body and the module by the
@@ -734,6 +588,18 @@ pub(crate) fn emit_compiled_module(
     // projection helpers take one i32 and return an i32
     let (proj_params, proj_result) = projection_signature();
     let projection_type_index = intern_type(&mut extra_types, proj_params, proj_result)?;
+    // host database imports: `(table ptr, table len, arg ptr, arg len) -> i64`
+    let mut db_imports: Vec<(&'static str, u32)> = Vec::with_capacity(db_ops.len());
+    if !db_ops.is_empty() {
+        let import_type = intern_type(
+            &mut extra_types,
+            vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+            Some(ValType::I64),
+        )?;
+        for op in &db_ops {
+            db_imports.push((host_import_name(*op), import_type));
+        }
+    }
     let output_cap = i32::try_from(caps.output_bytes).map_err(|_| EmitError::LimitExceeded {
         code: "B001",
         limit: i32::MAX as u64,
@@ -748,7 +614,7 @@ pub(crate) fn emit_compiled_module(
         output_cap,
     };
     let helper_count = helper_functions.len() as u32;
-    let users_base = 4 + helper_count;
+    let users_base = import_count + 3 + helper_count;
     let eq_base = users_base
         .checked_add(
             u32::try_from(ir.functions.len())
@@ -775,13 +641,47 @@ pub(crate) fn emit_compiled_module(
             .ok_or(EmitError::Internal("function index overflow"))?;
         projection_indices.push((*node_index, fn_index));
     }
+    // database projection helpers, then the database call helpers, follow the
+    // entry projection helpers
+    let db_proj_base = proj_base
+        .checked_add(
+            u32::try_from(distinct.len())
+                .map_err(|_| EmitError::Internal("projection count overflow"))?,
+        )
+        .ok_or(EmitError::Internal("function index overflow"))?;
+    let mut db_projection_indices: Vec<(u32, u32)> = Vec::with_capacity(db_nodes.len());
+    for (position, node_index) in db_nodes.iter().enumerate() {
+        let fn_index = db_proj_base
+            .checked_add(
+                u32::try_from(position)
+                    .map_err(|_| EmitError::Internal("projection index overflow"))?,
+            )
+            .ok_or(EmitError::Internal("function index overflow"))?;
+        db_projection_indices.push((*node_index, fn_index));
+    }
+    let db_call_base = db_proj_base
+        .checked_add(
+            u32::try_from(db_nodes.len())
+                .map_err(|_| EmitError::Internal("projection count overflow"))?,
+        )
+        .ok_or(EmitError::Internal("function index overflow"))?;
+    let mut db_helpers: Vec<(DbOp, u32)> = Vec::with_capacity(db_ops.len());
+    for (position, op) in db_ops.iter().enumerate() {
+        let fn_index = db_call_base
+            .checked_add(
+                u32::try_from(position)
+                    .map_err(|_| EmitError::Internal("database helper index overflow"))?,
+            )
+            .ok_or(EmitError::Internal("function index overflow"))?;
+        db_helpers.push((*op, fn_index));
+    }
     let plan = EmissionPlan {
         helper_count,
-        raise_index: 1 + helper_count,
-        alloc_index: 2 + helper_count,
+        raise_index: import_count + helper_count,
+        alloc_index: import_count + 1 + helper_count,
         decode_index,
         encode_index,
-        wrapper_index: 3 + helper_count,
+        wrapper_index: import_count + 2 + helper_count,
         users_base,
         eq_base,
         user_count: u32::try_from(ir.functions.len())
@@ -792,6 +692,8 @@ pub(crate) fn emit_compiled_module(
         eq_type_index,
         projection_type_index,
         user_type_indices,
+        db_helpers,
+        db_projection_indices,
         projection_indices,
         bases,
     };
@@ -804,6 +706,8 @@ pub(crate) fn emit_compiled_module(
         .checked_add(u64::from(plan.user_count))
         .and_then(|total| total.checked_add(u64::from(plan.eq_count)))
         .and_then(|total| total.checked_add(projection_count))
+        .and_then(|total| total.checked_add(plan.db_projection_indices.len() as u64))
+        .and_then(|total| total.checked_add(plan.db_helpers.len() as u64))
         .ok_or(EmitError::Internal("function count overflow"))?;
     if total_functions > MAX_DEFINED_FUNCTIONS {
         return Err(EmitError::LimitExceeded {
@@ -863,6 +767,7 @@ pub(crate) fn emit_compiled_module(
         arg_msg_addr: baked.wrapper.arg,
         i32_msg_addr: baked.wrapper.i32,
         field_msg_addr: baked.wrapper.field,
+        raise_kind: 2,
     };
     for &(node_index, _fn_index) in plan.projection_indices.iter() {
         charge_work(budget, 1)?;
@@ -877,6 +782,54 @@ pub(crate) fn emit_compiled_module(
         }
         charge_work(budget, observed)?;
         projection_functions.push((plan.projection_type_index, function));
+    }
+
+    // decode-class (kind 3) projection helpers of the database results and
+    // the database call helpers themselves
+    let db_spec = ProjectionSpec {
+        nodes: &ir.type_nodes,
+        descriptors: &descriptors,
+        alloc_index: plan.alloc_index,
+        raise_index: plan.raise_index,
+        null_cell: null_cell_addr,
+        arg_msg_addr: baked.wrapper.arg,
+        i32_msg_addr: baked.wrapper.i32,
+        field_msg_addr: baked.wrapper.field,
+        raise_kind: 3,
+    };
+    let mut db_projection_functions = Vec::with_capacity(plan.db_projection_indices.len());
+    for &(node_index, _fn_index) in plan.db_projection_indices.iter() {
+        charge_work(budget, 1)?;
+        let function = emit_projection_helper(&db_spec, &ir.type_nodes, node_index)?;
+        let observed = body_bytes(&function);
+        if observed > body_limit {
+            return Err(EmitError::LimitExceeded {
+                code: "B001",
+                limit: body_limit,
+                observed,
+            });
+        }
+        charge_work(budget, observed)?;
+        db_projection_functions.push((plan.projection_type_index, function));
+    }
+    let mut db_call_functions = Vec::with_capacity(plan.db_helpers.len());
+    for (position, &(op, _fn_index)) in plan.db_helpers.iter().enumerate() {
+        charge_work(budget, 1)?;
+        // host import i sits after `raise_error` (import 0)
+        let import_index = 1 + u32::try_from(position)
+            .map_err(|_| EmitError::Internal("database import index overflow"))?;
+        let function = emit_db_call_helper(&plan, op, import_index)?;
+        let observed = body_bytes(&function);
+        if observed > body_limit {
+            return Err(EmitError::LimitExceeded {
+                code: "B001",
+                limit: body_limit,
+                observed,
+            });
+        }
+        charge_work(budget, observed)?;
+        // `(table cell, argument cell) -> cell` shares the runtime type 1
+        db_call_functions.push((1u32, function));
     }
 
     // per-parameter projection helper indices for the wrapper (None = the
@@ -928,6 +881,7 @@ pub(crate) fn emit_compiled_module(
             result_projection: entry.result_projection,
             param_names: &baked.names,
             param_helper: &param_helper,
+            reinit_context: !plan.db_helpers.is_empty(),
         };
         if ir.entry_is_validator {
             super::support::validator::emit_validator_wrapper(inputs)?
@@ -966,6 +920,9 @@ pub(crate) fn emit_compiled_module(
         extra_types,
         heap_base: workspace.layout.heap_base,
         layout: workspace.layout,
+        db_imports,
+        db_projection_functions,
+        db_call_functions,
     };
     let (bytes, code_len) = assemble(&image)?;
     if code_len > CODE_BUDGET_BYTES {

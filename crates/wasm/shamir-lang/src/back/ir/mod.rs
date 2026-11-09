@@ -14,7 +14,7 @@ pub(crate) use module::{
     TypeNodeKind,
 };
 pub(crate) use ops::{
-    cell_tag, inst_result_kind, ArithOp, BlockKind, CastOp, CmpOp, FloatOp, InstKind, Terminator,
-    ValueKind,
+    cell_tag, inst_result_kind, ArithOp, BlockKind, CastOp, CmpOp, DbOp, FloatOp, InstKind,
+    Terminator, ValueKind,
 };
 pub(crate) use verifier::verify;

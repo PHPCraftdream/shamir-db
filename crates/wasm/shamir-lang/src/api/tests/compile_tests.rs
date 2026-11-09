@@ -310,24 +310,53 @@ fn compile_accepts_validator_entries() {
 }
 
 #[test]
-fn compile_still_rejects_procedures_with_t007() {
+fn compile_rejects_procedures_at_the_mvp_stage_with_t007() {
     let source = "@entry procedure p(a: i64) -> i64 { return a; }";
-    let options = CompileOptions {
+    // Derivation: the default stage is Mvp, where the checker reports T007 for
+    // a procedure entry (the only diagnostic).
+    let error = compile(source, &default_options()).expect_err("procedure entry is rejected");
+    match error {
+        CompileError::Diagnostics(diagnostics) => {
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].code, "T007");
+        }
+        other => panic!("expected Diagnostics, got {other:?}"),
+    }
+}
+
+fn procedure_options() -> CompileOptions {
+    CompileOptions {
         stage: crate::api::Stage::Procedures,
         ..default_options()
-    };
-    // Derivation: procedures are rejected at the entry-kind gate (T007), not
-    // by the stage switch — both the default and Procedures stages fail.
-    for options in [default_options(), options] {
-        let error = compile(source, &options).expect_err("procedure entry is rejected");
-        match error {
-            CompileError::Diagnostics(diagnostics) => {
-                assert_eq!(diagnostics.len(), 1);
-                assert_eq!(diagnostics[0].code, "T007");
-            }
-            other => panic!("expected Diagnostics, got {other:?}"),
-        }
     }
+}
+
+#[test]
+fn compile_accepts_a_pure_procedure_at_the_procedures_stage() {
+    let source = "@entry procedure p(a: i64) -> i64 { return a; }";
+    let module = compile(source, &procedure_options()).expect("procedure compiles");
+    // Derivation: no database builtin is used, so the module keeps the single
+    // `raise_error` import of the scalar modules.
+    assert_eq!(module.report.import_count, 1);
+}
+
+#[test]
+fn compile_procedure_with_database_calls_imports_the_host_functions() {
+    let source = "@entry procedure p(key: i64) -> i64 {
+         let user: { id: i64, name: string }? = db_get(\"users\", key);
+         let rows: [{ id: i64 }] = db_query(\"users\", null);
+         let stored: { id: i64 } = db_insert(\"users\", { id: key });
+         if (is_null(user)) { return 0; }
+         return stored.id + to_i64(len(rows));
+         }
+";
+    let module = compile(source, &procedure_options()).expect("procedure with db calls compiles");
+    // Derivation: `raise_error` plus one import per used operation
+    // (`db_get`, `db_insert`, `db_query`).
+    assert_eq!(module.report.import_count, 4);
+    // Determinism holds for procedure modules too.
+    let again = compile(source, &procedure_options()).expect("second compile");
+    assert_eq!(module.wasm, again.wasm);
 }
 
 #[test]

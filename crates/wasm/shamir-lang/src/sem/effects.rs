@@ -37,7 +37,7 @@ pub enum BuiltinCategory {
     Pure,
     /// Validator verdict constructor.
     ValidatorCtor,
-    /// Stage-2 database/call builtins; rejected in this milestone.
+    /// Stage-2 database builtins; allowed for procedure entries and helpers.
     Stage2,
 }
 
@@ -156,8 +156,11 @@ pub enum Capability {
     Scalar,
     /// Validators additionally allow verdict constructors.
     Validator,
-    /// Procedures; stage-2 builtins stay rejected in this milestone.
+    /// Procedures additionally allow the stage-2 database builtins.
     Procedure,
+    /// Helpers may use every category; the entry ceiling is enforced on the
+    /// transitive effects reachable from the entry.
+    Helper,
 }
 
 impl Capability {
@@ -165,9 +168,10 @@ impl Capability {
     pub fn permits(self, category: BuiltinCategory) -> bool {
         match category {
             BuiltinCategory::Pure => true,
-            BuiltinCategory::ValidatorCtor => self == Capability::Validator,
-            // Stage-2 builtins are rejected outright in this milestone.
-            BuiltinCategory::Stage2 => false,
+            BuiltinCategory::ValidatorCtor => {
+                self == Capability::Validator || self == Capability::Helper
+            }
+            BuiltinCategory::Stage2 => self == Capability::Procedure || self == Capability::Helper,
         }
     }
 }
@@ -176,6 +180,7 @@ impl Capability {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EffectSet {
     validator_ctors: bool,
+    stage2: bool,
 }
 
 impl EffectSet {
@@ -183,14 +188,16 @@ impl EffectSet {
     pub fn new() -> Self {
         Self {
             validator_ctors: false,
+            stage2: false,
         }
     }
 
-    /// Records one builtin call category; stage-2 calls are rejected before
-    /// recording, so they never become an effect.
+    /// Records one builtin call category.
     pub fn record(&mut self, category: BuiltinCategory) {
-        if category == BuiltinCategory::ValidatorCtor {
-            self.validator_ctors = true;
+        match category {
+            BuiltinCategory::ValidatorCtor => self.validator_ctors = true,
+            BuiltinCategory::Stage2 => self.stage2 = true,
+            BuiltinCategory::Pure => {}
         }
     }
 
@@ -199,8 +206,14 @@ impl EffectSet {
         self.validator_ctors
     }
 
+    /// True iff any stage-2 database builtin was observed.
+    pub fn stage2(self) -> bool {
+        self.stage2
+    }
+
     /// Merges `other` into this set.
     pub fn union(&mut self, other: EffectSet) {
         self.validator_ctors = self.validator_ctors || other.validator_ctors;
+        self.stage2 = self.stage2 || other.stage2;
     }
 }

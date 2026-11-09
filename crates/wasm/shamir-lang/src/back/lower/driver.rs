@@ -1,17 +1,15 @@
 use std::collections::BTreeMap;
 
 use crate::api::CompileLimits;
-use crate::back::ir::{
-    IrBuilder, IrError, IrLimits, IrModule, ParamProjection, RecordField, TypeNode, TypeNodeKind,
-};
+use crate::back::ir::{IrBuilder, IrError, IrLimits, IrModule, ParamProjection, TypeNode};
 use crate::front::budget::CompileBudget;
 use crate::front::EntryKind;
 use crate::front::Module;
-use crate::sem::{TypeData, TypeId, TypedFunction, TypedModule};
+use crate::sem::{TypeData, TypedFunction, TypedModule};
 
 use super::ctx::LowerCtx;
 use super::stmt::lower_stmt;
-use super::types::value_kind;
+use super::types::{node_for, value_kind};
 
 /// Lowers a checked module to typed IR: functions are emitted in
 /// `call_order` (callees first), dead functions are not emitted.
@@ -54,6 +52,7 @@ pub(crate) fn lower(
         field_error_descriptor: None,
         code_error_descriptor: None,
         error_cap_cell: None,
+        type_nodes: Vec::new(),
     };
     for fid in &typed.call_order {
         let function = typed
@@ -79,8 +78,12 @@ pub(crate) fn lower(
     // Structural parameter type nodes (finding 15): interned for the ENTRY's
     // parameters only, patched with the same indexing as the projections
     // patch.
-    let (type_nodes, param_node_lists) =
-        build_type_nodes(typed, limits.max_type_depth, entry_position)?;
+    let (type_nodes, param_node_lists) = build_type_nodes(
+        typed,
+        limits.max_type_depth,
+        entry_position,
+        std::mem::take(&mut ctx.type_nodes),
+    )?;
     for (index, nodes) in param_node_lists.into_iter().enumerate() {
         let function = ir.functions.get_mut(index).ok_or(IrError::Internal(
             "lower: call order exceeds emitted functions",
@@ -121,129 +124,6 @@ fn projection(data: TypeData, as_param: bool) -> ParamProjection {
     }
 }
 
-/// Interns one structural type node by linear scan (first-use order,
-/// deterministic; `TypeNode` derives `PartialEq` through its field vectors).
-fn intern_node(nodes: &mut Vec<TypeNode>, kind: TypeNodeKind) -> Result<u32, IrError> {
-    if let Some(index) = nodes.iter().position(|node| node.kind == kind) {
-        return u32::try_from(index).map_err(|_| IrError::Internal("lower: node index overflow"));
-    }
-    let index = u32::try_from(nodes.len())
-        .map_err(|_| IrError::Internal("lower: type node count overflow"))?;
-    nodes.push(TypeNode { kind });
-    Ok(index)
-}
-
-/// Interns one parameter's structural type into `nodes`, returning the node
-/// index. Iterative post-order walk over an explicit frame stack (no
-/// recursion); depth is capped by `max_type_depth`, which M3 already enforces
-/// at parse time, so exceeding it here is an internal invariant.
-fn node_for(
-    typed: &TypedModule,
-    ty: TypeId,
-    nodes: &mut Vec<TypeNode>,
-    max_depth: usize,
-) -> Result<u32, IrError> {
-    enum Frame {
-        Type(TypeId, usize),
-        Assemble(TypeData, usize),
-    }
-    let mut stack = vec![Frame::Type(ty, 0)];
-    let mut children: Vec<u32> = Vec::new();
-    let missing = || IrError::Internal("lower: missing interned type");
-    while let Some(frame) = stack.pop() {
-        match frame {
-            Frame::Assemble(data, count) => {
-                let taken = children
-                    .len()
-                    .checked_sub(count)
-                    .ok_or(IrError::Internal("lower: type node child underflow"))?;
-                let kind = match data {
-                    TypeData::Optional(_) => {
-                        TypeNodeKind::Optional(*children.get(taken).ok_or(missing())?)
-                    }
-                    TypeData::List(_) => TypeNodeKind::List(*children.get(taken).ok_or(missing())?),
-                    TypeData::Record(index) => {
-                        let shape = typed
-                            .types
-                            .record(index)
-                            .ok_or(IrError::Internal("lower: missing record shape"))?;
-                        // Fields are stored (and emitted here) in name-sorted
-                        // order: the canonical order the lowering uses for the
-                        // record's cell layout.
-                        let fields = shape
-                            .fields
-                            .iter()
-                            .enumerate()
-                            .map(|(field_index, (name, _))| {
-                                let child =
-                                    *children.get(taken + field_index).ok_or_else(missing)?;
-                                Ok(RecordField {
-                                    name: name.clone(),
-                                    ty: child,
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        TypeNodeKind::Record(fields)
-                    }
-                    _ => {
-                        return Err(IrError::Internal(
-                            "lower: container type node without children",
-                        ))
-                    }
-                };
-                children.truncate(taken);
-                let index = intern_node(nodes, kind)?;
-                children.push(index);
-            }
-            Frame::Type(id, depth) => {
-                if depth > max_depth {
-                    return Err(IrError::Internal(
-                        "lower: parameter type depth exceeds max_type_depth",
-                    ));
-                }
-                let data = typed.types.data(id).ok_or_else(missing)?;
-                match data {
-                    TypeData::I32 => children.push(intern_node(nodes, TypeNodeKind::I32)?),
-                    TypeData::I64 => children.push(intern_node(nodes, TypeNodeKind::I64)?),
-                    TypeData::F64 => children.push(intern_node(nodes, TypeNodeKind::F64)?),
-                    TypeData::Bool => children.push(intern_node(nodes, TypeNodeKind::Bool)?),
-                    TypeData::String => children.push(intern_node(nodes, TypeNodeKind::String)?),
-                    TypeData::Bytes => children.push(intern_node(nodes, TypeNodeKind::Bytes)?),
-                    TypeData::Null => children.push(intern_node(nodes, TypeNodeKind::Null)?),
-                    TypeData::Optional(inner) => {
-                        stack.push(Frame::Assemble(data, 1));
-                        stack.push(Frame::Type(inner, depth.saturating_add(1)));
-                    }
-                    TypeData::List(inner) => {
-                        stack.push(Frame::Assemble(data, 1));
-                        stack.push(Frame::Type(inner, depth.saturating_add(1)));
-                    }
-                    TypeData::Record(index) => {
-                        let shape = typed
-                            .types
-                            .record(index)
-                            .ok_or(IrError::Internal("lower: missing record shape"))?;
-                        stack.push(Frame::Assemble(data, shape.fields.len()));
-                        for (_, field_ty) in shape.fields.iter().rev() {
-                            stack.push(Frame::Type(*field_ty, depth.saturating_add(1)));
-                        }
-                    }
-                    TypeData::Error
-                    | TypeData::Validation
-                    | TypeData::Batch
-                    | TypeData::Request
-                    | TypeData::Response => {
-                        return Err(IrError::Internal(
-                            "lower: unsupported type in a parameter type node",
-                        ))
-                    }
-                }
-            }
-        }
-    }
-    children.pop().ok_or_else(missing)
-}
-
 /// Structural type nodes for the ENTRY function's parameters (finding 15).
 /// The wrapper projects only the entry's parameters; helper functions are
 /// never projected at a wire boundary, so their parameters get no nodes —
@@ -253,8 +133,8 @@ fn build_type_nodes(
     typed: &TypedModule,
     max_depth: usize,
     entry: usize,
+    mut nodes: Vec<TypeNode>,
 ) -> Result<(Vec<TypeNode>, Vec<Vec<u32>>), IrError> {
-    let mut nodes = Vec::new();
     let mut lists = vec![Vec::new(); typed.call_order.len()];
     let fid = *typed
         .call_order

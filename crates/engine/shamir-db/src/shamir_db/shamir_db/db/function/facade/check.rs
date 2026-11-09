@@ -2,8 +2,8 @@ use crate::access::{Action, Actor, ResourcePath};
 use crate::shamir_db::shamir_db::{FunctionSource, ShamirDb};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    check_module, check_shamir_source, AdmissionPolicy, CompileOptions, ModuleReport, TierMode,
-    WasmLimits,
+    check_module, check_shamir_source, AdmissionPolicy, CompileOptions, ModuleReport, ShamirStage,
+    TierMode, WasmLimits,
 };
 
 impl ShamirDb {
@@ -37,7 +37,10 @@ impl ShamirDb {
                 check_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),
-                    CompileOptions::default(),
+                    CompileOptions {
+                        stage: ShamirStage::Procedures,
+                        ..CompileOptions::default()
+                    },
                     WasmLimits::default(),
                     optimize,
                 )

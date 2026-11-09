@@ -1,8 +1,13 @@
 use crate::api::Span;
-use crate::back::ir::{cell_tag, ArithOp, EqShape, InstId, InstKind, IrError, ValueKind};
-use crate::sem::{BuiltinId, TypeData, TypeId};
+use crate::back::ir::{
+    cell_tag, ArithOp, DbOp, EqShape, InstId, InstKind, IrError, RecordField, TypeNode,
+    TypeNodeKind, ValueKind,
+};
+use crate::front::ExprId;
+use crate::sem::{BuiltinId, TypeData, TypeId, TypedModule};
 
 use super::ctx::LowerCtx;
+use super::expr::lower_expr;
 
 /// The documented compiler cap on accumulated validation errors; appending
 /// beyond it raises error kind 2 (never a trap or unbounded growth).
@@ -560,4 +565,195 @@ fn append_error(
     )?;
     let list = ctx.builder.append(InstKind::CellPass(new_list), span)?;
     validation_cell(ctx, list, old_stop, span)
+}
+
+/// Interns one structural type node by linear scan (first-use order,
+/// deterministic; `TypeNode` derives `PartialEq` through its field vectors).
+fn intern_node(nodes: &mut Vec<TypeNode>, kind: TypeNodeKind) -> Result<u32, IrError> {
+    if let Some(index) = nodes.iter().position(|node| node.kind == kind) {
+        return u32::try_from(index).map_err(|_| IrError::Internal("lower: node index overflow"));
+    }
+    let index = u32::try_from(nodes.len())
+        .map_err(|_| IrError::Internal("lower: type node count overflow"))?;
+    nodes.push(TypeNode { kind });
+    Ok(index)
+}
+
+/// Interns one parameter's structural type into `nodes`, returning the node
+/// index. Iterative post-order walk over an explicit frame stack (no
+/// recursion); depth is capped by `max_type_depth`, which M3 already enforces
+/// at parse time, so exceeding it here is an internal invariant.
+pub(super) fn node_for(
+    typed: &TypedModule,
+    ty: TypeId,
+    nodes: &mut Vec<TypeNode>,
+    max_depth: usize,
+) -> Result<u32, IrError> {
+    enum Frame {
+        Type(TypeId, usize),
+        Assemble(TypeData, usize),
+    }
+    let mut stack = vec![Frame::Type(ty, 0)];
+    let mut children: Vec<u32> = Vec::new();
+    let missing = || IrError::Internal("lower: missing interned type");
+    while let Some(frame) = stack.pop() {
+        match frame {
+            Frame::Assemble(data, count) => {
+                let taken = children
+                    .len()
+                    .checked_sub(count)
+                    .ok_or(IrError::Internal("lower: type node child underflow"))?;
+                let kind = match data {
+                    TypeData::Optional(_) => {
+                        TypeNodeKind::Optional(*children.get(taken).ok_or(missing())?)
+                    }
+                    TypeData::List(_) => TypeNodeKind::List(*children.get(taken).ok_or(missing())?),
+                    TypeData::Record(index) => {
+                        let shape = typed
+                            .types
+                            .record(index)
+                            .ok_or(IrError::Internal("lower: missing record shape"))?;
+                        // Fields are stored (and emitted here) in name-sorted
+                        // order: the canonical order the lowering uses for the
+                        // record's cell layout.
+                        let fields = shape
+                            .fields
+                            .iter()
+                            .enumerate()
+                            .map(|(field_index, (name, _))| {
+                                let child =
+                                    *children.get(taken + field_index).ok_or_else(missing)?;
+                                Ok(RecordField {
+                                    name: name.clone(),
+                                    ty: child,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        TypeNodeKind::Record(fields)
+                    }
+                    _ => {
+                        return Err(IrError::Internal(
+                            "lower: container type node without children",
+                        ))
+                    }
+                };
+                children.truncate(taken);
+                let index = intern_node(nodes, kind)?;
+                children.push(index);
+            }
+            Frame::Type(id, depth) => {
+                if depth > max_depth {
+                    return Err(IrError::Internal(
+                        "lower: parameter type depth exceeds max_type_depth",
+                    ));
+                }
+                let data = typed.types.data(id).ok_or_else(missing)?;
+                match data {
+                    TypeData::I32 => children.push(intern_node(nodes, TypeNodeKind::I32)?),
+                    TypeData::I64 => children.push(intern_node(nodes, TypeNodeKind::I64)?),
+                    TypeData::F64 => children.push(intern_node(nodes, TypeNodeKind::F64)?),
+                    TypeData::Bool => children.push(intern_node(nodes, TypeNodeKind::Bool)?),
+                    TypeData::String => children.push(intern_node(nodes, TypeNodeKind::String)?),
+                    TypeData::Bytes => children.push(intern_node(nodes, TypeNodeKind::Bytes)?),
+                    TypeData::Null => children.push(intern_node(nodes, TypeNodeKind::Null)?),
+                    TypeData::Optional(inner) => {
+                        stack.push(Frame::Assemble(data, 1));
+                        stack.push(Frame::Type(inner, depth.saturating_add(1)));
+                    }
+                    TypeData::List(inner) => {
+                        stack.push(Frame::Assemble(data, 1));
+                        stack.push(Frame::Type(inner, depth.saturating_add(1)));
+                    }
+                    TypeData::Record(index) => {
+                        let shape = typed
+                            .types
+                            .record(index)
+                            .ok_or(IrError::Internal("lower: missing record shape"))?;
+                        stack.push(Frame::Assemble(data, shape.fields.len()));
+                        for (_, field_ty) in shape.fields.iter().rev() {
+                            stack.push(Frame::Type(*field_ty, depth.saturating_add(1)));
+                        }
+                    }
+                    TypeData::Error
+                    | TypeData::Validation
+                    | TypeData::Batch
+                    | TypeData::Request
+                    | TypeData::Response => {
+                        return Err(IrError::Internal(
+                            "lower: unsupported type in a parameter type node",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+    children.pop().ok_or_else(missing)
+}
+
+/// The stage-2 database operation of a direct DB builtin, `None` otherwise.
+pub(crate) fn db_op_of(builtin: BuiltinId) -> Option<DbOp> {
+    match builtin {
+        BuiltinId::DbGet => Some(DbOp::Get),
+        BuiltinId::DbInsert => Some(DbOp::Insert),
+        BuiltinId::DbQuery => Some(DbOp::Query),
+        _ => None,
+    }
+}
+
+/// Lowers a direct database builtin call: the table cell and the boxed
+/// second argument are spilled like the validator constructor arguments (a
+/// later argument may open blocks), then reloaded in the block the lowering
+/// ends in.
+pub(crate) fn lower_db_builtin(
+    ctx: &mut LowerCtx,
+    id: ExprId,
+    op: DbOp,
+    arguments: &[ExprId],
+    span: Span,
+) -> Result<InstId, IrError> {
+    let (Some(&table), Some(&second)) = (arguments.first(), arguments.get(1)) else {
+        return Err(IrError::Internal("lower: database builtin arity mismatch"));
+    };
+    lower_expr(ctx, table)?;
+    let table_slot = ctx.builder.declare_local(ValueKind::I32)?;
+    ctx.builder
+        .append(InstKind::LocalSet(table_slot), ctx.expr_span(table))?;
+    let value = lower_expr(ctx, second)?;
+    let second_ty = ctx.expr_type(second)?;
+    let boxed = to_slot(ctx, second_ty, value, ctx.expr_span(second))?;
+    // LocalSet reads the immediately preceding instruction: re-yield the
+    // boxed cell pointer so it is that instruction.
+    ctx.builder
+        .append(InstKind::CellPass(boxed), ctx.expr_span(second))?;
+    let arg_slot = ctx.builder.declare_local(ValueKind::I32)?;
+    ctx.builder
+        .append(InstKind::LocalSet(arg_slot), ctx.expr_span(second))?;
+    let table_cell = ctx.builder.append(InstKind::LocalGet(table_slot), span)?;
+    let arg_cell = ctx.builder.append(InstKind::LocalGet(arg_slot), span)?;
+    let result_ty = ctx.expr_type(id)?;
+    lower_db_call(ctx, op, table_cell, arg_cell, result_ty, span)
+}
+
+/// Lowers one direct database call. `table` and `arg` are cell pointers that
+/// live in the block the lowering ends in; the result node is the structural
+/// type of the call expression (the contextual type the checker resolved).
+pub(crate) fn lower_db_call(
+    ctx: &mut LowerCtx,
+    op: DbOp,
+    table: InstId,
+    arg: InstId,
+    result_ty: TypeId,
+    span: Span,
+) -> Result<InstId, IrError> {
+    let max_depth = ctx.limits.max_type_depth;
+    let result = node_for(ctx.typed, result_ty, &mut ctx.type_nodes, max_depth)?;
+    ctx.builder.append(
+        InstKind::DbCall {
+            op,
+            table,
+            arg,
+            result,
+        },
+        span,
+    )
 }

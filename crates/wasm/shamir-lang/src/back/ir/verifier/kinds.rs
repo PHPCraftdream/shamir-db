@@ -306,6 +306,10 @@ fn check_inst_kinds(
             )?;
             want(kind(*count), ValueKind::I32, String::from("count operand"))?;
         }
+        InstKind::DbCall { table, arg, .. } => {
+            want(kind(*table), ValueKind::I32, String::from("table operand"))?;
+            want(kind(*arg), ValueKind::I32, String::from("argument operand"))?;
+        }
         InstKind::CellElemPtr { base, index } | InstKind::CellSlot { base, index } => {
             want(kind(*base), ValueKind::I32, String::from("base operand"))?;
             want(kind(*index), ValueKind::I32, String::from("index operand"))?;
