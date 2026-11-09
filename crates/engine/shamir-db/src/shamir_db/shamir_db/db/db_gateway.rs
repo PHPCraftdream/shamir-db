@@ -9,6 +9,7 @@ use crate::{
     shamir_db::shamir_db::ShamirDb,
 };
 use async_trait::async_trait;
+use shamir_query_types::batch::BatchTreeVisitor;
 use std::sync::Arc;
 
 /// [`DbGateway`] implementation that routes through [`ShamirDb::execute`].
@@ -18,11 +19,12 @@ use std::sync::Arc;
 ///
 /// # Re-entrancy note
 ///
-/// For this slice functions are invoked standalone (not from within an
-/// `execute` call), so routing back through `execute` is safe. When
-/// functions are later invoked *as batch ops*, the gateway must inherit
-/// the batch's transaction instead of opening a new `execute` — otherwise
-/// it would deadlock on the batch planner.
+/// This gateway is created only for function invocations. `execute` rejects
+/// any `Call` in the request tree before dispatch: invoking a function from
+/// here would create a fresh `FnCtx` and reset the active call stack, depth,
+/// and fuel accounting. The batch executor independently rejects `Call` ops
+/// inside transactional batches. Gateway operations execute independently;
+/// they do not inherit an enclosing transaction.
 pub(super) struct FacadeDbGateway {
     pub(super) shamir: ShamirDb,
     pub(super) db_name: String,
@@ -265,6 +267,14 @@ impl DbGateway for FacadeDbGateway {
                 message: format!("execute: request decode error: {e}"),
                 source: Box::new(e),
             })?;
+        if BatchTreeVisitor::new(&req.queries)
+            .any(|visit| matches!(&visit.entry.op, BatchOp::Call(_)))
+        {
+            return Err(DbGatewayError::Execution(
+                "execute: Call operations are not supported through a function database gateway"
+                    .to_string(),
+            ));
+        }
         let response = self
             .shamir
             .execute_as(self.actor.clone(), &self.db_name, &req)
