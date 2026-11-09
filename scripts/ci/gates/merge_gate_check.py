@@ -53,6 +53,7 @@ REQUIRED_JOBS = [
     "fast",
     "fmt",
     "clippy",
+    "wasm32-guest-check",
     "test-build",
     "test",
     "integration",
