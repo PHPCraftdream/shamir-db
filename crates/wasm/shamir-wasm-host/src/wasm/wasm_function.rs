@@ -382,13 +382,26 @@ impl WasmFunction {
         engine.validate_limits(&limits)?;
         let wasm = wasm_or_cwasm_bytes.to_vec();
         let gate = Arc::clone(&engine);
-        run_gated_compile(&gate, &policy, move || {
+        run_gated_compile(&gate, &policy, move |_permit| {
             let report = admit_module(&wasm, &policy)?;
             let function =
                 Self::from_sanitized(engine, wasm.into(), limits, mode, "WASM compile error")?;
             Ok((function, report))
         })
         .await
+    }
+
+    /// Assembles a function from already-admitted bytes WITHOUT acquiring a
+    /// compile-gate permit: the shamir source service owns the single permit
+    /// and calls this inside its gated closure. Same pipeline as the inner
+    /// half of [`Self::from_binary_admitted_blocking`].
+    pub(in crate::wasm) fn from_sanitized_ungated(
+        engine: Arc<WasmEngine>,
+        wasm: Arc<[u8]>,
+        limits: WasmLimits,
+        mode: TierMode,
+    ) -> FnResult<Self> {
+        Self::from_sanitized(engine, wasm, limits, mode, "shamir compile error")
     }
 
     /// The compilation tier the function's live slot is resident on.

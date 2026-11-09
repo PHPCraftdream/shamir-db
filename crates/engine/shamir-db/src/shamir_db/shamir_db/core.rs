@@ -36,6 +36,9 @@ pub enum FunctionSource<'a> {
     Wasm(&'a [u8]),
     /// Rust source code to compile.
     Source(&'a str),
+    /// `shamir` language source, compiled in-process by the host source
+    /// service (`lang = "shamir"`; no external toolchain).
+    Shamir(&'a str),
 }
 
 /// The caller-holds-proof newtype for `replication_control_lock` (round 5,

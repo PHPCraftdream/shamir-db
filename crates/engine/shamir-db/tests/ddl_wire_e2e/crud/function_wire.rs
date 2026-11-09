@@ -206,14 +206,14 @@ async fn alter_changes_described_mode() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn create_lang_shamir_is_rejected() {
+async fn create_lang_shamir_with_wasm_payload_is_rejected() {
     let db = setup_db().await;
     let wasm = accept_wasm();
     let mut b = Batch::new();
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("fn_shamir")
+        ddl::create_function("fn_shamir_wasm")
             .wasm(wasm_b64(&wasm))
             .lang("shamir")
             .build()
@@ -222,10 +222,96 @@ async fn create_lang_shamir_is_rejected() {
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
     assert!(
-        err.to_string()
-            .contains("lang \"shamir\" is not available yet"),
+        err.to_string().contains("requires the \"source\" field"),
         "got: {err}"
     );
+}
+
+#[tokio::test]
+async fn create_lang_shamir_compiles_and_succeeds() {
+    let db = setup_db().await;
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        ddl::create_function("fn_shamir")
+            .source("@entry scalar five() -> i64 { return 5; }")
+            .lang("shamir")
+            .build()
+            .expect("valid create function"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let resp = db.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
+    assert_eq!(expect_str(&rec, "created_function"), "fn_shamir");
+}
+
+#[tokio::test]
+async fn check_lang_shamir_source_reports_and_persists_nothing() {
+    let db = setup_db().await;
+    let before = db.list_functions().await.unwrap();
+
+    let mut b = Batch::new();
+    b.id("ck");
+    b.try_check_function(
+        "op",
+        ddl::check_function()
+            .source("@entry scalar five() -> i64 { return 5; }")
+            .lang("shamir"),
+    )
+    .expect("valid check function");
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let resp = db.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
+
+    assert!(matches!(rec["ok"], QueryValue::Bool(true)));
+    assert!(expect_int(&rec, "size") > 0);
+    // A check must not persist anything: the catalogue is unchanged.
+    assert_eq!(db.list_functions().await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn create_lang_shamir_compile_error_is_a_positioned_code_string() {
+    let db = setup_db().await;
+    let before = db.list_functions().await.unwrap();
+
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        ddl::create_function("fn_broken")
+            .source("@entry scalar x( -> i64 { }")
+            .lang("shamir")
+            .build()
+            .expect("valid create function"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    // Diagnostics render as `CODE:line:column: message`; the broken token is
+    // on line 1.
+    assert!(err.to_string().contains(":1:"), "got: {err}");
+    assert_eq!(db.list_functions().await.unwrap(), before);
+}
+
+#[tokio::test]
+async fn create_lang_shamir_procedure_entry_is_rejected_with_t007() {
+    let db = setup_db().await;
+    let before = db.list_functions().await.unwrap();
+
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        ddl::create_function("fn_procedure")
+            .source("@entry procedure p() -> i64 { return 1; }")
+            .lang("shamir")
+            .build()
+            .expect("valid create function"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let err = db.execute("testdb", &req).await.unwrap_err();
+    assert!(err.to_string().contains("T007"), "got: {err}");
+    assert_eq!(db.list_functions().await.unwrap(), before);
 }
 
 #[tokio::test]

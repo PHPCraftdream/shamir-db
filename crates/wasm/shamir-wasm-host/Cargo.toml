@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 shamir-types = { path = "../../foundation/shamir-types" }
 shamir-collections = { path = "../../foundation/shamir-collections" }
 shamir-funclib = { path = "../../query/shamir-funclib" }
+shamir-lang = { path = "../shamir-lang" }
 shamir-proc-tree = { path = "../../foundation/shamir-proc-tree" }
 shamir-wasm-admission = { path = "../shamir-wasm-admission" }
 # Lock-free RCU slot holding a function's live compiled form (two-tier swap).

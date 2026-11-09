@@ -1,6 +1,6 @@
 use crate::api::Span;
 use crate::back::ir::{ArithOp, BlockId, CmpOp, InstId, InstKind, IrError, ValueKind};
-use crate::front::{ExprId, ForKind, StatementId, StatementKind};
+use crate::front::{BinaryOp, ExprId, ExprKind, ForKind, StatementId, StatementKind};
 use crate::sem::{TypeData, TypeId};
 
 use super::ctx::{LoopFrame, LowerCtx};
@@ -494,4 +494,210 @@ fn load_item(ctx: &mut LowerCtx, elem: InstId, item_ty: TypeId, span: Span) -> R
         _ => {}
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Block-opening expression lowerings and the cross-block operand-spill
+// mechanism. `?:` conditionals and `&&`/`||` short-circuits open new IR
+// blocks; an operand lowered BEFORE such a construct but consumed AFTER it
+// (by `Call`, `CheckedArith`, `FloatArith`, `Compare`, `BytesCompare`,
+// `StructEq`, `CellElemPtr`, `CellSlot`, `SExtend64`, `RecordCell`) must be
+// spilled to a temp local right after it is lowered and re-loaded in the
+// block the consuming instruction is appended in — the IR verifier requires
+// every operand to live in the same block, strictly earlier.
+// ---------------------------------------------------------------------------
+
+/// Depth guard for the block-opening scan. The parser caps AST depth at
+/// `max_ast_depth` (128), so 255 is never reached by a clean module; past
+/// the guard the scan is conservatively positive.
+const SPILL_SCAN_DEPTH_LIMIT: u32 = 255;
+
+/// True iff the expression subtree contains a block-opening construct
+/// (`?:`, `&&`, `||`): lowering it may move `current_block`.
+pub(super) fn opens_blocks(ctx: &LowerCtx, id: ExprId) -> bool {
+    opens_blocks_at(ctx, id, 0)
+}
+
+fn opens_blocks_at(ctx: &LowerCtx, id: ExprId, depth: u32) -> bool {
+    if depth > SPILL_SCAN_DEPTH_LIMIT {
+        // Conservative: deeper trees are treated as block-opening.
+        return true;
+    }
+    let node = match ctx.module.expression(id) {
+        Some(node) => node,
+        // Conservative: a missing node is treated as block-opening.
+        None => return true,
+    };
+    match &node.kind {
+        ExprKind::Conditional { .. } => true,
+        ExprKind::Binary {
+            op: BinaryOp::And | BinaryOp::Or,
+            ..
+        } => true,
+        ExprKind::Binary { left, right, .. } => {
+            opens_blocks_at(ctx, *left, depth + 1) || opens_blocks_at(ctx, *right, depth + 1)
+        }
+        ExprKind::Group(inner) => opens_blocks_at(ctx, *inner, depth + 1),
+        ExprKind::List(items) => items
+            .iter()
+            .any(|item| opens_blocks_at(ctx, *item, depth + 1)),
+        ExprKind::Record(fields) => {
+            fields
+                .iter()
+                .any(|field| match ctx.module.value_field(*field) {
+                    Some(node) => opens_blocks_at(ctx, node.value, depth + 1),
+                    None => true,
+                })
+        }
+        ExprKind::Unary { operand, .. } => opens_blocks_at(ctx, *operand, depth + 1),
+        ExprKind::Call { target, arguments } => {
+            opens_blocks_at(ctx, *target, depth + 1)
+                || arguments
+                    .iter()
+                    .any(|argument| opens_blocks_at(ctx, *argument, depth + 1))
+        }
+        ExprKind::Field { target, .. } => opens_blocks_at(ctx, *target, depth + 1),
+        ExprKind::Index { target, index } => {
+            opens_blocks_at(ctx, *target, depth + 1) || opens_blocks_at(ctx, *index, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// Spills the value of the IMMEDIATELY PRECEDING instruction into a fresh
+/// local of `kind` and returns its slot. `value` documents the spilled id;
+/// `LocalSet` reads the preceding instruction, so this must be placed
+/// directly after the value's `lower_expr` (before any `convert`, which may
+/// pass the id through without appending anything).
+pub(super) fn spill(
+    ctx: &mut LowerCtx,
+    _value: InstId,
+    kind: ValueKind,
+    span: Span,
+) -> Result<u32, IrError> {
+    let slot = ctx.builder.declare_local(kind)?;
+    ctx.builder.append(InstKind::LocalSet(slot), span)?;
+    Ok(slot)
+}
+
+/// Re-loads a spilled slot in the current block; the `LocalGet` is the
+/// value the consuming instruction references.
+pub(super) fn reload(ctx: &mut LowerCtx, slot: u32, span: Span) -> Result<InstId, IrError> {
+    ctx.builder.append(InstKind::LocalGet(slot), span)
+}
+
+/// Short-circuit `&&`/`||` through a temp local. The join block is opened
+/// LAST (after both arms are filled), so both arms are forward targets and
+/// the branch condition is the lowered left value directly (no temp
+/// round-trip) — `lower_expr(left)` leaves `current_block()` on the
+/// unterminated block the BranchIf terminates.
+pub(super) fn short_circuit(
+    ctx: &mut LowerCtx,
+    is_and: bool,
+    left: ExprId,
+    right: ExprId,
+    span: Span,
+) -> Result<InstId, IrError> {
+    let tmp = ctx.builder.declare_local(ValueKind::I32)?;
+    let cond = lower_expr(ctx, left)?;
+    let current = ctx
+        .builder
+        .current_block()
+        .ok_or(IrError::Internal("lower: short-circuit outside a block"))?;
+    let region = ctx.block_region();
+    let eval = ctx.builder.open_block(region)?;
+    let constant = ctx.builder.open_block(region)?;
+    ctx.builder.set_current(current)?;
+    if is_and {
+        ctx.builder.terminate_branch_if(cond, eval, constant)?;
+    } else {
+        ctx.builder.terminate_branch_if(cond, constant, eval)?;
+    }
+    ctx.builder.set_current(eval)?;
+    let _rhs = lower_expr(ctx, right)?;
+    ctx.builder
+        .append(InstKind::LocalSet(tmp), ctx.expr_span(right))?;
+    // The join does not exist yet; patch after it is created. The holder is
+    // wherever the right operand left the current block (a nested arm may
+    // have terminated `eval` itself); captured before the pending terminate
+    // clears `current`.
+    let eval_join = ctx.builder.current_block().ok_or(IrError::Internal(
+        "lower: short-circuit without a pending arm",
+    ))?;
+    ctx.builder.terminate_pending_branch()?;
+    ctx.builder.set_current(constant)?;
+    let _value = ctx
+        .builder
+        .append(InstKind::ConstI32(if is_and { 0 } else { 1 }), span)?;
+    ctx.builder.append(InstKind::LocalSet(tmp), span)?;
+    ctx.builder.terminate_pending_branch()?;
+    let join = ctx.builder.open_block(region)?;
+    ctx.builder.patch_pending_branch(eval_join, join)?;
+    ctx.builder.patch_pending_branch(constant, join)?;
+    ctx.builder.set_current(join)?;
+    ctx.builder.append(InstKind::LocalGet(tmp), span)
+}
+
+pub(super) fn lower_conditional(
+    ctx: &mut LowerCtx,
+    id: ExprId,
+    condition: ExprId,
+    then_value: ExprId,
+    else_value: ExprId,
+    span: Span,
+) -> Result<InstId, IrError> {
+    let result_ty = ctx.expr_type(id)?;
+    let data = ctx.type_data(result_ty)?;
+    let tmp = ctx.builder.declare_local(value_kind(data))?;
+    let cond = lower_expr(ctx, condition)?;
+    let current = ctx
+        .builder
+        .current_block()
+        .ok_or(IrError::Internal("lower: conditional outside a block"))?;
+    let region = ctx.block_region();
+    let then_b = ctx.builder.open_block(region)?;
+    let else_b = ctx.builder.open_block(region)?;
+    ctx.builder.set_current(current)?;
+    ctx.builder.terminate_branch_if(cond, then_b, else_b)?;
+    ctx.builder.set_current(then_b)?;
+    let then_inst = lower_expr(ctx, then_value)?;
+    // The converted value is the last appended inst; LocalSet reads it.
+    convert(
+        ctx,
+        result_ty,
+        ctx.expr_type(then_value)?,
+        then_inst,
+        ctx.expr_span(then_value),
+    )?;
+    ctx.builder
+        .append(InstKind::LocalSet(tmp), ctx.expr_span(then_value))?;
+    // The join does not exist yet; patch after both arms are filled so the
+    // nested arms' own blocks are created first (all targets stay forward).
+    // The holder is wherever the arm left the current block — a nested
+    // conditional may have terminated `then_b` itself; captured before the
+    // pending terminate clears `current`.
+    let then_join = ctx.builder.current_block().ok_or(IrError::Internal(
+        "lower: conditional without a pending arm",
+    ))?;
+    ctx.builder.terminate_pending_branch()?;
+    ctx.builder.set_current(else_b)?;
+    let else_inst = lower_expr(ctx, else_value)?;
+    convert(
+        ctx,
+        result_ty,
+        ctx.expr_type(else_value)?,
+        else_inst,
+        ctx.expr_span(else_value),
+    )?;
+    ctx.builder
+        .append(InstKind::LocalSet(tmp), ctx.expr_span(else_value))?;
+    let else_join = ctx.builder.current_block().ok_or(IrError::Internal(
+        "lower: conditional without a pending arm",
+    ))?;
+    ctx.builder.terminate_pending_branch()?;
+    let join = ctx.builder.open_block(region)?;
+    ctx.builder.patch_pending_branch(then_join, join)?;
+    ctx.builder.patch_pending_branch(else_join, join)?;
+    ctx.builder.set_current(join)?;
+    ctx.builder.append(InstKind::LocalGet(tmp), span)
 }

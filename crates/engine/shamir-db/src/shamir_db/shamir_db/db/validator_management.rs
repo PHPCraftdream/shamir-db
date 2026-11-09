@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    compile_rust_source_blocking, AdmissionPolicy, FunctionError, TierMode, WasmFunction,
-    WasmLimits,
+    compile_rust_source_blocking, create_shamir_source, AdmissionPolicy, CompileOptions,
+    FunctionError, ModuleReport, TierMode, WasmFunction, WasmLimits,
 };
 use shamir_engine::validator::{
     NativeRecordValidator, RecordFields, RecordValidator, Validation, ValidatorBinding,
@@ -202,6 +202,29 @@ impl ShamirDb {
             .await
     }
 
+    /// Compile `shamir` language source and register the validator.
+    pub async fn create_validator_from_shamir_source(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+    ) -> DbResult<RecordId> {
+        self.create_validator_inner(name, FunctionSource::Shamir(source), replace, Actor::System)
+            .await
+    }
+
+    /// Like [`create_validator_from_shamir_source`] but with an explicit [`Actor`].
+    pub async fn create_validator_from_shamir_source_as(
+        &self,
+        name: &str,
+        source: &str,
+        replace: bool,
+        actor: Actor,
+    ) -> DbResult<RecordId> {
+        self.create_validator_inner(name, FunctionSource::Shamir(source), replace, actor)
+            .await
+    }
+
     /// Internal: compile/validate WASM, persist, register.
     async fn create_validator_inner(
         &self,
@@ -210,6 +233,10 @@ impl ShamirDb {
         replace: bool,
         actor: Actor,
     ) -> DbResult<RecordId> {
+        // `validator_ready` is Some for shamir sources: the service already
+        // built and gate-checked the validator function, so rebuilding from
+        // bytes would compile twice under two gate acquisitions.
+        let mut validator_ready: Option<(WasmFunction, ModuleReport)> = None;
         let (wasm, lang_tag, source_str) = match source {
             FunctionSource::Wasm(bytes) => (bytes.to_vec(), "wasm", None),
             FunctionSource::Source(src) => {
@@ -237,18 +264,49 @@ impl ShamirDb {
                     })?;
                 (compiled, "rust", Some(src.to_string()))
             }
+            FunctionSource::Shamir(src) => {
+                // Compiling shamir source is in-process, but the same
+                // WasmCompiler Execute gate applies (mirrors the
+                // function_management check).
+                self.authorize_access(&actor, &ResourcePath::WasmCompiler, Action::Execute)
+                    .await
+                    .map_err(|e| DbError::Validation(e.to_string()))?;
+                // Reject oversize source before compiling.
+                let limit = self.wasm_engine.admission_limits().max_source_bytes;
+                if src.len() > limit {
+                    return Err(DbError::Validation(format!(
+                        "source is {} bytes, limit is {}",
+                        src.len(),
+                        limit
+                    )));
+                }
+                let (wf, wasm, report) = create_shamir_source(
+                    self.wasm_engine.clone(),
+                    src.to_string(),
+                    CompileOptions::default(),
+                    WasmLimits::default(),
+                    TierMode::Auto,
+                )
+                .await
+                .map_err(|e| DbError::Validation(e.to_string()))?;
+                validator_ready = Some((wf, report));
+                (wasm, "shamir", Some(src.to_string()))
+            }
         };
 
         // Validate the wasm by compiling it (on the blocking thread pool).
-        let (wf, report) = WasmFunction::from_binary_admitted_blocking(
-            self.wasm_engine.clone(),
-            &wasm,
-            WasmLimits::default(),
-            TierMode::Auto,
-            AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
-        )
-        .await
-        .map_err(|e| DbError::Validation(e.to_string()))?;
+        let (wf, report) = match validator_ready {
+            Some(pair) => pair,
+            None => WasmFunction::from_binary_admitted_blocking(
+                self.wasm_engine.clone(),
+                &wasm,
+                WasmLimits::default(),
+                TierMode::Auto,
+                AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
+            )
+            .await
+            .map_err(|e| DbError::Validation(e.to_string()))?,
+        };
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
 

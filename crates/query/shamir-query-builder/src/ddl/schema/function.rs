@@ -88,9 +88,9 @@ impl CreateFunction {
         self
     }
 
-    /// Override the language (`"wasm" | "rust"`). Absent: inferred from
-    /// which of `wasm`/`source` is supplied. `"shamir"` is reserved and
-    /// rejected server-side.
+    /// Override the language (`"wasm" | "rust" | "shamir"`). Absent: inferred
+    /// from which of `wasm`/`source` is supplied. `"shamir"` takes `source`
+    /// and is compiled in-process by the server.
     ///
     /// ```text
     /// create_function("f").wasm("AQ==").lang("wasm")

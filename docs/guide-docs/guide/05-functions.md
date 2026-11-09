@@ -289,8 +289,27 @@ const { wasm, source, hash } = resp.results.e.records[0];
 
 `create_function` принимает необязательный `lang: 'wasm' | 'rust' | 'shamir'`
 (без него выводится: `wasm`, если прислан модуль `wasm`, `rust` — если
-прислан `source`); `'shamir'` зарезервирован — сервер пока отвергает его.
+прислан `source`). `lang: 'shamir'` берёт поле `source` и компилирует
+исходник встроенным компилятором языка `shamir` внутри сервера (внешний
+тулчейн не нужен); вместе с полем `wasm` он отвергается. Компиляция идёт
+под тем же ограничением одновременных сборок, что и остальные, с таймаутом
+10 секунд, и итоговый модуль проходит ту же адмиссию. Ошибка компиляции
+приходит одной детерминированной строкой: стабильный код, затем
+`строка:столбец` и сообщение (несколько диагностик — по строке на каждую).
 Там же задаётся необязательный `optimize` (см. выше).
+
+```ts
+await Batch.create('create-shamir-fn')
+  .add('c', ddl.createFunction('five', {
+    source: '@entry scalar five() -> i64 { return 5; }',
+    lang: 'shamir',
+  }))
+  .execute(client, 'my_app');
+```
+
+Точка входа обязательна и одна: `@entry scalar` (чистое вычисление) или
+`@entry validator` (получает `record` и `old_record`, возвращает
+`Validation`). Процедуры (`@entry procedure`) пока отвергаются кодом `T007`.
 
 ### Сухая проверка: `check_function`
 
@@ -373,7 +392,7 @@ GC, exceptions, tail calls, memory64, multi-memory, component model.
 ||---|---|
 || `describe_function` | `Read` на функцию (legacy-строки открыты, как все остальные права на них) |
 || `export_function` | `Write` на функцию (байты выдают логику; legacy-строки без режима открыты — это заявлено открыто, а не спрятано) |
-|| `check_function` | `Create` на `FunctionNamespace`, плюс `Execute` на `WasmCompiler` для Rust-исходника (`lang = rust`), как у `create_function` (сухая проверка запускает компилятор) |
+|| `check_function` | `Create` на `FunctionNamespace`, плюс `Execute` на `WasmCompiler` для исходника (`lang = rust` и `lang = shamir`), как у `create_function` (сухая проверка запускает компилятор) |
 || `alter_function` | `Write` на функцию |
 
 По проводу эти операции — административные, как `create_function` и `drop_function`: сервер принимает их

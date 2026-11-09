@@ -7,6 +7,9 @@
 //! * [`WasmFunction`] — the [`ShamirFunction`] implementation (`wasm_function`).
 //! * [`admit_module`] / [`check_module`] / [`AdmissionPolicy`] / [`AdmissionLimits`] / [`ModuleReport`] /
 //!   [`AdmissionError`] / [`ModuleHash`] — module admission (`admission`).
+//! * [`create_shamir_source`] / [`check_shamir_source`] — the shamir source
+//!   service: compile `shamir-lang` source under one gate permit
+//!   (`admission::gate::lang_compile`).
 //! * [`verify_wasm_module`] / [`SANCTIONED_HOST_IMPORTS`] — import allowlist verification.
 
 mod admission;
@@ -17,8 +20,9 @@ mod fuel;
 mod wasm_function;
 
 pub use admission::{
-    admit_module, check_module, verify_wasm_module, AdmissionError, AdmissionLimits,
-    AdmissionPolicy, ModuleHash, ModuleReport, SANCTIONED_HOST_IMPORTS,
+    admit_module, check_module, check_shamir_source, create_shamir_source, verify_wasm_module,
+    AdmissionError, AdmissionLimits, AdmissionPolicy, ModuleHash, ModuleReport,
+    SANCTIONED_HOST_IMPORTS,
 };
 pub use engine::{
     Tier, TierMode, TierOptions, TierReport, TierStats, UpgradeState, WasmEngine,

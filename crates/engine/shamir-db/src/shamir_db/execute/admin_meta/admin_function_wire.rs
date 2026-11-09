@@ -74,17 +74,20 @@ fn upgrade_state_name(state: UpgradeState) -> &'static str {
 /// `lang` validation shared by create/check (PROC-0 D6 rule 1): the explicit
 /// `lang` must name the supplied payload field. `payload` is `Some("wasm")`,
 /// `Some("source")` or `None`; callers only invoke this against a supplied
-/// field, so `None` never reaches the mismatch arms.
+/// field, so `None` never reaches the mismatch arms. `lang = "shamir"` names
+/// the source field — compiled in-process by the host shamir service.
 pub(super) fn validate_lang(lang: Option<&str>, payload: Option<&str>) -> Result<(), String> {
     match lang {
-        Some("shamir") => Err("lang \"shamir\" is not available yet".to_string()),
+        Some("shamir") if payload == Some("wasm") => Err(
+            "lang \"shamir\" requires the \"source\" field, but \"wasm\" was supplied".to_string(),
+        ),
         Some("wasm") if payload == Some("source") => Err(
             "lang \"wasm\" requires the \"wasm\" field, but \"source\" was supplied".to_string(),
         ),
         Some("rust") if payload == Some("wasm") => Err(
             "lang \"rust\" requires the \"source\" field, but \"wasm\" was supplied".to_string(),
         ),
-        Some(v) if v != "wasm" && v != "rust" => Err(format!(
+        Some(v) if v != "wasm" && v != "rust" && v != "shamir" => Err(format!(
             "unknown lang \"{v}\" (must be \"wasm\", \"rust\" or \"shamir\")"
         )),
         _ => Ok(()),
@@ -228,8 +231,16 @@ impl ShamirAdminExecutor {
         } else {
             // `spec.source` is Some: the exactly-one guard above proves it.
             let src = spec.source.as_deref().expect("source present");
+            // Lang-aware dispatch: shamir compiles in-process through the
+            // check-only service path.
+            let shamir = spec.lang.as_deref() == Some("shamir");
+            let source = if shamir {
+                FunctionSource::Shamir(src)
+            } else {
+                FunctionSource::Source(src)
+            };
             self.shamir
-                .check_function_as(self.actor.clone(), FunctionSource::Source(src), optimize)
+                .check_function_as(self.actor.clone(), source, optimize)
                 .await
                 .map_err(facade_err)?
         };
