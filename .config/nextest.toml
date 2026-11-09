@@ -172,6 +172,14 @@ test-group = "fsync-heavy"
 filter = "package(shamir-server) and binary(e2e) and test(/^(http_rest|token_matrix)::/)"
 test-group = "http-rest-e2e"
 
+# The lib tests that boot a real server over loopback (WS and handshake e2e)
+# run next to the launcher tests above and fsync the same volume: in a Windows
+# lib run the launcher test needed 45 s (28 s of boot, then the clean-shutdown
+# flush budget expired) while these 56 tests ran beside it (#1802).
+[[profile.default.overrides]]
+filter = "package(shamir-server) and test(/^tests::engine::connection::(ws|handshake_e2e_tests)::/)"
+test-group = "http-rest-e2e"
+
 [[profile.ci.overrides]]
 filter = "package(shamir-db) and binary(functions)"
 test-group = "wasm-heavy"
@@ -186,6 +194,14 @@ test-group = "fsync-heavy"
 
 [[profile.ci.overrides]]
 filter = "package(shamir-server) and binary(e2e) and test(/^(http_rest|token_matrix)::/)"
+test-group = "http-rest-e2e"
+
+# The lib tests that boot a real server over loopback (WS and handshake e2e)
+# run next to the launcher tests above and fsync the same volume: in a Windows
+# lib run the launcher test needed 45 s (28 s of boot, then the clean-shutdown
+# flush budget expired) while these 56 tests ran beside it (#1802).
+[[profile.ci.overrides]]
+filter = "package(shamir-server) and test(/^tests::engine::connection::(ws|handshake_e2e_tests)::/)"
 test-group = "http-rest-e2e"
 
 # ============================================================================
