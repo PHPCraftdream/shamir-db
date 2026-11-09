@@ -58,6 +58,7 @@ tokio = { version = "1.49.0", features = ["test-util"] }
 # its codec vectors through `shamir-lang::testsupport` (hidden test API);
 # the dev-dependency enables shamir-lang's `testsupport` feature.
 shamir-lang = { path = "../shamir-lang", features = ["testsupport"] }
+shamir-query-builder = { path = "../../query/shamir-query-builder" }
 
 # Bench/A-B only: the Winch and Pulley backends plus env-selected engine strategy
 # (`SHAMIR_WASM_STRATEGY`). Off by default and never enabled by the server build.

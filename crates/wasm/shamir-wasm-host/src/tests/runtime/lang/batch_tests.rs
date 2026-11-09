@@ -10,6 +10,10 @@ use crate::{
     WasmEngine, WasmFunction, WasmLimits,
 };
 use shamir_lang::{compile, CompileOptions};
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
+use shamir_query_builder::write::{doc, insert};
+use shamir_query_builder::ToWire;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 use std::sync::{Arc, Mutex};
@@ -144,41 +148,58 @@ fn assert_codec(error: &FunctionError, marker: &str) {
     );
 }
 
-/// The default `limits` record in serialization order (design section 4).
-fn default_limits() -> QueryValue {
-    map_of(&[
-        ("max_queries", int(50)),
-        ("max_dependency_depth", int(10)),
-        ("max_execution_time_secs", int(30)),
-        ("max_result_size", int(10_485_760)),
-        ("max_nesting_depth", int(4)),
-        ("max_iterations", int(1_000)),
-        ("max_total_queries", int(10_000)),
-        ("max_total_work", int(1_000_000)),
-        ("max_page_size", int(100_000)),
-        ("max_offset", int(1_000_000)),
-    ])
+/// Assert the guest request against the native builder at the decoded-value,
+/// query-order, typed-request, and raw-byte levels.
+fn assert_matches_native_batch(guest_bytes: &[u8], batch: &Batch) -> QueryValue {
+    let native_bytes = batch.to_msgpack().expect("native batch encodes");
+    let native_request = batch
+        .to_request_via_msgpack()
+        .expect("native batch decodes through msgpack");
+    let native_value = QueryValue::from_bytes(&native_bytes).expect("native request decodes");
+    let typed_request_aliases: Vec<&str> =
+        native_request.queries.keys().map(String::as_str).collect();
+    let typed_request_value = native_request
+        .to_query_value()
+        .expect("typed native request converts to QueryValue");
+    let guest_value = QueryValue::from_bytes(guest_bytes).expect("guest request decodes");
+
+    assert_eq!(
+        native_value, typed_request_value,
+        "native bytes match typed DTO"
+    );
+    assert_eq!(guest_value, native_value, "guest and native DTO values");
+    assert_eq!(
+        query_aliases(&native_value),
+        typed_request_aliases,
+        "native serialized query order matches typed BatchRequest"
+    );
+    assert_eq!(
+        query_aliases(&guest_value),
+        typed_request_aliases,
+        "guest query insertion order matches native Batch order"
+    );
+
+    // rmp-serde's QueryValue::Int calls write_sint and the guest DTO encoder
+    // chooses shortest-width MessagePack integers. Confirmed containers use
+    // write_map_len (fixmap < 16, map16 through u16::MAX, then map32); flattened
+    // QueryEntry serialization buffers its fields and writes that counted map
+    // header at end. These operations and all fixture maps are below 16, so
+    // raw byte equality is meaningful and intentionally asserted here.
+    assert_eq!(
+        guest_bytes, native_bytes,
+        "guest and native MessagePack bytes"
+    );
+    guest_value
 }
 
-fn select_all() -> QueryValue {
-    map_of(&[
-        (
-            "items",
-            QueryValue::List(vec![map_of(&[("type", text("all"))])]),
-        ),
-        ("distinct", QueryValue::Bool(false)),
-    ])
-}
-
-fn plan(id: QueryValue, queries: QueryValue) -> QueryValue {
-    map_of(&[
-        ("id", id),
-        ("transactional", QueryValue::Bool(false)),
-        ("queries", queries),
-        ("return_all", QueryValue::Bool(true)),
-        ("limits", default_limits()),
-        ("result_encoding", text("name")),
-    ])
+fn query_aliases(value: &QueryValue) -> Vec<&str> {
+    let QueryValue::Map(fields) = value else {
+        panic!("batch request is a map");
+    };
+    let Some(QueryValue::Map(queries)) = fields.get("queries") else {
+        panic!("batch request contains a queries map");
+    };
+    queries.keys().map(String::as_str).collect()
 }
 
 const READ_ONE: &str = "@entry procedure users() -> i64 {\n\
@@ -203,37 +224,18 @@ async fn batch_read_sends_the_exact_dto_and_projects_the_rows() {
     let requests = db.requests.lock().expect("requests lock");
     assert_eq!(requests.len(), 1);
     let bytes = &requests[0];
-    // derivation: fixmap(6) then the first key `id` (fixstr 2) mapped to nil,
-    // then `transactional` (fixstr 13): the descriptor keeps the DTO order.
+    // The decoded oracle below establishes the complete DTO; retain this small
+    // header pin for the guest's field order at the transport boundary.
     assert_eq!(
         &bytes[..5],
         &[0x86, 0xa2, b'i', b'd', 0xc0],
         "plan record header and id"
     );
     assert_eq!(&bytes[5..7], &[0xad, b't']);
-    let decoded = QueryValue::from_bytes(bytes).expect("request decodes");
-    // derivation: one equality on `role` (a single predicate field is a bare
-    // `eq`, not an `and`); `from` is the bare table string (repo main).
-    let expected = plan(
-        QueryValue::Null,
-        map_of(&[(
-            "u",
-            map_of(&[
-                ("from", text("users")),
-                ("select", select_all()),
-                (
-                    "where",
-                    map_of(&[
-                        ("op", text("eq")),
-                        ("field", QueryValue::List(vec![text("role")])),
-                        ("value", text("admin")),
-                    ]),
-                ),
-                ("return_result", QueryValue::Bool(true)),
-            ]),
-        )]),
-    );
-    assert_eq!(decoded, expected);
+
+    let mut native = Batch::new();
+    native.query("u", Query::from("users").where_eq("role", "admin"));
+    assert_matches_native_batch(bytes, &native);
 }
 
 #[tokio::test]
@@ -260,54 +262,26 @@ async fn batch_with_id_insert_and_two_filters_encodes_every_shape() {
         int(1)
     );
     let requests = db.requests.lock().expect("requests lock");
-    let decoded = QueryValue::from_bytes(&requests[0]).expect("request decodes");
-    let read = |filter: Option<QueryValue>| {
-        let mut fields = vec![("from", text("users")), ("select", select_all())];
-        if let Some(filter) = filter {
-            fields.push(("where", filter));
-        }
-        fields.push(("return_result", QueryValue::Bool(true)));
-        map_of(&fields)
-    };
-    let eq = |field: &str, value: QueryValue| {
-        map_of(&[
-            ("op", text("eq")),
-            ("field", QueryValue::List(vec![text(field)])),
-            ("value", value),
-        ])
-    };
-    // derivation: the record filter lists its fields sorted (name, role)
-    // inside one `and`; a scalar filter is an `eq` on the default `id`; null
-    // adds no `where`; the insert entry holds a one-element `values` list.
-    let expected = plan(
-        text("req-1"),
-        map_of(&[
-            (
-                "a",
-                map_of(&[
-                    ("insert_into", text("users")),
-                    (
-                        "values",
-                        QueryValue::List(vec![map_of(&[("name", text("Zed"))])]),
-                    ),
-                    ("return_result", QueryValue::Bool(true)),
-                ]),
-            ),
-            (
-                "b",
-                read(Some(map_of(&[
-                    ("op", text("and")),
-                    (
-                        "filters",
-                        QueryValue::List(vec![eq("name", text("Zed")), eq("role", text("admin"))]),
-                    ),
-                ]))),
-            ),
-            ("c", read(Some(eq("id", int(7))))),
-            ("d", read(None)),
-        ]),
+    assert_eq!(requests.len(), 1);
+    let mut native = Batch::new();
+    native.id("req-1");
+    native.insert(
+        "a",
+        insert("users").row(
+            doc()
+                .set("name", "Zed")
+                .expect("native insert document builds"),
+        ),
     );
-    assert_eq!(decoded, expected);
+    native.query(
+        "b",
+        Query::from("users")
+            .where_eq("name", "Zed")
+            .where_eq("role", "admin"),
+    );
+    native.query("c", Query::from("users").where_eq("id", 7));
+    native.query("d", Query::from("users"));
+    assert_matches_native_batch(&requests[0], &native);
 }
 
 #[tokio::test]
@@ -400,13 +374,18 @@ async fn queries_keep_the_insertion_order_of_the_builder_calls() {
         .await
         .expect("batch succeeds");
     let requests = db.requests.lock().expect("requests lock");
-    let decoded = QueryValue::from_bytes(&requests[0]).expect("request decodes");
-    let QueryValue::Map(plan) = decoded else {
-        panic!("the request is a map");
-    };
-    let Some(QueryValue::Map(queries)) = plan.get("queries") else {
-        panic!("the request has a queries map");
-    };
-    let aliases: Vec<&str> = queries.keys().map(String::as_str).collect();
-    assert_eq!(aliases, ["zeta", "alpha", "mid"]);
+    assert_eq!(requests.len(), 1);
+    let mut native = Batch::new();
+    native.insert(
+        "zeta",
+        insert("users").row(
+            doc()
+                .set("name", "Zed")
+                .expect("native insert document builds"),
+        ),
+    );
+    native.query("alpha", Query::from("users"));
+    native.query("mid", Query::from("users"));
+    let decoded = assert_matches_native_batch(&requests[0], &native);
+    assert_eq!(query_aliases(&decoded), ["zeta", "alpha", "mid"]);
 }

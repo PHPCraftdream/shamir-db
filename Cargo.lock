@@ -4161,6 +4161,7 @@ dependencies = [
  "shamir-lang",
  "shamir-private-dir",
  "shamir-proc-tree",
+ "shamir-query-builder",
  "shamir-types",
  "shamir-wasm-admission",
  "tempfile",
