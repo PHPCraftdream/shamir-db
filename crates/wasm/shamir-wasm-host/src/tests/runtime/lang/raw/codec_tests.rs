@@ -64,7 +64,8 @@ async fn every_rejected_vector_raises_its_class_marker_in_the_guest() {
 
 /// Shortest-width canonical bytes per value (`derivation:` the encoder's
 /// width table: fixint, uint8, uint16, uint32 for non-negatives up to
-/// `u32::MAX`; fixint, int8, int16, int32 for negatives; int64 otherwise).
+/// `u32::MAX`, uint64 above; fixint, int8, int16, int32 for negatives, int64
+/// below `i32::MIN`).
 const SHORTEST_INTEGERS: [(i64, &str); 22] = [
     (0, "00"),
     (127, "7f"),
@@ -74,8 +75,8 @@ const SHORTEST_INTEGERS: [(i64, &str); 22] = [
     (65_535, "cd ff ff"),
     (65_536, "ce 00 01 00 00"),
     (4_294_967_295, "ce ff ff ff ff"),
-    (4_294_967_296, "d3 00 00 00 01 00 00 00 00"),
-    (i64::MAX, "d3 7f ff ff ff ff ff ff ff"),
+    (4_294_967_296, "cf 00 00 00 01 00 00 00 00"),
+    (i64::MAX, "cf 7f ff ff ff ff ff ff ff"),
     (-1, "ff"),
     (-32, "e0"),
     (-33, "d0 df"),
