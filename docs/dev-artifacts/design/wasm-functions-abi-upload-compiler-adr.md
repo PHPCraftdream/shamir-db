@@ -149,17 +149,25 @@ without the incremental disk cache, so it leaves no entry anywhere.
   in [`shamir-lang-design.md`](shamir-lang-design.md).
 * **Compiler:** the server calls the separate, runtime-free Rust crate `shamir-lang`; its
   compile path scans, parses, type-checks, lowers, verifies, emits wasm through
-  `wasm-encoder`, then self-admits the emitted bytes. Production dependencies are exactly
+  `wasm-encoder`, then self-admits the emitted bytes under `options.admission`. For
+  `create_shamir_source`, the host replaces caller-supplied admission limits with the
+  engine's limits and admits the compiler output a second time under that same
+  engine-derived `AdmissionPolicy::Admission`. The emitter includes the custom section
+  `shamir.origin = shamir-lang`. Production dependencies are exactly
   `shamir-wasm-admission`, pinned `wasm-encoder = "=0.254.2"`, and `thiserror`. This path
   compiles in process and does not invoke `cargo`.
-* **Purity evidence:** `crates/wasm/shamir-lang/src/api/tests/purity_tests.rs` scans the
-  production sources with the token-based scanner in `purity_scanner.rs` (comments, strings
-  and raw strings are skipped). It rejects aliases of `std`/`core`/`alloc`, every
-  `extern crate`, the modules `process`, `fs`, `net`, `env` and `thread` under any import
-  spelling (path, grouped, renamed, glob, absolute), `Command::new`, and the `env!` and
-  `option_env!` macros, with one negative test per bypass family; a separate check compares
-  the exact production dependency names with the three above. No clippy
-  `disallowed-methods` entry or rust-guard rule enforces this constraint.
+* **Purity evidence:** this is an explicit deviation from the earlier decision for a
+  structural no-process rule: the implemented guard is a token-scan test in
+  `crates/wasm/shamir-lang/src/api/tests/purity_tests.rs`, which scans the crate's own
+  `src` tree while excluding `tests` and `testsupport`. The scanner skips comments and
+  strings; it rejects aliases of `std`/`core`/`alloc`, every `extern crate`, imports and
+  paths to `process`, `fs`, `net`, `env` and `thread` under those roots (including grouped,
+  renamed, glob and absolute imports/re-exports), `Command::new`, and the `env!` and
+  `option_env!` macros. A separate test compares only the names in `[dependencies]` with
+  the designed three; it does not check target-specific or build dependencies, nor
+  re-exports from dependencies. The source scan does not inspect dependency internals, so
+  this is not a whole-transitive-purity guarantee. No clippy `disallowed-methods` entry or
+  rust-guard purity rule enforces this constraint.
 * **Crash safety:** a stack overflow aborts the server and `spawn_blocking` does not catch
   it. Depth caps are enforced inside the recursive-descent parser and the type checker, and
   the compiler runs on a dedicated thread with a fixed stack size. Criteria: deep-nesting
@@ -171,14 +179,14 @@ without the incremental disk cache, so it leaves no entry anywhere.
   into each module and counts against the size caps.
 * **Async host calls** need no source transformation: the imports are already async
   wasmtime imports that suspend the guest fiber.
-* **Staging:** `Stage::Mvp` (the default) supports scalar and validator entries. The
-  implemented `Stage::Procedures` supports procedure entries with direct `db_get`,
-  `db_insert` and `db_query`, and typed `batch_read`/`batch_insert` requests through
-  `db_execute` and typed response projections. Direct database results and response
-  projections require contextual result types (`T010`); the guest emitter preserves query
-  insertion order. Source-level `call`, `$query`/`after` result references, and update/delete
-  builder operations remain design-only (PROC-2c). Optimization passes are out of scope
-  (the tiers do that).
+* **Staging:** standalone `CompileOptions::default()` selects `Stage::Mvp`, supporting scalar
+  and validator entries. Database create and check explicitly select `Stage::Procedures`,
+  which supports procedure entries with direct `db_get`, `db_insert` and `db_query`, and
+  typed `batch_read`/`batch_insert` requests through `db_execute` and typed response
+  projections. Direct database results and response projections require contextual result
+  types (`T010`); the guest emitter preserves query insertion order. Source-level `call`,
+  `$query`/`after` result references, and update/delete builder operations remain design-only
+  (PROC-2c). Optimization passes are out of scope (the tiers do that).
 * The Rust-source path stays behind `Execute` on `WasmCompiler`, whose default mode is
   0o755, i.e. open to everyone: the residual risk in
   `wasm-untrusted-compile-sanitization-decision.md` **stays fully open by default for
