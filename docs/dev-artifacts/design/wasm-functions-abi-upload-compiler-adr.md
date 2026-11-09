@@ -141,30 +141,52 @@ without the incremental disk cache, so it leaves no entry anywhere.
 
 ## D4. In-process language and compiler
 
+**Implementation status (D4 only):** M1–M8 implementation and supporting tests are present in the source. This status note records the implementation; it does not claim that tests were run.
+
 * **Language:** a strictly typed, TypeScript-like subset: `i32`, `i64`, `f64`, `bool`,
   `string`/`bytes` through the existing msgpack call convention, records, lists, `if`,
-  `while`, `for`, calls; no closures at first; no dynamic typing. The grammar is a separate
-  document at PROC-2 start; this ADR fixes only the constraints.
-* **Compiler:** a Rust module in the server process: lex, parse, type-check, emit wasm
-  through `wasm-encoder`. Output passes the same admission gates (D2) as an upload, with
-  `shamir.origin = shamir-lang`. No subprocess, no filesystem, no `cargo`. The rule "no
-  process spawn in the compiler module" is enforced structurally (a clippy
-  `disallowed-methods` entry or a rust-guard rule for `std::process` there), not by a test
-  with an empty `PATH`.
+  `while`, `for`, calls; no closures at first; no dynamic typing. The grammar is documented
+  in [`shamir-lang-design.md`](shamir-lang-design.md).
+* **Compiler:** the server calls the separate, runtime-free Rust crate `shamir-lang`; its
+  compile path scans, parses, type-checks, lowers, verifies, emits wasm through
+  `wasm-encoder`, then self-admits the emitted bytes under `options.admission`. For
+  `create_shamir_source`, the host replaces caller-supplied admission limits with the
+  engine's limits and admits the compiler output a second time under that same
+  engine-derived `AdmissionPolicy::Admission`. The emitter includes the custom section
+  `shamir.origin = shamir-lang`. Production dependencies are exactly
+  `shamir-wasm-admission`, pinned `wasm-encoder = "=0.254.2"`, and `thiserror`. This path
+  compiles in process and does not invoke `cargo`.
+* **Purity evidence:** this is an explicit deviation from the earlier decision for a
+  structural no-process rule: the implemented guard is a token-scan test in
+  `crates/wasm/shamir-lang/src/api/tests/purity_tests.rs`, which scans the crate's own
+  `src` tree while excluding `tests` and `testsupport`. The scanner skips comments and
+  strings; it rejects aliases of `std`/`core`/`alloc`, every `extern crate`, imports and
+  paths to `process`, `fs`, `net`, `env` and `thread` under those roots (including grouped,
+  renamed, glob and absolute imports/re-exports), `Command::new`, and the `env!` and
+  `option_env!` macros. A separate test compares only the names in `[dependencies]` with
+  the designed three; it does not check target-specific or build dependencies, nor
+  re-exports from dependencies. The source scan does not inspect dependency internals, so
+  this is not a whole-transitive-purity guarantee. No clippy `disallowed-methods` entry or
+  rust-guard purity rule enforces this constraint.
 * **Crash safety:** a stack overflow aborts the server and `spawn_blocking` does not catch
   it. Depth caps are enforced inside the recursive-descent parser and the type checker, and
   the compiler runs on a dedicated thread with a fixed stack size. Criteria: deep-nesting
   and fuzz tests. Other bounds: source size cap, a compile fuel counter, the shared compile
-  semaphore.
-* **Guest runtime:** every emitted module needs a msgpack codec and an allocator that is
-  safe to re-enter (the host calls `shamir_alloc` while the guest is suspended in an async
-  import). With multi-module linking a non-goal, the runtime is inlined into each module and
-  counts against the size caps; its design is PROC-2's first deliverable.
+  semaphore. The host uses an 8 MiB worker stack and the existing shared compile gate.
+* **Guest runtime:** compiled modules already embed the allocator and MessagePack codec;
+  raw-byte guest codec conformance is covered in the host tests. This is implemented, not a
+  future first deliverable. With multi-module linking a non-goal, the runtime remains inlined
+  into each module and counts against the size caps.
 * **Async host calls** need no source transformation: the imports are already async
   wasmtime imports that suspend the guest fiber.
-* **Staging:** MVP is scalars and validators (pure functions over parameters); then
-  procedures with database access through the existing `db_*` imports. Optimization passes
-  are out of scope (the tiers do that).
+* **Staging:** standalone `CompileOptions::default()` selects `Stage::Mvp`, supporting scalar
+  and validator entries. Database create and check explicitly select `Stage::Procedures`,
+  which supports procedure entries with direct `db_get`, `db_insert` and `db_query`, and
+  typed `batch_read`/`batch_insert` requests through `db_execute` and typed response
+  projections. Direct database results and response projections require contextual result
+  types (`T010`); the guest emitter preserves query insertion order. Source-level `call`,
+  `$query`/`after` result references, and update/delete builder operations remain design-only
+  (PROC-2c). Optimization passes are out of scope (the tiers do that).
 * The Rust-source path stays behind `Execute` on `WasmCompiler`, whose default mode is
   0o755, i.e. open to everyone: the residual risk in
   `wasm-untrusted-compile-sanitization-decision.md` **stays fully open by default for
@@ -240,7 +262,8 @@ default.
   operator caps.
 * PROC-2: golden compile tests; differential tests against a reference interpreter on the
   scalar subset; rejected-source tests (size, depth); deep-nesting and fuzz tests that must
-  not abort; the structural no-process rule is active.
+  not abort; the token-based purity test and its dependency-name check described in D4 are
+  present (they are not a structural no-process rule).
 * PROC-3b: wire round-trip tests of all ops; builder tests in Rust and TypeScript; permission
   matrix including `check_function` with Rust source without `Execute`, legacy rows, and
   `alter_function` limits; HMAC vectors for `lang` and `optimize`; `describe_function`
