@@ -115,3 +115,26 @@ async fn typed_builder_batches_run_against_the_real_executor() {
     assert_eq!(invoke(&shamir, "count").await, QueryValue::Int(1));
     assert_eq!(invoke(&shamir, "by_name").await, QueryValue::Int(1));
 }
+
+#[tokio::test]
+async fn independent_queries_run_in_the_order_the_procedure_added_them() {
+    let shamir = setup().await;
+    create(
+        &shamir,
+        "ordered",
+        "@entry procedure ordered() -> i64 {\n\
+         let b = batch_insert(batch(), \"zeta\", \"people\", { id: 3, name: \"trinity\" });\n\
+         let b2 = batch_read(b, \"alpha\", \"people\", null);\n\
+         let resp = db_execute(request(b2));\n\
+         let rows: [{ id: i64, name: string }]? = response_rows(resp, \"alpha\");\n\
+         if (is_null(rows)) { return -1; }\n\
+         return to_i64(len(unwrap(rows)));\n\
+         }\n",
+    )
+    .await;
+    // derivation: the server runs independent queries in the order of the
+    // encoded `queries` map; `zeta` (the insert) was added first, so the
+    // read `alpha` sees the row. Sorted aliases would run `alpha` first and
+    // return 0.
+    assert_eq!(invoke(&shamir, "ordered").await, QueryValue::Int(1));
+}

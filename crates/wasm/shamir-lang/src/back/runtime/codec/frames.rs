@@ -11,6 +11,11 @@ pub(crate) const CONTEXT_RESERVED_OFFSET: u32 = 48;
 /// Output-buffer capacity in bytes, written by the wrapper before encoding;
 /// `emit_append_byte` reads it as the defensive append bound.
 pub(crate) const CONTEXT_OUTPUT_CAP_OFFSET: u32 = 52;
+/// Nonzero while the DTO serializer runs (the `db_execute` request): dynamic
+/// maps keep their insertion order instead of the canonical key order, because
+/// the server executes independent batch queries in the order of the encoded
+/// map. Set and cleared by the execute helper around the encoder call.
+pub(crate) const CONTEXT_KEEP_ORDER_OFFSET: u32 = 60;
 /// Header bytes reserved at the workspace start below the frame stack. Frame
 /// zero sits at `frame_base - FRAME_BYTES`, so `frame_base` stored in the
 /// context must stay at least `CONTEXT_HEADER_BYTES` above the workspace

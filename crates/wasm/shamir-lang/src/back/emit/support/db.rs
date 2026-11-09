@@ -24,8 +24,9 @@ use crate::back::emit::module::{EmissionPlan, EmitError};
 use crate::back::ir::DbOp;
 use crate::back::runtime::{
     CONTEXT_CELL_BASE_OFFSET, CONTEXT_FRAME_BASE_OFFSET, CONTEXT_INPUT_LEN_OFFSET,
-    CONTEXT_INPUT_PTR_OFFSET, CONTEXT_OUTPUT_CAP_OFFSET, CONTEXT_OUTPUT_LEN_OFFSET,
-    CONTEXT_OUTPUT_PTR_OFFSET, CONTEXT_RESERVED_OFFSET, CONTEXT_SCRATCH_OFFSET,
+    CONTEXT_INPUT_PTR_OFFSET, CONTEXT_KEEP_ORDER_OFFSET, CONTEXT_OUTPUT_CAP_OFFSET,
+    CONTEXT_OUTPUT_LEN_OFFSET, CONTEXT_OUTPUT_PTR_OFFSET, CONTEXT_RESERVED_OFFSET,
+    CONTEXT_SCRATCH_OFFSET,
 };
 
 /// Capacity of the per-execution argument buffer: the encoder raises its
@@ -537,8 +538,11 @@ pub(crate) fn emit_db_execute_helper(
     function.instruction(&Instruction::I32Store(mem32(CONTEXT_OUTPUT_PTR_OFFSET)));
     store_i32(&mut function, ctx, CONTEXT_OUTPUT_LEN_OFFSET, 0);
     copy_cell_to_address(&mut function, bases.scratch, 0);
+    // the request keeps the insertion order of its dynamic maps (`queries`)
+    store_i32(&mut function, ctx, CONTEXT_KEEP_ORDER_OFFSET, 1);
     function.instruction(&Instruction::I32Const(ctx as i32));
     function.instruction(&Instruction::Call(plan.encode_index));
+    store_i32(&mut function, ctx, CONTEXT_KEEP_ORDER_OFFSET, 0);
     function.instruction(&Instruction::I32Const(ctx as i32));
     function.instruction(&Instruction::I32Load(mem32(CONTEXT_OUTPUT_LEN_OFFSET)));
     function.instruction(&Instruction::LocalSet(length));
