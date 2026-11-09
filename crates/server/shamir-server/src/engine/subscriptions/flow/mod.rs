@@ -3,7 +3,4 @@
 
 pub(crate) mod push;
 pub(crate) mod reactive;
-pub(crate) mod registry;
-
-#[cfg(test)]
-mod tests;
+pub(crate) use shamir_sync::subscriptions::registry;

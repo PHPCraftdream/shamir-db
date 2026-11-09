@@ -4,6 +4,8 @@ mod cursor_handlers;
 mod cursor_support;
 mod handler;
 mod handlers;
+#[path = "repo_admin/native_handler.rs"]
+mod native_handler;
 #[path = "repo_admin/repo_audit.rs"]
 mod repo_audit;
 #[path = "repo_admin/tx_handlers.rs"]
@@ -18,7 +20,7 @@ mod tests;
 // and for the tests under `tests/`.
 pub(crate) use handlers::{admin, subscribe_handler, visibility_handlers};
 
+pub(crate) use crate::security::user_directory::derive_scram_record;
 pub use config::{CursorLimitsCap, NodeMode, QueryLimitsCap, SlowQueryConfig, TxLimitsCap};
 pub use handler::{DbRequest, DbResponse, ShamirDbHandler};
-pub(crate) use handlers::admin::derive_scram_record;
 pub use handlers::admin::AdminGlue;

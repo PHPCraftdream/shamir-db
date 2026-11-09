@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
-use shamir_connect::common::crypto::try_random_array;
 use shamir_connect::common::kdf_params::KdfParams;
-use shamir_connect::common::scram::DerivedKeys;
 use shamir_connect::common::time::UnixNanos;
 use shamir_connect::common::types::limits;
 use shamir_connect::server::admin::UserDirectory;
@@ -11,14 +9,13 @@ use shamir_connect::server::changepw::{
     verify_change_password_request_with_sid, ChangePwRequest,
 };
 use shamir_connect::server::session::{Session, SessionStore};
-use shamir_connect::server::user_record::UserRecord;
 use shamir_db::query::batch::{BatchOp, BatchRequest};
 use shamir_query_types::auth::SecretString;
 use shamir_query_types::batch::BatchTreeVisitor;
 use shamir_query_types::hmac as canon;
-use zeroize::Zeroizing;
 
 use crate::tables_registry::TablesRegistry;
+use crate::user_directory::derive_scram_record;
 use crate::user_directory::FjallUserDirectory;
 
 use crate::db_handler::handler::DbResponse;
@@ -38,47 +35,6 @@ pub struct AdminGlue {
     /// re-register them on restart. `None` means "don't persist table
     /// changes" — fine for in-memory test setups, wrong for production.
     pub tables_registry: Option<Arc<TablesRegistry>>,
-}
-
-/// Derive a SCRAM `UserRecord` (Argon2id) from a plaintext password under
-/// the given KDF params. CPU-bound work is delegated to `spawn_blocking`.
-/// Shared between [`create_scram_user`] (the wire `CreateScramUser` path)
-/// and the `UserAdminPort::create_user` impl (task #559) so the Argon2id
-/// code is not duplicated a third time. Returns `Err(message)` on a
-/// derivation or join failure (callers surface it as a `code: "query"`
-/// error / `PortError` respectively).
-pub(crate) async fn derive_scram_record(
-    password: String,
-    kdf: KdfParams,
-) -> Result<UserRecord, String> {
-    // Move password into a zeroizing buffer right away. `Zeroizing`
-    // wipes on Drop, so we don't need an explicit `.zeroize()` call —
-    // both the success and error paths drop `pw_buf` before returning.
-    let pw_buf: Zeroizing<Vec<u8>> = Zeroizing::new(password.into_bytes());
-    let salt: [u8; 16] = try_random_array().map_err(|e| e.to_string())?;
-
-    // Argon2id is CPU-heavy — delegate to spawn_blocking so the runtime
-    // worker is free to make progress on other tasks during derivation.
-    let derive_result = tokio::task::spawn_blocking(move || {
-        DerivedKeys::derive(&pw_buf, &salt, &kdf).map(|d| (d, salt))
-    })
-    .await;
-
-    let (derived, salt) = match derive_result {
-        Ok(Ok(pair)) => pair,
-        Ok(Err(e)) => return Err(format!("argon2id: {e}")),
-        Err(join_err) => return Err(format!("argon2id task failed: {join_err}")),
-    };
-
-    let mut server_key_z: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
-    server_key_z.copy_from_slice(&derived.server_key[..]);
-    Ok(UserRecord {
-        salt,
-        stored_key: derived.stored_key,
-        server_key: server_key_z,
-        kdf_params: kdf,
-        tickets_invalid_before_ns: 0,
-    })
 }
 
 /// Create a SCRAM-authenticatable user. Server-side Argon2id is CPU-bound

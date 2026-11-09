@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use serde::Deserialize;
 
 use crate::boot::config::{ConfigError, ListenerConfig, ListenerKind};
-use crate::http_ws::browser::policy::canonical_authority as canonical_ws_authority;
+use crate::http_ws::canonical_authority as canonical_ws_authority;
 
 use super::login_listener::{canonical_authority, parse_listener_id};
 

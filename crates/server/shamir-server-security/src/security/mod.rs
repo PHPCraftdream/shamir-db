@@ -1,0 +1,11 @@
+//! Security and platform surface: access control, TLS, the user directory,
+//! response byte budgeting, observability endpoints and OS service
+//! management.
+
+pub mod observability;
+mod perimeter;
+pub mod service;
+pub mod tokens;
+pub mod user_directory;
+
+pub use perimeter::{byte_budget, http_login, http_rest, http_ws, tls};

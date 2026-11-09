@@ -165,7 +165,7 @@ test-group = "fsync-heavy"
 
 # Server launcher shutdown and backup/restore tests fsync the same volume (#1761).
 [[profile.default.overrides]]
-filter = "package(shamir-server) and test(/(boot::server_tests::launcher_|durability::restore_tests::|durability::restore_identity_tests::|durability::backup_tests::)/)"
+filter = "(package(shamir-server) | package(shamir-sync)) and test(/(boot::server_tests::launcher_|durability::restore_tests::|durability::restore_identity_tests::|durability::backup_tests::)/)"
 test-group = "fsync-heavy"
 
 [[profile.default.overrides]]
@@ -181,7 +181,7 @@ filter = "package(shamir-db) and test(/(binding_open_refusal_tests|binding_scope
 test-group = "fsync-heavy"
 
 [[profile.ci.overrides]]
-filter = "package(shamir-server) and test(/(boot::server_tests::launcher_|durability::restore_tests::|durability::restore_identity_tests::|durability::backup_tests::)/)"
+filter = "(package(shamir-server) | package(shamir-sync)) and test(/(boot::server_tests::launcher_|durability::restore_tests::|durability::restore_identity_tests::|durability::backup_tests::)/)"
 test-group = "fsync-heavy"
 
 [[profile.ci.overrides]]

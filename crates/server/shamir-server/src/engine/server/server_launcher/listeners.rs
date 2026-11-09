@@ -10,8 +10,7 @@ use shamir_transport_http::BodyBudget;
 
 use crate::db_handler::ShamirDbHandler;
 use crate::http_rest::RestGate;
-use crate::http_ws::browser::PreAuthAdmission;
-use crate::http_ws::cancel_registry::TokenWsCancelRegistry;
+use crate::http_ws::{PreAuthAdmission, TokenWsCancelRegistry};
 use crate::tokens::TokenService;
 
 use shamir_connect::common::kdf_params::KdfParams;

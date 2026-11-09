@@ -31,7 +31,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml` — kept out so the
 `crates/*/*` glob doesn't try to load it). Crates live in layer folders
 `crates/<group>/<crate>/` (names do not change; at most 7 crates per group). The
-default workspace ships **36 crates** (including the `shamir-client-node`
+default workspace ships **38 crates** (including the `shamir-client-node`
 napi-rs binding, a regular member; MSVC-only on Windows) plus the vendored
 `vendor/hnsw_rs` member:
 
@@ -44,7 +44,7 @@ napi-rs binding, a regular member; MSVC-only on Windows) plus the vendored
 | `engine` | `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`, `shamir-db` |
 | `wasm` | `shamir-wasm-host`, `shamir-wasm-admission`, `shamir-lang`, `shamir-sdk`, `shamir-sdk-macros` |
 | `net` | `shamir-connect`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`, `shamir-transport-ws` |
-| `server` | `shamir-server` |
+| `server` | `shamir-server`, `shamir-server-security`, `shamir-sync` |
 | `client` | `shamir-client`, `shamir-client-node` (and the TypeScript package `shamir-client-ts`) |
 | `devtools` | `shamir-bench-utils`, `shamir-test-diag`, `shamir-e2e` |
 
@@ -263,8 +263,8 @@ cargo tl -p shamir-tx                      # one-crate lib
 ./scripts/test.sh @oracle                  # tx + engine (Version Oracle area)
 ./scripts/test.sh @types                   # shamir-types + shamir-collections
 ./scripts/test.sh @storage                 # shamir-storage + shamir-wal
-./scripts/test.sh @server                  # shamir-server + shamir-connect
-./scripts/test.sh @e2e                     # shamir-db + shamir-server + shamir-e2e (forces --full)
+./scripts/test.sh @server                  # shamir-server + shamir-server-security + shamir-sync + shamir-connect
+./scripts/test.sh @e2e                     # shamir-db + shamir-server + shamir-server-security + shamir-sync + shamir-e2e (forces --full)
 ./scripts/test.sh @all                     # explicit workspace
 ./scripts/test.sh @oracle @types           # combine scopes
 ./scripts/test.sh @oracle -- watermark     # scope + name filter
