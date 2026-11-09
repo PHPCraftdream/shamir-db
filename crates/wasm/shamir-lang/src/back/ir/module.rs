@@ -161,6 +161,33 @@ impl IrModule {
     }
 }
 
+/// Which typed-builder helpers a module needs; all false for modules without
+/// builder intrinsics, so their emission stays unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BatchUses {
+    pub append: bool,
+    pub execute: bool,
+    pub response: bool,
+}
+
+impl IrModule {
+    /// Scans the module for the typed builder instructions.
+    pub(crate) fn batch_uses(&self) -> BatchUses {
+        let mut uses = BatchUses::default();
+        for function in &self.functions {
+            for inst in &function.insts {
+                match &inst.kind {
+                    InstKind::BatchAppend { .. } => uses.append = true,
+                    InstKind::DbExecute { .. } => uses.execute = true,
+                    InstKind::ResponseGet { .. } => uses.response = true,
+                    _ => {}
+                }
+            }
+        }
+        uses
+    }
+}
+
 impl BlockId {
     pub(crate) fn index(self) -> usize {
         self.0 as usize

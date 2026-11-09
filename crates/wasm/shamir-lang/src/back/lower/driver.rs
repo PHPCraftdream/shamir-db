@@ -53,6 +53,7 @@ pub(crate) fn lower(
         code_error_descriptor: None,
         error_cap_cell: None,
         type_nodes: Vec::new(),
+        batch_statics: None,
     };
     for fid in &typed.call_order {
         let function = typed

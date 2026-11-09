@@ -306,6 +306,32 @@ fn check_inst_kinds(
             )?;
             want(kind(*count), ValueKind::I32, String::from("count operand"))?;
         }
+        InstKind::BatchAppend {
+            batch,
+            alias,
+            entry,
+        } => {
+            want(kind(*batch), ValueKind::I32, String::from("batch operand"))?;
+            want(kind(*alias), ValueKind::I32, String::from("alias operand"))?;
+            want(kind(*entry), ValueKind::I32, String::from("entry operand"))?;
+        }
+        InstKind::DbExecute { request } => {
+            want(
+                kind(*request),
+                ValueKind::I32,
+                String::from("request operand"),
+            )?;
+        }
+        InstKind::ResponseGet {
+            response, alias, ..
+        } => {
+            want(
+                kind(*response),
+                ValueKind::I32,
+                String::from("response operand"),
+            )?;
+            want(kind(*alias), ValueKind::I32, String::from("alias operand"))?;
+        }
         InstKind::DbCall { table, arg, .. } => {
             want(kind(*table), ValueKind::I32, String::from("table operand"))?;
             want(kind(*arg), ValueKind::I32, String::from("argument operand"))?;

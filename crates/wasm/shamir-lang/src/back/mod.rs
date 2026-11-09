@@ -1,3 +1,4 @@
+pub(crate) mod batch;
 mod emit;
 pub(crate) mod ir;
 pub(crate) mod lower;

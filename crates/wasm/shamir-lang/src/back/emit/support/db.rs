@@ -235,3 +235,492 @@ pub(crate) fn emit_db_call_helper(
     function.instruction(&Instruction::End);
     Ok(function)
 }
+
+// ---------------------------------------------------------------------------
+// Typed builder helpers (`batch_read`/`batch_insert`, `db_execute`,
+// `response_rows`/`response_inserted`)
+// ---------------------------------------------------------------------------
+
+/// Cap on operations per batch plan (the design `max_queries`).
+const MAX_BATCH_OPERATIONS: i32 = 50;
+/// Longest alias accepted by `batch_read`/`batch_insert`.
+const MAX_ALIAS_BYTES: i32 = 64;
+/// Cell tags the helpers read (mirror `runtime::CellTag`).
+const TAG_STRING: i32 = 6;
+const TAG_DYNAMIC_MAP: i32 = 14;
+/// Stable cell tag of the opaque response cell (mirrors `CellTag::Response`).
+const RESPONSE_TAG: i32 = 13;
+/// Byte length of the response keys baked into the static image.
+const RESULTS_KEY_LEN: u32 = 7;
+const RECORDS_KEY_LEN: u32 = 7;
+/// Number of cells in the BatchRequest record (`id` .. `result_encoding`).
+const REQUEST_FIELDS: u32 = 6;
+/// Field position of `queries` in the BatchRequest record.
+const QUERIES_FIELD: u32 = 2;
+
+fn raise_with(function: &mut Function, plan: &EmissionPlan, kind: i32, message: u32, len: u32) {
+    function.instruction(&Instruction::I32Const(kind));
+    function.instruction(&Instruction::I32Const(message as i32));
+    function.instruction(&Instruction::I32Const(len as i32));
+    function.instruction(&Instruction::Call(plan.raise_index));
+    function.instruction(&Instruction::Unreachable);
+}
+
+/// `(batch cell, alias cell, entry cell) -> new batch cell`: validates the
+/// alias (1..=64 ASCII identifier bytes, unique) and the operation cap, then
+/// returns a copy of the plan whose `queries` map has the new `(alias,
+/// entry)` pair appended; the input plan is never mutated.
+pub(crate) fn emit_batch_append_helper(plan: &EmissionPlan) -> Result<Function, EmitError> {
+    let aptr: u32 = 3;
+    let alen: u32 = 4;
+    let region_old: u32 = 5;
+    let queries: u32 = 6;
+    let count: u32 = 7;
+    let pairs_old: u32 = 8;
+    let index: u32 = 9;
+    let pairs_new: u32 = 10;
+    let region_new: u32 = 11;
+    let newcell: u32 = 12;
+    let ch: u32 = 13;
+    let key: u32 = 14;
+    let mut function = Function::new([(12, ValType::I32)]);
+    let alias_len = 5u32;
+
+    function.instruction(&Instruction::LocalGet(1));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalSet(aptr));
+    function.instruction(&Instruction::LocalGet(1));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::LocalSet(alen));
+    // length 1..=64
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::I32Const(MAX_ALIAS_BYTES));
+    function.instruction(&Instruction::I32GtU);
+    function.instruction(&Instruction::I32Or);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 2, plan.msg_alias, alias_len);
+    function.instruction(&Instruction::End);
+    // every byte: letter, underscore, or (not first) digit
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalSet(index));
+    function.instruction(&Instruction::Block(BlockType::Empty));
+    function.instruction(&Instruction::Loop(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::I32GeU);
+    function.instruction(&Instruction::BrIf(1));
+    function.instruction(&Instruction::LocalGet(aptr));
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::I32Load8U(MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    }));
+    function.instruction(&Instruction::LocalSet(ch));
+    // lower: ch - 'a' <=u 25
+    function.instruction(&Instruction::LocalGet(ch));
+    function.instruction(&Instruction::I32Const(97));
+    function.instruction(&Instruction::I32Sub);
+    function.instruction(&Instruction::I32Const(25));
+    function.instruction(&Instruction::I32LeU);
+    // upper: ch - 'A' <=u 25
+    function.instruction(&Instruction::LocalGet(ch));
+    function.instruction(&Instruction::I32Const(65));
+    function.instruction(&Instruction::I32Sub);
+    function.instruction(&Instruction::I32Const(25));
+    function.instruction(&Instruction::I32LeU);
+    function.instruction(&Instruction::I32Or);
+    // underscore
+    function.instruction(&Instruction::LocalGet(ch));
+    function.instruction(&Instruction::I32Const(95));
+    function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::I32Or);
+    // digit when not the first byte
+    function.instruction(&Instruction::LocalGet(ch));
+    function.instruction(&Instruction::I32Const(48));
+    function.instruction(&Instruction::I32Sub);
+    function.instruction(&Instruction::I32Const(9));
+    function.instruction(&Instruction::I32LeU);
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::I32Ne);
+    function.instruction(&Instruction::I32And);
+    function.instruction(&Instruction::I32Or);
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 2, plan.msg_alias, alias_len);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(index));
+    function.instruction(&Instruction::Br(0));
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::End);
+
+    // the existing queries map: region slot 2 of the plan record
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalSet(region_old));
+    function.instruction(&Instruction::LocalGet(region_old));
+    function.instruction(&Instruction::I32Const((QUERIES_FIELD * 16) as i32));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(queries));
+    function.instruction(&Instruction::LocalGet(queries));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::LocalSet(count));
+    function.instruction(&Instruction::LocalGet(queries));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalSet(pairs_old));
+    // operation cap
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32Const(MAX_BATCH_OPERATIONS));
+    function.instruction(&Instruction::I32GeU);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 2, plan.msg_bound, 5);
+    function.instruction(&Instruction::End);
+    // duplicate alias
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalSet(index));
+    function.instruction(&Instruction::Block(BlockType::Empty));
+    function.instruction(&Instruction::Loop(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32GeU);
+    function.instruction(&Instruction::BrIf(1));
+    function.instruction(&Instruction::LocalGet(pairs_old));
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Const(32));
+    function.instruction(&Instruction::I32Mul);
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(key));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(aptr));
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::Call(plan.compare_index));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 2, plan.msg_alias, alias_len);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(index));
+    function.instruction(&Instruction::Br(0));
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::End);
+
+    // new pairs region: old pairs, then the new (alias, entry) pair
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::I32Const(5));
+    function.instruction(&Instruction::I32Shl);
+    function.instruction(&Instruction::Call(plan.alloc_index));
+    function.instruction(&Instruction::LocalSet(pairs_new));
+    function.instruction(&Instruction::LocalGet(pairs_new));
+    function.instruction(&Instruction::LocalGet(pairs_old));
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Shl);
+    function.instruction(&Instruction::Call(plan.copy_cells_index));
+    function.instruction(&Instruction::LocalGet(pairs_new));
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32Const(5));
+    function.instruction(&Instruction::I32Shl);
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(key));
+    for (from_local, to_offset) in [(1u32, 0u32), (2, 16)] {
+        for offset in [0u32, 4] {
+            function.instruction(&Instruction::LocalGet(key));
+            function.instruction(&Instruction::LocalGet(from_local));
+            function.instruction(&Instruction::I32Load(mem32(offset)));
+            function.instruction(&Instruction::I32Store(mem32(to_offset + offset)));
+        }
+        function.instruction(&Instruction::LocalGet(key));
+        function.instruction(&Instruction::LocalGet(from_local));
+        function.instruction(&Instruction::I64Load(mem64(8)));
+        function.instruction(&Instruction::I64Store(mem64(to_offset + 8)));
+    }
+    // new plan region: a copy of the six cells with `queries` replaced
+    function.instruction(&Instruction::I32Const((REQUEST_FIELDS * 16) as i32));
+    function.instruction(&Instruction::Call(plan.alloc_index));
+    function.instruction(&Instruction::LocalSet(region_new));
+    function.instruction(&Instruction::LocalGet(region_new));
+    function.instruction(&Instruction::LocalGet(region_old));
+    function.instruction(&Instruction::I32Const(REQUEST_FIELDS as i32));
+    function.instruction(&Instruction::Call(plan.copy_cells_index));
+    function.instruction(&Instruction::LocalGet(region_new));
+    function.instruction(&Instruction::I32Const((QUERIES_FIELD * 16) as i32));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(key));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I32Const(TAG_DYNAMIC_MAP));
+    function.instruction(&Instruction::I32Store(mem32(0)));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::I32Store(mem32(4)));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::LocalGet(pairs_new));
+    function.instruction(&Instruction::I64ExtendI32U);
+    function.instruction(&Instruction::I64Store(mem64(8)));
+    // the new record cell: same tag/aux, descriptor kept, region replaced
+    function.instruction(&Instruction::I32Const(16));
+    function.instruction(&Instruction::Call(plan.alloc_index));
+    function.instruction(&Instruction::LocalSet(newcell));
+    for offset in [0u32, 4] {
+        function.instruction(&Instruction::LocalGet(newcell));
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::I32Load(mem32(offset)));
+        function.instruction(&Instruction::I32Store(mem32(offset)));
+    }
+    function.instruction(&Instruction::LocalGet(newcell));
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I64Const(-4_294_967_296));
+    function.instruction(&Instruction::I64And);
+    function.instruction(&Instruction::LocalGet(region_new));
+    function.instruction(&Instruction::I64ExtendI32U);
+    function.instruction(&Instruction::I64Or);
+    function.instruction(&Instruction::I64Store(mem64(8)));
+    function.instruction(&Instruction::LocalGet(newcell));
+    function.instruction(&Instruction::End);
+    Ok(function)
+}
+
+/// `(request cell) -> response cell`: encodes the request record, calls the
+/// host `db_execute` import and wraps the answer bytes `(ptr, len)` into an
+/// opaque response cell (tag RESPONSE, aux = length, payload = pointer).
+pub(crate) fn emit_db_execute_helper(
+    plan: &EmissionPlan,
+    import_index: u32,
+) -> Result<Function, EmitError> {
+    let bases = plan.wrapper_bases();
+    let ctx = bases.context;
+    let buffer: u32 = 1;
+    let length: u32 = 2;
+    let cell: u32 = 3;
+    let packed: u32 = 4;
+    let mut function = Function::new([(3, ValType::I32), (1, ValType::I64)]);
+    emit_context_init(&mut function, &bases, DB_BUFFER_BYTES);
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::I32Load(mem32(CONTEXT_DB_BUFFER_OFFSET)));
+    function.instruction(&Instruction::LocalTee(buffer));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::I32Const(DB_BUFFER_BYTES as i32));
+    function.instruction(&Instruction::Call(plan.alloc_index));
+    function.instruction(&Instruction::LocalSet(buffer));
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::LocalGet(buffer));
+    function.instruction(&Instruction::I32Store(mem32(CONTEXT_DB_BUFFER_OFFSET)));
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::LocalGet(buffer));
+    function.instruction(&Instruction::I32Store(mem32(CONTEXT_OUTPUT_PTR_OFFSET)));
+    store_i32(&mut function, ctx, CONTEXT_OUTPUT_LEN_OFFSET, 0);
+    copy_cell_to_address(&mut function, bases.scratch, 0);
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::Call(plan.encode_index));
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::I32Load(mem32(CONTEXT_OUTPUT_LEN_OFFSET)));
+    function.instruction(&Instruction::LocalSet(length));
+    function.instruction(&Instruction::LocalGet(buffer));
+    function.instruction(&Instruction::LocalGet(length));
+    function.instruction(&Instruction::Call(import_index));
+    function.instruction(&Instruction::LocalSet(packed));
+    // opaque response cell: tag RESPONSE, aux = answer length, payload = ptr
+    function.instruction(&Instruction::I32Const(16));
+    function.instruction(&Instruction::Call(plan.alloc_index));
+    function.instruction(&Instruction::LocalSet(cell));
+    function.instruction(&Instruction::LocalGet(cell));
+    function.instruction(&Instruction::I32Const(RESPONSE_TAG));
+    function.instruction(&Instruction::I32Store(mem32(0)));
+    function.instruction(&Instruction::LocalGet(cell));
+    function.instruction(&Instruction::LocalGet(packed));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::I32Store(mem32(4)));
+    function.instruction(&Instruction::LocalGet(cell));
+    function.instruction(&Instruction::LocalGet(packed));
+    function.instruction(&Instruction::I64Const(32));
+    function.instruction(&Instruction::I64ShrU);
+    function.instruction(&Instruction::I64Store(mem64(8)));
+    function.instruction(&Instruction::LocalGet(cell));
+    function.instruction(&Instruction::End);
+    Ok(function)
+}
+
+/// `(map cell, key ptr, key len) -> child cell pointer or 0`: scans the pairs
+/// of a decoded dynamic map for a string key.
+pub(crate) fn emit_dynmap_find_helper(plan: &EmissionPlan) -> Result<Function, EmitError> {
+    let count: u32 = 3;
+    let pairs: u32 = 4;
+    let index: u32 = 5;
+    let key: u32 = 6;
+    let mut function = Function::new([(4, ValType::I32)]);
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::LocalSet(count));
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalSet(pairs));
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::LocalSet(index));
+    function.instruction(&Instruction::Block(BlockType::Empty));
+    function.instruction(&Instruction::Loop(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::LocalGet(count));
+    function.instruction(&Instruction::I32GeU);
+    function.instruction(&Instruction::BrIf(1));
+    function.instruction(&Instruction::LocalGet(pairs));
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Const(32));
+    function.instruction(&Instruction::I32Mul);
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(key));
+    // string key of the same length with equal bytes
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I32Load(mem32(0)));
+    function.instruction(&Instruction::I32Const(TAG_STRING));
+    function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::LocalGet(2));
+    function.instruction(&Instruction::I32Eq);
+    function.instruction(&Instruction::I32And);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(1));
+    function.instruction(&Instruction::LocalGet(2));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalGet(2));
+    function.instruction(&Instruction::Call(plan.compare_index));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    function.instruction(&Instruction::LocalGet(key));
+    function.instruction(&Instruction::I32Const(16));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::Return);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::LocalGet(index));
+    function.instruction(&Instruction::I32Const(1));
+    function.instruction(&Instruction::I32Add);
+    function.instruction(&Instruction::LocalSet(index));
+    function.instruction(&Instruction::Br(0));
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::I32Const(0));
+    function.instruction(&Instruction::End);
+    Ok(function)
+}
+
+/// `(response cell, alias cell) -> records list cell or the null cell`:
+/// decodes the raw answer and walks `results -> alias -> records`; a missing
+/// `results` map, a non-map level or a missing `records` list is a codec
+/// failure (kind 3), a missing alias reads as null.
+pub(crate) fn emit_response_get_helper(
+    plan: &EmissionPlan,
+    find_index: u32,
+) -> Result<Function, EmitError> {
+    let bases = plan.wrapper_bases();
+    let ctx = bases.context;
+    let aptr: u32 = 2;
+    let alen: u32 = 3;
+    let found: u32 = 4;
+    let mut function = Function::new([(3, ValType::I32)]);
+    function.instruction(&Instruction::LocalGet(1));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::LocalSet(aptr));
+    function.instruction(&Instruction::LocalGet(1));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::LocalSet(alen));
+    emit_context_init(&mut function, &bases, bases.output_cap);
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::I64Load(mem64(8)));
+    function.instruction(&Instruction::I32WrapI64);
+    function.instruction(&Instruction::I32Store(mem32(CONTEXT_INPUT_PTR_OFFSET)));
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::LocalGet(0));
+    function.instruction(&Instruction::I32Load(mem32(4)));
+    function.instruction(&Instruction::I32Store(mem32(CONTEXT_INPUT_LEN_OFFSET)));
+    function.instruction(&Instruction::I32Const(ctx as i32));
+    function.instruction(&Instruction::Call(plan.decode_index));
+    // root must be a map
+    function.instruction(&Instruction::I32Const(bases.scratch as i32));
+    function.instruction(&Instruction::I32Load(mem32(0)));
+    function.instruction(&Instruction::I32Const(TAG_DYNAMIC_MAP));
+    function.instruction(&Instruction::I32Ne);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 3, plan.msg_arg, 3);
+    function.instruction(&Instruction::End);
+    // results = root["results"]
+    function.instruction(&Instruction::I32Const(bases.scratch as i32));
+    function.instruction(&Instruction::I32Const(plan.key_results as i32));
+    function.instruction(&Instruction::I32Const(RESULTS_KEY_LEN as i32));
+    function.instruction(&Instruction::Call(find_index));
+    function.instruction(&Instruction::LocalTee(found));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 3, plan.msg_arg, 3);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::LocalGet(found));
+    function.instruction(&Instruction::I32Load(mem32(0)));
+    function.instruction(&Instruction::I32Const(TAG_DYNAMIC_MAP));
+    function.instruction(&Instruction::I32Ne);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 3, plan.msg_arg, 3);
+    function.instruction(&Instruction::End);
+    // entry = results[alias]; absent alias is null
+    function.instruction(&Instruction::LocalGet(found));
+    function.instruction(&Instruction::LocalGet(aptr));
+    function.instruction(&Instruction::LocalGet(alen));
+    function.instruction(&Instruction::Call(find_index));
+    function.instruction(&Instruction::LocalTee(found));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Result(ValType::I32)));
+    function.instruction(&Instruction::I32Const(bases.null as i32));
+    function.instruction(&Instruction::Else);
+    function.instruction(&Instruction::LocalGet(found));
+    function.instruction(&Instruction::I32Load(mem32(0)));
+    function.instruction(&Instruction::I32Const(TAG_DYNAMIC_MAP));
+    function.instruction(&Instruction::I32Ne);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 3, plan.msg_arg, 3);
+    function.instruction(&Instruction::End);
+    // records = entry["records"]
+    function.instruction(&Instruction::LocalGet(found));
+    function.instruction(&Instruction::I32Const(plan.key_records as i32));
+    function.instruction(&Instruction::I32Const(RECORDS_KEY_LEN as i32));
+    function.instruction(&Instruction::Call(find_index));
+    function.instruction(&Instruction::LocalTee(found));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
+    raise_with(&mut function, plan, 3, plan.msg_arg, 3);
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::LocalGet(found));
+    function.instruction(&Instruction::End);
+    function.instruction(&Instruction::End);
+    Ok(function)
+}

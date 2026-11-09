@@ -5,42 +5,33 @@ use thiserror::Error;
 use super::abi::{emit_call_wrapper, emit_scalar_wrapper, NullCell, WrapperBases, WrapperInputs};
 use super::helpers::{emit_helper_order, HelperGraph, HelperId};
 use super::scalar::emit_user_function;
-use super::support::assemble::{assemble, ModuleImage};
-use super::support::db::{emit_db_call_helper, host_import_name};
+use super::support::assemble::{assemble, intern_type, val_type, ModuleImage};
+use super::support::db::{
+    emit_batch_append_helper, emit_db_call_helper, emit_db_execute_helper, emit_dynmap_find_helper,
+    emit_response_get_helper, host_import_name,
+};
 use super::support::eq::{emit_bytes_compare, emit_eq_helper};
 use super::support::projection::{
     append_raise_messages, append_record_descriptors, collect_db_result_nodes,
     collect_projection_nodes, emit_projection_helper, projection_signature, reachable_nodes,
     ProjectionSpec,
 };
-use super::support::workspace::compute_workspace;
+use super::support::workspace::{compute_workspace, validate_caps, validate_cell_codec};
 use crate::api::{CompileLimits, Span};
-use crate::back::ir::{inst_result_kind, DbOp, IrModule, ParamProjection, ValueKind};
+use crate::back::ir::{inst_result_kind, DbOp, IrModule, ParamProjection};
 use crate::back::runtime::{
     emit_allocator, emit_append_byte, emit_check_range, emit_compare_bytes, emit_copy_cells,
     emit_decode_root, emit_encode_root, emit_error_raiser, emit_read_be, emit_read_byte,
-    emit_store_cell, emit_validate_utf8, Cell, CellTag, DecodeEmit, EncodeEmit, RuntimeCaps,
-    RuntimeError, MAX_ADDRESS, STATIC_START,
+    emit_store_cell, emit_validate_utf8, DecodeEmit, EncodeEmit, RuntimeCaps, RuntimeError,
+    STATIC_START,
 };
 use crate::front::CompileBudget;
 
-/// Design hard ceilings; exceeding any of them is a caller bug (the cap
-/// values themselves are the supported envelope), rejected before layout.
-const MAX_INPUT_BYTES: u64 = 8 * 1_024 * 1_024;
-const MAX_OUTPUT_BYTES: u64 = 8 * 1_024 * 1_024;
-const MAX_STRING_BYTES: u64 = 1_024 * 1_024;
-const MAX_KEY_BYTES: u64 = 65_536;
-const MAX_CONTAINERS: u64 = 100_000;
-const MAX_ENTRIES: u64 = 100_000;
-const MAX_CELLS: u64 = 1_000_000;
-const MAX_DEPTH: u64 = 32;
 /// Emitted code-section budget (design's runtime-code cap; static data has
 /// its own 4 MiB cap below).
 const CODE_BUDGET_BYTES: u64 = 64 * 1_024;
 /// Hard ceiling on defined functions (import excluded) per the design.
 const MAX_DEFINED_FUNCTIONS: u64 = 384;
-/// Hard ceiling on function types per the design.
-const MAX_TYPES: u64 = 512;
 /// Hard ceiling on wasm locals (params + locals + fixed scratch tail + dense
 /// instruction value locals) per user function.
 const MAX_LOCALS: u64 = 4096;
@@ -52,26 +43,6 @@ pub(crate) const MAX_UNROLLED_NAME_BYTES: usize = 64;
 
 type OrderedHelpers = (Vec<(u32, Function)>, u32, u32, u32, u32);
 
-/// Every cell tag must survive an encode/decode round trip before the wrapper
-/// embeds the null-cell constants, keeping the cell codec exercised in
-/// production.
-const ALL_CELL_TAGS: [CellTag; 15] = [
-    CellTag::Unused,
-    CellTag::Null,
-    CellTag::Bool,
-    CellTag::I32,
-    CellTag::I64,
-    CellTag::F64,
-    CellTag::String,
-    CellTag::Bytes,
-    CellTag::List,
-    CellTag::Record,
-    CellTag::Validation,
-    CellTag::Batch,
-    CellTag::Request,
-    CellTag::Response,
-    CellTag::DynamicMap,
-];
 /// Emission failure for the compiled (IR-driven) module path.
 #[derive(Debug, Error)]
 pub enum EmitError {
@@ -130,6 +101,18 @@ pub(crate) struct EmissionPlan {
     /// Decode-class projection helper per distinct database result node:
     /// `(node index, fn index)`.
     pub db_projection_indices: Vec<(u32, u32)>,
+    /// Typed builder helper function indices (`None` when unused).
+    pub batch_append_index: Option<u32>,
+    pub db_execute_index: Option<u32>,
+    pub response_get_index: Option<u32>,
+    pub dynmap_find_index: Option<u32>,
+    /// Static message/key addresses the builder helpers raise or look up
+    /// (0 when the module has no builder instructions).
+    pub msg_alias: u32,
+    pub msg_bound: u32,
+    pub msg_arg: u32,
+    pub key_results: u32,
+    pub key_records: u32,
     /// First generated projection helper (`eq_base + 1 + eq_count`).
     /// Projection helper per distinct type node: `(node index, fn index)` in
     /// the deterministic first-use order of the nodes.
@@ -140,47 +123,6 @@ impl EmissionPlan {
     pub(crate) fn wrapper_bases(&self) -> WrapperBases {
         self.bases
     }
-}
-
-fn validate_caps(caps: &RuntimeCaps) -> Result<(), RuntimeError> {
-    // design hard ceilings first: a cap above these is a configuration bug
-    if caps.input_bytes > MAX_INPUT_BYTES
-        || caps.output_bytes > MAX_OUTPUT_BYTES
-        || caps.string_bytes > MAX_STRING_BYTES
-        || caps.key_bytes > MAX_KEY_BYTES
-        || caps.containers > MAX_CONTAINERS
-        || caps.entries > MAX_ENTRIES
-        || caps.cells > MAX_CELLS
-        || u64::from(caps.depth) > MAX_DEPTH
-    {
-        return Err(RuntimeError::CapAboveCeiling);
-    }
-    let within_limit = |value: u64| value <= MAX_ADDRESS;
-    if !within_limit(caps.input_bytes)
-        || !within_limit(caps.output_bytes)
-        || !within_limit(caps.string_bytes)
-        || !within_limit(caps.key_bytes)
-        || !within_limit(caps.containers)
-        || !within_limit(caps.entries)
-        || !within_limit(caps.cells)
-        || !within_limit(u64::from(caps.depth))
-    {
-        return Err(RuntimeError::CapsBeyondAddressSpace);
-    }
-    Ok(())
-}
-
-fn validate_cell_codec() -> Result<[u8; 16], RuntimeError> {
-    for &tag in ALL_CELL_TAGS.iter() {
-        let cell = Cell::new(tag, 0, 0);
-        let Some(decoded) = Cell::decode(cell.encode()) else {
-            return Err(RuntimeError::CellTemplate);
-        };
-        if decoded.tag() != tag || decoded.auxiliary() != 0 || decoded.payload() != 0 {
-            return Err(RuntimeError::CellTemplate);
-        }
-    }
-    Ok(Cell::new(CellTag::Null, 0, 0).encode())
 }
 
 /// Registers each codec primitive plus the iterative decoder as a
@@ -406,49 +348,6 @@ pub(crate) fn static_address(offset: u64) -> Result<u32, EmitError> {
     u32::try_from(addr).map_err(|_| EmitError::Internal("static address exceeds i32"))
 }
 
-/// Deduplicates one signature by linear scan over the extra types
-/// (first-use order, deterministic); the runtime occupies types 0..=9.
-fn intern_type(
-    extra_types: &mut Vec<(Vec<ValType>, Option<ValType>)>,
-    params: Vec<ValType>,
-    result: Option<ValType>,
-) -> Result<u32, EmitError> {
-    if let Some(position) = extra_types
-        .iter()
-        .position(|(existing, existing_result)| *existing == params && *existing_result == result)
-    {
-        let index =
-            u32::try_from(position).map_err(|_| EmitError::Internal("type index overflow"))?;
-        return 10u32
-            .checked_add(index)
-            .ok_or(EmitError::Internal("type index overflow"));
-    }
-    let position =
-        u32::try_from(extra_types.len()).map_err(|_| EmitError::Internal("type index overflow"))?;
-    extra_types.push((params, result));
-    let observed = 10u64
-        .checked_add(u64::from(position) + 1)
-        .ok_or(EmitError::Internal("type count overflow"))?;
-    if observed > MAX_TYPES {
-        return Err(EmitError::LimitExceeded {
-            code: "B001",
-            limit: MAX_TYPES,
-            observed,
-        });
-    }
-    10u32
-        .checked_add(position)
-        .ok_or(EmitError::Internal("type index overflow"))
-}
-
-fn val_type(kind: ValueKind) -> ValType {
-    match kind {
-        ValueKind::I32 => ValType::I32,
-        ValueKind::I64 => ValType::I64,
-        ValueKind::F64 => ValType::F64,
-    }
-}
-
 /// Assembles the compiled module for one lowered IR module: runtime helpers,
 /// error bridge, allocator, call wrapper, user functions in IR order, then
 /// the generated equality helpers (bytes compare first, then one per shape).
@@ -474,8 +373,11 @@ pub(crate) fn emit_compiled_module(
     // helpers) and the host operations the module imports
     let db_nodes = collect_db_result_nodes(ir)?;
     let db_ops = ir.db_ops();
-    let import_count = 1 + u32::try_from(db_ops.len())
-        .map_err(|_| EmitError::Internal("database import count overflow"))?;
+    let batch_uses = ir.batch_uses();
+    let import_count = 1
+        + u32::try_from(db_ops.len())
+            .map_err(|_| EmitError::Internal("database import count overflow"))?
+        + u32::from(batch_uses.execute);
     let static_limit = limits.max_static_bytes as u64;
     // every record node reachable from a projected parameter or a database
     // result gets a descriptor
@@ -490,6 +392,23 @@ pub(crate) fn emit_compiled_module(
             *slot = address;
         }
     }
+    // static message and key bytes of the typed builder helpers
+    let (msg_alias, key_results, key_records) = if batch_uses.append || batch_uses.response {
+        let addrs = super::support::projection::append_message_block(
+            &mut static_bytes,
+            &[b"alias", b"results", b"records"],
+            static_limit,
+        )?;
+        let at = |position: usize| -> Result<u32, EmitError> {
+            addrs
+                .get(position)
+                .copied()
+                .ok_or(EmitError::Internal("missing builder message address"))
+        };
+        (at(0)?, at(1)?, at(2)?)
+    } else {
+        (0, 0, 0)
+    };
     // the shared null cell lives in the static image, outside the decoder's
     // cell slots (the decoder overwrites those)
     let null_cell_offset = u64::try_from(static_bytes.len())
@@ -600,6 +519,10 @@ pub(crate) fn emit_compiled_module(
             db_imports.push((host_import_name(*op), import_type));
         }
     }
+    if batch_uses.execute {
+        // `db_execute(request ptr, request len) -> i64` shares runtime type 8
+        db_imports.push(("db_execute", 8));
+    }
     let output_cap = i32::try_from(caps.output_bytes).map_err(|_| EmitError::LimitExceeded {
         code: "B001",
         limit: i32::MAX as u64,
@@ -675,6 +598,37 @@ pub(crate) fn emit_compiled_module(
             .ok_or(EmitError::Internal("function index overflow"))?;
         db_helpers.push((*op, fn_index));
     }
+    let mut next_batch_fn = db_call_base
+        .checked_add(
+            u32::try_from(db_ops.len())
+                .map_err(|_| EmitError::Internal("database helper count overflow"))?,
+        )
+        .ok_or(EmitError::Internal("function index overflow"))?;
+    let mut take_index = || {
+        let index = next_batch_fn;
+        next_batch_fn += 1;
+        Some(index)
+    };
+    let dynmap_find_index = if batch_uses.response {
+        take_index()
+    } else {
+        None
+    };
+    let batch_append_index = if batch_uses.append {
+        take_index()
+    } else {
+        None
+    };
+    let db_execute_index = if batch_uses.execute {
+        take_index()
+    } else {
+        None
+    };
+    let response_get_index = if batch_uses.response {
+        take_index()
+    } else {
+        None
+    };
     let plan = EmissionPlan {
         helper_count,
         raise_index: import_count + helper_count,
@@ -694,6 +648,15 @@ pub(crate) fn emit_compiled_module(
         user_type_indices,
         db_helpers,
         db_projection_indices,
+        batch_append_index,
+        db_execute_index,
+        response_get_index,
+        dynmap_find_index,
+        msg_alias,
+        msg_bound: baked.scalar[3],
+        msg_arg: baked.wrapper.arg,
+        key_results,
+        key_records,
         projection_indices,
         bases,
     };
@@ -708,6 +671,14 @@ pub(crate) fn emit_compiled_module(
         .and_then(|total| total.checked_add(projection_count))
         .and_then(|total| total.checked_add(plan.db_projection_indices.len() as u64))
         .and_then(|total| total.checked_add(plan.db_helpers.len() as u64))
+        .and_then(|total| {
+            total.checked_add(
+                u64::from(plan.dynmap_find_index.is_some())
+                    + u64::from(plan.batch_append_index.is_some())
+                    + u64::from(plan.db_execute_index.is_some())
+                    + u64::from(plan.response_get_index.is_some()),
+            )
+        })
         .ok_or(EmitError::Internal("function count overflow"))?;
     if total_functions > MAX_DEFINED_FUNCTIONS {
         return Err(EmitError::LimitExceeded {
@@ -831,6 +802,39 @@ pub(crate) fn emit_compiled_module(
         // `(table cell, argument cell) -> cell` shares the runtime type 1
         db_call_functions.push((1u32, function));
     }
+    // typed builder helpers (types: 0 = `(i32,i32,i32) -> i32`, 1 = `(i32,i32)
+    // -> i32`, 7 = `(i32) -> i32`)
+    let mut push_helper = |type_index: u32,
+                           function: wasm_encoder::Function,
+                           budget: &mut CompileBudget|
+     -> Result<(), EmitError> {
+        charge_work(budget, 1)?;
+        let observed = body_bytes(&function);
+        if observed > body_limit {
+            return Err(EmitError::LimitExceeded {
+                code: "B001",
+                limit: body_limit,
+                observed,
+            });
+        }
+        charge_work(budget, observed)?;
+        db_call_functions.push((type_index, function));
+        Ok(())
+    };
+    if plan.dynmap_find_index.is_some() {
+        push_helper(0, emit_dynmap_find_helper(&plan)?, budget)?;
+    }
+    if plan.batch_append_index.is_some() {
+        push_helper(0, emit_batch_append_helper(&plan)?, budget)?;
+    }
+    if plan.db_execute_index.is_some() {
+        let import_index = 1 + u32::try_from(db_ops.len())
+            .map_err(|_| EmitError::Internal("database import index overflow"))?;
+        push_helper(7, emit_db_execute_helper(&plan, import_index)?, budget)?;
+    }
+    if let Some(find) = plan.dynmap_find_index {
+        push_helper(1, emit_response_get_helper(&plan, find)?, budget)?;
+    }
 
     // per-parameter projection helper indices for the wrapper (None = the
     // inline pass-through for hand-built IR without nodes)
@@ -881,7 +885,9 @@ pub(crate) fn emit_compiled_module(
             result_projection: entry.result_projection,
             param_names: &baked.names,
             param_helper: &param_helper,
-            reinit_context: !plan.db_helpers.is_empty(),
+            reinit_context: !plan.db_helpers.is_empty()
+                || batch_uses.execute
+                || batch_uses.response,
         };
         if ir.entry_is_validator {
             super::support::validator::emit_validator_wrapper(inputs)?

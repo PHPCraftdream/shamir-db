@@ -195,6 +195,52 @@ pub(super) fn emit_inst(
             function.instruction(&Instruction::Call(projection));
             store_result(env, function, position)?;
         }
+        InstKind::BatchAppend {
+            batch,
+            alias,
+            entry,
+        } => {
+            let helper = env
+                .plan
+                .batch_append_index
+                .ok_or(EmitError::Internal("missing batch append helper"))?;
+            function.instruction(&Instruction::LocalGet(env.local_of(*batch)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*alias)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*entry)?));
+            function.instruction(&Instruction::Call(helper));
+            store_result(env, function, position)?;
+        }
+        InstKind::DbExecute { request } => {
+            let helper = env
+                .plan
+                .db_execute_index
+                .ok_or(EmitError::Internal("missing db_execute helper"))?;
+            function.instruction(&Instruction::LocalGet(env.local_of(*request)?));
+            function.instruction(&Instruction::Call(helper));
+            store_result(env, function, position)?;
+        }
+        InstKind::ResponseGet {
+            response,
+            alias,
+            result,
+        } => {
+            let helper = env
+                .plan
+                .response_get_index
+                .ok_or(EmitError::Internal("missing response helper"))?;
+            let projection = env
+                .plan
+                .db_projection_indices
+                .iter()
+                .find(|(node, _)| node == result)
+                .map(|(_, index)| *index)
+                .ok_or(EmitError::Internal("missing response projection helper"))?;
+            function.instruction(&Instruction::LocalGet(env.local_of(*response)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*alias)?));
+            function.instruction(&Instruction::Call(helper));
+            function.instruction(&Instruction::Call(projection));
+            store_result(env, function, position)?;
+        }
         InstKind::CellLoadPayload(value) => {
             function.instruction(&Instruction::LocalGet(env.local_of(*value)?));
             function.instruction(&Instruction::I64Load(mem64(8)));

@@ -3,7 +3,7 @@
 use shamir_db::ShamirDb;
 use shamir_engine::function::Params;
 
-use super::lifecycle::compile_or_skip;
+use crate::lifecycle::compile_or_skip;
 
 const USER_ERROR_SRC: &str = r#"use shamir::prelude::*;
 #[shamir::function]

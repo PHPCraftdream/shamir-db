@@ -177,9 +177,15 @@ fn stage2_builtins_are_rejected_everywhere() {
         expect_codes("@entry scalar probe() -> i64 { batch(); return 1; }"),
         vec!["T007"]
     );
+    // Derivation: `request()` has the wrong arity (one argument expected), which
+    // is reported before the capability ceiling.
     assert_eq!(
         expect_codes("@entry scalar probe() -> i64 { request(); return 1; }"),
-        vec!["T007"]
+        vec!["T004"]
+    );
+    assert_eq!(
+        expect_codes("@entry scalar probe() -> i64 { let r = request(batch()); return 1; }"),
+        vec!["T007", "T007"]
     );
 }
 
@@ -398,6 +404,47 @@ fn direct_db_builtins_exceed_scalar_and_validator_ceilings() {
         procedure_codes(&format!(
             "{helper}\n@entry scalar probe() -> i64 {{ return h(); }}"
         )),
+        vec!["T007"]
+    );
+}
+
+#[test]
+fn procedures_may_use_the_typed_builder_intrinsics() {
+    // Derivation: every call matches its fixed opaque signature, the record
+    // literal filter is a scalar record and the response projection has an
+    // optional-list-of-records context.
+    assert!(procedure_codes(
+        "@entry procedure p() -> i64 { let b = batch_id(batch(), \"r\"); let b2 = batch_read(b, \"u\", \"users\", { role: \"admin\" }); let b3 = batch_insert(b2, \"i\", \"users\", { name: \"Zed\" }); let resp = db_execute(request(b3)); let rows: [{ id: i64 }]? = response_rows(resp, \"u\"); if (is_null(rows)) { return 0; } return to_i64(len(unwrap(rows))); }"
+    )
+    .is_empty());
+}
+
+#[test]
+fn builder_intrinsic_typing_errors() {
+    // The response projection needs its contextual optional list of records.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p() -> i64 { let resp = db_execute(request(batch())); let rows = response_rows(resp, \"u\"); return 0; }"
+        ),
+        vec!["T010"]
+    );
+    // A list-valued filter field is not a scalar record.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p() -> i64 { let b = batch_read(batch(), \"u\", \"users\", { ids: [1] }); return 0; }"
+        ),
+        vec!["T001"]
+    );
+    // `db_execute` takes a Request, not a Batch.
+    assert_eq!(
+        procedure_codes(
+            "@entry procedure p() -> i64 { let resp = db_execute(batch()); return 0; }"
+        ),
+        vec!["T001"]
+    );
+    // Scalar entries may not build batches.
+    assert_eq!(
+        procedure_codes("@entry scalar probe() -> i64 { let b = batch(); return 1; }"),
         vec!["T007"]
     );
 }

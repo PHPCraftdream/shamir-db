@@ -787,6 +787,9 @@ fn lower_builtin(
     arguments: &[ExprId],
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
+    if crate::back::batch::is_batch_builtin(builtin) {
+        return crate::back::batch::lower_batch_builtin(ctx, id, builtin, arguments, span);
+    }
     if let Some(op) = super::types::db_op_of(builtin) {
         return super::types::lower_db_builtin(ctx, id, op, arguments, span);
     }

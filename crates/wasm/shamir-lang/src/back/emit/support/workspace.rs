@@ -1,6 +1,6 @@
 use crate::back::runtime::{
-    Layout, RuntimeCaps, RuntimeError, CONTEXT_HEADER_BYTES, FRAME_BYTES, FRAME_COUNT,
-    MAX_STATIC_BYTES, PAGE_BYTES,
+    Cell, CellTag, Layout, RuntimeCaps, RuntimeError, CONTEXT_HEADER_BYTES, FRAME_BYTES,
+    FRAME_COUNT, MAX_ADDRESS, MAX_STATIC_BYTES, PAGE_BYTES,
 };
 
 /// Bytes occupied by one runtime cell.
@@ -87,4 +87,77 @@ pub(crate) fn compute_workspace(
         sort_base,
         scratch,
     })
+}
+
+/// Design hard ceilings; exceeding any of them is a caller bug (the cap
+/// values themselves are the supported envelope), rejected before layout.
+const MAX_INPUT_BYTES: u64 = 8 * 1_024 * 1_024;
+const MAX_OUTPUT_BYTES: u64 = 8 * 1_024 * 1_024;
+const MAX_STRING_BYTES: u64 = 1_024 * 1_024;
+const MAX_KEY_BYTES: u64 = 65_536;
+const MAX_CONTAINERS: u64 = 100_000;
+const MAX_ENTRIES: u64 = 100_000;
+const MAX_CELLS: u64 = 1_000_000;
+const MAX_DEPTH: u64 = 32;
+
+/// Every cell tag must survive an encode/decode round trip before the wrapper
+/// embeds the null-cell constants, keeping the cell codec exercised in
+/// production.
+const ALL_CELL_TAGS: [CellTag; 15] = [
+    CellTag::Unused,
+    CellTag::Null,
+    CellTag::Bool,
+    CellTag::I32,
+    CellTag::I64,
+    CellTag::F64,
+    CellTag::String,
+    CellTag::Bytes,
+    CellTag::List,
+    CellTag::Record,
+    CellTag::Validation,
+    CellTag::Batch,
+    CellTag::Request,
+    CellTag::Response,
+    CellTag::DynamicMap,
+];
+
+pub(crate) fn validate_caps(caps: &RuntimeCaps) -> Result<(), RuntimeError> {
+    // design hard ceilings first: a cap above these is a configuration bug
+    if caps.input_bytes > MAX_INPUT_BYTES
+        || caps.output_bytes > MAX_OUTPUT_BYTES
+        || caps.string_bytes > MAX_STRING_BYTES
+        || caps.key_bytes > MAX_KEY_BYTES
+        || caps.containers > MAX_CONTAINERS
+        || caps.entries > MAX_ENTRIES
+        || caps.cells > MAX_CELLS
+        || u64::from(caps.depth) > MAX_DEPTH
+    {
+        return Err(RuntimeError::CapAboveCeiling);
+    }
+    let within_limit = |value: u64| value <= MAX_ADDRESS;
+    if !within_limit(caps.input_bytes)
+        || !within_limit(caps.output_bytes)
+        || !within_limit(caps.string_bytes)
+        || !within_limit(caps.key_bytes)
+        || !within_limit(caps.containers)
+        || !within_limit(caps.entries)
+        || !within_limit(caps.cells)
+        || !within_limit(u64::from(caps.depth))
+    {
+        return Err(RuntimeError::CapsBeyondAddressSpace);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_cell_codec() -> Result<[u8; 16], RuntimeError> {
+    for &tag in ALL_CELL_TAGS.iter() {
+        let cell = Cell::new(tag, 0, 0);
+        let Some(decoded) = Cell::decode(cell.encode()) else {
+            return Err(RuntimeError::CellTemplate);
+        };
+        if decoded.tag() != tag || decoded.auxiliary() != 0 || decoded.payload() != 0 {
+            return Err(RuntimeError::CellTemplate);
+        }
+    }
+    Ok(Cell::new(CellTag::Null, 0, 0).encode())
 }

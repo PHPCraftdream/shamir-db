@@ -427,6 +427,36 @@ impl<'b> IrBuilder<'b> {
         self.append_cell(cell_tag::LIST, cap, 0)
     }
 
+    /// Bakes one static cell; returns its ABSOLUTE address.
+    pub fn static_cell(&mut self, tag: u32, aux: u32, payload: u64) -> Result<u32, IrError> {
+        self.append_cell(tag, aux, payload)
+    }
+
+    /// Bakes a contiguous static REGION of cells `(tag, aux, payload)` and
+    /// returns its ABSOLUTE address (the region base, ready to be a record
+    /// region or a list payload).
+    pub fn static_region(&mut self, cells: &[(u32, u32, u64)]) -> Result<u32, IrError> {
+        let mut base = None;
+        for &(tag, aux, payload) in cells {
+            let address = self.append_cell(tag, aux, payload)?;
+            if base.is_none() {
+                base = Some(address);
+            }
+        }
+        base.ok_or(IrError::Internal(E_FIELD_COUNT))
+    }
+
+    /// Appends raw bytes and returns `(length, absolute address)` for a
+    /// string cell value baked into a static region.
+    pub fn static_text(&mut self, bytes: &[u8]) -> Result<(u32, u64), IrError> {
+        let length = u32::try_from(bytes.len()).map_err(|_| IrError::Internal(E_LITERAL))?;
+        let offset = self.message_bytes(bytes)?;
+        let address = STATIC_BASE
+            .checked_add(u64::from(offset))
+            .ok_or(IrError::Internal(E_IMAGE))?;
+        Ok((length, address))
+    }
+
     /// Raw message bytes; only `max_static_bytes` applies.
     pub fn message_bytes(&mut self, bytes: &[u8]) -> Result<u32, IrError> {
         self.reserve_image(bytes.len())?;
