@@ -294,7 +294,30 @@ async fn create_lang_shamir_compile_error_is_a_positioned_code_string() {
 }
 
 #[tokio::test]
-async fn create_lang_shamir_procedure_entry_is_rejected_with_t007() {
+async fn create_lang_shamir_procedure_with_database_calls_succeeds() {
+    let db = setup_db().await;
+
+    let mut b = Batch::new();
+    b.id("cf");
+    b.create_function(
+        "op",
+        ddl::create_function("fn_procedure")
+            .source(
+                "@entry procedure find(key: i64) -> i64 { let user: { id: i64 }? = db_get(\"users\", key); if (is_null(user)) { return -1; } return unwrap(user).id; }",
+            )
+            .lang("shamir")
+            .build()
+            .expect("valid create function"),
+    );
+    let req = b.to_request_via_msgpack().expect("batch request encoding");
+    let resp = db.execute("testdb", &req).await.unwrap();
+    let rec = resp.results["op"].records[0].as_value().into_owned();
+    // Derivation: procedures compile at the procedures stage the facade uses.
+    assert_eq!(expect_str(&rec, "created_function"), "fn_procedure");
+}
+
+#[tokio::test]
+async fn create_lang_shamir_scalar_with_database_calls_is_rejected_with_t007() {
     let db = setup_db().await;
     let before = db.list_functions().await.unwrap();
 
@@ -302,14 +325,17 @@ async fn create_lang_shamir_procedure_entry_is_rejected_with_t007() {
     b.id("cf");
     b.create_function(
         "op",
-        ddl::create_function("fn_procedure")
-            .source("@entry procedure p() -> i64 { return 1; }")
+        ddl::create_function("fn_scalar_db")
+            .source(
+                "@entry scalar probe() -> i64 { let rows: [{ id: i64 }] = db_query(\"users\", null); return 1; }",
+            )
             .lang("shamir")
             .build()
             .expect("valid create function"),
     );
     let req = b.to_request_via_msgpack().expect("batch request encoding");
     let err = db.execute("testdb", &req).await.unwrap_err();
+    // Derivation: a scalar entry may not use the stage-2 intrinsics.
     assert!(err.to_string().contains("T007"), "got: {err}");
     assert_eq!(db.list_functions().await.unwrap(), before);
 }
