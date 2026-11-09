@@ -6,7 +6,8 @@ use super::decode::{
     reject_message, FAIL_DEPTH, FAIL_ENTRIES, FAIL_LENGTH, FAIL_NONFINITE, FAIL_STR,
 };
 use super::frames::{
-    CONTEXT_FRAME_BASE_OFFSET, CONTEXT_OUTPUT_CAP_OFFSET, CONTEXT_SCRATCH_OFFSET, FRAME_BYTES,
+    CONTEXT_FRAME_BASE_OFFSET, CONTEXT_KEEP_ORDER_OFFSET, CONTEXT_OUTPUT_CAP_OFFSET,
+    CONTEXT_SCRATCH_OFFSET, FRAME_BYTES,
 };
 
 mod sort;
@@ -555,7 +556,13 @@ fn emit_map_value(function: &mut Function, params: &EncodeEmit) {
     reject_sequence(function, params, FAIL_LENGTH);
     function.instruction(&Instruction::End);
     build_pair_index(function, params);
+    // DTO mode keeps the insertion order (the index array is built in pair order)
+    lg(function, 0);
+    function.instruction(&Instruction::I32Load(mem32(CONTEXT_KEEP_ORDER_OFFSET)));
+    function.instruction(&Instruction::I32Eqz);
+    function.instruction(&Instruction::If(BlockType::Empty));
     insertion_sort_pairs(function, params);
+    function.instruction(&Instruction::End);
     budget(function, params, 5);
     emit_container_header(function, params, L_PAIRS, 0x80, 0xde, 0xdf);
     claim_depth(function, params);

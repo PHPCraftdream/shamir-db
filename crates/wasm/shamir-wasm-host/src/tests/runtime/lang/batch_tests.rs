@@ -377,3 +377,36 @@ async fn invalid_and_duplicate_aliases_are_rejected() {
         assert_invalid_argument(&error, "alias");
     }
 }
+
+#[tokio::test]
+async fn queries_keep_the_insertion_order_of_the_builder_calls() {
+    // derivation: the server runs independent queries in the order of the
+    // encoded `queries` map, so the guest must not sort the aliases: the
+    // insert named `zeta` is added first and has to stay first.
+    let function = compiled(
+        "@entry procedure ordered() -> i64 {\n\
+         let b = batch_insert(batch(), \"zeta\", \"users\", { name: \"Zed\" });\n\
+         let b2 = batch_read(b, \"alpha\", \"users\", null);\n\
+         let b3 = batch_read(b2, \"mid\", \"users\", null);\n\
+         let resp = db_execute(request(b3));\n\
+         let rows: [{ id: i64, name: string }]? = response_rows(resp, \"alpha\");\n\
+         if (is_null(rows)) { return -1; }\n\
+         return 0;\n\
+         }\n",
+    )
+    .await;
+    let db = gateway(canned_response());
+    call_with(&function, Arc::clone(&db))
+        .await
+        .expect("batch succeeds");
+    let requests = db.requests.lock().expect("requests lock");
+    let decoded = QueryValue::from_bytes(&requests[0]).expect("request decodes");
+    let QueryValue::Map(plan) = decoded else {
+        panic!("the request is a map");
+    };
+    let Some(QueryValue::Map(queries)) = plan.get("queries") else {
+        panic!("the request has a queries map");
+    };
+    let aliases: Vec<&str> = queries.keys().map(String::as_str).collect();
+    assert_eq!(aliases, ["zeta", "alpha", "mid"]);
+}
