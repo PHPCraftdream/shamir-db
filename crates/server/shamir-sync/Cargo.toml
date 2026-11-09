@@ -3,6 +3,9 @@ name = "shamir-sync"
 version = "0.1.0-alpha.1"
 publish = false
 edition = "2021"
+description = "ShamirDB server replication and sync layer."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/shamir-db"
 
 [lib]
 doctest = false
