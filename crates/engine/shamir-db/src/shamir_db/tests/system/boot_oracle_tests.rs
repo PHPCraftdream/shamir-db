@@ -9,6 +9,10 @@ use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::shamir_db::{ShamirDb, SystemStoreConfig};
 #[cfg(feature = "fjall")]
 use log::{Level, LevelFilter, Log, Metadata, Record};
+#[cfg(feature = "fjall")]
+use shamir_test_diag::ring::shared_ring;
+#[cfg(feature = "fjall")]
+use shamir_test_diag::FlakeGuard;
 
 #[cfg(feature = "fjall")]
 static WARNINGS: OnceLock<Mutex<Vec<(Level, String)>>> = OnceLock::new();
@@ -26,6 +30,13 @@ impl Log for WarningLogger {
 
     fn log(&self, record: &Record<'_>) {
         if self.enabled(record.metadata()) {
+            // The guard's own log capture degrades here (this logger owns the
+            // process logger), so feed its ring from this sink.
+            shared_ring().push(
+                record.level().to_string(),
+                record.target().to_string(),
+                record.args().to_string(),
+            );
             WARNINGS
                 .get_or_init(|| Mutex::new(Vec::new()))
                 .lock()
@@ -41,6 +52,13 @@ impl Log for WarningLogger {
 #[tokio::test]
 async fn boot_warns_once_for_unknown_repository_factory_and_keeps_other_repositories() {
     let capturing = log::set_logger(&LOGGER).is_ok();
+    // Failure-only diagnostics (flake #1802: flush stall on Windows). The
+    // guard is created after the logger so this test's logger stays installed;
+    // the shutdown stage timers are `warn` records and land in the ring.
+    let guard = FlakeGuard::with_watchdog(
+        "boot_warns_once_for_unknown_repository_factory_and_keeps_other_repositories",
+        std::time::Duration::from_secs(150),
+    );
     if capturing {
         log::set_max_level(LevelFilter::Warn);
         WARNINGS
@@ -57,7 +75,9 @@ async fn boot_warns_once_for_unknown_repository_factory_and_keeps_other_reposito
         let db = ShamirDb::init(SystemStoreConfig::Fjall(system_path.clone()))
             .await
             .expect("initial boot");
+        guard.mark("initial boot done");
         db.create_db(database).await.expect("create database");
+        guard.mark("database created");
         db.add_repo(
             database,
             RepoConfig::new("available", BoxRepoFactory::in_memory()),
@@ -70,6 +90,7 @@ async fn boot_warns_once_for_unknown_repository_factory_and_keeps_other_reposito
         )
         .await
         .expect("repository to alter");
+        guard.mark("repositories added");
         db.system_store()
             .save_repository(
                 database,
@@ -81,13 +102,17 @@ async fn boot_warns_once_for_unknown_repository_factory_and_keeps_other_reposito
             )
             .await
             .expect("rewrite persisted repository engine");
+        guard.mark("persisted repository engine rewritten");
         db.system_store()
             .flush_buffers_with_quiesce_timeout(std::time::Duration::from_secs(5))
             .await
             .expect("flush system catalogue");
+        guard.mark("system catalogue flushed");
     }
+    guard.mark("first instance dropped");
 
     let reopened = reinit_with_retry(system_path).await;
+    guard.mark("reopened");
     assert!(reopened
         .get_db(database)
         .expect("database")
