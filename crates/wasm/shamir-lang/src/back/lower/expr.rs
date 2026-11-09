@@ -5,6 +5,7 @@ use crate::front::{BinaryOp, ExprId, ExprKind, UnaryOp};
 use crate::sem::{BuiltinId, ResolvedTarget, TypeData, TypeId};
 
 use super::ctx::LowerCtx;
+use super::stmt::{lower_conditional, opens_blocks, reload, short_circuit, spill};
 use super::types::{convert, eq_shape_for, is_scalar, to_slot, value_kind};
 
 /// Magnitude of 2^63: the `negative_min_candidate` literal for i64::MIN.
@@ -118,6 +119,15 @@ fn lower_list(
         .map_err(|_| IrError::Internal("lower: list length out of i32 range"))?;
     let count_inst = ctx.builder.append(InstKind::ConstI32(count_i32), span)?;
     let region = ctx.builder.append(InstKind::CellsAlloc(count_inst), span)?;
+    // An item may open new blocks (`?:`, `&&`, `||`); the CellsAlloc region
+    // must then be re-loaded in the block of each consuming CellSlot, and
+    // for the final SExtend64 (verifier: same-block operands).
+    let any_opens = items.iter().any(|item| opens_blocks(ctx, *item));
+    let region_slot = if any_opens {
+        Some(spill(ctx, region, ValueKind::I32, span)?)
+    } else {
+        None
+    };
     for (position, item) in items.iter().enumerate() {
         let index = u32::try_from(position)
             .map_err(|_| IrError::Internal("lower: element index overflow"))?;
@@ -125,6 +135,10 @@ fn lower_list(
             .map_err(|_| IrError::Internal("lower: element index out of i32 range"))?;
         let value = lower_expr(ctx, *item)?;
         let boxed = to_slot(ctx, ctx.expr_type(*item)?, value, ctx.expr_span(*item))?;
+        let region = match region_slot {
+            Some(slot) => reload(ctx, slot, span)?,
+            None => region,
+        };
         let index_inst = ctx.builder.append(InstKind::ConstI32(index_i32), span)?;
         let dest = ctx.builder.append(
             InstKind::CellSlot {
@@ -151,6 +165,10 @@ fn lower_list(
     ctx.builder
         .append(InstKind::CellStoreAux { cell, value: aux }, span)?;
     // Addresses are < 2^31, so SExtend64 zero-extends the region offset.
+    let region = match region_slot {
+        Some(slot) => reload(ctx, slot, span)?,
+        None => region,
+    };
     let payload = ctx.builder.append(InstKind::SExtend64(region), span)?;
     ctx.builder.append(
         InstKind::CellStorePayload {
@@ -194,25 +212,46 @@ fn lower_record(
         .builder
         .append(InstKind::ConstI32(field_count_i32), span)?;
     let region = ctx.builder.append(InstKind::CellsAlloc(count_inst), span)?;
-    for (position, (name, _)) in shape.fields.iter().enumerate() {
-        let field = fields
-            .iter()
-            .find_map(|field_id| {
-                let node = ctx.module.value_field(*field_id)?;
-                if &node.name == name {
-                    Some(node)
-                } else {
-                    None
-                }
-            })
-            .ok_or(IrError::Internal("lower: record literal misses a field"))?;
-        let value = lower_expr(ctx, field.value)?;
+    // Resolve each shape field to its literal value expression first, so a
+    // block-opening field (`?:`, `&&`, `||`) can be detected before the loop.
+    let field_values: Vec<ExprId> = shape
+        .fields
+        .iter()
+        .map(|(name, _)| {
+            fields
+                .iter()
+                .find_map(|field_id| {
+                    let node = ctx.module.value_field(*field_id)?;
+                    if &node.name == name {
+                        Some(node.value)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or(IrError::Internal("lower: record literal misses a field"))
+        })
+        .collect::<Result<Vec<ExprId>, IrError>>()?;
+    // A field may open new blocks; the CellsAlloc region must then be
+    // re-loaded in the block of each consuming CellSlot, and for the final
+    // RecordCell (verifier: same-block operands).
+    let any_opens = field_values.iter().any(|value| opens_blocks(ctx, *value));
+    let region_slot = if any_opens {
+        Some(spill(ctx, region, ValueKind::I32, span)?)
+    } else {
+        None
+    };
+    for (position, value_id) in field_values.iter().enumerate() {
+        let value = lower_expr(ctx, *value_id)?;
         let boxed = to_slot(
             ctx,
-            ctx.expr_type(field.value)?,
+            ctx.expr_type(*value_id)?,
             value,
-            ctx.expr_span(field.value),
+            ctx.expr_span(*value_id),
         )?;
+        let region = match region_slot {
+            Some(slot) => reload(ctx, slot, span)?,
+            None => region,
+        };
         let index = u32::try_from(position)
             .map_err(|_| IrError::Internal("lower: field index overflow"))?;
         let index_i32 = i32::try_from(index)
@@ -241,6 +280,10 @@ fn lower_record(
             ctx.record_descriptors.insert(shape_index, offset);
             offset
         }
+    };
+    let region = match region_slot {
+        Some(slot) => reload(ctx, slot, span)?,
+        None => region,
     };
     ctx.builder.append(
         InstKind::RecordCell {
@@ -355,7 +398,23 @@ fn lower_arith(
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
     let left_inst = lower_expr(ctx, left)?;
+    // The right operand may open new blocks; spill the left value so both
+    // operands of the consuming instruction share its block.
+    let left_slot = if opens_blocks(ctx, right) {
+        Some(spill(
+            ctx,
+            left_inst,
+            value_kind(ctx.type_data(ctx.expr_type(left)?)?),
+            ctx.expr_span(left),
+        )?)
+    } else {
+        None
+    };
     let right_inst = lower_expr(ctx, right)?;
+    let left_inst = match left_slot {
+        Some(slot) => reload(ctx, slot, span)?,
+        None => left_inst,
+    };
     let data = ctx.type_data(ctx.expr_type(left)?)?;
     let right_data = ctx.type_data(ctx.expr_type(right)?)?;
     if data != right_data {
@@ -434,58 +493,6 @@ fn cmp_op(op: BinaryOp) -> Result<CmpOp, IrError> {
     }
 }
 
-/// Short-circuit `&&`/`||` through a temp local. The join block is opened
-/// LAST (after both arms are filled), so both arms are forward targets and
-/// the branch condition is the lowered left value directly (no temp
-/// round-trip) — `lower_expr(left)` leaves `current_block()` on the
-/// unterminated block the BranchIf terminates.
-fn short_circuit(
-    ctx: &mut LowerCtx,
-    is_and: bool,
-    left: ExprId,
-    right: ExprId,
-    span: crate::api::Span,
-) -> Result<InstId, IrError> {
-    let tmp = ctx.builder.declare_local(ValueKind::I32)?;
-    let cond = lower_expr(ctx, left)?;
-    let current = ctx
-        .builder
-        .current_block()
-        .ok_or(IrError::Internal("lower: short-circuit outside a block"))?;
-    let region = ctx.block_region();
-    let eval = ctx.builder.open_block(region)?;
-    let constant = ctx.builder.open_block(region)?;
-    ctx.builder.set_current(current)?;
-    if is_and {
-        ctx.builder.terminate_branch_if(cond, eval, constant)?;
-    } else {
-        ctx.builder.terminate_branch_if(cond, constant, eval)?;
-    }
-    ctx.builder.set_current(eval)?;
-    let _rhs = lower_expr(ctx, right)?;
-    ctx.builder
-        .append(InstKind::LocalSet(tmp), ctx.expr_span(right))?;
-    // The join does not exist yet; patch after it is created. The holder is
-    // wherever the right operand left the current block (a nested arm may
-    // have terminated `eval` itself); captured before the pending terminate
-    // clears `current`.
-    let eval_join = ctx.builder.current_block().ok_or(IrError::Internal(
-        "lower: short-circuit without a pending arm",
-    ))?;
-    ctx.builder.terminate_pending_branch()?;
-    ctx.builder.set_current(constant)?;
-    let _value = ctx
-        .builder
-        .append(InstKind::ConstI32(if is_and { 0 } else { 1 }), span)?;
-    ctx.builder.append(InstKind::LocalSet(tmp), span)?;
-    ctx.builder.terminate_pending_branch()?;
-    let join = ctx.builder.open_block(region)?;
-    ctx.builder.patch_pending_branch(eval_join, join)?;
-    ctx.builder.patch_pending_branch(constant, join)?;
-    ctx.builder.set_current(join)?;
-    ctx.builder.append(InstKind::LocalGet(tmp), span)
-}
-
 fn lower_equality(
     ctx: &mut LowerCtx,
     op: BinaryOp,
@@ -520,7 +527,23 @@ fn lower_equality(
         ));
     }
     let left_inst = lower_expr(ctx, left)?;
+    // The right operand may open new blocks; spill the left value so both
+    // operands of the consuming comparison share its block.
+    let left_slot = if opens_blocks(ctx, right) {
+        Some(spill(
+            ctx,
+            left_inst,
+            value_kind(left_data),
+            ctx.expr_span(left),
+        )?)
+    } else {
+        None
+    };
     let right_inst = lower_expr(ctx, right)?;
+    let left_inst = match left_slot {
+        Some(slot) => reload(ctx, slot, span)?,
+        None => left_inst,
+    };
     match left_data {
         TypeData::I32 | TypeData::Bool => ctx.builder.append(
             InstKind::Compare {
@@ -620,7 +643,23 @@ fn lower_order(
         ));
     }
     let left_inst = lower_expr(ctx, left)?;
+    // The right operand may open new blocks; spill the left value so both
+    // operands of the Compare share its block.
+    let left_slot = if opens_blocks(ctx, right) {
+        Some(spill(
+            ctx,
+            left_inst,
+            value_kind(data),
+            ctx.expr_span(left),
+        )?)
+    } else {
+        None
+    };
     let right_inst = lower_expr(ctx, right)?;
+    let left_inst = match left_slot {
+        Some(slot) => reload(ctx, slot, span)?,
+        None => left_inst,
+    };
     let width = match data {
         TypeData::I32 => ValueKind::I32,
         TypeData::I64 => ValueKind::I64,
@@ -646,70 +685,6 @@ fn lower_order(
         },
         span,
     )
-}
-
-fn lower_conditional(
-    ctx: &mut LowerCtx,
-    id: ExprId,
-    condition: ExprId,
-    then_value: ExprId,
-    else_value: ExprId,
-    span: crate::api::Span,
-) -> Result<InstId, IrError> {
-    let result_ty = ctx.expr_type(id)?;
-    let data = ctx.type_data(result_ty)?;
-    let tmp = ctx.builder.declare_local(value_kind(data))?;
-    let cond = lower_expr(ctx, condition)?;
-    let current = ctx
-        .builder
-        .current_block()
-        .ok_or(IrError::Internal("lower: conditional outside a block"))?;
-    let region = ctx.block_region();
-    let then_b = ctx.builder.open_block(region)?;
-    let else_b = ctx.builder.open_block(region)?;
-    ctx.builder.set_current(current)?;
-    ctx.builder.terminate_branch_if(cond, then_b, else_b)?;
-    ctx.builder.set_current(then_b)?;
-    let then_inst = lower_expr(ctx, then_value)?;
-    // The converted value is the last appended inst; LocalSet reads it.
-    convert(
-        ctx,
-        result_ty,
-        ctx.expr_type(then_value)?,
-        then_inst,
-        ctx.expr_span(then_value),
-    )?;
-    ctx.builder
-        .append(InstKind::LocalSet(tmp), ctx.expr_span(then_value))?;
-    // The join does not exist yet; patch after both arms are filled so the
-    // nested arms' own blocks are created first (all targets stay forward).
-    // The holder is wherever the arm left the current block — a nested
-    // conditional may have terminated `then_b` itself; captured before the
-    // pending terminate clears `current`.
-    let then_join = ctx.builder.current_block().ok_or(IrError::Internal(
-        "lower: conditional without a pending arm",
-    ))?;
-    ctx.builder.terminate_pending_branch()?;
-    ctx.builder.set_current(else_b)?;
-    let else_inst = lower_expr(ctx, else_value)?;
-    convert(
-        ctx,
-        result_ty,
-        ctx.expr_type(else_value)?,
-        else_inst,
-        ctx.expr_span(else_value),
-    )?;
-    ctx.builder
-        .append(InstKind::LocalSet(tmp), ctx.expr_span(else_value))?;
-    let else_join = ctx.builder.current_block().ok_or(IrError::Internal(
-        "lower: conditional without a pending arm",
-    ))?;
-    ctx.builder.terminate_pending_branch()?;
-    let join = ctx.builder.open_block(region)?;
-    ctx.builder.patch_pending_branch(then_join, join)?;
-    ctx.builder.patch_pending_branch(else_join, join)?;
-    ctx.builder.set_current(join)?;
-    ctx.builder.append(InstKind::LocalGet(tmp), span)
 }
 
 fn lower_call(
@@ -742,24 +717,59 @@ fn lower_call(
                 return Err(IrError::Internal("lower: call arity mismatch"));
             }
             let mut args = Vec::with_capacity(arguments.len());
+            // Argument k needs a spill iff some LATER argument opens new
+            // blocks (`?:`, `&&`, `||`): the verifier requires the Call's
+            // operands to live in the block the argument lowering ends in.
+            let mut opens_after = Vec::with_capacity(arguments.len());
+            let mut later_opens = false;
+            for argument in arguments.iter().rev() {
+                opens_after.push(later_opens);
+                later_opens = later_opens || opens_blocks(ctx, *argument);
+            }
+            opens_after.reverse();
+            // Spill in phase 1 directly after `lower_expr` (because `convert`
+            // may pass the id through without appending, a `LocalSet` after
+            // `convert` would read the wrong instruction); reload in phase 2
+            // because the `Call` and all its operands must share the final
+            // block.
+            let mut lowered: Vec<(ExprId, TypeId, InstId, Option<u32>)> =
+                Vec::with_capacity(arguments.len());
             for (position, argument) in arguments.iter().enumerate() {
                 let parameter = function
                     .parameters
                     .get(position)
                     .ok_or(IrError::Internal("lower: missing parameter type"))?;
                 let value = lower_expr(ctx, *argument)?;
-                let value_data = ctx.type_data(ctx.expr_type(*argument)?)?;
+                let value_type = ctx.expr_type(*argument)?;
+                let value_data = ctx.type_data(value_type)?;
                 let parameter_data = ctx.type_data(parameter.ty)?;
                 if is_scalar(parameter_data) && value_kind(parameter_data) != value_kind(value_data)
                 {
                     return Err(IrError::Internal("lower: argument kind mismatch"));
                 }
+                let slot = if opens_after[position] {
+                    Some(spill(
+                        ctx,
+                        value,
+                        value_kind(value_data),
+                        ctx.expr_span(*argument),
+                    )?)
+                } else {
+                    None
+                };
+                lowered.push((*argument, parameter.ty, value, slot));
+            }
+            for (argument, parameter_ty, raw, slot) in lowered {
+                let raw = match slot {
+                    Some(s) => reload(ctx, s, span)?,
+                    None => raw,
+                };
                 let converted = convert(
                     ctx,
-                    parameter.ty,
-                    ctx.expr_type(*argument)?,
-                    value,
-                    ctx.expr_span(*argument),
+                    parameter_ty,
+                    ctx.expr_type(argument)?,
+                    raw,
+                    ctx.expr_span(argument),
                 )?;
                 args.push(converted);
             }
@@ -957,7 +967,18 @@ fn lower_index(
     if index_data != TypeData::I32 {
         return Err(IrError::Internal("lower: list index is not i32"));
     }
+    // The index may open new blocks; spill the base cell pointer so both
+    // operands of the CellElemPtr share its block.
+    let base_slot = if opens_blocks(ctx, index) {
+        Some(spill(ctx, base, ValueKind::I32, span)?)
+    } else {
+        None
+    };
     let index_inst = lower_expr(ctx, index)?;
+    let base = match base_slot {
+        Some(slot) => reload(ctx, slot, span)?,
+        None => base,
+    };
     let elem = ctx.builder.append(
         InstKind::CellElemPtr {
             base,

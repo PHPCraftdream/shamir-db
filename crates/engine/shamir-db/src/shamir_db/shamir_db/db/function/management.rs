@@ -159,18 +159,24 @@ impl ShamirDb {
                 .await
                 .map_err(|e| DbError::Function(e.to_string()))?;
         }
-        let (wasm, lang_tag, source_str) = self.materialize_function_source(source, &actor).await?;
-
-        // Validate the wasm by compiling it (on the blocking thread pool).
-        let (wf, report) = WasmFunction::from_binary_admitted_blocking(
-            self.wasm_engine.clone(),
-            &wasm,
-            WasmLimits::default(),
-            opts.optimize,
-            AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
-        )
-        .await
-        .map_err(|e| DbError::Function(e.to_string()))?;
+        // `ready` is Some for shamir sources: the service already built and
+        // gate-checked the function, so rebuild from bytes would compile
+        // twice under two gate acquisitions.
+        let (wasm, lang_tag, source_str, ready) = self
+            .materialize_function_source(source, &actor, opts.optimize)
+            .await?;
+        let (wf, report) = match ready {
+            Some((wf, report)) => (wf, report),
+            None => WasmFunction::from_binary_admitted_blocking(
+                self.wasm_engine.clone(),
+                &wasm,
+                WasmLimits::default(),
+                opts.optimize,
+                AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
+            )
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?,
+        };
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
 

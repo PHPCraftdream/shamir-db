@@ -25,12 +25,27 @@ pub async fn check_module(
 ) -> FnResult<ModuleReport> {
     let wasm = bytes.to_vec();
     let gate = Arc::clone(&engine);
-    run_gated_compile(&gate, &policy, move || {
-        let report = admit_module(&wasm, &policy)?;
-        compile_and_discard(&engine, &wasm, mode)?;
-        Ok(report)
+    // `AdmissionPolicy` is `Copy`, so `policy` is captured by the same
+    // by-value move as before and shared with the ungated body by reference.
+    run_gated_compile(&gate, &policy, move |_permit| {
+        check_module_ungated(&engine, &wasm, &policy, mode)
     })
     .await
+}
+
+/// The gate-free body of [`check_module`]: admits `wasm` under `policy` and
+/// compiles/pre-instantiates for `mode`, persisting nothing. Called inside
+/// a `run_gated_compile` closure — either `check_module`'s own single
+/// permit or the shamir source service's — never with a gate of its own.
+pub(in crate::wasm) fn check_module_ungated(
+    engine: &Arc<WasmEngine>,
+    wasm: &[u8],
+    policy: &AdmissionPolicy,
+    mode: TierMode,
+) -> FnResult<ModuleReport> {
+    let report = admit_module(wasm, policy)?;
+    compile_and_discard(engine, wasm, mode)?;
+    Ok(report)
 }
 
 fn compile_and_discard(engine: &WasmEngine, wasm: &[u8], mode: TierMode) -> FnResult<()> {

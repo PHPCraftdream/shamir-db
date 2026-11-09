@@ -43,10 +43,14 @@ pub use runtime::{
     GlobalsQuota, GlobalsQuotaError, Params, ShamirFunction,
 };
 pub use wasm::{
-    admit_module, check_module, verify_wasm_module, AdmissionError, AdmissionLimits,
-    AdmissionPolicy, ModuleHash, ModuleReport, Tier, TierMode, TierOptions, TierReport, TierStats,
-    UpgradeState, WasmEngine, WasmEngineOptions, WasmFunction, WasmLimits, SANCTIONED_HOST_IMPORTS,
+    admit_module, check_module, check_shamir_source, create_shamir_source, verify_wasm_module,
+    AdmissionError, AdmissionLimits, AdmissionPolicy, ModuleHash, ModuleReport, Tier, TierMode,
+    TierOptions, TierReport, TierStats, UpgradeState, WasmEngine, WasmEngineOptions, WasmFunction,
+    WasmLimits, SANCTIONED_HOST_IMPORTS,
 };
+// Re-export so consumers of `create_shamir_source`/`check_shamir_source` can
+// name `CompileOptions` without a direct dependency on the compiler crate.
+pub use shamir_lang::CompileOptions;
 
 #[cfg(test)]
 pub(crate) use wasm::test_linker_and_store;

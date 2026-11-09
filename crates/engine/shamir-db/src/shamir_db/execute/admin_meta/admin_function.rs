@@ -89,13 +89,14 @@ impl ShamirAdminExecutor {
         }
 
         if let Some(ref source) = op.source {
+            // Dispatch by lang: `validate_lang` above rejects lang = "wasm"
+            // with a source payload; absent lang stays rust.
+            let source = match op.lang.as_deref() {
+                Some("shamir") => FunctionSource::Shamir(source),
+                _ => FunctionSource::Source(source),
+            };
             self.shamir
-                .create_function_with_opts_as(
-                    &op.create_function,
-                    FunctionSource::Source(source),
-                    opts,
-                    self.actor.clone(),
-                )
+                .create_function_with_opts_as(&op.create_function, source, opts, self.actor.clone())
                 .await
                 .map_err(|e| err(e.to_string()))?;
         } else if let Some(ref wasm_b64) = op.wasm {

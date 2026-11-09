@@ -1,7 +1,10 @@
 use crate::access::{Action, Actor, ResourcePath};
 use crate::shamir_db::shamir_db::{FunctionSource, ShamirDb};
 use crate::{DbError, DbResult};
-use shamir_engine::function::{check_module, AdmissionPolicy, ModuleReport, TierMode};
+use shamir_engine::function::{
+    check_module, check_shamir_source, AdmissionPolicy, CompileOptions, ModuleReport, TierMode,
+    WasmLimits,
+};
 
 impl ShamirDb {
     /// Dry-run a function creation as the system actor.
@@ -25,14 +28,35 @@ impl ShamirDb {
         self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
-        let (bytes, _, _) = self.materialize_function_source(source, &actor).await?;
-        check_module(
-            self.wasm_engine.clone(),
-            &bytes,
-            AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
-            optimize,
-        )
-        .await
-        .map_err(|e| DbError::Function(e.to_string()))
+        match source {
+            FunctionSource::Shamir(src) => {
+                // Route shamir through the check-only service path so the
+                // source compiles exactly once; materialize would compile it
+                // again from bytes. Nothing is persisted.
+                self.authorize_shamir_source(src, &actor).await?;
+                check_shamir_source(
+                    self.wasm_engine.clone(),
+                    src.to_string(),
+                    CompileOptions::default(),
+                    WasmLimits::default(),
+                    optimize,
+                )
+                .await
+                .map_err(|e| DbError::Function(e.to_string()))
+            }
+            other => {
+                let (bytes, _, _, _) = self
+                    .materialize_function_source(other, &actor, optimize)
+                    .await?;
+                check_module(
+                    self.wasm_engine.clone(),
+                    &bytes,
+                    AdmissionPolicy::Admission(*self.wasm_engine.admission_limits()),
+                    optimize,
+                )
+                .await
+                .map_err(|e| DbError::Function(e.to_string()))
+            }
+        }
     }
 }
