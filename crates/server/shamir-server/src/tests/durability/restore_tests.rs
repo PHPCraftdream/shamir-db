@@ -591,6 +591,7 @@ fn backup_restore_round_trip_into_fresh_target_is_byte_identical() {
 fn copy_step_failure_propagates_and_leaves_data_dir_untouched() {
     use std::os::windows::fs::OpenOptionsExt;
 
+    let guard = FlakeGuard::new("copy_step_failure_propagates_and_leaves_data_dir_untouched");
     let root = TempDir::new().unwrap();
 
     // Build a multi-file snapshot: several large decoy files (alphabetically
@@ -600,10 +601,12 @@ fn copy_step_failure_propagates_and_leaves_data_dir_untouched() {
     // watcher thread time to lock it after temp_dir appears.
     let src = root.path().join("src");
     fs::create_dir_all(&src).unwrap();
-    // 256 KB decoys: each copy + fsync takes ~1-5ms, so 4 decoys give the
-    // watcher ~4-20ms of window before `z_locked.txt` is reached.
-    for i in 0..4u8 {
-        fs::write(src.join(format!("a_decoy_{i}.bin")), vec![i; 256 * 1024]).unwrap();
+    // 256 KB decoys: each copy + fsync takes ~1-5ms. The watcher spins on
+    // `yield_now` (a sleep is quantized to the ~15.6ms Windows timer tick,
+    // which exceeded the former 4-decoy window under CI load), and 32 decoys
+    // give it a ~30-150ms window before `z_locked.txt` is reached.
+    for i in 0..32u8 {
+        fs::write(src.join(format!("a_decoy_{i:02}.bin")), vec![i; 256 * 1024]).unwrap();
     }
     fs::write(src.join("z_locked.txt"), b"this file will fail to copy").unwrap();
 
@@ -631,8 +634,11 @@ fn copy_step_failure_propagates_and_leaves_data_dir_untouched() {
     let held: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let held2 = held.clone();
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let polls2 = polls.clone();
     let watcher = std::thread::spawn(move || {
         while !stop2.load(std::sync::atomic::Ordering::SeqCst) {
+            polls2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Ok(entries) = fs::read_dir(&parent) {
                 for entry in entries.flatten() {
                     if entry
@@ -651,17 +657,27 @@ fn copy_step_failure_propagates_and_leaves_data_dir_untouched() {
                     }
                 }
             }
-            std::thread::sleep(std::time::Duration::from_micros(100));
+            std::thread::yield_now();
         }
     });
+    guard.mark("snapshot built, watcher started");
 
     let result = restore(&snapshot, &data_dir, true);
+    guard.mark("restore returned");
 
     // Stop the watcher and release the held handle (it may or may not have
     // grabbed it depending on timing, but either way the handle must be
     // dropped so the test doesn't leak it).
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = watcher.join();
+    guard.note(
+        "watcher locked z_locked.txt",
+        held.lock().unwrap().is_some().to_string(),
+    );
+    guard.note(
+        "watcher polls",
+        polls.load(std::sync::atomic::Ordering::Relaxed).to_string(),
+    );
     drop(held);
 
     let err = result.expect_err(
