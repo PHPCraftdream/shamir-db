@@ -15,7 +15,7 @@ pub use filter::{filter_eval, target_match};
 pub(crate) use flow::{push, registry};
 pub(crate) use journal::{db_journal_source, journal_drain, journal_source};
 
-pub use registry::SubscriptionRegistry;
+pub use shamir_sync::subscriptions::SubscriptionRegistry;
 
 #[cfg(test)]
 mod tests;

@@ -76,9 +76,13 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use shamir_query_types::batch::BatchLimits;
 
+pub use shamir_sync::config_error::ConfigError;
+
 pub use crate::durability::DurabilityConfig;
 pub use crate::transactions_config::TransactionsConfig;
+pub use shamir_server_security::config::{LoggingConfig, TokensConfig};
 
+pub mod diagnostics;
 mod http_listener;
 mod http_mapping;
 mod http_validation;
@@ -86,14 +90,12 @@ mod limits;
 mod login_listener;
 #[cfg(test)]
 mod tests;
-mod tokens;
 
 pub use http_listener::HttpListenerSettings;
 pub use http_mapping::to_http_server_config;
 pub use login_listener::LoginListenerSettings;
 
 pub use limits::{CursorLimitsConfig, QueryLimitsConfig, TxLimitsConfig};
-pub use tokens::TokensConfig;
 
 /// Top-level configuration as loaded from the `.ktav` file.
 ///
@@ -317,49 +319,6 @@ fn default_max_active_connections_per_ip() -> usize {
     100
 }
 
-/// Logging / tracing configuration.
-#[derive(Debug, Clone, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level: `trace` | `debug` | `info` | `warn` | `error`.
-    /// Defaults to `info` when the whole `logging` block is omitted.
-    #[serde(default = "default_log_level")]
-    pub level: String,
-    /// Log a `WARN` line for every batch whose `execution_time_us`
-    /// exceeds this many milliseconds. Set to `0` to disable. Default
-    /// 1000 ms (1 second).
-    #[serde(default = "default_slow_query_threshold_ms")]
-    pub slow_query_threshold_ms: u64,
-    /// Optional file path for batched log output. When `None` (default)
-    /// logs go to stdout via the non-blocking appender (slice 1). When
-    /// `Some(path)`, logs are written to a file through an in-memory
-    /// buffer flushed every `flush_interval_ms` or on shutdown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-    /// How often (ms) the batched file writer flushes its in-memory
-    /// buffer to disk. Only used when `file` is `Some`. Default 2000 ms.
-    #[serde(default = "default_log_flush_interval_ms")]
-    pub flush_interval_ms: u64,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-            slow_query_threshold_ms: default_slow_query_threshold_ms(),
-            file: None,
-            flush_interval_ms: default_log_flush_interval_ms(),
-        }
-    }
-}
-
-fn default_slow_query_threshold_ms() -> u64 {
-    1_000
-}
-
-fn default_log_flush_interval_ms() -> u64 {
-    2_000
-}
-
 /// Argon2id KDF parameters (spec §3.7).
 ///
 /// `argon2_version` is the raw protocol byte — `0x13` is the only
@@ -450,24 +409,6 @@ pub struct TlsConfig {
     pub cert_path: PathBuf,
     /// Path to the matching private key (PEM, PKCS#8 or SEC1).
     pub key_path: PathBuf,
-}
-
-/// Configuration error covering both load failure and validation failure.
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-    /// Ktav parser rejected the input. Wraps the formatted ktav error.
-    #[error("config parse: {0}")]
-    Parse(String),
-    /// One of the [`Config::validate`] invariants was violated.
-    #[error("config validation: {0}")]
-    Validation(String),
-    /// Underlying I/O error (file missing, permission denied, etc.).
-    #[error("config io: {0}")]
-    Io(#[from] std::io::Error),
-}
-
-fn default_log_level() -> String {
-    "info".into()
 }
 
 fn default_argon2_max() -> u32 {

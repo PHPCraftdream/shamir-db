@@ -67,6 +67,7 @@ diagnostics stay because the class (timing, ports, OS differences) can recur.
 | `token_listener_socket_traces_redact_rest_and_native_ws_credentials` | shamir-server `tests/e2e/token_matrix/suite/observability.rs` | |
 | `seed_e2e_c_incomplete_install_boot_gate_refuses_then_exact_retry_converges` | shamir-server `tests/seed_recovery_e2e/scenarios/c_refusals.rs` | |
 | `restore_failure_at_pre_swap_invalidation_leaves_data_dir_untouched` | shamir-server `tests/admin/ops/backup_restore_e2e/restore_failure.rs` | |
+| `copy_step_failure_propagates_and_leaves_data_dir_untouched` | shamir-server `src/tests/durability/restore_tests.rs` | Windows only: the watcher lost the race for `z_locked.txt` (a sleep is quantized to the ~15.6ms timer tick); the guard notes whether the lock was taken and the poll count |
 | `http_ws_native_group` | shamir-server `tests/e2e/http_ws/native.rs` | |
 | `incomplete_body_timeout_releases_declared_reservation` | shamir-transport-http `src/tests/transport_tests.rs` | macOS timing |
 | `in_doubt_rename_reopens_as_exactly_one_catalogued_incarnation` | shamir-db `.../tests/catalogue/rename_restart_tests.rs` | |

@@ -8,5 +8,7 @@ pub mod config;
 pub mod runtime;
 pub mod scheduler;
 
+pub use config::diagnostics::{access_tree, observability, restore};
+pub(crate) use policy::maintenance_lock;
 pub(crate) use policy::transactions_config;
-pub use policy::version;
+pub use policy::{service, tokens, version};

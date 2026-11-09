@@ -24,9 +24,9 @@ const ALLOCATOR_CONFIG: sefer_alloc::LargeCacheConfig = sefer_alloc::LargeCacheC
 static GLOBAL: sefer_alloc::SeferAlloc = sefer_alloc::SeferAlloc::with_config(ALLOCATOR_CONFIG);
 
 #[cfg(test)]
-#[path = "security/service/tests/bootstrap_cli_tests.rs"]
+#[path = "../../shamir-server-security/src/security/service/tests/bootstrap_cli_tests.rs"]
 mod bootstrap_cli_tests;
-#[path = "security/service/bootstrap_stdin.rs"]
+#[path = "../../shamir-server-security/src/security/service/bootstrap_stdin.rs"]
 mod bootstrap_stdin;
 
 use std::path::PathBuf;

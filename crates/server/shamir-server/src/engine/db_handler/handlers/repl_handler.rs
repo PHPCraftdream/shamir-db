@@ -57,8 +57,7 @@ use shamir_query_types::wire::repl::{
 use shamir_query_types::ReplicationServe;
 
 use crate::replication::in_process::MAX_PULL_EVENTS;
-use crate::replication::source::seed::advertisement::authorized_publications;
-use crate::replication::source::seed::fence::live_schema;
+use crate::replication::source::{authorized_publications, live_schema};
 
 use crate::db_handler::handler::{session_actor, ShamirDbHandler};
 

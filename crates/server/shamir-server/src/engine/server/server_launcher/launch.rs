@@ -32,8 +32,7 @@ use crate::connection::ConnTasks;
 use crate::db_handler::{
     AdminGlue, CursorLimitsCap, QueryLimitsCap, ShamirDbHandler, SlowQueryConfig, TxLimitsCap,
 };
-use crate::http_ws::cancel_registry::TokenWsCancelRegistry;
-use crate::http_ws::PreAuthAdmission;
+use crate::http_ws::{PreAuthAdmission, TokenWsCancelRegistry};
 use crate::ports::DirectoryPorts;
 use crate::scheduler::{Scheduler, SchedulerConfig, SchedulerInputs};
 use crate::server::boot_error::BootError;

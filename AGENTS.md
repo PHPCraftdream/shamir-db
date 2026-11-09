@@ -30,17 +30,19 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*/*", "vendor/hnsw_rs"]` and excludes
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*/*` glob
 must not try to load it). Crates live in layer folders `crates/<group>/<crate>/`
-(see CLAUDE.md for the group table). The default workspace ships **30 crates** under `crates/` (including
+(see CLAUDE.md for the group table). The default workspace ships **38 crates** under `crates/` (including
 the `shamir-client-node` napi-rs binding, a regular member; MSVC-only on
 Windows) plus the vendored `vendor/hnsw_rs` member:
 
 `shamir-collections`, `shamir-types`, `shamir-storage`, `shamir-query-types`,
 `shamir-query-builder`, `shamir-query-builder-macros`, `shamir-engine`, `shamir-engine-query`, `shamir-engine-validator`,
 `shamir-funclib`, `shamir-wal`, `shamir-tx`, `shamir-db`, `shamir-connect`,
-`shamir-server`, `shamir-transport-ipc`, `shamir-transport-tcp`,
+`shamir-server`, `shamir-server-security`, `shamir-sync`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
 `shamir-sdk-macros`, `shamir-tunables`, `shamir-wasm-host`, `shamir-index`,
 `shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`,
+`shamir-index-core`, `shamir-vector`, `shamir-wasm-admission`, `shamir-e2e`,
+`shamir-test-diag`,
 `shamir-lang` (its `testsupport` module is behind the `testsupport` feature,
 enabled only by the host dev-dependency). Milestone 4 adds the typed IR (`back/ir`), the lowering (`back/lower`), scalar emission with the named/positional call envelope, and the public `compile` entry returning a self-admitted `CompiledModule`. Milestone 5 adds validator entries and their ABI (`back/emit/support/validator.rs`, the in-guest `Validation` record and the seven constructor lowerings). Milestone 6 adds the host source service (`create_shamir_source`/`check_shamir_source` in `shamir-wasm-host`, one compile-gate permit and a fixed-stack worker) and wires `lang = "shamir"` through `shamir-db`. Milestone 7a adds `@entry procedure` entries and the direct database intrinsics `db_get`/`db_insert`/`db_query` (contextual result types, `T010`; host imports, encoder/decoder call helpers in `back/emit/support/db.rs`, decode-class kind-3 projection). Milestone 7b adds the typed builder intrinsics (`batch`, `batch_read`, `batch_insert`, `request`, `db_execute`, `response_rows`/`response_inserted`): the plan is the `BatchRequest` record encoded with the shared encoder, templates and lowering in `back/batch`, the append/execute/response helpers in `back/emit/support/db.rs`. Milestone 8 hardens it without widening the surface: deterministic mutation fuzzing of the compile pipeline, a source-scan guard that keeps `std::process`/`fs`/`net`/`env`/`thread` out of the production code (and pins the three production dependencies), and raw-byte guest conformance (codec vectors, shortest integers, canonical key order, the second-call guard) in `shamir-wasm-host`'s `raw` tests.
 

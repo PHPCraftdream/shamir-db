@@ -15,28 +15,29 @@
 //! - [`db_handler`] — `RequestHandler` bridge to `ShamirDb` query layer.
 
 mod boot;
+pub mod durability;
 mod engine;
-mod security;
-mod sync;
+pub(crate) use shamir_server_security as security;
+pub(crate) use shamir_sync as sync;
 
+pub(crate) use boot::maintenance_lock;
+pub use boot::tokens;
 pub(crate) use boot::transactions_config;
-pub use boot::{bootstrap, config, runtime, scheduler, version};
+pub use boot::{
+    access_tree, bootstrap, config, observability, restore, runtime, scheduler, service, version,
+};
 pub use connection::conn_limiter;
-pub(crate) use durability::maintenance_lock;
-pub use durability::{backup, restore, tx_registry};
+pub use durability::{backup, tx_registry};
 pub use engine::{
     cursor_registry, db_handler, server, server_meta, subscriptions, tables_registry,
 };
 pub use logging::audit_appender;
 pub use observability::doctor;
 pub use observability::logging;
-pub use security::{
-    access_tree, byte_budget, http_login, http_rest, http_ws, observability, service, tls, tokens,
-    user_directory,
-};
+pub use security::{byte_budget, http_login, http_rest, http_ws, tls, user_directory};
 #[cfg(windows)]
 pub use service::windows_service;
-pub use sync::{connection, durability, framer, ports, replication, replication_seed};
+pub use sync::{connection, framer, ports, replication, replication_seed};
 
 #[cfg(test)]
 mod tests;

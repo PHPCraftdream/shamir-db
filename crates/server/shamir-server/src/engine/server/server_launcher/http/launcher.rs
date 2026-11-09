@@ -384,7 +384,7 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
     let ws_service = Arc::new(WsUpgradeService {
         gate: Arc::clone(&gate),
         service: Arc::clone(env.token_service),
-        handler: Arc::clone(env.handler_concrete),
+        handler: env.handler_concrete.clone(),
         registry: Arc::clone(env.token_ws_cancel_registry),
         pre_auth: Arc::clone(env.pre_auth_admission),
         tls: settings.tls == Some(true),
@@ -407,6 +407,9 @@ pub(in crate::engine::server::server_launcher) async fn start_http_listener(
                 .filter_map(|item| super::proxy::parse_cidr(item))
                 .collect::<Vec<_>>();
             move |peer: &PeerInfo| super::proxy::resolve_peer(peer, &trusted)
+        }),
+        runner: Arc::new(|context, socket| {
+            Box::pin(crate::connection::token_ws::run_token_loop(context, socket))
         }),
     });
     let span = tracing::Span::current();

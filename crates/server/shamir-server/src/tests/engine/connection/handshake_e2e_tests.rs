@@ -39,11 +39,10 @@ use crate::connection::wire::{
     AuthInit as WireAuthInit, AuthOk as WireAuthOk, Challenge as WireChallenge,
     ClientProof as WireClientProof,
 };
-use crate::connection::CLOCK_OVERRIDE_NS;
 use crate::connection::{request_loop, ConnTasks};
 use crate::framer::{FrameReader, FrameWriter, Framer, FramerError, TcpFramer};
 use crate::server::drain_connections;
-use crate::server_meta::ServerMetaStore;
+use crate::server_meta::{ServerMetaStore, CLOCK_OVERRIDE_NS};
 
 // ---------------------------------------------------------------------
 // RV-TRANSPORT-TCP-B5244FA2 harness: paused-clock tests with a SCRIPTED

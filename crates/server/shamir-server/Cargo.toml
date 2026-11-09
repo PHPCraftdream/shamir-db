@@ -33,6 +33,8 @@ bench-sefer       = []
 bench-sefer-tuned = []
 
 [dependencies]
+shamir-server-security = { path = "../shamir-server-security" }
+shamir-sync = { path = "../shamir-sync" }
 shamir-connect = { path = "../../net/shamir-connect", features = ["server", "client", "durable-fjall"] }
 shamir-tunables = { path = "../../foundation/shamir-tunables" }
 shamir-transport-tcp = { path = "../../net/shamir-transport-tcp" }

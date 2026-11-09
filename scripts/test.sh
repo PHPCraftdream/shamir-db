@@ -40,8 +40,8 @@
 #   @oracle   — shamir-tx + shamir-engine (Version Oracle area)
 #   @types    — shamir-types + shamir-collections
 #   @storage  — shamir-storage + shamir-wal
-#   @server   — shamir-server + shamir-connect
-#   @e2e      — shamir-db + shamir-server + shamir-e2e (forces --full)
+#   @server   — shamir-server + shamir-server-security + shamir-sync + shamir-connect
+#   @e2e      — shamir-db + shamir-server + shamir-server-security + shamir-sync + shamir-e2e (forces --full)
 #   @all      — every workspace crate (explicit; same as no -p)
 #
 # Power-user: pass `-E '<nextest-filter-expression>'` for arbitrary
@@ -113,9 +113,9 @@ scope_args() {
         @oracle)   echo "-p shamir-tx -p shamir-engine" ;;
         @types)    echo "-p shamir-types -p shamir-collections" ;;
         @storage)  echo "-p shamir-storage -p shamir-wal" ;;
-        @server)   echo "-p shamir-server -p shamir-connect" ;;
+        @server)   echo "-p shamir-server -p shamir-server-security -p shamir-sync -p shamir-connect" ;;
         @vector)   echo "-p shamir-index-core -p shamir-vector -p shamir-index -p shamir-engine" ;;
-        @e2e)      echo "-p shamir-db -p shamir-server -p shamir-e2e" ;;
+        @e2e)      echo "-p shamir-db -p shamir-server -p shamir-server-security -p shamir-sync -p shamir-e2e" ;;
         @all)      echo "" ;;  # nextest default = workspace
         @*)
             echo "ERROR: unknown scope '$1'. See ./scripts/test.sh --help." >&2
