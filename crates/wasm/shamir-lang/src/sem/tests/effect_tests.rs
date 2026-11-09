@@ -177,9 +177,15 @@ fn stage2_builtins_are_rejected_everywhere() {
         expect_codes("@entry scalar probe() -> i64 { batch(); return 1; }"),
         vec!["T007"]
     );
+    // Derivation: `request()` has the wrong arity (one argument expected), which
+    // is reported before the capability ceiling.
     assert_eq!(
         expect_codes("@entry scalar probe() -> i64 { request(); return 1; }"),
-        vec!["T007"]
+        vec!["T004"]
+    );
+    assert_eq!(
+        expect_codes("@entry scalar probe() -> i64 { let r = request(batch()); return 1; }"),
+        vec!["T007", "T007"]
     );
 }
 
