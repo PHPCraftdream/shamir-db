@@ -8,7 +8,7 @@ use crate::front::{self, EntryKind};
 use crate::sem;
 
 use super::error::{limit_error, CompileError};
-use super::options::CompileOptions;
+use super::options::{CompileOptions, Stage};
 use super::{Diagnostic, Span};
 
 /// A compiled, self-admitted module (design section 6).
@@ -52,8 +52,14 @@ pub fn compile(source: &str, options: &CompileOptions) -> Result<CompiledModule,
     let typed = sem::check_scoped(&module, &normalized, options.stage, &mut budget)
         .map_err(CompileError::Diagnostics)?;
     // Entry gate: scalar and validator entries have wrappers in this build;
-    // procedures stay rejected until the stage-2 milestone (design section 3).
-    if typed.entry_kind != EntryKind::Scalar && typed.entry_kind != EntryKind::Validator {
+    // procedure entries compile only at `Stage::Procedures` (design section 3;
+    // the checker already rejects them at `Stage::Mvp`).
+    let procedure_allowed =
+        typed.entry_kind == EntryKind::Procedure && options.stage == Stage::Procedures;
+    if typed.entry_kind != EntryKind::Scalar
+        && typed.entry_kind != EntryKind::Validator
+        && !procedure_allowed
+    {
         let span = typed
             .function(typed.entry)
             .map(|function| function.span)

@@ -16,7 +16,9 @@
 use wasm_encoder::{BlockType, Function, Instruction, MemArg, ValType};
 
 use crate::api::CompileLimits;
-use crate::back::ir::{IrFunction, IrModule, ParamProjection, RecordField, TypeNode, TypeNodeKind};
+use crate::back::ir::{
+    InstKind, IrFunction, IrModule, ParamProjection, RecordField, TypeNode, TypeNodeKind,
+};
 
 use crate::back::emit::module::{static_address, EmitError, MAX_UNROLLED_NAME_BYTES};
 
@@ -320,6 +322,37 @@ pub(crate) fn collect_projection_nodes(
     Ok(distinct)
 }
 
+/// Distinct type-node indices of the module's stage-2 database results, in
+/// first-use order (deterministic), after validating generation limits.
+pub(crate) fn collect_db_result_nodes(ir: &IrModule) -> Result<Vec<u32>, EmitError> {
+    let name_limit = MAX_UNROLLED_NAME_BYTES as u64;
+    let mut distinct: Vec<u32> = Vec::new();
+    for function in &ir.functions {
+        for inst in &function.insts {
+            let InstKind::DbCall { result, .. } = &inst.kind else {
+                continue;
+            };
+            let node = ir
+                .type_nodes
+                .get(*result as usize)
+                .ok_or(EmitError::Internal("projection node out of range"))?;
+            check_node_names(node, name_limit)?;
+            let depth = node_depth(&ir.type_nodes, *result)?;
+            if depth > u64::from(PROJECTION_MAX_DEPTH) {
+                return Err(EmitError::LimitExceeded {
+                    code: "B001",
+                    limit: u64::from(PROJECTION_MAX_DEPTH),
+                    observed: depth,
+                });
+            }
+            if !distinct.contains(result) {
+                distinct.push(*result);
+            }
+        }
+    }
+    Ok(distinct)
+}
+
 /// Rejects record field names too long to unroll byte-by-byte.
 fn check_node_names(root: &TypeNode, limit: u64) -> Result<(), EmitError> {
     let mut stack = vec![root];
@@ -389,6 +422,9 @@ pub(crate) struct ProjectionSpec<'a> {
     pub i32_msg_addr: u32,
     /// kind-2 "field" (missing record field).
     pub field_msg_addr: u32,
+    /// Error kind raised on a mismatch: 2 for entry arguments, 3 for decoded
+    /// database results (a codec-class failure).
+    pub raise_kind: u32,
 }
 
 /// The shared projection helper signature.
@@ -401,9 +437,9 @@ pub(crate) fn projection_local_count() -> u32 {
     PROJECTION_MAX_DEPTH * 7
 }
 
-/// Raises a kind-2 wrapper error and never returns (`unreachable`).
+/// Raises the spec's error kind and never returns (`unreachable`).
 fn raise(function: &mut Function, spec: &ProjectionSpec, message: u32, len: u32) {
-    function.instruction(&Instruction::I32Const(2));
+    function.instruction(&Instruction::I32Const(spec.raise_kind as i32));
     function.instruction(&Instruction::I32Const(message as i32));
     function.instruction(&Instruction::I32Const(len as i32));
     function.instruction(&Instruction::Call(spec.raise_index));

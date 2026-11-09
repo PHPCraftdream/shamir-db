@@ -58,7 +58,9 @@ pub(super) fn check_expression(
             else_value,
         } => check_conditional(c, frame, condition, then_value, else_value, expected, next),
         // The callee name is not a value: it keeps no type entry.
-        ExprKind::Call { arguments, .. } => check_call(c, frame, id, span, &arguments, depth),
+        ExprKind::Call { arguments, .. } => {
+            check_call(c, frame, id, span, &arguments, expected, depth)
+        }
         ExprKind::Field { target, name } => {
             let target_span = expr_span(c, target);
             let t = check_expression(c, frame, None, target, next);
@@ -703,6 +705,7 @@ fn check_call(
     id: ExprId,
     span: Span,
     arguments: &[ExprId],
+    expected: Option<TypeId>,
     depth: u32,
 ) -> TypeId {
     let callee = c
@@ -760,7 +763,7 @@ fn check_call(
             result
         }
         Some(Callee::Builtin(bid)) => {
-            builtins::check_builtin_call(c, frame, bid, id, arguments, depth)
+            builtins::check_builtin_call(c, frame, bid, id, arguments, expected, depth)
         }
         Some(Callee::Error) | None => {
             for &argument in arguments {

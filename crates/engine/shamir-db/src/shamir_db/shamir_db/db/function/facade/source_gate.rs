@@ -3,7 +3,7 @@ use crate::shamir_db::shamir_db::{FunctionSource, ShamirDb};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
     compile_rust_source_blocking, create_shamir_source, CompileOptions, FunctionError,
-    ModuleReport, TierMode, WasmFunction, WasmLimits,
+    ModuleReport, ShamirStage, TierMode, WasmFunction, WasmLimits,
 };
 
 impl ShamirDb {
@@ -86,7 +86,10 @@ impl ShamirDb {
                 let (wf, wasm, report) = create_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),
-                    CompileOptions::default(),
+                    CompileOptions {
+                        stage: ShamirStage::Procedures,
+                        ..CompileOptions::default()
+                    },
                     WasmLimits::default(),
                     optimize,
                 )

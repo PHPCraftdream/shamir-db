@@ -24,6 +24,6 @@ pub mod sem;
 #[doc(hidden)]
 pub mod testsupport;
 
-pub use api::{compile, CompileError, CompileOptions, CompiledModule};
+pub use api::{compile, CompileError, CompileOptions, CompiledModule, Stage};
 pub use back::runtime::RuntimeCaps;
 pub use back::{emit_runtime_module, RuntimeError};

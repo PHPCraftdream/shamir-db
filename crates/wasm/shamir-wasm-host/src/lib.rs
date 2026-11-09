@@ -50,7 +50,7 @@ pub use wasm::{
 };
 // Re-export so consumers of `create_shamir_source`/`check_shamir_source` can
 // name `CompileOptions` without a direct dependency on the compiler crate.
-pub use shamir_lang::CompileOptions;
+pub use shamir_lang::{CompileOptions, Stage as ShamirStage};
 
 #[cfg(test)]
 pub(crate) use wasm::test_linker_and_store;

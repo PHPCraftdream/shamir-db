@@ -536,12 +536,14 @@ pub(super) fn expr_span(c: &Checker, id: ExprId) -> Span {
         .unwrap_or(c.module.span)
 }
 
-/// Capability ceiling for one entry kind; helpers use the validator ceiling.
+/// Capability ceiling for one entry kind; helpers may use every category and
+/// are restricted by the transitive effect walk from their entry.
 pub(super) fn capability_of(kind: Option<EntryKind>) -> Capability {
     match kind {
         Some(EntryKind::Scalar) => Capability::Scalar,
-        Some(EntryKind::Validator) | None => Capability::Validator,
+        Some(EntryKind::Validator) => Capability::Validator,
         Some(EntryKind::Procedure) => Capability::Procedure,
+        None => Capability::Helper,
     }
 }
 

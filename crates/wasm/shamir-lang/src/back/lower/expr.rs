@@ -775,17 +775,21 @@ fn lower_call(
             }
             ctx.builder.append(InstKind::Call { callee, args }, span)
         }
-        crate::sem::Callee::Builtin(builtin) => lower_builtin(ctx, builtin, arguments, span),
+        crate::sem::Callee::Builtin(builtin) => lower_builtin(ctx, id, builtin, arguments, span),
         _ => Err(IrError::Internal("lower: unresolved callee")),
     }
 }
 
 fn lower_builtin(
     ctx: &mut LowerCtx,
+    id: ExprId,
     builtin: BuiltinId,
     arguments: &[ExprId],
     span: crate::api::Span,
 ) -> Result<InstId, IrError> {
+    if let Some(op) = super::types::db_op_of(builtin) {
+        return super::types::lower_db_builtin(ctx, id, op, arguments, span);
+    }
     // Validator verdict constructors lower outside the single-argument path.
     // Each argument is spilled to a fresh local right after it is lowered: a
     // later argument may open new blocks (`?:`, `&&`, `||`), and the
