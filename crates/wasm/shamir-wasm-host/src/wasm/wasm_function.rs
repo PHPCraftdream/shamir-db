@@ -971,12 +971,14 @@ pub(super) fn map_wasm_error(e: wasmtime::Error, context: &str) -> FunctionError
             other => FunctionError::Compute(format!("{context}: {other}")),
         };
     }
+    // `{e:#}` keeps the cause chain: a host-import error (e.g. a gateway
+    // permission denial) is the root cause behind the wasm backtrace context.
     if let Some(trap) = e.downcast_ref::<wasmtime::Trap>() {
         return match trap {
             wasmtime::Trap::OutOfFuel => FunctionError::FuelExhausted,
             wasmtime::Trap::Interrupt => FunctionError::Interrupted,
-            _ => FunctionError::Compute(format!("{context} trap: {e}")),
+            _ => FunctionError::Compute(format!("{context} trap: {e:#}")),
         };
     }
-    FunctionError::Compute(format!("{context} trap: {e}"))
+    FunctionError::Compute(format!("{context} trap: {e:#}"))
 }
