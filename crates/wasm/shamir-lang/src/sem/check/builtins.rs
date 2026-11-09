@@ -1,5 +1,5 @@
 use crate::api::Span;
-use crate::front::ExprId;
+use crate::front::{ExprId, ExprKind};
 use crate::sem::effects::{builtin_category, builtin_name, BuiltinCategory, BuiltinId, Capability};
 
 use crate::sem::types::{TypeData, TypeId};
@@ -336,7 +336,7 @@ fn check_direct_db(
     if !c.types.is_error(table_ty) && !assignable(c, string, table_ty) {
         report_mismatch(c, string, table_ty, table, expr_span(c, table), "argument");
     }
-    let second_ty = check_arg(c, frame, None, second, depth);
+    let second_ty = check_db_second(c, frame, second, depth);
     let second_span = expr_span(c, second);
     if !c.types.is_error(second_ty) {
         let accepted = match bid {
@@ -430,4 +430,53 @@ fn direct_db_result(
         return error_type(c);
     }
     expected
+}
+
+/// Checks the key/document/filter argument of a direct DB builtin. A record
+/// literal has no expected type of its own, so its structural type is
+/// inferred from its field values first (nested record literals recurse) and
+/// the literal is then checked against that type.
+fn check_db_second(
+    c: &mut Checker,
+    frame: &mut FunctionFrame,
+    second: ExprId,
+    depth: u32,
+) -> TypeId {
+    let before = c.diags.len();
+    let inferred = infer_record_literal(c, frame, second, depth);
+    if c.diags.len() != before {
+        return error_type(c);
+    }
+    check_arg(c, frame, inferred, second, depth)
+}
+
+/// The structural type of a record literal built from its field values, or
+/// `None` when the expression is not a record literal or repeats a field name
+/// (the regular literal check reports that).
+fn infer_record_literal(
+    c: &mut Checker,
+    frame: &mut FunctionFrame,
+    id: ExprId,
+    depth: u32,
+) -> Option<TypeId> {
+    let fields = match c.module.expression(id).map(|expr| expr.kind.clone()) {
+        Some(ExprKind::Record(fields)) => fields,
+        _ => return None,
+    };
+    let mut typed: Vec<(String, TypeId)> = Vec::with_capacity(fields.len());
+    for field_id in fields {
+        let (name, value) = {
+            let field = c.module.value_field(field_id)?;
+            (field.name.clone(), field.value)
+        };
+        if typed.iter().any(|(existing, _)| *existing == name) {
+            return None;
+        }
+        let ty = match infer_record_literal(c, frame, value, depth) {
+            Some(nested) => nested,
+            None => check_arg(c, frame, None, value, depth),
+        };
+        typed.push((name, ty));
+    }
+    Some(c.types.intern_record(typed))
 }
