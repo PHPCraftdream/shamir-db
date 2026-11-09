@@ -152,14 +152,14 @@ without the incremental disk cache, so it leaves no entry anywhere.
   `wasm-encoder`, then self-admits the emitted bytes. Production dependencies are exactly
   `shamir-wasm-admission`, pinned `wasm-encoder = "=0.254.2"`, and `thiserror`. This path
   compiles in process and does not invoke `cargo`.
-* **Purity evidence:** `crates/wasm/shamir-lang/src/api/tests/purity_tests.rs` contains a
-  source-text test. It removes `//` comments and whitespace, then checks direct
-  `std::process`, `std::fs`, `std::net`, `std::env`, and `std::thread` spellings, grouped
-  `std::{...}` imports for those modules, and `Command::new`; a separate check compares the
-  exact production dependency names with the three above. This is not a token or AST
-  scanner: it does not establish coverage for aliases or `core`/`alloc`, and it does not
-  parse or skip strings, raw strings, or macros. No clippy `disallowed-methods` entry or
-  rust-guard purity rule enforces this constraint.
+* **Purity evidence:** `crates/wasm/shamir-lang/src/api/tests/purity_tests.rs` scans the
+  production sources with the token-based scanner in `purity_scanner.rs` (comments, strings
+  and raw strings are skipped). It rejects aliases of `std`/`core`/`alloc`, every
+  `extern crate`, the modules `process`, `fs`, `net`, `env` and `thread` under any import
+  spelling (path, grouped, renamed, glob, absolute), `Command::new`, and the `env!` and
+  `option_env!` macros, with one negative test per bypass family; a separate check compares
+  the exact production dependency names with the three above. No clippy
+  `disallowed-methods` entry or rust-guard rule enforces this constraint.
 * **Crash safety:** a stack overflow aborts the server and `spawn_blocking` does not catch
   it. Depth caps are enforced inside the recursive-descent parser and the type checker, and
   the compiler runs on a dedicated thread with a fixed stack size. Criteria: deep-nesting
@@ -254,7 +254,7 @@ default.
   operator caps.
 * PROC-2: golden compile tests; differential tests against a reference interpreter on the
   scalar subset; rejected-source tests (size, depth); deep-nesting and fuzz tests that must
-  not abort; the source-text purity test and its dependency-name check described in D4 are
+  not abort; the token-based purity test and its dependency-name check described in D4 are
   present (they are not a structural no-process rule).
 * PROC-3b: wire round-trip tests of all ops; builder tests in Rust and TypeScript; permission
   matrix including `check_function` with Rust source without `Execute`, legacy rows, and
