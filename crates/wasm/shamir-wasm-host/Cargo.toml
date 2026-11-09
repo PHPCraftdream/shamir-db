@@ -69,6 +69,11 @@ name = "wasm_procedures"
 path = "benches/wasm_procedures/main.rs"
 harness = false
 
+[[bench]]
+name = "wasm_scale"
+path = "benches/wasm_scale/main.rs"
+harness = false
+
 [lib]
 doctest = false
 
