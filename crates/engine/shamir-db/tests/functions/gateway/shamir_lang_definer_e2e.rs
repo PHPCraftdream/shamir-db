@@ -234,7 +234,8 @@ async fn shamir_invoker_db_insert_is_denied_independently() {
         QueryValue::Int(2)
     );
     assert_native_row(&db, 2, "inserted").await;
-    assert_gateway_denial(invoke(&db, "insert_invoker").await, "db_insert", "WRITE");
+    // Inserting a record is a CREATE action on the table in the platform's DAC.
+    assert_gateway_denial(invoke(&db, "insert_invoker").await, "db_insert", "CREATE");
 }
 
 #[tokio::test]
