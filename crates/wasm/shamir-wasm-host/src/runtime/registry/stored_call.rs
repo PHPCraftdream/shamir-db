@@ -16,6 +16,15 @@ pub(crate) async fn dispatch_stored_call(
             "stored call requires an active root invocation".into(),
         ));
     }
+    if parent
+        .registry()
+        .is_some_and(|registry| registry.is_catalogue_bound())
+        && parent.stored_call_resolver().is_none()
+    {
+        return Err(FunctionError::Compute(
+            "catalogue-bound stored call requires a stored-call resolver".into(),
+        ));
+    }
     let next_depth = parent.depth().saturating_add(1);
     if next_depth > parent.depth_limit() {
         return Err(FunctionError::Compute(format!(

@@ -24,20 +24,36 @@ use shamir_db::shamir_db::shamir_db::ArtifactKind;
 #[cfg(feature = "fjall")]
 use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
-use shamir_engine::function::{FnBatch, FnCtx, Params};
+use shamir_engine::function::{FnBatch, FnCtx, FunctionMeta, Params, Security, Visibility};
 use shamir_engine::validator::{RecordFields, Validation, ValidatorCtx};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
 #[cfg(feature = "fjall")]
 use shamir_test_diag::FlakeGuard;
+use shamir_types::access::ResourceMeta;
 use shamir_types::mpack;
 use shamir_types::record_view::ScalarRef;
+use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 // ========================================================================
 // Helpers
 // ========================================================================
+
+async fn persist_native_function(db: &ShamirDb, name: &str) {
+    let mut fields = new_map();
+    fields.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    fields.insert("lang".to_string(), QueryValue::Str("rust".to_string()));
+    fields.insert("kind".to_string(), ArtifactKind::Native.as_query_value());
+    let mut record = QueryValue::Map(fields);
+    FunctionMeta::new(Visibility::Public, Security::Invoker, vec![], vec![])
+        .inject_into(&mut record);
+    db.system_store()
+        .save_function(name, &record, &ResourceMeta::open())
+        .await
+        .unwrap();
+}
 
 /// In-memory ShamirDb with `testdb/main/users` table.
 async fn setup_db() -> ShamirDb {
@@ -82,6 +98,7 @@ async fn register_fn_round_trip() {
         },
     )
     .unwrap();
+    persist_native_function(&db, "shout").await;
 
     // Invoke it.
     let mut params = Params::new();
@@ -99,6 +116,7 @@ async fn register_fn_replace_overwrites() {
         Ok(QueryValue::Str("v1".into()))
     })
     .unwrap();
+    persist_native_function(&db, "versioned").await;
 
     let p = Params::new();
     let r1 = db.invoke_function("versioned", p.clone()).await.unwrap();

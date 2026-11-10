@@ -4,12 +4,14 @@ use crate::engine::table::{TableConfig, TableManager};
 use crate::shamir_db::shamir_db::{ArtifactKind, KIND_FIELD};
 use crate::shamir_db::{FunctionSource, ShamirDb, SystemStoreConfig};
 use base64::Engine;
-use shamir_engine::function::CreateFunctionOptions;
+use shamir_engine::function::{CreateFunctionOptions, FnBatch, FnCtx, Params};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
 use shamir_query_types::admin::{ReplDirection, ReplMode};
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn malformed_later_metadata_prevents_recovery_registration() {
@@ -586,5 +588,193 @@ async fn rv_db_55b0a5d9_admin_if_exists_second_drop_reports_false() {
     assert_eq!(
         dropped.get("existed").and_then(|v| v.as_bool()),
         Some(false)
+    );
+}
+
+fn constant_result_wasm(value: i64) -> Vec<u8> {
+    let bytes = QueryValue::Int(value)
+        .to_bytes()
+        .expect("encode integer result");
+    let data = bytes
+        .iter()
+        .map(|byte| format!("\\{byte:02x}"))
+        .collect::<String>();
+    let len = bytes.len();
+    let wat = format!(
+        r#"(module
+          (memory (export "memory") 1)
+          (func (export "shamir_alloc") (param i32) (result i32) (i32.const 2048))
+          (func (export "shamir_call") (param i32 i32) (result i64)
+            (i64.or (i64.shl (i64.const 1024) (i64.const 32)) (i64.const {len})))
+          (data (i32.const 1024) "{data}")
+        )"#
+    );
+    wat::parse_str(wat).expect("parse constant-result WAT")
+}
+
+async fn create_constant_result(db: &ShamirDb, name: &str, value: i64, replace: bool) {
+    let wasm = constant_result_wasm(value);
+    db.create_function_from_wasm(name, &wasm, replace)
+        .await
+        .unwrap_or_else(|error| panic!("create {name}: {error}"));
+}
+
+fn assert_replacement_ids_changed(db: &ShamirDb, name: &str, old_id: &str) -> String {
+    let binding_id = db
+        .functions()
+        .capture(name)
+        .expect("replacement binding")
+        .artifact_id()
+        .map(str::to_owned)
+        .expect("replacement binding has artifact id");
+    assert_ne!(binding_id, old_id, "registry binding id must change");
+    binding_id
+}
+
+fn install_replacement_hook(
+    db: &ShamirDb,
+    target: &'static str,
+    nested_route: bool,
+) -> Arc<AtomicBool> {
+    let fired = Arc::new(AtomicBool::new(false));
+    let hook_fired = fired.clone();
+    assert!(db
+        .function_resolution_hook
+        .set(Box::new(move |db, name, nested| {
+            let hook_fired = hook_fired.clone();
+            Box::pin(async move {
+                if name == target
+                    && nested == nested_route
+                    && !hook_fired.swap(true, Ordering::SeqCst)
+                {
+                    create_constant_result(&db, &name, 29, true).await;
+                }
+            })
+        }))
+        .is_ok());
+    fired
+}
+
+#[tokio::test]
+async fn root_resolution_rejects_replacement_after_capture_and_next_call_runs_new_artifact() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    create_constant_result(&db, "root_window", 17, false).await;
+    let old_id = db
+        .functions()
+        .capture("root_window")
+        .unwrap()
+        .artifact_id()
+        .unwrap()
+        .to_owned();
+    let old_calls = Arc::new(AtomicUsize::new(0));
+    db.register_fn("root_window", true, {
+        let old_calls = old_calls.clone();
+        move |_, _, _| {
+            let old_calls = old_calls.clone();
+            async move {
+                old_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(QueryValue::Int(17))
+            }
+        }
+    })
+    .unwrap();
+    let fired = install_replacement_hook(&db, "root_window", false);
+
+    let error = db
+        .invoke_function("root_window", Params::new())
+        .await
+        .expect_err("root resolution must reject the changed artifact");
+    assert!(error
+        .to_string()
+        .contains("function changed during resolution"));
+    assert!(fired.load(Ordering::SeqCst), "root hook fired");
+    assert_eq!(
+        old_calls.load(Ordering::SeqCst),
+        0,
+        "captured old body did not run"
+    );
+    let row = db
+        .system_store()
+        .load_function("root_window")
+        .await
+        .unwrap()
+        .unwrap();
+    let row_id = row["artifact_id"].as_str().unwrap();
+    assert_ne!(row_id, old_id);
+    let binding_id = assert_replacement_ids_changed(&db, "root_window", &old_id);
+    assert_eq!(row_id, binding_id);
+    assert_eq!(
+        db.invoke_function("root_window", Params::new())
+            .await
+            .unwrap(),
+        QueryValue::Int(29)
+    );
+}
+
+#[tokio::test]
+async fn nested_resolution_rejects_replacement_after_capture_and_next_call_runs_new_artifact() {
+    let db = ShamirDb::init_memory().await.unwrap();
+    create_constant_result(&db, "nested_window", 17, false).await;
+    let old_id = db
+        .functions()
+        .capture("nested_window")
+        .unwrap()
+        .artifact_id()
+        .unwrap()
+        .to_owned();
+    let old_calls = Arc::new(AtomicUsize::new(0));
+    db.register_fn("nested_window", true, {
+        let old_calls = old_calls.clone();
+        move |_, _, _| {
+            let old_calls = old_calls.clone();
+            async move {
+                old_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(QueryValue::Int(17))
+            }
+        }
+    })
+    .unwrap();
+    create_constant_result(&db, "nested_parent", 5, false).await;
+    db.register_fn(
+        "nested_parent",
+        true,
+        |ctx: &FnCtx, batch: &FnBatch, params: &Params| {
+            let ctx = ctx.clone();
+            let batch = batch.clone();
+            let params = params.clone();
+            async move { ctx.call_stored("nested_window", &batch, &params).await }
+        },
+    )
+    .unwrap();
+    let fired = install_replacement_hook(&db, "nested_window", true);
+
+    let error = db
+        .invoke_function("nested_parent", Params::new())
+        .await
+        .expect_err("nested resolution must reject the changed artifact");
+    assert!(error
+        .to_string()
+        .contains("function changed during resolution"));
+    assert!(fired.load(Ordering::SeqCst), "nested hook fired");
+    assert_eq!(
+        old_calls.load(Ordering::SeqCst),
+        0,
+        "captured old body did not run"
+    );
+    let row = db
+        .system_store()
+        .load_function("nested_window")
+        .await
+        .unwrap()
+        .unwrap();
+    let row_id = row["artifact_id"].as_str().unwrap();
+    assert_ne!(row_id, old_id);
+    let binding_id = assert_replacement_ids_changed(&db, "nested_window", &old_id);
+    assert_eq!(row_id, binding_id);
+    assert_eq!(
+        db.invoke_function("nested_parent", Params::new())
+            .await
+            .unwrap(),
+        QueryValue::Int(29)
     );
 }

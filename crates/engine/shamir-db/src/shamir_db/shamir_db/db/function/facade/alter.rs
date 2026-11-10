@@ -6,6 +6,7 @@ use crate::{DbError, DbResult};
 use shamir_engine::function::{AdmissionPolicy, TierMode, WasmFunction, WasmLimits};
 use shamir_types::types::value::QueryValue;
 
+use super::super::artifact::artifact_id_from_record;
 use super::super::boot::{decode_stored_bytes, verify_stored_hash, HashVerdict};
 use super::super::types::{optimize_name, FunctionState};
 
@@ -77,10 +78,13 @@ impl ShamirDb {
                 QueryValue::Str(optimize_name(mode).to_string()),
             );
         }
+        let artifact_id = artifact_id_from_record(&existing)
+            .map_err(|error| DbError::Function(format!("invalid function artifact id: {error}")))?;
         self.system_store
             .save_function(name, &rec, &ResourceMeta::from_record(&existing))
             .await?;
-        self.functions.replace(name, Arc::new(wf));
+        self.functions
+            .replace_with_artifact_id(name, Arc::new(wf), artifact_id);
         self.function_state
             .insert(name.to_string(), FunctionState::Loaded);
         Ok(())

@@ -1,3 +1,4 @@
+mod artifact;
 mod boot;
 mod facade;
 mod invocation;

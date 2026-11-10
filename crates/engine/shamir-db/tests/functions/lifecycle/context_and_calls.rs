@@ -4,13 +4,30 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use shamir_db::access::ResourceMeta;
 use shamir_db::ShamirDb;
 use shamir_engine::function::{
-    BatchContext, FnBatch, FnCtx, FunctionError, Params, ShamirFunction,
+    BatchContext, FnBatch, FnCtx, FunctionError, FunctionMeta, Params, Security, ShamirFunction,
+    Visibility,
 };
+use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use super::support::{compile_or_skip, DOUBLE_SRC};
+
+async fn persist_native_function(db: &ShamirDb, name: &str) {
+    let mut fields = new_map();
+    fields.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    fields.insert("lang".to_string(), QueryValue::Str("rust".to_string()));
+    fields.insert("kind".to_string(), QueryValue::Str("native".to_string()));
+    let mut record = QueryValue::Map(fields);
+    FunctionMeta::new(Visibility::Public, Security::Invoker, vec![], vec![])
+        .inject_into(&mut record);
+    db.system_store()
+        .save_function(name, &record, &ResourceMeta::open())
+        .await
+        .unwrap();
+}
 
 // ── Slice 5: native test functions for batch context + globals ────────
 
@@ -77,6 +94,8 @@ async fn facade_batch_context_exchange() {
     db.functions()
         .register("consumer", Arc::new(Consumer))
         .unwrap();
+    persist_native_function(&db, "producer").await;
+    persist_native_function(&db, "consumer").await;
 
     let ctx = db.new_batch_context();
 
@@ -99,6 +118,7 @@ async fn facade_globals_shared() {
     db.functions()
         .register("bump", Arc::new(GlobalBump))
         .unwrap();
+    persist_native_function(&db, "bump").await;
 
     let r1 = db.invoke_function("bump", Params::new()).await.unwrap();
     assert_eq!(r1, QueryValue::Int(1));
