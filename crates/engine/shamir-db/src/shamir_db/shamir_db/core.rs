@@ -29,6 +29,25 @@ pub(super) type FunctionResolutionHook = Box<
         + Sync,
 >;
 
+#[cfg(test)]
+pub(super) type FunctionDdlHook = Box<
+    dyn Fn(FunctionDdlHookPoint) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FunctionDdlHookPoint {
+    AlterAfterRowReadBeforeWrite,
+    RenameAfterRowReadBeforeWrite,
+    RenameAfterCatalogueWritesBeforeRegistryRename,
+    MetaAfterRowReadBeforeWrite,
+    MarkCorruptBeforeLock,
+    MarkCorruptAfterRowReadBeforeRegistryWrite,
+    ReplaceAfterRowSaveBeforeRegistryWrite,
+}
+
 pub(in crate::shamir_db) const SYSTEM_DB_NAME: &str = "__system__";
 
 use crate::engine::migration::MigrationCoordinator;
@@ -39,7 +58,7 @@ use crate::shamir_db::system_store::table_config_from_catalogue_record;
 use super::super::ports::{PrincipalResolver, UserAdminPort};
 use super::super::repo_durability::durability_from_record;
 use super::super::system_store::{SystemStore, SystemStoreConfig};
-use super::db::FunctionState;
+use super::db::{FunctionDdlLocks, FunctionState};
 
 /// Input source for [`ShamirDb::create_function_with_opts`].
 pub enum FunctionSource<'a> {
@@ -124,6 +143,7 @@ pub struct ShamirDb {
     /// Inserted at create/boot, moved on rename, removed on drop: same
     /// lifecycle as `function_meta`.
     pub(super) function_state: Arc<DashMap<String, FunctionState, THasher>>,
+    pub(in crate::shamir_db::shamir_db) function_ddl_locks: FunctionDdlLocks,
     /// Serialises group-id allocation so concurrent create_group calls
     /// can't read-modify-write the same `next_group_id`. Group creation is
     /// rare, so holding this across the (bounded) await sequence is fine.
@@ -205,6 +225,9 @@ pub struct ShamirDb {
     /// Deterministic interleaving seam for catalogue-bound function resolution tests.
     #[cfg(test)]
     pub(super) function_resolution_hook: Arc<std::sync::OnceLock<FunctionResolutionHook>>,
+    /// Deterministic pause points for function DDL interleaving regression tests.
+    #[cfg(test)]
+    pub(super) function_ddl_hook: Arc<std::sync::OnceLock<FunctionDdlHook>>,
     /// Round-5 T6 seam: when armed, `DROP … CASCADE` parks INSIDE the
     /// interlock after the binding check, so the test holds the
     /// replication-control lock mid-cascade (a moved lock acquisition turns
@@ -220,6 +243,13 @@ pub struct ShamirDb {
 }
 
 impl ShamirDb {
+    #[cfg(test)]
+    pub(super) async fn function_ddl_test_hook(&self, point: FunctionDdlHookPoint) {
+        if let Some(hook) = self.function_ddl_hook.get() {
+            hook(point).await;
+        }
+    }
+
     /// Initialize ShamirDb with a system store.
     ///
     /// # Arguments
@@ -314,6 +344,7 @@ impl ShamirDb {
             )),
             function_meta: Arc::new(DashMap::with_hasher(THasher::default())),
             function_state: Arc::new(DashMap::with_hasher(THasher::default())),
+            function_ddl_locks: FunctionDdlLocks::new(),
             group_id_lock: Arc::new(Mutex::new(())),
             db_create_lock: Arc::new(Mutex::new(())),
             repo_create_locks: Arc::new(DashMap::with_hasher(THasher::default())),
@@ -350,6 +381,8 @@ impl ShamirDb {
             final_write_release: std::sync::Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             function_resolution_hook: Arc::new(std::sync::OnceLock::new()),
+            #[cfg(test)]
+            function_ddl_hook: Arc::new(std::sync::OnceLock::new()),
             #[cfg(test)]
             cascade_pause: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]

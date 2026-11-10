@@ -68,16 +68,37 @@ impl ShamirAdminExecutor {
             .authorize_access(&self.actor, &path, Action::Manage)
             .await
             .map_err(err_access)?;
-        let mut meta = self
-            .shamir
-            .resource_meta(&path)
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        meta.mode = op.mode;
-        self.shamir
-            .set_resource_meta(&path, &meta)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+        if let ResourcePath::Function { name } = &path {
+            let mode = op.mode;
+            self.shamir
+                .update_function_resource_meta(
+                    name,
+                    |mut current| {
+                        if !crate::access::permits(&self.actor, &current, Action::Manage, false) {
+                            return Err(err_access(shamir_types::access::AccessError {
+                                actor: self.actor.clone(),
+                                path: path.to_string(),
+                                action: Action::Manage,
+                            }));
+                        }
+                        current.mode = mode;
+                        Ok(current)
+                    },
+                    |e| err(e.to_string()),
+                )
+                .await?;
+        } else {
+            let mut meta = self
+                .shamir
+                .resource_meta(&path)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            meta.mode = op.mode;
+            self.shamir
+                .set_resource_meta(&path, &meta)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        }
         Ok(admin_result(mpack!({
             "chmod": @(to_qv(&op.chmod)?),
             "mode": @(QueryValue::Int(op.mode as i64)),
@@ -150,16 +171,37 @@ impl ShamirAdminExecutor {
             }
         }
 
-        let mut meta = self
-            .shamir
-            .resource_meta(&path)
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        meta.owner = Actor::from_owner_id(op.owner);
-        self.shamir
-            .set_resource_meta(&path, &meta)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+        if let ResourcePath::Function { name } = &path {
+            let owner = Actor::from_owner_id(op.owner);
+            self.shamir
+                .update_function_resource_meta(
+                    name,
+                    |mut current| {
+                        if !crate::access::permits(&self.actor, &current, Action::Manage, false) {
+                            return Err(err_access(shamir_types::access::AccessError {
+                                actor: self.actor.clone(),
+                                path: path.to_string(),
+                                action: Action::Manage,
+                            }));
+                        }
+                        current.owner = owner;
+                        Ok(current)
+                    },
+                    |e| err(e.to_string()),
+                )
+                .await?;
+        } else {
+            let mut meta = self
+                .shamir
+                .resource_meta(&path)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            meta.owner = Actor::from_owner_id(op.owner);
+            self.shamir
+                .set_resource_meta(&path, &meta)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        }
         Ok(admin_result(mpack!({
             "chown": @(to_qv(&op.chown)?),
             "owner": @(QueryValue::Int(op.owner as i64)),
@@ -208,16 +250,36 @@ impl ShamirAdminExecutor {
             }
         }
 
-        let mut meta = self
-            .shamir
-            .resource_meta(&path)
-            .await
-            .map_err(|e| err(e.to_string()))?;
-        meta.group = op.group;
-        self.shamir
-            .set_resource_meta(&path, &meta)
-            .await
-            .map_err(|e| err(e.to_string()))?;
+        if let ResourcePath::Function { name } = &path {
+            self.shamir
+                .update_function_resource_meta(
+                    name,
+                    |mut current| {
+                        if !crate::access::permits(&self.actor, &current, Action::Manage, false) {
+                            return Err(err_access(shamir_types::access::AccessError {
+                                actor: self.actor.clone(),
+                                path: path.to_string(),
+                                action: Action::Manage,
+                            }));
+                        }
+                        current.group = op.group;
+                        Ok(current)
+                    },
+                    |e| err(e.to_string()),
+                )
+                .await?;
+        } else {
+            let mut meta = self
+                .shamir
+                .resource_meta(&path)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+            meta.group = op.group;
+            self.shamir
+                .set_resource_meta(&path, &meta)
+                .await
+                .map_err(|e| err(e.to_string()))?;
+        }
         Ok(admin_result(mpack!({
             "chgrp": @(to_qv(&op.chgrp)?),
             "group": @(match op.group { Some(g) => QueryValue::Int(g as i64), None => QueryValue::Null }),

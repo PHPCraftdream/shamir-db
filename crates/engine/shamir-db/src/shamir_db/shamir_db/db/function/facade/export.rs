@@ -3,6 +3,7 @@ use crate::shamir_db::shamir_db::{ArtifactKind, ShamirDb};
 use crate::{DbError, DbResult};
 use shamir_engine::function::ModuleHash;
 
+use super::super::artifact::artifact_id_from_record;
 use super::super::boot::{decode_stored_bytes, verify_stored_hash, HashVerdict};
 use super::super::types::FunctionExport;
 
@@ -36,9 +37,13 @@ impl ShamirDb {
         let bytes = decode_stored_bytes(&row)
             .ok_or_else(no_module)?
             .map_err(DbError::Function)?;
+        let artifact_id = artifact_id_from_record(&row)
+            .map_err(|error| DbError::Function(format!("invalid function artifact id: {error}")))?;
         let hash = match verify_stored_hash(&row, &bytes) {
-            HashVerdict::Mismatch { expected, actual } => {
-                return Err(self.mark_function_corrupt(name, expected, actual));
+            HashVerdict::Mismatch { .. } => {
+                return Err(self
+                    .mark_function_corrupt(name, artifact_id.as_deref())
+                    .await?);
             }
             HashVerdict::Match(h) => h.to_hex(),
             HashVerdict::Unknown => ModuleHash::of(&bytes).to_hex(),

@@ -1,6 +1,5 @@
-mod alter;
 mod check;
+mod ddl;
 mod describe;
 mod export;
-mod mark_corrupt;
 mod source_gate;

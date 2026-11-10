@@ -3,4 +3,4 @@ pub mod compile_tests;
 pub mod context_tests;
 pub mod lang;
 pub mod limits;
-pub mod registry_tests;
+pub mod registry;
