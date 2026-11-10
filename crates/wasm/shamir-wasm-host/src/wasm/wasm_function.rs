@@ -89,7 +89,7 @@ use crate::runtime::context::{BatchContext, FnBatch, FnCtx, GlobalVars};
 use crate::runtime::contract::ShamirFunction;
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::runtime::params::Params;
-use crate::runtime::registry::FunctionRegistry;
+use crate::runtime::registry::{ActiveCallPath, FunctionRegistry, StoredCallResolver};
 use async_trait::async_trait;
 use shamir_collections::TFxSet;
 use shamir_types::access::Actor;
@@ -114,6 +114,9 @@ pub(crate) struct HostState {
     pub(super) batch: Arc<BatchContext>,
     pub(super) globals: Arc<GlobalVars>,
     pub(super) registry: Option<Arc<FunctionRegistry>>,
+    pub(super) stored_call_resolver: Option<Arc<dyn StoredCallResolver>>,
+    pub(super) active_call_path: ActiveCallPath,
+    pub(super) definer_owner: Option<Actor>,
     pub(super) depth: u32,
     pub(super) depth_limit: u32,
     /// RI-7: the invocation's actor — threaded from the parent `FnCtx` so a
@@ -163,6 +166,9 @@ pub(crate) fn test_linker_and_store(
         batch: Arc::new(BatchContext::new()),
         globals: Arc::new(GlobalVars::new()),
         registry: None,
+        stored_call_resolver: None,
+        active_call_path: ActiveCallPath::default(),
+        definer_owner: None,
         depth: 0,
         depth_limit: 0,
         actor: Actor::System,
@@ -686,6 +692,9 @@ impl ShamirFunction for WasmFunction {
         let batch_ctx = batch.context().clone();
         let globals = ctx.globals().clone();
         let registry = ctx.registry().cloned();
+        let stored_call_resolver = ctx.stored_call_resolver().cloned();
+        let active_call_path = ctx.active_call_path().clone();
+        let definer_owner = ctx.definer_owner().cloned();
         let depth = ctx.depth();
         let depth_limit = ctx.depth_limit();
         // RI-7: the invocation's actor travels from FnCtx → HostState so
@@ -739,6 +748,9 @@ impl ShamirFunction for WasmFunction {
             batch: batch_ctx,
             globals,
             registry,
+            stored_call_resolver,
+            active_call_path,
+            definer_owner,
             depth,
             depth_limit,
             actor,

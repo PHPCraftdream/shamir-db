@@ -31,7 +31,9 @@ async fn invocation_settings_match_resource_meta_defaults_and_malformed_values()
     let db = ShamirDb::init_memory().await.unwrap();
     let caller = Actor::User(7);
     assert_eq!(
-        db.authorize_invocation("missing", &caller).await.unwrap(),
+        db.authorize_invocation_from_catalogue("missing", &caller)
+            .await
+            .unwrap(),
         caller
     );
     db.system_store()
@@ -43,7 +45,9 @@ async fn invocation_settings_match_resource_meta_defaults_and_malformed_values()
         .await
         .unwrap();
     assert_eq!(
-        db.authorize_invocation("missing", &caller).await.unwrap(),
+        db.authorize_invocation_from_catalogue("missing", &caller)
+            .await
+            .unwrap(),
         caller
     );
     let mut malformed = new_map();
@@ -52,7 +56,10 @@ async fn invocation_settings_match_resource_meta_defaults_and_malformed_values()
         .save_setting("fn_namespace_meta", &QueryValue::Map(malformed))
         .await
         .unwrap();
-    assert!(db.authorize_invocation("missing", &caller).await.is_err());
+    assert!(db
+        .authorize_invocation_from_catalogue("missing", &caller)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -70,7 +77,7 @@ async fn invocation_snapshot_uses_current_definer_owner() {
     };
     store.save_function("sample", &record, &meta).await.unwrap();
     assert_eq!(
-        db.authorize_invocation("sample", &Actor::User(7))
+        db.authorize_invocation_from_catalogue("sample", &Actor::User(7))
             .await
             .unwrap(),
         Actor::User(10)
@@ -78,7 +85,7 @@ async fn invocation_snapshot_uses_current_definer_owner() {
     meta.owner = Actor::User(11);
     store.save_function("sample", &record, &meta).await.unwrap();
     assert_eq!(
-        db.authorize_invocation("sample", &Actor::User(7))
+        db.authorize_invocation_from_catalogue("sample", &Actor::User(7))
             .await
             .unwrap(),
         Actor::User(11)
@@ -91,7 +98,7 @@ async fn invocation_snapshot_uses_current_definer_owner() {
         .await
         .unwrap();
     assert_eq!(
-        db.authorize_invocation("sample", &Actor::User(7))
+        db.authorize_invocation_from_catalogue("sample", &Actor::User(7))
             .await
             .unwrap(),
         Actor::User(7)

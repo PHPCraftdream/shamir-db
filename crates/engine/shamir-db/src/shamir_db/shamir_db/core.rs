@@ -7,8 +7,8 @@ use crate::{DbError, DbResult};
 use dashmap::DashMap;
 use shamir_collections::THasher;
 use shamir_engine::function::{
-    EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, WasmEngine, WasmFunction,
-    WasmLimits,
+    EnvPolicy, FnCtx, FunctionMeta, FunctionRegistry, GlobalVars, StoredCallResolver, WasmEngine,
+    WasmFunction, WasmLimits,
 };
 use shamir_engine::repo::durability_policy::{effective_wal_segment_bytes, resolve};
 use shamir_engine::validator::{RecordValidator, ValidatorRegistry, WasmRecordValidator};
@@ -910,17 +910,29 @@ impl ShamirDb {
         table.info_store_read_view().read_op_status(&op_id).await
     }
 
-    /// Build an [`FnCtx`] with globals, registry, net gateway, the
-    /// function's secret_grants from [`function_meta`], and the given
-    /// [`Actor`] (R2).
-    pub(super) fn build_invoke_ctx(&self, fn_name: &str, actor: Actor) -> FnCtx {
-        let grants = self
-            .function_meta(fn_name)
-            .map(|m| m.secret_grants)
+    /// Build a captured-root [`FnCtx`] with the target's catalogue-derived
+    /// capabilities and the shared nested-call resolver.
+    pub(super) fn build_invoke_ctx(
+        &self,
+        fn_name: &str,
+        actor: Actor,
+        resolver: Arc<dyn StoredCallResolver>,
+        definer_owner: Option<Actor>,
+        target_meta: Option<&FunctionMeta>,
+    ) -> FnCtx {
+        let grants = target_meta
+            .map(|meta| meta.secret_grants.clone())
+            .or_else(|| self.function_meta(fn_name).map(|meta| meta.secret_grants))
             .unwrap_or_default();
+        let net = target_meta.map_or_else(
+            || self.build_net_gateway(fn_name),
+            |meta| self.net_allowlist.gateway(Some(&meta.net_grants)),
+        );
         FnCtx::with_globals(self.globals.clone())
             .with_registry(self.functions.clone())
-            .with_net(self.build_net_gateway(fn_name))
+            .with_stored_call_resolver(resolver)
+            .with_definer_owner(definer_owner)
+            .with_net(net)
             .with_secret_grants(grants)
             .with_actor(actor)
     }

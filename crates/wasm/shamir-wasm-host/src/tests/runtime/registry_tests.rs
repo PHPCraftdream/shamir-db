@@ -10,8 +10,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, OnceLock, Weak};
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -348,6 +350,373 @@ async fn invoke_unknown_errors() {
         .await
         .unwrap_err();
     assert!(matches!(err, FunctionError::NotFound(_)));
+}
+
+struct ForwardTo(String);
+
+#[async_trait]
+impl ShamirFunction for ForwardTo {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        ctx.call_stored(&self.0, batch, params).await
+    }
+}
+
+struct FailOnce(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ShamirFunction for FailOnce {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            Err(FunctionError::User("first attempt".into()))
+        } else {
+            Ok(QueryValue::Int(2))
+        }
+    }
+}
+
+struct PendingOnce(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ShamirFunction for PendingOnce {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            std::future::pending().await
+        } else {
+            Ok(QueryValue::Int(3))
+        }
+    }
+}
+
+struct RetryAfterError(&'static str);
+
+#[async_trait]
+impl ShamirFunction for RetryAfterError {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        match ctx.call_stored(self.0, batch, params).await {
+            Err(FunctionError::User(_)) => ctx.call_stored(self.0, batch, params).await,
+            other => Err(FunctionError::Compute(format!(
+                "expected first target call to fail, got {other:?}"
+            ))),
+        }
+    }
+}
+
+#[tokio::test]
+async fn stored_call_rejects_self_cycle_before_reentry() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register("self", Arc::new(ForwardTo("self".into())))
+        .unwrap();
+    let ctx = FnCtx::new().with_registry(registry.clone());
+    let error = registry
+        .invoke("self", &ctx, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("cycle")));
+}
+
+#[tokio::test]
+async fn stored_call_rejects_two_function_cycle_at_repeated_identity() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register("first", Arc::new(ForwardTo("second".into())))
+        .unwrap();
+    registry
+        .register("second", Arc::new(ForwardTo("first".into())))
+        .unwrap();
+    let ctx = FnCtx::new().with_registry(registry.clone());
+    let error = registry
+        .invoke("first", &ctx, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("cycle")));
+}
+
+fn call_chain(registry: &FunctionRegistry, count: usize) {
+    for index in 0..count {
+        let name = format!("node-{index}");
+        let target = format!("node-{}", index + 1);
+        let function: Arc<dyn ShamirFunction> = if index + 1 < count {
+            Arc::new(ForwardTo(target))
+        } else {
+            Arc::new(Const(1))
+        };
+        registry.register(&name, function).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn stored_call_path_accepts_32_functions_including_root() {
+    let registry = Arc::new(FunctionRegistry::new());
+    call_chain(&registry, 32);
+    let ctx = FnCtx::new().with_registry(registry.clone());
+    let result = registry
+        .invoke("node-0", &ctx, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap();
+    assert_eq!(result, QueryValue::Int(1));
+}
+
+#[tokio::test]
+async fn stored_call_path_rejects_33rd_function() {
+    let registry = Arc::new(FunctionRegistry::new());
+    call_chain(&registry, 33);
+    let ctx = FnCtx::new().with_registry(registry.clone());
+    let error = registry
+        .invoke("node-0", &ctx, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("path limit")));
+}
+
+#[tokio::test]
+async fn stored_call_keeps_lower_depth_limit() {
+    let registry = Arc::new(FunctionRegistry::new());
+    call_chain(&registry, 5);
+    let ctx = FnCtx::new()
+        .with_registry(registry.clone())
+        .with_depth_limit(3);
+    let error = registry
+        .invoke("node-0", &ctx, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("depth limit")));
+}
+
+#[tokio::test]
+async fn stored_call_identity_survives_replace_and_rename_and_rejects_repeat() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register("entry", Arc::new(Const(1))).unwrap();
+    let original = registry.capture("entry").unwrap();
+    registry.replace("entry", Arc::new(Const(9)));
+    let replacement = registry.capture("entry").unwrap();
+    assert!(!original.same_as(&replacement));
+    assert_eq!(original.identity(), replacement.identity());
+    registry.rename("entry", "renamed").unwrap();
+    let renamed = registry.capture("renamed").unwrap();
+    assert!(replacement.same_as(&renamed));
+    assert_eq!(original.identity(), renamed.identity());
+
+    let context = FnCtx::new().with_registry(registry.clone());
+    let result = registry
+        .invoke_captured(&original, &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap();
+    assert_eq!(result, QueryValue::Int(1));
+
+    assert!(registry.remove("renamed"));
+    registry.register("renamed", Arc::new(Const(10))).unwrap();
+    let re_registered = registry.capture("renamed").unwrap();
+    assert_ne!(original.identity(), re_registered.identity());
+}
+
+struct MutateOwnEntryAndRepeat(Weak<FunctionRegistry>);
+
+#[async_trait]
+impl ShamirFunction for MutateOwnEntryAndRepeat {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        let registry = self.0.upgrade().expect("registry stays alive during call");
+        registry.replace("entry", Arc::new(Const(9)));
+        registry.rename("entry", "renamed")?;
+        ctx.call_stored("renamed", batch, params).await
+    }
+}
+
+#[tokio::test]
+async fn stored_call_identity_rejects_repeat_after_replace_and_rename() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register(
+            "entry",
+            Arc::new(MutateOwnEntryAndRepeat(Arc::downgrade(&registry))),
+        )
+        .unwrap();
+    let context = FnCtx::new().with_registry(registry.clone());
+    let error = registry
+        .invoke("entry", &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("cycle")));
+}
+
+struct CallTwice(&'static str);
+
+#[async_trait]
+impl ShamirFunction for CallTwice {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        let first = ctx.call_stored(self.0, batch, params).await?;
+        let second = ctx.call_stored(self.0, batch, params).await?;
+        Ok(QueryValue::List(vec![first, second]))
+    }
+}
+
+struct Increment(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ShamirFunction for Increment {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        Ok(QueryValue::Int(
+            self.0.fetch_add(1, Ordering::SeqCst) as i64 + 1,
+        ))
+    }
+}
+
+#[tokio::test]
+async fn stored_call_path_allows_sequential_successful_calls_in_one_parent() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register("target", Arc::new(Increment(Arc::new(AtomicUsize::new(0)))))
+        .unwrap();
+    registry
+        .register("parent", Arc::new(CallTwice("target")))
+        .unwrap();
+    let context = FnCtx::new().with_registry(registry.clone());
+    let result = registry
+        .invoke("parent", &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        result,
+        QueryValue::List(vec![QueryValue::Int(1), QueryValue::Int(2)])
+    );
+}
+
+struct CancelThenRetry(&'static str);
+
+#[async_trait]
+impl ShamirFunction for CancelThenRetry {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        {
+            let mut first_attempt = Box::pin(ctx.call_stored(self.0, batch, params));
+            let mut task_context = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                first_attempt.as_mut().poll(&mut task_context),
+                Poll::Pending
+            ));
+            drop(first_attempt);
+        }
+        ctx.call_stored(self.0, batch, params).await
+    }
+}
+
+#[tokio::test]
+async fn stored_call_path_is_scoped_after_cancelled_child_in_same_parent() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register(
+            "target",
+            Arc::new(PendingOnce(Arc::new(AtomicUsize::new(0)))),
+        )
+        .unwrap();
+    registry
+        .register("parent", Arc::new(CancelThenRetry("target")))
+        .unwrap();
+    let context = FnCtx::new().with_registry(registry.clone());
+    let result = registry
+        .invoke("parent", &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap();
+    assert_eq!(result, QueryValue::Int(3));
+}
+
+struct CapturedInvokeBypass {
+    registry: Arc<FunctionRegistry>,
+    binding: crate::RegistryBinding,
+}
+
+#[async_trait]
+impl ShamirFunction for CapturedInvokeBypass {
+    async fn call(
+        &self,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        self.registry
+            .invoke_captured(&self.binding, ctx, batch, params)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn invoke_captured_cannot_bypass_active_nested_call_path() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register("target", Arc::new(Const(1))).unwrap();
+    let binding = registry.capture("target").unwrap();
+    registry
+        .register(
+            "parent",
+            Arc::new(CapturedInvokeBypass {
+                registry: registry.clone(),
+                binding,
+            }),
+        )
+        .unwrap();
+    let context = FnCtx::new().with_registry(registry.clone());
+    let error = registry
+        .invoke("parent", &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("active")));
+}
+
+#[tokio::test]
+async fn stored_call_path_is_scoped_after_error() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register("target", Arc::new(FailOnce(Arc::new(AtomicUsize::new(0)))))
+        .unwrap();
+    registry
+        .register("parent", Arc::new(RetryAfterError("target")))
+        .unwrap();
+    let ctx = FnCtx::new().with_registry(registry.clone());
+    let batch = FnBatch::new();
+    let params = Params::new();
+    let result = registry
+        .invoke("parent", &ctx, &batch, &params)
+        .await
+        .unwrap();
+    assert_eq!(result, QueryValue::Int(2));
 }
 
 #[test]

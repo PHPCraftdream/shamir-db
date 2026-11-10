@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use shamir_db::ShamirDb;
-use shamir_engine::function::{FnBatch, FnCtx, FunctionError, Params, ShamirFunction};
+use shamir_engine::function::{
+    BatchContext, FnBatch, FnCtx, FunctionError, Params, ShamirFunction,
+};
 use shamir_types::types::value::QueryValue;
 
 use super::support::{compile_or_skip, DOUBLE_SRC};
@@ -233,10 +235,15 @@ pub async fn caller(ctx: Ctx, _batch: Batch, params: Params) -> Result<Value> {
 }
 "#;
 
-/// Source for a function that unconditionally calls itself (tests depth limit).
+/// Source for a function that unconditionally calls itself (stored-call cycle).
 const RECURSE_SRC: &str = r#"use shamir::prelude::*;
 #[shamir::function]
-pub async fn recurse(ctx: Ctx, _batch: Batch, _params: Params) -> Result<Value> {
+pub async fn recurse(ctx: Ctx, batch: Batch, _params: Params) -> Result<Value> {
+    let count = match batch.get("entries")? {
+        Some(Value::Int(count)) => count,
+        _ => 0,
+    };
+    batch.put("entries", Value::Int(count + 1))?;
     let args = Value::Map(vec![]);
     ctx.call("recurse", args);
     Ok(Value::Null)
@@ -285,33 +292,25 @@ async fn wasm_function_calls_function() {
     );
 }
 
-/// A function that calls itself unconditionally must hit the depth limit and
-/// error (not hang or stack-overflow).
+/// A function that calls itself unconditionally must be rejected by the
+/// active stored-call identity path before the lower depth policy.
 #[tokio::test]
-async fn wasm_call_depth_limit() {
+async fn wasm_call_cycle_is_rejected_before_depth_limit() {
     let db = ShamirDb::init_memory().await.unwrap();
 
     if !compile_or_skip(&db, "recurse", RECURSE_SRC).await {
         return;
     }
 
-    let result = db.invoke_function("recurse", Params::new()).await;
+    let batch = Arc::new(BatchContext::new());
+    let result = db
+        .invoke_function_with_batch("recurse", Params::new(), &batch)
+        .await;
     assert!(
         result.is_err(),
-        "recursive call must be rejected by the depth limit"
+        "recursive call must be rejected by the stored-call identity path"
     );
-    let err_msg = format!("{}", result.unwrap_err());
-    // The exact wording depends on how the depth-limit trap unwinds through
-    // ~32 guest frames. The inner "call depth limit exceeded" message is
-    // often swallowed by the wasm backtrace unwinder; what reliably survives
-    // is the compute-path marker. The key invariant: it errored (did not
-    // hang) and the error came from the WASM compute path.
-    assert!(
-        err_msg.contains("depth limit")
-            || err_msg.contains("call depth")
-            || err_msg.contains("shamir_call trap"),
-        "error should mention depth limit or call failure, got: {err_msg}"
-    );
+    assert_eq!(batch.get("entries"), Some(QueryValue::Int(1)));
 }
 
 /// A caller puts into the batch, then calls a callee that reads the same key.

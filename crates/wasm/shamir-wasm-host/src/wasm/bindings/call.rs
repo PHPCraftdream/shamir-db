@@ -57,7 +57,7 @@ pub(in crate::wasm) fn host_call(
         let registry;
         let batch_ctx;
         let globals;
-        let next_depth;
+        let depth;
         let depth_limit;
         let fuel_pool;
         let baseline;
@@ -67,6 +67,9 @@ pub(in crate::wasm) fn host_call(
         let repo;
         let net_gateway;
         let secret_grants;
+        let stored_call_resolver;
+        let active_call_path;
+        let definer_owner;
         {
             let memory = caller
                 .get_export("memory")
@@ -80,7 +83,7 @@ pub(in crate::wasm) fn host_call(
             registry = state.registry.clone();
             batch_ctx = state.batch.clone();
             globals = state.globals.clone();
-            next_depth = state.depth.saturating_add(1);
+            depth = state.depth;
             depth_limit = state.depth_limit;
             fuel_pool = state.fuel_pool.clone();
             baseline = state.fuel_baseline.load(Ordering::Relaxed);
@@ -94,6 +97,9 @@ pub(in crate::wasm) fn host_call(
             repo = state.repo.clone();
             net_gateway = state.net.clone();
             secret_grants = state.secret_grants.clone();
+            stored_call_resolver = state.stored_call_resolver.clone();
+            active_call_path = state.active_call_path.clone();
+            definer_owner = state.definer_owner.clone();
         }
         // Borrows on caller (memory, data) are dropped. Caller itself is still alive.
         #[cfg(test)]
@@ -136,47 +142,36 @@ pub(in crate::wasm) fn host_call(
             .map_err(|e| wasmtime::Error::msg(format!("call: params decode error: {e}")))?;
 
         // ── Depth check ──
+        let next_depth = depth.saturating_add(1);
         if next_depth > depth_limit {
             return Err(wasmtime::Error::msg(format!(
                 "call depth limit exceeded: {next_depth} > {depth_limit}"
             )));
         }
 
-        let reg = registry
-            .ok_or_else(|| wasmtime::Error::msg(format!("call: function not found: {name}")))?;
-
-        // ── Phase 2: await the callee ──
-        // RI-7: thread the parent invocation's actor into the child FnCtx so
-        // a nested ctx.call(...) inherits the SAME actor instead of silently
-        // defaulting to Actor::System (a confused-deputy privilege-escalation
-        // primitive). db/repo/net/secret_grants are threaded the same way so
-        // the nested call inherits the parent's capabilities instead of
-        // silently losing them (the same unfinished-plumbing site — fail-
-        // closed, lower urgency than the actor fail-open, fixed together).
-        let mut child_ctx = FnCtx::with_globals(globals)
-            .with_registry(reg)
-            .with_depth(next_depth)
+        let mut parent_ctx = FnCtx::with_globals(globals)
+            .with_depth(depth)
             .with_depth_limit(depth_limit)
             .with_actor(actor)
             .with_shared_secret_grants(secret_grants)
-            .with_fuel_budget(fuel_pool.clone());
+            .with_fuel_budget(fuel_pool.clone())
+            .with_call_runtime(stored_call_resolver, active_call_path, definer_owner);
+        if let Some(registry) = registry {
+            parent_ctx = parent_ctx.with_registry(registry);
+        }
         #[cfg(test)]
         if let Some(obs) = observer.clone() {
-            child_ctx = child_ctx.with_fuel_observer(obs);
+            parent_ctx = parent_ctx.with_fuel_observer(obs);
         }
         if let Some(db) = db_gateway {
-            child_ctx = child_ctx.with_db(db, repo);
+            parent_ctx = parent_ctx.with_db(db, repo);
         }
         if let Some(net) = net_gateway {
-            child_ctx = child_ctx.with_net(net);
+            parent_ctx = parent_ctx.with_net(net);
         }
         let child_batch = FnBatch::with_context(batch_ctx);
 
-        let invoked = child_ctx
-            .registry()
-            .expect("registry just set")
-            .invoke(&name, &child_ctx, &child_batch, &params)
-            .await;
+        let invoked = parent_ctx.call_stored(&name, &child_batch, &params).await;
         // Reacquire for the parent BEFORE any parent guest code runs again (the
         // shamir_alloc below) and BEFORE propagating the child's result or error.
         // The ceiling is min(own_cap_left, the amount just relinquished) — the
