@@ -5,6 +5,8 @@ use shamir_types::types::value::QueryValue;
 use crate::access::{
     escape_resource_diagnostic, Actor, Mode, ResourceMeta, ResourcePath, ResourcePathRef,
 };
+#[cfg(test)]
+use crate::shamir_db::shamir_db::core::FunctionDdlHookPoint;
 use crate::{DbError, DbResult};
 
 use super::super::ShamirDb;
@@ -312,6 +314,40 @@ impl ShamirDb {
         }
     }
 
+    /// Update function metadata from a fresh catalogue row while holding the
+    /// per-function DDL lock. The closure must derive its result only from the
+    /// supplied current metadata and the requested operation.
+    pub(crate) async fn update_function_resource_meta<F, E, M>(
+        &self,
+        name: &str,
+        update: F,
+        map_storage_error: M,
+    ) -> Result<(), E>
+    where
+        F: FnOnce(ResourceMeta) -> Result<ResourceMeta, E> + Send,
+        E: Send,
+        M: Fn(DbError) -> E + Send,
+    {
+        let _function_guard = self.function_ddl_locks.lock(name).await;
+        let mut record = self
+            .system_store
+            .load_function(name)
+            .await
+            .map_err(&map_storage_error)?
+            .ok_or_else(|| {
+                map_storage_error(DbError::NotFound(format!("function '{}' not found", name)))
+            })?;
+        let current_meta = ResourceMeta::from_record(&record);
+        #[cfg(test)]
+        self.function_ddl_test_hook(FunctionDdlHookPoint::MetaAfterRowReadBeforeWrite)
+            .await;
+        update(current_meta)?.inject_into(&mut record);
+        self.system_store
+            .save_function_meta_record(name, &record)
+            .await
+            .map_err(map_storage_error)
+    }
+
     /// Durable write of [`ResourceMeta`] for a mode-bearing resource.
     ///
     /// Loads the existing catalogue record, injects the new meta fields,
@@ -351,15 +387,7 @@ impl ShamirDb {
                     .await
             }
             ResourcePath::Function { name } => {
-                let rec = self
-                    .system_store
-                    .load_function(name)
-                    .await?
-                    .ok_or_else(|| DbError::NotFound(format!("function '{}' not found", name)))?;
-                let mut rec = rec;
-                meta.inject_into(&mut rec);
-                self.system_store
-                    .save_function_meta_record(name, &rec)
+                self.update_function_resource_meta(name, |_| Ok(meta.clone()), |error| error)
                     .await
             }
             ResourcePath::FunctionFolder { path: segments } => {

@@ -2,7 +2,7 @@ use shamir_engine::function::{FunctionMeta, Security};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-use crate::access::{Action, Actor, Mode, ResourceMeta, ResourcePath};
+use crate::access::{permits, AccessError, Action, Actor, Mode, ResourceMeta, ResourcePath};
 use crate::{DbError, DbResult};
 
 use super::super::super::ShamirDb;
@@ -25,6 +25,38 @@ pub(super) fn artifact_id_from_record(record: &QueryValue) -> Result<Option<Stri
 }
 
 impl ShamirDb {
+    pub(super) async fn authorize_function_row_action(
+        &self,
+        actor: &Actor,
+        name: &str,
+        record: Option<&QueryValue>,
+        action: Action,
+    ) -> Result<(), AccessError> {
+        let path = ResourcePath::function(name);
+        let denied = || AccessError {
+            actor: actor.clone(),
+            path: path.to_string(),
+            action,
+        };
+        if matches!(actor, Actor::System | Actor::Admin(_)) {
+            return Ok(());
+        }
+
+        let meta = record.map(ResourceMeta::from_record).unwrap_or_default();
+        let in_group = match (actor, meta.group) {
+            (Actor::User(user_id), Some(group_id)) => self
+                .user_in_group(*user_id, group_id)
+                .await
+                .map_err(|_| denied())?,
+            _ => false,
+        };
+        if permits(actor, &meta, action, in_group) {
+            Ok(())
+        } else {
+            Err(denied())
+        }
+    }
+
     pub(super) async fn authorize_function_replacement(
         &self,
         actor: &Actor,

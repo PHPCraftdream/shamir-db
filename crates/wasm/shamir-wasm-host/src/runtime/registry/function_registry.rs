@@ -125,6 +125,28 @@ impl FunctionRegistry {
         }
     }
 
+    /// Replace only an occupied entry whose catalogue artifact id matches `expected_artifact_id`.
+    /// The entry's identity, artifact id, and built-in provenance are preserved; a vacant name is
+    /// left vacant.
+    pub fn replace_if_artifact_id(
+        &self,
+        name: &str,
+        f: Arc<dyn ShamirFunction>,
+        expected_artifact_id: Option<&str>,
+    ) -> bool {
+        match self.functions.entry_sync(name.to_string()) {
+            scc::hash_map::Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                if entry.artifact_id.as_deref() != expected_artifact_id {
+                    return false;
+                }
+                entry.artifact = f;
+                true
+            }
+            scc::hash_map::Entry::Vacant(_) => false,
+        }
+    }
+
     /// Register or overwrite an artifact and its catalogue artifact id together.
     pub fn replace_with_artifact_id(
         &self,

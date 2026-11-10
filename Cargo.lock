@@ -3529,6 +3529,7 @@ dependencies = [
  "rand 0.9.4",
  "rmp-serde",
  "rustc-hash 2.1.2",
+ "scc",
  "sefer-alloc",
  "serde",
  "serial_test",

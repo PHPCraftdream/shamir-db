@@ -7,11 +7,30 @@ use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
 use crate::shamir_db::FunctionSource;
 use crate::types::value::QueryValue;
+use crate::DbError;
 use shamir_engine::function::{CreateFunctionOptions, Security, TierMode, Visibility};
 use shamir_types::mpack;
 
 use super::admin_dispatch::ShamirAdminExecutor;
 use super::helpers::{admin_result, validate_name_component};
+
+fn function_admin_err(error: DbError) -> BatchError {
+    let code = match &error {
+        DbError::Function(message) if message.starts_with("access denied:") => {
+            Some("access_denied".to_string())
+        }
+        _ => None,
+    };
+    let message = match (&code, error) {
+        (Some(_), DbError::Function(message)) => message,
+        (_, error) => error.to_string(),
+    };
+    BatchError::QueryError {
+        alias: String::new(),
+        message,
+        code,
+    }
+}
 
 impl ShamirAdminExecutor {
     pub(super) async fn handle_create_function(
@@ -203,7 +222,7 @@ impl ShamirAdminExecutor {
             .shamir
             .drop_function_as(&op.drop_function, self.actor.clone())
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(function_admin_err)?;
         Ok(admin_result(mpack!({
             "dropped_function": @(QueryValue::Str(op.drop_function.clone())),
             "existed": @(QueryValue::Bool(existed)),
@@ -218,11 +237,6 @@ impl ShamirAdminExecutor {
             unreachable!("handle_rename_function called with non-RenameFunction op");
         };
 
-        let err = |msg: String| BatchError::QueryError {
-            alias: String::new(),
-            message: msg,
-            code: None,
-        };
         let err_code = |code: &str, msg: String| BatchError::QueryError {
             alias: String::new(),
             message: msg,
@@ -244,7 +258,7 @@ impl ShamirAdminExecutor {
         self.shamir
             .rename_function_as(&op.rename_function, &op.to, self.actor.clone())
             .await
-            .map_err(|e| err(e.to_string()))?;
+            .map_err(function_admin_err)?;
         Ok(admin_result(mpack!({
             "renamed_function": @(QueryValue::Str(op.rename_function.clone())),
             "to": @(QueryValue::Str(op.to.clone())),

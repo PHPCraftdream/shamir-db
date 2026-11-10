@@ -12,6 +12,8 @@ use shamir_types::types::value::QueryValue;
 use super::super::super::{ArtifactKind, FunctionSource, ShamirDb};
 use super::artifact::{fresh_artifact_id, ARTIFACT_ID_FIELD};
 use super::types::{optimize_name, FunctionState};
+#[cfg(test)]
+use crate::shamir_db::shamir_db::core::FunctionDdlHookPoint;
 
 impl ShamirDb {
     // ========================================================================
@@ -183,6 +185,7 @@ impl ShamirDb {
 
         let wasm_b64 = base64::engine::general_purpose::STANDARD.encode(&wasm);
 
+        let _function_ddl_guard = self.function_ddl_locks.lock(name).await;
         if !opts.replace
             && (self.functions.contains(name)
                 || self.system_store.load_function(name).await?.is_some())
@@ -291,6 +294,10 @@ impl ShamirDb {
                 .await?;
         }
 
+        #[cfg(test)]
+        self.function_ddl_test_hook(FunctionDdlHookPoint::ReplaceAfterRowSaveBeforeRegistryWrite)
+            .await;
+
         if opts.replace {
             self.functions
                 .replace_with_artifact_id(name, Arc::new(wf), Some(artifact_id));
@@ -329,6 +336,11 @@ impl ShamirDb {
         )
         .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        let _function_ddl_guard = self.function_ddl_locks.lock(name).await;
+        let current_record = self.system_store.load_function(name).await?;
+        self.authorize_function_row_action(&actor, name, current_record.as_ref(), Action::Delete)
+            .await
+            .map_err(|error| DbError::Function(error.to_string()))?;
         // Durable removal FIRST (RV-DB-6540DC7B): a persistence error on
         // this PREWRITE delete propagates and leaves the live binding
         // intact, so a retry still sees the artifact. (A remove that
@@ -338,7 +350,7 @@ impl ShamirDb {
         // idempotently.
         // Durable catalogue-only entries count as existent even when no live
         // artifact was materialized (for example persisted native functions).
-        let existed = self.system_store.load_function(name).await?.is_some();
+        let existed = current_record.is_some();
         self.system_store.remove_function(name).await?;
         let live_existed = self.functions.remove(name);
         let _ = self.function_meta.remove(name);
@@ -367,61 +379,8 @@ impl ShamirDb {
         self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
             .await
             .map_err(|e| DbError::Function(e.to_string()))?;
-        if self.system_store.load_function(to).await?.is_some() {
-            return Err(DbError::Function(format!(
-                "function '{}' already exists",
-                to
-            )));
-        }
-        // Load the old catalogue record to re-key it.
-        let fn_records = self.system_store.load_functions().await?;
-        let old_record = fn_records
-            .iter()
-            .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(from))
-            .cloned();
-
-        // Install a cloned source metadata value before the synchronous registry
-        // rename; no DashMap guard is held across the operation.
-        let source_meta = self.function_meta(from);
-        let destination_meta = self.function_meta(to);
-        if let Some(meta) = source_meta {
-            self.function_meta.insert(to.to_string(), meta);
-        }
-        if let Err(error) = self.functions.rename(from, to) {
-            match destination_meta {
-                Some(meta) => {
-                    self.function_meta.insert(to.to_string(), meta);
-                }
-                None => {
-                    let _ = self.function_meta.remove(to);
-                }
-            }
-            return Err(DbError::Function(error.to_string()));
-        }
-        let _ = self.function_meta.remove(from);
-        if let Some((_, state)) = self.function_state.remove(from) {
-            self.function_state.insert(to.to_string(), state);
-        }
-
-        // If there was a durable record, re-key it, preserving the
-        // existing owner/group/mode. Write the durable new record BEFORE
-        // removing the old one (a crash between the two leaves the new row
-        // resolvable and the old row inert).
-        if let Some(mut rec) = old_record {
-            let existing_meta = ResourceMeta::from_record(&rec);
-            if let shamir_types::types::value::QueryValue::Map(ref mut map) = rec {
-                map.insert(
-                    "name".to_string(),
-                    shamir_types::types::value::QueryValue::Str(to.to_string()),
-                );
-            }
-            self.system_store
-                .save_function(to, &rec, &existing_meta)
-                .await?;
-            self.system_store.remove_function(from).await?;
-        }
-
-        Ok(())
+        let (_from_guard, _to_guard) = self.function_ddl_locks.lock_pair(from, to).await;
+        self.rename_function_catalogue_first(from, to, &actor).await
     }
 
     /// List all registered function names (sorted alphabetically).

@@ -65,6 +65,7 @@ rand        = "0.9.2"          # facade rng for record-id allocation
 arc-swap    = "1.7"            # RCU snapshot for the quarantine cache
 base64      = "0.22"           # function wasm binary persistence
 rustc-hash  = "2.1"            # function content hash (fxhash's maintained successor)
+scc         = "3.8"
 tempfile    = "3.10.1"         # curl gateway temp files for secrets
 
 # Bench allocator options (optional — gated by bench-sefer features).

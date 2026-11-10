@@ -1,6 +1,6 @@
 use shamir_engine::function::TierMode;
 
-use super::support::{
+use super::super::support::{
     create_echo, echo_params, echo_result, echo_variant_wasm, echo_wasm, open_fjall, put_row,
     restart, simd_wasm, stored_row, tamper_row, without_key,
 };
