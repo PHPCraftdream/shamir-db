@@ -1,10 +1,12 @@
 use crate::access::{Action, Actor, ResourcePath};
-use crate::shamir_db::shamir_db::{FunctionSource, ShamirDb};
+use crate::shamir_db::shamir_db::{ArtifactKind, FunctionSource, ShamirDb};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
-    compile_rust_source_blocking, create_shamir_source, CompileOptions, FunctionError,
+    compile_rust_source_blocking, create_shamir_source, CompileOptions, FunctionError, ModuleHash,
     ModuleReport, ShamirStage, TierMode, WasmFunction, WasmLimits,
 };
+use shamir_types::types::value::QueryValue;
+use std::collections::BTreeMap;
 
 impl ShamirDb {
     /// Shared authorization for `shamir` language sources. Shamir compilation
@@ -30,8 +32,36 @@ impl ShamirDb {
         Ok(())
     }
 
+    /// Snapshot persisted signatures from hash-identified `shamir` WASM rows.
+    /// Runtime resolution remains responsible for artifact coherence.
+    pub(super) async fn callable_catalog_snapshot(&self) -> DbResult<BTreeMap<String, Vec<u8>>> {
+        let records = self.system_store.load_functions().await?;
+        let mut catalog = BTreeMap::new();
+        for record in records {
+            let Some(name) = record.get("name").and_then(QueryValue::as_str) else {
+                continue;
+            };
+            if record.get("lang").and_then(QueryValue::as_str) != Some("shamir")
+                || ArtifactKind::from_record(&record) != ArtifactKind::Wasm
+            {
+                continue;
+            }
+            let Some(QueryValue::Bin(signature)) = record.get("call_signature") else {
+                continue;
+            };
+            let Some(module_hash) = record.get("module_hash").and_then(QueryValue::as_str) else {
+                continue;
+            };
+            if ModuleHash::from_hex(module_hash).is_err() || signature.is_empty() {
+                continue;
+            }
+            catalog.insert(name.to_string(), signature.clone());
+        }
+        Ok(catalog)
+    }
+
     /// Turn a [`FunctionSource`] into `(wasm bytes, lang tag, source text,
-    /// ready-built function)`.
+    /// ready-built function, callable signature)`.
     ///
     /// For `Source`, authorizes the compiler and caps the source size before
     /// the compiler process is spawned.
@@ -51,9 +81,10 @@ impl ShamirDb {
         &'static str,
         Option<String>,
         Option<(WasmFunction, ModuleReport)>,
+        Option<Vec<u8>>,
     )> {
         match source {
-            FunctionSource::Wasm(bytes) => Ok((bytes.to_vec(), "wasm", None, None)),
+            FunctionSource::Wasm(bytes) => Ok((bytes.to_vec(), "wasm", None, None, None)),
             FunctionSource::Source(src) => {
                 // Task #607: compiling Rust source into WASM runs a host
                 // compiler process — gate it as a separate POSIX-style
@@ -79,23 +110,31 @@ impl ShamirDb {
                         }
                         other => DbError::Function(other.to_string()),
                     })?;
-                Ok((compiled, "rust", Some(src.to_string()), None))
+                Ok((compiled, "rust", Some(src.to_string()), None, None))
             }
             FunctionSource::Shamir(src) => {
                 self.authorize_shamir_source(src, actor).await?;
-                let (wf, wasm, report) = create_shamir_source(
+                let mut options = CompileOptions {
+                    stage: ShamirStage::Procedures,
+                    ..CompileOptions::default()
+                };
+                options.callable_catalog = self.callable_catalog_snapshot().await?;
+                let (wf, wasm, report, signature) = create_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),
-                    CompileOptions {
-                        stage: ShamirStage::Procedures,
-                        ..CompileOptions::default()
-                    },
+                    options,
                     WasmLimits::default(),
                     optimize,
                 )
                 .await
                 .map_err(|e| DbError::Function(e.to_string()))?;
-                Ok((wasm, "shamir", Some(src.to_string()), Some((wf, report))))
+                Ok((
+                    wasm,
+                    "shamir",
+                    Some(src.to_string()),
+                    Some((wf, report)),
+                    signature,
+                ))
             }
         }
     }

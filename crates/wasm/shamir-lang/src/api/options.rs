@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use shamir_wasm_admission::AdmissionLimits;
 
 /// Compiler capability stage.
@@ -52,6 +54,8 @@ pub struct CompileOptions {
     pub limits: CompileLimits,
     /// WASM module admission limits retained for the compile pipeline.
     pub admission: AdmissionLimits,
+    /// Previously emitted callable signatures indexed by arbitrary target name.
+    pub callable_catalog: BTreeMap<String, Vec<u8>>,
 }
 
 impl CompileLimits {
@@ -133,6 +137,7 @@ impl Default for CompileOptions {
             stage: Stage::Mvp,
             limits: CompileLimits::default(),
             admission: AdmissionLimits::default(),
+            callable_catalog: BTreeMap::new(),
         }
     }
 }

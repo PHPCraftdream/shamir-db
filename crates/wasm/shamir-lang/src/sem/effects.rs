@@ -31,6 +31,7 @@ pub enum BuiltinId {
     BatchUpdate,
     BatchDelete,
     ResponseAffected,
+    CallChecked,
 }
 
 /// Classification driving capability checks and effect recording.
@@ -45,7 +46,7 @@ pub enum BuiltinCategory {
 }
 
 /// Number of reserved builtin names; kept in sync with `BUILTIN_TABLE`.
-pub const BUILTIN_NAME_COUNT: usize = 30;
+pub const BUILTIN_NAME_COUNT: usize = 31;
 
 /// Private const-ordered (name, identity) table scanned linearly.
 const BUILTIN_TABLE: [(&str, BuiltinId); BUILTIN_NAME_COUNT] = [
@@ -79,6 +80,7 @@ const BUILTIN_TABLE: [(&str, BuiltinId); BUILTIN_NAME_COUNT] = [
     ("batch_update", BuiltinId::BatchUpdate),
     ("batch_delete", BuiltinId::BatchDelete),
     ("response_affected", BuiltinId::ResponseAffected),
+    ("call", BuiltinId::CallChecked),
 ];
 
 /// The exact source name of one builtin.
@@ -114,6 +116,7 @@ pub fn builtin_name(id: BuiltinId) -> &'static str {
         BuiltinId::BatchUpdate => "batch_update",
         BuiltinId::BatchDelete => "batch_delete",
         BuiltinId::ResponseAffected => "response_affected",
+        BuiltinId::CallChecked => "call",
     }
 }
 
@@ -149,7 +152,8 @@ pub fn builtin_category(id: BuiltinId) -> BuiltinCategory {
         | BuiltinId::ResponseInserted
         | BuiltinId::BatchUpdate
         | BuiltinId::BatchDelete
-        | BuiltinId::ResponseAffected => BuiltinCategory::Stage2,
+        | BuiltinId::ResponseAffected
+        | BuiltinId::CallChecked => BuiltinCategory::Stage2,
     }
 }
 

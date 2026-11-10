@@ -1,7 +1,7 @@
 use super::identity::CallIdentity;
 use crate::runtime::context::FnCtx;
 use crate::runtime::contract::ShamirFunction;
-use crate::runtime::error::FnResult;
+use crate::runtime::error::{FnResult, FunctionError};
 use shamir_types::access::Actor;
 use std::sync::Arc;
 
@@ -37,4 +37,18 @@ impl ResolvedStoredCall {
 #[async_trait::async_trait]
 pub trait StoredCallResolver: Send + Sync {
     async fn resolve(&self, name: &str, parent: &FnCtx) -> FnResult<ResolvedStoredCall>;
+
+    /// Resolve a stored call only when the captured artifact has the exact
+    /// compiler-emitted signature expected by the caller. Implementations that
+    /// do not explicitly support checked calls fail closed.
+    async fn resolve_checked(
+        &self,
+        _name: &str,
+        _parent: &FnCtx,
+        _expected_signature: &[u8],
+    ) -> FnResult<ResolvedStoredCall> {
+        Err(FunctionError::Compute(
+            "checked stored calls are not supported by this resolver".into(),
+        ))
+    }
 }

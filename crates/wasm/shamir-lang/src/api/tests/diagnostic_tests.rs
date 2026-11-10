@@ -1,13 +1,22 @@
 use crate::api::{
     CompileError, CompileOptions, Diagnostic, Position, Span, Stage, MAX_DIAGNOSTIC_MESSAGE_BYTES,
 };
+use crate::compile;
+use wasmparser::{Parser, Payload, TypeRef, ValType};
+
+fn assert_call_diag_codes(source: &str, options: &CompileOptions, code: &str) {
+    let error = compile(source, options).expect_err("source must produce the requested diagnostic");
+    assert!(
+        matches!(error, CompileError::Diagnostics(ref diagnostics) if diagnostics.iter().any(|d| d.code == code))
+    );
+}
 
 fn assert_diag_codes(source: &str, expected: &[&str]) {
     let options = CompileOptions {
         stage: Stage::Procedures,
         ..CompileOptions::default()
     };
-    let error = crate::compile(source, &options).expect_err("invalid procedure source rejects");
+    let error = compile(source, &options).expect_err("invalid procedure source rejects");
     let actual: Vec<&str> = match error {
         CompileError::Diagnostics(diagnostics) => diagnostics
             .iter()
@@ -429,6 +438,324 @@ fn diagnostic_message_and_related_message_are_bounded_and_utf8_safe() {
     let related = diagnostic.related.as_ref().expect("related source");
     assert!(related.message.len() <= MAX_DIAGNOSTIC_MESSAGE_BYTES);
     assert!(related.message.is_char_boundary(related.message.len()));
+}
+
+#[test]
+fn checked_call_emits_the_exact_import_and_is_deterministic() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options.callable_catalog.insert(
+        "increment".to_string(),
+        b"procedure(value:i64)->i64".to_vec(),
+    );
+    let source = "@entry procedure caller(value: i64) -> i64 { return call(\"increment\", { value: value }); }";
+    let first = compile(source, &options).expect("catalogued call compiles");
+    let again = compile(source, &options).expect("same catalogued call compiles");
+    assert_eq!(first.wasm, again.wasm);
+    assert_eq!(first.report.import_count, 2);
+    let mut types = Vec::new();
+    for payload in Parser::new(0).parse_all(&first.wasm) {
+        if let Payload::TypeSection(reader) = payload.expect("valid wasm") {
+            types.extend(
+                reader
+                    .into_iter_err_on_gc_types()
+                    .map(|ty| ty.expect("type")),
+            );
+        }
+    }
+    let mut checked = 0;
+    for payload in Parser::new(0).parse_all(&first.wasm) {
+        if let Payload::ImportSection(reader) = payload.expect("valid wasm") {
+            for import in reader.into_imports() {
+                let import = import.expect("valid import");
+                if import.module == "shamir_host" && import.name == "call_checked" {
+                    let (TypeRef::Func(index) | TypeRef::FuncExact(index)) = import.ty else {
+                        panic!("call_checked must be a function import");
+                    };
+                    let ty = &types[index as usize];
+                    assert_eq!(ty.params(), &[ValType::I32; 6]);
+                    assert_eq!(ty.results(), &[ValType::I64]);
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 1);
+}
+
+#[test]
+fn checked_call_catalog_descriptor_and_nullable_nil_are_exact() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options.callable_catalog.insert(
+        "transform".to_string(),
+        b"procedure(input:{items:[{label:string?}],meta:{count:i32,enabled:bool}},maybe:i64?)->{result:[bytes?]}?".to_vec(),
+    );
+    let source = "@entry procedure caller(maybe: i64?, input: { items: [{ label: string? }], meta: { enabled: bool, count: i32 } }) -> { result: [bytes?] }? { return call(\"transform\", { maybe: null, input: { items: [{ label: null }], meta: { enabled: true, count: 1 } } }); }";
+    let compiled = compile(source, &options).expect("exact nested signature compiles");
+    assert_eq!(compiled.report.import_count, 2);
+    assert_eq!(compiled.signature.as_deref(), Some(b"procedure(maybe:i64?,input:{items:[{label:string?}],meta:{count:i32,enabled:bool}})->{result:[bytes?]}?".as_slice()));
+    let signature = b"procedure(input:{items:[{label:string?}],meta:{count:i32,enabled:bool}},maybe:i64?)->{result:[bytes?]}?";
+    assert!(compiled
+        .wasm
+        .windows(signature.len())
+        .any(|bytes| bytes == signature));
+}
+
+#[test]
+fn checked_call_accepts_empty_map_and_infers_result() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options
+        .callable_catalog
+        .insert("empty".to_string(), b"procedure()->i64".to_vec());
+    let compiled = compile(
+        "@entry procedure caller() -> i64 { let result = call(\"empty\", {}); return result; }",
+        &options,
+    )
+    .expect("empty map call infers its result");
+    assert_eq!(compiled.report.import_count, 2);
+}
+
+#[test]
+fn checked_call_grouping_preserves_exact_record_argument_types() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options
+        .callable_catalog
+        .insert("remote".into(), b"procedure(value:i64?)->i64".to_vec());
+
+    for source in [
+        "@entry procedure caller(value: i64) -> i64 { return call(\"remote\", { value: value }); }",
+        "@entry procedure caller(value: i64) -> i64 { return call(\"remote\", ({ value: value })); }",
+        "@entry procedure caller(value: i64) -> i64 { return call(\"remote\", (({ value: value }))); }",
+    ] {
+        assert_call_diag_codes(source, &options, "T004");
+    }
+
+    for source in [
+        "@entry procedure caller(value: i64?) -> i64 { return call(\"remote\", ({ value: value })); }",
+        "@entry procedure caller() -> i64 { return call(\"remote\", (({ value: null }))); }",
+    ] {
+        compile(source, &options).expect("exact nullable grouped argument compiles");
+    }
+}
+
+#[test]
+fn checked_call_rejects_contextual_optional_composite_literals() {
+    for (signature, values) in [
+        (
+            b"procedure(p:{a:i64}?)->i64".as_slice(),
+            [
+                "{ p: { a: 1 } }",
+                "{ p: ({ a: 1 }) }",
+                "({ p: { a: 1 } })",
+                "({ p: ({ a: 1 }) })",
+            ],
+        ),
+        (
+            b"procedure(p:{nested:{a:i64}?})->i64".as_slice(),
+            [
+                "{ p: { nested: { a: 1 } } }",
+                "{ p: { nested: ({ a: 1 }) } }",
+                "({ p: { nested: { a: 1 } } })",
+                "({ p: { nested: ({ a: 1 }) } })",
+            ],
+        ),
+        (
+            b"procedure(p:[i64]?)->i64".as_slice(),
+            [
+                "{ p: [1] }",
+                "{ p: ([1]) }",
+                "({ p: [1] })",
+                "({ p: ([1]) })",
+            ],
+        ),
+    ] {
+        let options = CompileOptions {
+            stage: Stage::Procedures,
+            callable_catalog: [("remote".to_string(), signature.to_vec())]
+                .into_iter()
+                .collect(),
+            ..CompileOptions::default()
+        };
+        for arguments in values {
+            let source = format!(
+                "@entry procedure caller() -> i64 {{ return call(\"remote\", {arguments}); }}"
+            );
+            assert_call_diag_codes(&source, &options, "T004");
+        }
+    }
+}
+
+#[test]
+fn checked_call_accepts_exact_optional_composite_values_and_null() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options.callable_catalog.insert(
+        "remote".into(),
+        b"procedure(p:{a:i64}?,items:[i64]?)->i64".to_vec(),
+    );
+    for source in [
+        "@entry procedure caller(p: { a: i64 }?, items: [i64]?) -> i64 { return call(\"remote\", { p: p, items: items }); }",
+        "@entry procedure caller() -> i64 { return call(\"remote\", { p: null, items: null }); }",
+    ] {
+        compile(source, &options).expect("exact optional value or null compiles");
+    }
+}
+
+#[test]
+fn checked_call_rejects_invalid_signatures_and_argument_contracts() {
+    let mut catalog = std::collections::BTreeMap::new();
+    catalog.insert("remote".to_string(), b"procedure(value:i64)->i64".to_vec());
+    for source in [
+        "@entry procedure caller() -> i64 { return call(\"missing\", { value: 1 }); }",
+        "@entry procedure caller(target: string) -> i64 { return call(target, { value: 1 }); }",
+        "@entry procedure caller() -> i64 { return call(\"remote\", { wrong: 1 }); }",
+        "@entry procedure caller() -> i64 { return call(\"remote\", { value: 1, extra: 2 }); }",
+        "@entry procedure caller(value: i32) -> i64 { return call(\"remote\", { value: value }); }",
+        "@entry procedure caller() -> i64 { return call(\"remote\", {}); }",
+    ] {
+        let options = CompileOptions {
+            stage: Stage::Procedures,
+            callable_catalog: catalog.clone(),
+            ..CompileOptions::default()
+        };
+        assert_call_diag_codes(source, &options, "T004");
+    }
+    let mut nullable = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    nullable
+        .callable_catalog
+        .insert("remote".into(), b"procedure(value:i64?)->i64".to_vec());
+    assert_call_diag_codes(
+        "@entry procedure caller() -> i64 { return call(\"remote\", {}); }",
+        &nullable,
+        "T004",
+    );
+    let mut malformed = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    malformed
+        .callable_catalog
+        .insert("bad".into(), b"procedure( value:i64)->i64".to_vec());
+    assert_call_diag_codes(
+        "@entry procedure caller(value: i64) -> i64 { return call(\"bad\", { value: value }); }",
+        &malformed,
+        "T004",
+    );
+    let mut result_mismatch = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    result_mismatch
+        .callable_catalog
+        .insert("remote".into(), b"procedure()->i64?".to_vec());
+    assert_call_diag_codes(
+        "@entry procedure caller() -> i64 { return call(\"remote\", {}); }",
+        &result_mismatch,
+        "T004",
+    );
+}
+
+#[test]
+fn checked_call_capability_rejects_nonprocedure_entries_and_helpers() {
+    let mut options = CompileOptions::default();
+    options
+        .callable_catalog
+        .insert("remote".to_string(), b"procedure()->i64".to_vec());
+    for source in [
+        "@entry scalar caller() -> i64 { return call(\"remote\", {}); }",
+        "@entry validator caller(record: { name: string }?, old_record: { name: string }?) -> Validation { call(\"remote\", {}); return accept(); }",
+        "fn call_remote() -> i64 { return call(\"remote\", {}); }\n@entry scalar caller() -> i64 { return call_remote(); }",
+    ] {
+        assert_call_diag_codes(source, &options, "T007");
+    }
+}
+
+#[test]
+fn checked_call_reports_cycle_and_opaque_boundaries() {
+    let cycle = "fn loop(value: i64) -> i64 { return loop(value); }\n@entry procedure caller(value: i64) -> i64 { return loop(value); }";
+    assert_diag_codes(cycle, &["T008"]);
+    for (signature, source) in [
+        (
+            b"procedure(value:Batch)->i64".as_slice(),
+            "@entry procedure caller() -> i64 { return call(\"remote\", { value: batch() }); }",
+        ),
+        (
+            b"procedure()->Response".as_slice(),
+            "@entry procedure caller() -> i64 { return call(\"remote\", {}); }",
+        ),
+    ] {
+        let mut options = CompileOptions {
+            stage: Stage::Procedures,
+            ..CompileOptions::default()
+        };
+        options
+            .callable_catalog
+            .insert("remote".into(), signature.to_vec());
+        assert_call_diag_codes(source, &options, "T009");
+    }
+    let mut opaque_result = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    opaque_result
+        .callable_catalog
+        .insert("remote".into(), b"procedure()->Response".to_vec());
+    assert_call_diag_codes(
+        "@entry procedure caller() -> i64 { return call(\"remote\", {}); }",
+        &opaque_result,
+        "T009",
+    );
+    let mut opaque_null = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    opaque_null
+        .callable_catalog
+        .insert("bad".into(), b"procedure(value:null?)->i64".to_vec());
+    assert_call_diag_codes(
+        "@entry procedure caller() -> i64 { return call(\"bad\", { value: null }); }",
+        &opaque_null,
+        "T009",
+    );
+}
+
+#[test]
+fn checked_call_import_ceiling_is_six() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options
+        .callable_catalog
+        .insert("remote".to_string(), b"procedure()->i64".to_vec());
+    let source = r#"@entry procedure caller() -> i64 {
+      let user: { id: i64 }? = db_get("users", 1);
+      let rows: [{ id: i64 }] = db_query("users", null);
+      let stored: { id: i64 } = db_insert("users", { id: 1 });
+      let request_value = request(batch_read(batch(), "r", "users", null));
+      let response = db_execute(request_value);
+      let result: [{ id: i64 }]? = response_rows(response, "r");
+      if (is_null(user) || is_null(result)) { return call("remote", {}); }
+      return stored.id + to_i64(len(rows));
+    }"#;
+    let compiled = compile(source, &options).expect("imports compile");
+    assert_eq!(compiled.report.import_count, 6);
 }
 
 #[test]

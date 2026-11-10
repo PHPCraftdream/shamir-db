@@ -11,4 +11,4 @@ pub(crate) use active_path::ActiveCallPath;
 pub use binding::RegistryBinding;
 pub use function_registry::FunctionRegistry;
 pub use resolver::{ResolvedStoredCall, StoredCallResolver};
-pub(crate) use stored_call::dispatch_stored_call;
+pub(crate) use stored_call::{dispatch_stored_call, dispatch_stored_call_with_signature};

@@ -93,6 +93,11 @@ impl ShamirDb {
                 "optimize".to_string(),
                 QueryValue::Str(optimize_name(mode).to_string()),
             );
+            if m.get("lang").and_then(QueryValue::as_str) != Some("shamir")
+                || !matches!(m.get("call_signature"), Some(QueryValue::Bin(_)))
+            {
+                m.shift_remove("call_signature");
+            }
         }
         let current_binding = self
             .functions

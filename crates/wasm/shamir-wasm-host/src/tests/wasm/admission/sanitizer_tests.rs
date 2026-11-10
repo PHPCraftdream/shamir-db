@@ -62,9 +62,9 @@ const UNSANCTIONED_NAME_UNDER_SANCTIONED_MODULE_WAT: &str = r#"
 /// four sync imports take `(i32,i32,i32,i32)`/`(i32,i32) -> i64`; `call`
 /// and the two-`(ptr,len)`-argument imports (`db_execute`, `http_fetch`)
 /// take `(i32,i32,i32,i32) -> i64`/`(i32,i32) -> i64` respectively;
-/// `db_get`/`db_insert`/`db_query` take `(i32,i32,i32,i32) -> i64`. Only
-/// the import section shape matters for this test — the functions are
-/// never actually called.
+/// `db_get`/`db_insert`/`db_query` take `(i32,i32,i32,i32) -> i64`.
+/// `call_checked` takes six i32 parameters and returns i64. Only the import
+/// section shape matters for this test — the functions are never actually called.
 const ALL_SANCTIONED_IMPORTS_WAT: &str = r#"
 (module
   (import "shamir_host" "batch_put" (func $batch_put (param i32 i32 i32 i32)))
@@ -72,6 +72,7 @@ const ALL_SANCTIONED_IMPORTS_WAT: &str = r#"
   (import "shamir_host" "global_set" (func $global_set (param i32 i32 i32 i32)))
   (import "shamir_host" "global_get" (func $global_get (param i32 i32) (result i64)))
   (import "shamir_host" "call" (func $call (param i32 i32 i32 i32) (result i64)))
+  (import "shamir_host" "call_checked" (func $call_checked (param i32 i32 i32 i32 i32 i32) (result i64)))
   (import "shamir_host" "db_get" (func $db_get (param i32 i32 i32 i32) (result i64)))
   (import "shamir_host" "db_insert" (func $db_insert (param i32 i32 i32 i32) (result i64)))
   (import "shamir_host" "db_query" (func $db_query (param i32 i32 i32 i32) (result i64)))
@@ -167,6 +168,34 @@ fn unsanctioned_name_under_sanctioned_module_rejected_by_sanitizer() {
     );
 }
 
+#[test]
+fn sanctioned_list_accepts_checked_call_with_exact_signature() {
+    let module = r#"(module
+      (type $checked (func (param i32 i32 i32 i32 i32 i32) (result i64)))
+      (import "shamir_host" "call_checked" (func $checked_call (type $checked)))
+      (memory (export "memory") 1)
+      (func (export "shamir_alloc") (param i32) (result i32) (i32.const 0))
+      (func (export "shamir_call") (param i32 i32) (result i64) (i64.const 0)))"#;
+    assert!(verify_wasm_module(&wat::parse_str(module).unwrap()).is_ok());
+}
+
+#[test]
+fn checked_call_wrong_signature_rejected_by_sanitizer() {
+    let module = r#"(module
+      (type $checked (func (param i32 i32 i32 i32 i32) (result i64)))
+      (import "shamir_host" "call_checked" (func $checked_call (type $checked)))
+      (memory (export "memory") 1)
+      (func (export "shamir_alloc") (param i32) (result i32) (i32.const 0))
+      (func (export "shamir_call") (param i32 i32) (result i64) (i64.const 0)))"#;
+    assert!(matches!(
+        shamir_wasm_admission::verify_wasm_module(&wat::parse_str(module).unwrap()),
+        Err(AdmissionError::WrongImportType {
+            module: "shamir_host",
+            name: "call_checked",
+            ..
+        })
+    ));
+}
 // ── End-to-end: sanitizer runs before wasmtime instantiation ─────────────
 
 /// RED before the fix / GREEN after: a well-formed WAT module (valid

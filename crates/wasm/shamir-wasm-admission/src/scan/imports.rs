@@ -1,6 +1,7 @@
+use super::contract::check_checked_call_import;
 use crate::sanitizer::SANCTIONED_HOST_IMPORTS;
 use crate::types::AdmissionError;
-use wasmparser::{ImportSectionReader, TypeRef};
+use wasmparser::{FuncType, ImportSectionReader, TypeRef};
 
 /// Rejects any import outside [`SANCTIONED_HOST_IMPORTS`] or not a function.
 ///
@@ -9,6 +10,7 @@ use wasmparser::{ImportSectionReader, TypeRef};
 pub(super) fn scan_imports(
     reader: ImportSectionReader<'_>,
     mut func_type_indices: Option<&mut Vec<u32>>,
+    types: &[FuncType],
 ) -> Result<(), AdmissionError> {
     for import in reader.into_imports() {
         let import = import.map_err(|e| AdmissionError::Parse(e.to_string()))?;
@@ -26,6 +28,9 @@ pub(super) fn scan_imports(
                 kind: kind_name(import.ty),
             });
         };
+        if import.module == "shamir_host" && import.name == crate::abi::IMPORT_CALL_CHECKED {
+            check_checked_call_import(index, types)?;
+        }
         if let Some(indices) = func_type_indices.as_deref_mut() {
             indices.push(index);
         }

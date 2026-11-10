@@ -8,7 +8,8 @@ use super::store::{qv_map1, TABLE_FUNCTIONS, TABLE_GROUPS, TABLE_USERS};
 use super::SystemStore;
 
 impl SystemStore {
-    /// Persist a function catalogue entry. Upsert keyed by `name`.
+    /// Persist a complete function catalogue entry. Replaces any existing
+    /// record keyed by `name`, dropping fields omitted from `record`.
     /// Injects `owner`/`group`/`mode` from `meta` into the record.
     pub async fn save_function(
         &self,
@@ -20,12 +21,40 @@ impl SystemStore {
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
         let table = self.table(TABLE_FUNCTIONS).await?;
-        let op = crate::query::write::SetOp {
-            set: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            key: qv_map1("name", QueryValue::Str(name.to_string())),
-            value: rec,
+        let delete = crate::query::write::DeleteOp {
+            delete_from: crate::query::TableRef::new(TABLE_FUNCTIONS),
+            where_clause: crate::query::filter::Filter::Eq {
+                field: vec!["name".to_string()],
+                value: crate::query::filter::FilterValue::String(name.to_string()),
+            },
+            select: None,
+            expected_version: None,
         };
-        self.set_via_implicit_tx(&table, &op).await?;
+        let insert = crate::query::write::InsertOp {
+            insert_into: crate::query::TableRef::new(TABLE_FUNCTIONS),
+            values: vec![rec],
+            records_idmsgpack: Vec::new(),
+            select: None,
+        };
+        let repo = self.system_repo()?;
+        let owned_table = table.clone();
+        repo.run_implicit_batch_tx(Actor::System, "replace_function", move |tx| {
+            Box::pin(async move {
+                let refs = crate::types::common::new_map();
+                let ctx = owned_table
+                    .info_store_read_view()
+                    .filter_context(&refs)
+                    .await?;
+                owned_table
+                    .execute_delete_tx(&delete, &ctx, tx, None, &Actor::System)
+                    .await?;
+                owned_table
+                    .execute_insert_tx(&insert, tx, false, None, &Actor::System)
+                    .await
+            })
+        })
+        .await
+        .map_err(|e| DbError::Internal(e.to_string()))?;
         self.persist_table_interner(&table, None).await?;
         // Durable DDL — sync_wal + flush via shared helper.
         self.flush_system_repo_durable(&table).await?;

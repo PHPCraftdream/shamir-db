@@ -340,6 +340,37 @@ fn check_inst_kinds(
             )?;
             want(kind(*alias), ValueKind::I32, String::from("alias operand"))?;
         }
+        InstKind::CallChecked {
+            name,
+            signature,
+            args,
+            result,
+        } => {
+            want(
+                kind(*name),
+                ValueKind::I32,
+                String::from("call target operand"),
+            )?;
+            want(
+                kind(*signature),
+                ValueKind::I32,
+                String::from("call signature operand"),
+            )?;
+            want(
+                kind(*args),
+                ValueKind::I32,
+                String::from("call arguments operand"),
+            )?;
+            if *result >= module.type_nodes.len() as u32 {
+                return Err(out_of_range(
+                    function_index,
+                    block_index,
+                    inst_id,
+                    String::from("checked-call result type node"),
+                ));
+            }
+        }
+
         InstKind::DbCall { table, arg, .. } => {
             want(kind(*table), ValueKind::I32, String::from("table operand"))?;
             want(kind(*arg), ValueKind::I32, String::from("argument operand"))?;

@@ -202,6 +202,13 @@ pub enum InstKind {
         arg: InstId,
         result: u32,
     },
+    /// Checked stored procedure call; the expected descriptor and arbitrary target name are static cells.
+    CallChecked {
+        name: InstId,
+        signature: InstId,
+        args: InstId,
+        result: u32,
+    },
     /// Appends one `(alias, entry)` operation to an immutable batch plan and
     /// returns the new plan (kind-2 failure on an invalid or duplicate alias
     /// or a 51st operation) -> I32 cell pointer.
@@ -285,6 +292,7 @@ pub(crate) fn inst_result_kind(
         | InstKind::CellAllocF64(_)
         | InstKind::RecordCell { .. }
         | InstKind::DbCall { .. }
+        | InstKind::CallChecked { .. }
         | InstKind::BatchAppend { .. }
         | InstKind::ResponseAffected { .. }
         | InstKind::DbExecute { .. }
@@ -376,6 +384,16 @@ pub(crate) fn inst_operands(kind: &InstKind, out: &mut Vec<InstId>) {
         InstKind::DbCall { table, arg, .. } => {
             out.push(*table);
             out.push(*arg);
+        }
+        InstKind::CallChecked {
+            name,
+            signature,
+            args,
+            ..
+        } => {
+            out.push(*name);
+            out.push(*signature);
+            out.push(*args);
         }
         InstKind::BatchAppend {
             batch,

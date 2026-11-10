@@ -775,6 +775,9 @@ fn lower_call(
             }
             ctx.builder.append(InstKind::Call { callee, args }, span)
         }
+        crate::sem::Callee::Builtin(BuiltinId::CallChecked) => {
+            super::call::lower_checked_call(ctx, id, arguments, span)
+        }
         crate::sem::Callee::Builtin(builtin) => lower_builtin(ctx, id, builtin, arguments, span),
         _ => Err(IrError::Internal("lower: unresolved callee")),
     }
@@ -931,7 +934,7 @@ fn field_value(
 
 /// Loads one container slot as a value of type `ty`: scalars come out of the
 /// payload, aggregate slots are used as cell pointers directly.
-fn load_element(
+pub(super) fn load_element(
     ctx: &mut LowerCtx,
     elem: InstId,
     ty: TypeId,

@@ -6,6 +6,7 @@ use super::abi::{emit_call_wrapper, emit_scalar_wrapper, NullCell, WrapperBases,
 use super::helpers::{emit_helper_order, HelperGraph, HelperId};
 use super::scalar::emit_user_function;
 use super::support::assemble::{assemble, intern_type, val_type, ModuleImage};
+use super::support::db::checked::emit_checked_call_helper;
 use super::support::db::{
     emit_batch_append_helper, emit_db_call_helper, emit_db_execute_helper, emit_dynmap_find_helper,
     emit_response_affected_helper, emit_response_get_helper, host_import_name,
@@ -96,8 +97,10 @@ pub(crate) struct EmissionPlan {
     pub projection_type_index: u32,
     /// Type index per user function, in IR order.
     pub user_type_indices: Vec<u32>,
-    /// Stage-2 database operations of the module: `(op, helper fn index)`.
+    pub checked_call_index: Option<u32>,
+    /// Stage-2 database operation helpers.
     pub db_helpers: Vec<(DbOp, u32)>,
+
     /// Decode-class projection helper per distinct database result node:
     /// `(node index, fn index)`.
     pub db_projection_indices: Vec<(u32, u32)>,
@@ -125,6 +128,9 @@ pub(crate) struct EmissionPlan {
 impl EmissionPlan {
     pub(crate) fn wrapper_bases(&self) -> WrapperBases {
         self.bases
+    }
+    pub(crate) fn checked_call_index(&self) -> Option<u32> {
+        self.checked_call_index
     }
 }
 
@@ -307,6 +313,7 @@ pub fn emit_runtime_module(
         db_imports: Vec::new(),
         db_projection_functions: Vec::new(),
         db_call_functions: Vec::new(),
+        checked_call_functions: Vec::new(),
     };
     let (bytes, code_len) = assemble(&image)?;
     if code_len > CODE_BUDGET_BYTES {
@@ -377,10 +384,12 @@ pub(crate) fn emit_compiled_module(
     let db_nodes = collect_db_result_nodes(ir)?;
     let db_ops = ir.db_ops();
     let batch_uses = ir.batch_uses();
+    let checked_import = batch_uses.checked_call;
     let import_count = 1
         + u32::try_from(db_ops.len())
             .map_err(|_| EmitError::Internal("database import count overflow"))?
-        + u32::from(batch_uses.execute);
+        + u32::from(batch_uses.execute)
+        + u32::from(checked_import);
     let static_limit = limits.max_static_bytes as u64;
     // every record node reachable from a projected parameter or a database
     // result gets a descriptor
@@ -514,8 +523,12 @@ pub(crate) fn emit_compiled_module(
         }
     }
     if batch_uses.execute {
-        // `db_execute(request ptr, request len) -> i64` shares runtime type 8
         db_imports.push(("db_execute", 8));
+    }
+    if checked_import {
+        let checked_type =
+            intern_type(&mut extra_types, vec![ValType::I32; 6], Some(ValType::I64))?;
+        db_imports.push(("call_checked", checked_type));
     }
     let output_cap = i32::try_from(caps.output_bytes).map_err(|_| EmitError::LimitExceeded {
         code: "B001",
@@ -612,6 +625,11 @@ pub(crate) fn emit_compiled_module(
     let db_execute_index = take_index(batch_uses.execute);
     let response_get_index = take_index(batch_uses.response_rows);
     let response_affected_index = take_index(batch_uses.response_affected);
+    let checked_call_index = if checked_import {
+        Some(next_batch_fn)
+    } else {
+        None
+    };
     let plan = EmissionPlan {
         helper_count,
         raise_index: import_count + helper_count,
@@ -629,6 +647,7 @@ pub(crate) fn emit_compiled_module(
         eq_type_index,
         projection_type_index,
         user_type_indices,
+        checked_call_index,
         db_helpers,
         db_projection_indices,
         batch_append_index,
@@ -657,6 +676,7 @@ pub(crate) fn emit_compiled_module(
         .and_then(|total| total.checked_add(projection_count))
         .and_then(|total| total.checked_add(plan.db_projection_indices.len() as u64))
         .and_then(|total| total.checked_add(plan.db_helpers.len() as u64))
+        .and_then(|total| total.checked_add(u64::from(plan.checked_call_index.is_some())))
         .and_then(|total| {
             total.checked_add(
                 u64::from(plan.dynmap_find_index.is_some())
@@ -826,6 +846,27 @@ pub(crate) fn emit_compiled_module(
         push_helper(1, emit_response_affected_helper(&plan, find)?, budget)?;
     }
 
+    let mut checked_call_functions = Vec::new();
+    if plan.checked_call_index.is_some() {
+        let import_index = 1
+            + u32::try_from(db_ops.len())
+                .map_err(|_| EmitError::Internal("checked import index overflow"))?
+            + u32::from(batch_uses.execute);
+        let function = emit_checked_call_helper(&plan, import_index)?;
+        let observed = body_bytes(&function);
+        if observed > body_limit {
+            return Err(EmitError::LimitExceeded {
+                code: "B001",
+                limit: body_limit,
+                observed,
+            });
+        }
+        charge_work(budget, observed)?;
+        checked_call_functions.push((
+            intern_type(&mut extra_types, vec![ValType::I32; 3], Some(ValType::I32))?,
+            function,
+        ));
+    }
     // per-parameter projection helper indices for the wrapper (None = the
     // inline pass-through for hand-built IR without nodes)
     let param_helper: Vec<Option<u32>> = entry
@@ -878,7 +919,8 @@ pub(crate) fn emit_compiled_module(
             reinit_context: !plan.db_helpers.is_empty()
                 || batch_uses.execute
                 || batch_uses.response_rows
-                || batch_uses.response_affected,
+                || batch_uses.response_affected
+                || batch_uses.checked_call,
         };
         if ir.entry_is_validator {
             super::support::validator::emit_validator_wrapper(inputs)?
@@ -920,6 +962,7 @@ pub(crate) fn emit_compiled_module(
         db_imports,
         db_projection_functions,
         db_call_functions,
+        checked_call_functions,
     };
     let (bytes, code_len) = assemble(&image)?;
     if code_len > CODE_BUDGET_BYTES {

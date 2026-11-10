@@ -71,7 +71,7 @@ pub async fn create_shamir_source(
     options: CompileOptions,
     limits: WasmLimits,
     mode: TierMode,
-) -> FnResult<(WasmFunction, Vec<u8>, ModuleReport)> {
+) -> FnResult<(WasmFunction, Vec<u8>, ModuleReport, Option<Vec<u8>>)> {
     engine.validate_limits(&limits)?;
     // The caller's options.admission is never trusted: derive both the
     // compiler's self-admission limits and the gate policy from the engine.
@@ -80,13 +80,13 @@ pub async fn create_shamir_source(
     let policy = AdmissionPolicy::Admission(*engine.admission_limits());
     let gate = Arc::clone(&engine);
     run_gated_compile(&gate, &policy, move |permit| {
-        let wasm = compile_in_worker(permit, &policy, source, options)?;
+        let (wasm, signature) = compile_in_worker(permit, &policy, source, options)?;
         // Host-side second admission (the compiler already self-admitted
         // under the same limits).
         let report = admit_module(&wasm, &policy)?;
         let function =
             WasmFunction::from_sanitized_ungated(engine, wasm.clone().into(), limits, mode)?;
-        Ok((function, wasm, report))
+        Ok((function, wasm, report, signature))
     })
     .await
 }
@@ -106,14 +106,14 @@ pub async fn check_shamir_source(
     let policy = AdmissionPolicy::Admission(*engine.admission_limits());
     let gate = Arc::clone(&engine);
     run_gated_compile(&gate, &policy, move |permit| {
-        let wasm = compile_in_worker(permit, &policy, source, options)?;
+        let (wasm, _) = compile_in_worker(permit, &policy, source, options)?;
         check_module_ungated(&engine, &wasm, &policy, mode)
     })
     .await
 }
 
 /// Runs `shamir_lang::compile` on the fixed-stack worker while holding the
-/// gate permit; returns the emitted bytes.
+/// gate permit; returns the emitted bytes and optional checked-call signature.
 ///
 /// Permit lifecycle: the permit acquired by the enclosing
 /// `run_gated_compile` is moved INTO the worker thread's closure here, so
@@ -126,8 +126,8 @@ fn compile_in_worker(
     policy: &AdmissionPolicy,
     source: String,
     options: CompileOptions,
-) -> FnResult<Vec<u8>> {
-    let (tx, rx) = mpsc::channel::<FnResult<Vec<u8>>>();
+) -> FnResult<(Vec<u8>, Option<Vec<u8>>)> {
+    let (tx, rx) = mpsc::channel::<FnResult<(Vec<u8>, Option<Vec<u8>>)>>();
     let worker = std::thread::Builder::new()
         .name("shamir-lang-compile".to_string())
         .stack_size(WORKER_STACK_BYTES)
@@ -139,7 +139,7 @@ fn compile_in_worker(
                 catch_unwind(AssertUnwindSafe(|| shamir_lang::compile(&source, &options)))
                     .map(|compiled| {
                         compiled
-                            .map(|module| module.wasm)
+                            .map(|module| (module.wasm, module.signature))
                             .map_err(|error| render_compile_error(&error))
                     })
                     .unwrap_or_else(|payload| Err(render_panic(payload)));

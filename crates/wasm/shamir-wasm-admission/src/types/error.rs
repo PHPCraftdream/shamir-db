@@ -62,6 +62,13 @@ pub enum AdmissionError {
         expected: &'static str,
         found: String,
     },
+    #[error("wasm admission: import `{module}::{name}` must have type {expected}, found {found}")]
+    WrongImportType {
+        module: &'static str,
+        name: &'static str,
+        expected: &'static str,
+        found: String,
+    },
 
     #[error("wasm admission: module too large: {observed} bytes (limit {limit})")]
     ModuleTooLarge { limit: u64, observed: u64 },

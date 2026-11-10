@@ -19,6 +19,7 @@ fn compiles_deterministically() {
     let second = compile(FIXTURE, &default_options()).expect("fixture compiles");
     // Determinism: identical inputs must produce identical output bytes.
     assert_eq!(first.wasm, second.wasm);
+    assert_eq!(first.signature, second.signature);
     // The admission report counts the emitted module, so it must equal its length.
     assert_eq!(first.report.byte_size, first.wasm.len());
 }
@@ -307,6 +308,8 @@ fn compile_accepts_validator_entries() {
     let module = compile(VALIDATOR, &default_options()).expect("validator entry compiles");
     // The admission report counts the emitted module, so it must equal its length.
     assert_eq!(module.report.byte_size, module.wasm.len());
+    // This validator's opaque result intentionally has no procedure signature.
+    assert_eq!(module.signature, None);
 }
 
 #[test]
@@ -338,6 +341,58 @@ fn compile_accepts_a_pure_procedure_at_the_procedures_stage() {
     // Derivation: no database builtin is used, so the module keeps the single
     // `raise_error` import of the scalar modules.
     assert_eq!(module.report.import_count, 1);
+    assert_eq!(
+        module.signature.as_deref(),
+        Some(b"procedure(a:i64)->i64".as_slice())
+    );
+}
+
+#[test]
+fn compile_procedure_signature_is_canonical() {
+    let source = "@entry procedure run(second: { z: i64, a: string? }, first: [i32]?) -> { y: bool, b: bytes } { return { y: true, b: b\"x\" }; }";
+    let compiled = compile(source, &procedure_options()).expect("procedure compiles");
+    assert_eq!(
+        compiled.signature.as_deref(),
+        Some(b"procedure(second:{a:string?,z:i64},first:[i32]?)->{b:bytes,y:bool}".as_slice())
+    );
+}
+
+#[test]
+fn compile_procedure_signature_excludes_function_name_and_handles_null_result() {
+    let first = compile(
+        "@entry procedure first() -> null { return; }",
+        &procedure_options(),
+    )
+    .expect("first compiles");
+    let renamed = compile(
+        "@entry procedure renamed() -> null { return; }",
+        &procedure_options(),
+    )
+    .expect("renamed compiles");
+    assert_eq!(first.signature, renamed.signature);
+    assert_eq!(
+        first.signature.as_deref(),
+        Some(b"procedure()->null".as_slice())
+    );
+}
+
+#[test]
+fn compile_procedure_signature_supports_nullable_result() {
+    let compiled = compile(
+        "@entry procedure finish() -> i64? { return null; }",
+        &procedure_options(),
+    )
+    .expect("nullable-result procedure compiles");
+    assert_eq!(
+        compiled.signature.as_deref(),
+        Some(b"procedure()->i64?".as_slice())
+    );
+}
+
+#[test]
+fn compile_scalar_entry_has_no_callable_signature() {
+    let compiled = compile(FIXTURE, &default_options()).expect("scalar compiles");
+    assert_eq!(compiled.signature, None);
 }
 
 #[test]
@@ -351,6 +406,10 @@ fn compile_procedure_with_database_calls_imports_the_host_functions() {
          }
 ";
     let module = compile(source, &procedure_options()).expect("procedure with db calls compiles");
+    assert_eq!(
+        module.signature.as_deref(),
+        Some(b"procedure(key:i64)->i64".as_slice())
+    );
     // Derivation: `raise_error` plus one import per used operation
     // (`db_get`, `db_insert`, `db_query`).
     assert_eq!(module.report.import_count, 4);
@@ -370,6 +429,10 @@ fn compile_procedure_with_the_typed_builder_imports_db_execute() {
          }
 ";
     let module = compile(source, &procedure_options()).expect("builder procedure compiles");
+    assert_eq!(
+        module.signature.as_deref(),
+        Some(b"procedure()->i64".as_slice())
+    );
     // Derivation: `raise_error` plus the single `db_execute` import.
     assert_eq!(module.report.import_count, 2);
     let again = compile(source, &procedure_options()).expect("second compile");
@@ -403,6 +466,7 @@ fn compile_validator_is_deterministic() {
     let second = compile(VALIDATOR, &default_options()).expect("validator entry compiles");
     // Determinism: identical inputs must produce identical output bytes.
     assert_eq!(first.wasm, second.wasm);
+    assert_eq!(first.signature, None);
 }
 
 /// Fixture: a `Validation` helper parameter, an entry-only aggregate

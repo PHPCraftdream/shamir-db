@@ -1,4 +1,4 @@
-use crate::abi::{EXPORT_ALLOC, EXPORT_CALL, EXPORT_MEMORY};
+use crate::abi::{EXPORT_ALLOC, EXPORT_CALL, EXPORT_MEMORY, IMPORT_CALL_CHECKED};
 use crate::types::AdmissionError;
 use wasmparser::{ExternalKind, FuncType, ValType};
 
@@ -103,4 +103,26 @@ pub(super) fn check_contract(
         (&[ValType::I32, ValType::I32], &[ValType::I64]),
         "(i32, i32) -> i64",
     )
+}
+
+/// Verifies the exact `call_checked` host import ABI.
+pub(crate) fn check_checked_call_import(
+    type_index: u32,
+    types: &[FuncType],
+) -> Result<(), AdmissionError> {
+    let found = usize::try_from(type_index)
+        .ok()
+        .and_then(|index| types.get(index))
+        .ok_or_else(|| AdmissionError::Validation("call_checked has unknown type index".into()))?;
+    let expected_params = [ValType::I32; 6];
+    let expected_results = [ValType::I64];
+    if found.params() != expected_params || found.results() != expected_results {
+        return Err(AdmissionError::WrongImportType {
+            module: "shamir_host",
+            name: IMPORT_CALL_CHECKED,
+            expected: "(i32, i32, i32, i32, i32, i32) -> i64",
+            found: render_signature(found),
+        });
+    }
+    Ok(())
 }

@@ -50,6 +50,7 @@ pub(crate) struct ModuleImage {
     pub(crate) db_projection_functions: Vec<(u32, Function)>,
     /// Database call helpers, last in the function index space.
     pub(crate) db_call_functions: Vec<(u32, Function)>,
+    pub(crate) checked_call_functions: Vec<(u32, Function)>,
 }
 
 /// Assembles the complete module: custom ABI/origin sections, type, import
@@ -116,6 +117,9 @@ pub(crate) fn assemble(image: &ModuleImage) -> Result<(Vec<u8>, u64), RuntimeErr
     for (type_index, _) in &image.db_call_functions {
         functions.function(*type_index);
     }
+    for (type_index, _) in &image.checked_call_functions {
+        functions.function(*type_index);
+    }
 
     let mut memories = MemorySection::new();
     memories.memory(MemoryType {
@@ -174,6 +178,9 @@ pub(crate) fn assemble(image: &ModuleImage) -> Result<(Vec<u8>, u64), RuntimeErr
         code.function(function);
     }
     for (_, function) in &image.db_call_functions {
+        code.function(function);
+    }
+    for (_, function) in &image.checked_call_functions {
         code.function(function);
     }
 

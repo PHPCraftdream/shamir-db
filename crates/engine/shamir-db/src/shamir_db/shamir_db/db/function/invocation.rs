@@ -9,7 +9,7 @@ use shamir_types::access::{Actor, ResourceMeta};
 use shamir_types::types::value::QueryValue;
 
 use crate::engine::function::Security;
-use crate::shamir_db::shamir_db::ShamirDb;
+use crate::shamir_db::shamir_db::{ArtifactKind, ShamirDb};
 use crate::{DbError, DbResult};
 
 use super::super::db_gateway::FacadeDbGateway;
@@ -33,11 +33,13 @@ impl ShamirDbCallResolver {
             default_repo,
         }
     }
-}
 
-#[async_trait]
-impl StoredCallResolver for ShamirDbCallResolver {
-    async fn resolve(&self, name: &str, parent: &FnCtx) -> FnResult<ResolvedStoredCall> {
+    async fn resolve_with_signature(
+        &self,
+        name: &str,
+        parent: &FnCtx,
+        expected_signature: Option<&[u8]>,
+    ) -> FnResult<ResolvedStoredCall> {
         let registry = self.shamir.functions().clone();
         let binding = registry
             .capture(name)
@@ -82,6 +84,31 @@ impl StoredCallResolver for ShamirDbCallResolver {
             .authorize_invocation(name, parent.actor(), Some(&record))
             .await
             .map_err(|error| FunctionError::Compute(error.to_string()))?;
+        if let Some(expected) = expected_signature {
+            let row_hash = record
+                .get("module_hash")
+                .and_then(|value| value.as_str())
+                .and_then(|value| shamir_engine::function::ModuleHash::from_hex(value).ok());
+            let Some(binding_hash) = binding.module_hash() else {
+                return Err(FunctionError::Compute(
+                    "checked target is not a coherent stored shamir WASM artifact".into(),
+                ));
+            };
+            if record.get("lang").and_then(|value| value.as_str()) != Some("shamir")
+                || ArtifactKind::from_record(&record) != ArtifactKind::Wasm
+                || row_hash != Some(binding_hash)
+            {
+                return Err(FunctionError::Compute(
+                    "checked target is not a coherent stored shamir WASM artifact".into(),
+                ));
+            }
+            if !matches!(record.get("call_signature"), Some(QueryValue::Bin(signature)) if signature.as_slice() == expected)
+            {
+                return Err(FunctionError::Compute(
+                    "checked target signature is missing or does not match".into(),
+                ));
+            }
+        }
         if matches!(meta.security, Security::Invoker)
             && parent
                 .definer_owner()
@@ -117,6 +144,23 @@ impl StoredCallResolver for ShamirDbCallResolver {
             ));
         }
         Ok(ResolvedStoredCall::new(&binding, target, definer_owner))
+    }
+}
+
+#[async_trait]
+impl StoredCallResolver for ShamirDbCallResolver {
+    async fn resolve(&self, name: &str, parent: &FnCtx) -> FnResult<ResolvedStoredCall> {
+        self.resolve_with_signature(name, parent, None).await
+    }
+
+    async fn resolve_checked(
+        &self,
+        name: &str,
+        parent: &FnCtx,
+        expected_signature: &[u8],
+    ) -> FnResult<ResolvedStoredCall> {
+        self.resolve_with_signature(name, parent, Some(expected_signature))
+            .await
     }
 }
 

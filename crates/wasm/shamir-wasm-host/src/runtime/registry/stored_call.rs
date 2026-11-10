@@ -11,6 +11,17 @@ pub(crate) async fn dispatch_stored_call(
     batch: &FnBatch,
     params: &Params,
 ) -> FnResult<QueryValue> {
+    dispatch_stored_call_with_signature(parent, name, None, batch, params).await
+}
+
+/// Shared stored-call path for legacy and signature-checked dispatch.
+pub(crate) async fn dispatch_stored_call_with_signature(
+    parent: &FnCtx,
+    name: &str,
+    expected_signature: Option<&[u8]>,
+    batch: &FnBatch,
+    params: &Params,
+) -> FnResult<QueryValue> {
     if parent.active_call_path().len() == 0 {
         return Err(FunctionError::Compute(
             "stored call requires an active root invocation".into(),
@@ -33,7 +44,14 @@ pub(crate) async fn dispatch_stored_call(
         )));
     }
 
-    let resolved = if let Some(resolver) = parent.stored_call_resolver() {
+    let resolved = if let Some(expected_signature) = expected_signature {
+        let resolver = parent.stored_call_resolver().ok_or_else(|| {
+            FunctionError::Compute("checked stored call requires a catalogue resolver".into())
+        })?;
+        resolver
+            .resolve_checked(name, parent, expected_signature)
+            .await?
+    } else if let Some(resolver) = parent.stored_call_resolver() {
         resolver.resolve(name, parent).await?
     } else {
         let registry = parent

@@ -1,6 +1,6 @@
 # PROC-2c addendum: checked stored calls, batch references, update and delete
 
-**Status:** proposed design. Stage 1 (count-only `batch_update`, `batch_delete` and `response_affected`, section 4 and the stage 1 row of section 6) is implemented in `shamir-lang`; the checked call (stage 2) and result references (stage 3) are not implemented. This addendum supplements §§3–8 of `shamir-lang-design.md`; it does not change that document. §10 distinguishes observed source behavior from proposals. It replaces the earlier proposals and questions in this file with the decisions below.
+**Status:** Stage 1 (count-only `batch_update`, `batch_delete` and `response_affected`, section 4 and the stage 1 row of section 6) and stage 2 (checked stored-procedure call and safeguards, section 2) are implemented in source; tests are pending CI. Stage 3 scalar read references remain deferred. This addendum supplements §§3–8 of `shamir-lang-design.md`; it does not change that document. §10 distinguishes observed source behavior from proposals. It replaces the earlier proposals and questions in this file with the decisions below. Procedure entries may declare bare `-> null`, which the compiler emits as `procedure(...)->null`; this intentionally widens only the procedure-entry result boundary, and scalar and validator rules are unchanged.
 
 ## 1. Scope and decisions
 
@@ -22,6 +22,8 @@ Accepted decisions:
 ### 2.1 Surface, signature and binding
 
 `call` is a procedure-only intrinsic. Its target is a compile-time string literal naming a stored `shamir-lang` procedure; its argument record names exactly the target's declared parameters. Positional arguments are unsupported. The existing compile result contains only Wasm bytes and a report (`crates/wasm/shamir-lang/src/api/compile.rs:16-21`); stage 2 adds compiler-owned signature metadata at that boundary and persists it atomically with artifact creation. The compiler checks calls against its catalog of these emitted signatures; there is no external catalog publisher or legacy-signature inference.
+
+Procedure entries may declare bare `-> null`, which the compiler emits as `procedure(...)->null`; this intentionally widens only the procedure-entry result boundary, and scalar and validator rules are unchanged.
 
 Example source:
 
@@ -220,6 +222,8 @@ Stage 2 must ship the checked path, catalog/artifact persistence, linker/admissi
 ## 10. Verified against the code
 
 Evidence IDs map source observations to paths and line ranges. They describe inspected source, not runtime-test results.
+
+**Historical note:** The source observations below record the state before stage 2 was implemented; statements about missing checked-call registration, catalog/signature persistence, common resolution, and hardening describe that pre-stage-2 state. Stage-2 tests are pending CI.
 
 - **F1 — existing nested calls, linker, gateways, contexts and transaction guard.** `crates/wasm/shamir-wasm-host/src/wasm/bindings/call.rs:83-96,107-119,139,156-179,186-209` increments depth and clones actor/grants/pool into the child, including nested fuel lease suspension/reacquisition. `crates/wasm/shamir-wasm-host/src/wasm/wasm_function.rs:232-250` registers legacy `call` and DB imports only; there is no `call_checked` registration. `crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:262-276` decodes then executes as the facade actor. `crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:45-48` invokes with the actor clone. `crates/engine/shamir-db/src/shamir_db/shamir_db/db/function/management.rs:761-781` authorizes, resolves function metadata, builds `FnCtx`, then invokes registry; this is not one atomic binding capture. `crates/wasm/shamir-wasm-host/src/runtime/context.rs:555-574,599-613` has no A0 field and initializes depth zero/pool none in the observed builder. `crates/engine/shamir-engine/src/query/batch/runner/query_runner/runner.rs:143` rejects transactional batch Call before invocation; this guard is retained as a regression criterion. No transactional deadlock is observed.
 - **F2 — batch actions, update count and stats.** `crates/query/shamir-query-types/src/ops/batch/ops/batch_op.rs:530-536` maps Read/Insert/Update/Delete to Read/Create/Write/Delete. `crates/engine/shamir-engine/src/table/write/update/execute.rs:228-233,385-394` selects rows and increments affected only for changed rows. `crates/engine/shamir-engine/src/query/batch/control/receipts/accounting.rs:37-45` copies `WriteResult.affected` into both `stats.records_scanned` and `stats.records_returned`; returned record lists are separate. This pins the proposed `response_affected` source.

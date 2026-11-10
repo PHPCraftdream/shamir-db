@@ -34,13 +34,15 @@ impl ShamirDb {
                 // source compiles exactly once; materialize would compile it
                 // again from bytes. Nothing is persisted.
                 self.authorize_shamir_source(src, &actor).await?;
+                let mut options = CompileOptions {
+                    stage: ShamirStage::Procedures,
+                    ..CompileOptions::default()
+                };
+                options.callable_catalog = self.callable_catalog_snapshot().await?;
                 check_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),
-                    CompileOptions {
-                        stage: ShamirStage::Procedures,
-                        ..CompileOptions::default()
-                    },
+                    options,
                     WasmLimits::default(),
                     optimize,
                 )
@@ -48,7 +50,7 @@ impl ShamirDb {
                 .map_err(|e| DbError::Function(e.to_string()))
             }
             other => {
-                let (bytes, _, _, _) = self
+                let (bytes, _, _, _, _) = self
                     .materialize_function_source(other, &actor, optimize)
                     .await?;
                 check_module(

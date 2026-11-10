@@ -56,11 +56,21 @@ pub struct TypedModule {
     /// Call resolutions, parallel to the front expression arena; `None`
     /// where the checker produced no entry.
     pub calls: Vec<Option<ResolvedCall>>,
+    /// Checked stored-call metadata indexed by expression id.
+    pub(crate) checked_calls: Vec<Option<CheckedCall>>,
     /// Binding slot of each `let`/`for` statement, parallel to the front
     /// statement arena; `None` where the statement binds no slot.
     pub binding_slots: Vec<Option<u32>>,
     /// Source span of the whole module.
     pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedCall {
+    /// Arbitrary compile-time target name.
+    pub(crate) name: String,
+    /// Canonical expected callable signature bytes.
+    pub(crate) signature: Vec<u8>,
 }
 
 /// Fully typed function.
