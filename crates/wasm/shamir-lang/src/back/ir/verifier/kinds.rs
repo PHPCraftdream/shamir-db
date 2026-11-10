@@ -322,6 +322,14 @@ fn check_inst_kinds(
                 String::from("request operand"),
             )?;
         }
+        InstKind::ResponseAffected { response, alias } => {
+            want(
+                kind(*response),
+                ValueKind::I32,
+                String::from("response operand"),
+            )?;
+            want(kind(*alias), ValueKind::I32, String::from("alias operand"))?;
+        }
         InstKind::ResponseGet {
             response, alias, ..
         } => {

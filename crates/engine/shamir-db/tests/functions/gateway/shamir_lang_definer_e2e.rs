@@ -45,6 +45,22 @@ const BATCH_READ_SOURCE: &str = r#"@entry procedure p() -> i64 {
     return to_i64(len(unwrap(rows)));
 }"#;
 
+const UPDATE_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    let b = batch_update(batch(), "write", "secrets", { id: 10 }, { label: "updated" });
+    let resp = db_execute(request(b));
+    let affected: i64? = response_affected(resp, "write");
+    if (is_null(affected)) { return -1; }
+    return unwrap(affected);
+}"#;
+
+const DELETE_SOURCE: &str = r#"@entry procedure p() -> i64 {
+    let b = batch_delete(batch(), "remove", "secrets", { id: 11 });
+    let resp = db_execute(request(b));
+    let affected: i64? = response_affected(resp, "remove");
+    if (is_null(affected)) { return -1; }
+    return unwrap(affected);
+}"#;
+
 async fn setup() -> ShamirDb {
     let db = ShamirDb::init_memory().await.expect("in-memory database");
     db.create_db(DB_NAME).await.expect("create database");
@@ -87,7 +103,7 @@ async fn setup() -> ShamirDb {
     .expect("restrict table to function owner");
 
     let table_path = ResourcePath::table(DB_NAME, "main", TABLE);
-    for action in [Action::Read, Action::Write] {
+    for action in [Action::Read, Action::Write, Action::Delete] {
         let error = db
             .authorize_access(&restricted(), &table_path, action)
             .await
@@ -95,8 +111,9 @@ async fn setup() -> ShamirDb {
         let action_name = match action {
             Action::Read => "READ",
             Action::Write => "WRITE",
-            Action::Create | Action::Delete | Action::Execute | Action::List | Action::Manage => {
-                unreachable!("only READ and WRITE are checked here")
+            Action::Delete => "DELETE",
+            Action::Create | Action::Execute | Action::List | Action::Manage => {
+                unreachable!("only READ, WRITE, and DELETE are checked here")
             }
         };
         assert_eq!(
@@ -251,6 +268,57 @@ async fn shamir_invoker_db_get_is_denied_independently() {
     );
     assert_native_row(&db, 1, "seeded").await;
     assert_gateway_denial(invoke(&db, "get_invoker").await, "db_get", "READ");
+}
+
+async fn assert_native_absent(db: &ShamirDb, id: i64) {
+    let mut read = Batch::new();
+    read.id("verify_absent");
+    read.query(
+        "rows",
+        shamir_query_builder::query::Query::from(TABLE).where_eq("id", id),
+    );
+    let response = db
+        .execute(
+            DB_NAME,
+            &read
+                .to_request_via_msgpack()
+                .expect("absence query request"),
+        )
+        .await
+        .expect("native query for deleted row");
+    assert!(
+        response.results["rows"].records.is_empty(),
+        "native query must confirm id={id} is absent"
+    );
+}
+
+#[tokio::test]
+async fn shamir_update_delete_invoker_is_denied_but_definer_uses_owner_rights() {
+    let db = setup().await;
+    seed_row(&db, 10, "before-update").await;
+    seed_row(&db, 11, "before-delete").await;
+    create_procedure(&db, "update_definer", UPDATE_SOURCE, Security::Definer).await;
+    create_procedure(&db, "update_invoker", UPDATE_SOURCE, Security::Invoker).await;
+    create_procedure(&db, "delete_definer", DELETE_SOURCE, Security::Definer).await;
+    create_procedure(&db, "delete_invoker", DELETE_SOURCE, Security::Invoker).await;
+
+    assert_gateway_denial(invoke(&db, "update_invoker").await, "db_execute", "WRITE");
+    // An unauthorized write must not change the row before the Definer runs.
+    assert_native_row(&db, 10, "before-update").await;
+    assert_eq!(
+        invoke(&db, "update_definer").await.expect("Definer update"),
+        QueryValue::Int(1)
+    );
+    assert_native_row(&db, 10, "updated").await;
+
+    assert_gateway_denial(invoke(&db, "delete_invoker").await, "db_execute", "DELETE");
+    // The denied Invoker delete must not remove the still-existing seeded row.
+    assert_native_row(&db, 11, "before-delete").await;
+    assert_eq!(
+        invoke(&db, "delete_definer").await.expect("Definer delete"),
+        QueryValue::Int(1)
+    );
+    assert_native_absent(&db, 11).await;
 }
 
 #[tokio::test]

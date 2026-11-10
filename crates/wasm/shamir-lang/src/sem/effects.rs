@@ -28,6 +28,9 @@ pub enum BuiltinId {
     DbExecute,
     ResponseRows,
     ResponseInserted,
+    BatchUpdate,
+    BatchDelete,
+    ResponseAffected,
 }
 
 /// Classification driving capability checks and effect recording.
@@ -42,7 +45,7 @@ pub enum BuiltinCategory {
 }
 
 /// Number of reserved builtin names; kept in sync with `BUILTIN_TABLE`.
-pub const BUILTIN_NAME_COUNT: usize = 27;
+pub const BUILTIN_NAME_COUNT: usize = 30;
 
 /// Private const-ordered (name, identity) table scanned linearly.
 const BUILTIN_TABLE: [(&str, BuiltinId); BUILTIN_NAME_COUNT] = [
@@ -73,6 +76,9 @@ const BUILTIN_TABLE: [(&str, BuiltinId); BUILTIN_NAME_COUNT] = [
     ("db_execute", BuiltinId::DbExecute),
     ("response_rows", BuiltinId::ResponseRows),
     ("response_inserted", BuiltinId::ResponseInserted),
+    ("batch_update", BuiltinId::BatchUpdate),
+    ("batch_delete", BuiltinId::BatchDelete),
+    ("response_affected", BuiltinId::ResponseAffected),
 ];
 
 /// The exact source name of one builtin.
@@ -105,6 +111,9 @@ pub fn builtin_name(id: BuiltinId) -> &'static str {
         BuiltinId::DbExecute => "db_execute",
         BuiltinId::ResponseRows => "response_rows",
         BuiltinId::ResponseInserted => "response_inserted",
+        BuiltinId::BatchUpdate => "batch_update",
+        BuiltinId::BatchDelete => "batch_delete",
+        BuiltinId::ResponseAffected => "response_affected",
     }
 }
 
@@ -137,7 +146,10 @@ pub fn builtin_category(id: BuiltinId) -> BuiltinCategory {
         | BuiltinId::Request
         | BuiltinId::DbExecute
         | BuiltinId::ResponseRows
-        | BuiltinId::ResponseInserted => BuiltinCategory::Stage2,
+        | BuiltinId::ResponseInserted
+        | BuiltinId::BatchUpdate
+        | BuiltinId::BatchDelete
+        | BuiltinId::ResponseAffected => BuiltinCategory::Stage2,
     }
 }
 

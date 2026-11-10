@@ -8,7 +8,7 @@ use super::scalar::emit_user_function;
 use super::support::assemble::{assemble, intern_type, val_type, ModuleImage};
 use super::support::db::{
     emit_batch_append_helper, emit_db_call_helper, emit_db_execute_helper, emit_dynmap_find_helper,
-    emit_response_get_helper, host_import_name,
+    emit_response_affected_helper, emit_response_get_helper, host_import_name,
 };
 use super::support::eq::{emit_bytes_compare, emit_eq_helper};
 use super::support::projection::{
@@ -105,6 +105,7 @@ pub(crate) struct EmissionPlan {
     pub batch_append_index: Option<u32>,
     pub db_execute_index: Option<u32>,
     pub response_get_index: Option<u32>,
+    pub response_affected_index: Option<u32>,
     pub dynmap_find_index: Option<u32>,
     /// Static message/key addresses the builder helpers raise or look up
     /// (0 when the module has no builder instructions).
@@ -113,6 +114,8 @@ pub(crate) struct EmissionPlan {
     pub msg_arg: u32,
     pub key_results: u32,
     pub key_records: u32,
+    pub key_stats: u32,
+    pub key_records_scanned: u32,
     /// First generated projection helper (`eq_base + 1 + eq_count`).
     /// Projection helper per distinct type node: `(node index, fn index)` in
     /// the deterministic first-use order of the nodes.
@@ -392,23 +395,14 @@ pub(crate) fn emit_compiled_module(
             *slot = address;
         }
     }
-    // static message and key bytes of the typed builder helpers
-    let (msg_alias, key_results, key_records) = if batch_uses.append || batch_uses.response {
-        let addrs = super::support::projection::append_message_block(
+    let (msg_alias, key_results, key_records, key_stats, key_records_scanned) =
+        super::support::projection::append_builder_messages(
             &mut static_bytes,
-            &[b"alias", b"results", b"records"],
+            batch_uses.append,
+            batch_uses.response_rows,
+            batch_uses.response_affected,
             static_limit,
         )?;
-        let at = |position: usize| -> Result<u32, EmitError> {
-            addrs
-                .get(position)
-                .copied()
-                .ok_or(EmitError::Internal("missing builder message address"))
-        };
-        (at(0)?, at(1)?, at(2)?)
-    } else {
-        (0, 0, 0)
-    };
     // the shared null cell lives in the static image, outside the decoder's
     // cell slots (the decoder overwrites those)
     let null_cell_offset = u64::try_from(static_bytes.len())
@@ -604,31 +598,20 @@ pub(crate) fn emit_compiled_module(
                 .map_err(|_| EmitError::Internal("database helper count overflow"))?,
         )
         .ok_or(EmitError::Internal("function index overflow"))?;
-    let mut take_index = || {
-        let index = next_batch_fn;
-        next_batch_fn += 1;
-        Some(index)
+    let mut take_index = |needed: bool| {
+        if needed {
+            let index = next_batch_fn;
+            next_batch_fn += 1;
+            Some(index)
+        } else {
+            None
+        }
     };
-    let dynmap_find_index = if batch_uses.response {
-        take_index()
-    } else {
-        None
-    };
-    let batch_append_index = if batch_uses.append {
-        take_index()
-    } else {
-        None
-    };
-    let db_execute_index = if batch_uses.execute {
-        take_index()
-    } else {
-        None
-    };
-    let response_get_index = if batch_uses.response {
-        take_index()
-    } else {
-        None
-    };
+    let dynmap_find_index = take_index(batch_uses.response_rows || batch_uses.response_affected);
+    let batch_append_index = take_index(batch_uses.append);
+    let db_execute_index = take_index(batch_uses.execute);
+    let response_get_index = take_index(batch_uses.response_rows);
+    let response_affected_index = take_index(batch_uses.response_affected);
     let plan = EmissionPlan {
         helper_count,
         raise_index: import_count + helper_count,
@@ -651,12 +634,15 @@ pub(crate) fn emit_compiled_module(
         batch_append_index,
         db_execute_index,
         response_get_index,
+        response_affected_index,
         dynmap_find_index,
         msg_alias,
         msg_bound: baked.scalar[3],
         msg_arg: baked.wrapper.arg,
         key_results,
         key_records,
+        key_stats,
+        key_records_scanned,
         projection_indices,
         bases,
     };
@@ -676,7 +662,8 @@ pub(crate) fn emit_compiled_module(
                 u64::from(plan.dynmap_find_index.is_some())
                     + u64::from(plan.batch_append_index.is_some())
                     + u64::from(plan.db_execute_index.is_some())
-                    + u64::from(plan.response_get_index.is_some()),
+                    + u64::from(plan.response_get_index.is_some())
+                    + u64::from(plan.response_affected_index.is_some()),
             )
         })
         .ok_or(EmitError::Internal("function count overflow"))?;
@@ -832,8 +819,11 @@ pub(crate) fn emit_compiled_module(
             .map_err(|_| EmitError::Internal("database import index overflow"))?;
         push_helper(7, emit_db_execute_helper(&plan, import_index)?, budget)?;
     }
-    if let Some(find) = plan.dynmap_find_index {
+    if let (Some(find), Some(_response)) = (plan.dynmap_find_index, plan.response_get_index) {
         push_helper(1, emit_response_get_helper(&plan, find)?, budget)?;
+    }
+    if let (Some(find), Some(_affected)) = (plan.dynmap_find_index, plan.response_affected_index) {
+        push_helper(1, emit_response_affected_helper(&plan, find)?, budget)?;
     }
 
     // per-parameter projection helper indices for the wrapper (None = the
@@ -887,7 +877,8 @@ pub(crate) fn emit_compiled_module(
             param_helper: &param_helper,
             reinit_context: !plan.db_helpers.is_empty()
                 || batch_uses.execute
-                || batch_uses.response,
+                || batch_uses.response_rows
+                || batch_uses.response_affected,
         };
         if ir.entry_is_validator {
             super::support::validator::emit_validator_wrapper(inputs)?

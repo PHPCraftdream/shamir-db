@@ -4,12 +4,15 @@ use crate::sem::effects::{builtin_category, builtin_name, BuiltinCategory, Built
 
 use crate::sem::types::{TypeData, TypeId};
 
-use super::entry::{error_type, expr_span, intern_list, primitive_type, report, Checker};
-use super::expression::{assignable, check_expression, report_mismatch};
-use super::statement::FunctionFrame;
+use super::super::entry::{error_type, expr_span, intern_list, primitive_type, report, Checker};
+use super::super::expression::{assignable, check_expression, report_mismatch};
+use super::super::statement::FunctionFrame;
+use super::batch::{
+    check_mutation_call, check_response_affected, check_row_projection, record_plan_fact,
+};
 
 /// Checks one builtin call against its signature and the frame capability.
-pub(super) fn check_builtin_call(
+pub(in crate::sem::check) fn check_builtin_call(
     c: &mut Checker,
     frame: &mut FunctionFrame,
     bid: BuiltinId,
@@ -19,10 +22,16 @@ pub(super) fn check_builtin_call(
     depth: u32,
 ) -> TypeId {
     let call_span = expr_span(c, call_id);
-    match builtin_category(bid) {
+    let result = match builtin_category(bid) {
         BuiltinCategory::Stage2 => match bid {
             BuiltinId::DbGet | BuiltinId::DbInsert | BuiltinId::DbQuery => {
                 check_direct_db(c, frame, bid, call_span, args, expected, depth)
+            }
+            BuiltinId::BatchUpdate | BuiltinId::BatchDelete => {
+                check_mutation_call(c, frame, bid, call_span, args, depth)
+            }
+            BuiltinId::ResponseAffected => {
+                check_response_affected(c, frame, call_span, args, expected, depth)
             }
             _ => check_batch_family(c, frame, bid, call_span, args, expected, depth),
         },
@@ -36,7 +45,16 @@ pub(super) fn check_builtin_call(
             }
         }
         BuiltinCategory::Pure => check_pure(c, frame, bid, call_span, args, depth),
+    };
+    let plan = if c.types.is_error(result) {
+        None
+    } else {
+        record_plan_fact(c, frame, bid, args)
+    };
+    if let Some(slot) = c.plan_facts.get_mut(call_id.0 as usize) {
+        *slot = plan;
     }
+    result
 }
 
 /// Checks one argument, delegating to the expression pass.
@@ -533,6 +551,9 @@ fn check_batch_family(
                 check_batch_free_argument(c, bid, position, actual, arg);
             }
         }
+    }
+    if matches!(bid, BuiltinId::ResponseRows | BuiltinId::ResponseInserted) {
+        check_row_projection(c, frame, bid, args);
     }
     if let Some(effects) = c.own_effects.get_mut(frame.fid.0 as usize) {
         effects.record(BuiltinCategory::Stage2);

@@ -439,3 +439,302 @@ fn compile_accepts_validation_helpers_branching_and_optional_fields() {
     // The admission report counts the emitted module, so it must equal its length.
     assert_eq!(module.report.byte_size, module.wasm.len());
 }
+
+fn assert_procedure_diagnostic_codes(source: &str, expected: &[&str]) {
+    let error =
+        compile(source, &procedure_options()).expect_err("invalid procedure source rejects");
+    let actual: Vec<&str> = match error {
+        CompileError::Diagnostics(diagnostics) => diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect(),
+        other => panic!("expected source diagnostics, got {other:?}; source: {source}"),
+    };
+    assert_eq!(actual, expected, "source: {source}");
+}
+
+fn update_filter_source(filter: &str, parameters: &str) -> String {
+    format!(
+        "@entry procedure p({parameters}) -> i64 {{ let b = batch_update(batch(), \"u\", \"users\", {filter}, {{ name: \"x\" }}); return 0; }}"
+    )
+}
+
+fn delete_filter_source(filter: &str, parameters: &str) -> String {
+    format!(
+        "@entry procedure p({parameters}) -> i64 {{ let b = batch_delete(batch(), \"d\", \"users\", {filter}); return 0; }}"
+    )
+}
+
+fn assert_invalid_filter_both_operations(filter: &str, parameters: &str, code: &str) {
+    assert_procedure_diagnostic_codes(&update_filter_source(filter, parameters), &[code]);
+    assert_procedure_diagnostic_codes(&delete_filter_source(filter, parameters), &[code]);
+}
+
+#[test]
+fn compile_accepts_mutations_nested_sets_and_nullable_affected_results() {
+    let source = r#"
+@entry procedure p(key: i64) -> i64 {
+  let changes: { profile: { name: string }, labels: [string], score: i64 } = {
+    profile: { name: "Ada" },
+    labels: ["staff", "active"],
+    score: key
+  };
+  let updated = batch_update(batch(), "u", "users", { id: key }, changes);
+  let all = batch_delete(updated, "d", "sessions", { owner: key });
+  let literal = batch_delete(all, "literal", "users", { enabled: true });
+  let response = db_execute(request(literal));
+  let changed: i64? = response_affected(response, "u");
+  let removed: i64? = response_affected(response, "d");
+  let removed_literal: i64? = response_affected(response, "literal");
+  let missing: i64? = response_affected(response, "absent");
+  if (is_null(missing)) { return 0; }
+  return unwrap(changed) + unwrap(removed) + unwrap(removed_literal);
+}
+"#;
+    compile(source, &procedure_options()).expect("typed mutations compile");
+}
+
+#[test]
+fn compile_accepts_batch_helpers_without_opaque_result_provenance() {
+    let source = r#"
+fn build(key: i64) -> Batch {
+  return batch_update(batch(), "u", "users", { id: key }, { name: "Ada" });
+}
+@entry procedure p(key: i64) -> i64 {
+  let response = db_execute(request(build(key)));
+  return 0;
+}
+"#;
+    compile(source, &procedure_options())
+        .expect("helper mutation can be executed without projecting it");
+}
+
+#[test]
+fn mutation_predicates_reject_invalid_shapes_for_update_and_delete() {
+    assert_invalid_filter_both_operations("{}", "", "T001");
+    assert_invalid_filter_both_operations("null", "", "T001");
+    assert_invalid_filter_both_operations("key", "key: i64", "T001");
+    assert_invalid_filter_both_operations("{ id: maybe }", "maybe: i64?", "T001");
+    assert_invalid_filter_both_operations("filter", "filter: { id: i64 }?", "T001");
+    assert_invalid_filter_both_operations("filter", "filter: { id: i64 }", "T001");
+    assert_invalid_filter_both_operations("{ id: key + 1 }", "key: i64", "T001");
+    assert_invalid_filter_both_operations("{ id: to_i32(key) }", "key: i64", "T001");
+    // Record-field access stands for a reference-shaped expression; references
+    // themselves are not a stage-1 language feature.
+    assert_invalid_filter_both_operations("{ id: row.id }", "row: { id: i64 }", "T001");
+}
+
+#[test]
+fn mutation_predicates_reject_record_expressions_and_null_fields() {
+    let record_expression = r#"
+fn selection() -> { id: i64 } { return { id: 1 }; }
+@entry procedure p() -> i64 {
+  let b = batch_update(batch(), "u", "users", selection(), { name: "x" });
+  return 0;
+}
+"#;
+    let delete_record_expression = r#"
+fn selection() -> { id: i64 } { return { id: 1 }; }
+@entry procedure p() -> i64 {
+  let b = batch_delete(batch(), "d", "users", selection());
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(record_expression, &["T001"]);
+    assert_procedure_diagnostic_codes(delete_record_expression, &["T001"]);
+
+    assert_invalid_filter_both_operations("{ id: null }", "", "T001");
+}
+
+#[test]
+fn unresolved_reference_helper_uses_the_unknown_function_diagnostic() {
+    let source = r#"
+@entry procedure p() -> i64 {
+  let b = batch_delete(batch(), "d", "users", { id: qref("users", "[0].id") });
+  return 0;
+}
+"#;
+    // qref is deliberately not a stage-1 builtin. The outer predicate shape
+    // diagnostic precedes the unresolved function diagnostic in source order.
+    assert_procedure_diagnostic_codes(source, &["T001", "N001"]);
+}
+
+#[test]
+fn mutation_calls_require_the_predicate_argument() {
+    assert_procedure_diagnostic_codes(
+        "@entry procedure p() -> i64 { batch_update(batch(), \"u\", \"users\"); return 0; }",
+        &["T004"],
+    );
+    assert_procedure_diagnostic_codes(
+        "@entry procedure p() -> i64 { batch_delete(batch(), \"d\", \"users\"); return 0; }",
+        &["T004"],
+    );
+}
+
+#[test]
+fn mutation_sets_reject_empty_nonrecord_and_opaque_values() {
+    assert_procedure_diagnostic_codes(
+        "@entry procedure p() -> i64 { batch_update(batch(), \"u\", \"users\", { id: 1 }, {}); return 0; }",
+        &["T001"],
+    );
+    assert_procedure_diagnostic_codes(
+        "@entry procedure p() -> i64 { batch_update(batch(), \"u\", \"users\", { id: 1 }, 7); return 0; }",
+        &["T001"],
+    );
+    assert_procedure_diagnostic_codes(
+        "@entry procedure p() -> i64 { batch_update(batch(), \"u\", \"users\", { id: 1 }, { nested: batch() }); return 0; }",
+        &["T001"],
+    );
+}
+
+#[test]
+fn mutation_alias_and_table_must_be_literals_for_both_operations() {
+    let update_alias = "@entry procedure p(alias: string) -> i64 { batch_update(batch(), alias, \"users\", { id: 1 }, { name: \"x\" }); return 0; }";
+    let delete_alias = "@entry procedure p(alias: string) -> i64 { batch_delete(batch(), alias, \"users\", { id: 1 }); return 0; }";
+    let update_table = "@entry procedure p(table: string) -> i64 { batch_update(batch(), \"u\", table, { id: 1 }, { name: \"x\" }); return 0; }";
+    let delete_table = "@entry procedure p(table: string) -> i64 { batch_delete(batch(), \"d\", table, { id: 1 }); return 0; }";
+    for source in [update_alias, delete_alias, update_table, delete_table] {
+        assert_procedure_diagnostic_codes(source, &["T001"]);
+    }
+}
+
+#[test]
+fn mutation_calls_reject_extra_returning_projection_and_cas_arguments() {
+    let header = "@entry procedure p(values: { name: string }, mode: string, projection: { id: i64 }, expected: i64) -> i64 { ";
+    let update_base = "batch_update(batch(), \"u\", \"users\", { id: 1 }, values, ";
+    for extra in ["mode", "projection", "expected"] {
+        let source = format!("{header}{update_base}{extra}); return 0; }}");
+        assert_procedure_diagnostic_codes(&source, &["T004"]);
+    }
+    let delete_header = "@entry procedure p(mode: string, projection: { id: i64 }) -> i64 { ";
+    for extra in ["mode", "projection"] {
+        let source = format!(
+            "{delete_header}batch_delete(batch(), \"d\", \"users\", {{ id: 1 }}, {extra}); return 0; }}"
+        );
+        assert_procedure_diagnostic_codes(&source, &["T004"]);
+    }
+}
+
+#[test]
+fn mutation_aliases_must_be_unique() {
+    let source = r#"
+@entry procedure p() -> i64 {
+  let first = batch_update(batch(), "same", "users", { id: 1 }, { name: "x" });
+  let second = batch_delete(first, "same", "users", { id: 1 });
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(source, &["T010"]);
+}
+
+#[test]
+fn mutation_metadata_requires_provable_batch_and_response_helpers() {
+    let batch_helper = r#"
+fn change(b: Batch) -> Batch {
+  return batch_update(b, "u", "users", { id: 1 }, { name: "x" });
+}
+@entry procedure p() -> i64 { return 0; }
+"#;
+    assert_procedure_diagnostic_codes(batch_helper, &["T010"]);
+
+    let response_helper = r#"
+fn affected(r: Response) -> i64? { return response_affected(r, "u"); }
+@entry procedure p() -> i64 { return 0; }
+"#;
+    assert_procedure_diagnostic_codes(response_helper, &["T010"]);
+}
+
+#[test]
+fn affected_projection_rejects_read_and_insert_aliases() {
+    let read = r#"
+@entry procedure p() -> i64 {
+  let response = db_execute(request(batch_read(batch(), "r", "users", { id: 1 })));
+  let count: i64? = response_affected(response, "r");
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(read, &["T001"]);
+
+    let insert = r#"
+@entry procedure p() -> i64 {
+  let response = db_execute(request(batch_insert(batch(), "i", "users", { id: 1 })));
+  let count: i64? = response_affected(response, "i");
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(insert, &["T001"]);
+}
+
+#[test]
+fn mutation_builtins_require_procedure_capability() {
+    let source = "@entry scalar p() -> i64 { batch_update(batch(), \"u\", \"users\", { id: 1 }, { name: \"x\" }); return 0; }";
+    assert_procedure_diagnostic_codes(source, &["T007", "T007"]);
+}
+
+#[test]
+fn affected_projection_requires_i64_optional_context() {
+    let source = r#"
+@entry procedure p() -> i64 {
+  let b = batch_update(batch(), "u", "users", { id: 1 }, { name: "x" });
+  let response = db_execute(request(b));
+  let count: i64 = response_affected(response, "u");
+  return count;
+}
+"#;
+    assert_procedure_diagnostic_codes(source, &["T010"]);
+}
+
+#[test]
+fn batch_metadata_reassignment_cannot_retain_stale_operations() {
+    let source = r#"
+fn replacement() -> Batch { return batch(); }
+@entry procedure p() -> i64 {
+  let b = batch_update(batch(), "u", "users", { id: 1 }, { name: "x" });
+  b = replacement();
+  let response = db_execute(request(b));
+  let count: i64? = response_affected(response, "u");
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(source, &["T010"]);
+}
+
+#[test]
+fn batch_metadata_after_if_and_loop_is_conservative() {
+    let conditional = r#"
+@entry procedure p(flag: bool) -> i64 {
+  let b = batch_update(batch(), "u", "users", { id: 1 }, { name: "x" });
+  if (flag) { let marker = 1; } else { let other = 2; }
+  let response = db_execute(request(b));
+  let count: i64? = response_affected(response, "u");
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(conditional, &["T010"]);
+
+    let looped = r#"
+@entry procedure p(flag: bool) -> i64 {
+  let b = batch_update(batch(), "u", "users", { id: 1 }, { name: "x" });
+  while (flag) { let marker = 1; }
+  let response = db_execute(request(b));
+  let count: i64? = response_affected(response, "u");
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(looped, &["T010"]);
+}
+
+#[test]
+fn batch_metadata_from_else_arm_does_not_leak_after_if() {
+    let source = r#"
+@entry procedure p(flag: bool) -> i64 {
+  let b = batch_update(batch(), "u", "users", { id: 1 }, { name: "x" });
+  if (flag) { let marker = 1; }
+  else { b = batch_update(batch(), "else", "users", { id: 2 }, { name: "y" }); }
+  let response = db_execute(request(b));
+  let count: i64? = response_affected(response, "u");
+  return 0;
+}
+"#;
+    assert_procedure_diagnostic_codes(source, &["T010"]);
+}

@@ -167,7 +167,8 @@ impl IrModule {
 pub(crate) struct BatchUses {
     pub append: bool,
     pub execute: bool,
-    pub response: bool,
+    pub response_rows: bool,
+    pub response_affected: bool,
 }
 
 impl IrModule {
@@ -179,7 +180,8 @@ impl IrModule {
                 match &inst.kind {
                     InstKind::BatchAppend { .. } => uses.append = true,
                     InstKind::DbExecute { .. } => uses.execute = true,
-                    InstKind::ResponseGet { .. } => uses.response = true,
+                    InstKind::ResponseGet { .. } => uses.response_rows = true,
+                    InstKind::ResponseAffected { .. } => uses.response_affected = true,
                     _ => {}
                 }
             }

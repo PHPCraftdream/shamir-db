@@ -219,6 +219,16 @@ pub(super) fn emit_inst(
             function.instruction(&Instruction::Call(helper));
             store_result(env, function, position)?;
         }
+        InstKind::ResponseAffected { response, alias } => {
+            let helper = env
+                .plan
+                .response_affected_index
+                .ok_or(EmitError::Internal("missing response affected helper"))?;
+            function.instruction(&Instruction::LocalGet(env.local_of(*response)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*alias)?));
+            function.instruction(&Instruction::Call(helper));
+            store_result(env, function, position)?;
+        }
         InstKind::ResponseGet {
             response,
             alias,

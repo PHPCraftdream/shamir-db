@@ -19,6 +19,7 @@ pub(super) struct FunctionFrame {
     pub(super) loop_depth: u32,
     /// Types indexed by combined slot; error-filled until assigned.
     pub(super) local_types: Vec<TypeId>,
+    pub(super) local_plan_facts: Vec<super::entry::PlanFact>,
     pub(super) in_entry: bool,
     pub(super) kind: Option<EntryKind>,
     /// Set once a control-flow diagnostic (T005) was reported in this body.
@@ -48,6 +49,8 @@ pub(super) fn check_all_bodies(c: &mut Checker) -> Vec<TypedFunction> {
             .unwrap_or(0);
         let initial = error_type(c);
         let mut local_types = vec![initial; slot_count];
+        let local_plan_facts = vec![super::entry::PlanFact::Unknown; slot_count];
+
         let param_count = func.parameters.len();
         if let Some(sig) = c.signatures.get(index) {
             for (position, ty) in sig.params.iter().enumerate().take(param_count) {
@@ -62,6 +65,7 @@ pub(super) fn check_all_bodies(c: &mut Checker) -> Vec<TypedFunction> {
             ceiling,
             loop_depth: 0,
             local_types,
+            local_plan_facts,
             in_entry: kind.is_some(),
             kind,
             flow_reported: false,
@@ -113,6 +117,36 @@ pub(super) fn check_all_bodies(c: &mut Checker) -> Vec<TypedFunction> {
         });
     }
     out
+}
+
+fn plan_expression_fact(
+    c: &Checker,
+    frame: &FunctionFrame,
+    expr: ExprId,
+) -> super::entry::PlanFact {
+    match c.module.expression(expr).map(|node| node.kind.clone()) {
+        Some(ExprKind::Group(inner)) => plan_expression_fact(c, frame, inner),
+        Some(ExprKind::Identifier(_)) => match c.resolved.get(expr.0 as usize).copied().flatten() {
+            Some(ResolvedTarget::Local(slot) | ResolvedTarget::Parameter(slot)) => frame
+                .local_plan_facts
+                .get(slot as usize)
+                .cloned()
+                .unwrap_or(super::entry::PlanFact::Unknown),
+            _ => super::entry::PlanFact::Unknown,
+        },
+        Some(ExprKind::Call { .. }) => c
+            .plan_facts
+            .get(expr.0 as usize)
+            .and_then(Clone::clone)
+            .unwrap_or(super::entry::PlanFact::Unknown),
+        _ => super::entry::PlanFact::Unknown,
+    }
+}
+
+fn invalidate_plan_facts(frame: &mut FunctionFrame) {
+    for fact in &mut frame.local_plan_facts {
+        *fact = super::entry::PlanFact::Unknown;
+    }
 }
 
 /// Checks one statement; `locals` collects typed locals in slot order.
@@ -167,6 +201,10 @@ pub(super) fn check_statement(
                 if let Some(slot_entry) = frame.local_types.get_mut(slot as usize) {
                     *slot_entry = local_ty;
                 }
+                let fact = plan_expression_fact(c, frame, value);
+                if let Some(slot_entry) = frame.local_plan_facts.get_mut(slot as usize) {
+                    *slot_entry = fact;
+                }
                 locals.push(TypedLocal {
                     slot,
                     name: name.clone(),
@@ -178,6 +216,14 @@ pub(super) fn check_statement(
         }
         StatementKind::Assign { target, value } => {
             check_assign(c, frame, target, value, next);
+            let slot = match c.resolved.get(target.0 as usize).copied().flatten() {
+                Some(ResolvedTarget::Local(slot)) => Some(slot as usize),
+                _ => None,
+            };
+            let fact = plan_expression_fact(c, frame, value);
+            if let Some(fact_slot) = slot.and_then(|slot| frame.local_plan_facts.get_mut(slot)) {
+                *fact_slot = fact;
+            }
         }
         StatementKind::If {
             condition,
@@ -195,10 +241,13 @@ pub(super) fn check_statement(
                     condition_span,
                 );
             }
+            invalidate_plan_facts(frame);
             check_statement(c, frame, then_block, next, locals);
+            invalidate_plan_facts(frame);
             if let Some(else_block) = else_branch {
                 check_statement(c, frame, else_block, next, locals);
             }
+            invalidate_plan_facts(frame);
         }
         StatementKind::While { condition, body } => {
             let bool_ty = primitive_type(c, "bool");
@@ -213,9 +262,11 @@ pub(super) fn check_statement(
                 );
             }
             let saved = frame.loop_depth;
+            invalidate_plan_facts(frame);
             frame.loop_depth = saved.saturating_add(1);
             check_statement(c, frame, body, next, locals);
             frame.loop_depth = saved;
+            invalidate_plan_facts(frame);
         }
         StatementKind::For {
             kind,
@@ -243,9 +294,11 @@ pub(super) fn check_statement(
                 });
             }
             let saved = frame.loop_depth;
+            invalidate_plan_facts(frame);
             frame.loop_depth = saved.saturating_add(1);
             check_statement(c, frame, body, next, locals);
             frame.loop_depth = saved;
+            invalidate_plan_facts(frame);
         }
         StatementKind::Return(None) => {
             if !c.types.is_null_type(frame.return_ty) {
