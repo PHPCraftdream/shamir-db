@@ -682,15 +682,8 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        let actor = self
-            .authorize_invocation(name, &caller)
+        self.invoke_function_root(name, params, None, caller, None)
             .await
-            .map_err(|e| DbError::Function(e.to_string()))?;
-        let ctx = self.build_invoke_ctx(name, actor);
-        self.functions
-            .invoke(name, &ctx, &FnBatch::new(), &params)
-            .await
-            .map_err(|e| DbError::Function(e.to_string()))
     }
 
     /// Invoke a function sharing an existing batch context.
@@ -715,15 +708,8 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        let actor = self
-            .authorize_invocation(name, &caller)
+        self.invoke_function_root(name, params, Some(batch), caller, None)
             .await
-            .map_err(|e| DbError::Function(e.to_string()))?;
-        let ctx = self.build_invoke_ctx(name, actor);
-        self.functions
-            .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
-            .await
-            .map_err(|e| DbError::Function(e.to_string()))
     }
 
     /// Invoke a function with database read/write access (slice 8b).
@@ -758,29 +744,8 @@ impl ShamirDb {
         params: Params,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        let actor = self
-            .authorize_invocation(name, &caller)
+        self.invoke_function_root(name, params, None, caller, Some((db_name, repo)))
             .await
-            .map_err(|e| DbError::Function(e.to_string()))?;
-        let gateway = Arc::new(super::super::db_gateway::FacadeDbGateway {
-            shamir: self.clone(),
-            db_name: db_name.to_string(),
-            actor: actor.clone(),
-        });
-        let grants = self
-            .function_meta(name)
-            .map(|m| m.secret_grants)
-            .unwrap_or_default();
-        let ctx = FnCtx::with_globals(self.globals.clone())
-            .with_registry(self.functions.clone())
-            .with_db(gateway, repo.to_string())
-            .with_net(self.build_net_gateway(name))
-            .with_secret_grants(grants)
-            .with_actor(actor);
-        self.functions
-            .invoke(name, &ctx, &FnBatch::new(), &params)
-            .await
-            .map_err(|e| DbError::Function(e.to_string()))
     }
 
     /// Like [`invoke_function_in_db`] but shares an existing batch context.
@@ -806,28 +771,7 @@ impl ShamirDb {
         batch: &Arc<BatchContext>,
         caller: Actor,
     ) -> DbResult<QueryValue> {
-        let actor = self
-            .authorize_invocation(name, &caller)
+        self.invoke_function_root(name, params, Some(batch), caller, Some((db_name, repo)))
             .await
-            .map_err(|e| DbError::Function(e.to_string()))?;
-        let gateway = Arc::new(super::super::db_gateway::FacadeDbGateway {
-            shamir: self.clone(),
-            db_name: db_name.to_string(),
-            actor: actor.clone(),
-        });
-        let grants = self
-            .function_meta(name)
-            .map(|m| m.secret_grants)
-            .unwrap_or_default();
-        let ctx = FnCtx::with_globals(self.globals.clone())
-            .with_registry(self.functions.clone())
-            .with_db(gateway, repo.to_string())
-            .with_net(self.build_net_gateway(name))
-            .with_secret_grants(grants)
-            .with_actor(actor);
-        self.functions
-            .invoke(name, &ctx, &FnBatch::with_context(batch.clone()), &params)
-            .await
-            .map_err(|e| DbError::Function(e.to_string()))
     }
 }

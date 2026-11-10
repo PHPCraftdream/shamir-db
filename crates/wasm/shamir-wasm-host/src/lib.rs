@@ -40,7 +40,8 @@ pub use gateway::{
 };
 pub use runtime::{
     BatchContext, FnAdapter, FnBatch, FnCtx, FnResult, FunctionError, FunctionRegistry, GlobalVars,
-    GlobalsQuota, GlobalsQuotaError, Params, ShamirFunction,
+    GlobalsQuota, GlobalsQuotaError, Params, RegistryBinding, ResolvedStoredCall, ShamirFunction,
+    StoredCallResolver,
 };
 pub use wasm::{
     admit_module, check_module, check_shamir_source, create_shamir_source, verify_wasm_module,

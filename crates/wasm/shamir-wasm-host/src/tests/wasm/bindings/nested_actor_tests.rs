@@ -16,6 +16,9 @@
 //! [`nested_wasm_call_inherits_parent_actor`] would FAIL — the probe would see
 //! `Actor::System != Actor::User(42)` and return `Int(0)`, so the assertion
 //! `result == Int(1)` fails. Re-applying the fix makes it pass.
+//!
+//! These host-only tests use the catalogue-free fallback; production contexts
+//! must attach the catalogue resolver.
 
 use async_trait::async_trait;
 use shamir_collections::TFxSet;

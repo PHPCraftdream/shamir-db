@@ -1,17 +1,11 @@
-//! Lock-free function registry.
-//!
-//! `scc::HashMap` (CAS-based) per the engine's concurrency invariants — no
-//! `RwLock`. The map key is the invocation name (the catalogue identity);
-//! the value is the compiled function. `rename` is a pure re-key (no
-//! recompile), `replace` swaps the artifact, `remove` drops it. In-flight
-//! invocations hold their own `Arc` and finish on the version they captured
-//! (RCU).
-
-use super::context::{FnBatch, FnCtx};
-use super::contract::ShamirFunction;
-use super::error::{FnResult, FunctionError};
-use super::params::Params;
+use super::active_path::ActiveCallPath;
+use super::binding::{RegistryBinding, RegistryEntry};
+use super::identity::CallIdentity;
 use crate::builtin::Argon2idFunction;
+use crate::runtime::context::{FnBatch, FnCtx};
+use crate::runtime::contract::ShamirFunction;
+use crate::runtime::error::{FnResult, FunctionError};
+use crate::runtime::params::Params;
 use shamir_collections::THasher;
 use shamir_types::types::value::QueryValue;
 use std::sync::Arc;
@@ -24,7 +18,7 @@ type InterleaveHook = Box<dyn Fn(&FunctionRegistry) + Send + Sync>;
 
 /// Maps an invocation name to a compiled [`ShamirFunction`].
 pub struct FunctionRegistry {
-    functions: scc::HashMap<String, Arc<dyn ShamirFunction>, THasher>,
+    functions: scc::HashMap<String, RegistryEntry, THasher>,
     #[cfg(test)]
     pub(crate) interleave: OnceLock<InterleaveHook>,
 }
@@ -51,7 +45,13 @@ impl FunctionRegistry {
     pub fn register(&self, name: impl Into<String>, f: Arc<dyn ShamirFunction>) -> FnResult<()> {
         let name = name.into();
         self.functions
-            .insert_sync(name.clone(), f)
+            .insert_sync(
+                name.clone(),
+                RegistryEntry {
+                    identity: CallIdentity::new(),
+                    artifact: f,
+                },
+            )
             .map_err(|_| FunctionError::AlreadyExists(name))
     }
 
@@ -60,16 +60,26 @@ impl FunctionRegistry {
     pub fn replace(&self, name: impl Into<String>, f: Arc<dyn ShamirFunction>) {
         let name = name.into();
         match self.functions.entry_sync(name) {
-            scc::hash_map::Entry::Occupied(mut occupied) => *occupied.get_mut() = f,
+            scc::hash_map::Entry::Occupied(mut occupied) => occupied.get_mut().artifact = f,
             scc::hash_map::Entry::Vacant(vacant) => {
-                vacant.insert_entry(f);
+                vacant.insert_entry(RegistryEntry {
+                    identity: CallIdentity::new(),
+                    artifact: f,
+                });
             }
         }
     }
 
     /// Look up a function by name.
     pub fn get(&self, name: &str) -> Option<Arc<dyn ShamirFunction>> {
-        self.functions.read_sync(name, |_, v| v.clone())
+        self.capture(name)
+            .map(|binding| Arc::clone(binding.artifact()))
+    }
+
+    /// This capture is the entry identity and artifact pair for authorization and invocation.
+    pub fn capture(&self, name: &str) -> Option<RegistryBinding> {
+        self.functions
+            .read_sync(name, |_, entry| RegistryBinding(entry.clone()))
     }
 
     /// Whether a function is registered under `name`.
@@ -88,30 +98,27 @@ impl FunctionRegistry {
     /// The target is installed before retiring the source, so concurrent
     /// readers never see an absence caused by the rename itself.
     pub fn rename(&self, from: &str, to: &str) -> FnResult<()> {
-        let function = self
-            .get(from)
+        let binding = self
+            .capture(from)
             .ok_or_else(|| FunctionError::NotFound(from.to_string()))?;
         self.functions
-            .insert_sync(to.to_string(), function.clone())
+            .insert_sync(to.to_string(), binding.0.clone())
             .map_err(|_| FunctionError::AlreadyExists(to.to_string()))?;
 
-        let same = |candidate: &Arc<dyn ShamirFunction>| {
-            std::ptr::addr_eq(Arc::as_ptr(candidate), Arc::as_ptr(&function))
-        };
         #[cfg(test)]
         if let Some(interleave) = self.interleave.get() {
             interleave(self);
         }
         if self
             .functions
-            .remove_if_sync(from, |candidate| same(candidate))
+            .remove_if_sync(from, |candidate| candidate.same_binding(&binding.0))
             .is_some()
         {
             return Ok(());
         }
 
         self.functions
-            .remove_if_sync(to, |candidate| same(candidate));
+            .remove_if_sync(to, |candidate| candidate.same_binding(&binding.0));
         Err(FunctionError::NotFound(from.to_string()))
     }
 
@@ -145,10 +152,30 @@ impl FunctionRegistry {
         batch: &FnBatch,
         params: &Params,
     ) -> FnResult<QueryValue> {
-        let f = self
-            .get(name)
+        if ctx.active_call_path().len() != 0 {
+            return super::stored_call::dispatch_stored_call(ctx, name, batch, params).await;
+        }
+        let binding = self
+            .capture(name)
             .ok_or_else(|| FunctionError::NotFound(name.to_string()))?;
-        f.call(ctx, batch, params).await
+        self.invoke_captured(&binding, ctx, batch, params).await
+    }
+
+    /// Start a captured root only from a plain context with no active call path.
+    pub async fn invoke_captured(
+        &self,
+        binding: &RegistryBinding,
+        ctx: &FnCtx,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> FnResult<QueryValue> {
+        if ctx.active_call_path().len() != 0 {
+            return Err(FunctionError::Compute(
+                "cannot start a captured root with an active stored-call path".into(),
+            ));
+        }
+        let root_context = ctx.with_call_path(ActiveCallPath::root(binding.identity().clone()));
+        binding.artifact().call(&root_context, batch, params).await
     }
 }
 

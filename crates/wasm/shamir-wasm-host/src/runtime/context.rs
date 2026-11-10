@@ -25,7 +25,9 @@ use std::sync::atomic::{
 };
 use std::sync::Arc;
 
-use super::registry::FunctionRegistry;
+use super::error::FnResult;
+use super::params::Params;
+use super::registry::{ActiveCallPath, FunctionRegistry, StoredCallResolver};
 use crate::gateway::db_gateway::DbGateway;
 use crate::gateway::env_policy::EnvPolicy;
 use crate::gateway::net_gateway::NetGateway;
@@ -549,12 +551,15 @@ impl Default for GlobalVars {
 /// native Rust `FnCtx::global_get` performs NO secret-grant filtering and
 /// is for trusted native callers; non-`env.` globals are ungated.
 ///
-/// R2 adds `actor` — the [`Actor`] that initiated the invocation, threaded
-/// from the facade. Defaults to `Actor::System`.
+/// Runtime binding identity is opaque to consumers and remains stable across
+/// artifact replacement and registry rename for the same registered binding.
 #[derive(Clone)]
 pub struct FnCtx {
     globals: Arc<GlobalVars>,
     registry: Option<Arc<FunctionRegistry>>,
+    stored_call_resolver: Option<Arc<dyn StoredCallResolver>>,
+    active_call_path: ActiveCallPath,
+    definer_owner: Option<Actor>,
     depth: u32,
     depth_limit: u32,
     db: Option<Arc<dyn DbGateway>>,
@@ -582,6 +587,9 @@ impl FnCtx {
         Self {
             globals: Arc::new(GlobalVars::new()),
             registry: None,
+            stored_call_resolver: None,
+            active_call_path: ActiveCallPath::default(),
+            definer_owner: None,
             depth: 0,
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
             db: None,
@@ -600,6 +608,9 @@ impl FnCtx {
         Self {
             globals,
             registry: None,
+            stored_call_resolver: None,
+            active_call_path: ActiveCallPath::default(),
+            definer_owner: None,
             depth: 0,
             depth_limit: Self::DEFAULT_DEPTH_LIMIT,
             db: None,
@@ -616,6 +627,105 @@ impl FnCtx {
     /// Builder: attach a function registry (call gateway).
     pub fn with_registry(mut self, registry: Arc<FunctionRegistry>) -> Self {
         self.registry = Some(registry);
+        self
+    }
+
+    /// Contexts without a resolver use registry fallback; that unchecked path is only for
+    /// catalogue-free host use. Production contexts must attach their catalogue resolver.
+    pub fn with_stored_call_resolver(mut self, resolver: Arc<dyn StoredCallResolver>) -> Self {
+        self.stored_call_resolver = Some(resolver);
+        self
+    }
+
+    /// Invoke another stored function. Without a catalogue resolver, the registry fallback is
+    /// unchecked and only valid for catalogue-free host-only contexts; production contexts
+    /// must attach their catalogue resolver.
+    pub async fn call_stored(
+        &self,
+        name: &str,
+        batch: &FnBatch,
+        params: &Params,
+    ) -> FnResult<QueryValue> {
+        if self.active_call_path.len() == 0 {
+            if self.stored_call_resolver.is_some() {
+                return Err(crate::runtime::error::FunctionError::Compute(
+                    "catalogue-backed stored call requires a captured root invocation".into(),
+                ));
+            }
+            let root = self.with_call_path(ActiveCallPath::standalone_root());
+            super::registry::dispatch_stored_call(&root, name, batch, params).await
+        } else {
+            super::registry::dispatch_stored_call(self, name, batch, params).await
+        }
+    }
+
+    pub(crate) fn with_call_runtime(
+        mut self,
+        resolver: Option<Arc<dyn StoredCallResolver>>,
+        path: ActiveCallPath,
+        definer_owner: Option<Actor>,
+    ) -> Self {
+        self.stored_call_resolver = resolver;
+        self.active_call_path = path;
+        self.definer_owner = definer_owner;
+        self
+    }
+
+    pub(crate) fn with_call_path(&self, path: ActiveCallPath) -> Self {
+        let mut child = self.clone();
+        child.active_call_path = path;
+        child
+    }
+
+    pub(crate) fn stored_call_resolver(&self) -> Option<&Arc<dyn StoredCallResolver>> {
+        self.stored_call_resolver.as_ref()
+    }
+
+    pub(crate) fn active_call_path(&self) -> &ActiveCallPath {
+        &self.active_call_path
+    }
+
+    pub(crate) fn with_call_child_runtime(
+        mut self,
+        parent: &FnCtx,
+        depth: u32,
+        path: ActiveCallPath,
+        definer_owner: Option<Actor>,
+    ) -> Self {
+        self.globals = parent.globals.clone();
+        self.registry = parent.registry.clone();
+        self.stored_call_resolver = parent.stored_call_resolver.clone();
+        self.depth = depth;
+        self.depth_limit = parent.depth_limit;
+        self.fuel_budget = parent.fuel_budget.clone();
+        self.active_call_path = path;
+        self.definer_owner = definer_owner;
+        #[cfg(test)]
+        {
+            self.fuel_observer = parent.fuel_observer.clone();
+        }
+        self
+    }
+
+    /// Builder: retain the current function's owner when it is a Definer.
+    pub fn with_definer_owner(mut self, owner: Option<Actor>) -> Self {
+        self.definer_owner = owner;
+        self
+    }
+
+    pub fn definer_owner(&self) -> Option<&Actor> {
+        self.definer_owner.as_ref()
+    }
+
+    /// Clear inherited caller resources before a resolver builds target capabilities.
+    pub fn without_target_capabilities(mut self) -> Self {
+        self.db = None;
+        self.repo.clear();
+        self.net = None;
+        self.secret_grants = Arc::new(TFxSet::default());
+        self.registry = None;
+        self.stored_call_resolver = None;
+        self.definer_owner = None;
         self
     }
 
@@ -764,7 +874,7 @@ impl FnCtx {
         &self.secret_grants
     }
 
-    /// The default repo name for DB operations.
+    /// The default repository for DB operations.
     pub fn repo(&self) -> &str {
         &self.repo
     }

@@ -10,4 +10,4 @@ pub use contract::ShamirFunction;
 pub use error::{FnResult, FunctionError};
 pub use fn_adapter::FnAdapter;
 pub use params::Params;
-pub use registry::FunctionRegistry;
+pub use registry::{FunctionRegistry, RegistryBinding, ResolvedStoredCall, StoredCallResolver};

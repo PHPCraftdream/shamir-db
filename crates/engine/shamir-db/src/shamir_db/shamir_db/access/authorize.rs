@@ -206,15 +206,47 @@ impl ShamirDb {
         }
     }
 
-    pub(in crate::shamir_db::shamir_db) async fn authorize_invocation(
+    #[cfg(test)]
+    pub(in crate::shamir_db::shamir_db) async fn authorize_invocation_from_catalogue(
         &self,
         name: &str,
         caller: &Actor,
     ) -> Result<Actor, AccessError> {
         let path = ResourcePath::function(name);
+        let denied = || AccessError {
+            actor: caller.clone(),
+            path: path.to_string(),
+            action: Action::Execute,
+        };
+        let record = self
+            .system_store
+            .load_function(name)
+            .await
+            .map_err(|error| {
+                log::warn!(
+                    "authorize_invocation: function lookup failed for '{}' (actor={caller}): {}",
+                    escape_resource_diagnostic(&path.to_string()),
+                    escape_resource_diagnostic(&error.to_string())
+                );
+                denied()
+            })?;
+        self.authorize_invocation(name, caller, record.as_ref())
+            .await
+            .map(|(actor, _)| actor)
+    }
+
+    pub(in crate::shamir_db::shamir_db) async fn authorize_invocation(
+        &self,
+        name: &str,
+        caller: &Actor,
+        record: Option<&QueryValue>,
+    ) -> Result<(Actor, Option<Actor>), AccessError> {
+        let path = ResourcePath::function(name);
         if matches!(caller, Actor::System | Actor::Admin(_)) {
             trace_access(caller, &path, Action::Execute)?;
-            return Ok(self.effective_fn_actor(name, caller).await);
+            return Ok(record
+                .map(|record| Self::fn_actor_decision_from_record(record, caller))
+                .unwrap_or_else(|| (caller.clone(), None)));
         }
         let denied = || AccessError {
             actor: caller.clone(),
@@ -227,22 +259,13 @@ impl ShamirDb {
                 .await
                 .map_err(|e| {
                     log::warn!(
-                        "authorize_invocation: settings lookup failed for '{}' \
-                     (actor={caller}): {}",
-                        escape_resource_diagnostic(&path.to_string()),
-                        escape_resource_diagnostic(&e.to_string())
-                    );
-                    denied()
-                })?;
-        let record = self.system_store.load_function(name).await.map_err(|e| {
-            log::warn!(
-                "authorize_invocation: function lookup failed for '{}' (actor={caller}): {}",
+                "authorize_invocation: settings lookup failed for '{}' (actor={caller}): {}",
                 escape_resource_diagnostic(&path.to_string()),
                 escape_resource_diagnostic(&e.to_string())
             );
-            denied()
-        })?;
-        let meta = match &record {
+                    denied()
+                })?;
+        let meta = match record {
             Some(rec @ QueryValue::Map(_)) => ResourceMeta::from_record(rec),
             Some(_) => return Err(denied()),
             None => ResourceMeta::default(),
@@ -269,9 +292,8 @@ impl ShamirDb {
         self.authorize_access_in(caller, &path, Action::Execute, Some(&memo))
             .await?;
         Ok(record
-            .as_ref()
-            .map(|rec| Self::effective_fn_actor_from_record(rec, caller))
-            .unwrap_or_else(|| caller.clone()))
+            .map(|record| Self::fn_actor_decision_from_record(record, caller))
+            .unwrap_or_else(|| (caller.clone(), None)))
     }
 
     /// Resolve the effective actor for function invocation.
@@ -355,28 +377,29 @@ impl ShamirDb {
     }
 
     fn effective_fn_actor_from_record(rec: &QueryValue, caller: &Actor) -> Actor {
-        // Malformed metadata never escalates: the caller is kept unchanged.
+        Self::fn_actor_decision_from_record(rec, caller).0
+    }
+
+    fn fn_actor_decision_from_record(rec: &QueryValue, caller: &Actor) -> (Actor, Option<Actor>) {
+        // Malformed metadata never escalates or establishes a guard.
         let Ok(fn_meta) = FunctionMeta::try_from_record(rec) else {
-            return caller.clone();
+            return (caller.clone(), None);
         };
         let res_meta = ResourceMeta::from_record(rec);
         // Fail-closed owner lookup for escalation: `None` (owner field
         // absent) must resolve to the caller, never to
         // `from_record`'s System default. See the doc comment above.
-        let escalated_owner = || ResourceMeta::owner_field(rec).unwrap_or_else(|| caller.clone());
+        let Some(owner) = ResourceMeta::owner_field(rec) else {
+            return (caller.clone(), None);
+        };
         match fn_meta.security {
             // Explicit definer request → always run as the function owner,
             // irrespective of the legacy POSIX setuid mode bit.
-            Security::Definer => escalated_owner(),
+            Security::Definer => (owner.clone(), Some(owner)),
             // Explicit (or defaulted) invoker: honour the legacy setuid
             // bit for backward compatibility — see the doc note above.
-            Security::Invoker => {
-                if Mode::is_setuid(res_meta.mode) {
-                    escalated_owner()
-                } else {
-                    caller.clone()
-                }
-            }
+            Security::Invoker if Mode::is_setuid(res_meta.mode) => (owner.clone(), Some(owner)),
+            Security::Invoker => (caller.clone(), None),
         }
     }
 
