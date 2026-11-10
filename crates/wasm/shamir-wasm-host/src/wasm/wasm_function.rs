@@ -73,7 +73,7 @@
 
 use super::admission::{admit_module, run_gated_compile, AdmissionPolicy, ModuleReport};
 use super::bindings::batch::{host_batch_get, host_batch_put};
-use super::bindings::call::host_call;
+use super::bindings::call::{host_call, host_call_checked};
 use super::bindings::db::{host_db_execute, host_db_get, host_db_insert, host_db_query};
 use super::bindings::globals::{host_global_get, host_global_set};
 use super::bindings::http::host_http_fetch;
@@ -239,6 +239,9 @@ pub(crate) fn build_linker(engine: &Engine) -> FnResult<Linker<HostState>> {
     linker
         .func_wrap_async("shamir_host", "call", host_call)
         .map_err(|e| FunctionError::Compute(format!("linker call: {e}")))?;
+    linker
+        .func_wrap_async("shamir_host", "call_checked", host_call_checked)
+        .map_err(|e| FunctionError::Compute(format!("linker call_checked: {e}")))?;
     linker
         .func_wrap_async("shamir_host", "db_get", host_db_get)
         .map_err(|e| FunctionError::Compute(format!("linker db_get: {e}")))?;
@@ -673,7 +676,6 @@ pub(crate) fn encode_params(params: &Params) -> FnResult<Vec<u8>> {
     MessagePackCodec::encode(&MessagePackCodec, params.raw())
         .map_err(|e| FunctionError::Compute(format!("params encode error: {e}")))
 }
-
 // ── ShamirFunction impl ──────────────────────────────────────────────
 
 #[async_trait]
@@ -681,7 +683,9 @@ impl ShamirFunction for WasmFunction {
     fn tier_report(&self) -> Option<TierReport> {
         Some(WasmFunction::tier_report(self))
     }
-
+    fn module_hash(&self) -> Option<crate::wasm::ModuleHash> {
+        self.shared.module_hash().into()
+    }
     async fn call(&self, ctx: &FnCtx, batch: &FnBatch, params: &Params) -> FnResult<QueryValue> {
         maybe_schedule_upgrade(&self.shared);
         let input = encode_params(params)?;

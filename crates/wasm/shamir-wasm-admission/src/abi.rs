@@ -6,6 +6,8 @@ pub const EXPORT_MEMORY: &str = "memory";
 pub const EXPORT_ALLOC: &str = "shamir_alloc";
 /// Name of the required entrypoint export (`(i32, i32) -> i64`).
 pub const EXPORT_CALL: &str = "shamir_call";
+/// Checked stored-call import name.
+pub const IMPORT_CALL_CHECKED: &str = "call_checked";
 /// Name of the ABI-version custom section.
 pub const ABI_SECTION: &str = "shamir.abi";
 /// Name of the origin-claim custom section.

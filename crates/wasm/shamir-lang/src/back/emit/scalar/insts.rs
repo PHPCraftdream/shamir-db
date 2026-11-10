@@ -195,6 +195,30 @@ pub(super) fn emit_inst(
             function.instruction(&Instruction::Call(projection));
             store_result(env, function, position)?;
         }
+        InstKind::CallChecked {
+            name,
+            signature,
+            args,
+            result,
+        } => {
+            let helper = env
+                .plan
+                .checked_call_index()
+                .ok_or(EmitError::Internal("missing checked-call helper"))?;
+            let projection = env
+                .plan
+                .db_projection_indices
+                .iter()
+                .find(|(node, _)| node == result)
+                .map(|(_, index)| *index)
+                .ok_or(EmitError::Internal("missing checked-call projection"))?;
+            function.instruction(&Instruction::LocalGet(env.local_of(*name)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*signature)?));
+            function.instruction(&Instruction::LocalGet(env.local_of(*args)?));
+            function.instruction(&Instruction::Call(helper));
+            function.instruction(&Instruction::Call(projection));
+            store_result(env, function, position)?;
+        }
         InstKind::BatchAppend {
             batch,
             alias,

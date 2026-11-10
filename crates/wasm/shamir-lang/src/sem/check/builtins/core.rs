@@ -33,6 +33,9 @@ pub(in crate::sem::check) fn check_builtin_call(
             BuiltinId::ResponseAffected => {
                 check_response_affected(c, frame, call_span, args, expected, depth)
             }
+            BuiltinId::CallChecked => super::call_signature::check_checked_call(
+                c, frame, call_id, call_span, args, expected, depth,
+            ),
             _ => check_batch_family(c, frame, bid, call_span, args, expected, depth),
         },
         BuiltinCategory::ValidatorCtor => {

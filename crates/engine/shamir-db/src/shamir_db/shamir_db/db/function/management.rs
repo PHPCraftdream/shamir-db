@@ -167,7 +167,7 @@ impl ShamirDb {
         // `ready` is Some for shamir sources: the service already built and
         // gate-checked the function, so rebuild from bytes would compile
         // twice under two gate acquisitions.
-        let (wasm, lang_tag, source_str, ready) = self
+        let (wasm, lang_tag, source_str, ready, call_signature) = self
             .materialize_function_source(source, &actor, opts.optimize)
             .await?;
         let (wf, report) = match ready {
@@ -263,6 +263,9 @@ impl ShamirDb {
                 ARTIFACT_ID_FIELD.to_string(),
                 QueryValue::Str(artifact_id.clone()),
             );
+            if let Some(signature) = call_signature {
+                fields.insert("call_signature".to_string(), QueryValue::Bin(signature));
+            }
         }
         // Namespace Create permits new names only. Replacing an existing
         // persisted function requires Function Write and retains ACL metadata.

@@ -166,6 +166,7 @@ impl IrModule {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BatchUses {
     pub append: bool,
+    pub checked_call: bool,
     pub execute: bool,
     pub response_rows: bool,
     pub response_affected: bool,
@@ -182,6 +183,7 @@ impl IrModule {
                     InstKind::DbExecute { .. } => uses.execute = true,
                     InstKind::ResponseGet { .. } => uses.response_rows = true,
                     InstKind::ResponseAffected { .. } => uses.response_affected = true,
+                    InstKind::CallChecked { .. } => uses.checked_call = true,
                     _ => {}
                 }
             }

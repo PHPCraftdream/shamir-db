@@ -3,7 +3,7 @@
 use super::context::{FnBatch, FnCtx};
 use super::error::FnResult;
 use super::params::Params;
-use crate::wasm::TierReport;
+use crate::wasm::{ModuleHash, TierReport};
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
 
@@ -26,6 +26,11 @@ pub trait ShamirFunction: Send + Sync {
 
     /// Per-function tier snapshot; `None` for functions that are not WASM-backed.
     fn tier_report(&self) -> Option<TierReport> {
+        None
+    }
+
+    /// Content identity of the raw WebAssembly artifact, when available.
+    fn module_hash(&self) -> Option<ModuleHash> {
         None
     }
 }

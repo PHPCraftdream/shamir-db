@@ -53,7 +53,7 @@ fn compute_message(error: FunctionError) -> String {
 #[tokio::test]
 async fn create_scalar_runs_and_reports_consistently() {
     let engine = engine_with_gate(1);
-    let (function, bytes, report) = create_shamir_source(
+    let (function, bytes, report, signature) = create_shamir_source(
         Arc::clone(&engine),
         SCALAR.to_string(),
         CompileOptions::default(),
@@ -64,6 +64,7 @@ async fn create_scalar_runs_and_reports_consistently() {
     .expect("scalar source compiles");
     // derivation: the report is the host-side scan of the returned bytes.
     assert_eq!(report.hash, ModuleHash::of(&bytes));
+    assert_eq!(signature, None);
     assert_eq!(report.byte_size, bytes.len());
     // derivation: x + x with x = 21 is 42 through the named envelope.
     let result = function
@@ -76,7 +77,7 @@ async fn create_scalar_runs_and_reports_consistently() {
 #[tokio::test]
 async fn check_matches_create_for_every_tier_mode() {
     let engine = engine_with_gate(1);
-    let (_function, _bytes, created) = create_shamir_source(
+    let (_function, _bytes, created, signature) = create_shamir_source(
         Arc::clone(&engine),
         SCALAR.to_string(),
         CompileOptions::default(),
@@ -85,6 +86,7 @@ async fn check_matches_create_for_every_tier_mode() {
     )
     .await
     .expect("scalar source compiles");
+    assert_eq!(signature, None);
     for mode in [TierMode::Auto, TierMode::Now, TierMode::Never] {
         let checked = check_shamir_source(
             Arc::clone(&engine),

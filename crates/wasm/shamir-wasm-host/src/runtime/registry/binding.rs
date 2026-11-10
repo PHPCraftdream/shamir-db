@@ -1,5 +1,6 @@
 use super::identity::CallIdentity;
 use crate::runtime::contract::ShamirFunction;
+use crate::wasm::ModuleHash;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -45,5 +46,10 @@ impl RegistryBinding {
 
     pub(crate) fn artifact(&self) -> &Arc<dyn ShamirFunction> {
         &self.0.artifact
+    }
+
+    /// Module hash for the captured artifact, when the implementation exposes one.
+    pub fn module_hash(&self) -> Option<ModuleHash> {
+        self.0.artifact.module_hash()
     }
 }

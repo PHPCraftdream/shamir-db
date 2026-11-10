@@ -2,6 +2,7 @@ use super::super::fuel::{pool_refund, FuelLease};
 use super::super::wasm_function::{read_guest_mem, HostState};
 use crate::runtime::context::{FnBatch, FnCtx};
 use crate::runtime::params::Params;
+use shamir_lang::api::CompileLimits;
 use shamir_types::types::value::QueryValue;
 use std::sync::atomic::Ordering;
 
@@ -47,12 +48,56 @@ pub(crate) fn decode_guest_params(bytes: &[u8]) -> Result<Params, wasmtime::Erro
 /// because the returned `Box<dyn Future + Send + '_>` captures it. Wasmtime
 /// guarantees `Caller` is `Send` when `T: Send` and async support is active.
 pub(in crate::wasm) fn host_call(
-    mut caller: wasmtime::Caller<'_, HostState>,
+    caller: wasmtime::Caller<'_, HostState>,
     (name_ptr, name_len, params_ptr, params_len): (i32, i32, i32, i32),
 ) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    host_call_inner(caller, name_ptr, name_len, None, params_ptr, params_len)
+}
+
+/// Checked stored-call import with the exact six-i32 ABI.
+pub(in crate::wasm) fn host_call_checked(
+    caller: wasmtime::Caller<'_, HostState>,
+    (name_ptr, name_len, signature_ptr, signature_len, params_ptr, params_len): (
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+        i32,
+    ),
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
+    host_call_inner(
+        caller,
+        name_ptr,
+        name_len,
+        Some((signature_ptr, signature_len)),
+        params_ptr,
+        params_len,
+    )
+}
+
+fn host_call_inner(
+    mut caller: wasmtime::Caller<'_, HostState>,
+    name_ptr: i32,
+    name_len: i32,
+    signature_bounds: Option<(i32, i32)>,
+    params_ptr: i32,
+    params_len: i32,
+) -> Box<dyn std::future::Future<Output = Result<i64, wasmtime::Error>> + Send + '_> {
     Box::new(async move {
+        if let Some((_, signature_len)) = signature_bounds {
+            let signature_len = usize::try_from(signature_len)
+                .map_err(|_| wasmtime::Error::msg("call_checked: negative signature length"))?;
+            let signature_limit = CompileLimits::default().max_static_bytes;
+            if signature_len > signature_limit {
+                return Err(wasmtime::Error::msg(format!(
+                    "call_checked: signature length limit exceeded: {signature_len} bytes > {signature_limit} bytes"
+                )));
+            }
+        }
         // ── Phase 1: read inputs + clone Arcs (all sync, before any await) ──
         let name_bytes;
+        let signature_bytes;
         let params_bytes;
         let registry;
         let batch_ctx;
@@ -77,6 +122,9 @@ pub(in crate::wasm) fn host_call(
                 .ok_or_else(|| wasmtime::Error::msg("call: missing export `memory`"))?;
 
             name_bytes = read_guest_mem(memory.data(&caller), name_ptr, name_len)?;
+            signature_bytes = signature_bounds
+                .map(|(ptr, len)| read_guest_mem(memory.data(&caller), ptr, len))
+                .transpose()?;
             params_bytes = read_guest_mem(memory.data(&caller), params_ptr, params_len)?;
 
             let state = caller.data();
@@ -171,7 +219,14 @@ pub(in crate::wasm) fn host_call(
         }
         let child_batch = FnBatch::with_context(batch_ctx);
 
-        let invoked = parent_ctx.call_stored(&name, &child_batch, &params).await;
+        let invoked = match signature_bytes.as_deref() {
+            Some(signature) => {
+                parent_ctx
+                    .call_stored_checked(&name, signature, &child_batch, &params)
+                    .await
+            }
+            None => parent_ctx.call_stored(&name, &child_batch, &params).await,
+        };
         // Reacquire for the parent BEFORE any parent guest code runs again (the
         // shamir_alloc below) and BEFORE propagating the child's result or error.
         // The ceiling is min(own_cap_left, the amount just relinquished) — the

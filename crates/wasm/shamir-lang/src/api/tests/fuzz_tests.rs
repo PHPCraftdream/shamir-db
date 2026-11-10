@@ -139,10 +139,20 @@ fn options() -> CompileOptions {
     }
 }
 
-/// Bytes on success, the debug rendering of the error otherwise.
+/// Artifact and callable-signature bytes on success, the debug rendering of the error otherwise.
 fn fingerprint(result: &Result<CompiledModule, CompileError>) -> Vec<u8> {
     match result {
-        Ok(module) => module.wasm.clone(),
+        Ok(module) => {
+            let mut fingerprint = module.wasm.clone();
+            match &module.signature {
+                Some(signature) => {
+                    fingerprint.push(1);
+                    fingerprint.extend_from_slice(signature);
+                }
+                None => fingerprint.push(0),
+            }
+            fingerprint
+        }
         Err(error) => format!("{error:?}").into_bytes(),
     }
 }

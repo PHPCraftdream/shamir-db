@@ -13,6 +13,7 @@ use super::TierFaults;
 use super::{Tier, TierMode, TierReport, UpgradeState, WasmEngine, WasmLimits};
 use crate::runtime::error::{FnResult, FunctionError};
 use crate::wasm::wasm_function::HostState;
+use crate::wasm::ModuleHash;
 use arc_swap::ArcSwap;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Weak};
@@ -40,6 +41,7 @@ pub(in crate::wasm) struct FunctionShared {
     /// Sanitized wasm bytes: the upgrade job recompiles them on the
     /// optimized engine, since a compiled `Module` cannot cross engines.
     wasm: Arc<[u8]>,
+    module_hash: ModuleHash,
     engine: Arc<WasmEngine>,
     limits: WasmLimits,
     mode: TierMode,
@@ -60,10 +62,12 @@ impl FunctionShared {
         slot: FunctionSlot,
         build_pre: fn(&Engine, &Module) -> FnResult<InstancePre<HostState>>,
     ) -> Self {
+        let module_hash = ModuleHash::of(&wasm);
         let slot = ArcSwap::from_pointee(slot);
         Self {
             slot,
             wasm,
+            module_hash,
             engine,
             limits,
             mode,
@@ -81,6 +85,10 @@ impl FunctionShared {
 
     pub(in crate::wasm) fn limits(&self) -> &WasmLimits {
         &self.limits
+    }
+
+    pub(in crate::wasm) fn module_hash(&self) -> ModuleHash {
+        self.module_hash
     }
 
     pub(in crate::wasm) fn tier(&self) -> Tier {

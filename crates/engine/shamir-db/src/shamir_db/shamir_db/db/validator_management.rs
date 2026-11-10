@@ -280,7 +280,7 @@ impl ShamirDb {
                         limit
                     )));
                 }
-                let (wf, wasm, report) = create_shamir_source(
+                let (wf, wasm, report, _signature) = create_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),
                     CompileOptions::default(),

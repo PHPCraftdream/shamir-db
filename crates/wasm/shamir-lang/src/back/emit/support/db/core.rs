@@ -32,11 +32,6 @@ use crate::back::runtime::{
 /// Capacity of the per-execution argument buffer: the encoder raises its
 /// output-cap error (kind 3) when a document or filter does not fit.
 pub(crate) const DB_BUFFER_BYTES: u32 = 1_024 * 1_024;
-
-/// Context offset of the lazily allocated argument buffer pointer. It sits
-/// above the header bytes the context re-initialisation zeroes, so it
-/// survives across calls within one execution (module admission allows only
-/// two globals, so the pointer lives in the context instead).
 pub(crate) const CONTEXT_DB_BUFFER_OFFSET: u32 = 56;
 
 /// Stable cell tag of the null cell (mirrors `runtime::CellTag::Null`).

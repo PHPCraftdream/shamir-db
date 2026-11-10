@@ -70,7 +70,7 @@
 //! encoding it wasn't designed to scan.
 
 use crate::types::AdmissionError;
-use wasmparser::{Encoding, Parser, Payload, TypeRef};
+use wasmparser::{Encoding, FuncType, Parser, Payload, TypeRef, ValType};
 
 /// The host-import ABI a compiled guest module is permitted to use.
 ///
@@ -90,6 +90,7 @@ pub const SANCTIONED_HOST_IMPORTS: &[(&str, &str)] = &[
     ("shamir_host", "global_set"),
     ("shamir_host", "global_get"),
     ("shamir_host", "call"),
+    ("shamir_host", "call_checked"),
     ("shamir_host", "db_get"),
     ("shamir_host", "db_insert"),
     ("shamir_host", "db_query"),
@@ -97,6 +98,34 @@ pub const SANCTIONED_HOST_IMPORTS: &[(&str, &str)] = &[
     ("shamir_host", "raise_error"),
     ("shamir_host", "http_fetch"),
 ];
+
+fn check_checked_call_signature(type_index: u32, types: &[FuncType]) -> Result<(), AdmissionError> {
+    let found = usize::try_from(type_index)
+        .ok()
+        .and_then(|index| types.get(index))
+        .ok_or_else(|| AdmissionError::Validation("call_checked has unknown type index".into()))?;
+    if found.params() == [ValType::I32; 6] && found.results() == [ValType::I64] {
+        return Ok(());
+    }
+    let params = found
+        .params()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let results = found
+        .results()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(AdmissionError::WrongImportType {
+        module: "shamir_host",
+        name: crate::abi::IMPORT_CALL_CHECKED,
+        expected: "(i32, i32, i32, i32, i32, i32) -> i64",
+        found: format!("({params}) -> {results}"),
+    })
+}
 
 /// Structurally verify a compiled `.wasm` module's import section against
 /// [`SANCTIONED_HOST_IMPORTS`] — an allowlist posture (reject anything not
@@ -116,6 +145,7 @@ pub const SANCTIONED_HOST_IMPORTS: &[(&str, &str)] = &[
 /// caller's subsequent `wasmtime::Module::new`/`from_binary` call would
 /// reject the same bytes anyway, just after paying for full validation).
 pub fn verify_wasm_module(bytes: &[u8]) -> Result<(), AdmissionError> {
+    let mut types = Vec::<FuncType>::new();
     for payload in Parser::new(0).parse_all(bytes) {
         let payload = payload.map_err(|e| AdmissionError::Parse(e.to_string()))?;
         // Explicitly reject the WASM *component* encoding rather than
@@ -138,6 +168,11 @@ pub fn verify_wasm_module(bytes: &[u8]) -> Result<(), AdmissionError> {
         } = payload
         {
             return Err(AdmissionError::ComponentEncoding);
+        }
+        if let Payload::TypeSection(reader) = &payload {
+            for ty in reader.clone().into_iter_err_on_gc_types() {
+                types.push(ty.map_err(|e| AdmissionError::Parse(e.to_string()))?);
+            }
         }
         let Payload::ImportSection(reader) = payload else {
             continue;
@@ -168,6 +203,11 @@ pub fn verify_wasm_module(bytes: &[u8]) -> Result<(), AdmissionError> {
                     name: import.name.to_string(),
                     kind,
                 });
+            }
+            if import.module == "shamir_host" && import.name == crate::abi::IMPORT_CALL_CHECKED {
+                if let TypeRef::Func(type_index) | TypeRef::FuncExact(type_index) = import.ty {
+                    check_checked_call_signature(type_index, &types)?;
+                }
             }
         }
     }

@@ -376,7 +376,9 @@ pub(crate) fn collect_db_result_nodes(ir: &IrModule) -> Result<Vec<u32>, EmitErr
     for function in &ir.functions {
         for inst in &function.insts {
             let result = match &inst.kind {
-                InstKind::DbCall { result, .. } | InstKind::ResponseGet { result, .. } => *result,
+                InstKind::DbCall { result, .. }
+                | InstKind::ResponseGet { result, .. }
+                | InstKind::CallChecked { result, .. } => *result,
                 InstKind::ResponseAffected { .. } => continue,
                 _ => continue,
             };

@@ -6,7 +6,7 @@ use crate::front::{
     self, EntryKind, ExprId, FunctionId, PrimitiveType, TypeFieldId, TypeId as AstTypeId, TypeKind,
 };
 use crate::sem::effects::{builtin_by_name, Capability, EffectSet};
-use crate::sem::tables::TypedModule;
+use crate::sem::tables::{CheckedCall, TypedModule};
 use crate::sem::types::{TypeData, TypeId, TypeInterner};
 
 use super::{calls, resolve, statement};
@@ -44,6 +44,7 @@ pub(super) struct Checker<'a> {
     pub(super) module: &'a front::Module,
     pub(super) limits: &'a CompileLimits,
     pub(super) stage: Stage,
+    pub(super) callable_catalog: &'a std::collections::BTreeMap<String, Vec<u8>>,
     pub(super) types: TypeInterner,
     pub(super) diags: Vec<Diagnostic>,
     pub(super) type_map: Vec<Option<TypeId>>,
@@ -58,6 +59,8 @@ pub(super) struct Checker<'a> {
     pub(super) own_effects: Vec<EffectSet>,
     pub(super) by_name: BTreeMap<String, FunctionId>,
     pub(super) edges: Vec<CallEdge>,
+    pub(super) checked_calls: Vec<Option<CheckedCall>>,
+    pub(super) budget: &'a mut CompileBudget,
     /// Canonical ids for primitive types (`TypeInterner::intern` does not
     /// deduplicate, so equality-based assignability needs one id per name).
     pub(super) primitives: BTreeMap<&'static str, TypeId>,
@@ -65,17 +68,17 @@ pub(super) struct Checker<'a> {
     pub(super) structural: BTreeMap<String, TypeId>,
 }
 
-/// Resolved function signature.
-pub(super) struct ResolvedSignature {
-    pub(super) params: Vec<TypeId>,
-    pub(super) result: TypeId,
-}
-
 /// One user-function call edge recorded during resolution.
 pub(super) struct CallEdge {
     pub(super) caller: FunctionId,
     pub(super) callee: FunctionId,
     pub(super) site: ExprId,
+}
+
+/// Resolved function signature.
+pub(super) struct ResolvedSignature {
+    pub(super) params: Vec<TypeId>,
+    pub(super) result: TypeId,
 }
 
 /// Position of a type conversion; drives null/opaque acceptance rules.
@@ -114,16 +117,36 @@ pub fn check(
             )]);
         }
     };
-    check_scoped(module, &normalized, stage, &mut budget)
+    check_scoped_with_catalog(
+        module,
+        &normalized,
+        stage,
+        &std::collections::BTreeMap::new(),
+        &mut budget,
+    )
 }
 
-/// Runs the full milestone-3 semantic check using the CALLER's compile budget
-/// (one pipeline budget; `check` is a thin wrapper creating its own).
-/// Assumes `limits` are normalized and `budget` is ready.
 pub fn check_scoped(
     module: &front::Module,
     limits: &CompileLimits,
     stage: Stage,
+    budget: &mut CompileBudget,
+) -> Result<TypedModule, Vec<Diagnostic>> {
+    check_scoped_with_catalog(
+        module,
+        limits,
+        stage,
+        &std::collections::BTreeMap::new(),
+        budget,
+    )
+}
+
+/// Runs the full semantic checker with a caller-supplied callable catalog.
+pub(crate) fn check_scoped_with_catalog(
+    module: &front::Module,
+    limits: &CompileLimits,
+    stage: Stage,
+    callable_catalog: &std::collections::BTreeMap<String, Vec<u8>>,
     budget: &mut CompileBudget,
 ) -> Result<TypedModule, Vec<Diagnostic>> {
     let normalized = limits;
@@ -135,6 +158,7 @@ pub fn check_scoped(
         module,
         limits: normalized,
         stage,
+        callable_catalog,
         types: TypeInterner::new(),
         diags: Vec::new(),
         type_map: vec![None; module.types.len()],
@@ -149,6 +173,8 @@ pub fn check_scoped(
         own_effects: Vec::new(),
         by_name: BTreeMap::new(),
         edges: Vec::new(),
+        checked_calls: vec![None; module.expressions.len()],
+        budget,
         primitives: BTreeMap::new(),
         structural: BTreeMap::new(),
     };
@@ -204,6 +230,7 @@ pub fn check_scoped(
         diags,
         resolved,
         calls,
+        checked_calls,
         expr_types,
         binding_slots,
         ..
@@ -217,6 +244,7 @@ pub fn check_scoped(
         expr_types,
         resolved,
         calls,
+        checked_calls,
         binding_slots,
         span,
     };
@@ -403,7 +431,9 @@ fn check_entry_boundary(
                     );
                 }
             }
-            if !c.types.wire_safe(result, 0) && !c.types.contains_error(result, 0) {
+            let null_result =
+                kind == EntryKind::Procedure && c.types.data(result) == Some(TypeData::Null);
+            if !c.types.wire_safe(result, 0) && !c.types.contains_error(result, 0) && !null_result {
                 report(
                     c,
                     "T009",
@@ -633,7 +663,11 @@ fn convert_primitive(
     match prim {
         PrimitiveType::Null => {
             let allowed = match top {
-                TopPosition::Return => !in_entry || kind == Some(EntryKind::Validator),
+                TopPosition::Return => {
+                    !in_entry
+                        || kind == Some(EntryKind::Validator)
+                        || kind == Some(EntryKind::Procedure)
+                }
                 TopPosition::Parameter => !in_entry,
                 TopPosition::Local => !in_entry || kind == Some(EntryKind::Validator),
                 TopPosition::Nested | TopPosition::Field => {

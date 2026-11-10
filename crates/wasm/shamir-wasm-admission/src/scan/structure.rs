@@ -96,7 +96,11 @@ impl<'l> Structure<'l> {
             self.type_count,
             |limit, observed| AdmissionError::TooManyTypes { limit, observed },
         )?;
+        // Keep the type table in Load mode solely for the checked import ABI.
         if self.limits.is_none() {
+            for item in reader.into_iter_err_on_gc_types() {
+                self.types.push(item.map_err(validation)?);
+            }
             return Ok(());
         }
         for item in reader.into_iter_err_on_gc_types() {
@@ -127,7 +131,11 @@ impl<'l> Structure<'l> {
             |limit, observed| AdmissionError::TooManyImports { limit, observed },
         )?;
         let collect = self.limits.is_some();
-        scan_imports(reader, collect.then_some(&mut self.func_type_indices))
+        scan_imports(
+            reader,
+            collect.then_some(&mut self.func_type_indices),
+            &self.types,
+        )
     }
 
     pub(crate) fn on_function_section(
