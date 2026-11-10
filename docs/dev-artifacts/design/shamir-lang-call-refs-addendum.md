@@ -1,6 +1,6 @@
 # PROC-2c addendum: checked stored calls, batch references, update and delete
 
-**Status:** proposed design, not implementation. This addendum supplements §§3–8 of `shamir-lang-design.md`; it does not change that document. §10 distinguishes observed source behavior from proposals. It replaces the earlier proposals and questions in this file with the decisions below.
+**Status:** proposed design. Stage 1 (count-only `batch_update`, `batch_delete` and `response_affected`, section 4 and the stage 1 row of section 6) is implemented in `shamir-lang`; the checked call (stage 2) and result references (stage 3) are not implemented. This addendum supplements §§3–8 of `shamir-lang-design.md`; it does not change that document. §10 distinguishes observed source behavior from proposals. It replaces the earlier proposals and questions in this file with the decisions below.
 
 ## 1. Scope and decisions
 
