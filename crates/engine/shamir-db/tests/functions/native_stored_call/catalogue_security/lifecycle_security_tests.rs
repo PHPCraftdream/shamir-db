@@ -174,7 +174,8 @@ async fn rename_registry_collision_restores_source_and_destination_metadata() {
         .await
         .expect_err("live registry collision must reject rename");
 
-    assert!(error.to_string().contains("already exists"), "{error}");
+    // The registry (not the catalogue) rejects a live-only destination.
+    assert!(error.to_string().contains("already registered"), "{error}");
     assert_eq!(function_row(&db, "rename_source_meta").await, source_before);
     assert!(db
         .system_store()
