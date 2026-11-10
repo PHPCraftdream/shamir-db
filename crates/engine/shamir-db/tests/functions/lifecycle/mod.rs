@@ -7,4 +7,4 @@ mod db_gateway;
 mod http_egress;
 mod secrets_meta;
 mod support;
-pub(crate) use support::compile_or_skip;
+pub(crate) use support::{compile_or_skip, init_redb_retry};

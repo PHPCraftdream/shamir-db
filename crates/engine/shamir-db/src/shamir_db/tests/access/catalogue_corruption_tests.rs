@@ -30,6 +30,25 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
+async fn persist_native_function(shamir: &ShamirDb, name: &str) {
+    let mut fields = new_map();
+    fields.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    fields.insert("kind".to_string(), QueryValue::Str("native".to_string()));
+    let mut record = QueryValue::Map(fields);
+    shamir_engine::function::FunctionMeta::new(
+        shamir_engine::function::Visibility::Public,
+        shamir_engine::function::Security::Invoker,
+        vec![],
+        vec![],
+    )
+    .inject_into(&mut record);
+    shamir
+        .system_store()
+        .save_function(name, &record, &ResourceMeta::open())
+        .await
+        .unwrap();
+}
+
 const NOT_A_MAP: &[u8] = b"not-a-map";
 
 /// Stage one MVCC-committed row whose body is not a valid record map, then
@@ -348,6 +367,7 @@ async fn invocation_denies_settings_storage_read_failure() {
     shamir
         .register_fn("sample", false, |_, _, _| async { Ok(QueryValue::Null) })
         .unwrap();
+    persist_native_function(&shamir, "sample").await;
     let fault = std::sync::Arc::new(super::access_meta_tests::failing_store::FailingStore::new());
     let repo = shamir.system_store().system_repo().unwrap();
     let table = TableManager::create_with_domain(
@@ -390,6 +410,7 @@ async fn invocation_denies_corrupt_settings_catalogue() {
     shamir
         .register_fn("sample", false, |_, _, _| async { Ok(QueryValue::Null) })
         .unwrap();
+    persist_native_function(&shamir, "sample").await;
     assert!(shamir
         .invoke_function_as(
             "sample",

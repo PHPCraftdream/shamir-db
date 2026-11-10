@@ -3,6 +3,7 @@ use std::sync::Arc;
 use shamir_engine::function::{AdmissionPolicy, ShamirFunction, WasmFunction, WasmLimits};
 use shamir_types::types::value::QueryValue;
 
+use super::super::artifact::artifact_id_from_record;
 use super::super::types::{FunctionState, UnavailableFunction};
 use super::{decode_stored_bytes, stored_optimize, verify_stored_hash, HashVerdict};
 use crate::shamir_db::shamir_db::catalog::with_checked_function_metadata;
@@ -35,6 +36,9 @@ impl ShamirDb {
                         name
                     )));
                 }
+                let artifact_id = artifact_id_from_record(rec).map_err(|error| {
+                    DbError::Function(format!("invalid function artifact id in catalogue: {error}"))
+                })?;
                 // Dispatch on artifact kind: Native rows have no WASM bytes —
                 // skip materialisation. The embedder re-registers the native
                 // artifact at startup; until then the function is absent and any
@@ -114,7 +118,11 @@ impl ShamirDb {
                         }
                     },
                 };
-                if self.functions.register(&name, function).is_err() {
+                if self
+                    .functions
+                    .register_with_artifact_id(&name, function, artifact_id)
+                    .is_err()
+                {
                     return Err(DbError::Function(format!(
                         "catalogue function '{}' collides with a builtin or registered function",
                         name

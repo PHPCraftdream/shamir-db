@@ -88,10 +88,9 @@ pub struct FunctionMeta {
     /// precedent — an EMPTY/absent `net_grants` means NO egress for this
     /// function. A non-empty grant list can only ask for LESS than the
     /// DB-wide `net_allowlist`, never more (see `build_net_gateway`'s doc
-    /// comment for the full reasoning). Builtin functions with no
-    /// catalogue row are a separate code path and keep the full
-    /// allowlist — this restrictive default applies to user-created
-    /// functions going through `CreateFunctionOptions`.
+    /// comment for the full reasoning). Catalogue-free builtins in a
+    /// database-bound registry receive no net grants and use the empty/deny
+    /// gateway; they do not inherit the DB allowlist.
     pub net_grants: Vec<String>,
 }
 
@@ -252,8 +251,9 @@ impl FunctionMeta {
 /// granting egress requires explicitly listing host patterns, which are then
 /// intersected with the DB-wide `net_allowlist` (a function can never exceed
 /// the DB ceiling). `optimize` selects the compilation tier policy for
-/// WASM-backed functions (default `TierMode::Auto`). Builtin functions with no catalogue row are a separate
-/// code path and keep the full allowlist. See [`FunctionMeta::net_grants`]
+/// WASM-backed functions (default `TierMode::Auto`). Catalogue-free builtins in
+/// a database-bound registry receive no net grants and use the empty/deny
+/// gateway; they do not inherit the DB allowlist. See [`FunctionMeta::net_grants`]
 /// and `build_net_gateway`.
 #[derive(Debug, Clone)]
 pub struct CreateFunctionOptions {

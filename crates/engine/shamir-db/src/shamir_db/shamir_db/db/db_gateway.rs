@@ -1,15 +1,15 @@
+#[cfg(test)]
+use crate::engine::function::NetGateway;
+use crate::engine::function::{DbGateway, DbGatewayError};
 use crate::engine::query::batch::{BatchError, BatchLimits, BatchOp, BatchRequest, ResultEncoding};
 use crate::engine::query::read::ReadQuery;
 use crate::engine::query::write::InsertOp;
 use crate::engine::query::{Filter, FilterValue, TableRef};
 use crate::types::value::QueryValue;
-use crate::{
-    access::Actor,
-    engine::function::{DbGateway, DbGatewayError, NetGateway},
-    shamir_db::shamir_db::ShamirDb,
-};
+use crate::{access::Actor, shamir_db::shamir_db::ShamirDb};
 use async_trait::async_trait;
 use shamir_query_types::batch::BatchTreeVisitor;
+#[cfg(test)]
 use std::sync::Arc;
 
 /// [`DbGateway`] implementation that routes through [`ShamirDb::execute`].
@@ -287,6 +287,7 @@ impl DbGateway for FacadeDbGateway {
     }
 }
 
+#[cfg(test)]
 impl ShamirDb {
     /// Build a [`NetGateway`] scoped to `fn_name`'s effective egress reach:
     /// the function's `net_grants` INTERSECTED with the DB-wide

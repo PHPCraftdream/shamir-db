@@ -5,8 +5,8 @@
 //! but is not deterministic: a 500 ms reader deschedule can hide it.
 
 use crate::{
-    FnBatch, FnCtx, FunctionError, FunctionMeta, FunctionRegistry, Params, Security,
-    ShamirFunction, Visibility,
+    FnBatch, FnCtx, FunctionError, FunctionMeta, FunctionRegistry, Params, ResolvedStoredCall,
+    Security, ShamirFunction, StoredCallResolver, Visibility,
 };
 use async_trait::async_trait;
 use shamir_types::types::value::QueryValue;
@@ -717,6 +717,249 @@ async fn stored_call_path_is_scoped_after_error() {
         .await
         .unwrap();
     assert_eq!(result, QueryValue::Int(2));
+}
+
+#[tokio::test]
+async fn artifact_ids_participate_in_binding_and_follow_registry_updates() {
+    let registry = FunctionRegistry::new();
+    let function: Arc<dyn ShamirFunction> = Arc::new(Const(1));
+    registry
+        .register_with_artifact_id("entry", Arc::clone(&function), Some("artifact-a".into()))
+        .unwrap();
+    let initial = registry.capture("entry").unwrap();
+    assert_eq!(initial.artifact_id(), Some("artifact-a"));
+
+    registry.replace_with_artifact_id("entry", Arc::clone(&function), Some("artifact-b".into()));
+    let changed_id = registry.capture("entry").unwrap();
+    assert_eq!(changed_id.artifact_id(), Some("artifact-b"));
+    assert!(!initial.same_as(&changed_id));
+
+    registry.rename("entry", "renamed").unwrap();
+    let renamed = registry.capture("renamed").unwrap();
+    assert_eq!(renamed.artifact_id(), Some("artifact-b"));
+    assert!(changed_id.same_as(&renamed));
+
+    let legacy_replacement: Arc<dyn ShamirFunction> = Arc::new(Const(3));
+    registry.replace("renamed", Arc::clone(&legacy_replacement));
+    let legacy = registry.capture("renamed").unwrap();
+    assert_eq!(legacy.artifact_id(), Some("artifact-b"));
+    assert_eq!(legacy.identity(), renamed.identity());
+    assert!(!renamed.same_as(&legacy));
+    assert!(std::ptr::addr_eq(
+        Arc::as_ptr(legacy.artifact()),
+        Arc::as_ptr(&legacy_replacement)
+    ));
+
+    let context = FnCtx::new();
+    let saved_result = registry
+        .invoke_captured(&renamed, &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap();
+    assert_eq!(saved_result, QueryValue::Int(1));
+    let current_result = registry
+        .invoke_captured(&legacy, &context, &FnBatch::new(), &Params::new())
+        .await
+        .unwrap();
+    assert_eq!(current_result, QueryValue::Int(3));
+
+    registry.replace_with_artifact_id("renamed", Arc::clone(&function), None);
+    let cleared = registry.capture("renamed").unwrap();
+    assert_eq!(cleared.artifact_id(), None);
+    assert_eq!(legacy.identity(), cleared.identity());
+
+    let vacant_replacement: Arc<dyn ShamirFunction> = Arc::new(Const(4));
+    registry.replace("vacant", Arc::clone(&vacant_replacement));
+    let vacant = registry.capture("vacant").unwrap();
+    assert_eq!(vacant.artifact_id(), None);
+    assert_ne!(vacant.identity(), cleared.identity());
+    assert!(std::ptr::addr_eq(
+        Arc::as_ptr(vacant.artifact()),
+        Arc::as_ptr(&vacant_replacement)
+    ));
+
+    registry
+        .register("registered", Arc::clone(&function))
+        .unwrap();
+    assert_eq!(registry.capture("registered").unwrap().artifact_id(), None);
+}
+
+struct CountedCall(Arc<AtomicUsize>);
+
+#[async_trait]
+impl ShamirFunction for CountedCall {
+    async fn call(
+        &self,
+        _ctx: &FnCtx,
+        _batch: &FnBatch,
+        _params: &Params,
+    ) -> Result<QueryValue, FunctionError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(QueryValue::Int(1))
+    }
+}
+
+struct RejectingResolver(Arc<AtomicUsize>);
+
+#[async_trait]
+impl StoredCallResolver for RejectingResolver {
+    async fn resolve(&self, _name: &str, _parent: &FnCtx) -> crate::FnResult<ResolvedStoredCall> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(FunctionError::Compute("unexpected resolver call".into()))
+    }
+}
+
+#[tokio::test]
+async fn catalogue_bound_registry_rejects_unresolved_paths_without_running_functions() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(FunctionRegistry::with_catalogue_builtins());
+    registry
+        .register("counted", Arc::new(CountedCall(Arc::clone(&calls))))
+        .unwrap();
+    let binding = registry.capture("counted").unwrap();
+    let batch = FnBatch::new();
+    let params = Params::new();
+
+    let rootless = FnCtx::new().with_registry(Arc::clone(&registry));
+    let invoke_error = registry
+        .invoke("counted", &rootless, &batch, &params)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(invoke_error, FunctionError::Compute(message) if message.contains("resolver"))
+    );
+    let captured_error = registry
+        .invoke_captured(&binding, &rootless, &batch, &params)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(captured_error, FunctionError::Compute(message) if message.contains("resolver"))
+    );
+
+    let call_error = rootless
+        .call_stored("counted", &batch, &params)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(call_error, FunctionError::Compute(message) if message.contains("captured root"))
+    );
+
+    let active = rootless.with_call_runtime(
+        None,
+        crate::runtime::registry::ActiveCallPath::standalone_root(),
+        None,
+    );
+    let active_error = active
+        .call_stored("counted", &batch, &params)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(active_error, FunctionError::Compute(message) if message.contains("resolver"))
+    );
+    let active_invoke_error = registry
+        .invoke("counted", &active, &batch, &params)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(active_invoke_error, FunctionError::Compute(message) if message.contains("resolver"))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn rootless_calls_with_resolver_are_rejected_before_resolution() {
+    let registry = Arc::new(FunctionRegistry::new());
+    registry.register("target", Arc::new(Const(1))).unwrap();
+    let resolver_calls = Arc::new(AtomicUsize::new(0));
+    let ctx = FnCtx::new()
+        .with_registry(registry)
+        .with_stored_call_resolver(Arc::new(RejectingResolver(Arc::clone(&resolver_calls))));
+    let error = ctx
+        .call_stored("target", &FnBatch::new(), &Params::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, FunctionError::Compute(message) if message.contains("captured root")));
+    assert_eq!(resolver_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn host_only_rootless_call_stored_and_invoke_remain_available() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let registry = Arc::new(FunctionRegistry::new());
+    registry
+        .register("target", Arc::new(CountedCall(Arc::clone(&calls))))
+        .unwrap();
+    let ctx = FnCtx::new().with_registry(Arc::clone(&registry));
+    let batch = FnBatch::new();
+    let params = Params::new();
+
+    let stored = ctx.call_stored("target", &batch, &params).await.unwrap();
+    assert_eq!(stored, QueryValue::Int(1));
+    let invoked = registry
+        .invoke("target", &ctx, &batch, &params)
+        .await
+        .unwrap();
+    assert_eq!(invoked, QueryValue::Int(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn database_builtin_provenance_is_private_and_only_set_during_catalogue_construction() {
+    let function: Arc<dyn ShamirFunction> = Arc::new(Const(1));
+    let catalogue = FunctionRegistry::with_catalogue_builtins();
+    assert!(catalogue.capture("argon2id").unwrap().is_database_builtin());
+    assert!(!FunctionRegistry::with_builtins()
+        .capture("argon2id")
+        .unwrap()
+        .is_database_builtin());
+
+    let user_registry = FunctionRegistry::new();
+    user_registry
+        .register("registered", Arc::clone(&function))
+        .unwrap();
+    assert!(!user_registry
+        .capture("registered")
+        .unwrap()
+        .is_database_builtin());
+    user_registry
+        .register_with_artifact_id("explicit", Arc::clone(&function), Some("id".into()))
+        .unwrap();
+    assert!(!user_registry
+        .capture("explicit")
+        .unwrap()
+        .is_database_builtin());
+    user_registry.replace("vacant", Arc::clone(&function));
+    assert!(!user_registry
+        .capture("vacant")
+        .unwrap()
+        .is_database_builtin());
+
+    let original_builtin = catalogue.capture("argon2id").unwrap();
+    catalogue.replace("argon2id", catalogue.get("argon2id").unwrap());
+    let preserved_builtin = catalogue.capture("argon2id").unwrap();
+    assert!(preserved_builtin.is_database_builtin());
+    assert!(original_builtin.same_as(&preserved_builtin));
+    catalogue.rename("argon2id", "renamed_builtin").unwrap();
+    assert!(catalogue
+        .capture("renamed_builtin")
+        .unwrap()
+        .is_database_builtin());
+    catalogue.replace_with_artifact_id(
+        "renamed_builtin",
+        Arc::clone(&function),
+        Some("managed".into()),
+    );
+    assert!(!catalogue
+        .capture("renamed_builtin")
+        .unwrap()
+        .is_database_builtin());
+
+    let argon_registry = FunctionRegistry::with_catalogue_builtins();
+    assert!(argon_registry.remove("argon2id"));
+    argon_registry.register("argon2id", function).unwrap();
+    assert!(!argon_registry
+        .capture("argon2id")
+        .unwrap()
+        .is_database_builtin());
 }
 
 #[test]

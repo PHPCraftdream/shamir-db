@@ -27,11 +27,12 @@ use shamir_db::engine::validator::WriteOp;
 use shamir_db::query::batch::BatchRequest;
 use shamir_db::shamir_db::shamir_db::ArtifactKind;
 use shamir_db::ShamirDb;
-use shamir_engine::function::{FnBatch, FnCtx, Params};
+use shamir_engine::function::{FnBatch, FnCtx, FunctionMeta, Params, Security, Visibility};
 use shamir_engine::validator::{RecordFields, Validation, ValidatorCtx};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::write::insert;
 use shamir_query_builder::Query;
+use shamir_types::access::ResourceMeta;
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
@@ -100,6 +101,20 @@ fn rejection_code(code: &str, stop: bool) -> QueryValue {
 // ============================================================================
 // Setup helpers
 // ============================================================================
+
+async fn persist_native_function(db: &ShamirDb, name: &str) {
+    let mut fields = new_map();
+    fields.insert("name".to_string(), QueryValue::Str(name.to_string()));
+    fields.insert("lang".to_string(), QueryValue::Str("rust".to_string()));
+    fields.insert("kind".to_string(), ArtifactKind::Native.as_query_value());
+    let mut record = QueryValue::Map(fields);
+    FunctionMeta::new(Visibility::Public, Security::Invoker, vec![], vec![])
+        .inject_into(&mut record);
+    db.system_store()
+        .save_function(name, &record, &ResourceMeta::open())
+        .await
+        .unwrap();
+}
 
 /// In-memory ShamirDb with `testdb/main/users` table.
 async fn setup_db() -> ShamirDb {
@@ -352,6 +367,7 @@ async fn parity_native_and_wasm_function_return_identical() {
         },
     )
     .unwrap();
+    persist_native_function(&db, "native_echo").await;
 
     // Wasm function: returns msgpack str "parity!".
     let wasm = make_wat_returning(&QueryValue::Str("parity!".into()));
@@ -528,6 +544,7 @@ async fn three_planes_native_function_validator_scalar_independent() {
         },
     )
     .unwrap();
+    persist_native_function(&db, "compute_label").await;
 
     // ── Plane 2: Native validator ──
     db.register_native_validator(

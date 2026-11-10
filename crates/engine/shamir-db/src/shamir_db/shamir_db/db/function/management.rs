@@ -10,6 +10,7 @@ use shamir_engine::function::{
 use shamir_types::types::value::QueryValue;
 
 use super::super::super::{ArtifactKind, FunctionSource, ShamirDb};
+use super::artifact::{fresh_artifact_id, ARTIFACT_ID_FIELD};
 use super::types::{optimize_name, FunctionState};
 
 impl ShamirDb {
@@ -31,11 +32,13 @@ impl ShamirDb {
 
     /// Register a native (in-process) procedural function by closure.
     ///
-    /// This is the MVP in-memory path: the closure is wrapped in
-    /// [`FnAdapter`] and inserted into the live [`FunctionRegistry`]. No
-    /// catalogue row is written — the registration is lost on restart. For a
-    /// persisted native function, write a `kind = Native` row manually (see
-    /// Deliverable 3 for the validator analogue).
+    /// This registers the closure only in the live [`FunctionRegistry`]; it
+    /// does not write a catalogue row and is lost on restart. Database-facade
+    /// invocation requires a persisted native catalogue row (unless the
+    /// function is a database builtin). Raw registry replacement remains a
+    /// trusted host operation. To persist a native function, write a
+    /// `kind = Native` row manually (see Deliverable 3 for the validator
+    /// analogue).
     ///
     /// `replace` controls overwrite semantics: `false` errors on name
     /// collision, `true` silently overwrites.
@@ -251,6 +254,13 @@ impl ShamirDb {
             ArtifactKind::Wasm.as_query_value(),
         );
         let mut record = shamir_types::types::value::QueryValue::Map(m);
+        let artifact_id = fresh_artifact_id();
+        if let QueryValue::Map(ref mut fields) = record {
+            fields.insert(
+                ARTIFACT_ID_FIELD.to_string(),
+                QueryValue::Str(artifact_id.clone()),
+            );
+        }
         // Namespace Create permits new names only. Replacing an existing
         // persisted function requires Function Write and retains ACL metadata.
         if opts.replace {
@@ -262,15 +272,8 @@ impl ShamirDb {
                 )));
             }
             if let Some(existing) = existing_record {
-                self.authorize_access(
-                    &actor,
-                    &ResourcePath::Function {
-                        name: name.to_string(),
-                    },
-                    Action::Write,
-                )
-                .await
-                .map_err(|e| DbError::Function(e.to_string()))?;
+                self.authorize_function_replacement(&actor, name, &existing, opts.security)
+                    .await?;
                 meta.inject_into(&mut record);
                 self.system_store
                     .save_function(name, &record, &ResourceMeta::from_record(&existing))
@@ -289,10 +292,11 @@ impl ShamirDb {
         }
 
         if opts.replace {
-            self.functions.replace(name, Arc::new(wf));
+            self.functions
+                .replace_with_artifact_id(name, Arc::new(wf), Some(artifact_id));
         } else {
             self.functions
-                .register(name, Arc::new(wf))
+                .register_with_artifact_id(name, Arc::new(wf), Some(artifact_id))
                 .map_err(|e| DbError::Function(e.to_string()))?;
         }
 
@@ -360,6 +364,15 @@ impl ShamirDb {
         )
         .await
         .map_err(|e| DbError::Function(e.to_string()))?;
+        self.authorize_access(&actor, &ResourcePath::FunctionNamespace, Action::Create)
+            .await
+            .map_err(|e| DbError::Function(e.to_string()))?;
+        if self.system_store.load_function(to).await?.is_some() {
+            return Err(DbError::Function(format!(
+                "function '{}' already exists",
+                to
+            )));
+        }
         // Load the old catalogue record to re-key it.
         let fn_records = self.system_store.load_functions().await?;
         let old_record = fn_records
@@ -367,15 +380,25 @@ impl ShamirDb {
             .find(|r| r.get("name").and_then(|v| v.as_str()) == Some(from))
             .cloned();
 
-        // Rename in the live registry first.
-        self.functions
-            .rename(from, to)
-            .map_err(|e| DbError::Function(e.to_string()))?;
-
-        // Migrate in-memory metadata.
-        if let Some((_, meta)) = self.function_meta.remove(from) {
+        // Install a cloned source metadata value before the synchronous registry
+        // rename; no DashMap guard is held across the operation.
+        let source_meta = self.function_meta(from);
+        let destination_meta = self.function_meta(to);
+        if let Some(meta) = source_meta {
             self.function_meta.insert(to.to_string(), meta);
         }
+        if let Err(error) = self.functions.rename(from, to) {
+            match destination_meta {
+                Some(meta) => {
+                    self.function_meta.insert(to.to_string(), meta);
+                }
+                None => {
+                    let _ = self.function_meta.remove(to);
+                }
+            }
+            return Err(DbError::Function(error.to_string()));
+        }
+        let _ = self.function_meta.remove(from);
         if let Some((_, state)) = self.function_state.remove(from) {
             self.function_state.insert(to.to_string(), state);
         }

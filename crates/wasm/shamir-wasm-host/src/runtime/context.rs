@@ -647,6 +647,15 @@ impl FnCtx {
         params: &Params,
     ) -> FnResult<QueryValue> {
         if self.active_call_path.len() == 0 {
+            if self
+                .registry
+                .as_ref()
+                .is_some_and(|registry| registry.is_catalogue_bound())
+            {
+                return Err(crate::runtime::error::FunctionError::Compute(
+                    "catalogue-bound stored call requires a captured root invocation".into(),
+                ));
+            }
             if self.stored_call_resolver.is_some() {
                 return Err(crate::runtime::error::FunctionError::Compute(
                     "catalogue-backed stored call requires a captured root invocation".into(),

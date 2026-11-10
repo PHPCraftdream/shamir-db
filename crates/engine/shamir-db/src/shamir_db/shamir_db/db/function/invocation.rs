@@ -13,6 +13,7 @@ use crate::shamir_db::shamir_db::ShamirDb;
 use crate::{DbError, DbResult};
 
 use super::super::db_gateway::FacadeDbGateway;
+use super::artifact::artifact_id_from_record;
 
 pub(in crate::shamir_db::shamir_db) struct ShamirDbCallResolver {
     shamir: ShamirDb,
@@ -41,6 +42,10 @@ impl StoredCallResolver for ShamirDbCallResolver {
         let binding = registry
             .capture(name)
             .ok_or_else(|| FunctionError::NotFound(name.to_string()))?;
+        #[cfg(test)]
+        if let Some(hook) = self.shamir.function_resolution_hook.get() {
+            hook(self.shamir.clone(), name.to_string(), true).await;
+        }
         let record = self
             .shamir
             .system_store()
@@ -60,6 +65,14 @@ impl StoredCallResolver for ShamirDbCallResolver {
         let record = record.ok_or_else(|| {
             FunctionError::Compute("nested target is missing from the catalogue".into())
         })?;
+        let row_artifact_id = artifact_id_from_record(&record).map_err(|error| {
+            FunctionError::Compute(format!("invalid nested target artifact id: {error}"))
+        })?;
+        if row_artifact_id.as_deref() != binding.artifact_id() {
+            return Err(FunctionError::Compute(
+                "function changed during resolution".into(),
+            ));
+        }
         let meta = strict_nested_meta(&record)?;
         let owner = ResourceMeta::owner_field(&record).ok_or_else(|| {
             FunctionError::Compute("nested target owner is missing or invalid".into())
@@ -139,12 +152,31 @@ impl ShamirDb {
             .functions()
             .capture(name)
             .ok_or_else(|| DbError::Function(format!("function '{name}' not found")))?;
+        #[cfg(test)]
+        if let Some(hook) = self.function_resolution_hook.get() {
+            hook(self.clone(), name.to_string(), false).await;
+        }
         let record = self.system_store().load_function(name).await?;
         let current_binding = self
             .functions()
             .capture(name)
             .ok_or_else(|| DbError::Function("function changed during resolution".into()))?;
         if !binding.same_as(&current_binding) {
+            return Err(DbError::Function(
+                "function changed during resolution".into(),
+            ));
+        }
+        if record.is_none() && !binding.is_database_builtin() {
+            return Err(DbError::Function(
+                "catalogue-managed function is missing from the catalogue".to_string(),
+            ));
+        }
+        let row_artifact_id = match record.as_ref() {
+            Some(record) => artifact_id_from_record(record)
+                .map_err(|error| DbError::Function(format!("invalid root artifact id: {error}")))?,
+            None => None,
+        };
+        if row_artifact_id.as_deref() != binding.artifact_id() {
             return Err(DbError::Function(
                 "function changed during resolution".into(),
             ));
@@ -173,7 +205,7 @@ impl ShamirDb {
                 "root Definer owner is missing or invalid".into(),
             ));
         }
-        let mut ctx = self.build_invoke_ctx(name, actor, resolver, root_owner, metadata.as_ref());
+        let mut ctx = self.build_invoke_ctx(actor, resolver, root_owner, metadata.as_ref());
         if let Some((db_name, repo)) = db {
             let gateway = Arc::new(FacadeDbGateway {
                 shamir: self.clone(),

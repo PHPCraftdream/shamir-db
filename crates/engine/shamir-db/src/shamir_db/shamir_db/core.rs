@@ -18,6 +18,17 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+#[cfg(test)]
+pub(super) type FunctionResolutionHook = Box<
+    dyn Fn(
+            ShamirDb,
+            String,
+            bool,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
+
 pub(in crate::shamir_db) const SYSTEM_DB_NAME: &str = "__system__";
 
 use crate::engine::migration::MigrationCoordinator;
@@ -191,6 +202,9 @@ pub struct ShamirDb {
     /// future parks on this Notify at the final-write boundary until released.
     #[cfg(any(test, feature = "test-util"))]
     pub(crate) final_write_release: std::sync::Arc<tokio::sync::Notify>,
+    /// Deterministic interleaving seam for catalogue-bound function resolution tests.
+    #[cfg(test)]
+    pub(super) function_resolution_hook: Arc<std::sync::OnceLock<FunctionResolutionHook>>,
     /// Round-5 T6 seam: when armed, `DROP … CASCADE` parks INSIDE the
     /// interlock after the binding check, so the test holds the
     /// replication-control lock mid-cascade (a moved lock acquisition turns
@@ -278,7 +292,7 @@ impl ShamirDb {
                 Arc::new(WasmEngine::new().map_err(|e| DbError::Function(e.to_string()))?)
             }
         };
-        let functions = Arc::new(FunctionRegistry::with_builtins());
+        let functions = Arc::new(FunctionRegistry::with_catalogue_builtins());
         let globals = Arc::new(GlobalVars::new());
         globals.seed_env(&policy);
 
@@ -334,6 +348,8 @@ impl ShamirDb {
             final_write_arrived: std::sync::Arc::new(tokio::sync::Notify::new()),
             #[cfg(any(test, feature = "test-util"))]
             final_write_release: std::sync::Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            function_resolution_hook: Arc::new(std::sync::OnceLock::new()),
             #[cfg(test)]
             cascade_pause: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
@@ -914,7 +930,6 @@ impl ShamirDb {
     /// capabilities and the shared nested-call resolver.
     pub(super) fn build_invoke_ctx(
         &self,
-        fn_name: &str,
         actor: Actor,
         resolver: Arc<dyn StoredCallResolver>,
         definer_owner: Option<Actor>,
@@ -922,10 +937,9 @@ impl ShamirDb {
     ) -> FnCtx {
         let grants = target_meta
             .map(|meta| meta.secret_grants.clone())
-            .or_else(|| self.function_meta(fn_name).map(|meta| meta.secret_grants))
             .unwrap_or_default();
         let net = target_meta.map_or_else(
-            || self.build_net_gateway(fn_name),
+            || self.net_allowlist.gateway(Some(&[])),
             |meta| self.net_allowlist.gateway(Some(&meta.net_grants)),
         );
         FnCtx::with_globals(self.globals.clone())

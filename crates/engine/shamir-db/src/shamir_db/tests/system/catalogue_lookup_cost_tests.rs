@@ -3,11 +3,14 @@ use crate::engine::function::Params;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::query::admin::GroupRef;
-use crate::shamir_db::shamir_db::ShamirDb;
+use crate::shamir_db::shamir_db::{ArtifactKind, ShamirDb};
 use crate::shamir_db::system_store::{SystemStore, SystemStoreConfig};
 use crate::DbError;
+use shamir_engine::function::{FunctionMeta, Security, Visibility};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::Query;
+use shamir_types::types::common::new_map;
+use shamir_types::types::value::QueryValue;
 
 #[tokio::test]
 async fn rv_db_5977a782_missing_name_is_cached_without_catalogue_io() {
@@ -108,6 +111,17 @@ async fn invocation_reads_one_function_and_one_settings_snapshot() {
         Ok(shamir_types::types::value::QueryValue::Null)
     })
     .unwrap();
+    let mut fields = new_map();
+    fields.insert("name".to_string(), QueryValue::Str("sample".to_string()));
+    fields.insert("lang".to_string(), QueryValue::Str("rust".to_string()));
+    fields.insert("kind".to_string(), ArtifactKind::Native.as_query_value());
+    let mut record = QueryValue::Map(fields);
+    FunctionMeta::new(Visibility::Public, Security::Invoker, vec![], vec![])
+        .inject_into(&mut record);
+    db.system_store()
+        .save_function("sample", &record, &ResourceMeta::open())
+        .await
+        .unwrap();
     let store = db.system_store();
     let batch = db.new_batch_context();
     for variant in 0..4 {
