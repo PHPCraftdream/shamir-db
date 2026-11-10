@@ -107,6 +107,52 @@ pub(crate) fn append_message_block(
     Ok(addrs)
 }
 
+pub(crate) fn append_builder_messages(
+    image: &mut Vec<u8>,
+    append: bool,
+    response_rows: bool,
+    response_affected: bool,
+    limit: u64,
+) -> Result<(u32, u32, u32, u32, u32), EmitError> {
+    let mut messages: Vec<&[u8]> = Vec::new();
+    if append || response_rows {
+        messages.extend([&b"alias"[..], &b"results"[..], &b"records"[..]]);
+    }
+    if response_affected {
+        if !append && !response_rows {
+            messages.push(&b"results"[..]);
+        }
+        messages.extend([&b"stats"[..], &b"records_scanned"[..]]);
+    }
+    let addresses = append_message_block(image, &messages, limit)?;
+    let address = |index: usize| addresses.get(index).copied().unwrap_or(0);
+    let results = if append || response_rows {
+        address(1)
+    } else {
+        address(0)
+    };
+    let affected_base = if append || response_rows { 3 } else { 1 };
+    Ok((
+        if append { address(0) } else { 0 },
+        results,
+        if append || response_rows {
+            address(2)
+        } else {
+            0
+        },
+        if response_affected {
+            address(affected_base)
+        } else {
+            0
+        },
+        if response_affected {
+            address(affected_base + 1)
+        } else {
+            0
+        },
+    ))
+}
+
 /// Appends raw bytes to the static image under `limit`; returns the bytes'
 /// ABSOLUTE address (`STATIC_START + offset`).
 fn append_bytes(image: &mut Vec<u8>, bytes: &[u8], limit: u64) -> Result<u32, EmitError> {
@@ -329,17 +375,17 @@ pub(crate) fn collect_db_result_nodes(ir: &IrModule) -> Result<Vec<u32>, EmitErr
     let mut distinct: Vec<u32> = Vec::new();
     for function in &ir.functions {
         for inst in &function.insts {
-            let (InstKind::DbCall { result, .. } | InstKind::ResponseGet { result, .. }) =
-                &inst.kind
-            else {
-                continue;
+            let result = match &inst.kind {
+                InstKind::DbCall { result, .. } | InstKind::ResponseGet { result, .. } => *result,
+                InstKind::ResponseAffected { .. } => continue,
+                _ => continue,
             };
             let node = ir
                 .type_nodes
-                .get(*result as usize)
+                .get(result as usize)
                 .ok_or(EmitError::Internal("projection node out of range"))?;
             check_node_names(node, name_limit)?;
-            let depth = node_depth(&ir.type_nodes, *result)?;
+            let depth = node_depth(&ir.type_nodes, result)?;
             if depth > u64::from(PROJECTION_MAX_DEPTH) {
                 return Err(EmitError::LimitExceeded {
                     code: "B001",
@@ -347,8 +393,8 @@ pub(crate) fn collect_db_result_nodes(ir: &IrModule) -> Result<Vec<u32>, EmitErr
                     observed: depth,
                 });
             }
-            if !distinct.contains(result) {
-                distinct.push(*result);
+            if !distinct.contains(&result) {
+                distinct.push(result);
             }
         }
     }

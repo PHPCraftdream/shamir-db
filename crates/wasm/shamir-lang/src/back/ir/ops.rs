@@ -210,6 +210,10 @@ pub enum InstKind {
         alias: InstId,
         entry: InstId,
     },
+    ResponseAffected {
+        response: InstId,
+        alias: InstId,
+    },
     /// Encodes the request plan, calls the host `db_execute` import and
     /// returns an opaque response cell holding the raw answer bytes -> I32.
     DbExecute {
@@ -282,6 +286,7 @@ pub(crate) fn inst_result_kind(
         | InstKind::RecordCell { .. }
         | InstKind::DbCall { .. }
         | InstKind::BatchAppend { .. }
+        | InstKind::ResponseAffected { .. }
         | InstKind::DbExecute { .. }
         | InstKind::ResponseGet { .. }
         | InstKind::Compare { .. } => Some(ValueKind::I32),
@@ -382,6 +387,10 @@ pub(crate) fn inst_operands(kind: &InstKind, out: &mut Vec<InstId>) {
             out.push(*entry);
         }
         InstKind::DbExecute { request } => out.push(*request),
+        InstKind::ResponseAffected { response, alias } => {
+            out.push(*response);
+            out.push(*alias);
+        }
         InstKind::ResponseGet {
             response, alias, ..
         } => {

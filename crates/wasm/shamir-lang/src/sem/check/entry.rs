@@ -14,6 +14,31 @@ use super::{calls, resolve, statement};
 /// Maximum number of retained diagnostics.
 pub(super) const MAX_DIAGNOSTICS: usize = 64;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum PlanOperation {
+    Read,
+    Insert,
+    Update,
+    Delete,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum PlanFact {
+    Batch {
+        operations: Vec<(String, PlanOperation)>,
+        unknown_alias: bool,
+    },
+    Request {
+        operations: Vec<(String, PlanOperation)>,
+        unknown_alias: bool,
+    },
+    Response {
+        operations: Vec<(String, PlanOperation)>,
+        unknown_alias: bool,
+    },
+    Unknown,
+}
+
 /// Shared semantic-checker context; arena-parallel tables indexed by id.
 pub(super) struct Checker<'a> {
     pub(super) module: &'a front::Module,
@@ -24,6 +49,7 @@ pub(super) struct Checker<'a> {
     pub(super) type_map: Vec<Option<TypeId>>,
     pub(super) resolved: Vec<Option<crate::sem::ResolvedTarget>>,
     pub(super) calls: Vec<Option<crate::sem::ResolvedCall>>,
+    pub(super) plan_facts: Vec<Option<PlanFact>>,
     pub(super) expr_types: Vec<Option<TypeId>>,
     pub(super) binding_slots: Vec<Option<u32>>,
     pub(super) slot_mutability: Vec<Vec<bool>>,
@@ -114,6 +140,7 @@ pub fn check_scoped(
         type_map: vec![None; module.types.len()],
         resolved: vec![None; module.expressions.len()],
         calls: vec![None; module.expressions.len()],
+        plan_facts: vec![None; module.expressions.len()],
         expr_types: vec![None; module.expressions.len()],
         binding_slots: vec![None; module.statements.len()],
         slot_mutability: (0..module.functions.len()).map(|_| Vec::new()).collect(),

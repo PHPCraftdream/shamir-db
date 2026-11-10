@@ -1,6 +1,6 @@
 //! Lowering of the typed builder intrinsics: `batch`, `batch_id`,
-//! `batch_read`, `batch_insert`, `request`, `db_execute`, `response_rows`
-//! and `response_inserted`.
+//! `batch_read`, `batch_insert`, `batch_update`, `batch_delete`, `request`,
+//! `db_execute`, `response_rows`, `response_inserted` and `response_affected`.
 //!
 //! Every argument is lowered, boxed to a cell pointer and spilled into a
 //! fresh local (a later argument may open blocks), then reloaded in the
@@ -23,10 +23,13 @@ pub(crate) fn is_batch_builtin(builtin: BuiltinId) -> bool {
             | BuiltinId::BatchId
             | BuiltinId::BatchRead
             | BuiltinId::BatchInsert
+            | BuiltinId::BatchUpdate
+            | BuiltinId::BatchDelete
             | BuiltinId::Request
             | BuiltinId::DbExecute
             | BuiltinId::ResponseRows
             | BuiltinId::ResponseInserted
+            | BuiltinId::ResponseAffected
     )
 }
 
@@ -115,6 +118,47 @@ pub(crate) fn lower_batch_builtin(
                 span,
             )
         }
+        BuiltinId::BatchUpdate => {
+            let filter_ty = *types
+                .get(3)
+                .ok_or(IrError::Internal("lower: builder intrinsic arity mismatch"))?;
+            let filter = read_filter(ctx, arg(3)?, filter_ty, span)?.ok_or(IrError::Internal(
+                "lower: mutation predicate unexpectedly has no filter",
+            ))?;
+            let entry = update_entry(ctx, arg(2)?, filter, arg(4)?, span)?;
+            ctx.builder.append(
+                InstKind::BatchAppend {
+                    batch: arg(0)?,
+                    alias: arg(1)?,
+                    entry,
+                },
+                span,
+            )
+        }
+        BuiltinId::BatchDelete => {
+            let filter_ty = *types
+                .get(3)
+                .ok_or(IrError::Internal("lower: builder intrinsic arity mismatch"))?;
+            let filter = read_filter(ctx, arg(3)?, filter_ty, span)?.ok_or(IrError::Internal(
+                "lower: mutation predicate unexpectedly has no filter",
+            ))?;
+            let entry = delete_entry(ctx, arg(2)?, filter, span)?;
+            ctx.builder.append(
+                InstKind::BatchAppend {
+                    batch: arg(0)?,
+                    alias: arg(1)?,
+                    entry,
+                },
+                span,
+            )
+        }
+        BuiltinId::ResponseAffected => ctx.builder.append(
+            InstKind::ResponseAffected {
+                response: arg(0)?,
+                alias: arg(1)?,
+            },
+            span,
+        ),
         _ => Err(IrError::Internal("lower: not a builder intrinsic")),
     }
 }
@@ -336,6 +380,43 @@ fn read_entry(
     let flag = static_cell(ctx, true_cell, span)?;
     set_slot(ctx, region, next, flag, span)?;
     record(ctx, region, descriptor, fields as u32, span)
+}
+
+/// Update entry: `update`, `where`, `set`, `return_result`.
+fn update_entry(
+    ctx: &mut LowerCtx,
+    table: InstId,
+    filter: InstId,
+    set: InstId,
+    span: Span,
+) -> Result<InstId, IrError> {
+    let descriptor = ctx
+        .builder
+        .record_descriptor(&["update", "where", "set", "return_result"].map(str::to_string))?;
+    let region = region_of(ctx, 4, span)?;
+    set_slot(ctx, region, 0, table, span)?;
+    set_slot(ctx, region, 1, filter, span)?;
+    set_slot(ctx, region, 2, set, span)?;
+    let flag = static_cell(ctx, statics(ctx)?.true_cell, span)?;
+    set_slot(ctx, region, 3, flag, span)?;
+    record(ctx, region, descriptor, 4, span)
+}
+
+fn delete_entry(
+    ctx: &mut LowerCtx,
+    table: InstId,
+    filter: InstId,
+    span: Span,
+) -> Result<InstId, IrError> {
+    let descriptor = ctx
+        .builder
+        .record_descriptor(&["delete_from", "where", "return_result"].map(str::to_string))?;
+    let region = region_of(ctx, 3, span)?;
+    set_slot(ctx, region, 0, table, span)?;
+    set_slot(ctx, region, 1, filter, span)?;
+    let flag = static_cell(ctx, statics(ctx)?.true_cell, span)?;
+    set_slot(ctx, region, 2, flag, span)?;
+    record(ctx, region, descriptor, 3, span)
 }
 
 /// The insert entry record: `insert_into`, a one-element `values`,

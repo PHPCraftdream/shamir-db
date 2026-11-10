@@ -11,8 +11,9 @@ use crate::{
 };
 use shamir_lang::{compile, CompileOptions};
 use shamir_query_builder::batch::Batch;
+use shamir_query_builder::filter::{and, eq};
 use shamir_query_builder::query::Query;
-use shamir_query_builder::write::{doc, insert};
+use shamir_query_builder::write::{delete, doc, insert, update};
 use shamir_query_builder::ToWire;
 use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
@@ -388,4 +389,223 @@ async fn queries_keep_the_insertion_order_of_the_builder_calls() {
     native.query("mid", Query::from("users"));
     let decoded = assert_matches_native_batch(&requests[0], &native);
     assert_eq!(query_aliases(&decoded), ["zeta", "alpha", "mid"]);
+}
+
+const MUTATION_PLAN: &str = r#"@entry procedure mutate(owner: i64, status: string) -> i64 {
+    let changes: { profile: { active: bool, city: string }, tags: [string] } = { profile: { active: true, city: "Paris" }, tags: ["vip", "paid"] };
+    let b = batch_update(batch(), "zeta", "profiles", { owner: owner, status: status }, changes);
+    let b2 = batch_delete(b, "alpha", "sessions", { owner: owner });
+    let b3 = batch_update(b2, "mid", "profiles", { id: 7 }, { status: "archived" });
+    let resp = db_execute(request(b3));
+    let affected: i64? = response_affected(resp, "zeta");
+    if (is_null(affected)) { return -1; }
+    return unwrap(affected);
+}"#;
+
+/// The guest builds a mixed update/delete plan whose native counterpart uses
+/// only the public typed builders; this pins operation DTOs, predicate
+/// conjunctions, nested values and source insertion order at the byte boundary.
+#[tokio::test]
+async fn batch_update_delete_match_native_builder_bytes_and_keep_order() {
+    let function = compiled(MUTATION_PLAN).await;
+    let db = gateway(affected_response_for("zeta", int(3)));
+    let db_gateway: Arc<dyn DbGateway> = db.clone();
+    let ctx = FnCtx::new().with_db(db_gateway, "main".to_string());
+    let params: TMap<String, QueryValue> = [
+        ("owner".to_string(), int(42)),
+        ("status".to_string(), text("active")),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        function
+            .call(&ctx, &FnBatch::new(), &Params::from_map(params))
+            .await
+            .expect("mutation plan executes"),
+        int(3)
+    );
+
+    let requests = db.requests.lock().expect("requests lock");
+    assert_eq!(requests.len(), 1);
+    let mut native = Batch::new();
+    native
+        .try_update(
+            "zeta",
+            update("profiles")
+                .where_(and(vec![eq("owner", 42_i64), eq("status", "active")]))
+                .set(
+                    doc()
+                        .set_value(
+                            "profile",
+                            map_of(&[("active", QueryValue::Bool(true)), ("city", text("Paris"))]),
+                        )
+                        .set_value("tags", QueryValue::List(vec![text("vip"), text("paid")])),
+                ),
+        )
+        .expect("native update builds");
+    native
+        .try_delete("alpha", delete("sessions").where_(eq("owner", 42_i64)))
+        .expect("native delete builds");
+    native
+        .try_update(
+            "mid",
+            update("profiles")
+                .where_(eq("id", 7_i64))
+                .set(doc().set("status", "archived").expect("native set builds")),
+        )
+        .expect("native update builds");
+
+    let decoded = assert_matches_native_batch(&requests[0], &native);
+    assert_eq!(query_aliases(&decoded), ["zeta", "alpha", "mid"]);
+}
+
+/// The mutation intrinsics reuse the existing single `db_execute` import;
+/// `response_affected` is guest-side projection, not a new host import.
+#[test]
+fn batch_mutations_do_not_add_a_host_import() {
+    let options = CompileOptions {
+        stage: ShamirStage::Procedures,
+        ..CompileOptions::default()
+    };
+    let module = compile(MUTATION_PLAN, &options).expect("mutation source compiles");
+    // Derivation: `raise_error` plus the pre-existing `db_execute` import.
+    assert_eq!(module.report.import_count, 2);
+}
+
+const AFFECTED_ONE: &str = r#"@entry procedure affected() -> i64 {
+    let b = batch_update(batch(), "u", "users", { id: 7 }, { active: true });
+    let resp = db_execute(request(b));
+    let count: i64? = response_affected(resp, "u");
+    if (is_null(count)) { return -1; }
+    return unwrap(count);
+}"#;
+
+fn response_with_results(results: QueryValue) -> Vec<u8> {
+    map_of(&[("results", results)])
+        .to_bytes()
+        .expect("response encodes")
+        .to_vec()
+}
+
+fn response_with_entry(alias: &str, entry: QueryValue) -> Vec<u8> {
+    response_with_results(map_of(&[(alias, entry)]))
+}
+
+fn affected_response_for(alias: &str, count: QueryValue) -> Vec<u8> {
+    response_with_entry(
+        alias,
+        map_of(&[("stats", map_of(&[("records_scanned", count)]))]),
+    )
+}
+
+#[tokio::test]
+async fn response_affected_projects_zero_and_i64_max() {
+    let function = compiled(AFFECTED_ONE).await;
+    for count in [0, i64::MAX] {
+        let observed = call_with(&function, gateway(affected_response_for("u", int(count))))
+            .await
+            .expect("valid affected count projects");
+        assert_eq!(observed, int(count));
+    }
+}
+
+#[tokio::test]
+async fn response_affected_missing_alias_is_null_only_with_results_map() {
+    let function = compiled(
+        r#"@entry procedure missing() -> i64 {
+    let b = batch_delete(batch(), "d", "sessions", { owner: 7 });
+    let resp = db_execute(request(b));
+    let count: i64? = response_affected(resp, "absent");
+    if (is_null(count)) { return -1; }
+    return unwrap(count);
+}"#,
+    )
+    .await;
+    // A valid root results map with no `absent` entry represents no result;
+    // the same absence at the root/results boundary is a kind-3 error below.
+    let result = call_with(&function, gateway(response_with_results(map_of(&[]))))
+        .await
+        .expect("missing alias in a valid results map is nullable");
+    assert_eq!(result, int(-1));
+
+    let error = call_with(&function, gateway(response_root_missing_results()))
+        .await
+        .expect_err("missing results root must not become null");
+    assert_codec(&error, "arg");
+}
+
+fn response_root_missing_results() -> Vec<u8> {
+    map_of(&[])
+        .to_bytes()
+        .expect("malformed response fixture encodes")
+        .to_vec()
+}
+
+/// This is deliberately raw response data: `QueryValue` cannot represent an
+/// unsigned integer above `i64::MAX`, and query construction remains builder-only.
+fn response_with_u64_max_count() -> Vec<u8> {
+    vec![
+        0x81, 0xa7, b'r', b'e', b's', b'u', b'l', b't', b's', // root results map
+        0x81, 0xa1, b'u', // results alias
+        0x81, 0xa5, b's', b't', b'a', b't', b's', // alias stats map
+        0x81, 0xaf, b'r', b'e', b'c', b'o', b'r', b'd', b's', b'_', b's', b'c', b'a', b'n', b'n',
+        b'e', b'd', // count key
+        0xcf, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // u64::MAX
+    ]
+}
+
+#[tokio::test]
+async fn response_affected_rejects_malformed_and_invalid_projection_shapes_as_kind_three() {
+    let function = compiled(AFFECTED_ONE).await;
+    let malformed = [
+        (
+            "wrong response root type",
+            QueryValue::List(Vec::new())
+                .to_bytes()
+                .expect("malformed response root encodes")
+                .to_vec(),
+        ),
+        (
+            "wrong results type",
+            response_with_results(QueryValue::List(Vec::new())),
+        ),
+        ("missing stats", response_with_entry("u", map_of(&[]))),
+        (
+            "wrong stats type",
+            response_with_entry("u", map_of(&[("stats", text("not a map"))])),
+        ),
+        (
+            "missing count",
+            response_with_entry("u", map_of(&[("stats", map_of(&[]))])),
+        ),
+        (
+            "wrong count type",
+            affected_response_for("u", text("not an integer")),
+        ),
+        ("negative count", affected_response_for("u", int(-1))),
+        ("wrong alias entry type", response_with_entry("u", int(1))),
+        (
+            "unsigned count above i64::MAX",
+            response_with_u64_max_count(),
+        ),
+    ];
+    for (case, response) in malformed {
+        let error = call_with(&function, gateway(response)).await.unwrap_err();
+        assert_codec(
+            &error,
+            if case == "unsigned count above i64::MAX" {
+                "u64"
+            } else {
+                "arg"
+            },
+        );
+    }
+
+    // Raw response bytes exercise the shared decoder's truncation rejection;
+    // this is response decoding, not hand-built query/request construction.
+    let truncated = vec![0x81, 0xa7, b'r', b'e', b's', b'u', b'l', b't', b's'];
+    let error = call_with(&function, gateway(truncated))
+        .await
+        .expect_err("truncated response must fail decoding");
+    assert_codec(&error, "trunc");
 }
