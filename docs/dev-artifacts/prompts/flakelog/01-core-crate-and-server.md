@@ -36,7 +36,7 @@ Read first: `docs/dev-artifacts/design/flake-failure-logs.md` (the design and th
      token expiry, first frame/close/reset observed, the code or error received).
 5. Add `shamir-test-diag` as a `[dev-dependencies]` entry only (path dependency) of each crate you adopt it in.
 6. Update the workspace section of `CLAUDE.md` (crate count 30 -> 31 and the crate list) with a one-line mention;
-   update `scripts/ci/affected_crates.py` or other crate lists only if the repo requires every crate to be
+   update `scripts/ci/matrix/affected_crates.py` or other crate lists only if the repo requires every crate to be
    registered there (read them and say what you found).
 
 ## Acceptance

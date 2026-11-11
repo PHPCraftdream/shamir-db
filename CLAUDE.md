@@ -454,7 +454,7 @@ CI is segmented into two tiers to keep the shared runner pool responsive
 (see `.github/workflows/ci.yml`):
 
 * **FAST tier — draft PR pushes without the full-tier marker.** One ubuntu job (`fast`): `cargo fmt
-  --check`, the `scripts/ci/affected_crates.py` unit tests, then clippy and
+  --check`, the `scripts/ci/matrix/affected_crates.py` unit tests, then clippy and
   lib tests (`./scripts/test.sh`) limited to the AFFECTED crates (changed
   crate + its workspace dependents). Falls back to `--workspace` when the
   diff cannot be bounded (lockfile, toolchain, `.github/`, scripts, …) and
@@ -464,9 +464,13 @@ CI is segmented into two tiers to keep the shared runner pool responsive
   test ×2, integration ×2 (ubuntu, windows), engine feature cells on ubuntu,
   ts-unit, cooldown, `deny`, loom) plus the path-gated numa workflow (opt-in
   QEMU tier). On pull_request this tier narrows by the dependency closure: the
-  new `affected` job runs `scripts/ci/affected_crates.py` (the same selector
+  new `affected` job runs `scripts/ci/matrix/affected_crates.py` (the same selector
   the fast tier uses) and every heavy step gates on its outputs, so a change
   to a crate tests that crate plus its workspace dependents — not all 31.
+  The workflow's shadow step writes the legacy execution selection beside the new
+  `python3 -I scripts/ci/matrix/test_matrix.py --format explain` report to the
+  step summary; shadow failures warn without failing CI. Hidden test/data edges
+  are documented in `scripts/ci/matrix/edges.toml` and validated by `--check`.
   Master pushes, `workflow_dispatch` and the weekly schedule (with macOS)
   always run the whole workspace. Global paths force the whole workspace:
   `Cargo.lock`, the root `Cargo.toml`, toolchain files, `deny.toml`,
@@ -505,7 +509,7 @@ CI is segmented into two tiers to keep the shared runner pool responsive
      (or "Run workflow" in the UI) — `workflow_dispatch` is always full.
 
   Test selection is NOT read from the commit message: on PRs (fast tier and
-  full tier alike) the tested crates come from the diff (`scripts/ci/affected_crates.py`).
+  full tier alike) the tested crates come from the diff (`scripts/ci/matrix/affected_crates.py`).
   The marker only decides fast vs full. Rule for sprints: waves of work go
   as drafts (fast tier); the full matrix is run once at the end of the
   sprint — by the marker, `gh pr ready` or a manual dispatch.

@@ -3,7 +3,7 @@
 Owner's rule: do not test all crates on every change; read the real test matrix by climbing the dependency tree
 from the edited crates up to all their consumers (reverse dependency closure, normal + dev + build edges). The
 topmost crate must not trigger the tests of other crates. Today only the draft "fast" tier does this
-(`scripts/ci/affected_crates.py`); the FULL tier (the merge gate) always runs the whole workspace. Measured on the
+(`scripts/ci/matrix/affected_crates.py`); the FULL tier (the merge gate) always runs the whole workspace. Measured on the
 last full run: the Windows `integration` job (32 min) and the Windows archive build (9.5 min) are the critical path;
 a mean commit affects 7.3 of 32 crates and ~756 of 1059 test-seconds. Target: -29% test time and the same share of
 build time per PR, with the safety nets below.
@@ -12,7 +12,7 @@ build time per PR, with the safety nets below.
 
 1. **New job `affected`** in `.github/workflows/ci.yml` (`needs: plan`, `if: needs.plan.outputs.full == 'true'`,
    ubuntu, 5 minutes, full-history checkout like the fast tier, python only, no Rust toolchain). It runs
-   `scripts/ci/affected_crates.py` and publishes outputs:
+   `scripts/ci/matrix/affected_crates.py` and publishes outputs:
    * `args`: `--workspace`, an empty string, or `-p a -p b ...` (same contract the fast tier already validates;
      keep that validation loop and move it into the script's own output check so both tiers share it);
    * boolean flags (string `true`/`false`): `engine` (shamir-engine in the set or workspace), `ts` (any path under
@@ -43,7 +43,7 @@ build time per PR, with the safety nets below.
    * `ts-unit`: only if `affected.ts == 'true'`; `node-binding`: only if `affected.node == 'true'`.
    * Unchanged: `fmt`, `source-integrity`, `rust-guard-selftest`, `test-discovery`, `cooldown`, `deny`, `plan`.
    Skipped steps must print `::notice::` naming the reason, so a green run shows what was narrowed.
-3. **`scripts/ci/affected_crates.py` rewrite points** (keep its CLI and unit-test style):
+3. **`scripts/ci/matrix/affected_crates.py` rewrite points** (keep its CLI and unit-test style):
    * map a changed path to its package by the NEAREST ANCESTOR DIRECTORY CONTAINING A WORKSPACE MANIFEST (from
      `cargo metadata` manifest paths), not by the assumption `crates/<dir>/`; this must keep working when the crates
      are later regrouped under `crates/<group>/<crate>/`; `vendor/hnsw_rs` is a workspace package too;
@@ -63,7 +63,7 @@ build time per PR, with the safety nets below.
 
 ## Unit tests (required, python `unittest`, written not run: no local test runs)
 
-`scripts/ci/tests/test_affected_crates.py`: nearest-manifest mapping (including a synthetic nested group layout
+`scripts/ci/tests/matrix/test_affected_crates.py`: nearest-manifest mapping (including a synthetic nested group layout
 `crates/g/x`), the client-ts flag, event rule (`push`/`schedule`/`workflow_dispatch` => workspace),
 the flags (`engine`, `ts`, `node`, `docs_only`), dev-dependency closure, global-path sentinel, github-output format.
 `scripts/ci/tests/gates/.../test_merge_gate_check.py`: the new required job `affected` (present/missing, skipped in

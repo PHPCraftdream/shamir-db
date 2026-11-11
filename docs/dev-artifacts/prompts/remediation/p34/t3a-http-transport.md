@@ -61,7 +61,7 @@ A design note `docs/dev-artifacts/audits/2026-11-01-token-t3a-http-transport/DES
 
 ## Scope
 
-New crate `crates/shamir-transport-http` and its design note. Other files only where adding a workspace crate requires it: grep `scripts/`, `.github/`, `deploy/` and `CLAUDE.md` for lists that enumerate `shamir-transport-ws` (for example `scripts/test.sh` scopes, `scripts/ci/affected_crates.py` tables and its tests) and extend those lists minimally; report each such edit. Do NOT edit `CLAUDE.md` (its crate list changes in the documentation stage T8). `Cargo.lock` will change (a new workspace member); say so. Nothing in `shamir-server`, `shamir-connect` or any other crate changes.
+New crate `crates/shamir-transport-http` and its design note. Other files only where adding a workspace crate requires it: grep `scripts/`, `.github/`, `deploy/` and `CLAUDE.md` for lists that enumerate `shamir-transport-ws` (for example `scripts/test.sh` scopes, `scripts/ci/matrix/affected_crates.py` tables and its tests) and extend those lists minimally; report each such edit. Do NOT edit `CLAUDE.md` (its crate list changes in the documentation stage T8). `Cargo.lock` will change (a new workspace member); say so. Nothing in `shamir-server`, `shamir-connect` or any other crate changes.
 
 ## Coordination with other tasks
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Affected-crates selector for the CI fast tier.
+"""Legacy affected-crates selector for the CI fast tier.
 
 Reads the files changed between a base ref and HEAD (``git diff --name-only
 <base>...HEAD``) and prints, on ONE line, the sorted ``-p <crate>`` arguments

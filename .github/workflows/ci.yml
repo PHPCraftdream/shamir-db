@@ -45,7 +45,7 @@ jobs:
   # counts: one marker buys one full run, the next push is fast again. The
   # message is fetched through the API into a file and never interpolated
   # into a shell line. Test selection inside the fast tier stays diff-based
-  # (scripts/ci/affected_crates.py), not message-based.
+  # (scripts/ci/matrix/affected_crates.py), not message-based.
   plan:
     name: tier plan
     runs-on: ubuntu-latest
@@ -73,7 +73,7 @@ jobs:
           python3 -I scripts/ci/gates/full_tier_plan.py --event "$EVENT_NAME" --draft "$DRAFT" --message-file "$message"
 
   # AFFECTED-CRATES PLANNER (full tier). Runs the same selector the fast
-  # tier uses (scripts/ci/affected_crates.py) and publishes the dependency
+  # tier uses (scripts/ci/matrix/affected_crates.py) and publishes the dependency
   # closure as job outputs; every heavy full-tier step below is gated on
   # them, so the merge-gate matrix tests only what a change can affect.
   # Event rule (decided inside the script): pull_request diffs
@@ -111,12 +111,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/ci/affected_crates.py --base origin/master --event "$EVENT_NAME" --format github-output >> "$GITHUB_OUTPUT"
+          python3 scripts/ci/matrix/affected_crates.py --base origin/master --event "$EVENT_NAME" --format github-output >> "$GITHUB_OUTPUT"
+      - name: Matrix selector shadow
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          case "$EVENT_NAME" in
+            pull_request) new="$(python3 -I scripts/ci/matrix/test_matrix.py --base "$PR_BASE" --head "$PR_HEAD" --event pull_request --format explain 2>"$RUNNER_TEMP/matrix-shadow.err")" ;;
+            push) new="$(python3 -I scripts/ci/matrix/test_matrix.py --event push --before "$BEFORE" --after "$AFTER" --format explain 2>"$RUNNER_TEMP/matrix-shadow.err")" ;;
+            workflow_dispatch|schedule) new="$(python3 -I scripts/ci/matrix/test_matrix.py --range HEAD^..HEAD --format explain 2>"$RUNNER_TEMP/matrix-shadow.err")" ;;
+            *) echo "::warning::matrix shadow skipped for unsupported event"; exit 0 ;;
+          esac
+          new_rc=$?
+          if [ "$new_rc" -ne 0 ]; then echo "::warning::matrix shadow failed; no summary appended"; exit 0; fi
+          old="$(python3 scripts/ci/matrix/affected_crates.py --base origin/master --event "$EVENT_NAME" 2>"$RUNNER_TEMP/old-selector-shadow.err")"
+          old_rc=$?
+          if [ "$old_rc" -ne 0 ]; then echo "::warning::old selector shadow failed; no summary appended"; exit 0; fi
+          { printf '## Matrix selector shadow\n\nOld execution selection: `%s`\n\n```text\n%s\n```\n' "$old" "$new"; } >> "$GITHUB_STEP_SUMMARY"
 
   # FAST tier — draft pull requests only. ONE ubuntu job with a shared
   # cargo cache: cargo fmt, the affected-crates selector's unit tests, then
   # clippy + lib tests limited to the crates the PR can affect
-  # (scripts/ci/affected_crates.py). Compile/lint errors surface in minutes
+  # (scripts/ci/matrix/affected_crates.py). Compile/lint errors surface in minutes
   # without queueing the 17-job full matrix. It never silently skips: a diff
   # the selector cannot bound runs --workspace; a docs-only diff runs fmt +
   # the selector's unit tests only. The FULL tier below (the merge gate)
@@ -146,7 +169,7 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
       - run: cargo fmt --all -- --check
-      - name: affected_crates.py unit tests
+      - name: matrix selector unit tests
         run: python3 -I -m unittest discover -s scripts/ci/tests
       # Layout limits (CLAUDE.md): <=7 direct entries per folder, <=1000
       # physical lines per source file, ratcheted against the committed
@@ -154,6 +177,8 @@ jobs:
       # unconditionally, including docs-only diffs (which skip clippy/tests).
       - name: layout check
         run: python3 -I scripts/ci/check_layout.py
+      - name: matrix self-check
+        run: python3 -I scripts/ci/matrix/test_matrix.py --check
       - name: Determine affected crates
         id: affected
         env:
@@ -161,11 +186,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args="$(python3 scripts/ci/affected_crates.py --base origin/master --event "$EVENT_NAME")"
+          args="$(python3 scripts/ci/matrix/affected_crates.py --base origin/master --event "$EVENT_NAME")"
           echo "args=$args" >> "$GITHUB_OUTPUT"
           if [ -z "$args" ]; then
             echo "::notice::docs-only diff: clippy and lib tests are deliberately skipped in the fast tier"
           fi
+      - name: Matrix selector shadow
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        shell: bash
+        run: |
+          set +e
+          set -uo pipefail
+          case "$EVENT_NAME" in
+            pull_request) new="$(python3 -I scripts/ci/matrix/test_matrix.py --base "$PR_BASE" --head "$PR_HEAD" --event pull_request --format explain 2>"$RUNNER_TEMP/matrix-shadow.err")" ;;
+            push) new="$(python3 -I scripts/ci/matrix/test_matrix.py --event push --before "$BEFORE" --after "$AFTER" --format explain 2>"$RUNNER_TEMP/matrix-shadow.err")" ;;
+            workflow_dispatch|schedule) new="$(python3 -I scripts/ci/matrix/test_matrix.py --range HEAD^..HEAD --format explain 2>"$RUNNER_TEMP/matrix-shadow.err")" ;;
+            *) echo "::warning::matrix shadow skipped for unsupported event"; exit 0 ;;
+          esac
+          new_rc=$?
+          if [ "$new_rc" -ne 0 ]; then echo "::warning::matrix shadow failed; no summary appended"; exit 0; fi
+          old="$(python3 scripts/ci/matrix/affected_crates.py --base origin/master --event "$EVENT_NAME" 2>"$RUNNER_TEMP/old-selector-shadow.err")"
+          old_rc=$?
+          if [ "$old_rc" -ne 0 ]; then echo "::warning::old selector shadow failed; no summary appended"; exit 0; fi
+          { printf '## Matrix selector shadow\n\nOld execution selection: `%s`\n\n```text\n%s\n```\n' "$old" "$new"; } >> "$GITHUB_STEP_SUMMARY"
       - name: wasm32 guest check (affected crates)
         env:
           AFFECTED: ${{ steps.affected.outputs.args }}
@@ -261,13 +309,14 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
-      - name: affected_crates.py unit tests
+      - name: matrix selector unit tests
         run: python3 -I -m unittest discover -s scripts/ci/tests
       # FULL-tier layout check (same as the fast tier's; together the two
       # cover every PR and every master push).
       - name: layout check
         run: python3 -I scripts/ci/check_layout.py
-
+      - name: matrix self-check
+        run: python3 -I scripts/ci/matrix/test_matrix.py --check
   # Lint on ubuntu and windows on every PR (macOS joins on workflow_dispatch
   # and the weekly schedule: CI-05, the macOS runner queue is the bottleneck).
   # Crucial for cross-platform correctness:
@@ -510,7 +559,7 @@ jobs:
         id: affected
         run: |
           set -euo pipefail
-          args="$(python3 scripts/ci/affected_crates.py --base origin/master)"
+          args="$(python3 scripts/ci/matrix/affected_crates.py --base origin/master)"
           echo "args=$args" >> "$GITHUB_OUTPUT"
       - name: engine feature cells 1 and 5
         if: steps.affected.outputs.args != ''

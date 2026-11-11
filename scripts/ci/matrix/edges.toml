@@ -1,0 +1,67 @@
+# Production sources that sit under a tests/ path (treated as production, not reported by --check).
+production_in_test_path = ["crates/engine/shamir-db/src/shamir_db/shamir_db/seed/tests/durability_init.rs"]
+canary = ["shamir-types", "shamir-query-types", "shamir-server", "shamir-sdk", "shamir-client"]
+
+[[edge]]
+paths = ["crates/wasm/shamir-sdk/**"]
+crates = ["shamir-wasm-host"]
+propagate = "prod"
+reason = "wasm-host's guest build workspace consumes SDK sources by path"
+
+[[edge]]
+paths = ["crates/wasm/shamir-sdk-macros/**"]
+crates = ["shamir-wasm-host"]
+propagate = "prod"
+reason = "wasm-host's guest build workspace includes the sibling SDK macro crate by path"
+
+[[edge]]
+paths = ["crates/query/shamir-query-builder/tests/fixtures/wire_ops_matrix.json"]
+crates = []
+propagate = "tests"
+flags = ["ts"]
+reason = "TypeScript wire-op parity tests read this shared fixture"
+
+[[edge]]
+paths = ["crates/query/shamir-query-builder/tests/fixtures/create_index_matrix.json", "crates/query/shamir-query-builder/tests/fixtures/vector_filter_msgpack.json", "crates/query/shamir-query-builder/tests/fixtures/repl_ddl_msgpack.json"]
+crates = []
+propagate = "tests"
+flags = ["ts"]
+reason = "three TypeScript parity suites consume shared Rust builder byte fixtures"
+
+[[edge]]
+paths = ["crates/query/shamir-query-types/test-vectors/**"]
+crates = []
+propagate = "tests"
+flags = ["ts"]
+reason = "TypeScript protocol tests read query-types vector files"
+
+[[edge]]
+paths = ["crates/query/shamir-query-types/test-vectors/username_precis.json"]
+crates = ["shamir-connect"]
+propagate = "tests"
+reason = "Rust username integration tests consume the shared PRECIS vector"
+
+[[edge]]
+paths = ["crates/net/shamir-connect/test-vectors", "crates/net/shamir-connect/test-vectors/**"]
+crates = []
+propagate = "tests"
+flags = ["ts"]
+reason = "TypeScript login tests read shared shamir-connect vectors"
+
+[[edge]]
+paths = ["deploy/**"]
+crates = ["shamir-server"]
+propagate = "tests"
+reason = "shamir-server config tests include shipped deployment profiles"
+
+[[edge]]
+paths = ["crates/engine/shamir-db/src/shamir_db/gateway/curl_gateway.rs"]
+crates = ["shamir-wasm-host"]
+propagate = "tests"
+reason = "wasm-host's gateway unit test includes this exact shamir-db source target"
+
+[[edge]]
+paths = ["Cargo.lock"]
+crates = ["shamir-storage"]
+propagate = "tests"
+reason = "shamir-storage unit test reads the root Cargo.lock directly"

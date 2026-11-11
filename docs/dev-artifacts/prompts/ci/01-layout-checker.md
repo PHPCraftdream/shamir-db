@@ -41,7 +41,7 @@ existing violations will be swept into subfolders / split files afterwards.
      will re-generate it in CI if your local tree differs; describe the
      command in the final message). Do not hand-edit counts.
 2. `scripts/ci/tests/test_check_layout.py` (unittest, like
-   `test_affected_crates.py`): fixtures built in a temporary git repo or via
+   `scripts/ci/tests/matrix/test_affected_crates.py`): fixtures built in a temporary git repo or via
    an injectable file list; cover folder limit, file limit, exclusions,
    baseline pass, baseline growth failure, new violation failure, baseline
    shrink hint, `--update-baseline` never adding entries.
