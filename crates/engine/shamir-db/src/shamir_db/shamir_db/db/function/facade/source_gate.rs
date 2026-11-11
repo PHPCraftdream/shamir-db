@@ -1,4 +1,5 @@
-use crate::access::{Action, Actor, ResourcePath};
+use crate::access::{Action, Actor, ResourceMeta, ResourcePath};
+use crate::shamir_db::shamir_db::access::AclMemo;
 use crate::shamir_db::shamir_db::{ArtifactKind, FunctionSource, ShamirDb};
 use crate::{DbError, DbResult};
 use shamir_engine::function::{
@@ -7,6 +8,12 @@ use shamir_engine::function::{
 };
 use shamir_types::types::value::QueryValue;
 use std::collections::BTreeMap;
+
+use super::super::invocation::strict_nested_meta;
+
+fn callable_row_metadata_is_valid(record: &QueryValue) -> bool {
+    strict_nested_meta(record).is_ok() && ResourceMeta::owner_field(record).is_some()
+}
 
 impl ShamirDb {
     /// Shared authorization for `shamir` language sources. Shamir compilation
@@ -34,15 +41,42 @@ impl ShamirDb {
 
     /// Snapshot persisted signatures from hash-identified `shamir` WASM rows.
     /// Runtime resolution remains responsible for artifact coherence.
-    pub(super) async fn callable_catalog_snapshot(&self) -> DbResult<BTreeMap<String, Vec<u8>>> {
+    pub(super) async fn callable_catalog_snapshot(
+        &self,
+        actor: &Actor,
+        source: &str,
+    ) -> DbResult<BTreeMap<String, Vec<u8>>> {
+        if !source.contains("call") {
+            return Ok(BTreeMap::new());
+        }
         let records = self.system_store.load_functions().await?;
+        let settings = if matches!(actor, Actor::System | Actor::Admin(_)) {
+            None
+        } else {
+            Some(self.system_store.load_invocation_settings().await)
+        };
+        let memo = AclMemo::default();
         let mut catalog = BTreeMap::new();
-        for record in records {
+        for record in &records {
             let Some(name) = record.get("name").and_then(QueryValue::as_str) else {
                 continue;
             };
             if record.get("lang").and_then(QueryValue::as_str) != Some("shamir")
-                || ArtifactKind::from_record(&record) != ArtifactKind::Wasm
+                || ArtifactKind::from_record(record) != ArtifactKind::Wasm
+                || !callable_row_metadata_is_valid(record)
+            {
+                continue;
+            }
+            if self
+                .authorize_invocation_with_settings(
+                    name,
+                    actor,
+                    Some(record),
+                    settings.as_ref().map(Result::as_ref),
+                    &memo,
+                )
+                .await
+                .is_err()
             {
                 continue;
             }
@@ -118,7 +152,7 @@ impl ShamirDb {
                     stage: ShamirStage::Procedures,
                     ..CompileOptions::default()
                 };
-                options.callable_catalog = self.callable_catalog_snapshot().await?;
+                options.callable_catalog = self.callable_catalog_snapshot(actor, src).await?;
                 let (wf, wasm, report, signature) = create_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),

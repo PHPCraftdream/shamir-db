@@ -778,3 +778,142 @@ fn diagnostic_rendering_is_deterministic_and_orders_related_location_after_prima
     assert_eq!(diagnostic.to_string(), rendered);
     assert_eq!(diagnostic.to_string(), rendered);
 }
+
+fn checked_call_diagnostics(source: &str, options: &CompileOptions) -> (Vec<Diagnostic>, String) {
+    let error = compile(source, options).expect_err("source must produce diagnostics");
+    let diagnostics = match &error {
+        CompileError::Diagnostics(diagnostics) => diagnostics.clone(),
+        other => panic!("expected source diagnostics, got {other:?}; source: {source}"),
+    };
+    (diagnostics, error.to_string())
+}
+
+#[test]
+fn checked_call_missing_catalog_targets_have_uniform_diagnostics() {
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options.callable_catalog.insert(
+        "unrelated_visible".to_string(),
+        b"procedure(unrelated_arg:string)->{unrelated_result:i64}".to_vec(),
+    );
+    let hidden_signature = b"procedure(private_arg:string)->{private_result:i64}";
+    assert!(!options.callable_catalog.contains_key("hidden"));
+    assert!(!options
+        .callable_catalog
+        .values()
+        .any(|signature| signature.as_slice() == hidden_signature));
+
+    let targets = ["absent", "ghosts", "hidden"];
+    assert_eq!(targets[0].len(), targets[1].len());
+    assert_eq!(targets[1].len(), targets[2].len());
+    let outputs: Vec<_> = targets
+        .into_iter()
+        .map(|target| {
+            let source = format!(
+                "@entry procedure caller() -> i64 {{ return call(\"{target}\", {{ probe: 1 }}); }}"
+            );
+            checked_call_diagnostics(&source, &options)
+        })
+        .collect();
+
+    for (diagnostics, rendered) in &outputs {
+        assert_eq!(diagnostics[0].code, "T004");
+        assert_eq!(diagnostics[0].message, "callable procedure is unavailable");
+        assert!(!rendered.contains("private_arg"));
+        assert!(!rendered.contains("private_result"));
+        assert!(!rendered.contains("unrelated_arg"));
+        assert!(!rendered.contains("unrelated_result"));
+    }
+    for output in outputs.iter().skip(1) {
+        assert_eq!(outputs[0].0, output.0);
+        assert_eq!(outputs[0].1.as_bytes(), output.1.as_bytes());
+    }
+}
+
+#[test]
+fn checked_call_visible_catalog_keeps_precise_signature_mismatches() {
+    let names = CompileOptions {
+        stage: Stage::Procedures,
+        callable_catalog: [(
+            "visible".to_string(),
+            b"procedure(expected:i64)->i64".to_vec(),
+        )]
+        .into_iter()
+        .collect(),
+        ..CompileOptions::default()
+    };
+    let (name_diagnostics, _) = checked_call_diagnostics(
+        "@entry procedure caller() -> i64 { return call(\"visible\", { actual: 1 }); }",
+        &names,
+    );
+    let name_messages: Vec<&str> = name_diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert!(name_messages.contains(&"unknown record field actual"));
+    assert!(name_messages.contains(&"missing record field expected"));
+    assert!(name_messages.contains(&"call arguments must name exactly the declared parameters"));
+
+    let types = CompileOptions {
+        stage: Stage::Procedures,
+        callable_catalog: [("visible".to_string(), b"procedure(value:i64)->i64".to_vec())]
+            .into_iter()
+            .collect(),
+        ..CompileOptions::default()
+    };
+    let (type_diagnostics, _) = checked_call_diagnostics(
+        "@entry procedure caller(value: string) -> i64 { return call(\"visible\", { value: value }); }",
+        &types,
+    );
+    let type_messages: Vec<&str> = type_diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect();
+    assert!(type_messages.contains(&"expected i64, found string (field value)"));
+    assert!(
+        type_messages.contains(&"call arguments must exactly match the declared parameter types")
+    );
+
+    let result = CompileOptions {
+        stage: Stage::Procedures,
+        callable_catalog: [("visible".to_string(), b"procedure()->i64?".to_vec())]
+            .into_iter()
+            .collect(),
+        ..CompileOptions::default()
+    };
+    let (result_diagnostics, _) = checked_call_diagnostics(
+        "@entry procedure caller() -> i64 { return call(\"visible\", {}); }",
+        &result,
+    );
+    assert!(result_diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message == "call result is i64?, not i64"));
+}
+
+#[test]
+fn checked_call_compiles_when_target_signature_is_added_to_catalog() {
+    let target = compile(
+        "@entry procedure target(value: i64) -> i64 { return value; }",
+        &CompileOptions {
+            stage: Stage::Procedures,
+            ..CompileOptions::default()
+        },
+    )
+    .expect("target procedure compiles");
+    let mut options = CompileOptions {
+        stage: Stage::Procedures,
+        ..CompileOptions::default()
+    };
+    options.callable_catalog.insert(
+        "target".to_string(),
+        target.signature.expect("procedure emits its signature"),
+    );
+
+    compile(
+        "@entry procedure caller(value: i64) -> i64 { return call(\"target\", { value: value }); }",
+        &options,
+    )
+    .expect("caller compiles once target signature is catalogued");
+}

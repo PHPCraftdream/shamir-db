@@ -77,7 +77,7 @@ pub(in crate::sem::check) fn check_checked_call(
         report(
             c,
             "T004",
-            format!("unknown callable procedure {name:?}"),
+            "callable procedure is unavailable".to_string(),
             expr_span(c, target),
         );
         check_expression(c, frame, None, args[1], depth);
@@ -109,7 +109,7 @@ pub(in crate::sem::check) fn check_checked_call(
         report(
             c,
             "T004",
-            format!("unknown callable procedure {name:?}"),
+            "callable procedure is unavailable".to_string(),
             expr_span(c, target),
         );
         check_expression(c, frame, None, args[1], depth);

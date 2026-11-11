@@ -74,6 +74,8 @@ For a Definer parent, retain its owner in frame metadata; a target whose effecti
 
 The checked resolver must close that gap with one coherent capture. The existing legacy nested route clones the parent actor/context and invokes without the per-target Execute authorization described here; the proposal hardens it. Missing target, signature, security metadata, owner, or required capability fails closed.
 
+Compile-time catalog visibility uses the principal performing create, create-with-replace, or check, based on that principal's Execute right; it does not use a later alterer's identity, because `alter_function_optimize_as` rebuilds stored bytes and does not take a callable-catalog snapshot. If Execute is later revoked, the existing runtime Execute check refuses already-stored callers.
+
 ### 2.4 Recursion, resources, cancellation and gateway calls
 
 The active-call identity path is immutable per invocation lineage, shared by every stored-call mechanism, and capped at 32 entries **including the root**. Before entry, reject if the target identity is already in the path or adding it would exceed 32 entries. Use an identity stable across rename and artifact replacement, not a mutable function name, so neither can evade repeat detection. Pop by scoped guard on return, error, cancellation or task teardown. Keep the existing lower depth policy and pool/resource limits; the 32-entry cap does not raise any lower limit. Any gateway-originated nested call enabled after safe context plumbing must inherit depth, shared fuel pool, active-call identity path, current actor and root deadline; until then it is refused before dispatch (F1).

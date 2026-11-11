@@ -3,14 +3,86 @@ use crate::engine::function::Params;
 use crate::engine::repo::{BoxRepoFactory, RepoConfig};
 use crate::engine::table::TableConfig;
 use crate::query::admin::GroupRef;
-use crate::shamir_db::shamir_db::{ArtifactKind, ShamirDb};
+use crate::shamir_db::shamir_db::{ArtifactKind, FunctionSource, ShamirDb};
 use crate::shamir_db::system_store::{SystemStore, SystemStoreConfig};
 use crate::DbError;
-use shamir_engine::function::{FunctionMeta, Security, Visibility};
+use shamir_engine::function::{
+    CreateFunctionOptions, FunctionMeta, Security, TierMode, Visibility,
+};
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::Query;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
+
+#[tokio::test]
+async fn callable_catalog_no_call_source_skips_catalogue_and_settings_reads() {
+    let db = ShamirDb::init_memory().await.expect("db");
+    let store = db.system_store();
+    store.reset_function_catalogue_reads();
+    store.reset_invocation_settings_reads();
+
+    db.check_function_as(
+        Actor::System,
+        FunctionSource::Shamir("@entry scalar plain() -> i64 { return 1; }"),
+        TierMode::Auto,
+    )
+    .await
+    .expect("compile source without calls");
+
+    assert_eq!(store.function_catalogue_read_count(), 0);
+    assert_eq!(store.invocation_settings_read_count(), 0);
+}
+
+#[tokio::test]
+async fn callable_catalog_reads_settings_once_for_multiple_candidate_rows() {
+    let db = ShamirDb::init_memory().await.expect("db");
+    for name in ["leaf0", "leaf1", "leaf2"] {
+        let source =
+            format!("@entry procedure {name}() -> {{ answer: i64 }} {{ return {{ answer: 7 }}; }}");
+        db.create_function_with_opts_as(
+            name,
+            FunctionSource::Shamir(&source),
+            CreateFunctionOptions::default(),
+            Actor::System,
+        )
+        .await
+        .expect("create callable candidate");
+        db.set_resource_meta(&ResourcePath::function(name), &ResourceMeta::open())
+            .await
+            .expect("open candidate Execute metadata");
+    }
+
+    let store = db.system_store();
+    store.reset_function_catalogue_reads();
+    store.reset_invocation_settings_reads();
+    db.check_function_as(
+        Actor::User(7),
+        FunctionSource::Shamir("@entry procedure plain() -> i64 { return 7; }"),
+        TierMode::Auto,
+    )
+    .await
+    .expect("compile source without calls as user");
+    let baseline_settings_reads = store.invocation_settings_read_count();
+    assert_eq!(store.function_catalogue_read_count(), 0);
+
+    store.reset_function_catalogue_reads();
+    store.reset_invocation_settings_reads();
+    db.check_function_as(
+        Actor::User(7),
+        FunctionSource::Shamir(
+            "@entry procedure caller() -> i64 { let result: { answer: i64 } = call(\"leaf0\", {}); return result.answer; }",
+        ),
+        TierMode::Auto,
+    )
+    .await
+    .expect("compile source calling visible candidate");
+
+    assert_eq!(store.function_catalogue_read_count(), 1);
+    assert_eq!(
+        store.invocation_settings_read_count(),
+        baseline_settings_reads + 1
+    );
+}
 
 #[tokio::test]
 async fn rv_db_5977a782_missing_name_is_cached_without_catalogue_io() {

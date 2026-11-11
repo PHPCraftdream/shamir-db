@@ -38,7 +38,7 @@ impl ShamirDb {
                     stage: ShamirStage::Procedures,
                     ..CompileOptions::default()
                 };
-                options.callable_catalog = self.callable_catalog_snapshot().await?;
+                options.callable_catalog = self.callable_catalog_snapshot(&actor, src).await?;
                 check_shamir_source(
                     self.wasm_engine.clone(),
                     src.to_string(),
