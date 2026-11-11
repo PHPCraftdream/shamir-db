@@ -79,6 +79,7 @@ runs:
         print(chr(10).join(selection))
         PY
         )"
+        selection_text="${selection_text//$'\r'/}"  # Python prints CRLF on Windows
         if [ "$selection_text" = EMPTY ]; then
           echo "::notice::empty package selection: test archive build skipped"
           exit 0
