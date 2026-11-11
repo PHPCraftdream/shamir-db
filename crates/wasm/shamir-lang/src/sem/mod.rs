@@ -10,7 +10,9 @@ pub use effects::{BuiltinCategory, BuiltinId, Capability, EffectSet};
 pub use tables::{
     Callee, ResolvedCall, ResolvedTarget, TypedFunction, TypedLocal, TypedModule, TypedParameter,
 };
+#[cfg(test)]
+pub(crate) use tables::{ReferenceKind, ReferenceMarker};
 pub use types::{RecordShape, TypeData, TypeId, TypeInterner};
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

@@ -4,6 +4,7 @@ mod ctx;
 mod driver;
 #[path = "expressions/expr.rs"]
 mod expr;
+mod expressions;
 mod stmt;
 mod types;
 

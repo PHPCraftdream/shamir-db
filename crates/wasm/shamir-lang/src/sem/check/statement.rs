@@ -3,6 +3,7 @@ use crate::front::{EntryKind, ExprId, ExprKind, ForKind, FunctionId, StatementId
 use crate::sem::effects::Capability;
 use crate::sem::tables::{ResolvedTarget, TypedFunction, TypedLocal, TypedParameter};
 use crate::sem::types::{TypeData, TypeId};
+use std::collections::BTreeMap;
 
 use super::entry::{
     capability_of, convert_type, error_type, expr_span, primitive_type, report, Checker,
@@ -20,6 +21,9 @@ pub(super) struct FunctionFrame {
     /// Types indexed by combined slot; error-filled until assigned.
     pub(super) local_types: Vec<TypeId>,
     pub(super) local_plan_facts: Vec<super::entry::PlanFact>,
+    pub(super) ref_locals: Vec<Option<super::builtins::RefLocal>>,
+    pub(super) ref_sites: BTreeMap<u32, super::builtins::ReferenceSite>,
+    pub(super) ref_sink: Option<ExprId>,
     pub(super) in_entry: bool,
     pub(super) kind: Option<EntryKind>,
     /// Set once a control-flow diagnostic (T005) was reported in this body.
@@ -50,6 +54,7 @@ pub(super) fn check_all_bodies(c: &mut Checker) -> Vec<TypedFunction> {
         let initial = error_type(c);
         let mut local_types = vec![initial; slot_count];
         let local_plan_facts = vec![super::entry::PlanFact::Unknown; slot_count];
+        let ref_locals = vec![None; slot_count];
 
         let param_count = func.parameters.len();
         if let Some(sig) = c.signatures.get(index) {
@@ -66,6 +71,9 @@ pub(super) fn check_all_bodies(c: &mut Checker) -> Vec<TypedFunction> {
             loop_depth: 0,
             local_types,
             local_plan_facts,
+            ref_locals,
+            ref_sites: BTreeMap::new(),
+            ref_sink: None,
             in_entry: kind.is_some(),
             kind,
             flow_reported: false,
@@ -186,6 +194,7 @@ pub(super) fn check_statement(
             let converted = ty
                 .map(|ast| convert_type(c, ast, TopPosition::Local, frame.in_entry, frame.kind, 0));
             let value_span = expr_span(c, value);
+            super::builtins::register_reference_sites(c, frame, mutable, converted, value);
             let actual = check_expression(c, frame, converted, value, next);
             let local_ty = match converted {
                 Some(expected) => {
@@ -205,6 +214,14 @@ pub(super) fn check_statement(
                 if let Some(slot_entry) = frame.local_plan_facts.get_mut(slot as usize) {
                     *slot_entry = fact;
                 }
+                super::builtins::finish_reference_local(
+                    c,
+                    frame,
+                    Some(slot),
+                    mutable,
+                    ty.is_some(),
+                    value,
+                );
                 locals.push(TypedLocal {
                     slot,
                     name: name.clone(),

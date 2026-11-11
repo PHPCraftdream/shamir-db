@@ -4,7 +4,7 @@ use crate::back::ir::{verify, IrError};
 use crate::back::lower::lower;
 use crate::back::{emit_compiled_module, EmitError};
 use crate::front::budget::CompileBudget;
-use crate::front::{self, EntryKind};
+use crate::front::{self, EntryKind, ExprId};
 use crate::sem::{self, TypeData, TypeId, TypeInterner};
 
 use super::error::{limit_error, CompileError};
@@ -26,6 +26,14 @@ pub struct CompiledModule {
 /// Compiles one source module into a self-admitted WebAssembly artifact and
 /// compiler-owned callable signature metadata, when the entry is a procedure.
 pub fn compile(source: &str, options: &CompileOptions) -> Result<CompiledModule, CompileError> {
+    compile_with(source, options, false)
+}
+
+pub(crate) fn compile_with(
+    source: &str,
+    options: &CompileOptions,
+    references: bool,
+) -> Result<CompiledModule, CompileError> {
     let normalized = options.limits.clamped().map_err(|error| {
         CompileError::Diagnostics(vec![Diagnostic::new(
             "B001",
@@ -60,6 +68,29 @@ pub fn compile(source: &str, options: &CompileOptions) -> Result<CompiledModule,
         &mut budget,
     )
     .map_err(CompileError::Diagnostics)?;
+    let has_references = typed.reference_markers.iter().any(Option::is_some)
+        || typed.reference_sinks.iter().any(|sink| !sink.is_empty());
+    if !references && has_references {
+        let first_reference_span = typed
+            .reference_markers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, marker)| {
+                marker.as_ref()?;
+                let index = u32::try_from(index).ok()?;
+                module
+                    .expression(ExprId(index))
+                    .map(|expression| expression.span)
+            })
+            .min_by_key(|span| span.start_byte);
+        if let Some(span) = first_reference_span {
+            return Err(CompileError::Diagnostics(vec![Diagnostic::new(
+                "T010",
+                "query_ref_field is gated: scalar reference validation is not implemented",
+                span,
+            )]));
+        }
+    }
     // Entry gate: scalar and validator entries have wrappers in this build;
     // procedure entries compile only at `Stage::Procedures` (design section 3;
     // the checker already rejects them at `Stage::Mvp`).

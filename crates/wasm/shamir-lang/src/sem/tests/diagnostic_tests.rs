@@ -4,6 +4,12 @@ use crate::sem::types::TypeData;
 use super::helper::{check_with_stage, expect_clean, first_diagnostic};
 
 #[test]
+fn query_ref_field_arity_is_checked_before_site_validation() {
+    let diagnostic = first_diagnostic("@entry scalar probe() -> i64 { return query_ref_field(); }");
+    assert_eq!(diagnostic.code, "T004");
+}
+
+#[test]
 fn n001_renders_code_line_column_and_message() {
     let source = "@entry scalar probe() -> i64 {\n  return missing; }";
     assert_eq!(

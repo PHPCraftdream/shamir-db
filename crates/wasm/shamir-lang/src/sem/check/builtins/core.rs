@@ -36,7 +36,10 @@ pub(in crate::sem::check) fn check_builtin_call(
             BuiltinId::CallChecked => super::call_signature::check_checked_call(
                 c, frame, call_id, call_span, args, expected, depth,
             ),
-            _ => check_batch_family(c, frame, bid, call_span, args, expected, depth),
+            BuiltinId::QueryRefField => {
+                super::batch::check_query_ref_field(c, frame, call_id, call_span, args, depth)
+            }
+            _ => check_batch_family(c, frame, bid, call_id, args, expected, depth),
         },
         BuiltinCategory::ValidatorCtor => {
             let violated = !frame.ceiling.permits(BuiltinCategory::ValidatorCtor);
@@ -52,7 +55,7 @@ pub(in crate::sem::check) fn check_builtin_call(
     let plan = if c.types.is_error(result) {
         None
     } else {
-        record_plan_fact(c, frame, bid, args)
+        record_plan_fact(c, frame, bid, call_id, args)
     };
     if let Some(slot) = c.plan_facts.get_mut(call_id.0 as usize) {
         *slot = plan;
@@ -499,11 +502,12 @@ fn check_batch_family(
     c: &mut Checker,
     frame: &mut FunctionFrame,
     bid: BuiltinId,
-    call_span: Span,
+    call_id: ExprId,
     args: &[ExprId],
     expected: Option<TypeId>,
     depth: u32,
 ) -> TypeId {
+    let call_span = expr_span(c, call_id);
     let name = builtin_name(bid);
     let string = primitive_type(c, "string");
     let batch = primitive_type(c, "batch");
@@ -542,6 +546,11 @@ fn check_batch_family(
         return error_type(c);
     }
     for (position, (&arg, param)) in args.iter().zip(params.iter()).enumerate() {
+        let is_reference_sink =
+            matches!(bid, BuiltinId::BatchRead | BuiltinId::BatchInsert) && position == 3;
+        if is_reference_sink {
+            frame.ref_sink = super::batch::reference_identifier(c, arg);
+        }
         match param {
             Some(want) => {
                 let actual = check_arg(c, frame, Some(*want), arg, depth);
@@ -553,6 +562,10 @@ fn check_batch_family(
                 let actual = check_db_second(c, frame, arg, depth);
                 check_batch_free_argument(c, bid, position, actual, arg);
             }
+        }
+        if is_reference_sink {
+            frame.ref_sink = None;
+            super::batch::check_reference_sink(c, frame, call_id, bid, args);
         }
     }
     if matches!(bid, BuiltinId::ResponseRows | BuiltinId::ResponseInserted) {

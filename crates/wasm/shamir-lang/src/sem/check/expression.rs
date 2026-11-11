@@ -118,6 +118,9 @@ pub(super) fn check_expression(
 /// Types a variable reference through its resolved slot.
 fn check_identifier(c: &mut Checker, frame: &mut FunctionFrame, id: ExprId, span: Span) -> TypeId {
     let resolved = c.resolved.get(id.0 as usize).copied().flatten();
+    if !super::builtins::check_reference_use(c, frame, id) {
+        return error_type(c);
+    }
     match resolved {
         Some(ResolvedTarget::Parameter(slot)) | Some(ResolvedTarget::Local(slot)) => frame
             .local_types

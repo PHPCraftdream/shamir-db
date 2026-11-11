@@ -5,5 +5,7 @@ mod module_tests;
 #[path = "procedures/procedure_tests.rs"]
 mod procedure_tests;
 mod raw;
+#[path = "procedures/scalar_refs_tests.rs"]
+mod scalar_refs_tests;
 mod scalar_tests;
 mod validator_tests;

@@ -27,4 +27,4 @@ pub use msgpack::{
     enc_str, key_payload,
 };
 pub use vectors::{codec_vectors, CodecVector, VectorExpectation};
-pub use wasm::runtime_module;
+pub use wasm::{compile_with_references, runtime_module};

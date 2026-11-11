@@ -34,6 +34,23 @@ pub struct ResolvedCall {
     pub callee: Callee,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReferenceKind {
+    String,
+    Bool,
+    Bytes,
+    F64,
+    I32,
+    I64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReferenceMarker {
+    pub(crate) alias: String,
+    pub(crate) path: String,
+    pub(crate) kind: ReferenceKind,
+}
+
 /// Typed module consumed by the lowering milestone.
 #[derive(Debug)]
 pub struct TypedModule {
@@ -58,6 +75,10 @@ pub struct TypedModule {
     pub calls: Vec<Option<ResolvedCall>>,
     /// Checked stored-call metadata indexed by expression id.
     pub(crate) checked_calls: Vec<Option<CheckedCall>>,
+    /// Scalar reference marker keyed by intrinsic call expression id.
+    pub(crate) reference_markers: Vec<Option<ReferenceMarker>>,
+    /// Scalar reference markers keyed by batch sink call expression id.
+    pub(crate) reference_sinks: Vec<Vec<ReferenceMarker>>,
     /// Binding slot of each `let`/`for` statement, parallel to the front
     /// statement arena; `None` where the statement binds no slot.
     pub binding_slots: Vec<Option<u32>>,
