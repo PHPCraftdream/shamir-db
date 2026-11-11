@@ -15,7 +15,7 @@ pub(crate) use fk_isolation::{
     implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, FkParentOpKind,
 };
 pub(in crate::query::batch) use helpers::{
-    build_resolved_refs, resolve_skip, skipped_query_result,
+    abort_reason, build_resolved_refs, resolve_skip, skip_or_abort, skipped_query_result,
 };
 #[cfg(test)]
 pub(crate) use helpers::{effective_max_iterations, ABSOLUTE_MAX_FOR_EACH_ITERATIONS};

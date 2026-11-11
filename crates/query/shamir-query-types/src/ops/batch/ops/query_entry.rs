@@ -61,6 +61,10 @@ pub struct QueryEntry {
     /// behavior — omitted from the wire for full backward compatibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<Filter>,
+
+    /// Abort the enclosing transactional batch if this entry would be skipped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub abort_on_skip: bool,
 }
 
 fn default_return() -> bool {
@@ -74,6 +78,7 @@ impl From<ReadQuery> for QueryEntry {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         }
     }
 }

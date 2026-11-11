@@ -43,6 +43,7 @@ fn make_batch(n: usize, chain: bool) -> BatchRequest {
                 return_result: true,
                 after: Vec::new(),
                 when: None,
+                abort_on_skip: false,
             },
         );
     }

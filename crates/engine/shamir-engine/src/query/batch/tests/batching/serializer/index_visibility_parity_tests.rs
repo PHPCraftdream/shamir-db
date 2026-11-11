@@ -62,6 +62,7 @@ fn async_visibility_request() -> BatchRequest {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },

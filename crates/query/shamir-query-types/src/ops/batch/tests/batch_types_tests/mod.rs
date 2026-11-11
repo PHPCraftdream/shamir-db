@@ -1,3 +1,4 @@
+pub mod abort_on_skip_wire_tests;
 #[allow(clippy::module_inception)]
 pub mod batch_types_tests;
 pub mod classification_tests;

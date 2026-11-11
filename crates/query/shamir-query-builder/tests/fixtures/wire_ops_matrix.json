@@ -452,6 +452,31 @@
     }
   },
   {
+    "name": "entry_abort_on_skip_tx",
+    "builder": "ts: Batch.create(1).transactional().add(guarded,insert(users,{name:Ada}),{when:valueEq(1,1),abortOnSkip:true})",
+    "wire": {
+      "id": 1,
+      "transactional": true,
+      "queries": {
+        "guarded": {
+          "insert_into": "users",
+          "values": [
+            {
+              "name": "Ada"
+            }
+          ],
+          "when": {
+            "op": "value_compare",
+            "left": 1,
+            "cmp": "eq",
+            "right": 1
+          },
+          "abort_on_skip": true
+        }
+      }
+    }
+  },
+  {
     "name": "sub_batch_rust",
     "builder": "rust: Batch::sub_batch(nested, Batch id=1 empty, bind x=1)",
     "wire": {

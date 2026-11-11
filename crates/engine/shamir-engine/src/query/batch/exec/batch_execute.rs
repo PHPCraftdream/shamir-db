@@ -1,14 +1,17 @@
 use std::time::Instant;
 
 use crate::query::batch::authorized::Authorized;
-use crate::query::batch::batch_validate::{validate_executable_guards, validate_tables};
+use crate::query::batch::batch_validate::{
+    validate_abort_on_skip_scope, validate_executable_guards, validate_tables,
+};
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 use crate::query::batch::op_watchdog::register_op_watchdog;
 #[cfg(test)]
 use crate::query::batch::query_runner::execute_single_impl;
 use crate::query::batch::query_runner::{
-    build_resolved_refs, resolve_skip, skipped_query_result, QueryRunner,
+    abort_reason, build_resolved_refs, resolve_skip, skip_or_abort, skipped_query_result,
+    QueryRunner,
 };
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{
@@ -309,11 +312,10 @@ pub(in crate::query::batch) fn execute_batch_impl<'a>(
         // already elapsed.
         scope.check()?;
 
-        let metadata = if depth == 0 {
-            scope.root_metadata()
-        } else {
-            None
-        };
+        let metadata = (depth == 0).then(|| scope.root_metadata()).flatten();
+        if depth == 0 && !request.transactional {
+            validate_abort_on_skip_scope(&request.queries)?;
+        }
         let mut plan = plan_and_validate_with_metadata(request, resolver, scope, metadata).await?;
 
         // 3. Execute — branch on transactional.
@@ -723,14 +725,18 @@ pub(in crate::query::batch) async fn execute_plan_tx_impl(
 
             // Epic03/B (#645): own `when` false, or cascaded from a
             // skipped DataFlow/Both dependency — do NOT execute the op.
-            if resolve_skip(
+            if skip_or_abort(
                 entry,
-                &all_results,
-                deps,
-                &resolved_refs,
-                params,
-                resolver.scalar_resolver(),
-            ) {
+                alias,
+                resolve_skip(
+                    entry,
+                    &all_results,
+                    deps,
+                    &resolved_refs,
+                    params,
+                    resolver.scalar_resolver(),
+                ),
+            )? {
                 let result = skipped_query_result();
                 if scope.enforce_result_size() {
                     scope.charge_bytes(ResultSize::result(&result))?;
@@ -916,10 +922,8 @@ pub(in crate::query::batch) async fn execute_transactional_impl(
                 return Err(plan_err);
             }
 
-            let info = shamir_query_types::batch::TransactionInfo::aborted(
-                tx_id,
-                format!("{:?}", plan_err),
-            );
+            let info =
+                shamir_query_types::batch::TransactionInfo::aborted(tx_id, abort_reason(&plan_err));
             Ok((new_map(), Some(info)))
         }
         Ok(results) => {

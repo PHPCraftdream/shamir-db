@@ -207,6 +207,7 @@ fn insert_order_body(bind_row: &str) -> BatchRequest {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -236,6 +237,7 @@ fn wrap_for_each(fe: ForEachOp) -> BatchRequest {
         QueryEntry {
             op: BatchOp::ForEach(fe),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -285,6 +287,7 @@ fn build_flat_insert_batch(n: usize) -> BatchRequest {
                     select: None,
                 }),
                 return_result: true,
+                abort_on_skip: false,
                 after: Vec::new(),
                 when: None,
             },
@@ -326,6 +329,7 @@ fn build_for_each_query_ref_batch() -> BatchRequest {
         QueryEntry {
             op: BatchOp::Read(ReadQuery::from(Query::from("rows"))),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -335,6 +339,7 @@ fn build_for_each_query_ref_batch() -> BatchRequest {
         QueryEntry {
             op: BatchOp::ForEach(fe),
             return_result: true,
+            abort_on_skip: false,
             after: vec!["seed".to_string()],
             when: None,
         },
@@ -371,6 +376,7 @@ fn build_nested_for_each(outer_n: usize, inner_n: usize) -> BatchRequest {
         QueryEntry {
             op: BatchOp::ForEach(inner_fe),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },

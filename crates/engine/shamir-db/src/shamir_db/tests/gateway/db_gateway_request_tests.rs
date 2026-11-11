@@ -19,6 +19,7 @@ fn legacy_request(alias: &str, id: &str, op: BatchOp) -> BatchRequest {
         QueryEntry {
             op,
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },

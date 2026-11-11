@@ -762,6 +762,7 @@ pub(crate) fn single_batch_op_req(
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let batch = shamir_query_types::batch::BatchRequest {

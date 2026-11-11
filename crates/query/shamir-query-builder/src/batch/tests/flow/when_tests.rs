@@ -386,3 +386,58 @@ fn switch_entries_participate_in_try_build_validation() {
 
     assert!(b.try_build().is_ok());
 }
+
+#[test]
+fn abort_on_skip_unknown_handle_is_a_deferred_error() {
+    let mut batch = Batch::new();
+    let mut other_batch = Batch::new();
+    let unknown = other_batch.query("ghost", Query::from("flags"));
+
+    batch.abort_on_skip(&unknown);
+
+    assert!(matches!(
+        batch.try_build(),
+        Err(BuildError::UnknownOrderingTarget {
+            alias,
+            operation: "abort_on_skip",
+        }) if alias == "ghost"
+    ));
+}
+
+#[test]
+fn abort_on_skip_is_emitted_only_when_true() {
+    let mut batch = Batch::new();
+    let flagged = batch.insert(
+        "flagged",
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
+    batch.insert(
+        "unflagged",
+        write::insert("users").row(doc().set("name", "Bob").unwrap()),
+    );
+    batch.abort_on_skip(&flagged);
+
+    let wire = serde_json::to_value(batch.build()).unwrap();
+    assert!(wire["queries"]["flagged"]["abort_on_skip"]
+        .as_bool()
+        .unwrap());
+    assert!(wire["queries"]["unflagged"].get("abort_on_skip").is_none());
+}
+
+#[test]
+fn abort_on_skip_msgpack_matches_batch_request_serde() {
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.transactional();
+    let guarded = batch.insert(
+        "guarded",
+        write::insert("users").row(doc().set("name", "Alice").unwrap()),
+    );
+    batch
+        .when(&guarded, filter::value_eq(1, 1))
+        .abort_on_skip(&guarded);
+
+    let request = batch.try_build().unwrap();
+    let expected = rmp_serde::to_vec_named(&request).unwrap();
+    assert_eq!(batch.to_msgpack().unwrap(), expected);
+}

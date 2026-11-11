@@ -83,6 +83,7 @@ fn for_each_is_write_reflects_body() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let mut inner = empty_inner_batch();

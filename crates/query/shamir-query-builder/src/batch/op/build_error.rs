@@ -39,15 +39,15 @@ pub enum BuildError {
         /// The alias that was registered twice.
         alias: String,
     },
-    /// A handle-consuming API (`after`/`when`) received a handle whose alias
-    /// is not registered in this batch. The call is discarded and recorded as
-    /// a deferred error surfaced by [`Batch::try_build`] — unknown handles are
-    /// errors, not silent no-ops.
+    /// A handle-consuming API (`after`/`when`/`abort_on_skip`) received a handle
+    /// whose alias is not registered in this batch. The call is discarded and
+    /// recorded as a deferred error surfaced by [`Batch::try_build`] — unknown
+    /// handles are errors, not silent no-ops.
     #[error("'{operation}' received a handle for alias '{alias}', which is not registered in this batch")]
     UnknownOrderingTarget {
         /// The alias the handle carried (not registered in the batch).
         alias: String,
-        /// The attempted operation: `"after"` or `"when"`.
+        /// The attempted operation: `"after"`, `"when"`, or `"abort_on_skip"`.
         operation: &'static str,
     },
     /// A msgpack round-trip used by validation, or request encoding, failed.

@@ -208,6 +208,7 @@ fn build_read_batch(n: usize, skip_half: bool) -> BatchRequest {
             QueryEntry {
                 op: BatchOp::Read(read_q),
                 return_result: true,
+                abort_on_skip: false,
                 after: Vec::new(),
                 when,
             },

@@ -1,3 +1,4 @@
+pub mod abort_on_skip_tests;
 pub mod cross_repo_guard_tests;
 pub mod error_handling_tests;
 pub mod permissions_tests;

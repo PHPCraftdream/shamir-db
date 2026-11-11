@@ -138,6 +138,7 @@ fn build_independent_read_batch(n: usize) -> BatchRequest {
             QueryEntry {
                 op: BatchOp::Read(read_q),
                 return_result: true,
+                abort_on_skip: false,
                 after: Vec::new(),
                 when: None,
             },

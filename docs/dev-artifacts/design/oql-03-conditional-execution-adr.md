@@ -70,6 +70,10 @@ to `after` in `QueryEntry`'s `#[serde(flatten)] op: BatchOp` sibling fields,
 fully backward-compatible (omitted → today's unconditional-execution
 behavior, byte-identical wire format for every existing client).
 
+`abort_on_skip` is an opt-in per-entry flag that turns a skip into an abort
+inside a single-call transactional batch; it is not valid for non-transactional
+or interactive execution.
+
 ---
 
 ## Decision 2 — Semantics of a dependency on a skipped op

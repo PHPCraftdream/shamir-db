@@ -62,6 +62,7 @@ fn call_entry() -> QueryEntry {
             repo: "main".to_string(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     }
@@ -163,6 +164,7 @@ async fn call_in_transactional_batch_rejected() {
             select: None,
         }),
         return_result: false,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };

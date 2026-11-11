@@ -393,6 +393,7 @@ fn rv_collections_da7d2cd3_nested_sub_batch_over_cap_rejected() {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     };
     let mut outer: TMap<String, QueryEntry> = shamir_collections::new_map();
     outer.insert("sub".to_string(), sub);

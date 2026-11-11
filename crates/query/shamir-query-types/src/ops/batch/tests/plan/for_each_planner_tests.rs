@@ -40,6 +40,7 @@ fn read_entry(table: &str) -> QueryEntry {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -89,6 +90,7 @@ fn for_each_entry(over: FilterValue, bind_row: &str, batch: BatchRequest) -> Que
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -321,6 +323,7 @@ fn for_each_nesting_depth_within_limit_ok() {
                 return_result: true,
                 after: Vec::new(),
                 when: None,
+                abort_on_skip: false,
             },
         );
         inner = batch_request_with_queries(outer_queries);
@@ -364,6 +367,7 @@ fn for_each_nesting_depth_exceeded_errors() {
                 return_result: true,
                 after: Vec::new(),
                 when: None,
+                abort_on_skip: false,
             },
         );
         inner = batch_request_with_queries(outer_queries);

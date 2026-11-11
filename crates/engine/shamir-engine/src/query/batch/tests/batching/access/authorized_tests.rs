@@ -202,6 +202,7 @@ async fn authorize_recurses_into_nested_batch_ops() {
             bind: new_map(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };

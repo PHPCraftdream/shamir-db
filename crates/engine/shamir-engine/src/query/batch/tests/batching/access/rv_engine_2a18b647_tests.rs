@@ -53,6 +53,7 @@ fn request(op: BatchOp) -> BatchRequest {
         QueryEntry {
             op,
             return_result: true,
+            abort_on_skip: false,
             after: vec![],
             when: None,
         },
