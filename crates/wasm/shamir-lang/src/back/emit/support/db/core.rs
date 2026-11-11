@@ -564,6 +564,12 @@ pub(crate) fn emit_db_execute_helper(
     function.instruction(&Instruction::I64Const(32));
     function.instruction(&Instruction::I64ShrU);
     function.instruction(&Instruction::I64Store(mem64(8)));
+    if let Some(tx_check) = plan.tx_check_plan {
+        function.instruction(&Instruction::LocalGet(0));
+        function.instruction(&Instruction::LocalGet(cell));
+        function.instruction(&Instruction::Call(tx_check.helper_index));
+        function.instruction(&Instruction::LocalSet(cell));
+    }
     function.instruction(&Instruction::LocalGet(cell));
     if let Some(skip_check_index) = plan.skip_check_index {
         function.instruction(&Instruction::Call(skip_check_index));

@@ -136,6 +136,21 @@ pub(in crate::query::batch) fn tables_created_in_batch(
     (created_tables, created_repos)
 }
 
+pub(in crate::query::batch) fn validate_abort_on_skip_scope(
+    queries: &TMap<String, QueryEntry>,
+) -> Result<(), BatchError> {
+    for visit in BatchTreeVisitor::new(queries) {
+        if visit.entry.abort_on_skip {
+            return Err(BatchError::query_coded(
+                visit.alias,
+                "validation",
+                "abort_on_skip requires a single-call transactional batch",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Validate every executable filter/value/select-expression surface in all
 /// nested batch and foreach bodies in one iterative batch-tree walk.
 pub(in crate::query::batch) fn validate_executable_guards(

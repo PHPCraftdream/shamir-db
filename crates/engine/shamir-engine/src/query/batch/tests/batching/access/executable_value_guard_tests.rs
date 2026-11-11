@@ -85,6 +85,7 @@ fn entry(op: BatchOp) -> QueryEntry {
     QueryEntry {
         op,
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     }
@@ -230,6 +231,7 @@ async fn rv_engine_c1a53a7a_rejects_deep_where_before_prior_insert() {
                 bind: new_map(),
             }),
             return_result: true,
+            abort_on_skip: false,
             after: vec!["before".into()],
             when: None,
         },

@@ -30,6 +30,7 @@ pub(super) fn read_entry(table: &str) -> QueryEntry {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -39,6 +40,7 @@ fn sub_batch_entry(inner: BatchRequest, bind: TMap<String, FilterValue>) -> Quer
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -295,6 +297,7 @@ fn read_entry_with_query_ref(table: &str, dep_alias: &str) -> QueryEntry {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -493,6 +496,7 @@ fn where_query_ref_nested_in_cond_then_is_extracted_as_dependency() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 
@@ -562,6 +566,7 @@ fn where_query_ref_nested_in_expr_args_is_extracted_as_dependency() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 
@@ -612,6 +617,7 @@ fn where_query_ref_nested_in_fn_call_args_is_extracted_as_dependency() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 
@@ -789,6 +795,7 @@ fn rv_query_types_8257acb4_deep_write_value_extraction_is_depth_bounded() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let res = BatchPlanner::plan(&queries, &BatchLimits::default());
@@ -841,6 +848,7 @@ fn rv_query_types_8257acb4_deep_select_expr_conversion_is_gated() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let res = BatchPlanner::plan(&queries, &BatchLimits::default());
@@ -889,6 +897,7 @@ fn rv_query_types_8257acb4_deep_when_comparison_walk_is_bounded() {
             return_result: true,
             after: Vec::new(),
             when: Some(f),
+            abort_on_skip: false,
         },
     );
     let res = BatchPlanner::plan(&queries, &BatchLimits::default());
@@ -928,6 +937,7 @@ fn rv_query_types_8257acb4_deep_marker_value_skips_serde() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let res = BatchPlanner::plan(&queries, &BatchLimits::default());

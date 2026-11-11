@@ -60,6 +60,7 @@ pub(crate) async fn execute_reactive_batch(
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 
@@ -117,6 +118,7 @@ pub(crate) async fn execute_reactive_call(
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let inner_batch = BatchRequest {
@@ -147,6 +149,7 @@ pub(crate) async fn execute_reactive_call(
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let wrapper = BatchRequest {

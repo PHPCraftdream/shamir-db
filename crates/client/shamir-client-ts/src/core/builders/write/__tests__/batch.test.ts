@@ -774,6 +774,27 @@ describe('Batch — when (conditional execution guard)', () => {
     expect(req.queries.maybe.when).toEqual(cond);
   });
 
+  it('omits abort_on_skip unless explicitly enabled', () => {
+    const absent = Batch.create()
+      .add('maybe', write.insert('users', { name: 'Alice' }))
+      .build();
+    const disabled = Batch.create()
+      .add('maybe', write.insert('users', { name: 'Alice' }), {
+        abortOnSkip: false,
+      })
+      .build();
+    const enabled = Batch.create()
+      .add('maybe', write.insert('users', { name: 'Alice' }), {
+        when: filter.valueEq(1, 1),
+        abortOnSkip: true,
+      })
+      .build();
+
+    expect(absent.queries.maybe.abort_on_skip).toBeUndefined();
+    expect(disabled.queries.maybe.abort_on_skip).toBeUndefined();
+    expect(enabled.queries.maybe.abort_on_skip).toBe(true);
+  });
+
   it('when may carry a $query ref to another declared alias', () => {
     const req = Batch.create()
       .add('flag', Query.from('flags'))

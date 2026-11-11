@@ -319,6 +319,7 @@ fn insert_entry(op: InsertOp) -> QueryEntry {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -416,6 +417,7 @@ fn update_set_value_cond_with_field_based_condition_is_rejected_at_plan_time() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 

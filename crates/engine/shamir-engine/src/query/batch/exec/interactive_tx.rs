@@ -2,7 +2,9 @@ use std::time::Instant;
 
 use crate::query::batch::authorized::Authorized;
 use crate::query::batch::batch_execute::{execute_plan_tx, filter_results};
-use crate::query::batch::batch_validate::{validate_executable_guards, validate_tables};
+use crate::query::batch::batch_validate::{
+    validate_abort_on_skip_scope, validate_executable_guards, validate_tables,
+};
 use crate::query::batch::exec_scope::ExecScope;
 use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
 #[cfg(test)]
@@ -97,6 +99,7 @@ pub(in crate::query::batch) async fn execute_in_open_tx_with_scope(
     scope: &ExecScope,
 ) -> Result<BatchResponse, BatchError> {
     let repos = &auth.metadata().repos;
+    validate_abort_on_skip_scope(&auth.request().queries)?;
     if repos.len() > 1 {
         let mut repos: Vec<String> = repos.iter().cloned().collect();
         repos.sort();

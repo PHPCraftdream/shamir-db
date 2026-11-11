@@ -3,7 +3,7 @@ use shamir_query_types::batch::BatchLimits;
 use shamir_types::types::common::{new_map_wc, TMap};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::QueryEntry;
+use crate::query::batch::{BatchError, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
 
@@ -135,4 +135,27 @@ pub(in crate::query::batch) fn resolve_skip(
         .with_params(params);
     let node = crate::query::filter::compile_filter(filter, &scratch);
     !node.matches(&InnerValue::Null, &ctx)
+}
+
+pub(in crate::query::batch) fn skip_or_abort(
+    entry: &QueryEntry,
+    alias: &str,
+    skipped: bool,
+) -> Result<bool, BatchError> {
+    if skipped && entry.abort_on_skip {
+        return Err(BatchError::query_coded(
+            alias,
+            "skip_aborted",
+            "entry skipped under abort_on_skip",
+        ));
+    }
+    Ok(skipped)
+}
+
+pub(in crate::query::batch) fn abort_reason(error: &BatchError) -> String {
+    if error.code() == Some("skip_aborted") {
+        "skip_aborted".to_owned()
+    } else {
+        format!("{:?}", error)
+    }
 }

@@ -68,6 +68,7 @@ async fn activate_subscriptions_injects_sub_id_into_response() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 
@@ -179,6 +180,7 @@ async fn activate_subscriptions_enforces_per_connection_cap() {
                 return_result: true,
                 after: Vec::new(),
                 when: None,
+                abort_on_skip: false,
             },
         );
     }
@@ -293,6 +295,7 @@ async fn bridge_self_exit_releases_registry_slot() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
 

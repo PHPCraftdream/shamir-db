@@ -12,11 +12,8 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
     args: &[ExprId],
 ) -> Option<PlanFact> {
     match bid {
-        BuiltinId::Batch => Some(PlanFact::Batch {
-            root: call_id,
-            operations: Vec::new(),
-            unknown_alias: false,
-        }),
+        BuiltinId::Batch => Some(batch_fact(call_id, false)),
+        BuiltinId::BatchTx => Some(batch_fact(call_id, true)),
         BuiltinId::BatchId => plan_argument(c, frame, *args.first()?),
         BuiltinId::BatchRead | BuiltinId::BatchInsert => {
             let base = plan_argument(c, frame, *args.first()?)?;
@@ -41,7 +38,6 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
             PlanFact::Request {
                 operations,
                 unknown_alias,
-                ..
             } => Some(PlanFact::Response {
                 operations,
                 unknown_alias,
@@ -52,7 +48,16 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
     }
 }
 
-type ReferenceProvenance = (ExprId, Vec<(String, PlanOperation)>);
+fn batch_fact(root: ExprId, transactional: bool) -> PlanFact {
+    PlanFact::Batch {
+        root,
+        transactional,
+        operations: Vec::new(),
+        unknown_alias: false,
+    }
+}
+
+type ReferenceProvenance = (ExprId, Vec<(String, PlanOperation)>, bool);
 
 pub(in crate::sem::check) fn reference_provenance(
     c: &Checker,
@@ -70,8 +75,8 @@ pub(in crate::sem::check) fn reference_provenance(
     reference_sink_provenance(c, frame, base, producer_alias)
 }
 
-/// Returns the known batch root and snapshot for a sink base after proving
-/// that `producer_alias` occurs exactly once in that snapshot and is a Read.
+/// Returns the known batch root, snapshot and transaction bit after proving
+/// that `producer_alias` occurs exactly once in the snapshot and is a Read.
 /// Unlike the sink's alias, the producer alias must already exist in `base`.
 pub(in crate::sem::check) fn reference_sink_provenance(
     c: &Checker,
@@ -81,6 +86,7 @@ pub(in crate::sem::check) fn reference_sink_provenance(
 ) -> Result<ReferenceProvenance, &'static str> {
     let Some(PlanFact::Batch {
         root,
+        transactional,
         operations,
         unknown_alias: false,
     }) = plan_argument(c, frame, base)
@@ -100,7 +106,7 @@ pub(in crate::sem::check) fn reference_sink_provenance(
         .iter()
         .filter(|(known, _)| normalized_alias(known) == normalized_alias(&alias));
     match (matching.next(), matching.next()) {
-        (Some((_, PlanOperation::Read)), None) => Ok((root, operations)),
+        (Some((_, PlanOperation::Read)), None) => Ok((root, operations, transactional)),
         _ => Err("query_ref_field alias must identify exactly one read"),
     }
 }
@@ -140,6 +146,7 @@ fn append_legacy(
 ) -> Option<PlanFact> {
     let PlanFact::Batch {
         root,
+        transactional,
         mut operations,
         mut unknown_alias,
     } = fact
@@ -179,6 +186,7 @@ fn append_legacy(
     }
     Some(PlanFact::Batch {
         root,
+        transactional,
         operations,
         unknown_alias,
     })

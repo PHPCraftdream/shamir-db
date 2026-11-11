@@ -158,6 +158,7 @@ pub(super) fn insert_order_body(bind_row: &str) -> BatchRequest {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -236,6 +237,7 @@ pub(super) fn insert_order_body_with_div_guard(bind_row: &str) -> BatchRequest {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -264,6 +266,7 @@ pub(super) fn wrap_for_each(fe: ForEachOp) -> BatchRequest {
         QueryEntry {
             op: BatchOp::ForEach(fe),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },

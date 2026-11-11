@@ -82,6 +82,17 @@ The current wire options are typed fields: `durability` accepts `buffered` or
 pessimistic locking (level 3); only the string alias `level3` is obsolete and
 must be replaced by `pessimistic`.
 
+`abort_on_skip` is an opt-in entry field accepted only under a single-call
+transactional batch. A non-transactional root (including one with the flag in a
+nested entry) and interactive `TxExecute` are refused before operations run with
+code `validation` and message
+`abort_on_skip requires a single-call transactional batch`.
+
+The query v4 option key `abort_on_skip` is omitted when false and present only
+when true. If such an entry would be skipped, the transaction aborts with
+`reason: "skip_aborted"`; this outcome is not retryable without changing the
+input or condition (see [Commit outcome reasons and retry decisions](#commit-outcome-reasons-and-retry-decisions)).
+
 The parser rejects unsupported requested query-language versions with
 `DbResponse::Error { code: "unsupported_query_version", message: ... }`.
 Unknown `BatchRequest` and `CreateRepoOp` keys, invalid enum values, and
@@ -382,6 +393,7 @@ Commit errors are mapped to transaction metadata, not necessarily to a top-level
 | `reason: "tx_conflict"` | SSI, phantom, or wound-wait conflict. Retryable as a **new transaction**, re-reading state. |
 | `reason: "version_conflict"` | Commit-time CAS mismatch; also used by staging-time CAS errors. Re-read and refresh the expected version before retrying; do not blindly resend the stale expectation. |
 | `reason: "unique_violation"` | Unique constraint failure. Not retryable without changing input/state. |
+| `reason: "skip_aborted"` | A `QueryEntry` with `abort_on_skip: true` was skipped in a single-call transactional batch; the whole batch was aborted. Not retryable without changing the input. |
 | `reason: "table_migrating"` | Source table is frozen for migration. Wait for migration completion/cancellation and resolve the active table before submitting a new write. |
 | `status: "indeterminate"` + `error: "wal_outcome_unknown"` | WAL outcome unknown AFTER the frame was queued; carries the ATTEMPTED `commit_version` (no success claim). Reopen and reconcile by reading first; never blind-retry and never treat as rolled back. Implicit single ops fail with the stable `wal_requires_reopen` code carrying the attempted commit_version as a typed field of the batch error. An admission refusal BEFORE admission is `status: "aborted"` with `reason: "wal_requires_reopen"`. |
 | `reason: "wal_retention_exceeded"` | Retained sealed WAL exceeded `durability.wal_retention_max_bytes` under `on_wal_retention_exceeded: refuse_writes`. Retryable: transient admission refusal; clears once the drainer truncates, then a retried commit succeeds. |

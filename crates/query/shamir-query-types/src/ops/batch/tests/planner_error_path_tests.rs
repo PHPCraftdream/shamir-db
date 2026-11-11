@@ -31,6 +31,7 @@ fn read_entry(table: &str) -> QueryEntry {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 
@@ -61,6 +62,7 @@ fn sub_batch_entry(queries: TMap<String, QueryEntry>) -> QueryEntry {
         return_result: true,
         after: Vec::new(),
         when: None,
+        abort_on_skip: false,
     }
 }
 

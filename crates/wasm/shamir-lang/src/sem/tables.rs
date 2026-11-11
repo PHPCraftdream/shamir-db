@@ -49,6 +49,7 @@ pub(crate) struct ReferenceMarker {
     pub(crate) alias: String,
     pub(crate) path: String,
     pub(crate) kind: ReferenceKind,
+    pub(crate) transactional: bool,
 }
 
 /// Typed module consumed by the lowering milestone.

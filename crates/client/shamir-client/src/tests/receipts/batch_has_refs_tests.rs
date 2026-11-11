@@ -41,6 +41,7 @@ fn batch_with(op: BatchOp) -> BatchRequest {
         QueryEntry {
             op,
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -201,6 +202,7 @@ fn rv_client_5212ed16_when_guard_and_foreach_are_scanned() {
         QueryEntry {
             op: read_op("name", FilterValue::String("alice".into())),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: Some(Filter::Eq {
                 field: vec!["flag".to_string()],

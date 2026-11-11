@@ -307,6 +307,27 @@ impl Batch {
         self
     }
 
+    /// Abort the enclosing transactional batch if this entry would be skipped.
+    ///
+    /// The server validates that the root batch is transactional; the builder
+    /// records the per-entry flag without imposing transaction policy.
+    pub fn abort_on_skip(&mut self, handle: &Handle) -> &mut Self {
+        // Unknown handles are deferred errors (surfaced by `try_build`), not
+        // silent no-ops — an abort intent must not be silently discarded.
+        if !self.queries.contains_key(handle.alias()) {
+            self.deferred_errors
+                .push(BuildError::UnknownOrderingTarget {
+                    alias: handle.alias().to_string(),
+                    operation: "abort_on_skip",
+                });
+            return self;
+        }
+        if let Some(entry) = self.queries.get_mut(handle.alias()) {
+            entry.abort_on_skip = true;
+        }
+        self
+    }
+
     /// Multi-branch conditional dispatch — builder-only sugar (no new wire
     /// primitive; see the ADR, Decision 1, "Switch-case is confirmed as
     /// builder-only sugar").
@@ -390,6 +411,7 @@ impl Batch {
                 // mechanical field is required here only to keep the struct
                 // literal compiling after Epic03/B added `QueryEntry.when`.
                 when: None,
+                abort_on_skip: false,
             },
         );
         Handle { alias }

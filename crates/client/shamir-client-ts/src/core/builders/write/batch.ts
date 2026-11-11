@@ -102,11 +102,18 @@ export class Batch {
    * WHERE clause; see
    * `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`,
    * Decision 1). Omitted from the wire when not provided.
+   * `opts.abortOnSkip` opts this entry into aborting the enclosing single-call
+   * transaction if skipped; `abort_on_skip` is emitted only when true.
    */
   add(
     alias: string,
     op: BatchOpInput | Buildable,
-    opts?: { returnResult?: boolean; after?: string[]; when?: Filter },
+    opts?: {
+      returnResult?: boolean;
+      after?: string[];
+      when?: Filter;
+      abortOnSkip?: boolean;
+    },
   ): this {
     const resolved: BatchOpInput =
       typeof (op as Partial<Buildable>).build === 'function'
@@ -125,6 +132,10 @@ export class Batch {
 
     if (opts?.when !== undefined) {
       entry.when = opts.when;
+    }
+
+    if (opts?.abortOnSkip === true) {
+      entry.abort_on_skip = true;
     }
 
     this.queriesMap[alias] = entry;

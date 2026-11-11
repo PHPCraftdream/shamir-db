@@ -63,6 +63,7 @@ fn read_batch(encoding: ResultEncoding, where_value: FilterValue) -> BatchReques
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     BatchRequest {
@@ -297,6 +298,7 @@ async fn rv_client_5212ed16_id_refs_write_batch_with_uncached_fields_never_touch
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let mut record: TMap<String, QueryValue> = TMap::default();
@@ -320,6 +322,7 @@ async fn rv_client_5212ed16_id_refs_write_batch_with_uncached_fields_never_touch
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let batch = BatchRequest {

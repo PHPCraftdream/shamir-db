@@ -140,6 +140,14 @@ function build(name: string): unknown {
         })
         .limits({ max_queries: 20 })
         .build();
+    case 'entry_abort_on_skip_tx':
+      return Batch.create(1)
+        .transactional()
+        .add('guarded', insert('users', { name: 'Ada' }), {
+          when: filter.valueEq(1, 1),
+          abortOnSkip: true,
+        })
+        .build();
     case 'sub_batch_ts':
       return Batch.create()
         .subBatch('nested', Batch.create(), { bind: { x: 1 } })
@@ -181,6 +189,7 @@ describe('first-party wire operation matrix', () => {
       'subscribe_default_ts',
       'batch_rust',
       'batch_ts',
+      'entry_abort_on_skip_tx',
       'sub_batch_rust',
       'for_each_rust',
       'sub_batch_ts',

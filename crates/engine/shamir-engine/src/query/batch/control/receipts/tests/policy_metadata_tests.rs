@@ -29,6 +29,7 @@ fn entry(op: BatchOp) -> QueryEntry {
     QueryEntry {
         op,
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     }

@@ -26,6 +26,7 @@ pub(super) enum PlanOperation {
 pub(super) enum PlanFact {
     Batch {
         root: ExprId,
+        transactional: bool,
         operations: Vec<(String, PlanOperation)>,
         unknown_alias: bool,
     },

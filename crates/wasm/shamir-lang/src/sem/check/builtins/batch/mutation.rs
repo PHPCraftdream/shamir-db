@@ -261,6 +261,7 @@ pub(super) fn append_mutation_fact(
     };
     let PlanFact::Batch {
         root,
+        transactional,
         mut operations,
         unknown_alias,
     } = fact
@@ -292,6 +293,7 @@ pub(super) fn append_mutation_fact(
     ));
     Some(PlanFact::Batch {
         root,
+        transactional,
         operations,
         unknown_alias: false,
     })

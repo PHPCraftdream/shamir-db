@@ -321,9 +321,11 @@ await Batch.create('create-shamir-fn')
 обращаться к БД не могут (`T007`).
 
 Для нескольких операций за один вызов есть типизированный построитель
-батча: `batch()`, `batch_id(b, id)`, `batch_read(b, alias, table, filter)`,
-`batch_insert(b, alias, table, document)`, `request(b)`, `db_execute(r)`,
-`response_rows(resp, alias)` и `response_inserted(resp, alias)`. Это
+батча: `batch()` (нетранзакционный корень), `batch_tx()` (транзакционный
+корень), `batch_id(b, id)`, `batch_read(b, alias, table, filter)`,
+`batch_insert(b, alias, table, document)`, `batch_update(...)`,
+`batch_delete(...)`, `request(b)`, `db_execute(r)`, `response_rows(resp, alias)`,
+`response_inserted(resp, alias)` и `response_affected(resp, alias)`. Это
 неизменяемые значения (`Batch`, `Request`, `Response`): каждая операция
 возвращает новый план. Алиас — ASCII-идентификатор до 64 байт, уникальный в
 батче; операций не больше 50 (нарушение — ошибка вида 2). Фильтр `batch_read`
@@ -331,7 +333,20 @@ await Batch.create('create-shamir-fn')
 каждому полю, поля в порядке имён). Проекция ответа берёт тип из контекста:
 `let rows: [{ id: i64 }]? = response_rows(resp, "all");` — отсутствующий
 алиас даёт `null`, несовпадение формы — ошибку кодека (вид 3). Поддержаны
-только операции чтения и вставки.
+чтение, вставка и count-only update/delete.
+
+Атомарность ограничена одним выполнением: `batch_tx()` делает транзакционным
+ровно один вызов `db_execute(request(...))`; все записи этого батча
+фиксируются вместе или откатываются вместе. Обычный `batch()` остаётся
+нетранзакционным. Прямые `db_get`, `db_insert` и `db_query` выполняются с
+autocommit. `call(...)`/`call_checked` и отдельные вызовы `db_execute` не
+объединяются общей транзакцией процедуры: каждый `db_execute` плана
+`batch_tx()` выполняется в собственной транзакции, а `db_execute` плана
+`batch()` остаётся нетранзакционным. Изоляция `batch_tx()` — Snapshot;
+конкурирующие записи разрешаются по last-writer-wins, поэтому read-then-write
+не является serializable. Таймаут процедуры не доказывает rollback: если
+отмена пришлась на commit, транзакция могла уже зафиксироваться, хотя гостевой
+вызов сообщил таймаут.
 
 ### Сухая проверка: `check_function`
 

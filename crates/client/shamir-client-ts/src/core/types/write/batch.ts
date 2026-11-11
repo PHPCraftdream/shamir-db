@@ -85,17 +85,22 @@ export type BatchOpInput =
  * One entry in the `queries` map. `#[serde(flatten)]` on the Rust side
  * means the op fields are spread at the same level as `return_result`,
  * `after`, and `when`. The builder omits `return_result` when `true`
- * (default), `after` when empty, and `when` when unset.
+ * (default), `after` when empty, `when` when unset, and `abort_on_skip`
+ * unless explicitly `true`.
  *
  * `when` (Epic03/B, `#645`) is a conditional-execution guard: the op
  * executes iff `when` is absent, or present and evaluates to `true` via the
  * same `Filter` evaluation machinery WHERE clauses use. See
  * `docs/dev-artifacts/design/oql-03-conditional-execution-adr.md`.
+ * `abort_on_skip` requests transaction abort rather than a skipped result
+ * when this entry would be skipped; it is valid only under a single-call
+ * transactional root.
  */
 export type QueryEntry = BatchOpInput & {
   return_result?: boolean;
   after?: string[];
   when?: Filter;
+  abort_on_skip?: boolean;
 };
 
 // ── Isolation / Durability ──────────────────────────────────────────

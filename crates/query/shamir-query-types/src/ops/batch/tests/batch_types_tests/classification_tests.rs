@@ -32,6 +32,7 @@ fn single_query_batch(alias: &str, inner: BatchOp) -> BatchRequest {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     BatchRequest {
@@ -250,6 +251,7 @@ fn is_write_subbatch_with_read_and_insert_is_true() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     queries.insert(
@@ -259,6 +261,7 @@ fn is_write_subbatch_with_read_and_insert_is_true() {
             return_result: true,
             after: Vec::new(),
             when: None,
+            abort_on_skip: false,
         },
     );
     let batch = BatchRequest {

@@ -159,6 +159,19 @@ fn rust_request() -> Value {
     serde_json::to_value(batch.build()).unwrap()
 }
 
+fn rust_atomic_abort_request() -> Value {
+    let mut batch = Batch::new();
+    batch.id(1).transactional();
+    let guarded = batch.insert(
+        "guarded",
+        write::insert("users").row(write::doc().set("name", "Ada").unwrap()),
+    );
+    batch
+        .when(&guarded, filter::value_eq(1, 1))
+        .abort_on_skip(&guarded);
+    serde_json::to_value(batch.build()).unwrap()
+}
+
 fn decoded(wire: &Value, request: bool) -> (Value, Value) {
     let bytes = rmp_serde::to_vec_named(wire).expect("encode fixture");
     if request {
@@ -277,6 +290,7 @@ fn fixture_inventory_is_complete() {
             "subscribe_default_ts",
             "batch_rust",
             "batch_ts",
+            "entry_abort_on_skip_tx",
             "sub_batch_rust",
             "for_each_rust",
             "sub_batch_ts",
@@ -291,18 +305,29 @@ fn builder_parity_and_strict_dto_round_trips() {
         let name = case["name"].as_str().unwrap();
         let builder = case["builder"].as_str().unwrap();
         let wire = &case["wire"];
-        if builder.contains("rust:") {
+        let mut expected = wire.clone();
+        if name == "entry_abort_on_skip_tx" {
+            request_defaults(&mut expected);
+            expected["transactional"] = json!(true);
+            expected["queries"]["guarded"]["return_result"] = json!(true);
+        }
+        if builder.contains("rust:") || name == "entry_abort_on_skip_tx" {
             let actual = if name == "batch_rust" {
                 rust_request()
+            } else if name == "entry_abort_on_skip_tx" {
+                rust_atomic_abort_request()
             } else {
                 rust_op(name).expect("missing Rust builder")
             };
-            assert_eq!(actual, *wire, "{name}");
+            assert_eq!(actual, expected, "{name}");
         }
         if case.get("known_gap").is_none() {
-            let (json, msgpack) = decoded(wire, name == "batch_ts" || name == "batch_rust");
-            assert_eq!(json, *wire, "JSON {name}");
-            assert_eq!(msgpack, *wire, "msgpack {name}");
+            let (json, msgpack) = decoded(
+                wire,
+                name == "batch_ts" || name == "batch_rust" || name == "entry_abort_on_skip_tx",
+            );
+            assert_eq!(json, expected, "JSON {name}");
+            assert_eq!(msgpack, expected, "msgpack {name}");
         }
     }
 }

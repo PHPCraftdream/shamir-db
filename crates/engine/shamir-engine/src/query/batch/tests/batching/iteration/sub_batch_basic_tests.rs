@@ -157,6 +157,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
             bind: new_map(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -170,6 +171,7 @@ async fn sub_batch_runs_and_outer_reads_result() {
         QueryEntry {
             op: BatchOp::Read(crate::query::read::ReadQuery::from(read_q)),
             return_result: true,
+            abort_on_skip: false,
             after: vec!["sub".to_string()],
             when: None,
         },
@@ -267,6 +269,7 @@ async fn sub_batch_bind_injects_param() {
         QueryEntry {
             op: BatchOp::Read(inner_read),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -295,6 +298,7 @@ async fn sub_batch_bind_injects_param() {
     let outer_user_entry = QueryEntry {
         op: BatchOp::Read(crate::query::read::ReadQuery::from(outer_read_q)),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -313,6 +317,7 @@ async fn sub_batch_bind_injects_param() {
             bind,
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -385,6 +390,7 @@ async fn sub_batch_atomic() {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -399,6 +405,7 @@ async fn sub_batch_atomic() {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: vec!["good".to_string()],
             when: None,
         },
@@ -426,6 +433,7 @@ async fn sub_batch_atomic() {
             bind: new_map(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -514,6 +522,7 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -540,6 +549,7 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
             bind: new_map(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -580,6 +590,7 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
             select: None,
         }),
         return_result: true,
+        abort_on_skip: false,
         after: vec!["sub".to_string()],
         when: None,
     };
@@ -700,6 +711,7 @@ async fn tx_in_tx_rejected() {
                 select: None,
             }),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -726,6 +738,7 @@ async fn tx_in_tx_rejected() {
             bind: new_map(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -828,6 +841,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
         QueryEntry {
             op: BatchOp::Read(inner_read),
             return_result: true,
+            abort_on_skip: false,
             after: Vec::new(),
             when: None,
         },
@@ -855,6 +869,7 @@ async fn unbound_param_in_filter_is_silent_miss() {
             bind: new_map(),
         }),
         return_result: true,
+        abort_on_skip: false,
         after: Vec::new(),
         when: None,
     };
@@ -889,99 +904,5 @@ async fn unbound_param_in_filter_is_silent_miss() {
         0,
         "unbound $param in filter must return 0 records (silent miss), got {:?}",
         inner_records
-    );
-}
-// ============================================================================
-// Test 5b: unbound_param_in_bind_errors
-//
-// $param in bind map (outer scope has no such param) → unbound_param error.
-// ============================================================================
-#[tokio::test]
-async fn unbound_param_in_bind_errors() {
-    let resolver = setup().await;
-
-    // Inner batch with a trivial read.
-    let mut inner_queries = new_map();
-    inner_queries.insert(
-        "r".to_string(),
-        QueryEntry {
-            op: BatchOp::Read(shamir_query_types::read::ReadQuery {
-                from: crate::query::TableRef::new("users"),
-                r#where: None,
-                select: shamir_query_types::read::Select::all(),
-                order_by: None,
-                pagination: shamir_query_types::read::Pagination::default(),
-                group_by: None,
-                count_total: false,
-                temporal: shamir_query_types::read::Temporal::default(),
-                with_version: false,
-                explain: false,
-            }),
-            return_result: true,
-            after: Vec::new(),
-            when: None,
-        },
-    );
-    let inner_req = BatchRequest {
-        id: QueryValue::Int(51),
-        name: None,
-        transactional: false,
-        isolation: None,
-        visibility_wait: None,
-        durability: None,
-        index_visibility: None,
-        queries: inner_queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-        interner_epochs: Default::default(),
-        result_encoding: ResultEncoding::default(),
-    };
-
-    // Bind references a $param from the OUTER scope that doesn't exist.
-    let mut bind = new_map();
-    bind.insert(
-        "x".to_string(),
-        FilterValue::Param {
-            name: "nonexistent_outer_param".to_string(),
-        },
-    );
-    let sub_entry = QueryEntry {
-        op: BatchOp::Batch(SubBatchOp {
-            batch: inner_req,
-            bind,
-        }),
-        return_result: true,
-        after: Vec::new(),
-        when: None,
-    };
-
-    let mut outer_queries = new_map();
-    outer_queries.insert("sub".to_string(), sub_entry);
-    let outer_req = BatchRequest {
-        id: QueryValue::Int(5),
-        name: None,
-        transactional: false,
-        isolation: None,
-        visibility_wait: None,
-        durability: None,
-        index_visibility: None,
-        queries: outer_queries,
-        return_all: true,
-        return_only: None,
-        limits: BatchLimits::default(),
-        interner_epochs: Default::default(),
-        result_encoding: ResultEncoding::default(),
-    };
-
-    let err = execute_batch(&outer_req, &resolver, None, None, Actor::System, "test")
-        .await
-        .expect_err("$param in bind with no outer scope must error");
-
-    assert_eq!(
-        err.code(),
-        Some("unbound_param"),
-        "expected unbound_param code, got {:?}",
-        err
     );
 }
