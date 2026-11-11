@@ -84,10 +84,6 @@ fn assert_unavailable(error: &DbError) {
 
 async fn save_raw_function_row(db: &ShamirDb, name: &str, row: &QueryValue) {
     db.system_store()
-        .remove_function(name)
-        .await
-        .expect("remove prior function row before exact raw replacement");
-    db.system_store()
         .save_function_meta_record(name, row)
         .await
         .expect("insert exact raw function row");
