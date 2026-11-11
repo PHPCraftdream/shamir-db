@@ -146,7 +146,7 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
                  (["scripts/ci/tests/any.py"], "none", {"pipeline": False}),
                  ([".git-blame-ignore-revs", ".claude/x.md"], "none", {"docs_only": True}),
                  (["Cargo.lock"], "all", {"deny": True}),
-                 (["package-lock.json"], "none", {"deny": True, "docs_only": False}),
+                 (["crates/client/shamir-client-ts/package-lock.json"], "none", {"deny": True, "ts": True, "docs_only": False}),
                  (["scripts/ci/gates/npm_licenses_check.py"], "none", {"deny": True}),
                  (["deny.toml"], "none", {"deny": True}), (["clippy.toml"], "bounded", {}),
                  (["crates/client/shamir-client-ts/src/a.ts"], "none", {"ts": True, "docs_only": False}),
