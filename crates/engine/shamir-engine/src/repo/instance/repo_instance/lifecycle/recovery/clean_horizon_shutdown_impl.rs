@@ -217,28 +217,17 @@ impl RepoInstance {
         }
 
         for table_name in self.list_table_names() {
-            // Shutdown flush only reads/flushes a stable frozen source, so it
-            // must not fail on a fenced in-doubt name.
-            let table = match timed_stage(
-                &self.name,
-                &format!("get_table {table_name}"),
-                self.get_table_unfenced(&table_name),
-            )
-            .await
-            {
-                Ok(t) => t,
-                Err(e) => {
-                    log::warn!(
-                        "flush_buffers: get_table {}/{}: {}",
-                        self.name,
-                        table_name,
-                        e
-                    );
-                    if first_err.is_none() {
-                        first_err = Some(e);
-                    }
-                    continue;
-                }
+            // Only tables that are already open own buffered stores. A dormant
+            // table has nothing to drain, and instantiating it here would pay
+            // a full table open (keyspaces, indexes, validators) per table
+            // inside the shutdown budget and register it for MVCC routing. The
+            // map guard is dropped before any await.
+            let Some(table) = self
+                .tables
+                .get(&table_name)
+                .and_then(|cell| cell.get().cloned())
+            else {
+                continue;
             };
             if let Err(e) = timed_stage(
                 &self.name,

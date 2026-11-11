@@ -138,4 +138,12 @@ impl MvccStore {
     pub async fn flush_history(&self) -> DbResult<()> {
         self.history.flush().await
     }
+
+    /// Drain this store's `history` into its backend write path WITHOUT the
+    /// backend-wide durability barrier (`Store::flush_drain`). A caller that
+    /// drains many stores of one repository issues ONE `Repo::persist_once`
+    /// afterwards instead of one full-database fsync per store.
+    pub async fn flush_history_drain(&self) -> DbResult<()> {
+        self.history.flush_drain().await
+    }
 }
