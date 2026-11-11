@@ -22,7 +22,7 @@ does not build for `wasm32-unknown-unknown` without a feature/cfg.
    `scripts/ci/gates/merge_gate_check.py` like the other gating jobs (read that script
    and its unit tests, extend both). In the fast tier it runs only when the affected
    set contains `shamir-sdk`, `shamir-query-builder`, `shamir-query-types` or
-   `shamir-types` (use the outputs of `scripts/ci/affected_crates.py` the same way the
+   `shamir-types` (use the outputs of `scripts/ci/matrix/affected_crates.py` the same way the
    other gated jobs do; add unit tests there only if you change the script).
 3. Because there is no way to run CI here, read the existing jobs very carefully and
    copy their idioms exactly (job ids, `if:` conditions on the `plan`/`affected`

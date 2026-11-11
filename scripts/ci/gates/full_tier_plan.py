@@ -23,7 +23,7 @@ Rules (implemented exactly)
 The marker must be the whole line (surrounding blanks and a CR are
 tolerated): prose that merely mentions it never triggers a full run.  The
 test selection inside the fast tier is NOT driven by the message; it stays
-diff-based (scripts/ci/affected_crates.py).
+diff-based (scripts/ci/matrix/affected_crates.py).
 
 Usage
     full_tier_plan.py --event <event> --draft true|false --message-file <path>

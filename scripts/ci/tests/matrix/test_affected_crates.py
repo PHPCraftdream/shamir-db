@@ -1,4 +1,4 @@
-"""unittest suite for scripts/ci/affected_crates.py.
+"""unittest suite for scripts/ci/matrix/affected_crates.py.
 
 Pure-function tests over a hand-built `cargo metadata` dict and file lists —
 no cargo, no git, no filesystem.
@@ -14,7 +14,10 @@ import unittest
 
 sys.path.insert(
     0,
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "matrix",
+    ),
 )
 
 import affected_crates as ac  # noqa: E402

@@ -82,9 +82,10 @@ meta envelopes, persistence, expressions, runtime, IDV2 identity, the
 (HNSW / brute force / SQ8 + snapshots), re-exported by `shamir-index` as its
 `vector` module.
 
-Prefer `--workspace` flags in CI and scripts. Local pre-push checks are
-scoped to the touched crates (`-p <crate>`) — see "Compile / build / test
-policy".
+Prefer explicit `-p <crate>` package flags for scoped CI and scripts; the CI
+matrix computes test targets from changed paths, package dependencies and
+declared non-Cargo edges. Local pre-push checks remain scoped to touched crates
+(see "Compile / build / test policy").
 
 ---
 
@@ -119,14 +120,7 @@ changed; `--workspace` only when asked):
 Never push code that fails `check`, `clippy` or `fmt`. Everything else is
 CI's job, and `./scripts/test.sh` is executed **in the PR's CI**:
 
-* Push to a branch and open a draft PR: the fast tier (fmt, layout, clippy
-  and `./scripts/test.sh` lib tests of the affected crates) runs.
-  `gh pr ready` runs the full matrix (`./scripts/test.sh` and the
-  integration run on Ubuntu/Windows/macOS), which is the merge gate;
-  `gh workflow run ci.yml --ref <branch>` forces the full tier on a draft,
-  and so does the explicit marker `[ci full]` alone on a line of the head
-  commit message (see "CI tiers"). Nothing else triggers a full run on a
-  draft: the full matrix is kept for the end of a sprint.
+* Push to a branch and open a draft PR: the fast tier runs formatting, layout, Python helper tests, selected clippy/checks and lib tests. `gh pr ready` runs the full tier over only selected test targets across its OS matrices and is the merge gate. The `[ci full]` marker alone on a line of the head commit message also selects the full tier on a draft (see "CI tiers"). A manual `scope=workspace` dispatch is the explicit pre-release whole-workspace run.
 * A failing test, hang or flake is diagnosed from the CI log
   (`gh run view <id> --log-failed`), fixed in code and re-pushed. It is not
   reproduced locally; reading code and logs is the debugging tool. When a
@@ -453,46 +447,11 @@ substitute for running the gate yourself before pushing.
 CI is segmented into two tiers to keep the shared runner pool responsive
 (see `.github/workflows/ci.yml`):
 
-* **FAST tier — draft PR pushes without the full-tier marker.** One ubuntu job (`fast`): `cargo fmt
-  --check`, the `scripts/ci/affected_crates.py` unit tests, then clippy and
-  lib tests (`./scripts/test.sh`) limited to the AFFECTED crates (changed
-  crate + its workspace dependents). Falls back to `--workspace` when the
-  diff cannot be bounded (lockfile, toolchain, `.github/`, scripts, …) and
-  to fmt-only for docs-only diffs.
-* **FULL tier — the merge gate.** `gh pr ready` (ready_for_review), master
-  pushes and `workflow_dispatch` run the full matrix (fmt, clippy ×2 OS,
-  test ×2, integration ×2 (ubuntu, windows), engine feature cells on ubuntu,
-  ts-unit, cooldown, `deny`, loom) plus the path-gated numa workflow (opt-in
-  QEMU tier). On pull_request this tier narrows by the dependency closure: the
-  new `affected` job runs `scripts/ci/affected_crates.py` (the same selector
-  the fast tier uses) and every heavy step gates on its outputs, so a change
-  to a crate tests that crate plus its workspace dependents — not all 31.
-  Master pushes, `workflow_dispatch` and the weekly schedule (with macOS)
-  always run the whole workspace. Global paths force the whole workspace:
-  `Cargo.lock`, the root `Cargo.toml`, toolchain files, `deny.toml`,
-  `.cargo/`, `.config/`, `scripts/`, `.github/`, and any file outside
-  `crates/`/`docs/` that is not `*.md`. A docs-only diff keeps every job
-  green and skips the heavy steps with a `::notice::`. To force the full
-  workspace on a PR: `gh workflow run ci.yml --ref <branch>`
-  (`workflow_dispatch` always selects the workspace). The `deny` job (cargo
-  deny + npm licences) always reports but
-  skips its work when no dependency input changed since the base. Windows-only
-  failures surface here, at ready. The macOS cells (and the windows/macOS
-  engine feature cells) run only on `workflow_dispatch` and a weekly schedule
-  (CI-05: the macOS runner queue was the merge bottleneck), so a macOS-only
-  failure surfaces there, not at ready.
+* **FAST tier — draft PR pushes without the full-tier marker.** One Ubuntu job runs formatting, layout, Python helper tests and matrix-selected checks/tests. `scripts/ci/matrix/test_matrix.py` computes scope using changed paths and declared non-Cargo edges in `scripts/ci/matrix/edges.toml`; the lib/integration rows select tests while `check_only` rows receive checks only.
+* **FULL tier — the merge gate.** `gh pr ready`, master pushes and `workflow_dispatch` run the full job set. PRs use the merge-base range and master pushes use the event before/after range. Dispatch accepts a range, validated explicit package list, and `scope=computed|workspace`; without a range it covers the branch since its merge base with master, an explicit range or package list makes the run not merge-ready (the gate fails it), and only `scope=workspace` manually selects all crates. Weekly scheduled runs test only `shamir-server` and `shamir-e2e` on Ubuntu, Windows and macOS. Pipeline changes run canaries across job kinds. A master push may reuse tests only when a successful same-repository PR run with a green required gate has the same tree and its head contains the previous master tip; API uncertainty runs tests. `deny` follows the matrix deny flag. Empty test rows leave required workflow guard jobs green while skipping their unrelated test work.
 * **test-build — the compile budget, split from the run.** The full matrix
-  compiles the workspace lib test binaries ONCE per OS in `test-build`
-  (`timeout-minutes: 60`, the only job with a long limit) and packs them
-  into a nextest archive consumed only by the lib `test` job; `integration`
-  builds in place. The build steps (and the rust-cache shared key
-  `test-archive-v1`) live in `.github/actions/build-test-archive`, also used
-  by `cache-warm.yml`. The workflow-level `CARGO_TERM_COLOR` and
-  `RUST_BACKTRACE` env blocks must stay identical because rust-cache hashes
-  those environment values. After the default branch changes `Cargo.lock` or
-  the toolchain, run `gh workflow run cache-warm.yml --ref master` in the
-  repository whose CI is used; the weekly Saturday schedule keeps the cache
-  from expiring.
+  compiles selected lib test binaries once per OS in `test-build`, then packs
+  them for the lib `test` job. Integration builds its selected targets in place.
 * All three workflows cancel superseded PR runs via `concurrency`.
 * **Explicit triggers of the FULL tier on a draft (the ONLY two).**
   1. The commit-message marker: the line `[ci full]` alone on its own line
@@ -501,14 +460,16 @@ CI is segmented into two tiers to keep the shared runner pool responsive
      reads only the head commit, so one marker buys exactly one full run and
      the next push without it is fast again. The match is whole-line and
      case-sensitive; prose that merely mentions the marker never triggers.
-  2. A manual run through Actions: `gh workflow run ci.yml --ref <branch>`
-     (or "Run workflow" in the UI) — `workflow_dispatch` is always full.
+  2. A manual Actions run through `gh workflow run ci.yml --ref <branch>`
+     (or "Run workflow" in the UI) — `workflow_dispatch` is always full-tier;
+     selection remains computed unless `crates` or `scope=workspace` is provided.
 
-  Test selection is NOT read from the commit message: on PRs (fast tier and
-  full tier alike) the tested crates come from the diff (`scripts/ci/affected_crates.py`).
-  The marker only decides fast vs full. Rule for sprints: waves of work go
-  as drafts (fast tier); the full matrix is run once at the end of the
-  sprint — by the marker, `gh pr ready` or a manual dispatch.
+  `scope=workspace` is the only manual switch for selecting the whole
+  workspace; computed selection can also resolve to all crates for toolchain,
+  profile changes or unclassified paths. The weekly schedule selects only
+  `shamir-server` and `shamir-e2e` on Ubuntu, Windows and
+  macOS. Test selection is NOT read from the commit message: the affected job
+  consumes the matrix and declared edges; the marker only decides fast vs full.
 
 ### 📐 Layout limits (MANDATORY for new and changed code)
 
