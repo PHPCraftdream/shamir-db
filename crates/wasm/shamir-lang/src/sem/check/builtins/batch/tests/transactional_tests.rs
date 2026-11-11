@@ -95,7 +95,9 @@ fn transactional_reference_capability_only_stays_within_procedure_ceiling() {
         vec!["T007"]
     );
     assert_eq!(
-        codes("@entry validator v(x: i64) -> Validation { let b = batch_tx(); return accept(); }"),
+        codes(
+            "@entry validator v(record: { id: i64 }?, old_record: { id: i64 }?) -> Validation { let b = batch_tx(); return accept(); }",
+        ),
         vec!["T007"]
     );
 }

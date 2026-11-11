@@ -90,20 +90,21 @@ fn ordinary_batch_execute_does_not_register_or_bake_transaction_check() {
 }
 
 #[test]
-fn unreachable_batch_tx_helper_does_not_change_emitted_entry_bytes() {
+fn declared_but_uncalled_batch_tx_helper_still_bakes_the_checker() {
     let (baseline_bytes, baseline_ir) = compile(NON_TRANSACTIONAL);
-    let (unreachable_bytes, unreachable_ir) = compile(NON_TRANSACTIONAL_WITH_UNREACHABLE_BATCH_TX);
+    let (declared_bytes, declared_ir) = compile(NON_TRANSACTIONAL_WITH_UNREACHABLE_BATCH_TX);
 
-    // The lowerer emits only call-graph-reachable functions; the declared
-    // helper is valid source but absent from the emitted IR and its BatchUses.
+    // The lowerer does not prune uncalled user functions: the helper is part
+    // of the IR and its `batch_tx` counts as use, exactly like any other
+    // builder intrinsic in an uncalled function.
     assert_eq!(baseline_ir.functions.len(), 1);
-    assert_eq!(unreachable_ir.functions.len(), 1);
+    assert_eq!(declared_ir.functions.len(), 2);
     assert!(!baseline_ir.batch_uses().transactional);
-    assert!(!unreachable_ir.batch_uses().transactional);
-    // This locks reachability laziness against an independently compiled
-    // source without the helper. It is not a historical byte fixture: both
-    // outputs use the current emitter.
-    assert_eq!(baseline_bytes, unreachable_bytes);
+    assert!(declared_ir.batch_uses().transactional);
+    assert_ne!(baseline_bytes, declared_bytes);
+    for text in TX_ONLY_STRINGS {
+        assert!(has_static_text(&declared_bytes, text));
+    }
 }
 
 #[test]

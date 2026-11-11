@@ -62,9 +62,9 @@ async fn add_unique_code_index(db: &shamir_db::ShamirDb) {
     batch.id("unique_code_index");
     batch.create_index(
         "unique_code",
-        ddl::create_index("unique_code", "sink_rows")
-            .field("code")
-            .unique(),
+        // A plain index backs the schema-level unique rule (same as the
+        // declarative-schema tests): the rule requires a single-field index.
+        ddl::create_index("unique_code", "sink_rows").field("code"),
     );
     db.execute(
         super::support::DB_NAME,
