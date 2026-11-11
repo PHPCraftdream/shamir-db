@@ -8,10 +8,12 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
     c: &mut Checker,
     frame: &FunctionFrame,
     bid: BuiltinId,
+    call_id: ExprId,
     args: &[ExprId],
 ) -> Option<PlanFact> {
     match bid {
         BuiltinId::Batch => Some(PlanFact::Batch {
+            root: call_id,
             operations: Vec::new(),
             unknown_alias: false,
         }),
@@ -28,6 +30,7 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
             PlanFact::Batch {
                 operations,
                 unknown_alias,
+                ..
             } => Some(PlanFact::Request {
                 operations,
                 unknown_alias,
@@ -38,6 +41,7 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
             PlanFact::Request {
                 operations,
                 unknown_alias,
+                ..
             } => Some(PlanFact::Response {
                 operations,
                 unknown_alias,
@@ -46,6 +50,63 @@ pub(in crate::sem::check::builtins) fn record_plan_fact(
         },
         _ => None,
     }
+}
+
+type ReferenceProvenance = (ExprId, Vec<(String, PlanOperation)>);
+
+pub(in crate::sem::check) fn reference_provenance(
+    c: &Checker,
+    frame: &FunctionFrame,
+    args: &[ExprId],
+) -> Result<ReferenceProvenance, &'static str> {
+    let base = args
+        .first()
+        .copied()
+        .ok_or("query_ref_field requires a batch argument")?;
+    let producer_alias = args
+        .get(1)
+        .copied()
+        .ok_or("query_ref_field requires an alias argument")?;
+    reference_sink_provenance(c, frame, base, producer_alias)
+}
+
+/// Returns the known batch root and snapshot for a sink base after proving
+/// that `producer_alias` occurs exactly once in that snapshot and is a Read.
+/// Unlike the sink's alias, the producer alias must already exist in `base`.
+pub(in crate::sem::check) fn reference_sink_provenance(
+    c: &Checker,
+    frame: &FunctionFrame,
+    base: ExprId,
+    producer_alias: ExprId,
+) -> Result<ReferenceProvenance, &'static str> {
+    let Some(PlanFact::Batch {
+        root,
+        operations,
+        unknown_alias: false,
+    }) = plan_argument(c, frame, base)
+    else {
+        return Err("query_ref_field requires a known batch plan");
+    };
+    let alias = literal_alias(c, producer_alias)
+        .ok_or("query_ref_field requires a literal producer alias")?;
+    if operations.iter().enumerate().any(|(index, (known, _))| {
+        operations[..index]
+            .iter()
+            .any(|(prior, _)| normalized_alias(prior) == normalized_alias(known))
+    }) {
+        return Err("query_ref_field requires unique batch aliases");
+    }
+    let mut matching = operations
+        .iter()
+        .filter(|(known, _)| normalized_alias(known) == normalized_alias(&alias));
+    match (matching.next(), matching.next()) {
+        (Some((_, PlanOperation::Read)), None) => Ok((root, operations)),
+        _ => Err("query_ref_field alias must identify exactly one read"),
+    }
+}
+
+fn normalized_alias(alias: &str) -> &str {
+    alias.strip_prefix('@').unwrap_or(alias)
 }
 
 fn plan_argument(c: &Checker, frame: &FunctionFrame, expr: ExprId) -> Option<PlanFact> {
@@ -78,6 +139,7 @@ fn append_legacy(
     fact: PlanFact,
 ) -> Option<PlanFact> {
     let PlanFact::Batch {
+        root,
         mut operations,
         mut unknown_alias,
     } = fact
@@ -116,6 +178,7 @@ fn append_legacy(
         unknown_alias = true;
     }
     Some(PlanFact::Batch {
+        root,
         operations,
         unknown_alias,
     })

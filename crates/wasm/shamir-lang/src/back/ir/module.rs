@@ -130,6 +130,8 @@ pub struct IrModule {
     pub eq_shapes: Vec<EqShape>,
     /// Interned structural type nodes for entry projection.
     pub type_nodes: Vec<TypeNode>,
+    /// True if any function in this module emits a scalar-reference guard.
+    pub reference_guards: bool,
 }
 
 /// Lowering bounds, enforced by `IrBuilder` before growth.
@@ -170,6 +172,7 @@ pub(crate) struct BatchUses {
     pub execute: bool,
     pub response_rows: bool,
     pub response_affected: bool,
+    pub guarded: bool,
 }
 
 impl IrModule {
@@ -188,6 +191,7 @@ impl IrModule {
                 }
             }
         }
+        uses.guarded = self.reference_guards;
         uses
     }
 }

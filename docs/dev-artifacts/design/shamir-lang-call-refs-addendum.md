@@ -1,12 +1,12 @@
 # PROC-2c addendum: checked stored calls, batch references, update and delete
 
-**Status:** Stage 1 (count-only `batch_update`, `batch_delete` and `response_affected`, section 4 and the stage 1 row of section 6) and stage 2 (checked stored-procedure call and safeguards, section 2) are implemented in source; tests are pending CI. Stage 3 scalar read references remain deferred. This addendum supplements §§3–8 of `shamir-lang-design.md`; it does not change that document. §10 distinguishes observed source behavior from proposals. It replaces the earlier proposals and questions in this file with the decisions below. Procedure entries may declare bare `-> null`, which the compiler emits as `procedure(...)->null`; this intentionally widens only the procedure-entry result boundary, and scalar and validator rules are unchanged.
+**Status:** Stage 1 (count-only `batch_update`, `batch_delete` and `response_affected`, section 4 and the stage 1 row of section 6) and stage 2 (checked stored-procedure call and safeguards, section 2) are implemented in source; tests are pending CI. Stage 3 (A1–A7, B0–B3) scalar read references are implemented in source for the narrow `const` annotated-record/direct-reference subset below, including all-six-kind runtime guards and module-wide post-`db_execute` skipped-result checks. Production `compile` accepts this subset. A skipped result raises kind 2 with `batch reference did not resolve to the expected scalar`; malformed response shapes raise kind 3. Tests are pending CI; no runtime verification is claimed here. Pure moves A0 (`lower_record`) and B0 (`ordered_helper_functions`) are complete; B0 widens `pub(super)` visibility only. This addendum supplements §§3–8 of `shamir-lang-design.md`; it does not change that document. §10 distinguishes observed source behavior from proposals. It replaces the earlier proposals and questions in this file with the decisions below. Procedure entries may declare bare `-> null`, which the compiler emits as `procedure(...)->null`; this intentionally widens only the procedure-entry result boundary, and scalar and validator rules are unchanged.
 
 ## 1. Scope and decisions
 
-This addendum defines three work areas: checked calls between stored procedures, a deliberately deferred scalar read-reference subset in typed batches, and typed batch update/delete. It adds no arbitrary raw DTO construction or general query language.
+This addendum defines three work areas: checked calls between stored procedures, scalar read references in typed batches, and typed batch update/delete. Reference support is limited to the statically checked subset in section 3 and introduces no arbitrary raw DTO construction or general query language.
 
-Delivery is staged: stage 1 adds update/delete and affected-count projection; stage 2 adds checked stored calls and their security/runtime safeguards as one unit; stage 3 may add scalar read references only after the runtime type-checking gate in §3 is met. Stage 1 and 2 expose no references.
+Delivery is staged: stage 1 adds update/delete and affected-count projection; stage 2 adds checked stored calls and their security/runtime safeguards as one unit; stage 3 implements the narrow static reference checks, guarded lowering, and module-wide skipped-result checks. Production `compile` accepts only the checked reference subset; no transactional reference mode or wider query surface is added.
 
 Accepted decisions:
 
@@ -15,7 +15,7 @@ Accepted decisions:
 3. A checked call captures the artifact, signature and security/resource metadata together once, then validates, authorizes and invokes that captured artifact. No second name lookup is permitted. Missing catalog metadata fails closed.
 4. Recursion is forbidden on every stored-call route, including legacy guest `call` and gateway-originated batch `Call`. A shared immutable active-call identity path detects repeats and allows at most 32 entries including the root. Identities remain stable across rename/replacement. Check before entering; unwind with a scope/cancel-safe guard. This path is not a child-list global visited set.
 5. The current effective actor of the parent hop authorizes target Execute and is the target Invoker actor. There is no retained root `A0` identity. Preserve existing Invoker setuid behavior: when enabled it resolves the Invoker actor to the target owner. A new fail-closed rule rejects entry to an Invoker target owned by someone other than the parent Definer owner when the parent frame is Definer. Definer executes as its own owner.
-6. Version 1 adds only `batch_update`, `batch_delete`, and `response_affected`, with the exact narrow rules in §4. References are deferred as in §3; no transactional reference mode or new host import/engine DTO is added in stage 1.
+6. Version 1 adds only `batch_update`, `batch_delete`, and `response_affected`, with the exact narrow rules in §4. Stage 3 implements the narrow scalar-reference subset in §3 with runtime guards and skipped-result checking. No transactional reference mode or new host import/engine DTO is specified.
 
 ## 2. Checked stored calls
 
@@ -88,42 +88,50 @@ Existing Wasm execution has a depth-0 wall timeout, per-Store epoch deadlines an
 
 Future nested calls must preserve existing pool/fuel limits and shared lease behavior; do not claim fuel meters native DB/planner CPU. Cancellation-safe identity unwind and no detached child are stage-2 acceptance criteria, not verified behavior. Already committed gateway work is not rolled back.
 
-## 3. Deferred scalar read references
+## 3. Scalar read references in typed batches
 
-There are no references in stage 1 or stage 2. Stage 3 may add only scalar references from read producers, and only into read equality filters or insert field values (F4). The only accepted paths are `[n].field`; no whole row, `[].field`, list/column reference, nested field path, insert-result producer, update/delete reference, or reference in any other context. A data reference must refer backward to an earlier alias in the same immutable plan. `batch_after` is also deferred; if later added, it is backward-only, with dependent alias later than prerequisite alias, and both aliases must be in that same immutable plan.
+The compiler implements one reference intrinsic, `query_ref_field(plan, read_alias, index, field)`. `plan` must be a known batch value, `read_alias`, `index`, and `field` must be literals, and the resolved path is exactly `[n].field` for a prior read in the same plan history. A reference may appear only as a direct field in a `const` local initialized by an explicitly typed record literal, and that local may be consumed once, as a whole, by an eligible read-equality filter or insert value. The sink must be statically known and non-null scalar: `i32`, `i64`, `f64`, `bool`, `string`, or `bytes`. Literal fields may coexist in the record. This does not add public `QueryRef` or general value-flow. Reads through other paths, copies, reuse, escape, and all other sinks are rejected with the existing diagnostics (`T004`/`T007`/`T009`/`T010). No write/update/delete producer or sink, predicate outside read equality, collection, return, or `batch_after` use is supported.
 
-The narrow future source shape is compiler notation, not a promise of a public `QueryRef` type:
+The module-wide check traverses all `results` entries after every `db_execute` in any reference-bearing module, not only the directly referenced aliases. The compiler emits `when` only on reference operations and never emits `after`; `skipped: true` therefore means a failed reference guard or cascading data-flow skip and raises kind 2 with the exact message `batch reference did not resolve to the expected scalar`. A missing `skipped` key is accepted as an unskipped result. Missing `results`, a non-map result entry, or a non-boolean `skipped` field raises kind 3. The check needs no compiler-side operation-kind map. Engine pre-dispatch resolution and cascading skip behavior are relied upon; batches remain nontransactional, so independent operations may commit before the guest raises. Each function invocation uses a fresh Store; no trap-cleanup guarantee is made. This adds no engine DTO, ABI, import, or version change; the six-import ceiling is unchanged. Tests are pending CI; these source semantics are not runtime-verified.
+
+The guard checks the runtime value's type using `value_nav/type_of`: `string`, `bool`, `bytes`, `f64`, and `int` for `i64`; `i32` uses the `int` kind plus inclusive signed bounds −2,147,483,648 through 2,147,483,647. Missing rows/fields, null, a mismatched runtime kind (for example an integer into an `f64` sink), and out-of-range `i32` values fail the guard. The compiler lowers the native marker `{"$query":"@alias","path":"[n].field"}` and adds a `when` condition to each reference-bearing read/insert operation so an invalid value skips before dependent dispatch.
+
+The former proposal's additional exclusions remain outside this surface: whole rows, `[].field`, list/column references, nested paths, insert-result producers, update/delete references, other contexts, and `batch_after` are unavailable.
 
 ```text
-let b0 = batch_read(batch(), "users", "users", { id: user_id });
-let b1 = batch_insert(b0, "audit", "audit", {
-  user_name: query_ref_field(b0, "users", 0, "name")
-});
+const b0 = batch_read(batch(), "users", "users", { id: 7 });
+const row: { name: string } = { name: query_ref_field(b0, "users", 0, "name") };
+const b1 = batch_insert(b0, "audit", "audit", row);
+const response = db_execute(request(b1));
 ```
 
-Before stage 3, establish that the existing scalar resolver path can validate the actual runtime value against the compiler's required scalar type without inventing a soundness guarantee. Static checking proves known alias, source order, producer/consumer eligibility and scalar sink shape; it does not prove an external database row's field exists or its runtime value has the declared type. A reference must have a compiler-known alias/provenance and an eligible scalar sink; reject statically with `T010` when those facts cannot be proved (F4). missing or wrong-type runtime values must reject before dependent dispatch (proposed runtime kind 2 for plan/reference failure, kind 3 for malformed value/projection). If sound scalar validation cannot fit the existing mechanism, stage 3 remains gated until a precise implementation is designed. This is an implementation gate, not an open product choice.
+The compiler lowers a marker for each semantically validated reference and adds the operation's generated guard; this is production compiler output, not a test-only artifact. The post-execution skipped-result check is part of the compiled module as described above.
 
-Native builder examples must use the Rust query builder, not manually construct DTO values:
+### Runtime guard and native-builder illustration
+
+The native builder illustration below shows the guard representation corresponding to production compiler lowering:
 
 ```rust
 let mut batch = Batch::new();
-batch.query("users", Query::from("users").where_(eq("id", user_id)));
-batch.insert("audit", insert("audit").row(doc().set("user_name", qref("users", "[0].name"))?));
+batch.query("users", Query::from("users").where_(eq("id", 7)));
+let audit = batch.insert(
+    "audit",
+    insert("audit").row(doc().set("name", qref("users", "[0].name"))?),
+);
+batch.when(
+    &audit,
+    filter::value_eq(
+        val::func("value_nav/type_of", [val::qref("users", "[0].name")]),
+        "string",
+    ),
+);
 let bytes = batch.to_msgpack()?;
 ```
 
-The native builder normalizes the reference alias to `@users` and emits path `[0].name` (F10). The following single abbreviated wire example is an exception solely to document the marker shape; `transactional` is false by default, with no reference transaction mode.
+The native builder illustration above shows the guard representation used by compiler lowering. `keep_order` preserves request serialization, not global execution order. The flag is set around request encoding and reset on normal return; an encoder trap bypasses that reset. This existing caveat is unchanged and no trap-cleanup behavior is claimed.
 
-```text
-{ "transactional": false, "queries": {
-  "users": { "from":"users", "where":{"op":"eq","field":["id"],"value":7}, "return_result":true },
-  "audit": { "insert_into":"audit", "values":[{"user_name":{"$query":"@users","path":"[0].name"}}], "return_result":true }
-} }
-```
+Existing planner execution uses dependency waves, with insertion order only as the tie-break within a wave (F6). The compiler emits markers and guards for the supported references; this does not change the planner's ordering model.
 
-Existing planner execution is in dependency waves, with insertion order only as a tie-break inside each wave (F6). For source aliases A (read), B (depends on A), C (independent), execution is A,C then B. In stages 1–2 there are no refs or after edges: one wave executes in insertion/source order. Stage 3's backward-only after requires prerequisite earlier than dependent, rejects self/forward/unknown aliases, and therefore cannot form a cycle; native planner cycle/depth checks remain. Default dependency depth is 10. Keep-order preserves request serialization, not global execution order.
-
-The current compiler sets `keep_order=1` around request encoding and resets it on normal return (F8); an encoder trap bypasses that reset. Stage-3 conformance must cover terminal error behavior and fresh independent invocations without claiming trap cleanup.
 
 ## 4. Version-1 update/delete intrinsics
 
@@ -192,9 +200,9 @@ Stages are indivisible at their stated safety boundaries. Tests below are accept
 |---|---|---|---|
 | 1 — update/delete | `crates/wasm/shamir-lang/src/sem/check/builtins.rs`; `crates/wasm/shamir-lang/src/back/batch/{lower,template}.rs`; `crates/wasm/shamir-lang/src/back/emit/support/db.rs`; native `try_update`/`try_delete` + `to_msgpack` byte oracle; no engine/DTO/ABI change; import ceiling stays five | exact builder byte oracle; reject unsupported predicates/empty sets; pin `stats.records_scanned == WriteResult.affected`; changed-only update and removed delete counts; no-return empty records; malformed projection and ACL cases | DTO/accounting mismatch |
 | 2 — checked call and common admission | compiler checking/emission; admission sanitizer; host linker/bindings; function artifact create/replace and signature persistence; management authorization/binding; runtime context; legacy call and batch-call route | emitted signature atomically follows artifact; missing record fails closed; exact ABI/descriptor; captured binding is the invoked artifact; all target security cases; repeat and 32-entry rejection across every route; stable identity on rename/replacement; cancel-safe unwind; pool/depth inheritance; transaction guard remains; gateway-originated Call refused until context plumbing is safe | authorization confused-deputy, reentrant alias/replacement, cancellation/context split |
-| 3 — scalar read refs (gated) | compiler checker/lowering/template; existing resolver and param substitution only if adequate without new DTO/import | only `[n].field` from read to read-equality/insert scalar sink; backward same-plan aliases; runtime missing/wrong-scalar failure before dependent dispatch; byte oracle; planner wave order and keep-order behavior | existing marker/parser and scalar-value validation may not prove required type soundly |
+| 3 — scalar read refs | Narrow `const` annotated-record/direct-reference read-equality or insert subset, production `compile`, guarded lowering and module-wide skipped-result checks | Semantic and runtime-check implementation is present in source; all six scalar kinds are guarded and malformed/skipped response shapes are classified | Behavioral verification remains pending CI |
 
-Stage 2 must ship the checked path, catalog/artifact persistence, linker/admission registration, actor/security checks, shared active identity, legacy hardening, gateway context policy and transaction guard together. Do not enable an unchecked intermediate path. Stage 3 is not authorized until the scalar runtime soundness gate in §3 has an implementation that proves or rejects the actual value type.
+Stage 2 must ship the checked path, catalog/artifact persistence, linker/admission registration, actor/security checks, shared active identity, legacy hardening, gateway context policy and transaction guard together. Do not enable an unchecked intermediate path. Stage 3 production compilation accepts only the statically checked subset after guarded lowering and post-execution skipped-result checks are emitted.
 
 ## 7. Acceptance matrix
 
@@ -202,7 +210,7 @@ Stage 2 must ship the checked path, catalog/artifact persistence, linker/admissi
 - Stage 1 acceptance: exact native builder byte oracle and predicate rejection; pin `stats.records_scanned == WriteResult.affected`, changed-only update count and removed delete count; assert no-return operations expose no records. Also cover malformed/missing projections and gateway Write/Delete denial with Definer actor.
 - **Stage 2 compiler/admission:** exact named signature and result nullability; non-procedure target, unknown catalog, mismatched signature, denied effect and unsupported arguments fail closed; emitted import, sanitizer and linker agree. Legacy targets cannot be invoked through `call_checked`; untrusted callers cannot supply or forge trusted catalog metadata.
 - **Stage 2 identity/path:** actor chain for Invoker, Definer, Definer-to-Invoker owner match/mismatch and legacy setuid; Execute denial; absent metadata/owner; per-target grants; same captured artifact invoked; self/repeated identity and 32-entry boundary across checked, legacy and gateway paths; identity survives rename/replacement; path restores on success, error and cancellation. Confirm transactional batch `Call` is rejected before dispatch and nontransactional gateway `Call` is refused until context is carried safely.
-- **Stage 3 only after gate:** positive read scalar `[n].field` into read equality and insert field; reject unsupported path/producer/sink/order/plan; runtime missing/wrong type rejects dependent dispatch; verify independent operations retain insertion-order tie breaking within planner waves, not global source ordering.
+- **Stage 3 scalar refs:** semantic tests cover the narrow supported reference forms and static rejection cases; byte-oracle lowering and guard/response-check source are implemented. Production `compile` accepts the checked subset. Behavioral tests are pending CI; this status is not a claim that runtime value flow, planner waves, ACL, or malformed/skipped response cases have passed CI. No tests are claimed as run for this documentation update. Batches remain nontransactional, and no trap-cleanup guarantee is claimed.
 
 ## 8. Non-goals
 
@@ -219,13 +227,13 @@ Stage 2 must ship the checked path, catalog/artifact persistence, linker/admissi
 3. **Call identity/security:** every stored-call route shares a stable active identity path, repeat rejection and a 32-entry including-root limit; current parent effective actor authorizes Execute and supplies Invoker identity; retain legacy Invoker setuid semantics and add the Definer-owner mismatch guard.
 4. **Legacy and gateway routes:** harden legacy guest calls using the common resolver without requiring legacy signature comparison. Gateway batch `Call` shares invocation context; refuse it before dispatch until safe plumbing exists. Preserve transaction rejection.
 5. **Immediate batch surface:** stage 1 adds only `batch_update`, `batch_delete`, and `response_affected`; use nonempty non-null scalar equality records, nonempty typed sets, main repository, and no returning/projection/CAS.
-6. **Reference/compiler surface:** no stage-1/2 references; stage 3 is gated and limited to scalar `[n].field` references from read producers into read equality or insert values with runtime missing/type validation. The language emits only `call_checked`, never gateway batch `Call`; gateway-originated Call stays refused until common invocation-context plumbing is safe.
+6. **Reference/compiler surface:** stage 1/2 have no production references. Stage 3 production `compile` supports only the narrow `const` annotated-record/direct-reference read-equality or insert subset described in §3, with per-operation guards and module-wide post-`db_execute` skipped-result checks. The marker metadata stays private. No `batch_after`, public `QueryRef` type, engine/DTO/ABI/import change, transactional reference mode, version change, or update/delete references is accepted. The language emits only `call_checked`, never gateway batch `Call`; gateway-originated Call stays refused until common invocation-context plumbing is safe.
 
 ## 10. Verified against the code
 
 Evidence IDs map source observations to paths and line ranges. They describe inspected source, not runtime-test results.
 
-**Historical note:** The source observations below record the state before stage 2 was implemented; statements about missing checked-call registration, catalog/signature persistence, common resolution, and hardening describe that pre-stage-2 state. Stage-2 tests are pending CI.
+**Historical note:** The source observations below record the state before stage 2 was implemented; statements about missing checked-call registration, catalog/signature persistence, common resolution, and hardening describe that pre-stage-2 state. Stage-2 tests are pending CI. Section 3 records the current stage-3 source implementation, but its behavioral tests are pending CI.
 
 - **F1 — existing nested calls, linker, gateways, contexts and transaction guard.** `crates/wasm/shamir-wasm-host/src/wasm/bindings/call.rs:83-96,107-119,139,156-179,186-209` increments depth and clones actor/grants/pool into the child, including nested fuel lease suspension/reacquisition. `crates/wasm/shamir-wasm-host/src/wasm/wasm_function.rs:232-250` registers legacy `call` and DB imports only; there is no `call_checked` registration. `crates/engine/shamir-db/src/shamir_db/shamir_db/db/db_gateway.rs:262-276` decodes then executes as the facade actor. `crates/engine/shamir-db/src/shamir_db/execute/core/function_invoker.rs:45-48` invokes with the actor clone. `crates/engine/shamir-db/src/shamir_db/shamir_db/db/function/management.rs:761-781` authorizes, resolves function metadata, builds `FnCtx`, then invokes registry; this is not one atomic binding capture. `crates/wasm/shamir-wasm-host/src/runtime/context.rs:555-574,599-613` has no A0 field and initializes depth zero/pool none in the observed builder. `crates/engine/shamir-engine/src/query/batch/runner/query_runner/runner.rs:143` rejects transactional batch Call before invocation; this guard is retained as a regression criterion. No transactional deadlock is observed.
 - **F2 — batch actions, update count and stats.** `crates/query/shamir-query-types/src/ops/batch/ops/batch_op.rs:530-536` maps Read/Insert/Update/Delete to Read/Create/Write/Delete. `crates/engine/shamir-engine/src/table/write/update/execute.rs:228-233,385-394` selects rows and increments affected only for changed rows. `crates/engine/shamir-engine/src/query/batch/control/receipts/accounting.rs:37-45` copies `WriteResult.affected` into both `stats.records_scanned` and `stats.records_returned`; returned record lists are separate. This pins the proposed `response_affected` source.
@@ -237,14 +245,15 @@ Evidence IDs map source observations to paths and line ranges. They describe ins
 - **F8 — absence of response operation-kind tracking.** `crates/wasm/shamir-lang/src/back/emit/support/db.rs:34,246,248,542-545,641-714` defines the 1 MiB argument buffer, 50-operation/64-byte alias bounds, normal-return keep-order handling and ResponseGet walking, but no tracked Batch→Request→Response operation-kind metadata. The design's 8 MiB output capacity is in `docs/dev-artifacts/design/shamir-lang-design.md` §7. This document proposes adding compiler metadata; it does not claim the current helper already tracks kind.
 - **F9 — legacy call gap.** `crates/wasm/shamir-wasm-host/src/wasm/bindings/call.rs:83-96,156-179` clones current DB/network-secret context and invokes nested functions without the proposed common per-target resolver. Stage 2 hardening is new work; legacy signature comparison is not required.
 - **F10 — native builder markers and DTO.** `crates/query/shamir-query-builder/src/batch/batch.rs:194,220` provides `Batch::query`/`Batch::insert`; `crates/query/shamir-query-builder/src/read/val/filter_value.rs:157-186,171` normalizes builder query aliases/paths (`qref`); `crates/query/shamir-query-types/src/read/filter/filter_value.rs:87-99` constructs the native filter value without that normalization. `crates/query/shamir-query-types/src/ops/batch/ops/query_entry.rs:38-63` defines flattened operation/return/after/when serialization. `crates/query/shamir-query-types/src/ops/table_ref.rs:21-25,42-48` sets `TableRef::new` to main and emits a bare table for main.
-- **F11 — diagnostics and error categories.** `T` diagnostic codes are compiler-static by the main design. Runtime kind 2 plan and kind 3 projection mappings in this addendum are proposed; current host gateway failures are not asserted to map that way.
+- **F11 — diagnostics and error categories.** `T` diagnostic codes are compiler-static by the main design. For scalar references, the guest emits the stable kind-2 skipped-reference error and kind-3 malformed-response errors described in §3; behavior remains pending CI verification. Other checked-call runtime mappings remain as described in §2.
 - **F12 — call binding and catalog policy.** Atomic artifact/signature/resource binding and fail-closed missing-catalog behavior are accepted design decisions, not verified existing mechanisms. The separately looked-up management path is documented in F1.
 - **F13 — mutation predicate scope.** Null equality currently compares equal per F5; a nonempty scalar equality record can still match all records. The compiler's ban on bare-scalar predicates is therefore an explicit safety rule, not evidence that the engine treats a scalar as a record filter.
+- **F14 — scalar-reference implementation and verification status.** `crates/wasm/shamir-lang/src/sem/check/builtins/batch/reference.rs` contains semantic checking for the narrow annotated-const record-local/direct-field subset, including plan provenance, scalar kind, and one-time eligible sink checks; `sem/tables.rs` carries private marker/sink metadata. `back/lower/expressions/record.rs` and `back/batch/reference.rs` lower marker cells and per-operation guards; `api/compile.rs` enables references in the public `compile` path. The generated response check runs after each `db_execute` in a reference-bearing module. Source tests include semantic/lowering cases; runtime behavior tests are pending CI, so this is not an end-to-end verification claim.
 
 ### Not verified / design-only
 
 - `call_checked`, signature persistence, coherent captured binding, security/grant rebuilding, shared stable active-call path, cancellation-safe unwind, legacy call hardening, and gateway context propagation/refusal are proposals, not implemented behavior.
-- Stage-3 runtime checking that external read values are the declared scalar type is not established by source inspection. That is the explicit gate in §3; no claim of a sound static guarantee is made.
+- Stage 3 scalar-reference semantic checking, guarded lowering and module-wide post-`db_execute` skipped-result checks are present for the narrow subset described in §3; production `compile` accepts that subset. Tests are pending CI, and no runtime/value-flow, planner-wave, or ACL result is claimed verified here.
 - The transactional batch `Call` deadlock claim is false for current source: the batch runner rejects the call before invocation (F1).
 - Proposed kind-2 runtime plan and kind-3 projection mappings are not asserted as today's host error mapping.
-- No build or test was run for this documentation-only rewrite.
+- No build or test was run for this documentation-only update.

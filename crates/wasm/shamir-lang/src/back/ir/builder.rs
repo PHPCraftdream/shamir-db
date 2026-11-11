@@ -131,6 +131,7 @@ pub struct IrBuilder<'b> {
     null_cell: Option<u32>,
     literal_bytes: usize,
     ir_nodes: u64,
+    reference_guards: bool,
 }
 
 impl<'b> IrBuilder<'b> {
@@ -146,6 +147,7 @@ impl<'b> IrBuilder<'b> {
             null_cell: None,
             literal_bytes: 0,
             ir_nodes: 0,
+            reference_guards: false,
         }
     }
 
@@ -528,6 +530,11 @@ impl<'b> IrBuilder<'b> {
         params.checked_add(last).ok_or(IrError::Internal(E_COUNT))
     }
 
+    /// Records that this module emits a static scalar-reference guard.
+    pub(crate) fn mark_reference_guard(&mut self) {
+        self.reference_guards = true;
+    }
+
     /// Assembles the module; requires all begun functions finished.
     pub fn finish(self) -> Result<IrModule, IrError> {
         if self.current.is_some() {
@@ -541,6 +548,7 @@ impl<'b> IrBuilder<'b> {
             static_bytes: self.static_bytes,
             eq_shapes: shape_values,
             type_nodes: Vec::new(),
+            reference_guards: self.reference_guards,
         })
     }
 

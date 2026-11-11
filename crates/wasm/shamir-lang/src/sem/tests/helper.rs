@@ -24,7 +24,7 @@ pub(super) fn check_with(
 /// Parses with the default limits but checks with custom limits and stage.
 /// Needed where a lowered limit (e.g. zero compile fuel) would otherwise
 /// abort parsing before the semantic pass runs.
-pub(super) fn check_with_stage(
+pub(in crate::sem) fn check_with_stage(
     source: &str,
     limits: &CompileLimits,
     stage: Stage,

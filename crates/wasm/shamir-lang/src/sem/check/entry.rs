@@ -6,7 +6,7 @@ use crate::front::{
     self, EntryKind, ExprId, FunctionId, PrimitiveType, TypeFieldId, TypeId as AstTypeId, TypeKind,
 };
 use crate::sem::effects::{builtin_by_name, Capability, EffectSet};
-use crate::sem::tables::{CheckedCall, TypedModule};
+use crate::sem::tables::{CheckedCall, ReferenceMarker, TypedModule};
 use crate::sem::types::{TypeData, TypeId, TypeInterner};
 
 use super::{calls, resolve, statement};
@@ -25,6 +25,7 @@ pub(super) enum PlanOperation {
 #[derive(Clone, Debug)]
 pub(super) enum PlanFact {
     Batch {
+        root: ExprId,
         operations: Vec<(String, PlanOperation)>,
         unknown_alias: bool,
     },
@@ -60,6 +61,8 @@ pub(super) struct Checker<'a> {
     pub(super) by_name: BTreeMap<String, FunctionId>,
     pub(super) edges: Vec<CallEdge>,
     pub(super) checked_calls: Vec<Option<CheckedCall>>,
+    pub(super) reference_markers: Vec<Option<ReferenceMarker>>,
+    pub(super) reference_sinks: Vec<Vec<ReferenceMarker>>,
     pub(super) budget: &'a mut CompileBudget,
     /// Canonical ids for primitive types (`TypeInterner::intern` does not
     /// deduplicate, so equality-based assignability needs one id per name).
@@ -174,6 +177,8 @@ pub(crate) fn check_scoped_with_catalog(
         by_name: BTreeMap::new(),
         edges: Vec::new(),
         checked_calls: vec![None; module.expressions.len()],
+        reference_markers: vec![None; module.expressions.len()],
+        reference_sinks: vec![Vec::new(); module.expressions.len()],
         budget,
         primitives: BTreeMap::new(),
         structural: BTreeMap::new(),
@@ -231,6 +236,8 @@ pub(crate) fn check_scoped_with_catalog(
         resolved,
         calls,
         checked_calls,
+        reference_markers,
+        reference_sinks,
         expr_types,
         binding_slots,
         ..
@@ -245,6 +252,8 @@ pub(crate) fn check_scoped_with_catalog(
         resolved,
         calls,
         checked_calls,
+        reference_markers,
+        reference_sinks,
         binding_slots,
         span,
     };

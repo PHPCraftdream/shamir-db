@@ -4,6 +4,20 @@ use crate::sem::types::TypeData;
 use super::helper::{check_with_stage, expect_clean, first_diagnostic};
 
 #[test]
+fn query_ref_field_arity_is_checked_before_site_validation() {
+    let source = "@entry scalar probe() -> i64 { return query_ref_field(); }";
+    let diagnostic = first_diagnostic(source);
+    assert_eq!(diagnostic.code, "T004");
+    assert_eq!(
+        diagnostic.message,
+        "builtin query_ref_field expects 4 arguments"
+    );
+    let start = diagnostic.primary.start_byte as usize;
+    let end = diagnostic.primary.end_byte as usize;
+    assert_eq!(source.get(start..end), Some("query_ref_field()"));
+}
+
+#[test]
 fn n001_renders_code_line_column_and_message() {
     let source = "@entry scalar probe() -> i64 {\n  return missing; }";
     assert_eq!(
