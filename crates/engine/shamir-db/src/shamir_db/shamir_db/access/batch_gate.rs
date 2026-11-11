@@ -10,7 +10,7 @@ use crate::query::batch::BatchError;
 use crate::query::batch::BatchRequest;
 use crate::shamir_db::shamir_db::ShamirDb;
 
-pub(super) struct AclMemo {
+pub(in crate::shamir_db::shamir_db) struct AclMemo {
     pub(super) metas: DashMap<u64, Vec<(ResourcePath, ResourceMeta)>, THasher>,
     pub(super) membership: DashMap<(u64, u64), bool, THasher>,
 }

@@ -164,7 +164,7 @@ impl StoredCallResolver for ShamirDbCallResolver {
     }
 }
 
-fn strict_nested_meta(record: &QueryValue) -> FnResult<FunctionMeta> {
+pub(super) fn strict_nested_meta(record: &QueryValue) -> FnResult<FunctionMeta> {
     let QueryValue::Map(fields) = record else {
         return Err(FunctionError::Compute(
             "nested target catalogue row is not a map".into(),

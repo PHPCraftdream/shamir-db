@@ -12,6 +12,9 @@ use crate::DbResult;
 use super::super::ShamirDb;
 use super::gate::access_node;
 
+type InvocationSettingsRef<'a> =
+    Option<Result<&'a (Option<QueryValue>, Option<QueryValue>), &'a crate::DbError>>;
+
 impl ShamirDb {
     /// Enforcing authorization gate.
     ///
@@ -241,6 +244,29 @@ impl ShamirDb {
         caller: &Actor,
         record: Option<&QueryValue>,
     ) -> Result<(Actor, Option<Actor>), AccessError> {
+        let settings = if matches!(caller, Actor::System | Actor::Admin(_)) {
+            None
+        } else {
+            Some(self.system_store.load_invocation_settings().await)
+        };
+        self.authorize_invocation_with_settings(
+            name,
+            caller,
+            record,
+            settings.as_ref().map(Result::as_ref),
+            &super::batch_gate::AclMemo::default(),
+        )
+        .await
+    }
+
+    pub(in crate::shamir_db::shamir_db) async fn authorize_invocation_with_settings(
+        &self,
+        name: &str,
+        caller: &Actor,
+        record: Option<&QueryValue>,
+        settings: InvocationSettingsRef<'_>,
+        memo: &super::batch_gate::AclMemo,
+    ) -> Result<(Actor, Option<Actor>), AccessError> {
         let path = ResourcePath::function(name);
         if matches!(caller, Actor::System | Actor::Admin(_)) {
             trace_access(caller, &path, Action::Execute)?;
@@ -253,24 +279,23 @@ impl ShamirDb {
             path: path.to_string(),
             action: Action::Execute,
         };
-        let (root, namespace) =
-            self.system_store
-                .load_invocation_settings()
-                .await
-                .map_err(|e| {
-                    log::warn!(
-                "authorize_invocation: settings lookup failed for '{}' (actor={caller}): {}",
-                escape_resource_diagnostic(&path.to_string()),
-                escape_resource_diagnostic(&e.to_string())
-            );
-                    denied()
-                })?;
+        let (root, namespace) = match settings {
+            Some(Ok((root, namespace))) => (root, namespace),
+            Some(Err(error)) => {
+                log::warn!(
+                    "authorize_invocation: settings lookup failed for '{}' (actor={caller}): {}",
+                    escape_resource_diagnostic(&path.to_string()),
+                    escape_resource_diagnostic(&error.to_string())
+                );
+                return Err(denied());
+            }
+            None => return Err(denied()),
+        };
         let meta = match record {
             Some(rec @ QueryValue::Map(_)) => ResourceMeta::from_record(rec),
             Some(_) => return Err(denied()),
             None => ResourceMeta::default(),
         };
-        let memo = super::batch_gate::AclMemo::default();
         memo.insert_meta(
             ResourcePathRef::Root,
             root.as_ref()
@@ -289,7 +314,7 @@ impl ShamirDb {
                 .unwrap_or_default(),
         );
         memo.insert_meta(path.as_ref(), meta);
-        self.authorize_access_in(caller, &path, Action::Execute, Some(&memo))
+        self.authorize_access_in(caller, &path, Action::Execute, Some(memo))
             .await?;
         Ok(record
             .map(|record| Self::fn_actor_decision_from_record(record, caller))
