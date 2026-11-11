@@ -43,6 +43,7 @@ pub(crate) struct BatchStatics {
     pub batch_cell: u32,
     /// Descriptor of the `BatchRequest` record.
     pub request_descriptor: u32,
+    request_fields: [(u32, u32, u64); 6],
     /// The constant `select` template (`{ items: [{ type: "all" }], distinct: false }`).
     pub select_cell: u32,
     /// A static `true` cell (`return_result`).
@@ -59,6 +60,10 @@ pub(crate) struct BatchStatics {
     /// Guarded variants are baked only for modules that actually use references.
     pub read_guarded_descriptor: Option<u32>,
     pub insert_guarded_descriptor: Option<u32>,
+    /// The transaction descriptor is fetched lazily to preserve non-tx bytes.
+    pub transactional_batch_cell: Option<u32>,
+    pub transactional_true_cell: Option<u32>,
+    pub transactional_guarded_descriptors: Option<(u32, u32)>,
     /// Static one-segment field path lists by field name.
     pub paths: BTreeMap<String, u32>,
 }
@@ -79,7 +84,7 @@ fn text(builder: &mut IrBuilder, bytes: &[u8]) -> Result<(u32, u64), IrError> {
 }
 
 impl BatchStatics {
-    /// Bakes every constant template into the static image.
+    /// Bakes existing templates in their historical order and byte layout.
     pub(crate) fn bake(builder: &mut IrBuilder) -> Result<Self, IrError> {
         // limits record (ten i64 cells)
         let limit_cells: Vec<(u32, u32, u64)> = LIMIT_FIELDS
@@ -94,7 +99,7 @@ impl BatchStatics {
         let limits_descriptor = builder.record_descriptor(&limit_names)?;
         // the plan record
         let (encoding_len, encoding_addr) = text(builder, b"name")?;
-        let request_region = builder.static_region(&[
+        let request_fields = [
             (cell_tag::NULL, 0, 0),
             (cell_tag::BOOL, 0, 0),
             (cell_tag::DYNAMIC_MAP, 0, 0),
@@ -105,7 +110,8 @@ impl BatchStatics {
                 record_payload(limits_descriptor, limits_region),
             ),
             (cell_tag::STRING, encoding_len, encoding_addr),
-        ])?;
+        ];
+        let request_region = builder.static_region(&request_fields)?;
         let request_descriptor = builder.record_descriptor(&names(&REQUEST_FIELDS))?;
         let batch_cell = builder.static_cell(
             cell_tag::RECORD,
@@ -139,6 +145,7 @@ impl BatchStatics {
         Ok(Self {
             batch_cell,
             request_descriptor,
+            request_fields,
             select_cell,
             true_cell,
             eq_op,
@@ -163,8 +170,71 @@ impl BatchStatics {
             and_descriptor: builder.record_descriptor(&names(&["op", "filters"]))?,
             read_guarded_descriptor: None,
             insert_guarded_descriptor: None,
+            transactional_batch_cell: None,
+            transactional_true_cell: None,
+            transactional_guarded_descriptors: None,
             paths: BTreeMap::new(),
         })
+    }
+
+    /// The second request template; only the transactional field differs.
+    pub(crate) fn transactional_batch_cell(
+        &mut self,
+        builder: &mut IrBuilder,
+    ) -> Result<u32, IrError> {
+        if let Some(cell) = self.transactional_batch_cell {
+            return Ok(cell);
+        }
+        let mut fields = self.request_fields;
+        fields[1] = (cell_tag::BOOL, 0, 1);
+        let region = builder.static_region(&fields)?;
+        let cell = builder.static_cell(
+            cell_tag::RECORD,
+            REQUEST_FIELDS.len() as u32,
+            record_payload(self.request_descriptor, region),
+        )?;
+        self.transactional_batch_cell = Some(cell);
+        Ok(cell)
+    }
+
+    /// Static `true` cell for transactional `abort_on_skip` fields.
+    pub(crate) fn transactional_true_cell(
+        &mut self,
+        builder: &mut IrBuilder,
+    ) -> Result<u32, IrError> {
+        if let Some(cell) = self.transactional_true_cell {
+            return Ok(cell);
+        }
+        let cell = builder.static_cell(cell_tag::BOOL, 0, 1)?;
+        self.transactional_true_cell = Some(cell);
+        Ok(cell)
+    }
+
+    /// The guarded `when` + `abort_on_skip` operation descriptors.
+    pub(crate) fn transactional_guarded_descriptors(
+        &mut self,
+        builder: &mut IrBuilder,
+    ) -> Result<(u32, u32), IrError> {
+        if let Some(descriptors) = self.transactional_guarded_descriptors {
+            return Ok(descriptors);
+        }
+        let read = builder.record_descriptor(&names(&[
+            "from",
+            "select",
+            "where",
+            "return_result",
+            "when",
+            "abort_on_skip",
+        ]))?;
+        let insert = builder.record_descriptor(&names(&[
+            "insert_into",
+            "values",
+            "return_result",
+            "when",
+            "abort_on_skip",
+        ]))?;
+        self.transactional_guarded_descriptors = Some((read, insert));
+        Ok((read, insert))
     }
 
     /// Lazily bakes native-order operation descriptors with a trailing `when`.

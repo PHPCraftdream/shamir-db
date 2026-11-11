@@ -117,6 +117,7 @@ enum GatewayRequestShape {
     ForEach,
     WriteThenNestedBatch,
     TransactionalDirect,
+    TransactionalCrossRepo,
 }
 
 struct GatewayExecuteProc {
@@ -159,6 +160,15 @@ impl ShamirFunction for GatewayExecuteProc {
             GatewayRequestShape::TransactionalDirect => {
                 request.transactional();
                 request.call("call", self.target.as_str(), [] as [FilterValue; 0]);
+            }
+            GatewayRequestShape::TransactionalCrossRepo => {
+                request.transactional();
+                request.insert("main_write", insert("items").rows([doc! { "n" => 901 }]));
+                request.insert(
+                    "other_repo_write",
+                    shamir_query_builder::write::Insert::with_repo("hot", "items")
+                        .rows([doc! { "n" => 902 }]),
+                );
             }
         }
 
@@ -212,6 +222,28 @@ async fn setup_shamir_with_items() -> ShamirDb {
         )
         .await
         .expect("create items table");
+    shamir
+}
+
+async fn setup_shamir_with_hot_items() -> ShamirDb {
+    let shamir = setup_shamir_with_items().await;
+    let mut setup = Batch::new();
+    setup.id("setup_hot_items");
+    setup.create_repo(
+        "repo",
+        ddl::create_repo("hot")
+            .engine("in_memory")
+            .tables(["items"]),
+    );
+    shamir
+        .execute(
+            "testdb",
+            &setup
+                .to_request_via_msgpack()
+                .expect("hot repository request"),
+        )
+        .await
+        .expect("create hot repository and items table");
     shamir
 }
 
@@ -403,6 +435,68 @@ async fn db_gateway_execute_refuses_call_in_transactional_request() {
     assert_function_gateway_call_refused(error);
     assert_eq!(caller_invocations.load(Ordering::Relaxed), 1);
     assert_eq!(target_invocations.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn db_gateway_execute_refuses_transactional_cross_repo_before_any_write() {
+    let shamir = setup_shamir_with_hot_items().await;
+    let caller_invocations = Arc::new(AtomicUsize::new(0));
+    register_native_fn(
+        &shamir,
+        "gateway_cross_repo_caller",
+        Arc::new(GatewayExecuteProc {
+            target: String::new(),
+            shape: GatewayRequestShape::TransactionalCrossRepo,
+            invocations: caller_invocations.clone(),
+            stop_after: None,
+        }),
+    )
+    .await;
+
+    let error = invoke_native(&shamir, "gateway_cross_repo_caller")
+        .await
+        .expect_err("transactional gateway requests must refuse cross-repository writes");
+    assert!(
+        error.to_string().contains(
+            "transactional batch targets multiple repositories (hot, main); single-repo only"
+        ),
+        "expected transactional cross-repository refusal, got: {error}"
+    );
+    assert_eq!(caller_invocations.load(Ordering::Relaxed), 1);
+
+    let mut main_read = Batch::new();
+    main_read.id("verify_main_no_write");
+    main_read.query("rows", Query::from("items"));
+    let main_response = shamir
+        .execute(
+            "testdb",
+            &main_read
+                .to_request_via_msgpack()
+                .expect("main repository verification request"),
+        )
+        .await
+        .expect("read main repository after refusal");
+    assert!(
+        main_response.results["rows"].records.is_empty(),
+        "main-repository insert must not be dispatched"
+    );
+
+    let mut hot_read = Batch::new();
+    hot_read.id("verify_hot_no_write");
+    hot_read.query("rows", Query::with_repo("hot", "items"));
+    let hot_response = shamir
+        .execute(
+            "testdb",
+            &hot_read
+                .to_request_via_msgpack()
+                .expect("hot repository verification request"),
+        )
+        .await
+        .expect("read hot repository after refusal");
+    assert!(
+        hot_response.results["rows"].records.is_empty(),
+        "hot-repository insert must not be dispatched"
+    );
 }
 
 // ============================================================================

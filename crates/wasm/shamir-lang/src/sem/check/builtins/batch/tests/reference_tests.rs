@@ -58,6 +58,7 @@ fn marker(alias: &str, path: &str, kind: ReferenceKind) -> ReferenceMarker {
         alias: alias.to_string(),
         path: path.to_string(),
         kind,
+        transactional: false,
     }
 }
 

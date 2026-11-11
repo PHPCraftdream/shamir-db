@@ -132,6 +132,8 @@ pub struct IrModule {
     pub type_nodes: Vec<TypeNode>,
     /// True if any function in this module emits a scalar-reference guard.
     pub reference_guards: bool,
+    /// True if any function uses a transaction-rooted batch plan.
+    pub transactional: bool,
 }
 
 /// Lowering bounds, enforced by `IrBuilder` before growth.
@@ -173,6 +175,7 @@ pub(crate) struct BatchUses {
     pub response_rows: bool,
     pub response_affected: bool,
     pub guarded: bool,
+    pub transactional: bool,
 }
 
 impl IrModule {
@@ -192,6 +195,7 @@ impl IrModule {
             }
         }
         uses.guarded = self.reference_guards;
+        uses.transactional = self.transactional;
         uses
     }
 }

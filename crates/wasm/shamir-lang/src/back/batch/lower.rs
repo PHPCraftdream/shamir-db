@@ -1,4 +1,4 @@
-//! Lowering of the typed builder intrinsics: `batch`, `batch_id`,
+//! Lowering of the typed builder intrinsics: `batch`, `batch_tx`, `batch_id`,
 //! `batch_read`, `batch_insert`, `batch_update`, `batch_delete`, `request`,
 //! `db_execute`, `response_rows`, `response_inserted` and `response_affected`.
 //!
@@ -21,6 +21,7 @@ pub(crate) fn is_batch_builtin(builtin: BuiltinId) -> bool {
     matches!(
         builtin,
         BuiltinId::Batch
+            | BuiltinId::BatchTx
             | BuiltinId::BatchId
             | BuiltinId::BatchRead
             | BuiltinId::BatchInsert
@@ -78,9 +79,21 @@ pub(crate) fn lower_batch_builtin(
         .get(id.0 as usize)
         .cloned()
         .unwrap_or_default();
+    if markers.iter().any(|marker| marker.transactional) {
+        ctx.builder.mark_transactional();
+    }
     match builtin {
         BuiltinId::Batch => {
             let batch_cell = statics(ctx)?.batch_cell;
+            ctx.builder.append(InstKind::StaticCell(batch_cell), span)
+        }
+        BuiltinId::BatchTx => {
+            ctx.builder.mark_transactional();
+            let statics = ctx
+                .batch_statics
+                .as_mut()
+                .ok_or(IrError::Internal("lower: missing builder templates"))?;
+            let batch_cell = statics.transactional_batch_cell(&mut ctx.builder)?;
             ctx.builder.append(InstKind::StaticCell(batch_cell), span)
         }
         BuiltinId::BatchId => with_id(ctx, arg(0)?, arg(1)?, span),
@@ -112,7 +125,8 @@ pub(crate) fn lower_batch_builtin(
                 ctx.builder.mark_reference_guard();
                 Some(cell)
             };
-            let entry = read_entry(ctx, arg(2)?, arg(3)?, filter_ty, guard, span)?;
+            let transactional = markers.iter().any(|marker| marker.transactional);
+            let entry = read_entry(ctx, arg(2)?, arg(3)?, filter_ty, guard, transactional, span)?;
             ctx.builder.append(
                 InstKind::BatchAppend {
                     batch: arg(0)?,
@@ -131,7 +145,8 @@ pub(crate) fn lower_batch_builtin(
                 ctx.builder.mark_reference_guard();
                 Some(cell)
             };
-            let entry = insert_entry(ctx, arg(2)?, arg(3)?, guard, span)?;
+            let transactional = markers.iter().any(|marker| marker.transactional);
+            let entry = insert_entry(ctx, arg(2)?, arg(3)?, guard, transactional, span)?;
             ctx.builder.append(
                 InstKind::BatchAppend {
                     batch: arg(0)?,
@@ -380,6 +395,7 @@ fn read_entry(
     filter: InstId,
     filter_ty: TypeId,
     when: Option<InstId>,
+    transactional: bool,
     span: Span,
 ) -> Result<InstId, IrError> {
     let select_cell = statics(ctx)?.select_cell;
@@ -390,13 +406,24 @@ fn read_entry(
     if let Some(when_cell) = when {
         let where_filter =
             where_filter.ok_or(IrError::Internal("lower: guarded read has no where filter"))?;
-        let read_guarded_descriptor = ctx
-            .batch_statics
-            .as_mut()
-            .ok_or(IrError::Internal("lower: missing builder templates"))?
-            .guarded_descriptors(&mut ctx.builder)?
-            .0;
-        let region = region_of(ctx, 5, span)?;
+        let (descriptor, fields, abort_cell) = if transactional {
+            let statics = ctx
+                .batch_statics
+                .as_mut()
+                .ok_or(IrError::Internal("lower: missing builder templates"))?;
+            let (descriptor, _) = statics.transactional_guarded_descriptors(&mut ctx.builder)?;
+            let abort_cell = statics.transactional_true_cell(&mut ctx.builder)?;
+            (descriptor, 6, Some(abort_cell))
+        } else {
+            let descriptor = ctx
+                .batch_statics
+                .as_mut()
+                .ok_or(IrError::Internal("lower: missing builder templates"))?
+                .guarded_descriptors(&mut ctx.builder)?
+                .0;
+            (descriptor, 5, None)
+        };
+        let region = region_of(ctx, fields, span)?;
         set_slot(ctx, region, 0, table, span)?;
         let select = static_cell(ctx, select_cell, span)?;
         set_slot(ctx, region, 1, select, span)?;
@@ -404,7 +431,11 @@ fn read_entry(
         let flag = static_cell(ctx, true_cell, span)?;
         set_slot(ctx, region, 3, flag, span)?;
         set_slot(ctx, region, 4, when_cell, span)?;
-        return record(ctx, region, read_guarded_descriptor, 5, span);
+        if let Some(abort_cell) = abort_cell {
+            let abort_flag = static_cell(ctx, abort_cell, span)?;
+            set_slot(ctx, region, 5, abort_flag, span)?;
+        }
+        return record(ctx, region, descriptor, fields as u32, span);
     }
     let fields = if where_filter.is_some() { 4 } else { 3 };
     let region = region_of(ctx, fields, span)?;
@@ -469,27 +500,46 @@ fn insert_entry(
     table: InstId,
     document: InstId,
     when: Option<InstId>,
+    transactional: bool,
     span: Span,
 ) -> Result<InstId, IrError> {
     let true_cell = statics(ctx)?.true_cell;
     let insert_descriptor = statics(ctx)?.insert_descriptor;
     if let Some(when_cell) = when {
-        let insert_guarded_descriptor = ctx
-            .batch_statics
-            .as_mut()
-            .ok_or(IrError::Internal("lower: missing builder templates"))?
-            .guarded_descriptors(&mut ctx.builder)?
-            .1;
+        let (descriptor, fields, abort_cell) = if transactional {
+            let statics = ctx
+                .batch_statics
+                .as_mut()
+                .ok_or(IrError::Internal("lower: missing builder templates"))?;
+            let (_, descriptor) = statics.transactional_guarded_descriptors(&mut ctx.builder)?;
+            let abort_cell = statics.transactional_true_cell(&mut ctx.builder)?;
+            (descriptor, 5, Some(abort_cell))
+        } else {
+            let descriptor = ctx
+                .batch_statics
+                .as_mut()
+                .ok_or(IrError::Internal("lower: missing builder templates"))?
+                .guarded_descriptors(&mut ctx.builder)?
+                .1;
+            (descriptor, 4, None)
+        };
+        let abort_flag = match abort_cell {
+            Some(cell) => Some(static_cell(ctx, cell, span)?),
+            None => None,
+        };
         let values_region = region_of(ctx, 1, span)?;
         set_slot(ctx, values_region, 0, document, span)?;
         let values = list(ctx, values_region, 1, span)?;
-        let region = region_of(ctx, 4, span)?;
+        let region = region_of(ctx, fields, span)?;
         set_slot(ctx, region, 0, table, span)?;
         set_slot(ctx, region, 1, values, span)?;
         let flag = static_cell(ctx, true_cell, span)?;
         set_slot(ctx, region, 2, flag, span)?;
         set_slot(ctx, region, 3, when_cell, span)?;
-        return record(ctx, region, insert_guarded_descriptor, 4, span);
+        if let Some(abort_flag) = abort_flag {
+            set_slot(ctx, region, 4, abort_flag, span)?;
+        }
+        return record(ctx, region, descriptor, fields as u32, span);
     }
     let values_region = region_of(ctx, 1, span)?;
     set_slot(ctx, values_region, 0, document, span)?;

@@ -21,6 +21,7 @@ pub enum BuiltinId {
     DbInsert,
     DbQuery,
     Batch,
+    BatchTx,
     BatchId,
     BatchRead,
     BatchInsert,
@@ -48,7 +49,7 @@ pub enum BuiltinCategory {
 }
 
 /// Number of reserved builtin names; kept in sync with `BUILTIN_TABLE`.
-pub const BUILTIN_NAME_COUNT: usize = 32;
+pub const BUILTIN_NAME_COUNT: usize = 33;
 
 /// Private const-ordered (name, identity) table scanned linearly.
 const BUILTIN_TABLE: [(&str, BuiltinId); BUILTIN_NAME_COUNT] = [
@@ -72,6 +73,7 @@ const BUILTIN_TABLE: [(&str, BuiltinId); BUILTIN_NAME_COUNT] = [
     ("db_insert", BuiltinId::DbInsert),
     ("db_query", BuiltinId::DbQuery),
     ("batch", BuiltinId::Batch),
+    ("batch_tx", BuiltinId::BatchTx),
     ("batch_id", BuiltinId::BatchId),
     ("batch_read", BuiltinId::BatchRead),
     ("batch_insert", BuiltinId::BatchInsert),
@@ -109,6 +111,7 @@ pub fn builtin_name(id: BuiltinId) -> &'static str {
         BuiltinId::DbInsert => "db_insert",
         BuiltinId::DbQuery => "db_query",
         BuiltinId::Batch => "batch",
+        BuiltinId::BatchTx => "batch_tx",
         BuiltinId::BatchId => "batch_id",
         BuiltinId::BatchRead => "batch_read",
         BuiltinId::BatchInsert => "batch_insert",
@@ -147,6 +150,7 @@ pub fn builtin_category(id: BuiltinId) -> BuiltinCategory {
         | BuiltinId::DbInsert
         | BuiltinId::DbQuery
         | BuiltinId::Batch
+        | BuiltinId::BatchTx
         | BuiltinId::BatchId
         | BuiltinId::BatchRead
         | BuiltinId::BatchInsert

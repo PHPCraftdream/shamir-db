@@ -13,6 +13,7 @@ use super::super::super::statement::FunctionFrame;
 pub(in crate::sem::check) struct QueryRefFact {
     pub(in crate::sem::check) root: ExprId,
     pub(in crate::sem::check) snapshot: Vec<(String, PlanOperation)>,
+    pub(in crate::sem::check) transactional: bool,
     pub(in crate::sem::check) alias: String,
     pub(in crate::sem::check) index: u64,
     pub(in crate::sem::check) field: String,
@@ -240,7 +241,7 @@ pub(in crate::sem::check) fn check_query_ref_field(
         );
         return error_type(c);
     };
-    let (root, snapshot) = match super::reference_provenance(c, frame, args) {
+    let (root, snapshot, transactional) = match super::reference_provenance(c, frame, args) {
         Ok(provenance) => provenance,
         Err(message) => {
             report(c, "T010", message.to_string(), call_span);
@@ -250,6 +251,7 @@ pub(in crate::sem::check) fn check_query_ref_field(
     let fact = QueryRefFact {
         root,
         snapshot,
+        transactional,
         alias,
         index,
         field,
@@ -301,6 +303,7 @@ pub(in crate::sem::check) fn finish_reference_local(
                 alias: normalize_alias(&fact.alias),
                 path: format!("[{}].{}", fact.index, fact.field),
                 kind: fact.kind,
+                transactional: fact.transactional,
             });
         }
         markers.push(fact);
@@ -367,7 +370,7 @@ pub(in crate::sem::check) fn check_reference_sink(
     let Some(base) = args.first().copied() else {
         return;
     };
-    let (root, operations) = match reference_batch_plan(c, frame, base) {
+    let (root, operations, transactional) = match reference_batch_plan(c, frame, base) {
         Some(plan) => plan,
         None => {
             report(
@@ -407,7 +410,10 @@ pub(in crate::sem::check) fn check_reference_sink(
         }
     }
     for fact in &local.markers {
-        if fact.root != root || !operations.starts_with(&fact.snapshot) {
+        if fact.root != root
+            || fact.transactional != transactional
+            || !operations.starts_with(&fact.snapshot)
+        {
             report(
                 c,
                 "T010",
@@ -448,6 +454,7 @@ pub(in crate::sem::check) fn check_reference_sink(
     if !valid {
         return;
     }
+    let transactional = local.markers.first().is_some_and(|fact| fact.transactional);
     if !matches!(bid, BuiltinId::BatchRead | BuiltinId::BatchInsert) {
         report(
             c,
@@ -464,6 +471,7 @@ pub(in crate::sem::check) fn check_reference_sink(
             alias: normalize_alias(&fact.alias),
             path: format!("[{}].{}", fact.index, fact.field),
             kind: fact.kind,
+            transactional,
         })
         .collect();
     if let Some(sink) = c.reference_sinks.get_mut(call_id.0 as usize) {
@@ -549,11 +557,13 @@ fn grouped_identifier(c: &Checker, id: ExprId) -> Option<ExprId> {
     }
 }
 
+type ReferenceSinkPlan = (ExprId, Vec<(String, PlanOperation)>, bool);
+
 fn reference_batch_plan(
     c: &Checker,
     frame: &FunctionFrame,
     base: ExprId,
-) -> Option<(ExprId, Vec<(String, PlanOperation)>)> {
+) -> Option<ReferenceSinkPlan> {
     let fact = match c.module.expression(base).map(|node| node.kind.clone()) {
         Some(ExprKind::Group(inner)) => return reference_batch_plan(c, frame, inner),
         Some(ExprKind::Identifier(_)) => match c.resolved.get(base.0 as usize).copied().flatten() {
@@ -567,6 +577,7 @@ fn reference_batch_plan(
     };
     let PlanFact::Batch {
         root,
+        transactional,
         operations,
         unknown_alias: false,
     } = fact
@@ -580,7 +591,7 @@ fn reference_batch_plan(
     }) {
         return None;
     }
-    Some((root, operations))
+    Some((root, operations, transactional))
 }
 
 fn alias_key(alias: &str) -> &str {

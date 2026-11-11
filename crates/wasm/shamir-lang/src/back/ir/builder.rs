@@ -132,6 +132,7 @@ pub struct IrBuilder<'b> {
     literal_bytes: usize,
     ir_nodes: u64,
     reference_guards: bool,
+    transactional: bool,
 }
 
 impl<'b> IrBuilder<'b> {
@@ -148,6 +149,7 @@ impl<'b> IrBuilder<'b> {
             literal_bytes: 0,
             ir_nodes: 0,
             reference_guards: false,
+            transactional: false,
         }
     }
 
@@ -535,6 +537,10 @@ impl<'b> IrBuilder<'b> {
         self.reference_guards = true;
     }
 
+    pub(crate) fn mark_transactional(&mut self) {
+        self.transactional = true;
+    }
+
     /// Assembles the module; requires all begun functions finished.
     pub fn finish(self) -> Result<IrModule, IrError> {
         if self.current.is_some() {
@@ -549,6 +555,7 @@ impl<'b> IrBuilder<'b> {
             eq_shapes: shape_values,
             type_nodes: Vec::new(),
             reference_guards: self.reference_guards,
+            transactional: self.transactional,
         })
     }
 

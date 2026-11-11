@@ -516,6 +516,7 @@ fn check_batch_family(
     // (parameter types, result) with `None` for the free filter/document slot
     let (params, result): (Vec<Option<TypeId>>, Option<TypeId>) = match bid {
         BuiltinId::Batch => (Vec::new(), Some(batch)),
+        BuiltinId::BatchTx => (Vec::new(), Some(batch)),
         BuiltinId::BatchId => (vec![Some(batch), Some(string)], Some(batch)),
         BuiltinId::BatchRead | BuiltinId::BatchInsert => (
             vec![Some(batch), Some(string), Some(string), None],

@@ -81,6 +81,7 @@ fn module(functions: Vec<IrFunction>) -> IrModule {
         eq_shapes: Vec::new(),
         type_nodes: Vec::new(),
         reference_guards: false,
+        transactional: false,
     }
 }
 

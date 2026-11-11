@@ -15,7 +15,7 @@ Accepted decisions:
 3. A checked call captures the artifact, signature and security/resource metadata together once, then validates, authorizes and invokes that captured artifact. No second name lookup is permitted. Missing catalog metadata fails closed.
 4. Recursion is forbidden on every stored-call route, including legacy guest `call` and gateway-originated batch `Call`. A shared immutable active-call identity path detects repeats and allows at most 32 entries including the root. Identities remain stable across rename/replacement. Check before entering; unwind with a scope/cancel-safe guard. This path is not a child-list global visited set.
 5. The current effective actor of the parent hop authorizes target Execute and is the target Invoker actor. There is no retained root `A0` identity. Preserve existing Invoker setuid behavior: when enabled it resolves the Invoker actor to the target owner. A new fail-closed rule rejects entry to an Invoker target owned by someone other than the parent Definer owner when the parent frame is Definer. Definer executes as its own owner.
-6. Version 1 adds only `batch_update`, `batch_delete`, and `response_affected`, with the exact narrow rules in §4. Stage 3 implements the narrow scalar-reference subset in §3 with runtime guards and skipped-result checking. No transactional reference mode or new host import/engine DTO is specified.
+6. Version 1 adds only `batch_update`, `batch_delete`, and `response_affected`, with the exact narrow rules in §4. Stage 3 implements the narrow scalar-reference subset in §3 with runtime guards and skipped-result checking. No transactional reference mode or new host import/engine DTO is specified; this is superseded for the single-call `batch_tx()` reference case by `shamir-lang-atomic-execute.md`.
 
 ## 2. Checked stored calls
 
@@ -218,7 +218,9 @@ Stage 2 must ship the checked path, catalog/artifact persistence, linker/admissi
 - References in stage 1 or 2; whole-row/list/column references; references produced by inserts or writes; update/delete references; general result typing or a new reference descriptor grammar.
 - Direct update/delete imports, row-returning update/delete, projection, CAS/expected-version, upsert, repository-qualified operations, DDL, raw DTO maps/bytes, custom filter ASTs, dynamic values or general transactions.
 - Global source-order execution, transactional reference batches, rollback after committed effects, automatic retry, or claims that native CPU is Wasm-fuel-metered.
-- Contract-version/hash/SHA policy and general result-shape descriptor DTOs are excluded. No new transactional reference mode, cumulative cross-call work/byte budgets, or duplicate-alias host scan is proposed.
+- Contract-version/hash/SHA policy and general result-shape descriptor DTOs are excluded. No cumulative cross-call work/byte budgets or duplicate-alias host scan is proposed.
+
+Superseded for the single-call `batch_tx()` reference case by `shamir-lang-atomic-execute.md`; all other non-goals here remain.
 
 ## 9. Decisions
 
@@ -227,7 +229,7 @@ Stage 2 must ship the checked path, catalog/artifact persistence, linker/admissi
 3. **Call identity/security:** every stored-call route shares a stable active identity path, repeat rejection and a 32-entry including-root limit; current parent effective actor authorizes Execute and supplies Invoker identity; retain legacy Invoker setuid semantics and add the Definer-owner mismatch guard.
 4. **Legacy and gateway routes:** harden legacy guest calls using the common resolver without requiring legacy signature comparison. Gateway batch `Call` shares invocation context; refuse it before dispatch until safe plumbing exists. Preserve transaction rejection.
 5. **Immediate batch surface:** stage 1 adds only `batch_update`, `batch_delete`, and `response_affected`; use nonempty non-null scalar equality records, nonempty typed sets, main repository, and no returning/projection/CAS.
-6. **Reference/compiler surface:** stage 1/2 have no production references. Stage 3 production `compile` supports only the narrow `const` annotated-record/direct-reference read-equality or insert subset described in §3, with per-operation guards and module-wide post-`db_execute` skipped-result checks. The marker metadata stays private. No `batch_after`, public `QueryRef` type, engine/DTO/ABI/import change, transactional reference mode, version change, or update/delete references is accepted. The language emits only `call_checked`, never gateway batch `Call`; gateway-originated Call stays refused until common invocation-context plumbing is safe.
+6. **Reference/compiler surface:** stage 1/2 have no production references. Stage 3 production `compile` supports only the narrow `const` annotated-record/direct-reference read-equality or insert subset described in §3, with per-operation guards and module-wide post-`db_execute` skipped-result checks. The marker metadata stays private. No `batch_after`, public `QueryRef` type, engine/DTO/ABI/import change, transactional reference mode, version change, or update/delete references is accepted. The language emits only `call_checked`, never gateway batch `Call`; gateway-originated Call stays refused until common invocation-context plumbing is safe. This is superseded for the single-call `batch_tx()` reference case by `shamir-lang-atomic-execute.md`.
 
 ## 10. Verified against the code
 

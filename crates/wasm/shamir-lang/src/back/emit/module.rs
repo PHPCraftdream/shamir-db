@@ -8,9 +8,10 @@ use super::scalar::emit_user_function;
 use super::support::assemble::{assemble, intern_type, val_type, ModuleImage};
 use super::support::db::checked::emit_checked_call_helper;
 use super::support::db::{
-    append_guard_keys, emit_batch_append_helper, emit_db_call_helper, emit_db_execute_helper,
-    emit_dynmap_find_helper, emit_response_affected_helper, emit_response_get_helper,
-    emit_response_skip_check_helper, host_import_name,
+    append_guard_keys, append_tx_check_strings, emit_batch_append_helper, emit_db_call_helper,
+    emit_db_execute_helper, emit_dynmap_find_helper, emit_response_affected_helper,
+    emit_response_get_helper, emit_response_skip_check_helper, emit_response_tx_check_helper,
+    host_import_name, TxCheckPlan,
 };
 use super::support::eq::{emit_bytes_compare, emit_eq_helper};
 use super::support::projection::{
@@ -106,6 +107,8 @@ pub(crate) struct EmissionPlan {
     pub response_get_index: Option<u32>,
     pub response_affected_index: Option<u32>,
     pub skip_check_index: Option<u32>,
+    /// Emits the transaction outcome check, when this module reaches `batch_tx`.
+    pub tx_check_plan: Option<TxCheckPlan>,
     pub dynmap_find_index: Option<u32>,
     /// Static message/key addresses the builder helpers raise or look up
     /// (0 when the module has no builder instructions).
@@ -273,6 +276,7 @@ pub(crate) fn emit_compiled_module(
     let db_nodes = collect_db_result_nodes(ir)?;
     let db_ops = ir.db_ops();
     let batch_uses = ir.batch_uses();
+    let transactional = batch_uses.transactional;
     let checked_import = batch_uses.checked_call;
     let import_count = 1
         + u32::try_from(db_ops.len())
@@ -305,6 +309,11 @@ pub(crate) fn emit_compiled_module(
         append_guard_keys(&mut static_bytes, static_limit)?
     } else {
         (0, 0)
+    };
+    let tx_check_strings = if transactional {
+        Some(append_tx_check_strings(&mut static_bytes, static_limit)?)
+    } else {
+        None
     };
     // the shared null cell lives in the static image, outside the decoder's
     // cell slots (the decoder overwrites those)
@@ -514,13 +523,30 @@ pub(crate) fn emit_compiled_module(
             None
         }
     };
-    let dynmap_find_index =
-        take_index(batch_uses.response_rows || batch_uses.response_affected || batch_uses.guarded);
+    let dynmap_find_index = take_index(
+        batch_uses.response_rows
+            || batch_uses.response_affected
+            || batch_uses.guarded
+            || transactional,
+    );
     let batch_append_index = take_index(batch_uses.append);
     let db_execute_index = take_index(batch_uses.execute);
     let response_get_index = take_index(batch_uses.response_rows);
     let response_affected_index = take_index(batch_uses.response_affected);
+    let tx_check_index = take_index(transactional);
     let skip_check_index = take_index(batch_uses.guarded);
+    let tx_check_plan = match (tx_check_index, tx_check_strings) {
+        (Some(helper_index), Some(strings)) => Some(TxCheckPlan {
+            helper_index,
+            strings,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(EmitError::Internal(
+                "transaction check registration mismatch",
+            ))
+        }
+    };
     let checked_call_index = if checked_import {
         Some(next_batch_fn)
     } else {
@@ -551,6 +577,7 @@ pub(crate) fn emit_compiled_module(
         response_get_index,
         response_affected_index,
         skip_check_index,
+        tx_check_plan,
         dynmap_find_index,
         msg_alias,
         msg_bound: baked.scalar[3],
@@ -583,7 +610,8 @@ pub(crate) fn emit_compiled_module(
                     + u64::from(plan.db_execute_index.is_some())
                     + u64::from(plan.response_get_index.is_some())
                     + u64::from(plan.response_affected_index.is_some())
-                    + u64::from(plan.skip_check_index.is_some()),
+                    + u64::from(plan.skip_check_index.is_some())
+                    + u64::from(plan.tx_check_plan.is_some()),
             )
         })
         .ok_or(EmitError::Internal("function count overflow"))?;
@@ -744,6 +772,16 @@ pub(crate) fn emit_compiled_module(
     }
     if let (Some(find), Some(_affected)) = (plan.dynmap_find_index, plan.response_affected_index) {
         push_helper(1, emit_response_affected_helper(&plan, find)?, budget)?;
+    }
+    if let Some(tx_plan) = plan.tx_check_plan {
+        let find = plan
+            .dynmap_find_index
+            .ok_or(EmitError::Internal("missing transaction map finder"))?;
+        push_helper(
+            1,
+            emit_response_tx_check_helper(&plan, &tx_plan, find)?,
+            budget,
+        )?;
     }
     if let (Some(find), Some(_skip_check)) = (plan.dynmap_find_index, plan.skip_check_index) {
         push_helper(7, emit_response_skip_check_helper(&plan, find)?, budget)?;
