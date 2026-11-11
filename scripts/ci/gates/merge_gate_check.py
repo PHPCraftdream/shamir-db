@@ -249,6 +249,15 @@ def evaluate(
         matrix, matrix_error = _matrix_from_needs(needs)
     if matrix_error:
         reasons.append("affected outputs.matrix invalid: %s" % matrix_error)
+    if (
+        event == "workflow_dispatch"
+        and affected_outputs is not None
+        and affected_outputs.get("manual_partial") == "true"
+    ):
+        reasons.append(
+            "manual run with an explicit range or crates selection is not merge-ready "
+            "(use scope=workspace or the default branch range)"
+        )
 
     for job, info in needs.items():
         if job not in REQUIRED_JOBS:

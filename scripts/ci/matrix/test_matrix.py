@@ -85,6 +85,9 @@ def _range_input(args, root: str):
     head = args.head or "HEAD"
     if args.base:
         merge_base = _git(["merge-base", base, head], root).strip()
+        if merge_base == _git(["rev-parse", head], root).strip():
+            # head is already on the base (a run on master itself): the last commit only
+            return _changed_paths(f"{head}^..{head}", root), f"{head}^", head, f"{head}^", head
         return _changed_paths(f"{merge_base}...{head}", root), merge_base, head, merge_base, head
     # A default event uses a real previous first-parent snapshot, never an
     # implicit workspace sentinel. HEAD^ is a ref expression; no checkout.

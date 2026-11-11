@@ -48,17 +48,17 @@ runs:
         ARCHIVE_PATH: ${{ runner.temp }}/test-archive.tar.zst
       run: |
         set -euo pipefail
-        python3 -I - <<'PY'
+        # Python only validates the selection; the build runs from this bash step so a
+        # Windows runner cannot resolve a different `bash` (for example WSL) from Python.
+        selection_text="$(python3 -I - <<'PY'
         import json
         import os
         import re
         import subprocess
-        import sys
-        import time
 
         packages = os.environ["PACKAGES"].split()
         if not packages:
-            print("::notice::empty package selection: test archive build skipped")
+            print("EMPTY")
             raise SystemExit(0)
         if packages == ["--workspace"]:
             selection = ["--workspace"]
@@ -76,17 +76,20 @@ runs:
             if len(set(names)) != len(names) or not set(names) <= available:
                 raise SystemExit("package selection is not a unique workspace package list")
             selection = [token for name in names for token in ("-p", name)]
-        start = time.time()
-        result = subprocess.run([
-            "bash", "./scripts/test.sh", "--archive-to", os.environ["ARCHIVE_PATH"], "--locked", *selection
-        ])
-        if result.returncode:
-            raise SystemExit(result.returncode)
-        summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary:
-            with open(summary, "a", encoding="utf-8") as stream:
-                stream.write("test archive built in %d s\n" % int(time.time() - start))
+        print(chr(10).join(selection))
         PY
+        )"
+        if [ "$selection_text" = EMPTY ]; then
+          echo "::notice::empty package selection: test archive build skipped"
+          exit 0
+        fi
+        # tokens are validated above (-p, crate names, --workspace): word splitting is safe
+        selection=($selection_text)
+        start=$SECONDS
+        ./scripts/test.sh --archive-to "$ARCHIVE_PATH" --locked "${selection[@]}"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          echo "test archive built in $((SECONDS - start)) s" >> "$GITHUB_STEP_SUMMARY"
+        fi
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       if: inputs.upload == 'true' && inputs.packages != ''
       with:

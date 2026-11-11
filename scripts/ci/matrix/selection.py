@@ -15,6 +15,9 @@ from pathlib import PurePosixPath
 
 WORKSPACE = "--workspace"
 TS_DIR = "crates/client/shamir-client-ts"
+DEPENDENCY_INPUTS = {"Cargo.toml", "Cargo.lock", "deny.toml", "package.json", "package-lock.json"}
+DEPENDENCY_SCRIPTS = {"scripts/ci/gates/npm_licenses_check.py", "scripts/ci/gates/native_code_check.py",
+                      "scripts/ci/gates/dependency_admission_check.py"}
 WASM_GUESTS = {"shamir-sdk", "shamir-query-builder", "shamir-query-types", "shamir-types"}
 
 
@@ -115,7 +118,7 @@ def _markdown_is_production(pkg: dict, path: str, root: str,
         except ValueError:
             continue
         text = content_provider(source) if content_provider else None
-        if text and re.search(r"(?:include_str|include_bytes)!\s*\([^)]*\b" + re.escape(basename) + r"\b", text):
+        if text and re.search(r"(?:include_str|include_bytes)!\s*\([^;]*?\b" + re.escape(basename) + r"\b", text):
             return True
     return False
 
@@ -358,7 +361,7 @@ def _explicit_classification(path: str) -> str | None:
         return "special"
     if path.startswith("rust-toolchain") or path.startswith(".cargo/") or path == "scripts/test.sh":
         return "all"
-    if path.startswith((".github/", "scripts/", ".rust-guard/", "tools/rust-guard/", ".githooks/", "docs/")) or path in {"bench-iters.txt", ".gitignore", ".gitattributes"} or path.startswith("LICENSE") or path.endswith(".md"):
+    if path.startswith((".github/", "scripts/", ".rust-guard/", "tools/rust-guard/", ".githooks/", ".claude/", ".crush/", "docs/")) or path in {"bench-iters.txt", ".gitignore", ".gitattributes", ".git-blame-ignore-revs"} or path.startswith("LICENSE") or path.endswith(".md"):
         return "none"
     if path.startswith(TS_DIR + "/"):
         return "ts"
@@ -432,6 +435,8 @@ def select_matrix(changed: list[str], metadata: dict, root: str, content_provide
     for path in changed:
         pkg, _ = nearest_package(path, dirs)
         matching = [edge for edge in edges if edge_matches(edge, path)]
+        if (PurePosixPath(path).name in DEPENDENCY_INPUTS or path in DEPENDENCY_SCRIPTS):
+            flags["deny"] = True
         for edge in matching:
             for flag in edge.get("flags", ()):
                 if flag not in flags:
@@ -485,7 +490,8 @@ def select_matrix(changed: list[str], metadata: dict, root: str, content_provide
             for name in sorted(members):
                 add(name, "check", "clippy.toml affects lint checks")
             continue
-        if path == ".github/workflows/ci.yml" or path.startswith(".github/actions/"):
+        if (path == ".github/workflows/ci.yml" or path.startswith(".github/actions/")
+                or (path.startswith("scripts/ci/") and not path.startswith("scripts/ci/tests/"))):
             flags["pipeline"] = True
             for name in edge_config.get("canary", ()):
                 add(name, "all_tests", "CI pipeline canary")
@@ -507,7 +513,7 @@ def select_matrix(changed: list[str], metadata: dict, root: str, content_provide
             continue
         if classification == "special":
             continue
-        if path.startswith((".claude/", ".crush/", "examples/", "tests/", "tools/")):
+        if path.startswith(("examples/", "tests/", "tools/")):
             all_scope(f"unclassified path: {path}")
             continue
         if path.startswith("vendor/") and pkg:
@@ -556,6 +562,7 @@ def select_matrix(changed: list[str], metadata: dict, root: str, content_provide
         scope = "bounded" if jobs else "none"
     names = {crate["name"] for crate in result_crates}
     flags["engine"] = scope == "all" or "shamir-engine" in names
+    flags["deny"] |= scope == "all"
     flags["ts"] |= scope == "all" or "shamir-query-types" in names
     flags["node"] = scope == "all" or bool(names & {"shamir-client", "shamir-client-node"})
     flags["wasm32"] = scope == "all" or bool(names & WASM_GUESTS)

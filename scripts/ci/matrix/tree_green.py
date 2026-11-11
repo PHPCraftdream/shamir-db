@@ -93,11 +93,22 @@ def _successful_required_gate(repo: str, run_id: int, runner) -> bool:
     return False
 
 
-def check_tree_green(repo: str, after: str, runner=None) -> tuple[bool, str]:
+def _head_contains(repo: str, before: str, head_sha: str, runner) -> bool:
+    """A PR run tests head merged into master, which equals head only when head holds `before`."""
+    data = _api_json(repo, "compare/%s...%s" % (before, head_sha), runner)
+    status = data.get("status") if isinstance(data, dict) else None
+    if not isinstance(status, str):
+        raise _MalformedResponse
+    return status in ("ahead", "identical")
+
+
+def check_tree_green(repo: str, after: str, runner=None, before: str | None = None) -> tuple[bool, str]:
     """Return whether a confirmed full PR run has the pushed commit's tree."""
     if not isinstance(repo, str) or not _REPO_RE.fullmatch(repo):
         return False, "invalid_input"
     if not isinstance(after, str) or not _SHA_RE.fullmatch(after):
+        return False, "invalid_input"
+    if not isinstance(before, str) or not _SHA_RE.fullmatch(before):
         return False, "invalid_input"
     if runner is None:
         runner = subprocess.run
@@ -137,7 +148,12 @@ def check_tree_green(repo: str, after: str, runner=None) -> tuple[bool, str]:
             if run["conclusion"] != "success":
                 continue
             head_sha = run["head_sha"]
+            head_repo = run.get("head_repository")
+            if not isinstance(head_repo, dict) or head_repo.get("full_name") != repo:
+                continue
             if _tree_for_commit(repo, head_sha, runner) != after_tree:
+                continue
+            if not _head_contains(repo, before, head_sha, runner):
                 continue
             if _successful_required_gate(repo, run["id"], runner):
                 return True, "matching_full_run"
@@ -151,6 +167,7 @@ def check_tree_green(repo: str, after: str, runner=None) -> tuple[bool, str]:
 def main(argv: list[str] | None = None, *, runner=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--repo", required=True, help="owner/repository")
+    parser.add_argument("--before", required=True, help="previous tip of the pushed branch")
     parser.add_argument("--after", required=True, help="pushed commit SHA")
     parser.add_argument(
         "--format",
@@ -159,7 +176,7 @@ def main(argv: list[str] | None = None, *, runner=None) -> int:
         help="output format (default: github-output)",
     )
     args = parser.parse_args(argv)
-    tree_green, reason = check_tree_green(args.repo, args.after, runner=runner)
+    tree_green, reason = check_tree_green(args.repo, args.after, runner=runner, before=args.before)
     print("tree_green=%s" % ("true" if tree_green else "false"))
     print("reason=%s" % reason)
     return 0

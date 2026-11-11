@@ -724,6 +724,16 @@ class MainTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("job test unexpectedly skipped", err)
 
+    def test_partial_manual_run_is_not_merge_ready(self):
+        data = copy.deepcopy(FULL_OK)
+        data["affected"]["outputs"]["manual_partial"] = "true"
+        code, _, err = run_main(json.dumps(data), event="workflow_dispatch")
+        self.assertEqual(code, 1)
+        self.assertIn("explicit range or crates selection is not merge-ready", err)
+        data["affected"]["outputs"]["manual_partial"] = "false"
+        code, _, err = run_main(json.dumps(data), event="workflow_dispatch")
+        self.assertEqual((code, err), (0, ""))
+
     def test_non_pr_matrix_self_check_skip_emits_notice(self):
         data = copy.deepcopy(FULL_OK)
         data["matrix-self-check"] = {"result": "skipped", "outcome": "skipped"}

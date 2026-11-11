@@ -141,7 +141,13 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
                  (["rust-toolchain.toml"], "all", {}), ([".cargo/config.toml"], "all", {}),
                  (["scripts/test.sh"], "all", {}), ([".config/nextest.toml"], "all", {}),
                  ([".github/workflows/ci.yml"], "none", {"pipeline": True}),
-                 (["scripts/ci/any.py", "docs/guide.md"], "none", {"docs_only": True}),
+                 (["scripts/other.py", "docs/guide.md"], "none", {"docs_only": True}),
+                 (["scripts/ci/gates/any.py"], "none", {"pipeline": True, "docs_only": False}),
+                 (["scripts/ci/tests/any.py"], "none", {"pipeline": False}),
+                 ([".git-blame-ignore-revs", ".claude/x.md"], "none", {"docs_only": True}),
+                 (["Cargo.lock"], "all", {"deny": True}),
+                 (["package-lock.json"], "none", {"deny": True, "docs_only": False}),
+                 (["scripts/ci/gates/npm_licenses_check.py"], "none", {"deny": True}),
                  (["deny.toml"], "none", {"deny": True}), (["clippy.toml"], "bounded", {}),
                  (["crates/client/shamir-client-ts/src/a.ts"], "none", {"ts": True, "docs_only": False}),
                  (["mystery/file.bin"], "all", {})]
@@ -154,6 +160,11 @@ class DeclaredEdgeAndPathRuleTest(unittest.TestCase):
                 self.assertTrue(crate(result, "demo")["check_only"])
             if paths == ["deny.toml"]:
                 self.assertEqual(result["crates"], [])
+
+    def test_member_manifest_change_runs_the_dependency_gate(self):
+        result = select(["crates/group/demo/Cargo.toml"])
+        self.assertTrue(result["flags"]["deny"])
+        self.assertFalse(select(["crates/group/demo/src/lib.rs"])["flags"]["deny"])
 
     def test_ci_change_canary_coexists_with_normal_changed_crate(self):
         result = select([".github/workflows/ci.yml", "crates/group/demo/src/lib.rs"])

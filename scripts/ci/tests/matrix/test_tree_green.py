@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 import tree_green as tg
 
 
+BEFORE = "e" * 40
 AFTER = "a" * 40
 HEAD = "b" * 40
 AFTER_TREE = "c" * 40
@@ -42,6 +43,7 @@ def run(run_id=123, sha=HEAD):
         "status": "completed",
         "conclusion": "success",
         "head_sha": sha,
+        "head_repository": {"full_name": "example/project"},
     }
 
 
@@ -70,6 +72,7 @@ def green_run_responses(gate_conclusion="success"):
         ),
         "commits/" + AFTER: response(commit(AFTER, AFTER_TREE)),
         "commits/" + HEAD: response(commit(HEAD, AFTER_TREE)),
+        "compare/%s...%s" % (BEFORE, HEAD): response({"status": "ahead"}),
         "actions/runs/123/jobs?per_page=100": response(
             {
                 "jobs": [
@@ -87,10 +90,10 @@ class TreeGreenTest(unittest.TestCase):
     def test_same_tree_with_successful_required_gate_is_green(self):
         runner, calls = api_runner(green_run_responses())
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (True, "matching_full_run"),
         )
-        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(calls), 5)
         self.assertEqual(calls[0][1], "api")
 
     def test_different_trees_are_not_green(self):
@@ -108,14 +111,43 @@ class TreeGreenTest(unittest.TestCase):
             }
         )
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "no_matching_full_run"),
         )
+
+    def test_head_that_does_not_contain_before_is_not_green(self):
+        for status in ("behind", "diverged"):
+            responses = green_run_responses()
+            responses["compare/%s...%s" % (BEFORE, HEAD)] = response({"status": status})
+            runner, _ = api_runner(responses)
+            self.assertEqual(
+                tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
+                (False, "no_matching_full_run"),
+            )
+
+    def test_run_from_another_repository_is_not_green(self):
+        responses = green_run_responses()
+        forked = run()
+        forked["head_repository"] = {"full_name": "someone/project"}
+        responses[RUNS_ENDPOINT] = response({"workflow_runs": [forked]})
+        runner, _ = api_runner(responses)
+        self.assertEqual(
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
+            (False, "no_matching_full_run"),
+        )
+
+    def test_missing_before_is_invalid_input(self):
+        runner, calls = api_runner({})
+        self.assertEqual(
+            tg.check_tree_green("example/project", AFTER, runner),
+            (False, "invalid_input"),
+        )
+        self.assertEqual(calls, [])
 
     def test_api_failure_fails_closed(self):
         runner, _ = api_runner({RUNS_ENDPOINT: response({}, returncode=1)})
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "api_error"),
         )
 
@@ -132,7 +164,7 @@ class TreeGreenTest(unittest.TestCase):
             }
         )
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "malformed_response"),
         )
 
@@ -150,7 +182,7 @@ class TreeGreenTest(unittest.TestCase):
         )
         runner, _ = api_runner(responses)
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "no_matching_full_run"),
         )
 
@@ -165,7 +197,7 @@ class TreeGreenTest(unittest.TestCase):
             }
         )
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "no_matching_full_run"),
         )
         self.assertIn("per_page=30", calls[0][-1])
@@ -180,7 +212,7 @@ class TreeGreenTest(unittest.TestCase):
                 ),
             }
         )
-        tg.check_tree_green("example/project", AFTER, runner)
+        tg.check_tree_green("example/project", AFTER, runner, before=BEFORE)
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--paginate", calls[0])
 
@@ -197,14 +229,14 @@ class TreeGreenTest(unittest.TestCase):
             }
         )
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "malformed_response"),
         )
 
     def test_failed_required_gate_is_not_green(self):
         runner, _ = api_runner(green_run_responses(gate_conclusion="failure"))
         self.assertEqual(
-            tg.check_tree_green("example/project", AFTER, runner),
+            tg.check_tree_green("example/project", AFTER, runner, before=BEFORE),
             (False, "no_matching_full_run"),
         )
 
@@ -212,7 +244,7 @@ class TreeGreenTest(unittest.TestCase):
         output = io.StringIO()
         with redirect_stdout(output):
             result = tg.main(
-                ["--repo", "example/project", "--after", AFTER],
+                ["--repo", "example/project", "--before", BEFORE, "--after", AFTER],
                 runner=lambda *args, **kwargs: response({"workflow_runs": []}),
             )
         self.assertEqual(result, 0)
@@ -233,7 +265,7 @@ class TreeGreenTest(unittest.TestCase):
                 }
             )
 
-        tg.check_tree_green("example/project", AFTER, runner)
+        tg.check_tree_green("example/project", AFTER, runner, before=BEFORE)
         self.assertTrue(all(call.get("shell") is not True for call in options))
 
 

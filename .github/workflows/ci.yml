@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       range:
-        description: 'Commit range to compute (empty selects the last commit)'
+        description: 'Commit range to compute (empty selects the branch since its merge base with master; an explicit range or crates list makes the run not merge-ready)'
         required: false
         default: ''
         type: string
@@ -120,6 +120,7 @@ jobs:
       run_wasm32: ${{ steps.select.outputs.run_wasm32 }}
       run_deny: ${{ steps.select.outputs.run_deny }}
       run_pipeline: ${{ steps.select.outputs.run_pipeline }}
+      manual_partial: ${{ steps.manual.outputs.manual_partial }}
       tree_green: ${{ steps.tree.outputs.tree_green }}
       tree_reason: ${{ steps.tree.outputs.reason }}
     steps:
@@ -136,18 +137,34 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I scripts/ci/matrix/filterset.py plan --event-file "$GITHUB_EVENT_PATH" --event "$EVENT_NAME" --metadata cargo-metadata.json --format github-output >> "$GITHUB_OUTPUT"
+      - name: Flag a manual run that tests a partial selection
+        id: manual
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RANGE_INPUT: ${{ github.event.inputs.range }}
+          CRATES_INPUT: ${{ github.event.inputs.crates }}
+          SCOPE_INPUT: ${{ github.event.inputs.scope }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          partial=false
+          if [ "$EVENT_NAME" = workflow_dispatch ] && [ "${SCOPE_INPUT:-computed}" != workspace ]              && { [ -n "$RANGE_INPUT" ] || [ -n "$CRATES_INPUT" ]; }; then
+            partial=true
+          fi
+          echo "manual_partial=$partial" >> "$GITHUB_OUTPUT"
       - name: Check for an equivalent green PR tree
         id: tree
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
           AFTER: ${{ github.event.after }}
         shell: bash
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = push ]; then
-            python3 -I scripts/ci/matrix/tree_green.py --repo "$REPO" --after "$AFTER" --format github-output >> "$GITHUB_OUTPUT"
+            python3 -I scripts/ci/matrix/tree_green.py --repo "$REPO" --before "$BEFORE" --after "$AFTER" --format github-output >> "$GITHUB_OUTPUT"
           else
             printf 'tree_green=false\nreason=not_push\n' >> "$GITHUB_OUTPUT"
           fi

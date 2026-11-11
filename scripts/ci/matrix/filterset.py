@@ -277,8 +277,9 @@ def _dispatch_values(event_data: dict[str, Any], range_input: str | None,
     scope_value = scope_input if scope_input is not None else inputs.get("scope", "computed")
     if not isinstance(range_value, str) or not isinstance(crates_value, str) or not isinstance(scope_value, str):
         raise ValueError("workflow_dispatch range, crates and scope inputs must be strings")
-    range_value = range_value.strip() or "HEAD^..HEAD"
-    if RANGE_RE.fullmatch(range_value) is None or range_value.count("..") != 1 or "..." in range_value or range_value.startswith("-"):
+    range_value = range_value.strip()
+    if range_value and (RANGE_RE.fullmatch(range_value) is None or range_value.count("..") != 1
+                        or "..." in range_value or range_value.startswith("-")):
         raise ValueError("workflow_dispatch range must be a two-dot revision range")
     crates_value = crates_value.strip()
     scope_value = scope_value.strip() or "computed"
@@ -286,7 +287,7 @@ def _dispatch_values(event_data: dict[str, Any], range_input: str | None,
         raise ValueError("workflow_dispatch scope must be computed or workspace")
     if crates_value and scope_value == "workspace":
         raise ValueError("workflow_dispatch crates and scope=workspace are mutually exclusive")
-    return range_value, crates_value or None, scope_value
+    return range_value or None, crates_value or None, scope_value
 
 
 def _run_stage1(event: str, event_data: dict[str, Any], metadata: dict[str, Any],
@@ -304,7 +305,9 @@ def _run_stage1(event: str, event_data: dict[str, Any], metadata: dict[str, Any]
             raise ValueError("push event requires before and after commit SHAs")
         argv.extend(("--event", "push", "--before", before, "--after", after))
     elif event == "workflow_dispatch":
-        argv.extend(("--event", "workflow_dispatch", "--range", range_input or "HEAD^..HEAD"))
+        # Without an explicit range a manual run covers the whole branch (merge base with master).
+        argv.extend(("--event", "workflow_dispatch") + (
+            ("--range", range_input) if range_input else ("--base", "origin/master", "--head", "HEAD")))
     else:
         raise ValueError("stage1 is not invoked for schedule events")
     argv.extend(("--format", "github-output"))

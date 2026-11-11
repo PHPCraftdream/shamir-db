@@ -186,7 +186,9 @@ class PlanTests(unittest.TestCase):
         event = {"inputs": {"range": "", "scope": "computed", "crates": ""}}
         filterset.plan("workflow_dispatch", event, metadata(), runner=self.stage1)
         pairs = [self.argv[i:i + 2] for i in range(len(self.argv) - 1)]
-        self.assertIn(["--range", "HEAD^..HEAD"], pairs)
+        self.assertIn(["--base", "origin/master"], pairs)
+        self.assertIn(["--head", "HEAD"], pairs)
+        self.assertNotIn("--range", self.argv)
         event["inputs"]["range"] = "v1..HEAD"
         filterset.plan("workflow_dispatch", event, metadata(), runner=self.stage1)
         pairs = [self.argv[i:i + 2] for i in range(len(self.argv) - 1)]

@@ -247,8 +247,10 @@ def _attrs_before(lines, index):
 
 
 def _module_decl(text):
-    for match in re.finditer(r"(?m)^[ \t]*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;", text):
-        yield match.group(1), match.start()
+    pattern = (r"(?m)^[ \t]*((?:#\s*\[[^\]\n]*\]\s*)*)"
+               r"(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;")
+    for match in re.finditer(pattern, text):
+        yield match.group(2), match.start(), re.findall(r"#\s*\[[^\]\n]*\]", match.group(1))
 
 
 def _resolve_child(source_path, name, attrs, root, available=None):
@@ -290,9 +292,12 @@ def unit_path_audit(root, metadata, source_paths, content_provider, edge_config)
             findings.append(f"{rel}:0: module source missing/unreadable")
             return
         lines = text.splitlines()
-        for name, offset in _module_decl(text):
+        for name, offset, inline in _module_decl(text):
             prefix = text[:offset].splitlines()
             attrs, own_test = _attrs_before(prefix, len(prefix))
+            if inline:
+                attrs = attrs + inline
+                own_test = own_test or _attrs_before(inline, len(inline))[1]
             line = text.count("\n", 0, offset) + 1
             path_attr = next((m.group(1) for attr in attrs if (m := re.search(r'#\s*\[path\s*=\s*"([^"]+)"', attr))), None)
             child = _resolve_child(rel, name, attrs, root, available=available)
