@@ -140,7 +140,7 @@ async fn fixture(root: &Path, clean: bool) -> (u64, Vec<(Vec<u8>, Vec<u8>)>, Cha
         assert_eq!(before, (None, version));
         // flush_all checkpoints the target again as well as the system repo.
         // With stopped admission this is idempotent, not another allocation.
-        source.flush_all().await.unwrap();
+        source.flush_all_waiting().await.unwrap();
         assert_eq!(repo.consistent_version().await.unwrap(), version);
         assert_eq!(
             before,

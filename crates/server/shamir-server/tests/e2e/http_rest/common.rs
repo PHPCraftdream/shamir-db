@@ -6,6 +6,7 @@ use shamir_server::config::{Config, ListenerConfig, ListenerKind};
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_server::tokens::NewToken;
 use shamir_server::user_directory::FjallUserDirectory;
+use shamir_test_diag::FlakeGuard;
 use shamir_types::access::ResourcePath;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -239,6 +240,7 @@ async fn launch_through_fjall_release(config: Config) -> ServerHandle {
 /// The store's `0o711` mode grants traversal. Both resources are System-owned at
 /// `0o700` by default, which hides even tables the token owner created.
 pub async fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
+    let guard = FlakeGuard::new("http_rest seed_owner");
     let directory = FjallUserDirectory::open(data_dir.join("users")).expect("directory");
     let kdf = shamir_server::config::KdfConfig {
         memory_kb: 19_456,
@@ -309,7 +311,11 @@ pub async fn seed_owner(data_dir: &std::path::Path) -> ([u8; 16], Vec<String>) {
             .await
             .expect("set resource mode");
     }
-    db.flush_all().await.expect("flush owner seed database");
+    // The seed flush must not fail on a stalled fsync of a loaded Windows runner.
+    guard.mark("flush owner seed database");
+    db.flush_all_waiting()
+        .await
+        .expect("flush owner seed database");
     drop(db);
     (owner, owner_roles)
 }
