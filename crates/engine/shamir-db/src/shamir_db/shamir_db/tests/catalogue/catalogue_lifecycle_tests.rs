@@ -217,6 +217,163 @@ async fn rv_db_0486e3f9_sync_wal_fault_propagates() {
 }
 
 #[tokio::test]
+async fn rv_db_0486e3f9_database_chmod_sync_wal_fault_propagates() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    shamir.create_db("chmod_wal_fault").await.unwrap();
+    shamir_engine::repo::RepoInstance::arm_sync_wal_fault(1);
+
+    let mut batch = Batch::new();
+    batch.id(1);
+    batch.chmod(
+        "chmod",
+        ddl::chmod(ddl::res::database("chmod_wal_fault"), 0o700)
+            .hmac("test")
+            .build()
+            .expect("build database chmod"),
+    );
+    let error = shamir
+        .execute(
+            "chmod_wal_fault",
+            &batch
+                .to_request_via_msgpack()
+                .expect("batch request encoding"),
+        )
+        .await
+        .expect_err("database chmod must surface a failed durable catalogue write");
+    assert!(
+        error.to_string().contains("injected sync_wal fault"),
+        "unexpected chmod error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn rv_db_0486e3f9_group_member_removal_sync_wal_fault_propagates() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let group_id = shamir.create_group("wal_revoke").await.unwrap();
+    shamir.add_group_member(group_id, 41).await.unwrap();
+    assert_eq!(shamir.group_members(group_id).await.unwrap(), vec![41]);
+
+    shamir_engine::repo::RepoInstance::arm_sync_wal_fault(1);
+    let error = shamir
+        .remove_group_member(group_id, 41)
+        .await
+        .expect_err("membership revocation must surface a failed durable write");
+    assert_eq!(
+        error.to_string(),
+        "Storage backend error: injected sync_wal fault"
+    );
+}
+
+#[tokio::test]
+async fn rv_db_0486e3f9_function_meta_sync_wal_fault_propagates() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let wasm = wat::parse_str(TEST_WASM).unwrap();
+    shamir
+        .create_function_from_wasm("meta_wal_fault", &wasm, false)
+        .await
+        .unwrap();
+
+    shamir_engine::repo::RepoInstance::arm_sync_wal_fault(1);
+    let error = shamir
+        .set_resource_meta(
+            &ResourcePath::function("meta_wal_fault"),
+            &ResourceMeta {
+                owner: Actor::User(41),
+                group: Some(7),
+                mode: 0o740,
+            },
+        )
+        .await
+        .expect_err("function metadata update must surface a failed durable write");
+    assert_eq!(
+        error.to_string(),
+        "Storage backend error: injected sync_wal fault"
+    );
+}
+
+#[tokio::test]
+async fn rv_db_0486e3f9_function_meta_record_replaces_raw_row_without_injecting_defaults() {
+    let shamir = ShamirDb::init_memory().await.unwrap();
+    let store = shamir.system_store();
+    let mut initial = new_map();
+    initial.insert("name".into(), QueryValue::Str("raw_replacement".into()));
+    initial.insert("security".into(), QueryValue::Str("definer".into()));
+    initial.insert("artifact_id".into(), QueryValue::Str("old-artifact".into()));
+    initial.insert("extra".into(), QueryValue::Str("discard-me".into()));
+    let mut initial = QueryValue::Map(initial);
+    ResourceMeta {
+        owner: Actor::User(7),
+        group: Some(9),
+        mode: 0o740,
+    }
+    .inject_into(&mut initial);
+    store
+        .save_function_meta_record("raw_replacement", &initial)
+        .await
+        .unwrap();
+
+    let mut replacement = new_map();
+    replacement.insert("name".into(), QueryValue::Str("raw_replacement".into()));
+    replacement.insert("security".into(), QueryValue::Str("invoker".into()));
+    replacement.insert("artifact_id".into(), QueryValue::Str("new-artifact".into()));
+    replacement.insert("payload".into(), QueryValue::Str("kept".into()));
+    let replacement = QueryValue::Map(replacement);
+    store
+        .save_function_meta_record("raw_replacement", &replacement)
+        .await
+        .unwrap();
+
+    let saved = store
+        .load_function("raw_replacement")
+        .await
+        .unwrap()
+        .expect("replacement row remains stored");
+    assert_eq!(saved, replacement);
+    assert!(saved.get("extra").is_none());
+    assert!(saved.get("owner").is_none());
+    assert!(saved.get("group").is_none());
+    assert!(saved.get("mode").is_none());
+    assert_eq!(
+        saved.get("security"),
+        Some(&QueryValue::Str("invoker".into()))
+    );
+    assert_eq!(
+        saved.get("artifact_id"),
+        Some(&QueryValue::Str("new-artifact".into()))
+    );
+    assert_eq!(saved.get("payload"), Some(&QueryValue::Str("kept".into())));
+
+    let updated_meta = ResourceMeta {
+        owner: Actor::User(12),
+        group: Some(13),
+        mode: 0o640,
+    };
+    shamir
+        .set_resource_meta(&ResourcePath::function("raw_replacement"), &updated_meta)
+        .await
+        .unwrap();
+    let updated = store
+        .load_function("raw_replacement")
+        .await
+        .unwrap()
+        .expect("metadata-updated row remains stored");
+    assert_eq!(ResourceMeta::from_record(&updated), updated_meta);
+    assert_eq!(
+        updated.get("artifact_id"),
+        Some(&QueryValue::Str("new-artifact".into()))
+    );
+    assert_eq!(
+        updated.get("security"),
+        Some(&QueryValue::Str("invoker".into()))
+    );
+    assert_eq!(
+        updated.get("payload"),
+        Some(&QueryValue::Str("kept".into()))
+    );
+    assert!(updated.get("extra").is_none());
+}
+
+#[tokio::test]
 async fn rv_db_0486e3f9_create_database_flush_failure_propagates() {
     let (shamir, fault) = shamir_with_flush_fault_table("databases").await;
     fault.armed.store(true, std::sync::atomic::Ordering::SeqCst);

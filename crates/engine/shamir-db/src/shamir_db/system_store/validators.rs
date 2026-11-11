@@ -3,7 +3,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::DbResult;
 
-use super::store::{qv_map1, TABLE_FUNCTIONS, TABLE_FUNCTION_FOLDERS, TABLE_VALIDATORS};
+use super::store::{qv_map1, TABLE_FUNCTION_FOLDERS, TABLE_VALIDATORS};
 use super::SystemStore;
 
 impl SystemStore {
@@ -27,7 +27,7 @@ impl SystemStore {
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
         // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -46,7 +46,7 @@ impl SystemStore {
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -89,16 +89,7 @@ impl SystemStore {
 
     /// Persist a replacement function catalogue record (for `set_resource_meta`).
     pub async fn save_function_meta_record(&self, name: &str, record: &QueryValue) -> DbResult<()> {
-        let table = self.table(TABLE_FUNCTIONS).await?;
-        let op = crate::query::write::SetOp {
-            set: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            key: qv_map1("name", QueryValue::Str(name.to_string())),
-            value: record.clone(),
-        };
-        self.set_via_implicit_tx(&table, &op).await?;
-        self.persist_table_interner(&table, None).await?;
-        table.data_store_read_view().flush().await?;
-        Ok(())
+        self.replace_function_record(name, record).await
     }
 
     // Function folder catalogue (#118)
@@ -124,7 +115,7 @@ impl SystemStore {
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
         // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -143,7 +134,7 @@ impl SystemStore {
         };
         self.delete_via_implicit_tx(&table, &op).await?;
         // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -224,6 +215,7 @@ impl SystemStore {
         path_key: &str,
         record: &QueryValue,
     ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_FUNCTION_FOLDERS).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_FUNCTION_FOLDERS),
@@ -232,7 +224,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 }

@@ -201,10 +201,6 @@ async fn nonadmin_cannot_replace_ownerless_legacy_row_without_mode() {
     fields.shift_remove("mode");
     fields.shift_remove("group");
     db.system_store()
-        .remove_function("ownerless_legacy")
-        .await
-        .unwrap();
-    db.system_store()
         .save_function_meta_record("ownerless_legacy", &record)
         .await
         .unwrap();

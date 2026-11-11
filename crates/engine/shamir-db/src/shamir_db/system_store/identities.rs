@@ -17,9 +17,17 @@ impl SystemStore {
         record: &QueryValue,
         meta: &ResourceMeta,
     ) -> DbResult<()> {
-        self.catalogue_write_fault_gate()?;
         let mut rec = record.clone();
         meta.inject_into(&mut rec);
+        self.replace_function_record(name, &rec).await
+    }
+
+    pub(super) async fn replace_function_record(
+        &self,
+        name: &str,
+        record: &QueryValue,
+    ) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_FUNCTIONS).await?;
         let delete = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_FUNCTIONS),
@@ -32,7 +40,7 @@ impl SystemStore {
         };
         let insert = crate::query::write::InsertOp {
             insert_into: crate::query::TableRef::new(TABLE_FUNCTIONS),
-            values: vec![rec],
+            values: vec![record.clone()],
             records_idmsgpack: Vec::new(),
             select: None,
         };
@@ -56,7 +64,6 @@ impl SystemStore {
         .await
         .map_err(|e| DbError::Internal(e.to_string()))?;
         self.persist_table_interner(&table, None).await?;
-        // Durable DDL — sync_wal + flush via shared helper.
         self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
@@ -184,7 +191,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         if name_unchanged {
             self.group_names.store(previous);
         } else {
@@ -316,6 +323,7 @@ impl SystemStore {
     pub async fn remove_group(&self, group_id: u64) -> DbResult<()> {
         let _guard = self.group_names_rebuild.lock().await;
         self.group_names.store(None);
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_GROUPS).await?;
         let op = crate::query::write::DeleteOp {
             delete_from: crate::query::TableRef::new(TABLE_GROUPS),
@@ -327,7 +335,7 @@ impl SystemStore {
             expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         self.rebuild_group_names_locked().await;
         Ok(())
     }

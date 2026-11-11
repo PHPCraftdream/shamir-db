@@ -345,10 +345,6 @@ async fn catalogue_row_id_without_binding_id_fails_closed() {
         fields.insert("artifact_id".into(), QueryValue::Str("persisted-id".into()));
     }
     db.system_store()
-        .remove_function("row_id_no_binding_id")
-        .await
-        .unwrap();
-    db.system_store()
         .save_function_meta_record("row_id_no_binding_id", &row)
         .await
         .unwrap();
@@ -402,10 +398,6 @@ async fn nested_resolver_rejects_row_id_without_binding_id() {
             QueryValue::Str("replacement-row-id".into()),
         );
     }
-    db.system_store()
-        .remove_function("nested_id_target")
-        .await
-        .unwrap();
     db.system_store()
         .save_function_meta_record("nested_id_target", &row)
         .await
@@ -741,10 +733,6 @@ async fn legacy_none_ids_match_and_binding_only_id_mismatch_fails() {
     if let QueryValue::Map(fields) = &mut row {
         fields.shift_remove("artifact_id");
     }
-    db.system_store()
-        .remove_function("binding_id_no_row_id")
-        .await
-        .unwrap();
     db.system_store()
         .save_function_meta_record("binding_id_no_row_id", &row)
         .await

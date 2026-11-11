@@ -570,10 +570,6 @@ async fn nested_call_fails_closed_for_missing_metadata_and_missing_owner() {
         fields.shift_remove("owner");
     }
     db.system_store()
-        .remove_function("missing_owner_target")
-        .await
-        .unwrap();
-    db.system_store()
         .save_function_meta_record("missing_owner_target", &ownerless)
         .await
         .unwrap();

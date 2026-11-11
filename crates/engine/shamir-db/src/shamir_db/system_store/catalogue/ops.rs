@@ -113,11 +113,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        // DDL must be durable immediately: flush the MemBuffer-wrapped
-        // store so a crash right after the admin op can't lose (or, for
-        // removes, resurrect) the catalogue entry. DDL is rare → the
-        // fsync cost is irrelevant.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -143,8 +139,7 @@ impl SystemStore {
             expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
-        // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -244,8 +239,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -463,8 +457,7 @@ impl SystemStore {
             expected_version: None,
         };
         self.delete_via_implicit_tx(&table, &op).await?;
-        // Durable DDL — see save_repository.
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -606,6 +599,7 @@ impl SystemStore {
 
     /// Persist a replacement database record (for `set_resource_meta`).
     pub async fn save_database_meta(&self, name: &str, record: &QueryValue) -> DbResult<()> {
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_DATABASES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_DATABASES),
@@ -614,7 +608,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, Some(record)).await?;
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -630,6 +624,7 @@ impl SystemStore {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
+        self.catalogue_write_fault_gate()?;
         let table = self.table(TABLE_REPOSITORIES).await?;
         let op = crate::query::write::SetOp {
             set: crate::query::TableRef::new(TABLE_REPOSITORIES),
@@ -643,7 +638,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
@@ -684,7 +679,7 @@ impl SystemStore {
         };
         self.set_via_implicit_tx(&table, &op).await?;
         self.persist_table_interner(&table, None).await?;
-        table.data_store_read_view().flush().await?;
+        self.flush_system_repo_durable(&table).await?;
         Ok(())
     }
 
