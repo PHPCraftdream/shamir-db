@@ -89,18 +89,24 @@ pub(in crate::sem::check) fn reference_sink_provenance(
     };
     let alias = literal_alias(c, producer_alias)
         .ok_or("query_ref_field requires a literal producer alias")?;
-    if operations
-        .iter()
-        .enumerate()
-        .any(|(index, (known, _))| operations[..index].iter().any(|(prior, _)| prior == known))
-    {
+    if operations.iter().enumerate().any(|(index, (known, _))| {
+        operations[..index]
+            .iter()
+            .any(|(prior, _)| normalized_alias(prior) == normalized_alias(known))
+    }) {
         return Err("query_ref_field requires unique batch aliases");
     }
-    let mut matching = operations.iter().filter(|(known, _)| known == &alias);
+    let mut matching = operations
+        .iter()
+        .filter(|(known, _)| normalized_alias(known) == normalized_alias(&alias));
     match (matching.next(), matching.next()) {
         (Some((_, PlanOperation::Read)), None) => Ok((root, operations)),
         _ => Err("query_ref_field alias must identify exactly one read"),
     }
+}
+
+fn normalized_alias(alias: &str) -> &str {
+    alias.strip_prefix('@').unwrap_or(alias)
 }
 
 fn plan_argument(c: &Checker, frame: &FunctionFrame, expr: ExprId) -> Option<PlanFact> {

@@ -80,6 +80,7 @@ fn module(functions: Vec<IrFunction>) -> IrModule {
         static_bytes: Vec::new(),
         eq_shapes: Vec::new(),
         type_nodes: Vec::new(),
+        reference_guards: false,
     }
 }
 

@@ -37,6 +37,16 @@ fn assert_span_contains(source: &str, diagnostic: &crate::api::Diagnostic, text:
     );
 }
 
+fn assert_span_equals(source: &str, diagnostic: &crate::api::Diagnostic, expected: &str) {
+    let start = diagnostic.primary.start_byte as usize;
+    let end = diagnostic.primary.end_byte as usize;
+    assert_eq!(
+        source.get(start..end),
+        Some(expected),
+        "diagnostic span did not match {expected:?}: {diagnostic}"
+    );
+}
+
 fn markers(module: &TypedModule) -> Vec<ReferenceMarker> {
     let mut markers: Vec<_> = module.reference_markers.iter().flatten().cloned().collect();
     markers.sort_by(|left, right| (&left.alias, &left.path).cmp(&(&right.alias, &right.path)));
@@ -223,6 +233,45 @@ fn scalar_and_validator_entries_cannot_use_scalar_references() {
 }
 
 #[test]
+fn scalar_reference_producer_alias_and_field_must_be_literal_strings() {
+    let alias_source = "@entry procedure p(alias: string) -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, alias, 0, \"id\") }; return 0; }";
+    let diag = diagnostic(
+        alias_source,
+        "T009",
+        "query_ref_field producer alias must be a string literal",
+    );
+    assert_eq!(
+        diag.message,
+        "query_ref_field producer alias must be a string literal"
+    );
+    assert_span_equals(alias_source, &diag, "alias");
+    assert_eq!(
+        diag.primary.start_byte as usize,
+        alias_source
+            .rfind("alias")
+            .expect("call argument is present")
+    );
+
+    let field_source = "@entry procedure p(field: string) -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, field) }; return 0; }";
+    let diag = diagnostic(
+        field_source,
+        "T009",
+        "query_ref_field field must be a string literal",
+    );
+    assert_eq!(
+        diag.message,
+        "query_ref_field field must be a string literal"
+    );
+    assert_span_equals(field_source, &diag, "field");
+    assert_eq!(
+        diag.primary.start_byte as usize,
+        field_source
+            .rfind("field")
+            .expect("call argument is present")
+    );
+}
+
+#[test]
 fn scalar_reference_index_must_be_nonnegative_literal() {
     let negative = "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", -1, \"id\") }; return 0; }";
     let diag = diagnostic(negative, "T009", "index cannot be negative");
@@ -238,30 +287,167 @@ fn scalar_reference_index_must_be_nonnegative_literal() {
 }
 
 #[test]
+fn scalar_reference_producer_alias_must_match_bounded_ascii_identifier() {
+    let long_alias = "a".repeat(65);
+    for alias in [
+        "@src",
+        "src.name",
+        "src[0]",
+        "",
+        "1leading",
+        "naïve",
+        long_alias.as_str(),
+    ] {
+        let source = format!(
+            "@entry procedure p() -> i64 {{ const b0 = batch_read(batch(), \"src\", \"users\", {{ id: 1 }}); const value: {{ id: i64 }} = {{ id: query_ref_field(b0, \"{alias}\", 0, \"id\") }}; return 0; }}"
+        );
+        let diag = diagnostic(
+            &source,
+            "T009",
+            "query_ref_field producer alias must match [A-Za-z_][A-Za-z0-9_]{0,63}",
+        );
+        assert_eq!(
+            diag.message,
+            "query_ref_field producer alias must match [A-Za-z_][A-Za-z0-9_]{0,63}"
+        );
+        let alias_literal = format!("\"{alias}\"");
+        assert_span_equals(&source, &diag, &alias_literal);
+    }
+}
+
+#[test]
+fn underscore_and_maximum_length_ascii_reference_producer_aliases_are_valid() {
+    let long_alias = "a".repeat(64);
+    for alias in ["_", long_alias.as_str()] {
+        let source = format!(
+            "@entry procedure p() -> i64 {{ const b0 = batch_read(batch(), \"{alias}\", \"users\", {{ id: 1 }}); const value: {{ item: i64 }} = {{ item: query_ref_field(b0, \"{alias}\", 0, \"id\") }}; const b1 = batch_insert(b0, \"created\", \"users\", value); return 0; }}"
+        );
+        let module = clean(&source);
+        assert_eq!(
+            markers(&module),
+            vec![marker(&format!("@{alias}"), "[0].id", ReferenceKind::I64)]
+        );
+    }
+}
+
+#[test]
+fn scalar_reference_producer_aliases_must_be_unique_after_normalization() {
+    for (source, message) in [
+        (
+            "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const b1 = batch_read(b0, \"@src\", \"users\", { id: 2 }); const value: { id: i64 } = { id: query_ref_field(b1, \"src\", 0, \"id\") }; return 0; }",
+            "query_ref_field requires unique batch aliases",
+        ),
+        (
+            "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const b1 = batch_insert(b0, \"@src\", \"users\", { id: 2 }); const value: { id: i64 } = { id: query_ref_field(b1, \"src\", 0, \"id\") }; return 0; }",
+            "query_ref_field requires unique batch aliases",
+        ),
+    ] {
+        let diag = diagnostic(source, "T010", message);
+        assert_eq!(diag.message, message);
+        assert_span_equals(source, &diag, "query_ref_field(b1, \"src\", 0, \"id\")");
+    }
+}
+
+#[test]
+fn scalar_reference_sink_plan_rejects_aliases_that_collide_after_normalization() {
+    let sink_collision = "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, \"id\") }; const b1 = batch_read(b0, \"@src\", \"users\", value); return 0; }";
+    let diag = diagnostic(
+        sink_collision,
+        "T010",
+        "reference sink alias must be unique in the batch",
+    );
+    assert_eq!(
+        diag.message,
+        "reference sink alias must be unique in the batch"
+    );
+    assert_span_contains(
+        sink_collision,
+        &diag,
+        "batch_read(b0, \"@src\", \"users\", value)",
+    );
+
+    let collision_after_snapshot = "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, \"id\") }; const b1 = batch_read(b0, \"@src\", \"users\", { id: 2 }); const b2 = batch_read(b1, \"dst\", \"users\", value); return 0; }";
+    let diag = diagnostic(
+        collision_after_snapshot,
+        "T010",
+        "reference sink requires a known batch plan",
+    );
+    assert_eq!(diag.message, "reference sink requires a known batch plan");
+    assert_span_contains(
+        collision_after_snapshot,
+        &diag,
+        "batch_read(b1, \"dst\", \"users\", value)",
+    );
+}
+
+#[test]
 fn scalar_reference_field_name_must_match_the_bounded_identifier_pattern() {
     let long_field = "a".repeat(65);
-    for field in ["bad-name", long_field.as_str()] {
+    for field in [
+        "",
+        "bad-name",
+        "bad.name",
+        "bad[name]",
+        "1leading",
+        "naïve",
+        long_field.as_str(),
+    ] {
         let source = format!(
             "@entry procedure p() -> i64 {{ const b0 = batch_read(batch(), \"src\", \"users\", {{ id: 1 }}); const value: {{ id: i64 }} = {{ id: query_ref_field(b0, \"src\", 0, \"{field}\") }}; return 0; }}"
         );
         let diag = diagnostic(
             &source,
             "T009",
-            "field must match [A-Za-z_][A-Za-z0-9_]{0,63}",
+            "query_ref_field field must match [A-Za-z_][A-Za-z0-9_]{0,63}",
         );
-        assert_span_contains(&source, &diag, field);
+        assert_eq!(
+            diag.message,
+            "query_ref_field field must match [A-Za-z_][A-Za-z0-9_]{0,63}"
+        );
+        let field_literal = format!("\"{field}\"");
+        assert_span_equals(&source, &diag, &field_literal);
+    }
+}
+
+#[test]
+fn underscore_and_maximum_length_ascii_reference_fields_are_valid() {
+    let long_field = "a".repeat(64);
+    for field in ["_", long_field.as_str()] {
+        let source = format!(
+            "@entry procedure p() -> i64 {{ const b0 = batch_read(batch(), \"src\", \"users\", {{ id: 1 }}); const value: {{ item: i64 }} = {{ item: query_ref_field(b0, \"src\", 0, \"{field}\") }}; const b1 = batch_insert(b0, \"created\", \"users\", value); return 0; }}"
+        );
+        let module = clean(&source);
+        assert_eq!(
+            markers(&module),
+            vec![marker("@src", &format!("[0].{field}"), ReferenceKind::I64)]
+        );
+        let mut sinks: Vec<_> = module.reference_sinks.iter().flatten().cloned().collect();
+        sinks.sort_by(|left, right| (&left.alias, &left.path).cmp(&(&right.alias, &right.path)));
+        assert_eq!(
+            sinks,
+            vec![marker("@src", &format!("[0].{field}"), ReferenceKind::I64)]
+        );
     }
 }
 
 #[test]
 fn scalar_reference_sink_field_must_be_a_non_null_scalar() {
-    for field_type in ["i64?", "{ nested: i64 }", "[i64]", "null"] {
+    for field_type in ["i64?", "{ nested: i64 }", "[i64]"] {
         let source = format!(
             "@entry procedure p() -> i64 {{ const b0 = batch_read(batch(), \"src\", \"users\", {{ id: 1 }}); const value: {{ item: {field_type} }} = {{ item: query_ref_field(b0, \"src\", 0, \"id\") }}; return 0; }}"
         );
         let diag = diagnostic(&source, "T009", "requires a non-null scalar field type");
-        assert_span_contains(&source, &diag, "query_ref_field");
+        assert_eq!(
+            diag.message,
+            "query_ref_field requires a non-null scalar field type"
+        );
+        assert_span_equals(&source, &diag, "query_ref_field(b0, \"src\", 0, \"id\")");
     }
+
+    let null_field = "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { item: null } = { item: query_ref_field(b0, \"src\", 0, \"id\") }; return 0; }";
+    let diag = diagnostic(null_field, "T009", "null is not permitted here");
+    assert_eq!(diag.message, "null is not permitted here");
+    assert_span_equals(null_field, &diag, "null");
 }
 
 #[test]
@@ -295,29 +481,65 @@ fn scalar_reference_producer_must_be_a_unique_prior_read() {
     let cases = [
         (
             "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"other\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"missing\", 0, \"id\") }; return 0; }",
-            "alias must identify exactly one read",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"missing\", 0, \"id\")",
         ),
         (
             "@entry procedure p() -> i64 { const b0 = batch_insert(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, \"id\") }; return 0; }",
-            "alias must identify exactly one read",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"src\", 0, \"id\")",
         ),
         (
             "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const b1 = batch_insert(b0, \"src\", \"users\", { id: 2 }); const value: { id: i64 } = { id: query_ref_field(b1, \"src\", 0, \"id\") }; return 0; }",
-            "requires unique batch aliases",
+            "query_ref_field requires unique batch aliases",
+            "query_ref_field(b1, \"src\", 0, \"id\")",
+        ),
+        (
+            "@entry procedure p() -> i64 { const b0 = batch(); const value: { id: i64 } = { id: query_ref_field(b0, \"self\", 0, \"id\") }; const b1 = batch_read(b0, \"self\", \"users\", value); return 0; }",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"self\", 0, \"id\")",
+        ),
+        (
+            "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"next\", 0, \"id\") }; const b1 = batch_read(b0, \"next\", \"users\", value); return 0; }",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"next\", 0, \"id\")",
         ),
         (
             "@entry procedure p() -> i64 { const b0 = batch(); const value: { id: i64 } = { id: query_ref_field(b0, \"later\", 0, \"id\") }; const b1 = batch_read(b0, \"later\", \"users\", { id: 1 }); return 0; }",
-            "alias must identify exactly one read",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"later\", 0, \"id\")",
+        ),
+        (
+            "@entry procedure p() -> i64 { const b0 = batch_delete(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, \"id\") }; return 0; }",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"src\", 0, \"id\")",
         ),
         (
             "@entry procedure p() -> i64 { const b0 = batch_update(batch(), \"src\", \"users\", { id: 1 }, { name: \"x\" }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, \"id\") }; return 0; }",
-            "alias must identify exactly one read",
+            "query_ref_field alias must identify exactly one read",
+            "query_ref_field(b0, \"src\", 0, \"id\")",
         ),
     ];
-    for (source, message) in cases {
+    for (source, message, span) in cases {
         let diag = diagnostic(source, "T010", message);
-        assert_span_contains(source, &diag, "query_ref_field");
+        assert_eq!(diag.message, message);
+        assert_span_equals(source, &diag, span);
     }
+}
+
+#[test]
+fn scalar_reference_cannot_use_its_producer_alias_for_its_sink() {
+    let source = "@entry procedure p() -> i64 { const b0 = batch_read(batch(), \"src\", \"users\", { id: 1 }); const value: { id: i64 } = { id: query_ref_field(b0, \"src\", 0, \"id\") }; const b1 = batch_read(b0, \"src\", \"users\", value); return 0; }";
+    let diag = diagnostic(
+        source,
+        "T010",
+        "reference sink alias must be unique in the batch",
+    );
+    assert_eq!(
+        diag.message,
+        "reference sink alias must be unique in the batch"
+    );
+    assert_span_equals(source, &diag, "batch_read(b0, \"src\", \"users\", value)");
 }
 
 #[test]

@@ -56,6 +56,9 @@ pub(crate) struct BatchStatics {
     pub insert_descriptor: u32,
     pub eq_descriptor: u32,
     pub and_descriptor: u32,
+    /// Guarded variants are baked only for modules that actually use references.
+    pub read_guarded_descriptor: Option<u32>,
+    pub insert_guarded_descriptor: Option<u32>,
     /// Static one-segment field path lists by field name.
     pub paths: BTreeMap<String, u32>,
 }
@@ -158,8 +161,41 @@ impl BatchStatics {
             ]))?,
             eq_descriptor: builder.record_descriptor(&names(&["op", "field", "value"]))?,
             and_descriptor: builder.record_descriptor(&names(&["op", "filters"]))?,
+            read_guarded_descriptor: None,
+            insert_guarded_descriptor: None,
             paths: BTreeMap::new(),
         })
+    }
+
+    /// Lazily bakes native-order operation descriptors with a trailing `when`.
+    pub(crate) fn guarded_descriptors(
+        &mut self,
+        builder: &mut IrBuilder,
+    ) -> Result<(u32, u32), IrError> {
+        if self.read_guarded_descriptor.is_none() {
+            self.read_guarded_descriptor = Some(builder.record_descriptor(&names(&[
+                "from",
+                "select",
+                "where",
+                "return_result",
+                "when",
+            ]))?);
+        }
+        if self.insert_guarded_descriptor.is_none() {
+            self.insert_guarded_descriptor = Some(builder.record_descriptor(&names(&[
+                "insert_into",
+                "values",
+                "return_result",
+                "when",
+            ]))?);
+        }
+        Ok((
+            self.read_guarded_descriptor
+                .ok_or(IrError::Internal("lower: missing guarded read descriptor"))?,
+            self.insert_guarded_descriptor.ok_or(IrError::Internal(
+                "lower: missing guarded insert descriptor",
+            ))?,
+        ))
     }
 
     /// The static one-segment field path list cell of `name` (cached).

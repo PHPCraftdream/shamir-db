@@ -3,13 +3,14 @@ use wasm_encoder::{Encode, Function, ValType};
 use thiserror::Error;
 
 use super::abi::{emit_call_wrapper, emit_scalar_wrapper, NullCell, WrapperBases, WrapperInputs};
-use super::helpers::{emit_helper_order, HelperGraph, HelperId};
+use super::helpers::ordered_helper_functions;
 use super::scalar::emit_user_function;
 use super::support::assemble::{assemble, intern_type, val_type, ModuleImage};
 use super::support::db::checked::emit_checked_call_helper;
 use super::support::db::{
-    emit_batch_append_helper, emit_db_call_helper, emit_db_execute_helper, emit_dynmap_find_helper,
-    emit_response_affected_helper, emit_response_get_helper, host_import_name,
+    append_guard_keys, emit_batch_append_helper, emit_db_call_helper, emit_db_execute_helper,
+    emit_dynmap_find_helper, emit_response_affected_helper, emit_response_get_helper,
+    emit_response_skip_check_helper, host_import_name,
 };
 use super::support::eq::{emit_bytes_compare, emit_eq_helper};
 use super::support::projection::{
@@ -21,10 +22,7 @@ use super::support::workspace::{compute_workspace, validate_caps, validate_cell_
 use crate::api::{CompileLimits, Span};
 use crate::back::ir::{inst_result_kind, DbOp, IrModule, ParamProjection};
 use crate::back::runtime::{
-    emit_allocator, emit_append_byte, emit_check_range, emit_compare_bytes, emit_copy_cells,
-    emit_decode_root, emit_encode_root, emit_error_raiser, emit_read_be, emit_read_byte,
-    emit_store_cell, emit_validate_utf8, DecodeEmit, EncodeEmit, RuntimeCaps, RuntimeError,
-    STATIC_START,
+    emit_allocator, emit_error_raiser, RuntimeCaps, RuntimeError, STATIC_START,
 };
 use crate::front::CompileBudget;
 
@@ -41,8 +39,6 @@ const MAX_ARITY: u64 = 33;
 /// Parameter/field names are unrolled byte-by-byte into wrapper/projection
 /// code, so their length is bounded before generation.
 pub(crate) const MAX_UNROLLED_NAME_BYTES: usize = 64;
-
-type OrderedHelpers = (Vec<(u32, Function)>, u32, u32, u32, u32);
 
 /// Emission failure for the compiled (IR-driven) module path.
 #[derive(Debug, Error)]
@@ -109,6 +105,7 @@ pub(crate) struct EmissionPlan {
     pub db_execute_index: Option<u32>,
     pub response_get_index: Option<u32>,
     pub response_affected_index: Option<u32>,
+    pub skip_check_index: Option<u32>,
     pub dynmap_find_index: Option<u32>,
     /// Static message/key addresses the builder helpers raise or look up
     /// (0 when the module has no builder instructions).
@@ -119,6 +116,8 @@ pub(crate) struct EmissionPlan {
     pub key_records: u32,
     pub key_stats: u32,
     pub key_records_scanned: u32,
+    pub key_skipped: u32,
+    pub msg_skipped: u32,
     /// First generated projection helper (`eq_base + 1 + eq_count`).
     /// Projection helper per distinct type node: `(node index, fn index)` in
     /// the deterministic first-use order of the nodes.
@@ -133,116 +132,6 @@ impl EmissionPlan {
         self.checked_call_index
     }
 }
-
-/// Registers each codec primitive plus the iterative decoder as a
-/// `HelperGraph` node with its real dependencies, orders them deterministically
-/// (BTree-backed), and returns the emitted bodies with their type indices in
-/// dependency-first order together with the decoder/encoder module indices.
-fn ordered_helper_functions(
-    scratch: u32,
-    sort_base: u32,
-    caps: RuntimeCaps,
-    records: bool,
-    import_count: u32,
-) -> Result<OrderedHelpers, RuntimeError> {
-    const TYPE_RANGE: u32 = 0;
-    const TYPE_SMALL: u32 = 1;
-    const TYPE_READ_BE: u32 = 3;
-    const TYPE_STORE_CELL: u32 = 5;
-    const TYPE_APPEND: u32 = 6;
-    const TYPE_DECODE: u32 = 9;
-    const TYPE_ENCODE: u32 = 9;
-
-    let mut graph = HelperGraph::default();
-    let range = graph.add(&[]);
-    let utf8 = graph.add(&[]);
-    let compare = graph.add(&[]);
-    let read_byte = graph.add(&[]);
-    let read_be = graph.add(&[read_byte]);
-    let copy = graph.add(&[]);
-    let store = graph.add(&[]);
-    let append = graph.add(&[]);
-    // the decoder calls range validation, byte/be reads, UTF-8 validation,
-    // byte comparison (duplicate keys) and cell stores; it allocates heap
-    // copies through the allocator and raises through the error helper, both
-    // emitted after the graph order is fixed. The encoder appends to the
-    // output buffer and compares map-key bytes for the insertion sort.
-    let decode = graph.add(&[range, read_byte, read_be, utf8, compare, store]);
-    let encode = graph.add(&[append, compare]);
-    let roots = [
-        range, utf8, compare, read_byte, read_be, copy, store, append, decode, encode,
-    ];
-    let order = emit_helper_order(&graph, &roots)?;
-
-    let helper_count = order.len() as u32;
-    // defined functions start after the host imports (`raise_error` plus the
-    // stage-2 database imports of a procedure module)
-    let error_raiser_index = import_count + helper_count;
-    let alloc_index = error_raiser_index + 1;
-    let index_of = |helper: HelperId| -> Result<u32, RuntimeError> {
-        let position = order
-            .iter()
-            .position(|&candidate| candidate == helper)
-            .ok_or(RuntimeError::UnknownHelper)?;
-        u32::try_from(position)
-            .map(|position| import_count + position)
-            .map_err(|_| RuntimeError::UnknownHelper)
-    };
-    let decode_params = DecodeEmit {
-        scratch,
-        raise_index: error_raiser_index,
-        alloc_index,
-        check_range_index: index_of(range)?,
-        read_byte_index: index_of(read_byte)?,
-        read_be_index: index_of(read_be)?,
-        compare_index: index_of(compare)?,
-        utf8_index: index_of(utf8)?,
-        store_cell_index: index_of(store)?,
-        caps,
-    };
-    let encode_params = EncodeEmit {
-        scratch,
-        sort_base,
-        raise_index: error_raiser_index,
-        append_index: index_of(append)?,
-        compare_index: index_of(compare)?,
-        caps,
-        records,
-    };
-
-    let mut functions: Vec<(u32, Function)> = Vec::with_capacity(order.len());
-    for helper in &order {
-        let entry = match *helper {
-            id if id == range => (TYPE_RANGE, emit_check_range()),
-            id if id == utf8 => (TYPE_SMALL, emit_validate_utf8()),
-            id if id == compare => (TYPE_COMPARE, emit_compare_bytes()),
-            id if id == read_byte => (TYPE_SMALL, emit_read_byte()),
-            id if id == read_be => (TYPE_READ_BE, emit_read_be()),
-            id if id == copy => (TYPE_VOID_THREE_I32, emit_copy_cells()),
-            id if id == store => (TYPE_STORE_CELL, emit_store_cell()),
-            id if id == append => (TYPE_APPEND, emit_append_byte()),
-            id if id == decode => (TYPE_DECODE, emit_decode_root(&decode_params)),
-            id if id == encode => (TYPE_ENCODE, emit_encode_root(&encode_params)),
-            _ => return Err(RuntimeError::UnknownHelper),
-        };
-        functions.push(entry);
-    }
-    let decode_index = index_of(decode)?;
-    let encode_index = index_of(encode)?;
-    let compare_index = index_of(compare)?;
-    let copy_cells_index = index_of(copy)?;
-    Ok((
-        functions,
-        decode_index,
-        encode_index,
-        compare_index,
-        copy_cells_index,
-    ))
-}
-
-const TYPE_VOID_THREE_I32: u32 = 4;
-/// Runtime byte-compare helper type (`[i32,i32] -> [i32]`, position 2).
-const TYPE_COMPARE: u32 = 2;
 
 /// Assembles the M1 runtime module: no user functions, no generated equality
 /// helpers, no extra types.
@@ -408,10 +297,15 @@ pub(crate) fn emit_compiled_module(
         super::support::projection::append_builder_messages(
             &mut static_bytes,
             batch_uses.append,
-            batch_uses.response_rows,
+            batch_uses.response_rows || batch_uses.guarded,
             batch_uses.response_affected,
             static_limit,
         )?;
+    let (key_skipped, msg_skipped) = if batch_uses.guarded {
+        append_guard_keys(&mut static_bytes, static_limit)?
+    } else {
+        (0, 0)
+    };
     // the shared null cell lives in the static image, outside the decoder's
     // cell slots (the decoder overwrites those)
     let null_cell_offset = u64::try_from(static_bytes.len())
@@ -620,11 +514,13 @@ pub(crate) fn emit_compiled_module(
             None
         }
     };
-    let dynmap_find_index = take_index(batch_uses.response_rows || batch_uses.response_affected);
+    let dynmap_find_index =
+        take_index(batch_uses.response_rows || batch_uses.response_affected || batch_uses.guarded);
     let batch_append_index = take_index(batch_uses.append);
     let db_execute_index = take_index(batch_uses.execute);
     let response_get_index = take_index(batch_uses.response_rows);
     let response_affected_index = take_index(batch_uses.response_affected);
+    let skip_check_index = take_index(batch_uses.guarded);
     let checked_call_index = if checked_import {
         Some(next_batch_fn)
     } else {
@@ -654,6 +550,7 @@ pub(crate) fn emit_compiled_module(
         db_execute_index,
         response_get_index,
         response_affected_index,
+        skip_check_index,
         dynmap_find_index,
         msg_alias,
         msg_bound: baked.scalar[3],
@@ -662,6 +559,8 @@ pub(crate) fn emit_compiled_module(
         key_records,
         key_stats,
         key_records_scanned,
+        key_skipped,
+        msg_skipped,
         projection_indices,
         bases,
     };
@@ -683,7 +582,8 @@ pub(crate) fn emit_compiled_module(
                     + u64::from(plan.batch_append_index.is_some())
                     + u64::from(plan.db_execute_index.is_some())
                     + u64::from(plan.response_get_index.is_some())
-                    + u64::from(plan.response_affected_index.is_some()),
+                    + u64::from(plan.response_affected_index.is_some())
+                    + u64::from(plan.skip_check_index.is_some()),
             )
         })
         .ok_or(EmitError::Internal("function count overflow"))?;
@@ -844,6 +744,9 @@ pub(crate) fn emit_compiled_module(
     }
     if let (Some(find), Some(_affected)) = (plan.dynmap_find_index, plan.response_affected_index) {
         push_helper(1, emit_response_affected_helper(&plan, find)?, budget)?;
+    }
+    if let (Some(find), Some(_skip_check)) = (plan.dynmap_find_index, plan.skip_check_index) {
+        push_helper(7, emit_response_skip_check_helper(&plan, find)?, budget)?;
     }
 
     let mut checked_call_functions = Vec::new();

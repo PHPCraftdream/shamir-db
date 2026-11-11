@@ -9,6 +9,7 @@
 //! plan as it is.
 
 use crate::api::Span;
+use crate::back::batch::guard_cell;
 use crate::back::batch::template::BatchStatics;
 use crate::back::ir::{cell_tag, InstId, InstKind, IrError, ValueKind};
 use crate::back::lower::{lower_expr, result_node, to_slot, LowerCtx};
@@ -71,6 +72,12 @@ pub(crate) fn lower_batch_builtin(
             .copied()
             .ok_or(IrError::Internal("lower: builder intrinsic arity mismatch"))
     };
+    let markers = ctx
+        .typed
+        .reference_sinks
+        .get(id.0 as usize)
+        .cloned()
+        .unwrap_or_default();
     match builtin {
         BuiltinId::Batch => {
             let batch_cell = statics(ctx)?.batch_cell;
@@ -97,7 +104,15 @@ pub(crate) fn lower_batch_builtin(
             let filter_ty = *types
                 .get(3)
                 .ok_or(IrError::Internal("lower: builder intrinsic arity mismatch"))?;
-            let entry = read_entry(ctx, arg(2)?, arg(3)?, filter_ty, span)?;
+            let guard = if markers.is_empty() {
+                None
+            } else {
+                let address = guard_cell(&mut ctx.builder, &markers)?;
+                let cell = ctx.builder.append(InstKind::StaticCell(address), span)?;
+                ctx.builder.mark_reference_guard();
+                Some(cell)
+            };
+            let entry = read_entry(ctx, arg(2)?, arg(3)?, filter_ty, guard, span)?;
             ctx.builder.append(
                 InstKind::BatchAppend {
                     batch: arg(0)?,
@@ -108,7 +123,15 @@ pub(crate) fn lower_batch_builtin(
             )
         }
         BuiltinId::BatchInsert => {
-            let entry = insert_entry(ctx, arg(2)?, arg(3)?, span)?;
+            let guard = if markers.is_empty() {
+                None
+            } else {
+                let address = guard_cell(&mut ctx.builder, &markers)?;
+                let cell = ctx.builder.append(InstKind::StaticCell(address), span)?;
+                ctx.builder.mark_reference_guard();
+                Some(cell)
+            };
+            let entry = insert_entry(ctx, arg(2)?, arg(3)?, guard, span)?;
             ctx.builder.append(
                 InstKind::BatchAppend {
                     batch: arg(0)?,
@@ -356,6 +379,7 @@ fn read_entry(
     table: InstId,
     filter: InstId,
     filter_ty: TypeId,
+    when: Option<InstId>,
     span: Span,
 ) -> Result<InstId, IrError> {
     let select_cell = statics(ctx)?.select_cell;
@@ -363,6 +387,25 @@ fn read_entry(
     let read_descriptor = statics(ctx)?.read_descriptor;
     let read_where_descriptor = statics(ctx)?.read_where_descriptor;
     let where_filter = read_filter(ctx, filter, filter_ty, span)?;
+    if let Some(when_cell) = when {
+        let where_filter =
+            where_filter.ok_or(IrError::Internal("lower: guarded read has no where filter"))?;
+        let read_guarded_descriptor = ctx
+            .batch_statics
+            .as_mut()
+            .ok_or(IrError::Internal("lower: missing builder templates"))?
+            .guarded_descriptors(&mut ctx.builder)?
+            .0;
+        let region = region_of(ctx, 5, span)?;
+        set_slot(ctx, region, 0, table, span)?;
+        let select = static_cell(ctx, select_cell, span)?;
+        set_slot(ctx, region, 1, select, span)?;
+        set_slot(ctx, region, 2, where_filter, span)?;
+        let flag = static_cell(ctx, true_cell, span)?;
+        set_slot(ctx, region, 3, flag, span)?;
+        set_slot(ctx, region, 4, when_cell, span)?;
+        return record(ctx, region, read_guarded_descriptor, 5, span);
+    }
     let fields = if where_filter.is_some() { 4 } else { 3 };
     let region = region_of(ctx, fields, span)?;
     set_slot(ctx, region, 0, table, span)?;
@@ -425,10 +468,29 @@ fn insert_entry(
     ctx: &mut LowerCtx,
     table: InstId,
     document: InstId,
+    when: Option<InstId>,
     span: Span,
 ) -> Result<InstId, IrError> {
     let true_cell = statics(ctx)?.true_cell;
     let insert_descriptor = statics(ctx)?.insert_descriptor;
+    if let Some(when_cell) = when {
+        let insert_guarded_descriptor = ctx
+            .batch_statics
+            .as_mut()
+            .ok_or(IrError::Internal("lower: missing builder templates"))?
+            .guarded_descriptors(&mut ctx.builder)?
+            .1;
+        let values_region = region_of(ctx, 1, span)?;
+        set_slot(ctx, values_region, 0, document, span)?;
+        let values = list(ctx, values_region, 1, span)?;
+        let region = region_of(ctx, 4, span)?;
+        set_slot(ctx, region, 0, table, span)?;
+        set_slot(ctx, region, 1, values, span)?;
+        let flag = static_cell(ctx, true_cell, span)?;
+        set_slot(ctx, region, 2, flag, span)?;
+        set_slot(ctx, region, 3, when_cell, span)?;
+        return record(ctx, region, insert_guarded_descriptor, 4, span);
+    }
     let values_region = region_of(ctx, 1, span)?;
     set_slot(ctx, values_region, 0, document, span)?;
     let values = list(ctx, values_region, 1, span)?;

@@ -32,7 +32,7 @@ pub enum BuiltinId {
     BatchDelete,
     ResponseAffected,
     CallChecked,
-    /// Explicitly gated scalar reference builtin.
+    /// Supported scalar read-reference field builtin.
     QueryRefField,
 }
 

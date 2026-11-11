@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use crate::api::Span;
 use crate::front::{ExprId, ExprKind};
 use crate::sem::effects::{BuiltinCategory, BuiltinId};
@@ -179,6 +177,15 @@ pub(in crate::sem::check) fn check_query_ref_field(
         );
         return error_type(c);
     };
+    if !valid_field_name(&alias) {
+        report(
+            c,
+            "T009",
+            "query_ref_field producer alias must match [A-Za-z_][A-Za-z0-9_]{0,63}".to_string(),
+            expr_span(c, alias_arg),
+        );
+        return error_type(c);
+    }
     let Some((index, negative)) = literal_index(c, index_arg) else {
         report(
             c,
@@ -413,24 +420,9 @@ pub(in crate::sem::check) fn check_reference_sink(
         }
     }
     for fact in &local.markers {
-        if !operations
-            .iter()
-            .any(|(alias, kind)| alias == &fact.alias && matches!(kind, PlanOperation::Read))
-        {
-            report(
-                c,
-                "T010",
-                "reference producer must remain a read in the sink batch".to_string(),
-                expr_span(c, identifier),
-            );
-            valid = false;
-        }
-    }
-    for fact in &local.markers {
-        if !operations
-            .iter()
-            .any(|(alias, kind)| alias == &fact.alias && matches!(kind, PlanOperation::Read))
-        {
+        if !operations.iter().any(|(alias, kind)| {
+            alias_key(alias) == alias_key(&fact.alias) && matches!(kind, PlanOperation::Read)
+        }) {
             report(
                 c,
                 "T010",
@@ -581,14 +573,18 @@ fn reference_batch_plan(
     else {
         return None;
     };
-    let mut seen = BTreeMap::new();
-    if operations
-        .iter()
-        .any(|(alias, _)| seen.insert(alias, ()).is_some())
-    {
+    if operations.iter().enumerate().any(|(index, (alias, _))| {
+        operations[..index]
+            .iter()
+            .any(|(prior, _)| alias_key(prior) == alias_key(alias))
+    }) {
         return None;
     }
     Some((root, operations))
+}
+
+fn alias_key(alias: &str) -> &str {
+    alias.strip_prefix('@').unwrap_or(alias)
 }
 
 fn type_name(c: &Checker, ty: TypeId) -> &'static str {

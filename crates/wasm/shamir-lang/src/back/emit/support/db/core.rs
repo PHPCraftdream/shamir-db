@@ -565,6 +565,9 @@ pub(crate) fn emit_db_execute_helper(
     function.instruction(&Instruction::I64ShrU);
     function.instruction(&Instruction::I64Store(mem64(8)));
     function.instruction(&Instruction::LocalGet(cell));
+    if let Some(skip_check_index) = plan.skip_check_index {
+        function.instruction(&Instruction::Call(skip_check_index));
+    }
     function.instruction(&Instruction::End);
     Ok(function)
 }
