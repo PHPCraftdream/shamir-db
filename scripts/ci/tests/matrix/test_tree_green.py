@@ -6,12 +6,9 @@ import unittest
 from contextlib import redirect_stdout
 from types import SimpleNamespace
 
-sys.path.insert(
-    0,
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../matrix")))
 
-from matrix import tree_green as tg
+import tree_green as tg
 
 
 AFTER = "a" * 40
