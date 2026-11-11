@@ -35,6 +35,7 @@ Two top-level categories:
 - `dev-artifacts/prompts/` — briefs used to delegate work to sub-agents (prompt-first discipline).
 - `dev-artifacts/research/` — investigation notes that informed design decisions.
 - `dev-artifacts/roadmap/` — planned work and known gaps.
+- `dev-artifacts/release-1/` — plan of the first release: versioning and migrations, backup, export, observability.
 - `dev-artifacts/pre-transactional/` — notes from before the transactional engine existed.
 - `dev-artifacts/AUDIT_REPORT.md`, `dev-artifacts/BACKLOG.md`, `dev-artifacts/PROJECT_STATE.md` — top-level tracking documents.
 
