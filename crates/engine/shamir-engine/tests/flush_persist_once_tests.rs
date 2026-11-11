@@ -9,6 +9,7 @@
 #![cfg(feature = "fjall")]
 
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 
 use shamir_engine::repo::{BoxRepoFactory, RepoInstance};
 use shamir_engine::table::TableConfig;
@@ -17,11 +18,13 @@ use shamir_storage::storage_fjall::{reset_persist_sync_all_count, FJALL_PERSIST_
 use tempfile::tempdir;
 use tokio::runtime::Builder;
 
-// fjall-gated; SERIAL-style isolation not needed (no global hook), but
-// serialize the persist counter with a local mutex if a second test is
-// added — this single test is fine without.
+// The persist counter is process-global: tests that reset and read it
+// serialize on this lock.
+static PERSIST_COUNTER: Mutex<()> = Mutex::new(());
+
 #[test]
 fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
+    let _serial = PERSIST_COUNTER.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempdir().unwrap();
     let path = dir.path().join("repo");
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
@@ -95,6 +98,41 @@ fn flush_buffers_persists_once_per_pass_and_data_survives_reopen() {
         assert_eq!(
             interner.inner_to_query_value(&reopened).unwrap(),
             doc().set("k", "v").unwrap().build()
+        );
+    });
+    drop(runtime);
+}
+
+/// `flush_all_history` (truncation gate, retention, seed install, recovery)
+/// used to fsync the per-Database journal once per open table; it drains every
+/// history store and issues ONE persist.
+#[test]
+fn flush_all_history_persists_once_for_many_open_tables() {
+    let _serial = PERSIST_COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("repo");
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let repo = RepoInstance::from_factory(
+            "history_once_repo".into(),
+            BoxRepoFactory::fjall_raw(&path),
+            vec![
+                TableConfig::new("a"),
+                TableConfig::new("b"),
+                TableConfig::new("c"),
+            ],
+        )
+        .await
+        .unwrap();
+        for name in ["a", "b", "c"] {
+            repo.get_table(name).await.unwrap();
+        }
+        reset_persist_sync_all_count();
+        repo.flush_all_history().await.unwrap();
+        let n = FJALL_PERSIST_SYNC_ALL_COUNT.load(Ordering::Acquire);
+        assert_eq!(
+            n, 1,
+            "one full-database persist for three open tables, got {n}"
         );
     });
     drop(runtime);

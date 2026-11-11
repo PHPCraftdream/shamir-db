@@ -324,6 +324,11 @@ impl RepoInstance {
     /// the drainer would recurse. This seam is narrow: it touches ONLY each
     /// MVCC store's `history`, and never the WAL.
     ///
+    /// Every store is drained (`flush_history_drain`) and the repository then
+    /// issues ONE backend-wide durability barrier (`Repo::persist_once`): the
+    /// per-store `flush()` fsynced fjall's single per-Database journal once per
+    /// table, so a repository with N open tables paid N identical fsyncs.
+    ///
     /// Best-effort over all tables: a per-store flush error is logged and the
     /// first one returned after attempting them all.
     pub async fn flush_all_history(&self) -> DbResult<()> {
@@ -333,9 +338,18 @@ impl RepoInstance {
             true
         });
         let mut first_err: Option<DbError> = None;
+        let any = !mvccs.is_empty();
         for mvcc in mvccs {
-            if let Err(e) = mvcc.flush_history().await {
+            if let Err(e) = mvcc.flush_history_drain().await {
                 log::warn!("flush_all_history: {}: {}", self.name, e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        if any {
+            if let Err(e) = self.repo.persist_once().await {
+                log::warn!("flush_all_history: persist_once {}: {}", self.name, e);
                 if first_err.is_none() {
                     first_err = Some(e);
                 }
