@@ -65,16 +65,23 @@ import allowlist and the ABI constants — with no `wasmtime`/`tokio`/`shamir-*`
 dependencies; the wasm host re-exports its public surface.
 
 `shamir-lang` (`publish = false`) is the runtime-free compiler crate for the
-in-process `shamir` language (`docs/dev-artifacts/design/shamir-lang-design.md`).
-Milestone 1 emits the guest runtime every compiled module embeds: the bump
-allocator, the iterative MessagePack codec over 16-byte tagged cells, the
-`raise_error` bridge, and admission-valid module emission
-(`emit_runtime_module`). Production dependencies are exactly
-`shamir-wasm-admission`, `wasm-encoder = "=0.254.2"` and `thiserror`;
-`wat`/`wasmparser` are test-only. Its `testsupport` module is hidden
-test-only API consumed by the host crate's dev-dependency execution tests;
-it ships behind the `testsupport` Cargo feature, enabled only by the host
-dev-dependency. Milestone 4 adds the typed IR (`back/ir`), the lowering (`back/lower`), scalar emission with the named/positional call envelope, and the public `compile` entry returning a self-admitted `CompiledModule`. Milestone 5 adds validator entries and their ABI (`back/emit/support/validator.rs`, the in-guest `Validation` record and the seven constructor lowerings). Milestone 6 adds the host source service (`create_shamir_source`/`check_shamir_source` in `shamir-wasm-host`, one compile-gate permit and a fixed-stack worker) and wires `lang = "shamir"` through `shamir-db`. Milestone 7a adds `@entry procedure` entries and the direct database intrinsics `db_get`/`db_insert`/`db_query` (contextual result types, `T010`; host imports, encoder/decoder call helpers in `back/emit/support/db.rs`, decode-class kind-3 projection). Milestone 7b adds the typed builder intrinsics (`batch`, `batch_read`, `batch_insert`, `request`, `db_execute`, `response_rows`/`response_inserted`): the plan is the `BatchRequest` record encoded with the shared encoder, templates and lowering in `back/batch`, the append/execute/response helpers in `back/emit/support/db.rs`. PROC-2c stage 1 adds count-only `batch_update`/`batch_delete` and `response_affected` (`docs/dev-artifacts/design/shamir-lang-call-refs-addendum.md`, section 4). PROC-2c stage 2 adds checked stored-procedure call, compiler-emitted signatures persisted in `call_signature`, and shared per-hop resolution. PROC-2c stage 3 (A1–A7, B0–B3) scalar read references are implemented in source for the narrow `const` annotated-record/direct-reference subset: direct `[n].field` references from an earlier read in the same known plan may feed only read-equality or insert values, with a statically known non-null scalar sink; the compiler emits `when` type/presence guards for all six scalar kinds (including the `i32` range check) and checks all `results` entries after every `db_execute` in a reference-bearing module. A skipped result raises kind 2 (`batch reference did not resolve to the expected scalar`); malformed response shapes raise kind 3. Production `compile` accepts this subset. The compiler metadata remains private; there is no public `QueryRef` type or engine DTO, ABI, import, or version change, and the six-import ceiling is unchanged. Tests are pending CI; source status is not runtime verification. Pure moves A0 (`lower_record`) and B0 (`ordered_helper_functions`) are complete; B0 widens `pub(super)` visibility only. Milestone 8 hardens it without widening the surface: deterministic mutation fuzzing of the compile pipeline, a source-scan guard that keeps `std::process`/`fs`/`net`/`env`/`thread` out of the production code (and pins the three production dependencies), and raw-byte guest conformance (codec vectors, shortest integers, canonical key order, the second-call guard) in `shamir-wasm-host`'s `raw` tests.
+in-process `shamir` language: source → typed IR → a self-admitted WASM module
+that embeds its own guest runtime (bump allocator, MessagePack codec over
+16-byte tagged cells, `raise_error` bridge). Entries are `@entry scalar`,
+`@entry validator` and `@entry procedure`; procedures reach the database
+through `db_get`/`db_insert`/`db_query`, the typed batch builder
+(`batch_*`, `db_execute`, `response_*`), checked stored calls
+(`call_checked`, signatures persisted in `call_signature`) and narrow scalar
+batch references (`query_ref_field`). `shamir-db` compiles `lang = "shamir"`
+sources through the host source service in `shamir-wasm-host`. Production
+dependencies are exactly `shamir-wasm-admission`, `wasm-encoder = "=0.254.2"`
+and `thiserror` (pinned by a source-scan test that also keeps
+`std::process`/`fs`/`net`/`env`/`thread` out of production code);
+`wat`/`wasmparser` are test-only, and the hidden `testsupport` module ships
+only behind the `testsupport` feature used by the host's dev-dependency.
+Milestone history, the exact ABI/DTO mapping and what is deferred live in
+`docs/dev-artifacts/design/shamir-lang-design.md` and
+`docs/dev-artifacts/design/shamir-lang-call-refs-addendum.md`.
 
 `shamir-index-core` is the backend-agnostic index model (descriptors, kinds,
 meta envelopes, persistence, expressions, runtime, IDV2 identity, the
