@@ -33,6 +33,7 @@ use shamir_server::config::{
 use shamir_server::server::{BootstrapMode, ServerHandle, ServerLauncher};
 use shamir_server::tokens::NewToken;
 use shamir_server::user_directory::FjallUserDirectory;
+use shamir_test_diag::FlakeGuard;
 
 pub const ADMIN_PASSWORD_TEXT: &str = "token-matrix-admin-password";
 const ADMIN_PASSWORD: &[u8] = ADMIN_PASSWORD_TEXT.as_bytes();
@@ -244,6 +245,7 @@ fn make_config(data_dir: &Path) -> Config {
 }
 
 async fn seed_owner(data_dir: &Path) -> ([u8; 16], Vec<String>) {
+    let guard = FlakeGuard::new("token matrix seed_owner");
     let directory = FjallUserDirectory::open(data_dir.join("users")).expect("directory");
     let kdf = kdf();
     ensure_superuser(
@@ -308,7 +310,11 @@ async fn seed_owner(data_dir: &Path) -> ([u8; 16], Vec<String>) {
             .await
             .expect("set resource mode");
     }
-    db.flush_all().await.expect("flush owner seed database");
+    // The seed flush must not fail on a stalled fsync of a loaded Windows runner.
+    guard.mark("flush owner seed database");
+    db.flush_all_waiting()
+        .await
+        .expect("flush owner seed database");
     drop(db);
     (owner, owner_roles)
 }

@@ -155,7 +155,10 @@ async fn corrupt_table_counter(data_dir: &Path) {
     // MemBuffer (500 ms write-behind) and dropping does not flush it, so a
     // doctor reopening right away could read the pre-corruption 0 and report
     // a healthy table (CI census, 2 of 40).
-    shamir.flush_all().await.expect("flush corrupted counter");
+    shamir
+        .flush_all_waiting()
+        .await
+        .expect("flush corrupted counter");
 
     // Drop ShamirDb — releases file handles so doctor can reopen.
     drop(table_mgr);

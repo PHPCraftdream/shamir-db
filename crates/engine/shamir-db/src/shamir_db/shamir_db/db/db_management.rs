@@ -745,6 +745,15 @@ impl ShamirDb {
             .await
     }
 
+    /// [`flush_all`](Self::flush_all) that waits for completion instead of
+    /// failing on the wall-clock budget. For test harnesses outside this
+    /// crate: Windows CI runners stall every process's fsync for 10+ s at
+    /// times, and the runner's per-test timeout stays the hang detector.
+    pub async fn flush_all_waiting(&self) -> DbResult<()> {
+        self.flush_all_with_quiesce_timeout(Duration::from_secs(3600))
+            .await
+    }
+
     /// Test-only [`flush_all`](Self::flush_all) that waits for completion:
     /// Windows CI runners stall every process's fsync for 10+ s at times, so
     /// a wall-clock budget is a false failure here; nextest's per-test
