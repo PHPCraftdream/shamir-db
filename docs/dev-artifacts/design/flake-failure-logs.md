@@ -74,6 +74,7 @@ diagnostics stay because the class (timing, ports, OS differences) can recur.
 | `set_null_nulls_child_fk_transactional` | shamir-db `tests/schema_ddl/fk/declarative_schema_fk_ondelete_e2e.rs` | |
 | `boot_tolerates_native_validator_row` | shamir-db `tests/functions/facade/native_parity_e2e.rs` | |
 | `truncation_ceiling_blocks_segment_removal_when_a5_gate_unsafe` | shamir-engine `src/tx/tests/drain/truncation/truncation_tests.rs` | |
+| `one_permit_serializes_blocking_sections` | shamir-wasm-host `src/tests/wasm/admission/gates/compile_gate_tests.rs` | peak concurrency read 2 with one permit: the old probe decremented an exit-side counter AFTER the job closure had released its permit, so a queued compile could enter in between. Fixed in the instrument: the peak is now the number of permits held, read from the semaphore on entry; no separate diagnostics needed (the failure was a measurement artifact, not a gate defect) |
 | `recall_sq8_vs_f32_within_two_percent`, `recall_at_10_on_1k_vectors` | shamir-index `src/vector/tests/...` | statistical: log seed, dataset size, measured recall |
 | e2e-login subscription test | shamir-client-ts `__tests__/connection/token/e2e-login.test.ts` | already failure-only (timeline + server log in the error) |
 | browser-login "settles promptly on abort while fetch is pending..." | shamir-client-ts `src/login/__tests__/browser-login.test.ts` | timing |

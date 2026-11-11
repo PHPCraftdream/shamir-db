@@ -31,10 +31,19 @@ where
         .await
         .map_err(|e| FunctionError::Compute(format!("compile gate closed: {e}")))?;
     #[cfg(test)]
-    let faults = Arc::clone(engine.faults());
+    let probe_engine = Arc::clone(engine);
     let handle = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
-        let _probe = faults.enter_compile();
+        {
+            let permits = probe_engine.compile_permits();
+            let capacity = probe_engine
+                .admission_limits()
+                .max_concurrent_compiles
+                .max(1);
+            probe_engine
+                .faults()
+                .enter_compile(capacity - permits.available_permits());
+        }
         // The permit is owned by the job frame from here; a job that moves
         // it into a worker thread keeps it alive until that worker exits.
         job(permit)

@@ -49,9 +49,13 @@ fn apply_bench_strategy(config: &mut wasmtime::Config) -> FnResult<()> {
 /// * `upgrade_fault` — the background upgrade job fails
 ///   ([`TierFaults::UPGRADE_FAIL`]) or panics ([`TierFaults::UPGRADE_PANIC`])
 ///   instead of compiling, exercising the failure/retry/exhaustion machine.
-/// * `compile_delay_ms`, `compile_active`, `compile_max_active` — the
-///   compile-gate probe: an injected per-job delay plus the current and peak
-///   number of gated compile jobs inside their blocking section.
+/// * `compile_delay_ms`, `compile_max_active` — the compile-gate probe: an
+///   injected per-job delay plus the peak number of compile permits held at
+///   once. The peak is read from the semaphore when a job enters its blocking
+///   section, never from a counter the job itself decrements on exit: the
+///   job closure releases its permit before any outer local is dropped, so an
+///   exit-side counter lags the release and a queued job can enter in between,
+///   reporting an overlap that never happened.
 #[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct TierFaults {
@@ -62,9 +66,7 @@ pub(crate) struct TierFaults {
     /// Milliseconds every gated blocking compile job sleeps after taking its
     /// permit.
     pub(crate) compile_delay_ms: AtomicU64,
-    /// Gated jobs currently inside their blocking section.
-    pub(crate) compile_active: AtomicUsize,
-    /// Highest value `compile_active` reached.
+    /// Highest number of compile permits held at once (see the type doc).
     pub(crate) compile_max_active: AtomicUsize,
 }
 
@@ -77,29 +79,15 @@ impl TierFaults {
     /// Upgrade job panics (exercises the `JoinError` failure path).
     pub(crate) const UPGRADE_PANIC: u8 = 2;
 
-    /// Marks a gated compile job's blocking section: counts it active,
-    /// records the peak and sleeps the injected delay; dropping the probe
-    /// leaves the section.
-    pub(crate) fn enter_compile(&self) -> CompileProbe<'_> {
-        let active = self.compile_active.fetch_add(1, Ordering::SeqCst) + 1;
-        self.compile_max_active.fetch_max(active, Ordering::SeqCst);
+    /// Marks a gated compile job's blocking section: records the peak of
+    /// `held` (the permits taken out of the compile semaphore, this job's
+    /// included) and sleeps the injected delay.
+    pub(crate) fn enter_compile(&self, held: usize) {
+        self.compile_max_active.fetch_max(held, Ordering::SeqCst);
         let delay = self.compile_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
             std::thread::sleep(std::time::Duration::from_millis(delay));
         }
-        CompileProbe(self)
-    }
-}
-
-/// Guard of a gated compile job's blocking section; dropping it leaves the
-/// section.
-#[cfg(test)]
-pub(crate) struct CompileProbe<'a>(&'a TierFaults);
-
-#[cfg(test)]
-impl Drop for CompileProbe<'_> {
-    fn drop(&mut self) {
-        self.0.compile_active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
