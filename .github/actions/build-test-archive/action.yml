@@ -3,7 +3,9 @@ description: >
   Shared build steps for the archive consumed only by the lib `test` job;
   `integration` builds in place. Uses rust-cache and sccache, then
   ./scripts/test.sh --archive-to. Optionally uploads the archive artifact.
-  `packages` narrows the build (default `--workspace`; empty skips the build and the upload).
+  `packages` takes validated `-p <crate>` pairs from CI; the default
+  `--workspace` remains for `cache-warm.yml` compatibility. Empty selection
+  skips building and upload.
 
 inputs:
   shared-key:
@@ -19,7 +21,7 @@ inputs:
     required: false
     default: 'test-archive'
   packages:
-    description: 'package selection passed to ./scripts/test.sh --archive-to; "--workspace", "-p a -p b", or empty to skip the build+upload'
+    description: 'validated explicit package selection passed to ./scripts/test.sh --archive-to; "--workspace" is retained for cache-warm compatibility'
     required: false
     default: '--workspace'
 
@@ -43,16 +45,48 @@ runs:
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
+        ARCHIVE_PATH: ${{ runner.temp }}/test-archive.tar.zst
       run: |
         set -euo pipefail
-        if [ -z "$PACKAGES" ]; then
-          echo "::notice::empty package selection (docs-only diff): test archive build skipped"
-          exit 0
-        fi
-        start=$(date +%s)
-        ./scripts/test.sh --archive-to "$RUNNER_TEMP/test-archive.tar.zst" --locked $PACKAGES
-        end=$(date +%s)
-        echo "test archive built in $((end - start))s" >> "$GITHUB_STEP_SUMMARY"
+        python3 -I - <<'PY'
+        import json
+        import os
+        import re
+        import subprocess
+        import sys
+        import time
+
+        packages = os.environ["PACKAGES"].split()
+        if not packages:
+            print("::notice::empty package selection: test archive build skipped")
+            raise SystemExit(0)
+        if packages == ["--workspace"]:
+            selection = ["--workspace"]
+        else:
+            if len(packages) % 2 or any(packages[index] != "-p" for index in range(0, len(packages), 2)):
+                raise SystemExit("invalid package selection")
+            names = packages[1::2]
+            if any(not re.fullmatch(r"[A-Za-z0-9_-]+", name) for name in names):
+                raise SystemExit("invalid package name")
+            metadata = json.loads(subprocess.check_output([
+                "cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"
+            ], text=True))
+            members = set(metadata["workspace_members"])
+            available = {package["name"] for package in metadata["packages"] if package["id"] in members}
+            if len(set(names)) != len(names) or not set(names) <= available:
+                raise SystemExit("package selection is not a unique workspace package list")
+            selection = [token for name in names for token in ("-p", name)]
+        start = time.time()
+        result = subprocess.run([
+            "bash", "./scripts/test.sh", "--archive-to", os.environ["ARCHIVE_PATH"], "--locked", *selection
+        ])
+        if result.returncode:
+            raise SystemExit(result.returncode)
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as stream:
+                stream.write("test archive built in %d s\n" % int(time.time() - start))
+        PY
     - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       if: inputs.upload == 'true' && inputs.packages != ''
       with:
