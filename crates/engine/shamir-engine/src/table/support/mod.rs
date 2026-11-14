@@ -4,5 +4,6 @@
 pub mod guards;
 pub mod model;
 pub mod storage;
+pub mod table_resolver;
 pub(super) mod test_seams;
 pub mod validator_bound;

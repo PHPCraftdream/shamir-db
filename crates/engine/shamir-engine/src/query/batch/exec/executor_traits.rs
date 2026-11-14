@@ -4,7 +4,7 @@
 //! (and the free `execute_batch*` functions) from the concrete
 //! implementations that live in `shamir-db` / `shamir-server`.
 //! The table-side [`TableResolver`] contract lives in
-//! `table::support::model::table_resolver` and is re-exported here.
+//! `table::support::table_resolver` and is re-exported here.
 
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;

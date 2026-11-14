@@ -593,32 +593,32 @@ owner = "<wave-R1>"
 [[moved]]
 path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
 item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver"
-to_path = "crates/engine/shamir-engine/src/table/support/model/table_resolver.rs"
-to_item = "shamir-engine::lib::table::support::model::table_resolver::TableResolver"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver"
 reason = "R1: moved with its module"
 owner = "<wave-R1>"
 
 [[moved]]
 path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
 item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::resolve"
-to_path = "crates/engine/shamir-engine/src/table/support/model/table_resolver.rs"
-to_item = "shamir-engine::lib::table::support::model::table_resolver::TableResolver::resolve"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver::resolve"
 reason = "R1: moved with its module"
 owner = "<wave-R1>"
 
 [[moved]]
 path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
 item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::resolve_unfenced"
-to_path = "crates/engine/shamir-engine/src/table/support/model/table_resolver.rs"
-to_item = "shamir-engine::lib::table::support::model::table_resolver::TableResolver::resolve_unfenced"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver::resolve_unfenced"
 reason = "R1: moved with its module"
 owner = "<wave-R1>"
 
 [[moved]]
 path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
 item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::scalar_resolver"
-to_path = "crates/engine/shamir-engine/src/table/support/model/table_resolver.rs"
-to_item = "shamir-engine::lib::table::support::model::table_resolver::TableResolver::scalar_resolver"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver::scalar_resolver"
 reason = "R1: moved with its module"
 owner = "<wave-R1>"
 
@@ -673,8 +673,8 @@ reason = "R1: new item of the wave"
 owner = "<wave-R1>"
 
 [[added]]
-path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
-item = "shamir-engine::lib::table::support::model::table_resolver"
+path = "crates/engine/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::table_resolver"
 reason = "R1: new item of the wave"
 owner = "<wave-R1>"
 
