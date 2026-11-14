@@ -18,7 +18,7 @@ use crate::table::table_manager::TableManager;
 use crate::table::tx_scan_overlay::{
     merge_filtered_stream_with_tx_overlay, merge_stream_with_tx_overlay, overlay_rows_for_tx,
 };
-use shamir_engine_query::query::filter::eval::compile_filter;
+use shamir_engine_query::query::filter::eval::{compile_filter, predicate_to_index_range_in_ctx};
 use shamir_engine_query::query::filter::eval_context::FilterContext;
 use shamir_engine_query::query::filter::Filter;
 
@@ -419,12 +419,7 @@ impl TableManager {
             if t.isolation == shamir_tx::IsolationLevel::Serializable {
                 let token = self.table_token();
                 let deps =
-                    shamir_engine_query::query::filter::eval::predicate_to_index_range_in_ctx(
-                        filter,
-                        self.sorted_indexes(),
-                        ctx,
-                        token,
-                    );
+                    predicate_to_index_range_in_ctx(filter, self.sorted_indexes(), ctx, token);
                 if deps.is_empty() {
                     t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
                         table_token: token,
@@ -864,12 +859,7 @@ impl TableManager {
                 }
                 Some(filter) => {
                     let deps =
-                        shamir_engine_query::query::filter::eval::predicate_to_index_range_in_ctx(
-                            filter,
-                            self.sorted_indexes(),
-                            ctx,
-                            token,
-                        );
+                        predicate_to_index_range_in_ctx(filter, self.sorted_indexes(), ctx, token);
                     if deps.is_empty() {
                         tx_ref.record_predicate_shared(
                             shamir_tx::predicate_set::PredicateDep::TableScan {
@@ -929,12 +919,7 @@ impl TableManager {
                 }
                 Some(filter) => {
                     let deps =
-                        shamir_engine_query::query::filter::eval::predicate_to_index_range_in_ctx(
-                            filter,
-                            self.sorted_indexes(),
-                            ctx,
-                            token,
-                        );
+                        predicate_to_index_range_in_ctx(filter, self.sorted_indexes(), ctx, token);
                     if deps.is_empty() {
                         tx_ref.record_predicate_shared(
                             shamir_tx::predicate_set::PredicateDep::TableScan {
