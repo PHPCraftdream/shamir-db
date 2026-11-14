@@ -7,13 +7,13 @@ base = "c2536e8f172ae35c7a985253a5962952157525f2"
 
 [[allow_widen]]
 path = "crates/engine/shamir-engine/src/repo/seed/install/row.rs"
-item = "shamir-engine::lib::repo::seed::install::row::translate_row"
+item = "translate_row"
 reason = "R3: SeedImageWriter moved to repo/instance::seed; the row codec helper stays in repo"
 owner = "<wave-R3>"
 
 [[allow_widen]]
 path = "crates/engine/shamir-engine/src/repo/seed/install/receipt.rs"
-item = "shamir-engine::lib::repo::seed::install::receipt::SeedInstallState::save"
+item = "SeedInstallState::save"
 reason = "R3: SeedImageWriter moved to repo/instance::seed; the receipt type stays in repo"
 owner = "<wave-R3>"
 
@@ -33,12 +33,6 @@ owner = "<wave-R3>"
 path = "crates/engine/shamir-engine/src/repo/instance/seed/mod.rs"
 item = "shamir-engine::lib::repo::instance::seed::install"
 reason = "R3: seed-install orchestration module (design 5.14)"
-owner = "<wave-R3>"
-
-[[added]]
-path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
-item = "shamir-engine::lib::table::support::model::names"
-reason = "R3: pure table-store name/id helpers moved down (design 5.10)"
 owner = "<wave-R3>"
 
 [[added]]
@@ -233,22 +227,6 @@ item = "shamir-engine::lib::repo::instance::repo_instance::table_store::names::t
 to_path = "crates/engine/shamir-engine/src/table/support/model/names.rs"
 to_item = "shamir-engine::lib::table::support::model::names::table_store_names"
 reason = "R3: pure table-store name/id helpers moved down to table::support::model (design 5.10)"
-owner = "<wave-R3>"
-
-[[moved]]
-path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
-item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze"
-to_path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
-to_item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_impl"
-reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
-owner = "<wave-R3>"
-
-[[moved]]
-path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
-item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted"
-to_path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
-to_item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted_impl"
-reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
 owner = "<wave-R3>"
 
 [[moved]]
@@ -540,18 +518,6 @@ reason = "R3: tests follow the moved helpers (design 5.10)"
 owner = "<wave-R3>"
 
 [[changed]]
-path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
-item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_impl"
-reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
-owner = "<wave-R3>"
-
-[[changed]]
-path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
-item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted_impl"
-reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
-owner = "<wave-R3>"
-
-[[changed]]
 path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
 item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::r6_freeze_waits_for_parked_fast_committer_and_observes_row"
 reason = "R3: freeze tests use the table-local error (design 5.11)"
@@ -656,26 +622,14 @@ reason = "R3: install tests split with their subjects (design 5.14)"
 owner = "<wave-R3>"
 
 [[added]]
-path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/mod.rs"
-item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers"
-reason = "R3: install tests split with their subjects (design 5.14)"
-owner = "<wave-R3>"
-
-[[added]]
 path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
 item = "shamir-engine::lib::repo::seed::install::tests::receipt_tests"
 reason = "R3: receipt-subject test split out of validation_tests (design 5.14)"
 owner = "<wave-R3>"
 
 [[added]]
-path = "crates/engine/shamir-engine/src/table/support/model/tests/mod.rs"
+path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
 item = "shamir-engine::lib::table::support::model::tests"
-reason = "R3: tests follow the moved helpers (design 5.10)"
-owner = "<wave-R3>"
-
-[[added]]
-path = "crates/engine/shamir-engine/src/table/support/model/tests/mod.rs"
-item = "shamir-engine::lib::table::support::model::tests::names"
 reason = "R3: tests follow the moved helpers (design 5.10)"
 owner = "<wave-R3>"
 
@@ -725,4 +679,58 @@ owner = "<wave-R3>"
 path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
 item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::receipt_pointer_resolves"
 reason = "R3: canonical crate::repo::meta:: import hoisted to the file header (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::BookmarkV3"
+reason = "R3: canonical crate::repo::meta:: import (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::codec_error"
+reason = "R3: canonical crate::repo::meta:: import (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::classify_follower_bookmark"
+reason = "R3: canonical crate::repo::meta:: import (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/receipt_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::receipt_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
+item = "shamir-engine::lib::table::support::model::names"
+reason = "R3: pure table-store name/id helpers moved down (design 5.10)"
+owner = "<wave-R3>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_impl"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted_impl"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
 owner = "<wave-R3>"
