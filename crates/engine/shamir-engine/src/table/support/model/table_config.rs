@@ -1,6 +1,4 @@
-use crate::repo::instance::repo_instance::table_store::{
-    new_table_store_id, validate_table_store_name,
-};
+use super::names::{new_table_store_id, validate_table_store_name};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::types::record_id::RecordId;
 

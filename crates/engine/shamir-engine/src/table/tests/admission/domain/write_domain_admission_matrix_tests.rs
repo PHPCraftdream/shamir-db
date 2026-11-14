@@ -392,7 +392,7 @@ async fn migration_freeze_and_leader_write_semantics() {
     let _ = blocked_until_released(
         &domain,
         &mgr,
-        || mgr.begin_migration_freeze(),
+        || mgr.begin_migration_freeze_impl(),
         no_extra_effects,
     )
     .await

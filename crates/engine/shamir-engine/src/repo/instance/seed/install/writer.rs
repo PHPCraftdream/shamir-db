@@ -14,8 +14,8 @@ use crate::meta::repl::bookmark_v3::{save_bookmark_v3, BookmarkV3};
 use crate::repo::RepoInstance;
 
 use super::inventory::SeedTable;
-use super::receipt::{SeedInstallState, SeedReceipt};
-use super::row::translate_row;
+use crate::repo::seed::install::translate_row;
+use crate::repo::seed::install::{SeedInstallState, SeedReceipt};
 
 /// Offline, exclusively owned UNPUBLISHED destination. The server must verify
 /// the artifact/trusted digest, hold maintenance ownership and create a new

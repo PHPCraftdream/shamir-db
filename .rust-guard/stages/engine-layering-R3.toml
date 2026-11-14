@@ -1,0 +1,736 @@
+# Campaign engine-layering-R3: seed-install orchestration up into
+# repo/instance::seed, table-store name/id helpers down into
+# table::support::model, crate::meta canonicalisation (no inventory
+# impact), and the freeze-error split (design 7.3 file sets 1-3 and 5;
+# the db_instance/migration chunk is a later task).
+base = "c2536e8f172ae35c7a985253a5962952157525f2"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/row.rs"
+item = "translate_row"
+reason = "R3: SeedImageWriter moved to repo/instance::seed; the row codec helper stays in repo"
+owner = "<wave-R3>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/receipt.rs"
+item = "SeedInstallState::save"
+reason = "R3: SeedImageWriter moved to repo/instance::seed; the receipt type stays in repo"
+owner = "<wave-R3>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/mod.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::record_id"
+reason = "R3: new_table_store_id moved to table::support::model::names; the single-item module is gone"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/mod.rs"
+item = "shamir-engine::lib::repo::instance::seed"
+reason = "R3: seed-install orchestration module (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/seed/mod.rs"
+item = "shamir-engine::lib::repo::instance::seed::install"
+reason = "R3: seed-install orchestration module (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::MigrationFreezeError"
+reason = "R3: table-local freeze acquisition error (design 5.11)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_freeze::TableManager::begin_migration_freeze"
+reason = "R3: facade wrapper keeps the public CommitError contract (design 5.11)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_freeze::TableManager::begin_migration_freeze_admitted"
+reason = "R3: facade wrapper keeps the public CommitError contract (design 5.11)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/mod.rs"
+item = "shamir-engine::lib::repo::seed::prepare_seed"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::prepare_seed"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/prepare_seed.rs"
+item = "shamir-engine::lib::repo::seed::prepare_seed::prepare_seed"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/prepare_seed.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::prepare_seed::prepare_seed"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::SeedTable"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::SeedTable"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::SeedTable::config"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::SeedTable::config"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::SeedTable::load_configs"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::SeedTable::load_configs"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::SeedTable::load_inventory"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::SeedTable::load_inventory"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::SeedTable::save_inventory"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::SeedTable::save_inventory"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::SeedTable::save_local_ids"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::SeedTable::save_local_ids"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::writer"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter::begin"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::begin"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter::enter"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::enter"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter::binding"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::binding"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter::row"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::row"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter::finish"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::finish"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/writer.rs"
+item = "shamir-engine::lib::repo::seed::install::writer::SeedImageWriter::boundary"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/writer.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::writer::SeedImageWriter::boundary"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/mod.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::names"
+to_path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
+to_item = "shamir-engine::lib::table::support::model::names"
+reason = "R3: pure table-store name/id helpers moved down to table::support::model (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/record_id.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::record_id::new_table_store_id"
+to_path = "crates/engine/shamir-engine/src/table/support/model/names.rs"
+to_item = "shamir-engine::lib::table::support::model::names::new_table_store_id"
+reason = "R3: pure table-store name/id helpers moved down to table::support::model (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::names::TableStoreNames"
+to_path = "crates/engine/shamir-engine/src/table/support/model/names.rs"
+to_item = "shamir-engine::lib::table::support::model::names::TableStoreNames"
+reason = "R3: pure table-store name/id helpers moved down to table::support::model (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::names::validate_table_store_name"
+to_path = "crates/engine/shamir-engine/src/table/support/model/names.rs"
+to_item = "shamir-engine::lib::table::support::model::names::validate_table_store_name"
+reason = "R3: pure table-store name/id helpers moved down to table::support::model (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::names::table_store_names"
+to_path = "crates/engine/shamir-engine/src/table/support/model/names.rs"
+to_item = "shamir-engine::lib::table::support::model::names::table_store_names"
+reason = "R3: pure table-store name/id helpers moved down to table::support::model (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::durability_tests"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::durability_tests"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::helpers"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::image_tests"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::image_tests"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/mod.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::validation_tests"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/durability_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::durability_tests::real_history_and_bookmark_helpers_propagate_failed_barriers"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/durability_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::durability_tests::real_history_and_bookmark_helpers_propagate_failed_barriers"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/image_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::image_tests::interruptions_refuse_partial_image_and_fresh_attempt_converges"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/image_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::image_tests::interruptions_refuse_partial_image_and_fresh_attempt_converges"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/image_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::image_tests::cold_handles_read_remapped_rows_counters_and_bootstrap_gap"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/image_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::image_tests::cold_handles_read_remapped_rows_counters_and_bootstrap_gap"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/image_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::image_tests::exact_retry_and_ordinary_repository_admission_are_distinct"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/image_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::image_tests::exact_retry_and_ordinary_repository_admission_are_distinct"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/validation_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests::optional_local_mapping_accepts_legacy_and_rejects_corrupt_maps"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/validation_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::validation_tests::optional_local_mapping_accepts_legacy_and_rejects_corrupt_maps"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/validation_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests::reserved_binding_and_excess_inventory_are_refused"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/validation_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::validation_tests::reserved_binding_and_excess_inventory_are_refused"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/validation_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests::invalid_receipt_refuses_before_install_mutation"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/validation_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::validation_tests::invalid_receipt_refuses_before_install_mutation"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/validation_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests::missing_bindings_and_duplicate_keys_poison_attempts"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/validation_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::validation_tests::missing_bindings_and_duplicate_keys_poison_attempts"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/validation_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests::conflicting_binding_and_underfilled_inventory_cannot_complete"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/validation_tests.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::validation_tests::conflicting_binding_and_underfilled_inventory_cannot_complete"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/validation_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::validation_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+to_path = "crates/engine/shamir-engine/src/repo/seed/install/tests/receipt_tests.rs"
+to_item = "shamir-engine::lib::repo::seed::install::tests::receipt_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::insert"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::insert"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::set"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::set"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::get"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::get"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::remove"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::remove"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::flush"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::flush"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::iter_stream"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::iter_stream"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::scan_prefix_stream"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::scan_prefix_stream"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::iter_range_stream"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::iter_range_stream"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::FlushProbe::iter_range_stream_reverse"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::FlushProbe::iter_range_stream_reverse"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/helpers.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::helpers::receipt"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/helpers.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers::receipt"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/helpers.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::helpers::repo"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/helpers.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers::repo"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/helpers.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::helpers::inventory"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/helpers.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers::inventory"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/helpers.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::helpers::payload"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/helpers.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers::payload"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/helpers.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::helpers::populated"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/helpers.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::helpers::populated"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names::generated_store_name_limit_checks_longest_mapped_name_in_bytes"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/names.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names::generated_store_name_limit_checks_longest_mapped_name_in_bytes"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names::legacy_and_incarnation_mappings_are_distinct"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/names.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names::legacy_and_incarnation_mappings_are_distinct"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_memory_backend"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/names.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names::generated_names_open_in_memory_backend"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_fjall_backend"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/names.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names::generated_names_open_in_fjall_backend"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_hybrid_backend"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/names.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names::generated_names_open_in_hybrid_backend"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/names.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_cached_backend"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/names.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names::generated_names_open_in_cached_backend"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::r6_freeze_waits_for_parked_fast_committer_and_observes_row"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::retire_keeps_freeze_bit_after_drop"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::dropped_freeze_guard_clears_bit"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::sidecar_index_only_commit_rejected_while_frozen"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::sidecar_counter_only_commit_rejected_while_frozen"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::r7_second_freeze_rejected_without_clearing_first_owner"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::r8_unique_slow_committer_rechecks_freeze_under_lock"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::cancelled_freeze_clears_bit_at_both_preparation_awaits"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::implicit_commit_maps_freeze_to_table_migrating"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/index_lifecycle/registry/migration_freeze_tests.rs"
+item = "shamir-engine::lib::table::tests::index_lifecycle::registry::migration_freeze_tests::r8_non_tx_crud_queued_before_freeze_rejects_without_mutation"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/tests/admission/domain/write_domain_admission_matrix_tests.rs"
+item = "shamir-engine::lib::table::tests::admission::domain::write_domain_admission_matrix_tests::migration_freeze_and_leader_write_semantics"
+reason = "R3: freeze tests use the table-local error (design 5.11)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/table_store/tests/mod.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::table_store::tests::names"
+to_path = "crates/engine/shamir-engine/src/table/support/model/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::model::tests::names"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::INVENTORY_KEY"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::INVENTORY_KEY"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/inventory.rs"
+item = "shamir-engine::lib::repo::seed::install::inventory::LOCAL_IDS_KEY"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/inventory.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::inventory::LOCAL_IDS_KEY"
+reason = "R3: seed-install orchestration moved to repo/instance::seed (design 5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/flush_probe.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::flush_probe::TestStream"
+to_path = "crates/engine/shamir-engine/src/repo/instance/seed/install/tests/flush_probe.rs"
+to_item = "shamir-engine::lib::repo::instance::seed::install::tests::flush_probe::TestStream"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/instance/seed/install/mod.rs"
+item = "shamir-engine::lib::repo::instance::seed::install::tests"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/mod.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::receipt_tests"
+reason = "R3: receipt-subject test split out of validation_tests (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
+item = "shamir-engine::lib::table::support::model::tests"
+reason = "R3: tests follow the moved helpers (design 5.10)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/receipt_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::receipt_tests::receipt"
+reason = "R3: receipt-subject test split out of validation_tests (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/disk_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::disk_tests::receipt"
+reason = "R3: disk_tests keeps its unix-gated module path with local fixtures (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/disk_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::disk_tests::inventory"
+reason = "R3: disk_tests keeps its unix-gated module path with local fixtures (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/disk_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::disk_tests::payload"
+reason = "R3: disk_tests keeps its unix-gated module path with local fixtures (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/disk_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::disk_tests::payload_bytes"
+reason = "R3: disk_tests keeps its unix-gated module path with local fixtures (design 5.14)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/disk_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::disk_tests::populated"
+reason = "R3: disk_tests keeps its unix-gated module path with local fixtures (design 5.14)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/rename_freeze.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::rename_freeze::RenameFreeze::begin"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::receipt_pointer_resolves"
+reason = "R3: canonical crate::repo::meta:: import hoisted to the file header (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::BookmarkV3"
+reason = "R3: canonical crate::repo::meta:: import (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::codec_error"
+reason = "R3: canonical crate::repo::meta:: import (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/meta/repl/bookmark_v3.rs"
+item = "shamir-engine::lib::repo::meta::repl::bookmark_v3::classify_follower_bookmark"
+reason = "R3: canonical crate::repo::meta:: import (design 5.16)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/seed/install/tests/receipt_tests.rs"
+item = "shamir-engine::lib::repo::seed::install::tests::receipt_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+reason = "R3: install tests split with their subjects (design 5.14)"
+owner = "<wave-R3>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/model/mod.rs"
+item = "shamir-engine::lib::table::support::model::names"
+reason = "R3: pure table-store name/id helpers moved down (design 5.10)"
+owner = "<wave-R3>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_impl"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/table_manager/barriers/ddl_barriers.rs"
+item = "shamir-engine::lib::table::table_manager::barriers::ddl_barriers::TableManager::begin_migration_freeze_admitted_impl"
+reason = "R3: table-local MigrationFreezeError; CommitError mapping moved to the facade (design 5.11)"
+owner = "<wave-R3>"

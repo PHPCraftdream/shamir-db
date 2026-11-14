@@ -48,6 +48,7 @@ mod write_domain_rename_admitted;
 // `table_manager/<name>/mod.rs` — and were dropped.)
 pub(in crate::table) mod accessors;
 mod barriers;
+pub(crate) use barriers::MigrationFreezeError;
 pub mod diagnostics;
 pub(in crate::table) mod operations;
 pub(in crate::table) mod transactions;

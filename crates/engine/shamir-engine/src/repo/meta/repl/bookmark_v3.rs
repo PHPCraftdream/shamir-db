@@ -5,8 +5,9 @@
 //! [`DbError::FollowerStateRefused`] — there is no legacy-read fallback and
 //! no migration anywhere.
 
-use crate::meta::repl::fence_record::FenceRecord;
-use crate::meta::{MetaEnvelope, MetaError, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
+use crate::repo::meta::repl::fence_record::FenceRecord;
+use crate::repo::meta::repl::receipt::{decode_receipt, receipt_key};
+use crate::repo::meta::{MetaEnvelope, MetaError, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult, FollowerRefusalReason};
@@ -15,7 +16,7 @@ use std::sync::Arc;
 
 /// Bookmark v3 record: everything v2 carried plus an optional reference to
 /// the outstanding replication redo receipt (see
-/// [`crate::meta::repl::receipt`]).
+/// [`crate::repo::meta::repl::receipt`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookmarkV3 {
     pub fence: Option<FenceRecord>,
@@ -43,7 +44,7 @@ fn key() -> RecordKey {
     RecordKey::from_slice(MetaKey::ReplicationBookmark.as_record_id().as_bytes())
 }
 
-fn codec_error(e: crate::meta::MetaError) -> DbError {
+fn codec_error(e: crate::repo::meta::MetaError) -> DbError {
     DbError::Storage(format!("replication bookmark codec: {e}"))
 }
 
@@ -128,7 +129,7 @@ pub fn decode_bookmark_v3(bytes: &[u8]) -> DbResult<BookmarkV3> {
 /// record when v3; a typed [`DbError::FollowerStateRefused`] for ANY other
 /// bytes (legacy formats and malformed/unknown records alike — a malformed
 /// record is never treated as absent). The single strict-read helper for the
-/// crate: the projection loaders in `crate::meta::repl_bookmark` and the
+/// crate: the projection loaders in `crate::repo::meta::repl_bookmark` and the
 /// writer below share this reason logic.
 pub(crate) async fn read_strict_record(info: &Arc<dyn Store>) -> DbResult<Option<BookmarkV3>> {
     let bytes = match info.get(key()).await {
@@ -167,7 +168,7 @@ pub async fn classify_follower_bookmark(info: &Arc<dyn Store>) -> DbResult<Follo
     match read_strict_record(info).await? {
         Some(record) => Ok(FollowerBookmarkState::Native(record)),
         None => {
-            let floor = crate::meta::recovery_marker::load_last_committed(info)
+            let floor = crate::repo::meta::recovery_marker::load_last_committed(info)
                 .await?
                 .unwrap_or(0);
             if floor > 0 {
@@ -188,13 +189,13 @@ pub async fn receipt_pointer_resolves(info: &Arc<dyn Store>, v3: &BookmarkV3) ->
     let Some(id) = v3.outstanding_receipt else {
         return Ok(true);
     };
-    let bytes = match info.get(crate::meta::repl::receipt::receipt_key()).await {
+    let bytes = match info.get(receipt_key()).await {
         Err(DbError::NotFound(_)) => return Ok(false),
         Err(error) => return Err(error),
         Ok(bytes) => bytes,
     };
-    match crate::meta::repl::receipt::decode_receipt(&id, &bytes) {
-        Ok(receipt) => Ok(receipt.phase != crate::meta::repl::ReceiptPhase::Checkpointed),
+    match decode_receipt(&id, &bytes) {
+        Ok(receipt) => Ok(receipt.phase != crate::repo::meta::repl::ReceiptPhase::Checkpointed),
         // Corrupt bytes are durable corruption, not a transient failure.
         Err(_) => Ok(false),
     }

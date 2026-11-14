@@ -76,7 +76,7 @@ impl SeedInstallState {
         }
     }
 
-    pub(super) async fn save(&self, store: &Arc<dyn Store>) -> DbResult<()> {
+    pub(crate) async fn save(&self, store: &Arc<dyn Store>) -> DbResult<()> {
         let bytes = MetaEnvelope::new(self.clone())
             .encode()
             .map_err(|e| DbError::Codec(format!("seed receipt: {e}")))?;

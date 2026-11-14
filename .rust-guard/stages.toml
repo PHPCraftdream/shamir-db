@@ -26,4 +26,8 @@
 # delta   = ".rust-guard/stages/split-repo-instance.toml"
 # discovery_delta = ".rust-guard/stages/split-repo-instance-discovery.toml"
 
-campaigns = []
+[[campaigns]]
+name = "engine-layering-R3"
+packages = ["shamir-engine"]
+delta = ".rust-guard/stages/engine-layering-R3.toml"
+discovery_delta = ".rust-guard/stages/engine-layering-R3.discovery.toml"

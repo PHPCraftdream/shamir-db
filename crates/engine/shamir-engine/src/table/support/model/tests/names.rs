@@ -1,6 +1,6 @@
-use crate::repo::instance::repo_instance::table_store::table_store_names;
 use crate::repo::journal::backend::repo_types::RepoFactory;
 use crate::repo::repo_types::BoxRepoFactory;
+use crate::table::support::model::names::table_store_names;
 use crate::table::TableConfig;
 #[cfg(feature = "fjall")]
 use shamir_storage::storage_cached::WriteMode;

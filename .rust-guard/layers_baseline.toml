@@ -4,10 +4,8 @@
 # backward reference into layer B. Counts may only go down.
 
 [shamir-engine]
-"repo -> table" = 1
 "repo -> instance" = 5
 "table -> validator" = 9
-"table -> tx" = 1
 "table -> query" = 5
 "table -> instance" = 2
 "table -> db_instance" = 3

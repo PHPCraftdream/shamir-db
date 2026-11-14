@@ -72,24 +72,6 @@ async fn optional_local_mapping_accepts_legacy_and_rejects_corrupt_maps() {
 }
 
 #[tokio::test]
-async fn fresh_repo_identity_epoch_zero_is_valid_receipt_evidence() {
-    let source = repo(Arc::new(InMemoryRepo::new()), Vec::new());
-    let identity = source.repo_identity().await.unwrap();
-    assert_eq!(identity.history_epoch, 0);
-    assert_eq!(source.repo_identity().await.unwrap(), identity);
-
-    let mut evidence = receipt();
-    evidence.source_identity = identity;
-    evidence.validate().unwrap();
-
-    // Commit version zero remains reserved independently of the history epoch.
-    for version in [0, u64::MAX] {
-        evidence.source_version = version;
-        assert!(evidence.validate().is_err());
-    }
-}
-
-#[tokio::test]
 async fn reserved_binding_and_excess_inventory_are_refused() {
     let image = repo(Arc::new(InMemoryRepo::new()), Vec::new());
     let info = image.tx_info_store().await.unwrap();

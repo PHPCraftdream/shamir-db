@@ -7,7 +7,7 @@
 //! hot-reload-style to the store stack via
 //! `Store::apply_buffer_config`.
 
-use crate::meta::{MetaEnvelope, MetaError, MetaKey};
+use crate::repo::meta::{MetaEnvelope, MetaError, MetaKey};
 use std::sync::Arc;
 
 use bytes::Bytes;
