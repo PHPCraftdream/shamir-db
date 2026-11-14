@@ -4,3 +4,6 @@ pub mod buffer_config;
 pub mod names;
 pub mod table;
 pub mod table_config;
+
+#[cfg(test)]
+mod tests;
