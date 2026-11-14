@@ -1,6 +1,6 @@
 use super::accounting::write_result_to_query_result_with_encoding;
 use crate::query::batch::exec_scope::ExecScope;
-use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::query_runner::{build_resolved_refs, resolve_skip, skipped_query_result};
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchOp, BatchPlan, BatchRequest, QueryEntry, QueryRunner};
@@ -83,7 +83,7 @@ pub(in crate::query::batch) fn attach(
 pub(in crate::query::batch) async fn execute_plan(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,

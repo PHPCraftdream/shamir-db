@@ -14,7 +14,7 @@ use super::support::{
 };
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -585,7 +585,10 @@ impl TableResolver for ResolveCountingResolver {
         }
         self.inner.resolve(table_ref).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for ResolveCountingResolver {
     async fn resolve_repo(
         &self,
         repo_name: &str,

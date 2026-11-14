@@ -3,12 +3,15 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use crate::query::filter::eval::FilterNode;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::{exec, CorruptRecordRef, QueryRecord, QueryResult, QueryStats, ReadQuery};
 use crate::table::support::storage::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
 use bytes::Bytes;
+use shamir_engine_query::query::filter::eval::FilterNode;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::read::row_byte_meter::RowByteMeter;
+use shamir_engine_query::query::read::{
+    exec, CorruptRecordRef, QueryRecord, QueryResult, QueryStats, ReadQuery,
+};
 
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::Interner;
@@ -113,7 +116,7 @@ impl TableManager {
         // QueryRecord (for plain SELECT). S4: the aggregate arm now carries
         // Bytes + per-row RecordView instead of a full InnerValue tree.
         let mut raw_acc: Vec<(RecordId, Bytes)> = Vec::new();
-        let mut rec_acc: Vec<crate::query::read::QueryRecord> = Vec::new();
+        let mut rec_acc: Vec<shamir_engine_query::query::read::QueryRecord> = Vec::new();
         // F-7 (#797): plain ORDER BY + with_version — track each surviving
         // row's RecordId alongside rec_acc so the per-record versions array
         // can be rebuilt after the sort reorders rows. Only allocated when the
@@ -207,11 +210,7 @@ impl TableManager {
                                 };
                                 let qv = projection.project_value(&view, interner)?;
                                 if let Some(meter) = ctx.row_byte_meter {
-                                    meter.charge(
-                                        crate::query::batch::exec_scope::RowByteMeter::value_size(
-                                            &qv,
-                                        ),
-                                    )?;
+                                    meter.charge(RowByteMeter::value_size(&qv))?;
                                 }
                                 heap.push(qv, tracking_versions.then_some(id));
                             } else if needs_raw {
@@ -260,11 +259,7 @@ impl TableManager {
                                 };
                                 let qv = projection.project_value(&record, interner)?;
                                 if let Some(meter) = ctx.row_byte_meter {
-                                    meter.charge(
-                                        crate::query::batch::exec_scope::RowByteMeter::value_size(
-                                            &qv,
-                                        ),
-                                    )?;
+                                    meter.charge(RowByteMeter::value_size(&qv))?;
                                 }
                                 heap.push(qv, tracking_versions.then_some(id));
                             } else if needs_raw {
@@ -348,7 +343,7 @@ impl TableManager {
                 exec::try_apply_group_by(&raw_acc, group_by, &query.select, interner, ctx)?
             } else if has_agg {
                 exec::validate_aggregate_select(&query.select)?;
-                crate::query::read::aggregate::apply_aggregate_all_with_context(
+                shamir_engine_query::query::read::aggregate::apply_aggregate_all_with_context(
                     &raw_acc,
                     &query.select,
                     interner,
@@ -358,7 +353,7 @@ impl TableManager {
                 rec_acc
                     .into_iter()
                     .map(|r| match r {
-                        crate::query::read::QueryRecord::Direct(qv) => qv,
+                        shamir_engine_query::query::read::QueryRecord::Direct(qv) => qv,
                         other => other.as_value().into_owned(),
                     })
                     .collect()
@@ -400,9 +395,9 @@ impl TableManager {
                 exec::apply_pagination(qv_result, &query.pagination, query.count_total)
             }
         };
-        let final_records: Vec<crate::query::read::QueryRecord> = paged
+        let final_records: Vec<shamir_engine_query::query::read::QueryRecord> = paged
             .into_iter()
-            .map(crate::query::read::QueryRecord::Direct)
+            .map(shamir_engine_query::query::read::QueryRecord::Direct)
             .collect();
 
         if !needs_raw {

@@ -5,10 +5,7 @@
 
 [shamir-engine]
 "repo -> instance" = 5
-"table -> validator" = 9
-"table -> query" = 5
-"table -> instance" = 2
+"table -> instance" = 1
 "table -> db_instance" = 3
-"validator -> query" = 1
 "tx -> instance" = 35
 "query -> instance" = 11

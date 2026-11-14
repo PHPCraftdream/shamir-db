@@ -8,8 +8,8 @@ use shamir_query_types::filter::FilterValue;
 use shamir_types::access::Actor;
 
 use crate::query::batch::{
-    execute_batch, execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchResponse,
-    TableResolver,
+    execute_batch, execute_in_open_tx, open_interactive_tx, Authorized, BatchError, BatchResolver,
+    BatchResponse, TableResolver,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -25,7 +25,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table: &TableRef) -> shamir_storage::error::DbResult<TableManager> {
         self.repo.get_table(&table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }

@@ -14,8 +14,8 @@ use crate::query::batch::batch_execute::{
     execute_batch_impl, execute_plan_impl, execute_plan_tx, execute_transactional_impl,
 };
 use crate::query::batch::{
-    commit_interactive_tx, execute_batch_unchecked, open_interactive_tx, BatchError, ExecScope,
-    TableResolver,
+    commit_interactive_tx, execute_batch_unchecked, open_interactive_tx, BatchError, BatchResolver,
+    ExecScope, TableResolver,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -31,7 +31,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table: &TableRef) -> shamir_storage::error::DbResult<TableManager> {
         self.repo.get_table(&table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }

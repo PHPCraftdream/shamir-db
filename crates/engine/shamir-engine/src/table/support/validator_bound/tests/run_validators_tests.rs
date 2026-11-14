@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use smallvec::smallvec;
 
-use crate::validator::{
+use shamir_engine_validator::validator::{
     RecordFields, RecordValidator, Validation, ValidatorBinding, ValidatorCtx, ValidatorFailure,
     ValidatorRegistry, WriteOp,
 };
@@ -106,7 +106,7 @@ async fn build_table_with_validators(
     let info_store: Arc<dyn shamir_storage::types::Store> = Arc::new(InMemoryStore::new());
 
     // Persist bindings in the info-twin so TableManager loads them.
-    crate::validator::persistence::save_validators_metadata(&bindings, &info_store)
+    super::super::persistence::save_validators_metadata(&bindings, &info_store)
         .await
         .unwrap();
 
@@ -132,7 +132,7 @@ async fn no_bindings_returns_ok() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     assert!(result.is_ok());
@@ -164,7 +164,7 @@ async fn no_matching_op_returns_ok() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     assert!(result.is_ok());
@@ -196,7 +196,7 @@ async fn accept_validator_returns_ok() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     assert!(result.is_ok());
@@ -230,7 +230,7 @@ async fn reject_validator_returns_failed() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     match result {
@@ -290,7 +290,7 @@ async fn priority_order_and_collect_all() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     match result {
@@ -351,7 +351,7 @@ async fn stop_halts_remaining_validators() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     match result {
@@ -384,7 +384,7 @@ async fn missing_validator_fails_closed() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     match result {
@@ -421,7 +421,7 @@ async fn trap_validator_fails_closed() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     match result {
@@ -447,7 +447,7 @@ async fn no_registry_returns_ok() {
         ops: smallvec![WriteOp::Insert],
         priority: 1000,
     }];
-    crate::validator::persistence::save_validators_metadata(&bindings, &info_store)
+    super::super::persistence::save_validators_metadata(&bindings, &info_store)
         .await
         .unwrap();
 
@@ -463,7 +463,7 @@ async fn no_registry_returns_ok() {
             None,
             &Actor::System,
             None,
-            crate::validator::ValidatorFkCtx::default(),
+            super::super::validator_db::ValidatorFkCtx::default(),
         )
         .await;
     assert!(result.is_ok(), "no registry = validators disabled");

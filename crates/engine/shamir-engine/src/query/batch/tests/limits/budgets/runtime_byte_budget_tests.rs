@@ -21,7 +21,7 @@ use shamir_types::types::value::QueryValue;
 use crate::query::batch::batch_execute::execute_batch_impl;
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{
-    execute_batch, Authorized, BatchError, ExecScope, FunctionInvoker, TableResolver,
+    execute_batch, Authorized, BatchError, BatchResolver, ExecScope, FunctionInvoker, TableResolver,
 };
 use crate::query::read::{QueryRecord, QueryResult};
 use crate::query::TableRef;
@@ -36,7 +36,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, _: &TableRef) -> shamir_storage::error::DbResult<TableManager> {
         Err(shamir_storage::error::DbError::NotFound("no tables".into()))
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
         Err(shamir_storage::error::DbError::NotFound("no repos".into()))
     }
@@ -238,7 +241,10 @@ impl TableResolver for RepoResolver {
     async fn resolve(&self, table: &TableRef) -> shamir_storage::error::DbResult<TableManager> {
         self.0.get_table(&table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for RepoResolver {
     async fn resolve_repo(&self, _: &str) -> shamir_storage::error::DbResult<RepoInstance> {
         Ok(self.0.clone())
     }

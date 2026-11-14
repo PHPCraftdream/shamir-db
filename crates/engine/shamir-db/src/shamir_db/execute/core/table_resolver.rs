@@ -2,7 +2,7 @@
 
 use crate::engine::db_instance::db_instance::DbInstance;
 use crate::engine::table::TableManager;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::DbResult;
 use shamir_funclib::scalar_resolver::ScalarResolver;
@@ -46,13 +46,16 @@ impl TableResolver for DbTableResolver {
         Ok(table)
     }
 
+    fn scalar_resolver(&self) -> ScalarResolver {
+        ScalarResolver::new(std::sync::Arc::clone(self.db.scalars()))
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchResolver for DbTableResolver {
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::engine::repo::RepoInstance> {
         self.db.get_repo(repo_name).ok_or_else(|| {
             crate::DbError::NotFound(format!("Repository '{}' not found", repo_name))
         })
-    }
-
-    fn scalar_resolver(&self) -> ScalarResolver {
-        ScalarResolver::new(std::sync::Arc::clone(self.db.scalars()))
     }
 }

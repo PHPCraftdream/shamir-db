@@ -44,7 +44,10 @@ impl crate::query::batch::TableResolver for TxTestResolver {
     ) -> shamir_storage::error::DbResult<crate::table::TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl crate::query::batch::BatchResolver for TxTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

@@ -27,15 +27,16 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::TableRef;
-use crate::query::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
+use crate::table::TableResolver;
 use crate::table::{TableConfig, TableManager};
-use crate::validator::{
+use shamir_engine_validator::validator::{
     encode::Validation, record_fields::RecordFields, record_validator::RecordValidator,
     record_validator::ValidatorCtx, ValidatorBinding, ValidatorRegistry, WriteOp,
 };
+use shamir_query_types::TableRef;
 
 // ── Test TableResolver ─────────────────────────────────────────────────────
 
@@ -54,7 +55,10 @@ impl TableResolver for TestResolver {
         table.set_validator_registry(Arc::clone(&self.validators));
         Ok(table)
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }
@@ -382,7 +386,8 @@ async fn fk_final_staged_state_matrix() {
                     row.scalar_at(std::slice::from_ref(&key)),
                     Some(shamir_types::record_view::ScalarRef::Int(actual)) if actual == uid
                 ));
-                let db = crate::validator::ValidatorDb::new(&read_tx, &child, Some(&resolver));
+                let db =
+                    super::super::validator_db::ValidatorDb::new(&read_tx, &child, Some(&resolver));
                 assert!(db
                     .exists_in(&TableRef::new("parent"), "uid", &QueryValue::Int(uid))
                     .await
@@ -467,7 +472,7 @@ async fn fk_staged_corrupt_parent_fails_closed() {
             RecordKey::from_slice(id.as_bytes()),
             Bytes::from_static(b"\xc4"),
         );
-        let db = crate::validator::ValidatorDb::new(&tx, &child, Some(&resolver));
+        let db = super::super::validator_db::ValidatorDb::new(&tx, &child, Some(&resolver));
         let err = db
             .exists_in(&TableRef::new("parent"), "uid", &QueryValue::Int(1))
             .await
@@ -620,7 +625,7 @@ async fn validator_db_fk_sees_staged_parent_in_same_tx() {
     // would otherwise mask a real FK read failure as silent success. To
     // prove the fix precisely (not just "insert succeeded"), assert
     // `exists_in` directly via a fresh `ValidatorDb` built on the SAME tx.
-    let vdb = crate::validator::ValidatorDb::new(&tx, &child, Some(&resolver));
+    let vdb = super::super::validator_db::ValidatorDb::new(&tx, &child, Some(&resolver));
     let found = vdb
         .exists_in(&TableRef::new("parent"), "ref_id", &QueryValue::Int(7))
         .await
@@ -639,7 +644,8 @@ async fn validator_db_fk_sees_staged_parent_in_same_tx() {
         tx.snapshot_version,
         IsolationLevel::Snapshot,
     );
-    let vdb_other = crate::validator::ValidatorDb::new(&other_tx, &child, Some(&resolver));
+    let vdb_other =
+        super::super::validator_db::ValidatorDb::new(&other_tx, &child, Some(&resolver));
     let found_other = vdb_other
         .exists_in(&TableRef::new("parent"), "ref_id", &QueryValue::Int(7))
         .await
@@ -725,7 +731,7 @@ async fn exists_in_table_fails_closed_on_decode_corrupt_row() {
         .begin_tx(IsolationLevel::Snapshot)
         .await
         .unwrap();
-    let vdb = crate::validator::ValidatorDb::new(&tx, &child, Some(&resolver));
+    let vdb = super::super::validator_db::ValidatorDb::new(&tx, &child, Some(&resolver));
 
     let result = vdb
         .exists_in(&TableRef::new("parent"), "ref_id", &QueryValue::Int(99))
@@ -759,7 +765,7 @@ async fn exists_in_self_fails_closed_on_decode_corrupt_row() {
         .begin_tx(IsolationLevel::Snapshot)
         .await
         .unwrap();
-    let vdb = crate::validator::ValidatorDb::new(&tx, &table, Some(&resolver));
+    let vdb = super::super::validator_db::ValidatorDb::new(&tx, &table, Some(&resolver));
 
     let result = vdb
         .exists_in_self("ref_id", &QueryValue::Int(99), None)
@@ -873,7 +879,7 @@ async fn fk_multi_child_rows_unindexed_parent_correct_decisions() {
         .begin_tx(IsolationLevel::Snapshot)
         .await
         .unwrap();
-    let vdb = crate::validator::ValidatorDb::new(&probe_tx, &child, Some(&resolver));
+    let vdb = super::super::validator_db::ValidatorDb::new(&probe_tx, &child, Some(&resolver));
 
     // Simulates M "child rows" in one batch, each probing a different FK
     // value against the SAME unindexed parent field.
@@ -915,7 +921,7 @@ async fn fk_unindexed_field_scan_logs_warning() {
         .begin_tx(IsolationLevel::Snapshot)
         .await
         .unwrap();
-    let vdb = crate::validator::ValidatorDb::new(&probe_tx, &child, Some(&resolver));
+    let vdb = super::super::validator_db::ValidatorDb::new(&probe_tx, &child, Some(&resolver));
 
     let found = vdb
         .exists_in(&TableRef::new("parent"), "ref_id", &QueryValue::Int(1))

@@ -51,7 +51,7 @@ use arc_swap::ArcSwap;
 use shamir_query_types::admin::FkAction;
 use tokio::sync::Mutex;
 
-use crate::query::batch::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::query::TableRef;
 
 /// Test-only pause/resume handshake, installed via
@@ -485,10 +485,10 @@ impl FkReverseCache {
 /// [`FkReverseCache::get_or_build_by_parent`].
 ///
 /// The walk only READS FK declarations, so it resolves through the unfenced
-/// accessor ([`TableResolver::resolve_unfenced`]) and stays correct while a
+/// accessor ([`TableResolver::resolve_unfenced`](crate::query::batch::TableResolver::resolve_unfenced)) and stays correct while a
 /// rename is in doubt (a frozen source's declarations and data are stable).
 pub async fn build_reverse_fk_entries(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     repo_name: &str,
 ) -> shamir_storage::error::DbResult<Vec<TaggedReverseFkEntry>> {
     let repo = resolver.resolve_repo(repo_name).await?;

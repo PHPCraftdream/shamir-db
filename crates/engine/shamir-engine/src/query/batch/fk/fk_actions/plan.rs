@@ -7,7 +7,7 @@ use shamir_query_types::filter::Filter;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::batch::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::query::filter::FilterContext;
 use crate::query::TableRef;
 use crate::repo::ReverseFkEntry;
@@ -151,7 +151,7 @@ impl MutationDedup {
 /// inside the tx via `apply_cascade_plan`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_cascade(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
     parent_table: &TableManager,
     delete_where: &Filter,
@@ -188,7 +188,7 @@ pub(crate) async fn plan_cascade(
 /// with `fk_cascade_depth`.
 #[allow(clippy::too_many_arguments)]
 async fn plan_cascade_recursive(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
     parent_table: &TableManager,
     delete_where: &Filter,
@@ -516,7 +516,7 @@ async fn plan_cascade_recursive(
 /// Recurse into grandchildren for a set of specific cascaded child row IDs.
 #[allow(clippy::too_many_arguments)]
 async fn plan_cascade_for_ids(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
     parent_table: &TableManager,
     parent_ids: &[RecordId],

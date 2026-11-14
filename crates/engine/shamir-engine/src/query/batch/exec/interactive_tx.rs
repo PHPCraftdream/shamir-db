@@ -6,7 +6,7 @@ use crate::query::batch::batch_validate::{
     validate_abort_on_skip_scope, validate_executable_guards, validate_tables,
 };
 use crate::query::batch::exec_scope::ExecScope;
-use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 #[cfg(test)]
 use crate::query::batch::BatchRequest;
 use crate::query::batch::{BatchError, BatchResponse};
@@ -76,7 +76,7 @@ pub async fn open_interactive_tx(
 /// (#1199) — see `execute_batch`'s doc and `authorized.rs`'s module doc.
 pub async fn execute_in_open_tx(
     auth: Authorized<'_>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     tx: &mut shamir_tx::TxContext,
@@ -92,7 +92,7 @@ pub async fn execute_in_open_tx(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::query::batch) async fn execute_in_open_tx_with_scope(
     auth: Authorized<'_>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     tx: &mut shamir_tx::TxContext,
@@ -153,7 +153,7 @@ pub(in crate::query::batch) async fn execute_in_open_tx_with_scope(
 #[cfg(test)]
 pub(crate) async fn execute_in_open_tx_unchecked(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,

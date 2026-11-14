@@ -57,7 +57,7 @@ use shamir_types::types::value::{InnerValue, QueryValue};
 use tokio::sync::OnceCell;
 
 use super::TableManager;
-use crate::query::filter::{compile_filter, FilterContext, FilterNode};
+use shamir_engine_query::query::filter::{compile_filter, FilterContext, FilterNode};
 
 /// Read-only view over the table's sidecar metadata (`info`) store.
 ///
@@ -108,7 +108,7 @@ impl<'a> TableInfoStoreReadView<'a> {
     /// and with a caller-owned `resolved_refs` map.
     pub async fn filter_context(
         &self,
-        resolved_refs: &'a TMap<String, crate::query::read::QueryResult>,
+        resolved_refs: &'a TMap<String, shamir_engine_query::query::read::QueryResult>,
     ) -> DbResult<FilterContext<'a>> {
         let interner = self.manager.interner.get().await?;
         Ok(FilterContext::new(interner, resolved_refs))
@@ -144,7 +144,9 @@ impl<'a> TableInfoStoreReadView<'a> {
     /// segment was never interned.
     pub async fn intern_field_path(&self, field: &[String]) -> DbResult<Option<Vec<u64>>> {
         let interner = self.manager.interner.get().await?;
-        Ok(crate::query::filter::intern_field_path(field, interner))
+        Ok(shamir_engine_query::query::filter::intern_field_path(
+            field, interner,
+        ))
     }
 
     /// Reverse lookup: string for an interned id (`Interner::get_str`), used
@@ -321,8 +323,9 @@ impl InternerReadView {
     /// never use QueryRef/Param/FnCall), built engine-side so the raw
     /// dictionary stays encapsulated.
     fn eval_context(&self) -> FilterContext<'_> {
-        static EMPTY_REFS: std::sync::OnceLock<TMap<String, crate::query::read::QueryResult>> =
-            std::sync::OnceLock::new();
+        static EMPTY_REFS: std::sync::OnceLock<
+            TMap<String, shamir_engine_query::query::read::QueryResult>,
+        > = std::sync::OnceLock::new();
         let refs = EMPTY_REFS.get_or_init(shamir_types::types::common::new_map);
         FilterContext::new(self.interner(), refs)
     }
@@ -447,19 +450,22 @@ impl Index2ReadView {
     }
 }
 
-/// Read-only view over a table's [`crate::validator::ValidatorRegistry`]
+/// Read-only view over a table's [`shamir_engine_validator::validator::ValidatorRegistry`]
 /// (S5c-X F2, Round 6). The registry `Arc` is PRIVATE; the registry's
 /// `register`/`replace`/`rename`/`remove`/`replace_artifact` mutators are
 /// unreachable from this type — only id lookups are exposed.
 pub struct ValidatorRegistryReadView {
     /// PRIVATE. Mutation goes through the admitted engine DDL paths only.
-    registry: Arc<crate::validator::ValidatorRegistry>,
+    registry: Arc<shamir_engine_validator::validator::ValidatorRegistry>,
 }
 
 impl ValidatorRegistryReadView {
     /// Look up a compiled validator by record id (read-only twin of
     /// `ValidatorRegistry::get_by_id`).
-    pub fn get_by_id(&self, id: &RecordId) -> Option<Arc<dyn crate::validator::RecordValidator>> {
+    pub fn get_by_id(
+        &self,
+        id: &RecordId,
+    ) -> Option<Arc<dyn shamir_engine_validator::validator::RecordValidator>> {
         self.registry.get_by_id(id)
     }
 }

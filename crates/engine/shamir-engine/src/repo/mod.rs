@@ -1,3 +1,4 @@
+pub(crate) mod gate_visibility;
 pub mod instance;
 pub mod journal;
 pub mod meta;

@@ -2,7 +2,7 @@ use std::future::{poll_fn, Future};
 use std::task::Poll;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch_unchecked, TableResolver};
+use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
@@ -25,7 +25,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
         self.0.get_table(&table.repo, &table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
         self.0
             .get_repo(name)
@@ -317,7 +320,10 @@ impl TableResolver for BoundedResolver {
     async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
         self.0.resolve(table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for BoundedResolver {
     async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
         Ok(self
             .0
@@ -397,7 +403,10 @@ impl TableResolver for BoundedDefaultResolver {
     async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
         self.0.resolve(table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for BoundedDefaultResolver {
     async fn resolve_repo(&self, name: &str) -> DbResult<RepoInstance> {
         let repo = self.0.resolve_repo(name).await?;
         Ok(if name == "default" {

@@ -11,7 +11,7 @@ use shamir_types::access::Actor;
 use crate::query::batch::interactive_tx::execute_in_open_tx_with_scope;
 use crate::query::batch::{
     execute_in_open_tx_unchecked as execute_in_open_tx, open_interactive_tx, Authorized,
-    BatchError, ExecScope, ExecutionDeadline, TableResolver,
+    BatchError, BatchResolver, ExecScope, ExecutionDeadline, TableResolver,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -27,7 +27,10 @@ impl TableResolver for TxTestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> shamir_storage::error::DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TxTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

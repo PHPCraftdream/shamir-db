@@ -1,7 +1,7 @@
 //! Phase C1 — tx-scoped read-only database handle for relational validators.
 //!
 //! [`ValidatorDb`] is the narrow read-only interface that a
-//! [`RecordValidator`](crate::validator::RecordValidator) uses for cross-table
+//! [`RecordValidator`](shamir_engine_validator::validator::RecordValidator) uses for cross-table
 //! (`foreign_key`, Phase C2) and self-table (`unique`, Phase C3) checks.
 //!
 //! # No re-entrancy deadlock
@@ -44,10 +44,10 @@ use shamir_types::record_view::{RecordRef, RecordView, ScalarRef};
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::TableRef;
-use crate::query::TableResolver;
 use crate::table::TableManager;
-use crate::validator::ValidatorDbProbe;
+use crate::table::TableResolver;
+use shamir_engine_validator::validator::ValidatorDbProbe;
+use shamir_query_types::TableRef;
 
 /// Batch-scoped FK parent-membership cache (L4-RV-ENGINE-3C71057D).
 ///
@@ -283,7 +283,7 @@ pub struct ValidatorDb<'a> {
 #[derive(Default)]
 pub struct ValidatorFkCtx<'a> {
     /// Cross-table resolver for FK semi-joins. `None` when unavailable.
-    pub resolver: Option<&'a dyn crate::query::TableResolver>,
+    pub resolver: Option<&'a dyn TableResolver>,
     /// Batch-scoped FK parent-membership cache; `None` for probe-per-call.
     pub fk_cache: Option<&'a BatchFkCache>,
 }

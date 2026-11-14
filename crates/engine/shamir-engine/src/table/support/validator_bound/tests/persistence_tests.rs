@@ -1,5 +1,5 @@
-use crate::validator::persistence::{load_validators_metadata, save_validators_metadata};
-use crate::validator::{ValidatorBinding, WriteOp};
+use super::super::persistence::{load_validators_metadata, save_validators_metadata};
+use shamir_engine_validator::validator::{ValidatorBinding, WriteOp};
 use shamir_storage::storage_in_memory::InMemoryStore;
 use shamir_storage::types::Store;
 use shamir_types::types::record_id::RecordId;

@@ -3,13 +3,13 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use crate::query::filter::eval::FilterNode;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::{
-    exec, CorruptRecordRef, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery,
-};
 use crate::table::support::storage::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
+use shamir_engine_query::query::filter::eval::FilterNode;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::read::{
+    exec, CorruptRecordRef, PaginationInfo, QueryRecord, QueryResult, QueryStats, ReadQuery,
+};
 
 use serde_bytes::ByteBuf;
 use shamir_query_types::batch::ResultEncoding;
@@ -65,7 +65,7 @@ impl TableManager {
 
         let mut records_scanned: u64 = 0;
         let mut matched_total: u64 = 0;
-        let mut result: Vec<crate::query::read::QueryRecord> = Vec::new();
+        let mut result: Vec<shamir_engine_query::query::read::QueryRecord> = Vec::new();
         // FG-2: track which RecordId survived filter+pagination so we can
         // emit a parallel `versions` array when `with_version == true`.
         // Only populated when an MvccStore backs this table.

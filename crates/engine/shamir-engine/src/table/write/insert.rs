@@ -6,7 +6,7 @@ use bytes::Bytes;
 use rustc_hash::FxHashMap;
 
 use crate::function::builtin_scalars;
-use crate::query::write::{InsertOp, InsertedRecord, WriteResult};
+use shamir_engine_query::query::write::{InsertOp, InsertedRecord, WriteResult};
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     query_value_to_storage_bytes_into, record_view_to_query_value, validate_keys_resolve_interner,
@@ -16,7 +16,8 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-use crate::validator::WriteOp;
+use crate::table::validator_bound::{BatchFkCache, ValidatorFkCtx};
+use shamir_engine_validator::validator::WriteOp;
 use shamir_types::access::Actor;
 
 use crate::table::table_manager::TableManager;
@@ -25,6 +26,7 @@ use crate::table::write::write_helpers::{
     apply_defaults, apply_transforms, make_layered_interner, resolve_computed_record,
     validator_failure_to_db_error,
 };
+use crate::table::TableResolver;
 
 impl TableManager {
     /// FG-2/FG-7: optimistic-concurrency (CAS) version check for
@@ -105,7 +107,7 @@ impl TableManager {
         op: &InsertOp,
         tx: &mut shamir_tx::TxContext,
         return_result: bool,
-        resolver: Option<&dyn crate::query::TableResolver>,
+        resolver: Option<&dyn TableResolver>,
         actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
@@ -315,7 +317,7 @@ impl TableManager {
         // referencing the same parent row perform ONE committed-state parent
         // probe instead of N. Transaction-staged parents stay visible (the
         // cache never bypasses the tx's staged-overlay probe).
-        let fk_cache = crate::validator::BatchFkCache::new();
+        let fk_cache = BatchFkCache::new();
         for qv in &resolved_values {
             self.run_validators_qv(
                 WriteOp::Insert,
@@ -323,7 +325,7 @@ impl TableManager {
                 None,
                 actor,
                 Some(tx),
-                crate::validator::ValidatorFkCtx {
+                ValidatorFkCtx {
                     resolver,
                     fk_cache: Some(&fk_cache),
                 },
@@ -366,7 +368,7 @@ impl TableManager {
         } else {
             // Batch-scoped FK membership cache for the id-keyed rows
             // (L4-RV-ENGINE-3C71057D — see the `values` branch above).
-            let idmsgpack_fk_cache = crate::validator::BatchFkCache::new();
+            let idmsgpack_fk_cache = BatchFkCache::new();
             // Collect validated bytes — validate-before-collect so we never
             // stage any bytes whose keys don't resolve (security invariant).
             let mut idmsgpack_staged: Vec<Bytes> = Vec::with_capacity(op.records_idmsgpack.len());
@@ -419,7 +421,7 @@ impl TableManager {
                         None,
                         actor,
                         Some(tx),
-                        crate::validator::ValidatorFkCtx {
+                        ValidatorFkCtx {
                             resolver,
                             fk_cache: Some(&idmsgpack_fk_cache),
                         },

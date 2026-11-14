@@ -205,7 +205,9 @@ impl TableManager {
 
         // Pre-load validator bindings from the info-twin (S2).
         let validator_bindings =
-            match crate::validator::persistence::load_validators_metadata(&info_store).await? {
+            match crate::table::validator_bound::persistence::load_validators_metadata(&info_store)
+                .await?
+            {
                 Some(pv) => Arc::new(arc_swap::ArcSwap::from_pointee(pv.bindings)),
                 None => Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             };

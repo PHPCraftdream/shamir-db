@@ -3,13 +3,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use shamir_query_types::batch::RequestMetadata;
-use shamir_storage::error::DbError;
-
 use crate::query::batch::result_size::ResultSize;
 use crate::query::batch::{BatchError, BatchLimits, ExecutionDeadline};
 use crate::query::filter::read_budget::{ReadByteMeter, ReadVisibilityScope};
 use crate::query::read::{QueryRecord, QueryResult};
+use shamir_query_types::batch::RequestMetadata;
+use shamir_storage::error::DbError;
 
 /// Per-read credit, never a delta of the shared root counter.
 /// Intermediate charges are retained; only surviving, charged output rows
@@ -27,13 +26,11 @@ impl<'a> RowByteMeter<'a> {
         })
     }
 
-    pub(crate) fn value_size(value: &shamir_types::types::value::QueryValue) -> u64 {
-        48u64.saturating_add(ResultSize::value(value))
-    }
-
     pub(crate) fn record_size(record: &QueryRecord) -> u64 {
         match record {
-            QueryRecord::Direct(value) => Self::value_size(value),
+            QueryRecord::Direct(value) => {
+                shamir_engine_query::query::read::row_byte_meter::RowByteMeter::value_size(value)
+            }
             QueryRecord::IdBytes(bytes) => 72u64.saturating_add(bytes.len() as u64),
             // Sinks never produce Inserted; keep its estimator authoritative.
             QueryRecord::Inserted(_) => ResultSize::result(&QueryResult {

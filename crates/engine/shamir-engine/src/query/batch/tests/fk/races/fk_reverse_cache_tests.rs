@@ -40,10 +40,10 @@ use crate::query::batch::execute_batch_unchecked as execute_batch;
 use crate::query::batch::query_runner::{
     FkRoleDecisionHook, TEST_CHILD_PRE_ROLE_DECISION_HOOK, TEST_PARENT_PRE_ROLE_DECISION_HOOK,
 };
-use crate::query::batch::TableResolver;
 use crate::query::batch::{
     implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, FkParentOpKind,
 };
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, ReverseFkEntry, TaggedReverseFkEntry};
@@ -153,7 +153,10 @@ impl TableResolver for FkTestResolver {
         table.set_validator_registry(Arc::clone(&self.registry));
         Ok(table)
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for FkTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

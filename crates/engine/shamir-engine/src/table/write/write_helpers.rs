@@ -11,9 +11,9 @@ use std::sync::Arc;
 use futures::StreamExt;
 
 use crate::function::builtin_scalars;
-use crate::query::filter::eval::{compile_filter, FilterNode};
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::{Filter, FilterValue};
+use shamir_engine_query::query::filter::eval::{compile_filter, FilterNode};
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::filter::{Filter, FilterValue};
 use shamir_funclib::registry::ScalarRegistry;
 use shamir_funclib::scalar_resolver::{ScalarResolver, UserScalarLayer};
 use shamir_storage::error::DbResult;
@@ -24,7 +24,7 @@ use shamir_types::types::common::TMap;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::validator::{TransformSpec, ValidatorFailure};
+use shamir_engine_validator::validator::{TransformSpec, ValidatorFailure};
 
 use crate::table::table_manager::TableManager;
 

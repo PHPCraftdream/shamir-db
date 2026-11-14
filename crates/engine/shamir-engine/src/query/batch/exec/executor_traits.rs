@@ -3,47 +3,32 @@
 //! These traits are the thin contracts that decouple `QueryRunner`
 //! (and the free `execute_batch*` functions) from the concrete
 //! implementations that live in `shamir-db` / `shamir-server`.
+//! The table-side [`TableResolver`] contract lives in
+//! `table::support::model::table_resolver` and is re-exported here.
 
 use crate::query::batch::{BatchError, BatchOp};
 use crate::query::read::QueryResult;
-use crate::query::TableRef;
-use crate::table::TableManager;
-use shamir_funclib::scalar_resolver::ScalarResolver;
 use shamir_query_types::CallOp;
 use shamir_storage::error::DbResult;
 use shamir_types::access::Actor;
 use shamir_types::types::common::TMap;
 
-/// Trait for resolving table references to TableManager instances.
+pub use crate::table::TableResolver;
+
+/// Repo-scoped resolution port for tx-aware batch paths.
+///
+/// Extends [`TableResolver`] with the one method that reaches above the
+/// table layer; after the engine's crate split this port stays on the
+/// batch (query) side, so its return type may follow the tx-facing
+/// coordinator without dragging the table-side contract along.
 #[async_trait::async_trait]
-pub trait TableResolver: Send + Sync {
-    async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager>;
-
-    /// Resolve a table reference bypassing the rename-in-doubt name fence.
-    ///
-    /// Only for read-only declaration walks (FK reverse-cache scan): the
-    /// data of a frozen in-doubt source is stable and its FK declarations
-    /// cannot change, so the walk must not fail on the fenced source name.
-    /// Default: the ordinary fenced [`TableResolver::resolve`].
-    async fn resolve_unfenced(&self, table_ref: &TableRef) -> DbResult<TableManager> {
-        self.resolve(table_ref).await
-    }
-
+pub trait BatchResolver: TableResolver {
     /// Resolve a repository by name to its [`crate::repo::RepoInstance`].
     ///
     /// Used by tx-aware paths to obtain the per-repo coordinator
     /// (gate, WAL, commit lifecycle). Cross-repo guard upstream
     /// guarantees `repo_name` is well-defined for transactional batches.
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<crate::repo::RepoInstance>;
-
-    /// Return the per-DB scalar resolver (user + builtin layers).
-    ///
-    /// Default: built-ins only (no user-registered scalars). Overridden
-    /// by `DbTableResolver` when user scalars are registered on the
-    /// database instance.
-    fn scalar_resolver(&self) -> ScalarResolver {
-        ScalarResolver::builtins_only()
-    }
 }
 
 /// Trait for executing admin (DDL) operations.

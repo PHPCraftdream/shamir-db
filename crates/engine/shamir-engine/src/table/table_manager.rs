@@ -314,14 +314,16 @@ pub struct TableManager {
     /// `ArcSwap`; the S3 write path reads this on every write.
     /// DDL (`add_validator_binding` / `remove_validator_binding`)
     /// mutates + persists to the info-twin.
-    pub(super) validator_bindings: Arc<arc_swap::ArcSwap<Vec<crate::validator::ValidatorBinding>>>,
+    pub(super) validator_bindings:
+        Arc<arc_swap::ArcSwap<Vec<shamir_engine_validator::validator::ValidatorBinding>>>,
     /// DDL-only contention across clones; held across persist awaits, never on writes.
     pub(super) bindings_lock: Arc<tokio::sync::Mutex<()>>,
     /// Handle to the global validator registry (S3). `None` for system
     /// tables / tests that don't need validation. The S3 write path
     /// reads this to resolve `ValidatorBinding.validator_id` to a
     /// compiled `ShamirFunction`.
-    pub(super) validator_registry: Option<Arc<crate::validator::ValidatorRegistry>>,
+    pub(super) validator_registry:
+        Option<Arc<shamir_engine_validator::validator::ValidatorRegistry>>,
     /// SSI gate handle — wires the non-tx write path to the per-repo
     /// [`RepoTxGate`](shamir_tx::RepoTxGate) so that Serializable
     /// transactions see non-tx writes in their Phase 2-bis predicate-conflict
@@ -583,7 +585,7 @@ impl TableManager {
     #[cfg(any(test, feature = "test-util"))]
     pub fn validator_registry_ref_for_test(
         &self,
-    ) -> Option<&Arc<crate::validator::ValidatorRegistry>> {
+    ) -> Option<&Arc<shamir_engine_validator::validator::ValidatorRegistry>> {
         self.validator_registry.as_ref()
     }
 

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::table::TableManager;
 use crate::validator::ValidatorRegistry;
@@ -19,7 +19,10 @@ impl TableResolver for FkTestResolver {
         table.set_validator_registry(Arc::clone(&self.registry));
         Ok(table)
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for FkTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

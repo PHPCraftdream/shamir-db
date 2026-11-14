@@ -1,12 +1,12 @@
 use bytes::Bytes;
 
-use crate::query::filter::eval::intern_field_path;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::{
-    exec, CorruptRecordRef, ExplainPlan, PaginationInfo, PlanType, ReadQuery, SelectItem,
-};
 use crate::table::read::vector::filtered_vector::try_extract_filtered_vector_query;
 use crate::table::table_manager::TableManager;
+use shamir_engine_query::query::filter::eval::intern_field_path;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::read::{
+    exec, CorruptRecordRef, ExplainPlan, PaginationInfo, PlanType, ReadQuery, SelectItem,
+};
 
 use shamir_storage::error::DbResult;
 use shamir_types::core::interner::Interner;
@@ -74,9 +74,9 @@ impl TableManager {
                 // Check FTS / Vector / Computed shapes without actually running lookup.
                 let might_use_index2 = matches!(
                     filter,
-                    crate::query::filter::Filter::Fts { .. }
-                        | crate::query::filter::Filter::VectorSimilarity { .. }
-                        | crate::query::filter::Filter::Computed { .. }
+                    shamir_engine_query::query::filter::Filter::Fts { .. }
+                        | shamir_engine_query::query::filter::Filter::VectorSimilarity { .. }
+                        | shamir_engine_query::query::filter::Filter::Computed { .. }
                 );
                 if might_use_index2 {
                     return ExplainPlan {
@@ -204,7 +204,12 @@ pub(in crate::table::read) fn try_project_page_only(
     matched: &[(RecordId, InnerValue)],
     interner: &Interner,
     ctx: &FilterContext<'_>,
-) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
+) -> DbResult<
+    Option<(
+        Vec<shamir_engine_query::query::read::QueryRecord>,
+        Option<PaginationInfo>,
+    )>,
+> {
     // Gate: every condition below disables the push-down.
     if query.order_by.is_some()
         || query.group_by.is_some()
@@ -245,9 +250,10 @@ pub(in crate::table::read) fn try_project_page_only(
         ctx.scalars.clone(),
         Some(ctx),
     )?;
-    let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
+    let mut paged: Vec<shamir_engine_query::query::read::QueryRecord> =
+        Vec::with_capacity(page_slice.len());
     for (_, record) in page_slice {
-        paged.push(crate::query::read::QueryRecord::Direct(
+        paged.push(shamir_engine_query::query::read::QueryRecord::Direct(
             proj.project_value(record, interner)?,
         ));
     }
@@ -295,7 +301,12 @@ pub(in crate::table::read) fn try_project_page_only_bytes(
     ctx: &FilterContext<'_>,
     table: &str,
     corrupt: &mut Vec<CorruptRecordRef>,
-) -> DbResult<Option<(Vec<crate::query::read::QueryRecord>, Option<PaginationInfo>)>> {
+) -> DbResult<
+    Option<(
+        Vec<shamir_engine_query::query::read::QueryRecord>,
+        Option<PaginationInfo>,
+    )>,
+> {
     // Same eligibility gate as the InnerValue variant.
     if query.order_by.is_some()
         || query.group_by.is_some()
@@ -327,7 +338,8 @@ pub(in crate::table::read) fn try_project_page_only_bytes(
         ctx.scalars.clone(),
         Some(ctx),
     )?;
-    let mut paged: Vec<crate::query::read::QueryRecord> = Vec::with_capacity(page_slice.len());
+    let mut paged: Vec<shamir_engine_query::query::read::QueryRecord> =
+        Vec::with_capacity(page_slice.len());
     for (rid, bytes) in page_slice {
         let qv = match shamir_types::record_view::RecordView::new(bytes) {
             Ok(view) => proj.project_value(&view, interner)?,
@@ -342,7 +354,7 @@ pub(in crate::table::read) fn try_project_page_only_bytes(
                 }
             },
         };
-        paged.push(crate::query::read::QueryRecord::Direct(qv));
+        paged.push(shamir_engine_query::query::read::QueryRecord::Direct(qv));
     }
 
     let pagination = if query.pagination.is_none() && query.count_total {
@@ -380,7 +392,7 @@ pub(in crate::table::read) fn try_project_page_only_bytes(
 /// changes — mirrors F-10/#800's convention in this same file).
 pub(in crate::table::read) fn apply_select_value_bytes(
     matched: &[(RecordId, Bytes)],
-    select: &crate::query::read::Select,
+    select: &shamir_engine_query::query::read::Select,
     interner: &Interner,
     ctx: &FilterContext<'_>,
     table: &str,
@@ -410,15 +422,17 @@ pub(in crate::table::read) fn apply_select_value_bytes(
 
 /// Vector predicates have no row-level full-scan representation.
 pub(in crate::table::read) fn contains_vector_similarity(
-    filter: &crate::query::filter::Filter,
+    filter: &shamir_engine_query::query::filter::Filter,
 ) -> bool {
     match filter {
-        crate::query::filter::Filter::VectorSimilarity { .. } => true,
-        crate::query::filter::Filter::And { filters }
-        | crate::query::filter::Filter::Or { filters } => {
+        shamir_engine_query::query::filter::Filter::VectorSimilarity { .. } => true,
+        shamir_engine_query::query::filter::Filter::And { filters }
+        | shamir_engine_query::query::filter::Filter::Or { filters } => {
             filters.iter().any(contains_vector_similarity)
         }
-        crate::query::filter::Filter::Not { filter } => contains_vector_similarity(filter),
+        shamir_engine_query::query::filter::Filter::Not { filter } => {
+            contains_vector_similarity(filter)
+        }
         _ => false,
     }
 }

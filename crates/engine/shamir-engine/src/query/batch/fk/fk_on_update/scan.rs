@@ -8,7 +8,7 @@ use shamir_query_types::filter::Filter;
 use shamir_types::record_view::{RecordRef, RecordView};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
 use crate::repo::build_reverse_fk_entries;
@@ -41,7 +41,7 @@ use super::helpers::{
 /// the common no-op update (touching no FK-referenced field), every cached
 /// entry is rejected by this cheap local-map lookup alone.
 pub(crate) async fn discover_on_update_refs(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
     set_fields: &shamir_collections::TFxMap<String, QueryValue>,
 ) -> Result<Vec<OnUpdateRef>, BatchError> {

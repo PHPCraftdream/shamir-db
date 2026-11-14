@@ -1,6 +1,6 @@
 use shamir_query_types::batch::BatchError;
 
-use crate::query::batch::executor_traits::TableResolver;
+use crate::query::batch::executor_traits::BatchResolver;
 use crate::query::TableRef;
 
 /// B06 one-shot pause after graph acquisition, before an FK role decision.
@@ -88,7 +88,7 @@ pub(crate) static TEST_CHILD_PRE_ROLE_DECISION_HOOK: std::sync::OnceLock<
 /// The first touch builds the repo graph. Entries and roles come from one
 /// populated snapshot, unaffected by invalidation after acquisition.
 pub(crate) async fn require_footprint_if_fk_child(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     table_ref: &TableRef,
     table_token: u64,
     tx: &mut shamir_tx::TxContext,
@@ -191,7 +191,7 @@ pub(crate) enum FkParentOpKind {
 }
 
 pub(crate) async fn implicit_tx_isolation_for_fk_parent(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     table_ref: &TableRef,
     op: FkParentOpKind,
 ) -> shamir_tx::IsolationLevel {

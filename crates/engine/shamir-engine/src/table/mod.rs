@@ -2,11 +2,13 @@ mod support;
 
 pub(in crate::table) use support::guards::migration_freeze_guard;
 pub use support::guards::{in_flight_create_guard, writer_drain_barrier};
+pub use support::model::table_resolver::TableResolver;
 pub use support::model::{buffer_config, table, table_config};
 pub use support::storage::{interner_manager, persistable, record_counter, record_cow};
 #[cfg(test)]
 pub use support::test_seams::index2_backfill_hook;
 pub(in crate::table) use support::test_seams::tx_scan_overlay;
+pub use support::validator_bound;
 
 // Re-export ddl_op_log from shamir-index for inline terminal status writes
 pub use shamir_index::base_index::ddl_op_log;

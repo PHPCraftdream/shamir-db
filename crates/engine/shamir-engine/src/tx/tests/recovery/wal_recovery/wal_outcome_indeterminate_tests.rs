@@ -40,7 +40,7 @@ use shamir_types::access::Actor;
 use shamir_types::types::value::InnerValue;
 use shamir_wal::{WalAppendError, WalOpV2, WalSink};
 
-use crate::query::batch::{execute_batch_unchecked, TableResolver};
+use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::{BoxRepo, RepoInstance};
 use crate::table::{TableConfig, TableManager};
@@ -56,7 +56,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
         self.0.get_table(&table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> DbResult<RepoInstance> {
         Ok(self.0.clone())
     }

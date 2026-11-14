@@ -6,7 +6,9 @@ use shamir_query_builder::write;
 use shamir_query_builder::write::doc;
 use shamir_types::access::Actor;
 
-use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchRequest, TableResolver};
+use crate::query::batch::{
+    execute_batch_unchecked as execute_batch, BatchRequest, BatchResolver, TableResolver,
+};
 use crate::query::TableRef;
 use crate::table::TableManager;
 use shamir_storage::error::DbResult;
@@ -61,7 +63,10 @@ impl TableResolver for GateBarrierResolver {
         }
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for GateBarrierResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
         Ok(self.repo.clone())
     }

@@ -148,7 +148,7 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_engine::query::batch::{
     execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError,
-    BatchRequest, BatchResponse, FunctionInvoker, TableResolver,
+    BatchRequest, BatchResolver, BatchResponse, FunctionInvoker,
 };
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::TableConfig;
@@ -177,7 +177,7 @@ impl AccessGate for BenchAllowAll {
 /// token via [`BenchAllowAll`] and calls the real `execute_batch`.
 async fn execute_batch(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: Actor,

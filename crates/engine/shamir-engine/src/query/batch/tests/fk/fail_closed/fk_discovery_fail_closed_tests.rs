@@ -25,7 +25,7 @@ use shamir_query_types::admin::FkAction;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::fk_on_update::discover_on_update_refs;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::build_reverse_fk_entries;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -58,7 +58,10 @@ impl TableResolver for PoisoningResolver {
         }
         self.db.get_table(&self.repo, &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for PoisoningResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         self.db
             .get_repo(&self.repo)

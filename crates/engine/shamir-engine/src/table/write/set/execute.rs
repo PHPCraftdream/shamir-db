@@ -1,7 +1,7 @@
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::function::builtin_scalars;
-use crate::query::write::{InsertedRecord, SetOp, WriteResult};
+use shamir_engine_query::query::write::{InsertedRecord, SetOp, WriteResult};
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::{
     merge_storage_bytes, query_value_to_inner_with, query_value_to_storage_bytes,
@@ -11,7 +11,8 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue, Value};
 
-use crate::validator::WriteOp;
+use crate::table::validator_bound::ValidatorFkCtx;
+use shamir_engine_validator::validator::WriteOp;
 use shamir_types::access::Actor;
 
 use crate::table::table_manager::TableManager;
@@ -19,6 +20,7 @@ use crate::table::write::write_helpers::{
     apply_transforms, intern_via_layered, make_layered_interner, resolve_computed_record,
     validator_failure_to_db_error,
 };
+use crate::table::TableResolver;
 impl TableManager {
     /// tx-aware SET (upsert).
     ///
@@ -47,7 +49,7 @@ impl TableManager {
         &self,
         op: &SetOp,
         tx: &mut shamir_tx::TxContext,
-        resolver: Option<&dyn crate::query::TableResolver>,
+        resolver: Option<&dyn TableResolver>,
         actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
@@ -230,7 +232,7 @@ impl TableManager {
                         Some(&old_qv),
                         actor,
                         Some(tx),
-                        crate::validator::ValidatorFkCtx {
+                        ValidatorFkCtx {
                             resolver,
                             // SET (upsert) handles one record per call — no
                             // batch-scoped FK membership cache to share.
@@ -298,7 +300,7 @@ impl TableManager {
                 None,
                 actor,
                 Some(tx),
-                crate::validator::ValidatorFkCtx {
+                ValidatorFkCtx {
                     resolver,
                     // SET (upsert) handles one record per call — no batch-scoped
                     // FK membership cache to share.

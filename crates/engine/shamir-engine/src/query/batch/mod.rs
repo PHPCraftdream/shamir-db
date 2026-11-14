@@ -156,7 +156,7 @@ pub use authorized::{AccessGate, Authorized};
 pub use batch_execute::execute_batch;
 pub use exec_scope::ExecScope;
 pub use execution_deadline::ExecutionDeadline;
-pub use executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+pub use executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker, TableResolver};
 pub use interactive_tx::{commit_interactive_tx, execute_in_open_tx, open_interactive_tx};
 pub use query_runner::QueryRunner;
 pub use shamir_query_types::batch::{

@@ -135,7 +135,10 @@ impl crate::query::batch::TableResolver for TestResolver {
     ) -> shamir_storage::error::DbResult<crate::table::TableManager> {
         self.db.get_table(&self.repo, &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl crate::query::batch::BatchResolver for TestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
@@ -330,7 +333,7 @@ async fn watchdog_warns_while_slow_op_still_running() {
     tokio::spawn(async move {
         let result = execute_batch(
             &req,
-            resolver.as_ref() as &dyn crate::query::batch::TableResolver,
+            resolver.as_ref() as &dyn crate::query::batch::BatchResolver,
             None,
             Some(invoker.as_ref()),
             Actor::System,

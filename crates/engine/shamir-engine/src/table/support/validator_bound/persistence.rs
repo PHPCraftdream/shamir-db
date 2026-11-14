@@ -4,8 +4,8 @@
 //! Mirrors `crate::index2::persistence` exactly.
 
 use crate::meta::MetaEnvelope;
-use crate::validator::PersistedValidators;
 use bytes::Bytes;
+use shamir_engine_validator::validator::{PersistedValidators, ValidatorBinding};
 use shamir_storage::error::DbError;
 use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// and in-crate tests.
 /// under `MetaKey::Validators`.
 pub(crate) async fn save_validators_metadata(
-    bindings: &[crate::validator::ValidatorBinding],
+    bindings: &[ValidatorBinding],
     info_store: &Arc<dyn Store>,
 ) -> Result<(), DbError> {
     let p = PersistedValidators {

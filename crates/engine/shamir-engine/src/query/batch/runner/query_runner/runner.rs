@@ -7,7 +7,7 @@ use shamir_types::types::common::{new_map, TMap};
 use shamir_types::types::value::QueryValue;
 
 use crate::query::batch::exec_scope::ExecScope;
-use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::{BatchError, BatchOp, QueryEntry};
 use crate::query::filter::FilterContext;
 use crate::query::read::QueryResult;
@@ -30,7 +30,7 @@ use crate::table::TableManager;
 /// Per design decision D9 in
 /// `docs/dev-artifacts/pre-transactional/05-executor-isolation.md`.
 pub struct QueryRunner<'a> {
-    pub resolver: &'a dyn TableResolver,
+    pub resolver: &'a dyn BatchResolver,
     pub admin: Option<&'a dyn AdminExecutor>,
     pub invoker: Option<&'a dyn FunctionInvoker>,
     pub tx: Option<&'a mut shamir_tx::TxContext>,
@@ -281,7 +281,7 @@ impl<'a> QueryRunner<'a> {
 pub(in crate::query::batch) async fn execute_single_impl(
     alias: &str,
     entry: &QueryEntry,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     resolved_refs: &TMap<String, QueryResult>,

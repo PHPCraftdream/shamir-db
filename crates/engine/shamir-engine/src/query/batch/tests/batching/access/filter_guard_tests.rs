@@ -29,7 +29,9 @@ use shamir_query_types::filter::{Filter, FilterValue, MAX_FILTER_DEPTH};
 use shamir_types::access::Actor;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchError, TableResolver};
+use crate::query::batch::{
+    execute_batch_unchecked as execute_batch, BatchError, BatchResolver, TableResolver,
+};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
@@ -45,7 +47,10 @@ impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table("default", &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         self.db.get_repo("default").ok_or_else(|| {
             shamir_storage::error::DbError::NotFound("repo 'default' not found".into())

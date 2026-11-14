@@ -42,7 +42,7 @@ use bench_scale_tool::Harness;
 use shamir_engine::db_instance::db_instance::DbInstance;
 use shamir_engine::query::batch::{
     execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError,
-    BatchRequest, BatchResponse, FunctionInvoker, TableResolver,
+    BatchRequest, BatchResolver, BatchResponse, FunctionInvoker, TableResolver,
 };
 use shamir_engine::query::TableRef;
 use shamir_engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
@@ -86,7 +86,7 @@ impl AccessGate for BenchAllowAll {
 /// token via [`BenchAllowAll`] and calls the real `execute_batch`.
 async fn execute_batch(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: Actor,
@@ -142,7 +142,10 @@ impl TableResolver for FkBenchResolver {
         table.set_validator_registry(Arc::clone(&self.registry));
         Ok(table)
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for FkBenchResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

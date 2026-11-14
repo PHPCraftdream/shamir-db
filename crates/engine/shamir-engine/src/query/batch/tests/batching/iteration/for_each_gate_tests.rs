@@ -9,7 +9,7 @@ use shamir_types::types::value::QueryValue;
 
 use super::support::{setup, wrap_for_each};
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch_unchecked as execute_batch, TableResolver};
+use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoInstance;
@@ -98,7 +98,10 @@ impl TableResolver for CountingResolver {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.db.get_table("default", &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for CountingResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         self.db.get_repo("default").ok_or_else(|| {
             shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
@@ -121,7 +124,10 @@ impl TableResolver for CountingTxResolver {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for CountingTxResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }

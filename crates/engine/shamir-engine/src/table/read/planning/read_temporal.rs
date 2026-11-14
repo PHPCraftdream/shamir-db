@@ -7,13 +7,13 @@ use std::time::Instant;
 
 use futures::StreamExt;
 
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::{compile_filter_with_context, eval::FilterNode};
-use crate::query::read::{
+use crate::repo::gate_visibility::observe_gate_with_budget;
+use bytes::Bytes;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::filter::{compile_filter_with_context, eval::FilterNode};
+use shamir_engine_query::query::read::{
     exec, At, OrderDirection, QueryRecord, QueryResult, QueryStats, ReadQuery,
 };
-use crate::repo::visibility_observer::observe_gate_with_budget;
-use bytes::Bytes;
 use shamir_query_types::batch::{VisibilityPendingReason, VisibilityState};
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tunables::store_defaults::FULL_SCAN_BATCH;
@@ -276,7 +276,7 @@ impl TableManager {
         let mut topk_total: u64 = 0;
         // Declared up here (not after the loop, as pre-F-53a) so the inline
         // top-K projection can report corrupt rows during the scan.
-        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
 
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result?;
@@ -343,10 +343,12 @@ impl TableManager {
                                     topk_proj.as_ref().unwrap().project_value(&iv, interner)?
                                 }
                                 Err(_) => {
-                                    corrupt.push(crate::query::read::CorruptRecordRef {
-                                        table: self.name().to_string(),
-                                        id,
-                                    });
+                                    corrupt.push(
+                                        shamir_engine_query::query::read::CorruptRecordRef {
+                                            table: self.name().to_string(),
+                                            id,
+                                        },
+                                    );
                                     QueryValue::Null
                                 }
                             },
@@ -527,7 +529,7 @@ impl TableManager {
         // ── 2. For each matched id, pull its full timeline.
         let temporal = &query.temporal;
         let (from, to, limit, order) = match temporal {
-            crate::query::read::Temporal::History {
+            shamir_engine_query::query::read::Temporal::History {
                 from,
                 to,
                 limit,
@@ -593,7 +595,7 @@ impl TableManager {
         // ── 5. Project each version's value bytes via the RecordView lens
         //     and attach `_version` and `_ts`.
         let mut out_records: Vec<QueryRecord> = Vec::with_capacity(rows.len());
-        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
         for (id, version, ts, value_bytes) in rows {
             // Project directly from the version's storage bytes via the
             // RecordView lens (no full InnerValue decode for the common
