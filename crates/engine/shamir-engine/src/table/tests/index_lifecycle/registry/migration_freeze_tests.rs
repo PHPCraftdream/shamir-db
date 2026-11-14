@@ -16,7 +16,7 @@ use tokio::sync::Notify;
 use crate::index::write_barrier_flags::{MIGRATION_FREEZE, SCHEMA_ACTIVATION};
 use crate::repo::repo_instance::RepoInstance;
 use crate::repo::repo_types::BoxRepo;
-use crate::table::{TableConfig, TableManager};
+use crate::table::{MigrationFreezeError, TableConfig, TableManager};
 use crate::tx::commit::{PostValidatePrePublishHook, TEST_POST_VALIDATE_PRE_PUBLISH_HOOK};
 use crate::tx::CommitError;
 
@@ -60,7 +60,7 @@ async fn r6_freeze_waits_for_parked_fast_committer_and_observes_row() {
     }
     assert_eq!(table.count().await.unwrap(), 0);
 
-    let mut freeze = Box::pin(table.begin_migration_freeze());
+    let mut freeze = Box::pin(table.begin_migration_freeze_impl());
     let pending = poll!(freeze.as_mut()).is_pending();
     // Release and join even if the assertion below will fail.
     hook.resume.notify_one();
@@ -82,7 +82,7 @@ async fn r6_freeze_waits_for_parked_fast_committer_and_observes_row() {
 async fn retire_keeps_freeze_bit_after_drop() {
     let (_, table, _) = fixture().await;
     let flags = table.index_manager_ref().write_barrier_flags();
-    table.begin_migration_freeze().await.unwrap().retire();
+    table.begin_migration_freeze_impl().await.unwrap().retire();
     assert!(flags.is_set(MIGRATION_FREEZE));
 }
 
@@ -91,7 +91,7 @@ async fn retire_keeps_freeze_bit_after_drop() {
 async fn dropped_freeze_guard_clears_bit() {
     let (_, table, _) = fixture().await;
     let flags = table.index_manager_ref().write_barrier_flags();
-    drop(table.begin_migration_freeze().await.unwrap());
+    drop(table.begin_migration_freeze_impl().await.unwrap());
     assert!(!flags.is_set(MIGRATION_FREEZE));
 }
 
@@ -111,7 +111,7 @@ async fn sidecar_index_only_commit_rejected_while_frozen() {
     ));
     assert!(tx.write_set.is_empty());
 
-    let freeze = table.begin_migration_freeze().await.unwrap();
+    let freeze = table.begin_migration_freeze_impl().await.unwrap();
     let error = repo.commit_tx(tx).await.unwrap_err();
     assert!(matches!(&error, CommitError::MigrationFrozen { table } if table == "source"));
     drop(freeze);
@@ -130,7 +130,7 @@ async fn sidecar_counter_only_commit_rejected_while_frozen() {
     tx.bump_counter(token, 1);
     assert!(tx.write_set.is_empty());
 
-    let freeze = table.begin_migration_freeze().await.unwrap();
+    let freeze = table.begin_migration_freeze_impl().await.unwrap();
     let error = repo.commit_tx(tx).await.unwrap_err();
     assert!(matches!(&error, CommitError::MigrationFrozen { table } if table == "source"));
     drop(freeze);
@@ -163,17 +163,17 @@ async fn sidecar_index_only_commit_applies_when_not_frozen() {
 #[tokio::test]
 async fn r7_second_freeze_rejected_without_clearing_first_owner() {
     let (_, table, _) = fixture().await;
-    let guard = table.begin_migration_freeze().await.unwrap();
-    let error = table.begin_migration_freeze().await.unwrap_err();
+    let guard = table.begin_migration_freeze_impl().await.unwrap();
+    let error = table.begin_migration_freeze_impl().await.unwrap_err();
     assert!(
-        matches!(&error, CommitError::MigrationFrozen { table } if table == "source"),
+        matches!(&error, MigrationFreezeError::MigrationFrozen { table } if table == "source"),
         "unexpected error: {error:?}",
     );
     assert!(table.needs_write_barrier());
     assert!(table.ddl_admission.try_lock().is_ok());
     drop(guard);
     assert!(!table.needs_write_barrier());
-    let again = table.begin_migration_freeze().await.unwrap();
+    let again = table.begin_migration_freeze_impl().await.unwrap();
     drop(again);
     assert!(!table.needs_write_barrier());
 }
@@ -194,7 +194,7 @@ async fn r8_unique_slow_committer_rechecks_freeze_under_lock() {
     let lock = table.unique_write_lock().lock_owned().await;
     let mut commit = Box::pin(repo.commit_tx(tx));
     assert!(poll!(commit.as_mut()).is_pending());
-    let mut freeze = Box::pin(table.begin_migration_freeze());
+    let mut freeze = Box::pin(table.begin_migration_freeze_impl());
     assert!(poll!(freeze.as_mut()).is_pending());
     assert!(table
         .index_manager_ref()
@@ -224,7 +224,7 @@ async fn cancelled_freeze_clears_bit_at_both_preparation_awaits() {
     let flags = table.index_manager_ref().write_barrier_flags();
     table.set_schema_activation_barrier(true);
     let writer = table.enter_writer_drain();
-    let mut freeze = Box::pin(table.begin_migration_freeze());
+    let mut freeze = Box::pin(table.begin_migration_freeze_impl());
     assert!(poll!(freeze.as_mut()).is_pending());
     assert!(flags.is_set(MIGRATION_FREEZE));
     drop(freeze);
@@ -234,14 +234,14 @@ async fn cancelled_freeze_clears_bit_at_both_preparation_awaits() {
     table.set_schema_activation_barrier(false);
 
     let lock = table.unique_write_lock().lock_owned().await;
-    let mut freeze = Box::pin(table.begin_migration_freeze());
+    let mut freeze = Box::pin(table.begin_migration_freeze_impl());
     assert!(poll!(freeze.as_mut()).is_pending());
     assert!(flags.is_set(MIGRATION_FREEZE));
     drop(freeze);
     assert!(!flags.is_set(MIGRATION_FREEZE));
     assert!(table.ddl_admission.try_lock().is_ok());
     drop(lock);
-    let guard = table.begin_migration_freeze().await.unwrap();
+    let guard = table.begin_migration_freeze_impl().await.unwrap();
     drop(guard);
     assert!(!table.needs_write_barrier());
 }
@@ -251,7 +251,7 @@ async fn implicit_commit_maps_freeze_to_table_migrating() {
     let (repo, table, value) = fixture().await;
     let (mut tx, _snapshot) = repo.begin_tx(IsolationLevel::Snapshot).await.unwrap();
     table.insert_tx(&value, Some(&mut tx)).await.unwrap();
-    let guard = table.begin_migration_freeze().await.unwrap();
+    let guard = table.begin_migration_freeze_impl().await.unwrap();
     let error = repo
         .commit_implicit_batch_tx(tx, "write")
         .await
@@ -296,7 +296,7 @@ async fn r8_non_tx_crud_queued_before_freeze_rejects_without_mutation() {
         });
         // In-memory setup is complete: this poll reaches the held mutex.
         assert!(poll!(write.as_mut()).is_pending(), "operation: {operation}");
-        let mut freeze = Box::pin(table.begin_migration_freeze());
+        let mut freeze = Box::pin(table.begin_migration_freeze_impl());
         assert!(poll!(freeze.as_mut()).is_pending());
         assert!(table
             .index_manager_ref()

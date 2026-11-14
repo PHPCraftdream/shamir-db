@@ -23,3 +23,7 @@ pub(crate) fn table_store_names(name: &str, id: Option<&RecordId>) -> TableStore
         history: format!("__history__{name}{suffix}"),
     }
 }
+
+pub(crate) fn new_table_store_id() -> RecordId {
+    RecordId::new()
+}

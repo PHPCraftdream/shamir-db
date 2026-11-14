@@ -13,7 +13,7 @@ use std::sync::Arc;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
 
-use crate::meta::{MetaEnvelope, MetaError, MetaKey};
+use crate::repo::meta::{MetaEnvelope, MetaError, MetaKey};
 
 fn convert(err: MetaError) -> DbError {
     DbError::Internal(format!("recovery_marker codec: {err}"))

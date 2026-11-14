@@ -4,11 +4,18 @@ use crate::index::sorted_index_manager::SortedIndexManager;
 use crate::repo::RepoWritePermit;
 use crate::table::interner_manager::InternerManager;
 use crate::table::migration_freeze_guard::MigrationFreezeGuard;
-use crate::tx::CommitError;
-use shamir_storage::error::DbResult;
+use shamir_storage::error::{DbError, DbResult};
 
 use super::super::{NonTxChangefeed, TableManager};
 use super::guard::WriteBarrierGuard;
+
+/// Table-local freeze acquisition error; the facade (repo/instance) maps
+/// it into the public CommitError contract for shamir-db.
+#[derive(Debug)]
+pub(crate) enum MigrationFreezeError {
+    Storage(DbError),
+    MigrationFrozen { table: String },
+}
 
 impl TableManager {
     /// Permanently detach this manager's stores after a successful rename.
@@ -87,20 +94,22 @@ impl TableManager {
     /// cancel-safe: yes — admission acquisition has no side effect; after
     /// the bit is claimed its owner exists before drain or lock can suspend.
     /// Cancelling either wait drops that owner and clears only the freeze bit.
-    pub async fn begin_migration_freeze(&self) -> Result<MigrationFreezeGuard, CommitError> {
-        let permit = self.admit().await.map_err(CommitError::Storage)?;
-        self.begin_migration_freeze_admitted(&permit).await
+    pub(crate) async fn begin_migration_freeze_impl(
+        &self,
+    ) -> Result<MigrationFreezeGuard, MigrationFreezeError> {
+        let permit = self.admit().await.map_err(MigrationFreezeError::Storage)?;
+        self.begin_migration_freeze_admitted_impl(&permit).await
     }
 
-    pub async fn begin_migration_freeze_admitted(
+    pub(crate) async fn begin_migration_freeze_admitted_impl(
         &self,
         permit: &RepoWritePermit,
-    ) -> Result<MigrationFreezeGuard, CommitError> {
+    ) -> Result<MigrationFreezeGuard, MigrationFreezeError> {
         self.write_domain.debug_check_permit(permit);
         let admission = self.ddl_admission.lock().await;
         let guard =
             MigrationFreezeGuard::try_set(self.write_barrier_flags.clone()).ok_or_else(|| {
-                CommitError::MigrationFrozen {
+                MigrationFreezeError::MigrationFrozen {
                     table: self.name.clone(),
                 }
             })?;

@@ -1,11 +1,9 @@
-mod inventory;
 mod receipt;
 mod row;
-mod writer;
 
-pub use inventory::SeedTable;
+pub use crate::repo::instance::seed::install::{SeedImageWriter, SeedTable};
 pub use receipt::{SeedInstallState, SeedReceipt};
-pub use writer::SeedImageWriter;
+pub(crate) use row::translate_row;
 
 #[cfg(test)]
 mod tests;

@@ -7,3 +7,5 @@
 
 mod ddl_barriers;
 pub(super) mod guard;
+
+pub(crate) use ddl_barriers::MigrationFreezeError;

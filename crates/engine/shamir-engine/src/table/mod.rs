@@ -43,9 +43,12 @@ pub mod tests;
 
 pub use interner_manager::InternerManager;
 pub use migration_freeze_guard::MigrationFreezeGuard;
+
 pub use persistable::{PersistRegistry, Persistable};
 pub use record_counter::RecordCounter;
+pub(crate) use support::model::names::{new_table_store_id, table_store_names};
 pub use table_config::TableConfig;
+pub(crate) use table_manager::MigrationFreezeError;
 pub use table_manager::{
     table_token_for, Index2ReadView, InternerReadView, TableDataStoreReadView,
     TableInfoStoreReadView, TableManager, ValidatorRegistryReadView, WriteBarrierGuard,

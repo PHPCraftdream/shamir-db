@@ -19,7 +19,7 @@ use shamir_storage::error::{DbError, DbResult};
 use shamir_storage::types::{RecordKey, Store};
 use std::sync::Arc;
 
-use crate::meta::{MetaEnvelope, MetaKey};
+use crate::repo::meta::{MetaEnvelope, MetaKey};
 
 /// S5c-X PR7 (leader-side honesty): the lineage id identifies a DURABLE
 /// incarnation of the repository. `in_memory` and `hybrid` repositories keep

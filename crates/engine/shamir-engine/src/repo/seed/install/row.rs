@@ -9,7 +9,7 @@ use shamir_types::types::value::InnerValue;
 
 /// One verified row at a time: no table-sized buffers or synthetic events.
 /// The artifact verifier owns container-length validation before this boundary.
-pub(super) fn translate_row(bytes: Bytes, remap: &TFxMap<u64, u64>) -> DbResult<Bytes> {
+pub(crate) fn translate_row(bytes: Bytes, remap: &TFxMap<u64, u64>) -> DbResult<Bytes> {
     if bytes.is_empty() || bytes.len() > 16 * 1024 * 1024 {
         return Err(DbError::Codec("seed row exceeds frame budget".into()));
     }

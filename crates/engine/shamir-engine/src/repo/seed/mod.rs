@@ -1,2 +1,3 @@
 pub mod install;
-pub mod prepare_seed;
+
+pub use crate::repo::instance::seed::prepare_seed;

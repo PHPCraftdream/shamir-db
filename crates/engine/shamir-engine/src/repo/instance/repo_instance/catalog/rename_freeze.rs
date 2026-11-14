@@ -1,6 +1,7 @@
 use crate::repo::RepoInstance;
 use crate::repo::RepoWritePermit;
-use crate::table::{MigrationFreezeGuard, TableManager};
+use crate::table::{MigrationFreezeError, MigrationFreezeGuard, TableManager};
+use crate::tx::CommitError;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_tx::repo_tx_gate::VisibleOutcome;
 use std::time::Duration;
@@ -23,9 +24,14 @@ impl RenameFreeze {
     /// then mark its manager detached for the duration of this attempt.
     pub(crate) async fn begin(source: TableManager, permit: &RepoWritePermit) -> DbResult<Self> {
         let freeze = source
-            .begin_migration_freeze_admitted(permit)
+            .begin_migration_freeze_admitted_impl(permit)
             .await
-            .map_err(DbError::from)?;
+            .map_err(|error| match error {
+                MigrationFreezeError::Storage(error) => error,
+                MigrationFreezeError::MigrationFrozen { table } => {
+                    DbError::MigrationFrozen { table }
+                }
+            })?;
         source.detach_for_rename();
         Ok(Self {
             source,
@@ -73,5 +79,35 @@ impl Drop for RenameFreeze {
             self.source.reattach_after_rename();
             drop(freeze);
         }
+    }
+}
+
+/// Facade twin of the table-internal freeze entry points: maps the
+/// table-local `MigrationFreezeError` into the public `CommitError`
+/// contract for shamir-db.
+impl TableManager {
+    pub async fn begin_migration_freeze(&self) -> Result<MigrationFreezeGuard, CommitError> {
+        self.begin_migration_freeze_impl()
+            .await
+            .map_err(|error| match error {
+                MigrationFreezeError::Storage(error) => CommitError::Storage(error),
+                MigrationFreezeError::MigrationFrozen { table } => {
+                    CommitError::MigrationFrozen { table }
+                }
+            })
+    }
+
+    pub async fn begin_migration_freeze_admitted(
+        &self,
+        permit: &RepoWritePermit,
+    ) -> Result<MigrationFreezeGuard, CommitError> {
+        self.begin_migration_freeze_admitted_impl(permit)
+            .await
+            .map_err(|error| match error {
+                MigrationFreezeError::Storage(error) => CommitError::Storage(error),
+                MigrationFreezeError::MigrationFrozen { table } => {
+                    CommitError::MigrationFrozen { table }
+                }
+            })
     }
 }

@@ -1,0 +1,130 @@
+# Campaign engine-layering-R3: lib-test identity moves (binary id, test name).
+base = "c2536e8f172ae35c7a985253a5962952157525f2"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::durability_tests::real_history_and_bookmark_helpers_propagate_failed_barriers"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::durability_tests::real_history_and_bookmark_helpers_propagate_failed_barriers"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::image_tests::interruptions_refuse_partial_image_and_fresh_attempt_converges"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::image_tests::interruptions_refuse_partial_image_and_fresh_attempt_converges"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::image_tests::cold_handles_read_remapped_rows_counters_and_bootstrap_gap"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::image_tests::cold_handles_read_remapped_rows_counters_and_bootstrap_gap"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::image_tests::exact_retry_and_ordinary_repository_admission_are_distinct"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::image_tests::exact_retry_and_ordinary_repository_admission_are_distinct"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::validation_tests::optional_local_mapping_accepts_legacy_and_rejects_corrupt_maps"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::validation_tests::optional_local_mapping_accepts_legacy_and_rejects_corrupt_maps"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::validation_tests::reserved_binding_and_excess_inventory_are_refused"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::validation_tests::reserved_binding_and_excess_inventory_are_refused"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::validation_tests::invalid_receipt_refuses_before_install_mutation"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::validation_tests::invalid_receipt_refuses_before_install_mutation"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::validation_tests::missing_bindings_and_duplicate_keys_poison_attempts"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::validation_tests::missing_bindings_and_duplicate_keys_poison_attempts"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::validation_tests::conflicting_binding_and_underfilled_inventory_cannot_complete"
+to_path = "shamir-engine"
+to_item = "repo::instance::seed::install::tests::validation_tests::conflicting_binding_and_underfilled_inventory_cannot_complete"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::seed::install::tests::validation_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+to_path = "shamir-engine"
+to_item = "repo::seed::install::tests::receipt_tests::fresh_repo_identity_epoch_zero_is_valid_receipt_evidence"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::instance::repo_instance::table_store::tests::names::generated_store_name_limit_checks_longest_mapped_name_in_bytes"
+to_path = "shamir-engine"
+to_item = "table::support::model::tests::names::generated_store_name_limit_checks_longest_mapped_name_in_bytes"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::instance::repo_instance::table_store::tests::names::legacy_and_incarnation_mappings_are_distinct"
+to_path = "shamir-engine"
+to_item = "table::support::model::tests::names::legacy_and_incarnation_mappings_are_distinct"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_memory_backend"
+to_path = "shamir-engine"
+to_item = "table::support::model::tests::names::generated_names_open_in_memory_backend"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_fjall_backend"
+to_path = "shamir-engine"
+to_item = "table::support::model::tests::names::generated_names_open_in_fjall_backend"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_hybrid_backend"
+to_path = "shamir-engine"
+to_item = "table::support::model::tests::names::generated_names_open_in_hybrid_backend"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"
+
+[[moved]]
+path = "shamir-engine"
+item = "repo::instance::repo_instance::table_store::tests::names::generated_names_open_in_cached_backend"
+to_path = "shamir-engine"
+to_item = "table::support::model::tests::names::generated_names_open_in_cached_backend"
+reason = "R3: lib test moved with its module (design 5.10/5.14)"
+owner = "<wave-R3>"

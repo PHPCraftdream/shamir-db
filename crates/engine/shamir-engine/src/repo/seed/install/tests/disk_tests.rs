@@ -1,6 +1,72 @@
-use super::helpers::{populated, receipt};
-use crate::repo::{BoxRepoFactory, RepoFactory, RepoInstance, SeedInstallState, SeedTable};
+use std::sync::Arc;
+
+use bytes::Bytes;
+use shamir_storage::storage_in_memory::InMemoryRepo;
 use shamir_storage::types::Repo;
+use shamir_types::core::interner::InternerKey;
+use shamir_types::types::value::InnerValue;
+
+use crate::meta::repo_identity::RepoIdentity;
+use crate::repo::{
+    BoxRepoFactory, RepoFactory, RepoInstance, SeedImageWriter, SeedInstallState, SeedReceipt,
+    SeedTable,
+};
+
+fn receipt() -> SeedReceipt {
+    SeedReceipt {
+        artifact_digest: "a".repeat(64),
+        source_db: "app".into(),
+        source_repo: "main".into(),
+        source_identity: RepoIdentity {
+            lineage_id: [7; 16],
+            history_epoch: 3,
+        },
+        schema_digest: "b".repeat(64),
+        source_version: 73,
+        local_baseline: 1,
+    }
+}
+
+fn inventory() -> Vec<SeedTable> {
+    vec![
+        SeedTable {
+            name: "items".into(),
+            live_records: 1,
+        },
+        SeedTable {
+            name: "empty".into(),
+            live_records: 0,
+        },
+    ]
+}
+
+fn payload() -> InnerValue {
+    let mut nested = shamir_collections::TMap::default();
+    nested.insert(InternerKey::new(900), InnerValue::Bin(vec![0, 255]));
+    let mut root = shamir_collections::TMap::default();
+    root.insert(
+        InternerKey::new(700),
+        InnerValue::List(vec![InnerValue::Map(nested)]),
+    );
+    InnerValue::Map(root)
+}
+
+fn payload_bytes() -> Bytes {
+    payload().to_bytes().unwrap()
+}
+
+async fn populated(repo: RepoInstance) -> SeedImageWriter {
+    let mut writer = SeedImageWriter::begin(repo, receipt(), inventory())
+        .await
+        .unwrap();
+    writer.binding(700, "outer").await.unwrap();
+    writer.binding(900, "inner").await.unwrap();
+    writer
+        .row(0, Bytes::from_static(b"opaque-key"), payload_bytes())
+        .await
+        .unwrap();
+    writer
+}
 
 // Unix Store::flush cold reopen evidence, not a physical power-loss claim.
 // The independent raw factory bypasses caches and a new RepoInstance rebuilds

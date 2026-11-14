@@ -25,17 +25,17 @@ use shamir_storage::types::{AtomicBatch, AtomicCommitOutcome, KvOp, RecordKey, S
 use shamir_tx::{encode_version_key, version_key, ChangelogEvent, MvccStore};
 
 use super::super::super::{reproject_for_downstream, PreparedEvent};
-use crate::meta::recovery_marker::{load_last_committed, load_next_tx_id_snapshot};
-use crate::meta::repl::bookmark::load_fence_record;
-use crate::meta::repl::bookmark_v3::{encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
-use crate::meta::repl::receipt::{decode_receipt, load_outstanding_receipt, receipt_key};
-use crate::meta::repl::{
+use crate::repo::changelog_store::write_domain::RepoWritePermit;
+use crate::repo::meta::recovery_marker::{load_last_committed, load_next_tx_id_snapshot};
+use crate::repo::meta::repl::bookmark::load_fence_record;
+use crate::repo::meta::repl::bookmark_v3::{encode_bookmark_v3, load_bookmark_v3, BookmarkV3};
+use crate::repo::meta::repl::receipt::{decode_receipt, load_outstanding_receipt, receipt_key};
+use crate::repo::meta::repl::{
     encode_receipt, receipt_id, ReceiptBinding, ReceiptCounterDelta, ReceiptOp, ReceiptPhase,
     ReceiptTimestamp, ReceiptVersionMapping, ReplicationReceipt, MAX_RECEIPT_EVENTS,
     MAX_RECEIPT_OPS,
 };
-use crate::meta::{MetaEnvelope, MetaKey};
-use crate::repo::changelog_store::write_domain::RepoWritePermit;
+use crate::repo::meta::{MetaEnvelope, MetaKey};
 use crate::repo::RepoInstance;
 
 const TX_STORE: &str = "__tx__";

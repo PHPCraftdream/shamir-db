@@ -9,7 +9,7 @@
 //! This module is a codec only — no production path writes or reads
 //! receipts in this PR; PR6b-2 activates the writer/reader.
 
-use crate::meta::{MetaEnvelope, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
+use crate::repo::meta::{MetaEnvelope, MetaKey, ENVELOPE_MAGIC, ENVELOPE_VERSION};
 use rustc_hash::FxHasher;
 use serde::{Deserialize, Serialize};
 use shamir_storage::error::{DbError, DbResult};
