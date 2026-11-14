@@ -15,7 +15,7 @@ pub(crate) const DEFAULT_BASELINE: &str = ".rust-guard/layers_baseline.toml";
 /// Human-edited layering configuration.
 #[derive(Debug, Deserialize)]
 pub(crate) struct LayersFile {
-    #[serde(default)]
+    #[serde(default, rename = "crate")]
     pub(crate) crates: Vec<CrateLayers>,
 }
 
@@ -33,7 +33,8 @@ pub(crate) struct CrateLayers {
 /// Machine-managed ratchet baseline.
 #[derive(Debug, Deserialize, serde::Serialize, Default)]
 pub(crate) struct BaselineFile {
-    #[serde(default)]
+    /// Top-level tables, one per crate: `[shamir-engine]`.
+    #[serde(flatten)]
     pub(crate) crates: BTreeMap<String, BTreeMap<String, u64>>,
 }
 

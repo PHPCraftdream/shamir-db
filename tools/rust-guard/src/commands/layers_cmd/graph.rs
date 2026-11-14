@@ -189,7 +189,9 @@ pub(crate) fn build(
     let mut lib_path = None;
     for file in &tracked {
         let parts: Vec<&str> = file.split('/').collect();
-        if parts.len() != 4 || parts[0] != "crates" || parts[3] != "Cargo.toml" {
+        let nested = parts.len() == 4;
+        let flat = parts.len() == 3;
+        if !(nested || flat) || parts[0] != "crates" || parts[parts.len() - 1] != "Cargo.toml" {
             continue;
         }
         let manifest = fs
