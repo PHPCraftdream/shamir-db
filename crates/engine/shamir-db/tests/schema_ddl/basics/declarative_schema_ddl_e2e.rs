@@ -110,12 +110,7 @@ async fn try_insert(
 
 #[tokio::test]
 async fn ddl_set_table_schema_persists_and_validates() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     // Create a durable repo + table via wire DDL.
@@ -259,12 +254,7 @@ async fn ddl_schema_survives_reopen() {
 
 #[tokio::test]
 async fn ddl_expected_version_conflict() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
@@ -333,12 +323,7 @@ async fn ddl_expected_version_conflict() {
 
 #[tokio::test]
 async fn ddl_add_remove_get_schema() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();

@@ -13,7 +13,6 @@
 //! * AutoNowAdd preserves an explicitly-supplied `created_at`.
 //! * Both timestamps are stored as `Int` (nanoseconds since Unix epoch).
 
-use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -28,12 +27,8 @@ use shamir_types::types::value::QueryValue;
 // Helpers
 // ═══════════════════════════════════════════════════════════════════════
 
-async fn setup() -> (ShamirDb, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+async fn setup() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
@@ -44,7 +39,7 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
     )
     .await
     .unwrap();
-    (db, dir)
+    db
 }
 
 async fn exec_set_schema(db: &ShamirDb, rules: Vec<ddl::FieldBuilder>) -> Result<(), String> {
@@ -133,7 +128,7 @@ fn get_int(rec: &QueryValue, field: &str) -> Option<i64> {
 
 #[tokio::test]
 async fn insert_stamps_created_at_and_updated_at() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     exec_set_schema(
         &db,
@@ -193,7 +188,7 @@ async fn insert_stamps_created_at_and_updated_at() {
 
 #[tokio::test]
 async fn update_stamps_only_updated_at_preserves_created_at() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     exec_set_schema(
         &db,
@@ -267,7 +262,7 @@ async fn update_stamps_only_updated_at_preserves_created_at() {
 
 #[tokio::test]
 async fn auto_now_overwrites_caller_supplied_updated_at() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     exec_set_schema(
         &db,
@@ -307,7 +302,7 @@ async fn auto_now_overwrites_caller_supplied_updated_at() {
 
 #[tokio::test]
 async fn auto_now_add_preserves_explicit_created_at() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     exec_set_schema(
         &db,

@@ -144,6 +144,21 @@ async fn setup_combined(sys_path: std::path::PathBuf) -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
+    seed_combined(&db).await;
+    db
+}
+
+/// In-memory fixture: same seeding, no on-disk store.
+async fn setup_combined_memory() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
+    seed_combined(&db).await;
+    db
+}
+
+/// Set up db + repo with parent (departments) + child (employees) tables,
+/// indexes on departments.dept_id AND employees.badge (for unique),
+/// plus an index on employees.dept_id (for FK lookup).
+async fn seed_combined(db: &ShamirDb) {
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with both tables.
@@ -211,8 +226,6 @@ async fn setup_combined(sys_path: std::path::PathBuf) -> ShamirDb {
     )
     .await
     .unwrap();
-
-    db
 }
 
 /// Apply the combined FK + unique schema on the employees table.
@@ -246,10 +259,7 @@ async fn apply_combined_schema(db: &ShamirDb) {
 
 #[tokio::test]
 async fn combined_valid_passes_both_constraints() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_combined(sys_path).await;
+    let db = setup_combined_memory().await;
     apply_combined_schema(&db).await;
 
     // Valid: dept_id=10 exists, badge="A001" is unique.
@@ -277,10 +287,7 @@ async fn combined_valid_passes_both_constraints() {
 
 #[tokio::test]
 async fn combined_fk_violation_rejects() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_combined(sys_path).await;
+    let db = setup_combined_memory().await;
     apply_combined_schema(&db).await;
 
     // Invalid: dept_id=999 does not exist (badge is unique — no dup).
@@ -312,10 +319,7 @@ async fn combined_fk_violation_rejects() {
 
 #[tokio::test]
 async fn combined_unique_violation_rejects() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_combined(sys_path).await;
+    let db = setup_combined_memory().await;
     apply_combined_schema(&db).await;
 
     // First row: valid.
@@ -460,10 +464,7 @@ async fn combined_constraints_survive_durable_reopen() {
 
 #[tokio::test]
 async fn concurrent_tx_writes_no_deadlock() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = Arc::new(setup_combined(sys_path).await);
+    let db = Arc::new(setup_combined_memory().await);
     apply_combined_schema(&db).await;
 
     // Spawn N concurrent transactional inserts, each with a valid FK
@@ -518,10 +519,7 @@ async fn concurrent_tx_writes_no_deadlock() {
 
 #[tokio::test]
 async fn update_fk_violation_rejects() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_combined(sys_path).await;
+    let db = setup_combined_memory().await;
     apply_combined_schema(&db).await;
 
     // Insert a valid row.
@@ -566,10 +564,7 @@ async fn update_fk_violation_rejects() {
 
 #[tokio::test]
 async fn update_unique_violation_rejects() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_combined(sys_path).await;
+    let db = setup_combined_memory().await;
     apply_combined_schema(&db).await;
 
     // Insert two valid rows.
@@ -627,10 +622,7 @@ async fn update_unique_violation_rejects() {
 
 #[tokio::test]
 async fn update_non_constrained_field_ok() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_combined(sys_path).await;
+    let db = setup_combined_memory().await;
     apply_combined_schema(&db).await;
 
     // Insert a valid row.

@@ -186,6 +186,19 @@ async fn setup_with_index(sys_path: std::path::PathBuf) -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
+    seed_with_index(&db).await;
+    db
+}
+
+/// In-memory fixture: same seeding, no on-disk store.
+async fn setup_with_index_memory() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
+    seed_with_index(&db).await;
+    db
+}
+
+/// Seed db + repo with a table and an index on a column.
+async fn seed_with_index(db: &ShamirDb) {
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with table.
@@ -212,8 +225,6 @@ async fn setup_with_index(sys_path: std::path::PathBuf) -> ShamirDb {
     )
     .await
     .unwrap();
-
-    db
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -222,10 +233,7 @@ async fn setup_with_index(sys_path: std::path::PathBuf) -> ShamirDb {
 
 #[tokio::test]
 async fn unique_accept_new_reject_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_with_index(sys_path).await;
+    let db = setup_with_index_memory().await;
 
     // Set unique schema on users.email.
     let result = exec_set_schema(
@@ -305,12 +313,7 @@ async fn unique_accept_new_reject_duplicate() {
 
 #[tokio::test]
 async fn unique_without_index_rejected_at_ddl() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with table but NO index on users.email.
@@ -351,10 +354,7 @@ async fn unique_without_index_rejected_at_ddl() {
 
 #[tokio::test]
 async fn unique_batch_duplicate_within_tx() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_with_index(sys_path).await;
+    let db = setup_with_index_memory().await;
 
     // Set unique schema on users.email.
     let result = exec_set_schema(
@@ -516,10 +516,7 @@ async fn unique_survives_durable_reopen() {
 
 #[tokio::test]
 async fn unique_null_bypass_allows_multiple_nulls() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_with_index(sys_path).await;
+    let db = setup_with_index_memory().await;
 
     // Schema: email is unique but nullable (NOT required) → NULL is permitted.
     let result = exec_set_schema(
@@ -577,10 +574,7 @@ async fn unique_null_bypass_allows_multiple_nulls() {
 
 #[tokio::test]
 async fn unique_update_skip_if_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_with_index(sys_path).await;
+    let db = setup_with_index_memory().await;
 
     let result = exec_set_schema(
         &db,
@@ -669,10 +663,7 @@ async fn unique_update_skip_if_unchanged() {
 
 #[tokio::test]
 async fn unique_autocommit_enforcement() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_with_index(sys_path).await;
+    let db = setup_with_index_memory().await;
 
     let result = exec_set_schema(
         &db,
@@ -743,12 +734,7 @@ async fn unique_autocommit_enforcement() {
 
 #[tokio::test]
 async fn unique_bare_index_without_rule_rejects_duplicate() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with table.

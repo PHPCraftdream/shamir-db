@@ -117,14 +117,7 @@ async fn read_all(db: &ShamirDb, db_name: &str, table: &str) -> Vec<QueryValue> 
 
 /// Helper: set up db + repo with a `users` table (no index needed for default).
 async fn setup() -> ShamirDb {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    // Leak the tempdir so the fjall store survives for the test duration.
-    // (mirrors the pattern in declarative_schema_unique_e2e.rs which holds
-    //  the TempDir via the test's local binding.)
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
@@ -135,7 +128,6 @@ async fn setup() -> ShamirDb {
     )
     .await
     .unwrap();
-    std::mem::forget(dir);
     db
 }
 

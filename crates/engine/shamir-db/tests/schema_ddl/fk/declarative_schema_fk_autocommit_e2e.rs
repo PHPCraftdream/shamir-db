@@ -19,7 +19,6 @@
 //! arms), a valid FK reference must be ACCEPTED on the plain autocommit path
 //! too, and an invalid reference must still be REJECTED.
 
-use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -48,12 +47,7 @@ async fn try_insert_autocommit(
 
 #[tokio::test]
 async fn fk_autocommit_accepts_existing_rejects_missing() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with parent + child tables.

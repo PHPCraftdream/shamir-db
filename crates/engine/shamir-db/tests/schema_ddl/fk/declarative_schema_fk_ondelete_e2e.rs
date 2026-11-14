@@ -17,7 +17,6 @@
 //! Parent = `departments` (pk-ish `dept_id`, indexed). Child = `employees`
 //! with `dept_id` FK → `departments.dept_id`.
 
-use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -29,10 +28,8 @@ use shamir_types::mpack;
 
 /// Set up db + repo with parent (indexed) + child (indexed on FK field),
 /// one parent row `dept_id=100`.
-async fn setup(sys_path: std::path::PathBuf) -> ShamirDb {
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+async fn setup() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
@@ -192,8 +189,7 @@ async fn delete_parent(
 
 #[tokio::test]
 async fn cascade_deletes_child_transactional() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = setup(dir.path().join("meta.redb")).await;
+    let db = setup().await;
     set_child_fk_schema(&db, FkAction::Cascade, false).await;
     insert_child_tx(&db, 100, "Alice").await;
 
@@ -220,8 +216,7 @@ async fn cascade_deletes_child_transactional() {
 
 #[tokio::test]
 async fn cascade_deletes_child_autocommit() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = setup(dir.path().join("meta.redb")).await;
+    let db = setup().await;
     set_child_fk_schema(&db, FkAction::Cascade, false).await;
     insert_child_tx(&db, 100, "Alice").await;
 
@@ -247,8 +242,7 @@ async fn set_null_nulls_child_fk_transactional() {
     // ONLY while the test is panicking; notes record the measured state so
     // a failure explains itself from the log.
     let guard = FlakeGuard::new("set_null_nulls_child_fk_transactional");
-    let dir = tempfile::tempdir().unwrap();
-    let db = setup(dir.path().join("meta.redb")).await;
+    let db = setup().await;
     guard.mark("db set up (parent dept_id=100 present)");
     set_child_fk_schema(&db, FkAction::SetNull, true).await;
     guard.note(
@@ -290,8 +284,7 @@ async fn set_null_nulls_child_fk_transactional() {
 
 #[tokio::test]
 async fn restrict_delete_guard_control() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = setup(dir.path().join("meta.redb")).await;
+    let db = setup().await;
     set_child_fk_schema(&db, FkAction::Restrict, false).await;
     insert_child_tx(&db, 100, "Alice").await;
 
@@ -314,8 +307,7 @@ async fn restrict_delete_guard_control() {
 
 #[tokio::test]
 async fn drop_guard_refuses_referenced_parent() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = setup(dir.path().join("meta.redb")).await;
+    let db = setup().await;
     set_child_fk_schema(&db, FkAction::Restrict, false).await;
 
     let mut b = Batch::new();

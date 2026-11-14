@@ -274,11 +274,7 @@ async fn auto_now_timestamps_not_restamped_on_durable_reopen() {
 /// resolve → apply_defaults → apply_transforms → encode → CHECK.
 #[tokio::test]
 async fn default_before_one_of_check_passes_when_default_is_valid() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
@@ -353,11 +349,7 @@ async fn default_before_one_of_check_passes_when_default_is_valid() {
 /// a `one_of` violation.
 #[tokio::test]
 async fn default_before_one_of_check_rejects_when_default_is_invalid() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
     let mut b = Batch::new();
     b.id(1);
