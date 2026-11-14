@@ -13,7 +13,6 @@
 //! with `nested_path_transform_not_supported`, while single-segment rules
 //! (the working case) continue to be accepted and function exactly as before.
 
-use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -76,14 +75,8 @@ async fn exec_add_schema_rule(
 }
 
 /// Set up a db + repo with a table (no indexes needed for these tests).
-/// Returns the db AND the tempdir (caller must hold the tempdir for the
-/// test's lifetime — dropping it deletes the backing store).
-async fn setup() -> (ShamirDb, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+async fn setup() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
@@ -96,7 +89,7 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
     .await
     .unwrap();
 
-    (db, dir)
+    db
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -106,7 +99,7 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
 
 #[tokio::test]
 async fn nested_path_default_rejected_at_ddl() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     let result = exec_set_schema(
         &db,
@@ -136,7 +129,7 @@ async fn nested_path_default_rejected_at_ddl() {
 
 #[tokio::test]
 async fn nested_path_auto_now_rejected_at_ddl() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     let result = exec_set_schema(
         &db,
@@ -164,7 +157,7 @@ async fn nested_path_auto_now_rejected_at_ddl() {
 
 #[tokio::test]
 async fn nested_path_auto_now_add_rejected_at_ddl() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     let result = exec_set_schema(
         &db,
@@ -192,7 +185,7 @@ async fn nested_path_auto_now_add_rejected_at_ddl() {
 
 #[tokio::test]
 async fn nested_path_default_rejected_via_add_schema_rule() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     // First, set a valid single-segment schema so the table has a schema.
     let result = exec_set_schema(
@@ -239,7 +232,7 @@ async fn nested_path_default_rejected_via_add_schema_rule() {
 
 #[tokio::test]
 async fn single_segment_transforms_still_accepted_and_functional() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     // Set a schema with single-segment default, auto_now, and auto_now_add.
     // All three must be accepted — the new nested-path guard must NOT
@@ -295,7 +288,7 @@ async fn single_segment_transforms_still_accepted_and_functional() {
 
 #[tokio::test]
 async fn nested_path_unique_rejection_still_works() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     // A multi-segment unique rule should still be rejected by
     // validate_unique_indexes (we only added a sibling check, not modified it).

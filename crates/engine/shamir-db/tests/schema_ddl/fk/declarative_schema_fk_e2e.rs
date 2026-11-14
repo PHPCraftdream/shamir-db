@@ -114,6 +114,19 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
     let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
         .await
         .unwrap();
+    seed_with_parent_index(&db).await;
+    db
+}
+
+/// In-memory fixture: same seeding, no on-disk store.
+async fn setup_with_parent_index_memory() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
+    seed_with_parent_index(&db).await;
+    db
+}
+
+/// Seed db + repo with parent + child tables.
+async fn seed_with_parent_index(db: &ShamirDb) {
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with both tables.
@@ -160,8 +173,6 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
     )
     .await
     .unwrap();
-
-    db
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -170,10 +181,7 @@ async fn setup_with_parent_index(sys_path: std::path::PathBuf) -> ShamirDb {
 
 #[tokio::test]
 async fn fk_accept_existing_reject_missing() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = setup_with_parent_index(sys_path).await;
+    let db = setup_with_parent_index_memory().await;
 
     // Set FK schema on employees: dept_id references departments.dept_id.
     let result = exec_set_schema(
@@ -242,12 +250,7 @@ async fn fk_accept_existing_reject_missing() {
 
 #[tokio::test]
 async fn fk_without_index_rejected_at_ddl() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     // Create repo with tables but NO index on departments.dept_id.

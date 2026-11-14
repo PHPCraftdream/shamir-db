@@ -14,7 +14,6 @@
 //! self-referential `SET NULL` and non-self-referential `CASCADE` continue to
 //! be accepted.
 
-use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -68,14 +67,9 @@ async fn exec_add_schema_rule(
 }
 
 /// Set up a db + repo with a single `employees` table and an index on `id`
-/// (the FK target — `validate_fk_indexes` requires it). Returns the db and the
-/// tempdir (caller must hold it).
-async fn setup() -> (ShamirDb, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+/// (the FK target — `validate_fk_indexes` requires it).
+async fn setup() -> ShamirDb {
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();
@@ -99,7 +93,7 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
     .await
     .unwrap();
 
-    (db, dir)
+    db
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -108,7 +102,7 @@ async fn setup() -> (ShamirDb, tempfile::TempDir) {
 
 #[tokio::test]
 async fn self_ref_cascade_rejected_via_set_table_schema() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     let result = exec_set_schema(
         &db,
@@ -138,7 +132,7 @@ async fn self_ref_cascade_rejected_via_set_table_schema() {
 
 #[tokio::test]
 async fn self_ref_cascade_rejected_via_add_schema_rule() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     let result = exec_add_schema_rule(
         &db,
@@ -171,7 +165,7 @@ async fn self_ref_cascade_rejected_via_add_schema_rule() {
 
 #[tokio::test]
 async fn self_ref_set_null_accepted_at_ddl() {
-    let (db, _dir) = setup().await;
+    let db = setup().await;
 
     let result = exec_set_schema(
         &db,
@@ -200,11 +194,7 @@ async fn self_ref_set_null_accepted_at_ddl() {
 
 #[tokio::test]
 async fn non_self_ref_cascade_still_accepted() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     db.create_db("testdb").await.expect("create_db");
 
     let mut b = Batch::new();

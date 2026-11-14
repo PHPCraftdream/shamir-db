@@ -36,7 +36,6 @@
 //!   3. The rollback write's own failure is `log::warn!`-ed (secondary), and
 //!      the ORIGINAL activation error is returned to the caller.
 
-use shamir_db::shamir_db::SystemStoreConfig;
 use shamir_db::ShamirDb;
 use shamir_query_builder::batch::Batch;
 use shamir_query_builder::ddl;
@@ -116,11 +115,7 @@ async fn setup(db: &ShamirDb) {
 
 #[tokio::test]
 async fn bad_type_tag_set_table_schema_leaves_catalogue_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     setup(&db).await;
 
     // Set a valid schema: email required string → version 1.
@@ -183,11 +178,7 @@ async fn bad_type_tag_set_table_schema_leaves_catalogue_unchanged() {
 
 #[tokio::test]
 async fn bad_type_tag_add_schema_rule_leaves_catalogue_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     setup(&db).await;
 
     // Set a valid schema: email required string → version 1.
@@ -251,11 +242,7 @@ async fn bad_type_tag_add_schema_rule_leaves_catalogue_unchanged() {
 
 #[tokio::test]
 async fn garbled_array_of_surfaces_as_ddl_error_and_leaves_catalogue_unchanged() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     setup(&db).await;
 
     // Set a valid schema: tags list-of-string → version 1.
@@ -304,11 +291,7 @@ async fn garbled_array_of_surfaces_as_ddl_error_and_leaves_catalogue_unchanged()
 
 #[tokio::test]
 async fn valid_schema_still_succeeds_after_reorder() {
-    let dir = tempfile::tempdir().unwrap();
-    let sys_path = dir.path().join("meta.redb");
-    let db = ShamirDb::init(SystemStoreConfig::Fjall(sys_path.clone()))
-        .await
-        .unwrap();
+    let db = ShamirDb::init_memory().await.unwrap();
     setup(&db).await;
 
     // A fully valid schema with Phase B + array_of must still succeed and bump
