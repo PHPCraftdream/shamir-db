@@ -1,0 +1,10 @@
+# rust-guard layers: ordered module layers per crate, lowest first; a
+# module may refer to its own layer and lower ones only. `modules`
+# binds a layer name to its module path when the two differ.
+
+[[crate]]
+name = "shamir-engine"
+layers = ["repo", "table", "validator", "tx", "query", "instance", "db_instance"]
+
+[crate.modules]
+instance = "repo/instance"

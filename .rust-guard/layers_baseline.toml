@@ -1,0 +1,19 @@
+# rust-guard layers ratchet baseline (machine-managed; do not edit:
+# `rust-guard layers --update-baseline` rewrites this file).
+# `"A -> B" = files`: production files in layer A with at least one
+# backward reference into layer B. Counts may only go down.
+
+[shamir-engine]
+"repo -> table" = 1
+"repo -> instance" = 5
+"table -> validator" = 9
+"table -> tx" = 1
+"table -> query" = 5
+"table -> instance" = 2
+"table -> db_instance" = 1
+"validator -> table" = 1
+"validator -> query" = 1
+"tx -> query" = 1
+"tx -> instance" = 35
+"query -> tx" = 3
+"query -> instance" = 3

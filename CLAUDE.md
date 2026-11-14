@@ -528,6 +528,15 @@ self-tests run in the `rust-guard self-test` job, CI only):
 * `conservation` — per active campaign (`.rust-guard/stages.toml`,
   normally empty = no-op): every item survives between revisions, or the
   change is declared in the campaign's delta file.
+* `layers` — module layering: every production file of a configured crate
+  maps to a layer of `.rust-guard/layers.toml` (ordered, lowest first) and
+  may refer only to its own and lower layers; new backward pairs and file-count
+  growth fail against the machine-managed ratchet in
+  `.rust-guard/layers_baseline.toml` (`--update-baseline` lowers/prunes,
+  never raises). External re-export shadows are not edges; test code is
+  skipped. shamir-engine is configured with
+  `repo < table < validator < tx < query < instance < db_instance`
+  (`instance` = `repo/instance`).
 * `orderings` — AST pin of atomic memory orderings on the production
   (`not(loom)`) branch of `WriterDrainBarrier`; pins live in
   `.rust-guard/atomic_orderings.toml`. Changing a pinned ordering requires

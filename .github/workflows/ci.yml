@@ -1038,6 +1038,8 @@ jobs:
         run: tools/rust-guard/target/debug/rust-guard modules --repo .
       - name: rust-guard orderings
         run: tools/rust-guard/target/debug/rust-guard orderings --repo . --pins .rust-guard/atomic_orderings.toml
+      - name: rust-guard layers
+        run: tools/rust-guard/target/debug/rust-guard layers --repo .
       # Selection lives in scripts/ci/rust_guard_select.py (unit-tested in
       # scripts/ci/tests/test_rust_guard_select.py): it reads the changed
       # files on stdin, captures `cargo metadata` to a file ONCE, strips the

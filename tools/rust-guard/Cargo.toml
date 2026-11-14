@@ -12,6 +12,14 @@ publish = false
 name = "rust-guard"
 path = "src/main.rs"
 
+[[test]]
+name = "gates"
+path = "tests/gates/main.rs"
+
+[[test]]
+name = "diff"
+path = "tests/diff/main.rs"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 quote = "1"
