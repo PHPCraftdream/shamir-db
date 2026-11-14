@@ -2,9 +2,9 @@ mod support;
 
 pub(in crate::table) use support::guards::migration_freeze_guard;
 pub use support::guards::{in_flight_create_guard, writer_drain_barrier};
-pub use support::table_resolver::TableResolver;
 pub use support::model::{buffer_config, table, table_config};
 pub use support::storage::{interner_manager, persistable, record_counter, record_cow};
+pub use support::table_resolver::TableResolver;
 #[cfg(test)]
 pub use support::test_seams::index2_backfill_hook;
 pub(in crate::table) use support::test_seams::tx_scan_overlay;
