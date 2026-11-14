@@ -186,40 +186,34 @@ fn scan_macro_tokens(tokens: &proc_macro2::TokenStream, visitor: &mut RefVisitor
     }
     let mut flat: Vec<TokenKind> = Vec::new();
     walk(tokens, &mut flat);
+    let is_colon = |at: usize| matches!(flat.get(at), Some(TokenKind::Punct(':')));
     let mut idx = 0;
-    while idx + 1 < flat.len() {
-        let starts_chain = matches!(&flat[idx], TokenKind::Ident(s) if s == "crate" || s == "super")
-            && matches!(flat.get(idx + 1), Some(TokenKind::Punct(p)) if *p == ':');
-        if !starts_chain {
-            idx += 1;
-            continue;
-        }
+    while idx < flat.len() {
         let root = match &flat[idx] {
-            TokenKind::Ident(s) => s.clone(),
-            _ => unreachable!(),
+            TokenKind::Ident(s)
+                if (s == "crate" || s == "super") && is_colon(idx + 1) && is_colon(idx + 2) =>
+            {
+                s.clone()
+            }
+            _ => {
+                idx += 1;
+                continue;
+            }
         };
+        // `::` is two joint ':' puncts; every hop is `:: Ident`.
         let mut segs = vec![root];
-        let mut cursor = idx + 2;
-        while cursor < flat.len() {
-            match &flat[cursor] {
-                TokenKind::Ident(s) => {
+        let mut cursor = idx;
+        while is_colon(cursor + 1) && is_colon(cursor + 2) {
+            match flat.get(cursor + 3) {
+                Some(TokenKind::Ident(s)) => {
                     segs.push(s.clone());
-                    cursor += 1;
-                    // Continue only while `:: Ident` follows (stop cleanly
-                    // at generics/other tokens).
-                    if matches!(flat.get(cursor), Some(TokenKind::Punct(p)) if *p == ':')
-                        && matches!(flat.get(cursor + 1), Some(TokenKind::Ident(_)))
-                    {
-                        cursor += 1;
-                    } else {
-                        break;
-                    }
+                    cursor += 3;
                 }
                 _ => break,
             }
         }
         visitor.resolve_rooted(&segs, 1);
-        idx = cursor;
+        idx = cursor + 1;
     }
 }
 

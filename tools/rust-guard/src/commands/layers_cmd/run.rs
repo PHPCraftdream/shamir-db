@@ -145,9 +145,7 @@ fn compare_baseline(
                         file,
                         *line,
                         "LAYER_BACKWARD",
-                        format!(
-                            "LAYER_BACKWARD: {a} -> {b} (new backward pair; allowed direction is {b} -> {a})"
-                        ),
+                        format!("{a} -> {b} (new backward pair; allowed direction is {b} -> {a})"),
                     );
                 }
                 continue;
@@ -159,7 +157,7 @@ fn compare_baseline(
                         *line,
                         "LAYER_BACKWARD",
                         format!(
-                            "LAYER_BACKWARD: {a} -> {b} (baseline {n} exceeded by {} file(s); allowed direction is {b} -> {a})",
+                            "{a} -> {b} (baseline {n} exceeded by {} file(s); allowed direction is {b} -> {a})",
                             files.len()
                         ),
                     );

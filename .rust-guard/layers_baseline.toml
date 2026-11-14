@@ -10,10 +10,7 @@
 "table -> tx" = 1
 "table -> query" = 5
 "table -> instance" = 2
-"table -> db_instance" = 1
-"validator -> table" = 1
+"table -> db_instance" = 3
 "validator -> query" = 1
-"tx -> query" = 1
 "tx -> instance" = 35
-"query -> tx" = 3
-"query -> instance" = 3
+"query -> instance" = 11
