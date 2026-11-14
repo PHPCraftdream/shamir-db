@@ -39,15 +39,19 @@ use shamir_engine::query::batch::{
 use shamir_engine::repo::BoxRepoFactory;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
+use shamir_engine::tx::commit_tx;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::doc;
 use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_tx::VersionProvider;
+use shamir_tx::{CommitVisibility, IndexWriteOp, IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 /// Bench-only always-allow [`AccessGate`] (#1199): this bench measures
@@ -486,8 +490,6 @@ fn main() {
 
     // ── bench_provider_overhead ──────────────────────────────────────────
     {
-        use shamir_tx::VersionProvider;
-
         /// Always Some(0) — minimum-cost mock.
         struct StubAlwaysZero;
         impl VersionProvider for StubAlwaysZero {
@@ -651,12 +653,6 @@ fn main() {
     // one statement later inside the same async block does not add to
     // that already-captured cost.
     {
-        use shamir_engine::tx::commit_tx;
-        use shamir_tx::{
-            CommitVisibility, IndexWriteOp, IsolationLevel, StagingStore, TxContext, TxId,
-        };
-        use shamir_types::types::record_id::RecordId;
-
         // Scaled ladder collapsed to n=100 (smallest variant). NOTE: the
         // fjall cells are I/O-bound (fsync dominates; n=100 and n=1000 both
         // calibrate to ~1 iter at 0.05s), so reducing N further would not

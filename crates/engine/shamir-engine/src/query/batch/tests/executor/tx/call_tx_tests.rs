@@ -27,6 +27,7 @@ use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoInstance;
 use crate::table::TableConfig;
+use shamir_query_types::write::InsertOp;
 
 // ============================================================================
 // Shared infrastructure
@@ -153,8 +154,6 @@ async fn call_in_open_tx_rejected() {
 
 #[tokio::test]
 async fn call_in_transactional_batch_rejected() {
-    use shamir_query_types::write::InsertOp;
-
     let (_repo, resolver) = setup_repo().await;
 
     // Insert op (stage 1) — satisfies the distinct_repos / "no data ops" guard

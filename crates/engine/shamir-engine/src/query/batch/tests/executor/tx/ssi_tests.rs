@@ -14,6 +14,7 @@ use crate::table::TableManager;
 use shamir_storage::error::DbResult;
 
 use super::super::common::TxTestResolver;
+use shamir_types::core::interner::TouchInd;
 
 /// Resolver for the I.1 write-skew test. Resolves tables from `repo`, and on
 /// the execution-phase resolve of `gate_table` runs `writer_req` (a real
@@ -95,7 +96,6 @@ async fn ssi_write_skew_detected_through_execute_batch() {
     tbl.insert(&{
         let mut m = shamir_types::types::common::new_map_wc(2);
         let interner = tbl.interner().get().await.unwrap();
-        use shamir_types::core::interner::TouchInd;
         let name_id = match interner.touch_ind("name").unwrap() {
             TouchInd::Exists(k) | TouchInd::New(k) => k.id(),
         };

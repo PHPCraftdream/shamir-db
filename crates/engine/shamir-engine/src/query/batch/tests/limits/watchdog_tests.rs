@@ -22,6 +22,9 @@ use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
+use shamir_query_builder::write::doc;
 
 // ============================================================================
 // Log capture helper
@@ -595,10 +598,6 @@ fn watchdog_log_emitted_outside_iter_sync_lock_scope() {
 /// should produce no warnings.
 #[tokio::test]
 async fn watchdog_no_warnings_for_normal_ops() {
-    use shamir_query_builder::batch::Batch;
-    use shamir_query_builder::query::Query;
-    use shamir_query_builder::write::doc;
-
     let resolver = setup_resolver().await;
     let log_sink = TestLogSink::new();
 

@@ -30,6 +30,7 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::query_runner::{
     effective_max_iterations, ABSOLUTE_MAX_FOR_EACH_ITERATIONS,
 };
+use crate::query::batch::ExecutionDeadline;
 use crate::query::batch::{
     execute_batch_unchecked as execute_batch, BatchError, BatchResolver, TableResolver,
 };
@@ -426,8 +427,6 @@ async fn execute_batch_within_time_budget_succeeds_unaffected() {
 
 #[test]
 fn execution_deadline_from_absurd_budget_does_not_panic() {
-    use crate::query::batch::ExecutionDeadline;
-
     // Must not panic constructing the deadline...
     let deadline = ExecutionDeadline::from_budget_secs(u64::MAX);
     // ...and a normal (non-expired) checkpoint must still pass.
