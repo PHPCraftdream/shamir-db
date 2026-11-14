@@ -8,12 +8,8 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+mod commands;
 mod common;
-mod conservation_cmd;
-mod discovery_cmd;
-mod modules_cmd;
-mod orderings_cmd;
-mod structure_cmd;
 
 #[derive(Parser)]
 #[command(
@@ -121,6 +117,17 @@ enum Command {
         #[arg(long, requires = "suggest_delta")]
         base_sha: Option<String>,
     },
+    /// Module layering: no new backward dependencies between the
+    /// configured layers of a crate (ratchet baseline).
+    Layers {
+        /// Path to the layering config (default: .rust-guard/layers.toml).
+        #[arg(long)]
+        config: Option<String>,
+        /// Rewrite the ratchet baseline from this run: counts may only
+        /// go down, zero entries are pruned, growth is refused.
+        #[arg(long, default_value_t = false)]
+        update_baseline: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -128,10 +135,12 @@ fn main() -> ExitCode {
     let repo = PathBuf::from(&cli.repo);
     match cli.command {
         Command::Modules { rev, exceptions } => {
-            let code = modules_cmd::run(rev.as_deref(), exceptions.as_deref(), &repo);
+            let code = commands::modules_cmd::run(rev.as_deref(), exceptions.as_deref(), &repo);
             ExitCode::from(code)
         }
-        Command::Orderings { pins } => ExitCode::from(orderings_cmd::run(&repo, pins.as_deref())),
+        Command::Orderings { pins } => {
+            ExitCode::from(commands::orderings_cmd::run(&repo, pins.as_deref()))
+        }
         Command::Structure {
             paths,
             scopes,
@@ -140,30 +149,34 @@ fn main() -> ExitCode {
             delta,
             exceptions,
             warn_primary_export,
-        } => ExitCode::from(structure_cmd::run(structure_cmd::StructureArgs {
-            repo,
-            paths,
-            scopes,
-            changed_since,
-            base,
-            delta,
-            exceptions,
-            warn_primary_export,
-        })),
+        } => ExitCode::from(commands::structure_cmd::run(
+            commands::structure_cmd::StructureArgs {
+                repo,
+                paths,
+                scopes,
+                changed_since,
+                base,
+                delta,
+                exceptions,
+                warn_primary_export,
+            },
+        )),
         Command::Conservation {
             base,
             head,
             packages,
             delta,
             suggest_delta,
-        } => ExitCode::from(conservation_cmd::run(conservation_cmd::ConservationArgs {
-            repo,
-            base,
-            head,
-            packages,
-            delta,
-            suggest_delta,
-        })),
+        } => ExitCode::from(commands::conservation_cmd::run(
+            commands::conservation_cmd::ConservationArgs {
+                repo,
+                base,
+                head,
+                packages,
+                delta,
+                suggest_delta,
+            },
+        )),
         Command::Discovery {
             base_list,
             head_list,
@@ -171,13 +184,25 @@ fn main() -> ExitCode {
             kind,
             suggest_delta,
             base_sha,
-        } => ExitCode::from(discovery_cmd::run(discovery_cmd::DiscoveryArgs {
-            base_list,
-            head_list,
-            delta,
-            kind,
-            suggest_delta,
-            base_sha,
-        })),
+        } => ExitCode::from(commands::discovery_cmd::run(
+            commands::discovery_cmd::DiscoveryArgs {
+                base_list,
+                head_list,
+                delta,
+                kind,
+                suggest_delta,
+                base_sha,
+            },
+        )),
+        Command::Layers {
+            config,
+            update_baseline,
+        } => ExitCode::from(commands::layers_cmd::run(
+            commands::layers_cmd::LayersArgs {
+                repo,
+                config,
+                update_baseline,
+            },
+        )),
     }
 }

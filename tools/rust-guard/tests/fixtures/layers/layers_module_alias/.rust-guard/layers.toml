@@ -1,0 +1,7 @@
+# rust-guard layers: ordered layers, lowest first; `inst` names module b.
+[[crate]]
+name = "fix"
+layers = ["a", "inst"]
+
+[crate.modules]
+inst = "b"

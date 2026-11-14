@@ -433,6 +433,70 @@ pin; the pairing must be mutually unique (single base identity and
 single head candidate per test name) with equal `ignored` state,
 otherwise nothing is suggested.
 
+## Module layering (`rust-guard layers`)
+
+`rust-guard layers [--update-baseline]` enforces NO NEW backward
+dependencies between the configured layers of a crate (GUARD-LAYERS).
+Cargo forbids crate cycles, but rustc allows any module to use any
+other — this gate restores an ordering at the module level.
+
+Config lives in `.rust-guard/layers.toml`: each `[[crate]]` names a
+package and its ordered `layers`, LOWEST first; a module may refer to
+its own layer and lower ones only. An optional per-crate
+`[crate.modules]` table maps a layer NAME to its module path when the
+two differ (`instance = "repo/instance"`). Unlayered production files
+are `LAYER_UNASSIGNED`; the crate root file is exempt (the facade may
+refer anywhere).
+
+An EDGE is production code of module A referring to module B of the
+same crate. Counted kinds: `use crate::b::..` (grouped, renamed, glob,
+re-exported), paths in code without `use`, `super::` chains that leave
+the module, crate-root/module re-exports (attributed to where the item
+really lives), `impl` self-types owned by another module, and
+`crate::`-rooted paths inside macro token streams (line reported as 1).
+An EXTERNAL shadow — a re-export whose target leaves the crate
+(`pub use shamir_engine_validator::validator::*;` then
+`crate::validator::X`) — is NOT an edge into the re-exporting module.
+Test code (`#[cfg(test)]`/loom items, test-named modules, `#[test]`
+fns, `tests/` target dirs) is skipped and never fails the gate.
+
+Resolution fails closed: mod.rs files and the crate root are pure
+re-export surfaces — a name they neither bind nor locally glob resolves
+to nothing (no phantom edges into the module). Unparseable sources,
+broken module trees and unsupported `cfg_attr(path)` are infra errors.
+
+Findings:
+- `LAYER_BACKWARD` — `path:line: LAYER_BACKWARD: <A> -> <B> (...)`
+  with the allowed direction named; one per file and pair, printed
+  only for NEW pairs or pairs whose file count GREW.
+- `STALE_BASELINE` — a baseline entry whose count dropped to zero.
+- `LAYER_UNASSIGNED` — a production file outside every layer.
+- `LAYER_BASELINE_BAD` — malformed config or baseline keys.
+
+The ratchet baseline `.rust-guard/layers_baseline.toml` (machine-managed
+sibling) records per crate `"A -> B" = files`: the number of production
+files in layer A with at least one backward reference into layer B. A
+new pair fails, a known pair whose count grows fails, counts may only
+go down. `--update-baseline` rewrites the file — lowers counts, prunes
+zero entries, and REFUSES growth/new pairs (exit 1, no write). The
+first CI run after committing a hand-measured baseline is the true-up
+run (`rust-guard layers --update-baseline`).
+
+`shamir-engine` is configured with layers
+`repo < table < validator < tx < query < instance < db_instance` and
+`instance = repo/instance`.
+
+Fixture → finding map:
+
+| Fixture | Finding asserted |
+|---|---|
+| `layers_ok` | none |
+| `layers_use_backward` / `layers_grouped_use` / `layers_reexport_root` / `layers_code_path` / `layers_super_chain` / `layers_impl` / `layers_macro_path` / `layers_inline_mod` / `layers_reexport_shadow` / `layers_glob_shadow` | `LAYER_BACKWARD` (grouped/shadow variants assert exactly ONE finding) |
+| `layers_module_alias` | none (exit 0) — pair named by LAYER name via `[crate.modules]` |
+| `layers_baseline_stale` | `STALE_BASELINE` (pruned by `--update-baseline`) |
+| `layers_baseline_grow` | two `LAYER_BACKWARD` (`--update-baseline` refused) |
+| `layers_update_lower` | none (exit 0) — `--update-baseline` lowers 2 → 1 |
+
 ## When the gates run
 
 On pull requests, `modules` scans the whole repository. `structure` and
@@ -500,8 +564,10 @@ lines per file, `mod.rs` re-exports only, imports at the top.
 ## Self-tests (CI-only)
 
 `cargo test --manifest-path tools/rust-guard/Cargo.toml` (GitHub CI
-only) runs `tests/modules_tests.rs`, `tests/structure_tests.rs` and
-`tests/conservation_tests.rs` through the shared `tests/harness.rs`:
+only) runs two explicit `[[test]]` targets from Cargo.toml —
+`tests/gates/main.rs` (the modules, structure, orderings and layers
+suites) and `tests/diff/main.rs` (conservation, discovery) — sharing
+`tests/harness.rs` via `#[path]`:
 
 each test materialises a fixture tree from `tests/fixtures/` into a
 unique throwaway git repository under the OS temp dir (created with
