@@ -1,4 +1,4 @@
-base = "c2536e8f172ae35c7a985253a5962952157525f2"
+base = "62fdc16eb859dc49cde3269d93f1419856eb6feb"
 
 # ── R1: gate observation primitive moves to the repo layer ──
 [[moved]]
