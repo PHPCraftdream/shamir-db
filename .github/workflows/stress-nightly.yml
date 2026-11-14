@@ -74,13 +74,13 @@ jobs:
       # invocation — no shell loop needed). This is the narrowest, highest-
       # risk contention-window suite (overlay_ordering, a10_toctou, lock
       # races — see report 08 §3's "Highest-risk narrow-window tests" list).
-      # `mvcc_store_tests` is a substring filter matching every test under
-      # crates/storage/shamir-tx/src/tests/mvcc_store_tests/. Same stress profile
+      # `mvcc_store::tests` is a substring filter matching every test under
+      # crates/storage/shamir-tx/src/mvcc_store/tests/. Same stress profile
       # (test-threads = 8) for the same oversubscription rationale.
       #
       # failure-output = "immediate" is set in [profile.stress]: a hang/
       # deadlock under stress benefits from partial output streamed AS IT
       # HAPPENS, not buffered until the 600s slow-timeout kill.
-      - name: mvcc_store_tests ×10 (stress profile, repetition)
-        run: "./scripts/test.sh -p shamir-tx --profile stress --stress-count 10 mvcc_store_tests"
+      - name: mvcc_store tests ×10 (stress profile, repetition)
+        run: "./scripts/test.sh -p shamir-tx --profile stress --stress-count 10 mvcc_store::tests"
         shell: bash

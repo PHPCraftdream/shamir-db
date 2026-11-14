@@ -23,10 +23,12 @@ import {
 import type { ServerHandle } from '../e2e-harness.js';
 
 /**
- * Minimal valid WASM module — `(module)` in WAT.
- * 8 bytes: magic + version. Base64-encoded for the wire `wasm` field.
+ * Minimal module that passes admission: exports `memory`, `shamir_alloc`
+ * and `shamir_call` (an empty `(module)` is rejected). Base64-encoded for
+ * the wire `wasm` field; the DDL tests below never execute it.
  */
-const EMPTY_WASM_B64 = 'AGFzbQEAAAA=';
+const MINIMAL_WASM_B64 =
+  'AGFzbQEAAAABDAJgAX8Bf2ACf38BfgMDAgABBQMBAAIGBwF/AUGACAsHJwMGbWVtb3J5AgAMc2hhbWlyX2FsbG9jAAALc2hhbWlyX2NhbGwAAQogAhEBAX8jACEBIwAgAGokACABCwwAIACtQiCGIAGthAsAKQRuYW1lAhkCAAIAA2xlbgEDcHRyAQIAA3B0cgEDbGVuBwcBAARidW1w';
 
 // ─── test suite ──────────────────────────────────────────────────────────────
 
@@ -251,10 +253,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
         .execute(client!, db));
       expect(lsf.results.l.records).toBeDefined();
 
-      // create function from minimal WASM (avoids cargo-compile dependency)
+      // create function from minimal admitted WASM (avoids cargo-compile dependency)
       br(await Batch.create('mk-fn')
         .add('f', ddl.createFunction('my_fn', {
-          wasm: EMPTY_WASM_B64,
+          wasm: MINIMAL_WASM_B64,
         }))
         .execute(client!, db));
 
@@ -295,10 +297,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('validator: create (wasm) -> bind -> listValidators -> unbind -> drop', async () => {
       const db = await setupDb(client!, 'ddl_val', ['orders']);
 
-      // create validator from minimal WASM
+      // create validator from minimal admitted WASM
       br(await Batch.create('mk-val')
         .add('v', ddl.createValidator('check_qty', {
-          wasm: EMPTY_WASM_B64,
+          wasm: MINIMAL_WASM_B64,
         }))
         .execute(client!, db));
 
@@ -606,10 +608,10 @@ describe.skipIf(!SERVER_AVAILABLE)(
     it('validator: rename keeps binding functional under new name', async () => {
       const db = await setupDb(client!, 'ddl_valren', ['orders']);
 
-      // create validator from minimal WASM
+      // create validator from minimal admitted WASM
       br(await Batch.create('mk-val')
         .add('v', ddl.createValidator('v_old', {
-          wasm: EMPTY_WASM_B64,
+          wasm: MINIMAL_WASM_B64,
         }))
         .execute(client!, db));
 
