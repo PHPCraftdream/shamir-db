@@ -410,7 +410,8 @@ What this settles:
    grow again; it would put time marks inside one of those tests (repositories and tables created in the test, writes,
    commits, the second open) and run it alone through a nextest filter.
 
-Both measurement tests (`boot_cost_of_one_fjall_open` in `shamir-storage`, `boot_cost2_system_store_open_phases` in
-`shamir-db`) are `#[ignore]`d: they assert nothing and cost about 1.5 s and 10 s of Windows test time per run. To measure
-again, run them with nextest's `--run-ignored only`, or on a throwaway branch remove the `#[ignore]` and add a final
-failure so that the log shows the output.
+`boot_cost2_system_store_open_phases` (`shamir-db`) is `#[ignore]`d: it asserts nothing and costs about 10 s of Windows test
+time per run of the crate. To measure again, run it with nextest's `--run-ignored only`, or on a throwaway branch remove
+the `#[ignore]` and add a final failure so that the log shows the output. `boot_cost_of_one_fjall_open` (`shamir-storage`,
+about 1.5 s) stays a plain test: it is the only integration test of that crate, and an integration row with no test to
+run fails the CI gate (`--no-tests=fail`).
