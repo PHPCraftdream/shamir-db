@@ -9,12 +9,14 @@ use futures::StreamExt;
 use crate::index2::backend::{IndexQuery, IndexResult};
 use crate::index2::vector::vector_backend::VectorBackend;
 use crate::index2::vector::{SearchOpts, VectorAdapter as _};
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::{compile_filter_with_context, eval::intern_field_path, FilterNode};
-use crate::query::read::{exec, CorruptRecordRef, QueryResult, ReadQuery};
 use crate::table::support::storage::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
 use bytes::Bytes;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::filter::{
+    compile_filter_with_context, eval::intern_field_path, FilterNode,
+};
+use shamir_engine_query::query::read::{exec, CorruptRecordRef, QueryResult, ReadQuery};
 
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
@@ -186,7 +188,8 @@ impl TableManager {
         start: Instant,
     ) -> DbResult<QueryResult> {
         // Resolve the vector backend by field path + "vector" kind.
-        let field_path = crate::query::filter::eval::intern_field_path(&fvq.field, interner);
+        let field_path =
+            shamir_engine_query::query::filter::eval::intern_field_path(&fvq.field, interner);
         let lease_result = match &field_path {
             Some(fp) => {
                 self.index2_registry()

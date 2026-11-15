@@ -1,7 +1,7 @@
 //! Candidate identity and ordering, independent of query postprocessing.
 
 use crate::index2::backend::IndexResult;
-use crate::query::read::{exec, ReadQuery};
+use shamir_engine_query::query::read::{exec, ReadQuery};
 use shamir_types::types::record_id::RecordId;
 
 #[derive(Debug)]

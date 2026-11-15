@@ -5,9 +5,9 @@
 //! ORDER BY + LIMIT K fast-path eligibility check.
 
 use crate::index2::backend::{FtsMode, IndexQuery};
-use crate::query::filter::eval::{filter_value_to_inner, intern_field_path};
-use crate::query::filter::{Filter, FilterValue};
-use crate::query::read::{exec, ReadQuery};
+use shamir_engine_query::query::filter::eval::{filter_value_to_inner, intern_field_path};
+use shamir_engine_query::query::filter::{Filter, FilterValue};
+use shamir_engine_query::query::read::{exec, ReadQuery};
 use shamir_index::vector::SearchOpts;
 use shamir_storage::error::DbError;
 use shamir_types::core::interner::Interner;
@@ -501,7 +501,7 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
-        ctx: Option<&crate::query::filter::FilterContext<'_>>,
+        ctx: Option<&shamir_engine_query::query::filter::FilterContext<'_>>,
     ) -> Option<(u64, usize, usize, shamir_query_types::read::OrderDirection)> {
         // Shape guards.
         if query.r#where.is_some()
@@ -572,7 +572,7 @@ impl TableManager {
         &self,
         query: &ReadQuery,
         interner: &Interner,
-        ctx: Option<&crate::query::filter::FilterContext<'_>>,
+        ctx: Option<&shamir_engine_query::query::filter::FilterContext<'_>>,
     ) -> Option<KeysetSeekPlan> {
         // Same shape guards as the ORDER BY + LIMIT K fast path.
         if query.r#where.is_some()

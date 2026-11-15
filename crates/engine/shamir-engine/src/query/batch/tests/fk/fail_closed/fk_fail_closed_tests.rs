@@ -66,8 +66,8 @@ use shamir_tx::{IsolationLevel, TxContext, TxId};
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::{
-    implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, FkParentOpKind,
-    TableResolver,
+    implicit_tx_isolation_for_fk_parent, require_footprint_if_fk_child, BatchResolver,
+    FkParentOpKind, TableResolver,
 };
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -110,7 +110,10 @@ impl TableResolver for FailureInjectingResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table(&self.repo, &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for FailureInjectingResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         let n = self.resolve_repo_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if n >= self.fail_at_or_after {

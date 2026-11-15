@@ -22,6 +22,9 @@ use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
 use crate::table::TableConfig;
+use shamir_query_builder::batch::Batch;
+use shamir_query_builder::query::Query;
+use shamir_query_builder::write::doc;
 
 // ============================================================================
 // Log capture helper
@@ -135,7 +138,10 @@ impl crate::query::batch::TableResolver for TestResolver {
     ) -> shamir_storage::error::DbResult<crate::table::TableManager> {
         self.db.get_table(&self.repo, &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl crate::query::batch::BatchResolver for TestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
@@ -330,7 +336,7 @@ async fn watchdog_warns_while_slow_op_still_running() {
     tokio::spawn(async move {
         let result = execute_batch(
             &req,
-            resolver.as_ref() as &dyn crate::query::batch::TableResolver,
+            resolver.as_ref() as &dyn crate::query::batch::BatchResolver,
             None,
             Some(invoker.as_ref()),
             Actor::System,
@@ -592,10 +598,6 @@ fn watchdog_log_emitted_outside_iter_sync_lock_scope() {
 /// should produce no warnings.
 #[tokio::test]
 async fn watchdog_no_warnings_for_normal_ops() {
-    use shamir_query_builder::batch::Batch;
-    use shamir_query_builder::query::Query;
-    use shamir_query_builder::write::doc;
-
     let resolver = setup_resolver().await;
     let log_sink = TestLogSink::new();
 

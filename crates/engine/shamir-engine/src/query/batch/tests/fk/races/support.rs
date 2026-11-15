@@ -12,7 +12,7 @@ use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -116,7 +116,10 @@ impl TableResolver for TxTestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> shamir_storage::error::DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TxTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,
@@ -132,7 +135,10 @@ impl TableResolver for RaceInjectingResolver {
         table.set_validator_registry(Arc::clone(&self.registry));
         Ok(table)
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for RaceInjectingResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

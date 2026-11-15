@@ -26,7 +26,8 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_engine::query::batch::{
     execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError, BatchOp,
-    BatchRequest, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding, TableResolver,
+    BatchRequest, BatchResolver, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding,
+    TableResolver,
 };
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
@@ -61,7 +62,7 @@ impl AccessGate for BenchAllowAll {
 /// token via [`BenchAllowAll`] and calls the real `execute_batch`.
 async fn execute_batch(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: Actor,
@@ -83,6 +84,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
+
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }

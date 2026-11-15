@@ -6,7 +6,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::query::batch::batch_execute::execute_plan_tx_impl;
 use crate::query::batch::exec_scope::ExecScope;
-use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::param_subst::WriteValueError;
 use crate::query::batch::BatchError;
 use crate::query::read::QueryResult;
@@ -55,7 +55,7 @@ type NestedTxBodyFuture<'a> = std::pin::Pin<
 pub(super) fn run_nested_body_in_outer_tx<'a>(
     body: &'a crate::query::batch::BatchRequest,
     plan: &'a mut shamir_query_types::batch::BatchPlan,
-    resolver: &'a dyn TableResolver,
+    resolver: &'a dyn BatchResolver,
     admin: Option<&'a dyn AdminExecutor>,
     invoker: Option<&'a dyn FunctionInvoker>,
     actor: &'a Actor,

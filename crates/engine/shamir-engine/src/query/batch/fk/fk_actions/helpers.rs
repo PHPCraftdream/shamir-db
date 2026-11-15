@@ -9,7 +9,7 @@ use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, RecordView, Sc
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
 use crate::repo::{build_reverse_fk_entries, ReverseFkEntry};
@@ -70,7 +70,7 @@ pub(super) fn null_out_field(
 /// the cache carries every `on_delete` action; each caller filters what it
 /// needs.
 pub(super) async fn discover_action_refs(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
 ) -> Result<Vec<ReverseFkEntry>, BatchError> {
     let repo = resolver

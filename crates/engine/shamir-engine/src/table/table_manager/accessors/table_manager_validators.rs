@@ -6,27 +6,30 @@ use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
 use crate::repo::RepoWritePermit;
-use crate::validator::{
+use shamir_engine_validator::validator::{
     record_fields::{OwnedFields, ViewFields},
     record_validator::ValidatorCtx,
-    TransformSpec, ValidatorDb, ValidatorFailure,
+    TransformSpec, ValidatorFailure, WriteOp,
 };
+
+use crate::table::validator_bound::{ValidatorDb, ValidatorFkCtx};
+use shamir_engine_validator::validator::record_fields::RecordFields;
+use shamir_engine_validator::validator::schema::ForeignKeyRef;
+use shamir_engine_validator::validator::{ValidatorBinding, ValidatorRegistry};
 
 use crate::table::table_manager::TableManager;
 
 impl TableManager {
     /// Cheap snapshot of the current validator bindings for this table.
     /// The S3 write path reads this on every write.
-    pub fn validator_bindings(&self) -> Arc<Vec<crate::validator::ValidatorBinding>> {
+    pub fn validator_bindings(&self) -> Arc<Vec<ValidatorBinding>> {
         self.validator_bindings.load_full()
     }
 
     /// Borrow the global validator registry wired into this table, if any.
     /// `None` for system tables / tables without validators. Used by Phase D.2
     /// (SET NULL nullable enforcement) to inspect `SchemaValidator` rules.
-    pub(crate) fn validator_registry_ref(
-        &self,
-    ) -> Option<&Arc<crate::validator::ValidatorRegistry>> {
+    pub(crate) fn validator_registry_ref(&self) -> Option<&Arc<ValidatorRegistry>> {
         self.validator_registry.as_ref()
     }
 
@@ -37,7 +40,7 @@ impl TableManager {
     /// already exists, it is replaced (updated `ops` + `priority`).
     pub async fn add_validator_binding(
         &self,
-        binding: crate::validator::ValidatorBinding,
+        binding: ValidatorBinding,
     ) -> shamir_storage::error::DbResult<()> {
         // S5c-X: repo admission BEFORE `bindings_lock` (lock order: repo
         // permit FIRST → terminal `bindings_lock`).
@@ -48,7 +51,7 @@ impl TableManager {
     /// S5c-X admitted twin — caller already holds repo admission.
     pub async fn add_validator_binding_admitted(
         &self,
-        binding: crate::validator::ValidatorBinding,
+        binding: ValidatorBinding,
         permit: &RepoWritePermit,
     ) -> shamir_storage::error::DbResult<()> {
         self.write_domain.debug_check_permit(permit);
@@ -63,8 +66,11 @@ impl TableManager {
         } else {
             bindings.push(binding);
         }
-        crate::validator::persistence::save_validators_metadata(&bindings, &self.info_store)
-            .await?;
+        crate::table::validator_bound::persistence::save_validators_metadata(
+            &bindings,
+            &self.info_store,
+        )
+        .await?;
         self.validator_bindings.store(Arc::new(bindings));
         Ok(())
     }
@@ -95,8 +101,11 @@ impl TableManager {
         bindings.retain(|b| b.validator_id != *validator_id);
         let removed = bindings.len() < before;
         if removed {
-            crate::validator::persistence::save_validators_metadata(&bindings, &self.info_store)
-                .await?;
+            crate::table::validator_bound::persistence::save_validators_metadata(
+                &bindings,
+                &self.info_store,
+            )
+            .await?;
             self.validator_bindings.store(Arc::new(bindings));
         }
         Ok(removed)
@@ -105,7 +114,7 @@ impl TableManager {
     /// Inject the global validator registry (S3). Called by the facade
     /// when user tables are created/opened. System tables leave this at
     /// `None` (validators disabled).
-    pub fn set_validator_registry(&mut self, registry: Arc<crate::validator::ValidatorRegistry>) {
+    pub fn set_validator_registry(&mut self, registry: Arc<ValidatorRegistry>) {
         self.validator_registry = Some(registry);
     }
 
@@ -157,13 +166,13 @@ impl TableManager {
     /// caller, not System" convention.
     pub async fn run_validators_qv(
         &self,
-        op: crate::validator::WriteOp,
+        op: WriteOp,
         new_record: Option<&shamir_types::types::value::QueryValue>,
         old_record: Option<&shamir_types::types::value::QueryValue>,
         actor: &shamir_types::access::Actor,
         tx: Option<&shamir_tx::TxContext>,
-        fk_ctx: crate::validator::ValidatorFkCtx<'_>,
-    ) -> Result<(), crate::validator::ValidatorFailure> {
+        fk_ctx: ValidatorFkCtx<'_>,
+    ) -> Result<(), ValidatorFailure> {
         // 1. No registry → validators disabled (system tables / tests).
         let reg = match &self.validator_registry {
             Some(r) => r,
@@ -179,7 +188,7 @@ impl TableManager {
         let all_bindings = self.validator_bindings.load_full();
 
         // 2. Filter the snapshot to applicable ops.
-        let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
+        let applicable: Vec<&ValidatorBinding> = all_bindings
             .iter()
             .filter(|b| b.ops.contains(&op))
             .collect();
@@ -204,12 +213,10 @@ impl TableManager {
         let new_fields = new_record.map(|qv| OwnedFields { qv });
         let old_fields = old_record.map(|qv| OwnedFields { qv });
 
-        let new_dyn: Option<&dyn crate::validator::record_fields::RecordFields> = new_fields
-            .as_ref()
-            .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
-        let old_dyn: Option<&dyn crate::validator::record_fields::RecordFields> = old_fields
-            .as_ref()
-            .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
+        let new_dyn: Option<&dyn RecordFields> =
+            new_fields.as_ref().map(|f| f as &dyn RecordFields);
+        let old_dyn: Option<&dyn RecordFields> =
+            old_fields.as_ref().map(|f| f as &dyn RecordFields);
 
         // Phase B — attach the scalar resolver so scalar-bridge rules can
         // resolve registered scalars.  The resolver is loaded once per call
@@ -256,13 +263,13 @@ impl TableManager {
     /// for relational validators.
     pub(in crate::table) async fn run_validators_view(
         &self,
-        op: crate::validator::WriteOp,
+        op: WriteOp,
         new_record: Option<&QueryValue>,
         old_view: Option<&RecordView<'_>>,
         actor: &shamir_types::access::Actor,
         tx: &shamir_tx::TxContext,
-        fk_ctx: crate::validator::ValidatorFkCtx<'_>,
-    ) -> Result<(), crate::validator::ValidatorFailure> {
+        fk_ctx: ValidatorFkCtx<'_>,
+    ) -> Result<(), ValidatorFailure> {
         // 1. No registry → validators disabled.
         let reg = match &self.validator_registry {
             Some(r) => r,
@@ -278,7 +285,7 @@ impl TableManager {
         let all_bindings = self.validator_bindings.load_full();
 
         // 2. Filter the snapshot to applicable ops.
-        let applicable: Vec<&crate::validator::ValidatorBinding> = all_bindings
+        let applicable: Vec<&ValidatorBinding> = all_bindings
             .iter()
             .filter(|b| b.ops.contains(&op))
             .collect();
@@ -302,12 +309,10 @@ impl TableManager {
         let old_fields = old_view.map(|view| ViewFields::new(view, interner));
         let new_fields = new_record.map(|qv| OwnedFields { qv });
 
-        let new_dyn: Option<&dyn crate::validator::record_fields::RecordFields> = new_fields
-            .as_ref()
-            .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
-        let old_dyn: Option<&dyn crate::validator::record_fields::RecordFields> = old_fields
-            .as_ref()
-            .map(|f| f as &dyn crate::validator::record_fields::RecordFields);
+        let new_dyn: Option<&dyn RecordFields> =
+            new_fields.as_ref().map(|f| f as &dyn RecordFields);
+        let old_dyn: Option<&dyn RecordFields> =
+            old_fields.as_ref().map(|f| f as &dyn RecordFields);
 
         // Phase B — attach the scalar resolver (same as the QV path).
         // Phase C1 — attach a [`ValidatorDb`] from `tx` for relational
@@ -330,12 +335,12 @@ impl TableManager {
     /// accumulates errors, and applies the stop-flag semantics.
     async fn run_validators_loop(
         &self,
-        applicable: &[&crate::validator::ValidatorBinding],
-        reg: &crate::validator::ValidatorRegistry,
+        applicable: &[&ValidatorBinding],
+        reg: &ValidatorRegistry,
         ctx: &ValidatorCtx<'_>,
-        new: Option<&dyn crate::validator::record_fields::RecordFields>,
-        old: Option<&dyn crate::validator::record_fields::RecordFields>,
-    ) -> Result<(), crate::validator::ValidatorFailure> {
+        new: Option<&dyn RecordFields>,
+        old: Option<&dyn RecordFields>,
+    ) -> Result<(), ValidatorFailure> {
         // Sort by priority ascending, stable tie-break by id.
         let mut sorted = applicable.to_vec();
         sorted.sort_by(|a, b| {
@@ -404,7 +409,7 @@ impl TableManager {
     ///
     /// Used by Phase D reverse-FK discovery (the RESTRICT gate needs to find
     /// which child tables reference a given parent table).
-    pub fn collect_fk_refs(&self) -> Vec<(Vec<String>, crate::validator::schema::ForeignKeyRef)> {
+    pub fn collect_fk_refs(&self) -> Vec<(Vec<String>, ForeignKeyRef)> {
         let reg = match &self.validator_registry {
             Some(r) => r,
             None => return Vec::new(),

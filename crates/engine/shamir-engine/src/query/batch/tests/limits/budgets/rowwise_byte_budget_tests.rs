@@ -13,7 +13,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::query::batch::batch_execute::execute_batch_impl;
 use crate::query::batch::exec_scope::RowByteMeter;
-use crate::query::batch::{BatchError, ExecScope, TableResolver};
+use crate::query::batch::{BatchError, BatchResolver, ExecScope, TableResolver};
 use crate::query::read::{QueryRecord, QueryResult};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -28,7 +28,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
         self.0.get_table(&table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> DbResult<RepoInstance> {
         Ok(self.0.clone())
     }

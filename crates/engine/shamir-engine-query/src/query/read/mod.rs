@@ -8,6 +8,7 @@
 pub mod aggregation;
 pub mod exec;
 pub mod projection;
+pub mod row_byte_meter;
 
 // Module-path aliases preserving the historical `read::*` module paths.
 pub use aggregation as aggregate;

@@ -2,6 +2,7 @@
 
 pub mod persistence;
 pub mod validator_db;
+pub use validator_db::{BatchFkCache, FkCacheEntry, ValidatorDb, ValidatorFkCtx};
 
 #[cfg(test)]
 mod tests;

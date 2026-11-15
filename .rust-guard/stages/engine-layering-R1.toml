@@ -1,0 +1,1627 @@
+base = "62fdc16eb859dc49cde3269d93f1419856eb6feb"
+
+# ── R1: gate observation primitive moves to the repo layer ──
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "RowByteMeter"
+reason = "R1: leaf sizing namespace is pub; the batch meter it mirrors stays crate-private in shamir-engine"
+owner = "wave-R1"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "RowByteMeter::value_size"
+reason = "R1: the moved helper is pub in the leaf (was pub(crate) in the batch module); consumed cross-crate by table/collect.rs"
+owner = "wave-R1"
+
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::persistence"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::persistence"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/persistence.rs"
+item = "shamir-engine::lib::validator::engine_bound::persistence::save_validators_metadata"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/persistence.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::persistence::save_validators_metadata"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/persistence.rs"
+item = "shamir-engine::lib::validator::engine_bound::persistence::load_validators_metadata"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/persistence.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::persistence::load_validators_metadata"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/fk_probe/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe::fk_batch_cache_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/fk_probe/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe::staged_probe_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::staged_probe_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::computed_default_transform_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::persistence_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::persistence_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/mod.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::AcceptValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::AcceptValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::AcceptValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::AcceptValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::RejectValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::RejectValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::RejectValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::RejectValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::StopValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::StopValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::StopValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::StopValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::TrapValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::TrapValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::TrapValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::TrapValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::build_table_with_validators"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::build_table_with_validators"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_actor_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests::items_op"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_actor_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests::items_op"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_actor_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests::CallerActorValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_actor_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests::CallerActorValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_actor_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests::CallerActorValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_actor_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests::CallerActorValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_actor_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests::setup"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_actor_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests::setup"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::scalar_to_query_value"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::scalar_to_query_value"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::setup"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::setup"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::setup_with_validator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::setup_with_validator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::FinalStateFkValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::FinalStateFkValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::FinalStateFkValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::FinalStateFkValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestResolver"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestResolver"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestResolver::resolve"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestResolver::resolve"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestResolver::resolve_repo"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestResolver::resolve_repo"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::DbReadingValidator"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::DbReadingValidator"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::insert_ref_id_row"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::insert_ref_id_row"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::corrupt_row"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::corrupt_row"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestLogSink"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestLogSink"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestLogSink::new"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestLogSink::new"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestLogSink::contains"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestLogSink::contains"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestLogSink::enabled"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestLogSink::enabled"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestLogSink::log"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestLogSink::log"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::DbReadingValidator::validate"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::DbReadingValidator::validate"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::TestLogSink::flush"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::TestLogSink::flush"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::insert_parent_rows"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::insert_parent_rows"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::BatchFkCache::store"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::BatchFkCache::store"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::BatchFkCache::len"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::BatchFkCache::len"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::reset_fk_full_scans"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::reset_fk_full_scans"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::fk_full_scans"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::fk_full_scans"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::qv_scalar_to_inner"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::qv_scalar_to_inner"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::record_field_matches"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::record_field_matches"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::reset_staged_rechecks"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::reset_staged_rechecks"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::staged_rechecks"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::staged_rechecks"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::record_field_matches_by_id"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::record_field_matches_by_id"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::scalar_ref_matches_query_value"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::scalar_ref_matches_query_value"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorFkCtx"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorFkCtx"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::new"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::new"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::new_with_fk_cache"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::new_with_fk_cache"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::exists_in"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in_table"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::exists_in_table"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::committed_membership_probe"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::committed_membership_probe"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::BatchFkCache"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::BatchFkCache"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::staged_field_matches"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::staged_field_matches"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in_self"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::exists_in_self"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::exists_in"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::ValidatorDb::exists_in_self"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorDb::exists_in_self"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::FkCacheKey"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::FkCacheKey"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::FkCacheEntry"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::FkCacheEntry"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::BatchFkCache::new"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::BatchFkCache::new"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/validator_db.rs"
+item = "shamir-engine::lib::validator::engine_bound::validator_db::BatchFkCache::get"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::validator_db::BatchFkCache::get"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::value_size"
+to_path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+to_item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::value_size"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::resolve"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver::resolve"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::resolve_unfenced"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver::resolve_unfenced"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::scalar_resolver"
+to_path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+to_item = "shamir-engine::lib::table::support::table_resolver::TableResolver::scalar_resolver"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/visibility_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::visibility_impl::observe_gate_with_budget"
+to_path = "crates/engine/shamir-engine/src/repo/gate_visibility.rs"
+to_item = "shamir-engine::lib::repo::gate_visibility::observe_gate_with_budget"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/validator/mod.rs"
+item = "shamir-engine::lib::validator::engine_bound"
+reason = "R1: item left its module"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/mod.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::sequence_walk"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::sequence"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::BatchResolver"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/repo/mod.rs"
+item = "shamir-engine::lib::repo::gate_visibility"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::table_resolver"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/mod.rs"
+item = "shamir-engine::lib::table::support::validator_bound"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+item = "shamir-engine::bench::execute_batch"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/policy.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::policy::validate"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/control/receipts/propagation.rs"
+item = "shamir-engine::lib::query::batch::control::receipts::propagation::execute_plan"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_batch_unchecked"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::plan_and_validate_batch"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::plan_and_validate_with_metadata"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::flush_if_synced_durability"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_batch_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_planned_batch_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_batch_with_permissions"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_batch"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_plan_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_plan_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_plan_tx_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/batch_execute.rs"
+item = "shamir-engine::lib::query::batch::exec::batch_execute::execute_transactional_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/interactive_tx.rs"
+item = "shamir-engine::lib::query::batch::exec::interactive_tx::execute_in_open_tx_unchecked"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/interactive_tx.rs"
+item = "shamir-engine::lib::query::batch::exec::interactive_tx::execute_in_open_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/interactive_tx.rs"
+item = "shamir-engine::lib::query::batch::exec::interactive_tx::execute_in_open_tx_with_scope"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_actions/helpers.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::helpers::discover_action_refs"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_actions/plan.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::plan::plan_cascade"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_actions/plan.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::plan::plan_cascade_recursive"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_actions/plan.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_actions::plan::plan_cascade_for_ids"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_on_update/plan.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::plan::plan_fk_on_update"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_on_update/scan.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_on_update::scan::discover_on_update_refs"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_restrict.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_restrict::discover_restrict_refs"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/fk/fk_restrict.rs"
+item = "shamir-engine::lib::query::batch::fk::fk_restrict::check_fk_restrict"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/fk_isolation.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation::implicit_tx_isolation_for_fk_parent"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/fk_isolation.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::fk_isolation::require_footprint_if_fk_child"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/nested.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::nested::run_nested_body_in_outer_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/runner.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::runner::execute_single_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/support/catalog/fk_reverse_cache.rs"
+item = "shamir-engine::lib::repo::instance::support::catalog::fk_reverse_cache::build_reverse_fk_entries"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/explain.rs"
+item = "shamir-engine::lib::table::read::dispatch::explain::try_project_page_only"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/explain.rs"
+item = "shamir-engine::lib::table::read::dispatch::explain::try_project_page_only_bytes"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/explain.rs"
+item = "shamir-engine::lib::table::read::dispatch::explain::apply_select_value_bytes"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/explain.rs"
+item = "shamir-engine::lib::table::read::dispatch::explain::contains_vector_similarity"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_planner.rs"
+item = "shamir-engine::lib::table::read::planning::read_planner::TableManager::try_plan_order_limit_fast_path_with_context"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_planner.rs"
+item = "shamir-engine::lib::table::read::planning::read_planner::TableManager::try_plan_keyset_seek_with_interner"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/model/table.rs"
+item = "shamir-engine::lib::table::support::model::table::Table::list_stream_filtered"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/model/table.rs"
+item = "shamir-engine::lib::table::support::model::table::Table::decode_raw_batch_filtered"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_streaming.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming::TableManager::list_stream_filtered"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_streaming.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming::TableManager::read_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_streaming.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming::TableManager::read_tx_with_encoding"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_streaming.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming::TableManager::lock_query_reads"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::set_validator_registry"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::run_validators_qv"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::validator_bindings"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::run_validators_view"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::validator_registry_ref"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::run_validators_loop"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::add_validator_binding"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::collect_fk_refs"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::add_validator_binding_admitted"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/admission/views/read_only_views.rs"
+item = "shamir-engine::lib::table::table_manager::read_only_views::TableInfoStoreReadView::filter_context"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/admission/views/read_only_views.rs"
+item = "shamir-engine::lib::table::table_manager::read_only_views::ValidatorRegistryReadView::get_by_id"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager::validator_registry_ref_for_test"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/write/delete/execute.rs"
+item = "shamir-engine::lib::table::write::delete::execute::TableManager::execute_delete_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/write/insert.rs"
+item = "shamir-engine::lib::table::write::insert::TableManager::execute_insert_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/write/set/execute.rs"
+item = "shamir-engine::lib::table::write::set::execute::TableManager::execute_set_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/write/update/execute.rs"
+item = "shamir-engine::lib::table::write::update::execute::TableManager::execute_update_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_concurrent_parts/fk_child_workload.rs"
+item = "shamir-engine::bench::tx_concurrent_parts::fk_child_workload::run"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::record_size"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/runner.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::runner::QueryRunner"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/watchdog_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::watchdog_tests::watchdog_warns_while_slow_op_still_running"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/collect.rs"
+item = "shamir-engine::lib::table::read::dispatch::collect::TableManager::read_collecting_from"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/explain.rs"
+item = "shamir-engine::lib::table::read::dispatch::explain::TableManager::build_explain_plan"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/paged.rs"
+item = "shamir-engine::lib::table::read::dispatch::paged::TableManager::read_counting"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/scan.rs"
+item = "shamir-engine::lib::table::read::dispatch::scan::TableManager::read_snapshot_keyset"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/vector.rs"
+item = "shamir-engine::lib::table::read::dispatch::vector::TableManager::read_filtered_vector_scan"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/execution/dispatch.rs"
+item = "shamir-engine::lib::table::read::execution::dispatch::TableManager::read_impl"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_asof_seek.rs"
+item = "shamir-engine::lib::table::read::planning::read_asof_seek::TableManager::read_as_of_keyset_seek"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_index_scan.rs"
+item = "shamir-engine::lib::table::read::planning::read_index_scan::TableManager::read_sorted_index_scan"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_index_scan.rs"
+item = "shamir-engine::lib::table::read::planning::read_index_scan::TableManager::read_order_limit_fast"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_index_scan.rs"
+item = "shamir-engine::lib::table::read::planning::read_index_scan::TableManager::read_keyset_seek"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_index_scan.rs"
+item = "shamir-engine::lib::table::read::planning::read_index_scan::TableManager::read_index_scan"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_temporal.rs"
+item = "shamir-engine::lib::table::read::planning::read_temporal::TableManager::read_as_of"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/planning/read_temporal.rs"
+item = "shamir-engine::lib::table::read::planning::read_temporal::TableManager::read_history"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_streaming.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_streaming::TableManager::filter_stream_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/accessors/table_manager_validators.rs"
+item = "shamir-engine::lib::table::table_manager::accessors::table_manager_validators::TableManager::remove_validator_binding_admitted"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/admission/domain/barrier/write_domain_barrier.rs"
+item = "shamir-engine::lib::table::table_manager::write_domain_barrier::TableManager::open_with_domain_admitted"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/admission/views/read_only_views.rs"
+item = "shamir-engine::lib::table::table_manager::read_only_views::TableInfoStoreReadView::intern_field_path"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/admission/views/read_only_views.rs"
+item = "shamir-engine::lib::table::table_manager::read_only_views::InternerReadView::eval_context"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager/admission/views/read_only_views.rs"
+item = "shamir-engine::lib::table::table_manager::read_only_views::ValidatorRegistryReadView"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/table_manager.rs"
+item = "shamir-engine::lib::table::table_manager::TableManager"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::TableResolver::resolve_repo"
+reason = "R1: item left its module"
+owner = "<wave-R1>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/executor_traits.rs"
+item = "shamir-engine::lib::query::batch::exec::executor_traits::BatchResolver::resolve_repo"
+reason = "R1: new item of the wave"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/persistence.rs"
+item = "shamir-engine::lib::table::support::validator_bound::persistence::save_validators_metadata"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/benches/storage_concurrency/transactions/tx_pipeline.rs"
+item = "shamir-engine::bench::main"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::value_size"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::sub_batch_atomic"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::sub_batch_partial_writes_roll_back_on_later_top_level_failure"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/batching/iteration/sub_batch_basic_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::batching::iteration::sub_batch_basic_tests::tx_in_tx_rejected"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/call_tx_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::call_tx_tests::call_in_transactional_batch_rejected"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/executor/tx/ssi_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::executor::tx::ssi_tests::ssi_write_skew_detected_through_execute_batch"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/dos_gate_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::dos_gate_tests::execution_deadline_from_absurd_budget_does_not_panic"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/watchdog_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::watchdog_tests::watchdog_no_warnings_for_normal_ops"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/table_resolver.rs"
+item = "shamir-engine::lib::table::support::table_resolver::TableResolver"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::build_table_with_validators"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/validator_db.rs"
+item = "shamir-engine::lib::table::support::validator_bound::validator_db::ValidatorFkCtx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/computed_default_transform_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests::computed_default_fn_call_stamps_absent_field"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/computed_default_transform_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::computed_default_transform_tests::computed_default_fn_call_stamps_absent_field"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/computed_default_transform_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests::computed_default_does_not_overwrite_present_value"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/computed_default_transform_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::computed_default_transform_tests::computed_default_does_not_overwrite_present_value"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/computed_default_transform_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::computed_default_transform_tests::computed_default_does_not_overwrite_explicit_null"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/computed_default_transform_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::computed_default_transform_tests::computed_default_does_not_overwrite_explicit_null"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe::fk_batch_cache_tests::fk_without_batch_cache_scans_per_probe"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_without_batch_cache_scans_per_probe"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_insert_through_execute_insert_tx_scans_parent_once"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_insert_through_execute_insert_tx_scans_parent_once"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_cache_amortizes_parent_scans_and_keeps_staged_visibility"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_cache_amortizes_parent_scans_and_keeps_staged_visibility"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/fk_probe/staged_probe_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::fk_probe::staged_probe_tests::rv_engine_0db9257b_staged_probe_is_not_linear"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/staged_probe_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::staged_probe_tests::rv_engine_0db9257b_staged_probe_is_not_linear"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/persistence_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::persistence_tests::round_trip_empty"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/persistence_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::persistence_tests::round_trip_empty"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/persistence_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::persistence_tests::load_missing_returns_none"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/persistence_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::persistence_tests::load_missing_returns_none"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/persistence_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::persistence_tests::round_trip_save_load"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/persistence_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::persistence_tests::round_trip_save_load"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::no_bindings_returns_ok"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_bindings_returns_ok"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::no_matching_op_returns_ok"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_matching_op_returns_ok"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::accept_validator_returns_ok"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::accept_validator_returns_ok"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::reject_validator_returns_failed"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::reject_validator_returns_failed"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::priority_order_and_collect_all"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::priority_order_and_collect_all"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::stop_halts_remaining_validators"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::stop_halts_remaining_validators"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::missing_validator_fails_closed"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::missing_validator_fails_closed"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::trap_validator_fails_closed"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::trap_validator_fails_closed"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::run_validators_tests::no_registry_returns_ok"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_registry_returns_ok"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_actor_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests::validator_sees_caller_actor_not_system"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_actor_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests::validator_sees_caller_actor_not_system"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_actor_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_actor_tests::validator_rejects_when_caller_actor_differs"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_actor_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_actor_tests::validator_rejects_when_caller_actor_differs"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::fk_final_staged_state_matrix"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_final_staged_state_matrix"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::fk_control_missing_parent_is_rejected_through_execute_insert_tx"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_control_missing_parent_is_rejected_through_execute_insert_tx"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::fk_staged_corrupt_parent_fails_closed"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_staged_corrupt_parent_fails_closed"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::validator_db_no_deadlock_cross_and_self_read"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::validator_db_no_deadlock_cross_and_self_read"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::validator_db_fk_sees_staged_parent_in_same_tx"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::validator_db_fk_sees_staged_parent_in_same_tx"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::exists_in_table_fails_closed_on_decode_corrupt_row"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::exists_in_table_fails_closed_on_decode_corrupt_row"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::exists_in_self_fails_closed_on_decode_corrupt_row"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::exists_in_self_fails_closed_on_decode_corrupt_row"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::fk_multi_child_rows_unindexed_parent_correct_decisions"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_multi_child_rows_unindexed_parent_correct_decisions"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[moved]]
+path = "crates/engine/shamir-engine/src/validator/engine_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::validator::engine_bound::tests::validator_db_tests::fk_unindexed_field_scan_logs_warning"
+to_path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+to_item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_unindexed_field_scan_logs_warning"
+reason = "R1: moved with its module"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_without_batch_cache_scans_per_probe"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_insert_through_execute_insert_tx_scans_parent_once"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/fk_probe/fk_batch_cache_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::fk_probe::fk_batch_cache_tests::fk_batch_cache_amortizes_parent_scans_and_keeps_staged_visibility"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_bindings_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_matching_op_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::accept_validator_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::reject_validator_returns_failed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::priority_order_and_collect_all"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::stop_halts_remaining_validators"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::missing_validator_fails_closed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::trap_validator_fails_closed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/run_validators_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::run_validators_tests::no_registry_returns_ok"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_final_staged_state_matrix"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_staged_corrupt_parent_fails_closed"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::validator_db_fk_sees_staged_parent_in_same_tx"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::exists_in_table_fails_closed_on_decode_corrupt_row"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::exists_in_self_fails_closed_on_decode_corrupt_row"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_multi_child_rows_unindexed_parent_correct_decisions"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/support/validator_bound/tests/validator_db_tests.rs"
+item = "shamir-engine::lib::table::support::validator_bound::tests::validator_db_tests::fk_unindexed_field_scan_logs_warning"
+reason = "R1: imports, bounds or signature follow the move"
+owner = "<wave-R1>"

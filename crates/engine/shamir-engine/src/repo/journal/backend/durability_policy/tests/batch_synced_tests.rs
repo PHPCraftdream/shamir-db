@@ -9,7 +9,7 @@ use shamir_query_types::batch::VisibilityWait;
 use shamir_storage::error::DbResult;
 use shamir_types::access::Actor;
 
-use crate::query::batch::{execute_batch_unchecked, TableResolver};
+use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::RepoInstance;
 use crate::table::TableManager;
@@ -25,7 +25,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table: &TableRef) -> DbResult<TableManager> {
         self.0.get_table(&table.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> DbResult<RepoInstance> {
         Ok(self.0.clone())
     }

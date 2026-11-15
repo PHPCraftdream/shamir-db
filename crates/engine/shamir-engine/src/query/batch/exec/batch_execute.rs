@@ -5,7 +5,7 @@ use crate::query::batch::batch_validate::{
     validate_abort_on_skip_scope, validate_executable_guards, validate_tables,
 };
 use crate::query::batch::exec_scope::ExecScope;
-use crate::query::batch::executor_traits::{AdminExecutor, FunctionInvoker, TableResolver};
+use crate::query::batch::executor_traits::{AdminExecutor, BatchResolver, FunctionInvoker};
 use crate::query::batch::op_watchdog::register_op_watchdog;
 #[cfg(test)]
 use crate::query::batch::query_runner::execute_single_impl;
@@ -93,7 +93,7 @@ fn warn_if_op_slow(alias: &str, elapsed: std::time::Duration) {
 /// module doc for the full rationale.
 pub async fn execute_batch(
     auth: Authorized<'_>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
 ) -> Result<BatchResponse, BatchError> {
@@ -124,7 +124,7 @@ pub async fn execute_batch(
 #[cfg(test)]
 pub(crate) async fn execute_batch_unchecked(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: Actor,
@@ -157,7 +157,7 @@ pub(crate) async fn execute_batch_unchecked(
 /// same as before.
 pub(in crate::query::batch) async fn plan_and_validate_batch(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     scope: &ExecScope,
 ) -> Result<BatchPlan, BatchError> {
     plan_and_validate_with_metadata(request, resolver, scope, None).await
@@ -165,7 +165,7 @@ pub(in crate::query::batch) async fn plan_and_validate_batch(
 
 async fn plan_and_validate_with_metadata(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     scope: &ExecScope,
     metadata: Option<&shamir_query_types::batch::RequestMetadata>,
 ) -> Result<BatchPlan, BatchError> {
@@ -221,7 +221,7 @@ async fn plan_and_validate_with_metadata(
 /// immediate hard crash. No-op otherwise.
 async fn flush_if_synced_durability(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     db_name: &str,
     scope: &ExecScope,
     depth: usize,
@@ -291,7 +291,7 @@ async fn flush_if_synced_durability(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::query::batch) fn execute_batch_impl<'a>(
     request: &'a BatchRequest,
-    resolver: &'a dyn TableResolver,
+    resolver: &'a dyn BatchResolver,
     admin: Option<&'a dyn AdminExecutor>,
     invoker: Option<&'a dyn FunctionInvoker>,
     actor: Actor,
@@ -403,7 +403,7 @@ type PlannedBatchResultFuture<'a> = std::pin::Pin<
 pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
     request: &'a BatchRequest,
     plan: &'a mut BatchPlan,
-    resolver: &'a dyn TableResolver,
+    resolver: &'a dyn BatchResolver,
     admin: Option<&'a dyn AdminExecutor>,
     invoker: Option<&'a dyn FunctionInvoker>,
     actor: Actor,
@@ -478,7 +478,7 @@ pub(in crate::query::batch) fn execute_planned_batch_impl<'a>(
 #[cfg(test)]
 pub async fn execute_batch_with_permissions(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     permissions: &crate::query::auth::SessionPermissions,
     db_name: &str,
@@ -562,7 +562,7 @@ fn and_combine(
 pub(in crate::query::batch) async fn execute_plan_impl(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
@@ -662,7 +662,7 @@ pub(in crate::query::batch) async fn execute_plan_impl(
 pub(in crate::query::batch) async fn execute_plan_tx(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
@@ -691,7 +691,7 @@ pub(in crate::query::batch) async fn execute_plan_tx(
 pub(in crate::query::batch) async fn execute_plan_tx_impl(
     plan: &mut BatchPlan,
     queries: &TMap<String, QueryEntry>,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,
@@ -788,7 +788,7 @@ pub(in crate::query::batch) async fn execute_plan_tx_impl(
 pub(in crate::query::batch) async fn execute_transactional_impl(
     request: &BatchRequest,
     plan: &mut BatchPlan,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: &Actor,

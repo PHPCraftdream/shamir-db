@@ -3,22 +3,24 @@ use std::time::Instant;
 use bytes::Bytes;
 use futures::StreamExt;
 
-use crate::query::filter::eval::compile_filter;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::write::{DeleteOp, InsertedRecord, WriteResult};
+use shamir_engine_query::query::filter::eval::compile_filter;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::write::{DeleteOp, InsertedRecord, WriteResult};
 use shamir_storage::error::DbResult;
 use shamir_types::codecs::interned::record_view_to_query_value;
 use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::validator::WriteOp;
+use crate::table::validator_bound::ValidatorFkCtx;
+use shamir_engine_validator::validator::WriteOp;
 use shamir_types::access::Actor;
 
 use crate::table::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
 use crate::table::write::set::execute::project_query_value;
 use crate::table::write::write_helpers::validator_failure_to_db_error;
+use crate::table::TableResolver;
 impl TableManager {
     /// tx-aware variant of DELETE.
     ///
@@ -30,7 +32,7 @@ impl TableManager {
         op: &DeleteOp,
         ctx: &FilterContext<'_>,
         tx: &mut shamir_tx::TxContext,
-        resolver: Option<&dyn crate::query::TableResolver>,
+        resolver: Option<&dyn TableResolver>,
         actor: &Actor,
     ) -> DbResult<WriteResult> {
         let start = Instant::now();
@@ -196,7 +198,7 @@ impl TableManager {
                         Some(&view),
                         actor,
                         tx,
-                        crate::validator::ValidatorFkCtx {
+                        ValidatorFkCtx {
                             resolver,
                             // Deletes never gain FK parents; no batch cache.
                             fk_cache: None,

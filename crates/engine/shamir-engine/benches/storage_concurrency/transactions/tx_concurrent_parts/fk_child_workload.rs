@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use bench_scale_tool::Harness;
 use shamir_engine::db_instance::db_instance::DbInstance;
-use shamir_engine::query::batch::TableResolver;
+use shamir_engine::query::batch::{BatchResolver, TableResolver};
 use shamir_engine::query::TableRef;
 use shamir_engine::repo::{BoxRepoFactory, RepoConfig, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
@@ -118,6 +118,10 @@ pub(in super::super) fn run(h: &mut Harness) {
         ) -> shamir_storage::error::DbResult<TableManager> {
             self.repo.get_table(&table_ref.table).await
         }
+    }
+
+    #[async_trait::async_trait]
+    impl BatchResolver for FkChildBenchResolver {
         async fn resolve_repo(
             &self,
             _repo_name: &str,

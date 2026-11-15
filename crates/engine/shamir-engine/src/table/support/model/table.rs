@@ -232,7 +232,7 @@ impl Table {
     pub(in crate::table) fn list_stream_filtered<'a>(
         &self,
         batch_size: usize,
-        pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
+        pre_filter: std::sync::Arc<shamir_engine_query::query::filter::FilterNode>,
     ) -> impl Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + 'a {
         let table = self.clone();
 
@@ -302,7 +302,7 @@ impl Table {
     /// Error semantics: RELAXED (same as `decode_raw_batch`).
     pub(in crate::table) fn decode_raw_batch_filtered(
         batch_bytes: Vec<(bytes::Bytes, bytes::Bytes)>,
-        pre_filter: &crate::query::filter::FilterNode,
+        pre_filter: &shamir_engine_query::query::filter::FilterNode,
     ) -> impl Iterator<Item = DbResult<Vec<(RecordId, RecordCow)>>> {
         let mut batch = Vec::new();
 

@@ -5,17 +5,17 @@
 
 use std::time::Instant;
 
-use crate::query::filter::eval::intern_field_path;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::{
-    exec, GroupBy, QueryResult, QueryStats, ReadQuery, Select, SelectItem, Temporal,
-};
 use crate::table::read::dispatch::explain::contains_vector_similarity;
 use crate::table::read::vector::filtered_vector::{
     snapshot_vector_query, try_extract_filtered_vector_query,
 };
 use crate::table::support::storage::record_cow::RecordCow;
 use crate::table::table_manager::TableManager;
+use shamir_engine_query::query::filter::eval::intern_field_path;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::read::{
+    exec, GroupBy, QueryResult, QueryStats, ReadQuery, Select, SelectItem, Temporal,
+};
 
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
@@ -429,8 +429,10 @@ impl TableManager {
                             Ok(Some(id)) => {
                                 // Load the record and extract the field value.
                                 let record = self.get(id).await?;
-                                let val =
-                                    crate::query::filter::eval::resolve_field(&record, &field_path);
+                                let val = shamir_engine_query::query::filter::eval::resolve_field(
+                                    &record,
+                                    &field_path,
+                                );
                                 let qv_val = match val {
                                     Some(v) => {
                                         shamir_types::codecs::interned::inner_value_to_query_value(
@@ -448,9 +450,9 @@ impl TableManager {
                                 let mut obj = new_map_wc(1);
                                 obj.insert(key, qv_val);
                                 return Ok(QueryResult::with_stats(
-                                    vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
-                                        obj,
-                                    ))],
+                                    vec![shamir_engine_query::query::read::QueryRecord::Direct(
+                                        QueryValue::Map(obj),
+                                    )],
                                     QueryStats {
                                         index_used: Some(format!(
                                             "sorted_idx_{}_min",
@@ -481,9 +483,9 @@ impl TableManager {
                 let mut obj = new_map_wc(1);
                 obj.insert(key, QueryValue::Int(count as i64));
                 return Ok(QueryResult::with_stats(
-                    vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
-                        obj,
-                    ))],
+                    vec![shamir_engine_query::query::read::QueryRecord::Direct(
+                        QueryValue::Map(obj),
+                    )],
                     QueryStats {
                         index_used: Some("__record_counter__".to_string()),
                         records_scanned: 0,
@@ -599,9 +601,9 @@ impl TableManager {
                             let mut obj = new_map_wc(1);
                             obj.insert(key, QueryValue::Int(total as i64));
                             return Ok(QueryResult::with_stats(
-                                vec![crate::query::read::QueryRecord::Direct(QueryValue::Map(
-                                    obj,
-                                ))],
+                                vec![shamir_engine_query::query::read::QueryRecord::Direct(
+                                    QueryValue::Map(obj),
+                                )],
                                 QueryStats {
                                     index_used: Some(format!("idx_{idx_name}")),
                                     records_scanned: total,
@@ -668,8 +670,10 @@ impl TableManager {
                             Err(e) => return Err(e),
                             Ok(Some(id)) => {
                                 let record = self.get(id).await?;
-                                let val =
-                                    crate::query::filter::eval::resolve_field(&record, &field_path);
+                                let val = shamir_engine_query::query::filter::eval::resolve_field(
+                                    &record,
+                                    &field_path,
+                                );
                                 let qv_val = match val {
                                     Some(v) => {
                                         shamir_types::codecs::interned::inner_value_to_query_value(
@@ -687,9 +691,11 @@ impl TableManager {
                                 let mut obj = new_map_wc(1);
                                 obj.insert(key, qv_val);
                                 return Ok(QueryResult {
-                                    records: vec![crate::query::read::QueryRecord::Direct(
-                                        QueryValue::Map(obj),
-                                    )],
+                                    records: vec![
+                                        shamir_engine_query::query::read::QueryRecord::Direct(
+                                            QueryValue::Map(obj),
+                                        ),
+                                    ],
                                     stats: Some(QueryStats {
                                         index_used: Some(format!(
                                             "sorted_idx_{}_max",

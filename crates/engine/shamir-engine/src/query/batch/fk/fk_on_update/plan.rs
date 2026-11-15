@@ -8,7 +8,7 @@ use shamir_query_types::write::UpdateOp;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::batch::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::query::filter::FilterContext;
 use crate::query::TableRef;
 use crate::table::TableManager;
@@ -77,7 +77,7 @@ impl FkUpdatePlan {
 /// Returns `Ok(plan)` to proceed (possibly empty), or `Err` to reject.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn plan_fk_on_update(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
     parent_table: &TableManager,
     update_op: &UpdateOp,

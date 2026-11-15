@@ -13,7 +13,7 @@ use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::{execute_batch_unchecked, TableResolver};
+use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::read::QueryResult;
 use crate::query::TableRef;
 use crate::repo::RepoInstance;
@@ -105,7 +105,10 @@ impl TableResolver for Resolver {
         assert_eq!(table_ref.table, "rows");
         Ok(self.table.clone())
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         // Read-only batches use the standalone table's MVCC store, not a repo drainer.
         Err(DbError::NotFound("standalone fixture has no repo".into()))

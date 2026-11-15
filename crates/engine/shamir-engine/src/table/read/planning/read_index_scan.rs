@@ -9,11 +9,13 @@ use std::time::Instant;
 use bytes::Bytes;
 
 use crate::index::sorted_index_manager::decode_covering_projection;
-use crate::query::filter::eval::FilterNode;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::{compile_filter_with_context, Filter};
-use crate::query::read::order::PREALLOC_CAP;
-use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem};
+use shamir_engine_query::query::filter::eval::FilterNode;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::filter::{compile_filter_with_context, Filter};
+use shamir_engine_query::query::read::order::PREALLOC_CAP;
+use shamir_engine_query::query::read::{
+    exec, QueryRecord, QueryResult, QueryStats, ReadQuery, SelectItem,
+};
 use shamir_query_types::read::OrderDirection;
 use shamir_storage::error::{DbError, DbResult};
 use shamir_types::core::interner::{Interner, InternerKey};
@@ -335,7 +337,7 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
-            let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+            let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
 
             // Opt #3a (LIMIT push-down)
             if let Some((paged, pagination)) = try_project_page_only_bytes(
@@ -450,7 +452,7 @@ impl TableManager {
             }
         }
 
-        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
         let result_qv = apply_select_value_bytes(
             &matched,
             &query.select,
@@ -587,7 +589,7 @@ impl TableManager {
 
         // Project to QueryValue in value order — no sort, no exclusion
         // filter (both are now handled by the ordered early-stop walk).
-        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
         let result_qv = apply_select_value_bytes(
             &matched,
             &query.select,
@@ -788,7 +790,7 @@ impl TableManager {
             }
 
             let records_scanned = matched.len() as u64;
-            let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+            let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
 
             // Opt #3a (LIMIT push-down)
             if let Some((paged, pagination)) = try_project_page_only_bytes(

@@ -10,7 +10,7 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch_unchecked, TableResolver};
+use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::filter::eval_context::FilterContext;
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
@@ -26,7 +26,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table("default", &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         self.db
             .get_repo("default")

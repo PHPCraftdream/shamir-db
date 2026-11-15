@@ -2,14 +2,14 @@ use std::borrow::Cow;
 
 use shamir_collections::{TFxMap, TFxSet};
 
-use crate::query::batch::{BatchError, BatchOp, BatchRequest, QueryEntry, TableResolver};
+use crate::query::batch::{BatchError, BatchOp, BatchRequest, BatchResolver, QueryEntry};
 use shamir_query_types::batch::VisibilityWait;
 
 /// Preflight the complete tree before dispatch. Transactional DML is covered
 /// by the outer receipt; Call/admin writes are independently committed.
 pub(in crate::query::batch) async fn validate(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     root_metadata: Option<&shamir_query_types::batch::RequestMetadata>,
 ) -> Result<(), BatchError> {
     if !request.transactional

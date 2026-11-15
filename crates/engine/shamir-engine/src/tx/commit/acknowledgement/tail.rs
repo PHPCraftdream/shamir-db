@@ -7,9 +7,8 @@ use shamir_tunables::instance_defaults::MAX_UNDRAINED_VERSIONS;
 use shamir_tx::visibility_metrics::{AckMode, AckResult, PendingKind};
 use shamir_tx::TxContext;
 
-use crate::repo::visibility_observer::{
-    observe_gate_with_budget, query_ack_result, record_pending_kind,
-};
+use crate::repo::gate_visibility::observe_gate_with_budget;
+use crate::repo::visibility_observer::{query_ack_result, record_pending_kind};
 use crate::repo::RepoInstance;
 use crate::tx::commit::{commit_tx_inner, release_pessimistic_locks, TxError};
 use crate::tx::tx_outcome::{MaterializationState, TxOutcome};

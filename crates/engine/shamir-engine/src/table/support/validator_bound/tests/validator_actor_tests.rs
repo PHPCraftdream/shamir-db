@@ -25,14 +25,14 @@ use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
-use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
-use crate::validator::{
+use shamir_engine_validator::validator::{
     encode::Validation, record_fields::RecordFields, record_validator::RecordValidator,
     record_validator::ValidatorCtx, ValidatorBinding, ValidatorRegistry, WriteOp,
 };
+use shamir_query_types::TableRef;
 
 // ── Validator under test ───────────────────────────────────────────────────
 

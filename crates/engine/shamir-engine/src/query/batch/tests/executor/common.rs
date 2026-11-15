@@ -1,7 +1,7 @@
 //! Shared test helpers for batch executor tests.
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::RepoConfig;
@@ -22,7 +22,10 @@ impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table(&self.repo, &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
         // F4b-1: non-tx writes now route through an implicit Snapshot tx, so the
         // executor calls `resolve_repo` even on the non-transactional path. Back
@@ -56,7 +59,10 @@ impl TableResolver for TxTestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TxTestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
         Ok(self.repo.clone())
     }
@@ -105,14 +111,17 @@ impl TableResolver for TestResolverWithScalars {
         self.db.get_table(&self.repo, &table_ref.table).await
     }
 
+    fn scalar_resolver(&self) -> ScalarResolver {
+        self.scalars.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchResolver for TestResolverWithScalars {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<crate::repo::RepoInstance> {
         self.db.get_repo(&self.repo).ok_or_else(|| {
             shamir_storage::error::DbError::NotFound(format!("repo '{}' not found", self.repo))
         })
-    }
-
-    fn scalar_resolver(&self) -> ScalarResolver {
-        self.scalars.clone()
     }
 }
 

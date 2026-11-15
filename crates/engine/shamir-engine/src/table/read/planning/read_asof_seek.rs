@@ -90,9 +90,9 @@ use shamir_query_types::read::OrderDirection;
 use shamir_types::core::interner::Interner;
 use shamir_types::types::record_id::RecordId;
 
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::read::order::PREALLOC_CAP;
-use crate::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery};
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::read::order::PREALLOC_CAP;
+use shamir_engine_query::query::read::{exec, QueryRecord, QueryResult, QueryStats, ReadQuery};
 use shamir_storage::error::{DbError, DbResult};
 
 use crate::table::read::dispatch::explain::apply_select_value_bytes;
@@ -318,7 +318,7 @@ impl TableManager {
         // Project to QueryValue in value order — no sort, no exclusion filter
         // (both are handled by the ordered early-stop walk + the version
         // classifier above). Mirrors `read_keyset_seek`'s tail.
-        let mut corrupt: Vec<crate::query::read::CorruptRecordRef> = Vec::new();
+        let mut corrupt: Vec<shamir_engine_query::query::read::CorruptRecordRef> = Vec::new();
         let result_qv = apply_select_value_bytes(
             &matched,
             &query.select,

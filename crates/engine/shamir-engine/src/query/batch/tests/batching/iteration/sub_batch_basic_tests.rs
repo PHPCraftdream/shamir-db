@@ -17,11 +17,14 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::db_instance::db_instance::DbInstance;
-use crate::query::batch::{execute_batch_unchecked as execute_batch, TableResolver};
+use crate::query::batch::execute_in_open_tx_unchecked as execute_in_open_tx;
+use crate::query::batch::open_interactive_tx;
+use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
 use crate::table::{TableConfig, TableManager};
+use futures::StreamExt;
 use shamir_storage::error::DbResult;
 // ============================================================================
 // Shared infrastructure
@@ -35,7 +38,10 @@ impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table("default", &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         // F4b-1: non-tx inserts route through an implicit Snapshot tx, so the
         // executor now resolves the repo even on the non-transactional path.
@@ -63,7 +69,10 @@ impl TableResolver for TxTestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TxTestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }
@@ -101,14 +110,17 @@ impl TableResolver for TestResolverWithScalars {
         self.db.get_table("default", &table_ref.table).await
     }
 
+    fn scalar_resolver(&self) -> ScalarResolver {
+        self.scalars.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl BatchResolver for TestResolverWithScalars {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         self.db.get_repo("default").ok_or_else(|| {
             shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
         })
-    }
-
-    fn scalar_resolver(&self) -> ScalarResolver {
-        self.scalars.clone()
     }
 }
 
@@ -369,8 +381,6 @@ async fn sub_batch_bind_injects_param() {
 // ============================================================================
 #[tokio::test]
 async fn sub_batch_atomic() {
-    use futures::StreamExt;
-
     let factory = BoxRepoFactory::in_memory();
     let repo = RepoInstance::from_factory("test".into(), factory, vec![TableConfig::new("users")])
         .await
@@ -501,8 +511,6 @@ async fn sub_batch_atomic() {
 // ============================================================================
 #[tokio::test]
 async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
-    use futures::StreamExt;
-
     let factory = BoxRepoFactory::in_memory();
     let repo = RepoInstance::from_factory("test".into(), factory, vec![TableConfig::new("users")])
         .await
@@ -685,9 +693,6 @@ async fn sub_batch_partial_writes_roll_back_on_later_top_level_failure() {
 // ============================================================================
 #[tokio::test]
 async fn tx_in_tx_rejected() {
-    use crate::query::batch::execute_in_open_tx_unchecked as execute_in_open_tx;
-    use crate::query::batch::open_interactive_tx;
-
     let factory = BoxRepoFactory::in_memory();
     let repo = RepoInstance::from_factory("test".into(), factory, vec![TableConfig::new("users")])
         .await

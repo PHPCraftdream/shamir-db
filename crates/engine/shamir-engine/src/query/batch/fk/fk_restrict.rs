@@ -65,7 +65,7 @@ use shamir_query_types::filter::Filter;
 use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::TableResolver;
+use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
 use crate::repo::{build_reverse_fk_entries, ReverseFkEntry};
@@ -82,7 +82,7 @@ use crate::table::TableManager;
 /// Returns `Ok(())` to proceed with the delete, or `Err(BatchError)` to reject.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn check_fk_restrict(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
     parent_table: &TableManager,
     delete_where: &Filter,
@@ -178,7 +178,7 @@ pub(crate) async fn check_fk_restrict(
 /// exactly once and seeds every parent table's entry in the repo, not just
 /// this one.
 async fn discover_restrict_refs(
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     parent_table_ref: &TableRef,
 ) -> Result<Vec<ReverseFkEntry>, BatchError> {
     let repo = resolver

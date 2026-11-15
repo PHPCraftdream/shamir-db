@@ -12,7 +12,7 @@ use shamir_types::access::Actor;
 use shamir_types::types::common::new_map;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
-use crate::query::batch::{execute_batch_unchecked, TableResolver};
+use crate::query::batch::{execute_batch_unchecked, BatchResolver, TableResolver};
 use crate::query::filter::{FilterContext, FilterValue};
 use crate::query::TableRef;
 use crate::repo::RepoInstance;
@@ -26,7 +26,10 @@ impl TableResolver for Resolver {
         assert_eq!(table.table, "rows");
         Ok(self.0.clone())
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _: &str) -> DbResult<RepoInstance> {
         // Latest unchecked, nontransactional reads do not require a repo.
         Err(DbError::NotFound("standalone fixture".into()))

@@ -18,16 +18,9 @@
 #   discovery_delta = repo-relative path to a separate delta of the same shape;
 #             path/item identify the base binary id/test name, and explicit
 #             to_path/to_item identify the head binary id/test name
-#
-# Examples (do not uncomment; illustration only):
-# [[campaigns]]
-# name    = "split-repo-instance"
-# packages = ["shamir-db"]
-# delta   = ".rust-guard/stages/split-repo-instance.toml"
-# discovery_delta = ".rust-guard/stages/split-repo-instance-discovery.toml"
 
 [[campaigns]]
-name = "engine-layering-R3"
-packages = ["shamir-engine"]
-delta = ".rust-guard/stages/engine-layering-R3.toml"
-discovery_delta = ".rust-guard/stages/engine-layering-R3.discovery.toml"
+name = "engine-layering-R1"
+packages = ["shamir-engine", "shamir-engine-query"]
+delta = ".rust-guard/stages/engine-layering-R1.toml"
+discovery_delta = ".rust-guard/stages/engine-layering-R1-discovery.toml"

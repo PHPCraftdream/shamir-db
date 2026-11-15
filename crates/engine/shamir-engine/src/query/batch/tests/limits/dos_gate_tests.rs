@@ -30,7 +30,10 @@ use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::query_runner::{
     effective_max_iterations, ABSOLUTE_MAX_FOR_EACH_ITERATIONS,
 };
-use crate::query::batch::{execute_batch_unchecked as execute_batch, BatchError, TableResolver};
+use crate::query::batch::ExecutionDeadline;
+use crate::query::batch::{
+    execute_batch_unchecked as execute_batch, BatchError, BatchResolver, TableResolver,
+};
 use crate::query::TableRef;
 use crate::repo::repo_types::BoxRepoFactory;
 use crate::repo::{RepoConfig, RepoInstance};
@@ -50,7 +53,10 @@ impl TableResolver for TestResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.db.get_table("default", &table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for TestResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         self.db.get_repo("default").ok_or_else(|| {
             shamir_storage::error::DbError::NotFound("repo 'default' not found".into())
@@ -93,7 +99,10 @@ impl<R: TableResolver + Send + Sync> TableResolver for SlowResolver<R> {
         tokio::time::sleep(self.delay).await;
         self.inner.resolve(table_ref).await
     }
+}
 
+#[async_trait::async_trait]
+impl<R: BatchResolver> BatchResolver for SlowResolver<R> {
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<RepoInstance> {
         self.inner.resolve_repo(repo_name).await
     }
@@ -128,7 +137,10 @@ impl<R: TableResolver + Send + Sync> TableResolver for OpPathSlowResolver<R> {
         }
         self.inner.resolve(table_ref).await
     }
+}
 
+#[async_trait::async_trait]
+impl<R: BatchResolver> BatchResolver for OpPathSlowResolver<R> {
     async fn resolve_repo(&self, repo_name: &str) -> DbResult<RepoInstance> {
         self.inner.resolve_repo(repo_name).await
     }
@@ -145,7 +157,10 @@ impl TableResolver for RepoResolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for RepoResolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }
@@ -412,8 +427,6 @@ async fn execute_batch_within_time_budget_succeeds_unaffected() {
 
 #[test]
 fn execution_deadline_from_absurd_budget_does_not_panic() {
-    use crate::query::batch::ExecutionDeadline;
-
     // Must not panic constructing the deadline...
     let deadline = ExecutionDeadline::from_budget_secs(u64::MAX);
     // ...and a normal (non-expired) checkpoint must still pass.

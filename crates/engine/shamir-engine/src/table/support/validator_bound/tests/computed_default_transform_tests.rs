@@ -4,7 +4,7 @@ use shamir_types::types::value::QueryValue;
 
 use crate::function::builtin_scalars;
 use crate::table::write_helpers::apply_transforms;
-use crate::validator::TransformSpec;
+use shamir_engine_validator::validator::TransformSpec;
 
 // ── ③.2c: computed-default expression evaluated via apply_transforms ──────────
 

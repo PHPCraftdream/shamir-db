@@ -12,15 +12,15 @@ use shamir_types::record_view::RecordView;
 use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::InnerValue;
 
-use crate::query::filter::eval::compile_filter;
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::Filter;
 use crate::table::record_cow::RecordCow;
 use crate::table::table::Table;
 use crate::table::table_manager::TableManager;
 use crate::table::tx_scan_overlay::{
     merge_filtered_stream_with_tx_overlay, merge_stream_with_tx_overlay, overlay_rows_for_tx,
 };
+use shamir_engine_query::query::filter::eval::{compile_filter, predicate_to_index_range_in_ctx};
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::filter::Filter;
 
 // ── F-65 (#891) test-only failure-injection seam ────────────────────────────
 //
@@ -232,7 +232,7 @@ impl TableManager {
     pub(crate) fn list_stream_filtered(
         &self,
         batch_size: usize,
-        pre_filter: std::sync::Arc<crate::query::filter::FilterNode>,
+        pre_filter: std::sync::Arc<shamir_engine_query::query::filter::FilterNode>,
     ) -> impl futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + '_ {
         type DynStream<'a> = std::pin::Pin<
             Box<dyn futures::Stream<Item = DbResult<Vec<(RecordId, RecordCow)>>> + Send + 'a>,
@@ -418,12 +418,8 @@ impl TableManager {
         if let Some(t) = tx {
             if t.isolation == shamir_tx::IsolationLevel::Serializable {
                 let token = self.table_token();
-                let deps = crate::query::filter::eval::predicate_to_index_range_in_ctx(
-                    filter,
-                    self.sorted_indexes(),
-                    ctx,
-                    token,
-                );
+                let deps =
+                    predicate_to_index_range_in_ctx(filter, self.sorted_indexes(), ctx, token);
                 if deps.is_empty() {
                     t.record_predicate_shared(shamir_tx::predicate_set::PredicateDep::TableScan {
                         table_token: token,
@@ -834,10 +830,10 @@ impl TableManager {
     /// end-to-end.
     pub async fn read_tx(
         &self,
-        query: &crate::query::read::ReadQuery,
+        query: &shamir_engine_query::query::read::ReadQuery,
         ctx: &FilterContext<'_>,
         tx: Option<&shamir_tx::TxContext>,
-    ) -> DbResult<crate::query::read::QueryResult> {
+    ) -> DbResult<shamir_engine_query::query::read::QueryResult> {
         self.ensure_repo_readable()?;
         // Only a Serializable tx records reads; for everything else the
         // recording pass is pure overhead, so dispatch straight to `read`.
@@ -862,12 +858,8 @@ impl TableManager {
                     );
                 }
                 Some(filter) => {
-                    let deps = crate::query::filter::eval::predicate_to_index_range_in_ctx(
-                        filter,
-                        self.sorted_indexes(),
-                        ctx,
-                        token,
-                    );
+                    let deps =
+                        predicate_to_index_range_in_ctx(filter, self.sorted_indexes(), ctx, token);
                     if deps.is_empty() {
                         tx_ref.record_predicate_shared(
                             shamir_tx::predicate_set::PredicateDep::TableScan {
@@ -901,11 +893,11 @@ impl TableManager {
     /// so that the result rows honour the requested encoding.
     pub async fn read_tx_with_encoding(
         &self,
-        query: &crate::query::read::ReadQuery,
+        query: &shamir_engine_query::query::read::ReadQuery,
         ctx: &FilterContext<'_>,
         tx: Option<&shamir_tx::TxContext>,
         encoding: ResultEncoding,
-    ) -> DbResult<crate::query::read::QueryResult> {
+    ) -> DbResult<shamir_engine_query::query::read::QueryResult> {
         self.ensure_repo_readable()?;
         // Only a Serializable tx records reads; for everything else the
         // recording pass is pure overhead, so skip it.
@@ -926,12 +918,8 @@ impl TableManager {
                     );
                 }
                 Some(filter) => {
-                    let deps = crate::query::filter::eval::predicate_to_index_range_in_ctx(
-                        filter,
-                        self.sorted_indexes(),
-                        ctx,
-                        token,
-                    );
+                    let deps =
+                        predicate_to_index_range_in_ctx(filter, self.sorted_indexes(), ctx, token);
                     if deps.is_empty() {
                         tx_ref.record_predicate_shared(
                             shamir_tx::predicate_set::PredicateDep::TableScan {
@@ -960,7 +948,7 @@ impl TableManager {
     /// only — never called for Snapshot / Serializable.
     async fn lock_query_reads(
         &self,
-        query: &crate::query::read::ReadQuery,
+        query: &shamir_engine_query::query::read::ReadQuery,
         ctx: &FilterContext<'_>,
         tx: &shamir_tx::TxContext,
     ) -> DbResult<()> {

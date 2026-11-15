@@ -10,7 +10,7 @@ use smallvec::smallvec;
 
 use crate::db_instance::db_instance::DbInstance;
 use crate::query::batch::execute_batch_unchecked as execute_batch;
-use crate::query::batch::TableResolver;
+use crate::query::batch::{BatchResolver, TableResolver};
 use crate::query::TableRef;
 use crate::table::TableManager;
 use crate::validator::schema::constraints::Constraints;
@@ -35,7 +35,10 @@ impl TableResolver for FkTestResolver {
         table.set_validator_registry(Arc::clone(&self.registry));
         Ok(table)
     }
+}
 
+#[async_trait::async_trait]
+impl BatchResolver for FkTestResolver {
     async fn resolve_repo(
         &self,
         _repo_name: &str,

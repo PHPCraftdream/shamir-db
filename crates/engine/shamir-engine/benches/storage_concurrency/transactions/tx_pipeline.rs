@@ -32,21 +32,26 @@ use std::sync::Arc;
 use bench_scale_tool::Harness;
 use shamir_engine::query::batch::{
     execute_batch as execute_batch_raw, AccessGate, AdminExecutor, Authorized, BatchError, BatchOp,
-    BatchRequest, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding, TableResolver,
+    BatchRequest, BatchResolver, BatchResponse, FunctionInvoker, QueryEntry, ResultEncoding,
+    TableResolver,
 };
 #[cfg(feature = "fjall")]
 use shamir_engine::repo::BoxRepoFactory;
 use shamir_engine::repo::{BoxRepo, RepoInstance};
 use shamir_engine::table::{TableConfig, TableManager};
+use shamir_engine::tx::commit_tx;
 use shamir_query_builder::query::Query;
 use shamir_query_builder::write::doc;
 use shamir_query_types::write::InsertOp;
 use shamir_query_types::TableRef;
 use shamir_storage::error::DbResult;
 use shamir_storage::storage_in_memory::InMemoryRepo;
+use shamir_tx::VersionProvider;
+use shamir_tx::{CommitVisibility, IndexWriteOp, IsolationLevel, StagingStore, TxContext, TxId};
 use shamir_types::access::{AccessError, Action, Actor, ResourcePath};
 use shamir_types::mpack;
 use shamir_types::types::common::new_map;
+use shamir_types::types::record_id::RecordId;
 use shamir_types::types::value::{InnerValue, QueryValue};
 
 /// Bench-only always-allow [`AccessGate`] (#1199): this bench measures
@@ -70,7 +75,7 @@ impl AccessGate for BenchAllowAll {
 /// token via [`BenchAllowAll`] and calls the real `execute_batch`.
 async fn execute_batch(
     request: &BatchRequest,
-    resolver: &dyn TableResolver,
+    resolver: &dyn BatchResolver,
     admin: Option<&dyn AdminExecutor>,
     invoker: Option<&dyn FunctionInvoker>,
     actor: Actor,
@@ -105,6 +110,10 @@ impl TableResolver for Resolver {
     async fn resolve(&self, table_ref: &TableRef) -> DbResult<TableManager> {
         self.repo.get_table(&table_ref.table).await
     }
+}
+
+#[async_trait::async_trait]
+impl BatchResolver for Resolver {
     async fn resolve_repo(&self, _repo_name: &str) -> DbResult<RepoInstance> {
         Ok(self.repo.clone())
     }
@@ -481,8 +490,6 @@ fn main() {
 
     // ── bench_provider_overhead ──────────────────────────────────────────
     {
-        use shamir_tx::VersionProvider;
-
         /// Always Some(0) — minimum-cost mock.
         struct StubAlwaysZero;
         impl VersionProvider for StubAlwaysZero {
@@ -646,12 +653,6 @@ fn main() {
     // one statement later inside the same async block does not add to
     // that already-captured cost.
     {
-        use shamir_engine::tx::commit_tx;
-        use shamir_tx::{
-            CommitVisibility, IndexWriteOp, IsolationLevel, StagingStore, TxContext, TxId,
-        };
-        use shamir_types::types::record_id::RecordId;
-
         // Scaled ladder collapsed to n=100 (smallest variant). NOTE: the
         // fjall cells are I/O-bound (fsync dominates; n=100 and n=1000 both
         // calibrate to ~1 iter at 0.05s), so reducing N further would not

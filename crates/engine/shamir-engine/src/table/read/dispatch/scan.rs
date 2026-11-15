@@ -5,10 +5,12 @@ use bytes::Bytes;
 
 use futures::StreamExt;
 
-use crate::query::filter::eval_context::FilterContext;
-use crate::query::filter::{compile_filter_with_context, eval::FilterNode};
-use crate::query::read::{exec, CorruptRecordRef, QueryRecord, QueryResult, QueryStats, ReadQuery};
 use crate::table::table_manager::TableManager;
+use shamir_engine_query::query::filter::eval_context::FilterContext;
+use shamir_engine_query::query::filter::{compile_filter_with_context, eval::FilterNode};
+use shamir_engine_query::query::read::{
+    exec, CorruptRecordRef, QueryRecord, QueryResult, QueryStats, ReadQuery,
+};
 
 use shamir_query_types::batch::ResultEncoding;
 use shamir_storage::error::{DbError, DbResult};
@@ -206,10 +208,9 @@ impl TableManager {
                         values.push(id.as_bytes().to_vec());
                         continue;
                     }
-                    let Some(value) = path
-                        .as_ref()
-                        .and_then(|p| crate::query::filter::eval::resolve_field(&record, p))
-                    else {
+                    let Some(value) = path.as_ref().and_then(|p| {
+                        shamir_engine_query::query::filter::eval::resolve_field(&record, p)
+                    }) else {
                         // Absent fields have no sorted-index posting either.
                         continue 'rows;
                     };

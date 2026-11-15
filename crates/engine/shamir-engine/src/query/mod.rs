@@ -437,9 +437,10 @@ pub mod batch;
 #[doc(no_inline)]
 pub use shamir_engine_query::query::{admin, auth, filter, read, write};
 
+pub use crate::table::TableResolver;
 pub use batch::{
     execute_batch, BatchError, BatchLimits, BatchOp, BatchPlan, BatchPlanner, BatchRequest,
-    BatchResponse, QueryEntry, QueryPath, QueryReference, TableResolver,
+    BatchResponse, QueryEntry, QueryPath, QueryReference,
 };
 pub use filter::{FieldPath, Filter, FilterExpr, FilterExprOp, FilterValue};
 pub use read::{
