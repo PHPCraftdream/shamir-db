@@ -1,6 +1,7 @@
 //! Deterministic materialization accounting, independent of the wire codec.
 
 use crate::query::read::{QueryRecord, QueryResult};
+use shamir_engine_query::query::read::value_bytes::ValueBytes;
 use shamir_query_types::read::ddl::DdlOpState;
 use shamir_types::types::common::TMap;
 use shamir_types::types::value::QueryValue;
@@ -9,53 +10,21 @@ use shamir_types::types::value::QueryValue;
 pub(in crate::query::batch) struct ResultSize;
 
 impl ResultSize {
-    // Formula (bytes, saturating): scalar slot 16; string/bin slot 24 + byte
-    // length; decimal 56; big integer 24 + decimal text length; container shell
-    // 24 + 16 per element/entry + map key byte lengths + child sizes; result
-    // shell 32 + records list shell/entries + 32 per record + record payload.
-    // Optional metadata pays a conservative fixed shell plus dynamic strings.
+    // Result shell 32 + records list shell/entries + 32 per record + record
+    // payload. The value-walk constants live in shamir-engine-query's
+    // `ValueBytes`; `value` and `sequence` delegate to it. Optional metadata
+    // pays a conservative fixed shell plus dynamic strings.
     // This is bytes materialized by execution, not serialized response length,
     // allocator capacity or live RSS: filtering/dropping never gives bytes back.
-    pub(in crate::query::batch) const SHELL: u64 = 24;
-    pub(in crate::query::batch) const ENTRY: u64 = 16;
+    pub(in crate::query::batch) const SHELL: u64 = ValueBytes::SHELL;
+    pub(in crate::query::batch) const ENTRY: u64 = ValueBytes::ENTRY;
 
     pub(in crate::query::batch) fn value(value: &QueryValue) -> u64 {
-        let mut stack = vec![value];
-        let mut total = 0u64;
-        while let Some(value) = stack.pop() {
-            let size = match value {
-                QueryValue::Null
-                | QueryValue::Bool(_)
-                | QueryValue::Int(_)
-                | QueryValue::F64(_) => 16,
-                QueryValue::Dec(_) => 56,
-                QueryValue::Big(v) => 24u64.saturating_add(v.to_string().len() as u64),
-                QueryValue::Str(v) => 24u64.saturating_add(v.len() as u64),
-                QueryValue::Bin(v) => 24u64.saturating_add(v.len() as u64),
-                QueryValue::List(values) => {
-                    stack.extend(values);
-                    Self::sequence(values.len())
-                }
-                QueryValue::Set(values) => {
-                    stack.extend(values);
-                    Self::sequence(values.len())
-                }
-                QueryValue::Map(values) => {
-                    let mut size = Self::sequence(values.len());
-                    for (key, value) in values {
-                        size = size.saturating_add(key.len() as u64);
-                        stack.push(value);
-                    }
-                    size
-                }
-            };
-            total = total.saturating_add(size);
-        }
-        total
+        ValueBytes::value(value)
     }
 
     pub(in crate::query::batch) fn sequence(len: usize) -> u64 {
-        Self::SHELL.saturating_add(Self::ENTRY.saturating_mul(len as u64))
+        ValueBytes::sequence(len)
     }
 
     pub(in crate::query::batch) fn result(result: &QueryResult) -> u64 {

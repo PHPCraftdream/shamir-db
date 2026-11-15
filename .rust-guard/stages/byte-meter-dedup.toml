@@ -1,0 +1,296 @@
+base = "82ac99f7cd19c9154191927824621de781fa671c"
+
+
+[[removed]]
+path = "crates/engine/shamir-engine-query/src/query/read/mod.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::value_size"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::sequence_walk"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine-query/src/query/read/row_byte_meter.rs"
+item = "shamir-engine-query::lib::query::read::row_byte_meter::RowByteMeter::sequence"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::new"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::charge"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::charge"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::charge_record"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::charge_record"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::credit_survivors"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::credit_survivors"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::record_size"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::RowByteMeter::finish"
+reason = "BYTE-METER-DEDUP: replaced by ValueBytes (engine-query) or renamed to ScopeRowMeter (engine)"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/mod.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/tests/mod.rs"
+item = "shamir-engine-query::lib::query::read::tests::value_bytes_tests"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes::SHELL"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes::ENTRY"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes::ROW_SHELL"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes::row_bytes"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes::value"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "shamir-engine-query::lib::query::read::value_bytes::ValueBytes::sequence"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::new"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::charge"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::charge_record"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::credit_survivors"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::record_size"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::charge"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::charge_record"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::credit_survivors"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/query/batch/exec/exec_scope.rs"
+item = "shamir-engine::lib::query::batch::exec::exec_scope::ScopeRowMeter::finish"
+reason = "BYTE-METER-DEDUP: ValueBytes, its test, or the renamed ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/result_size.rs"
+item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::SHELL"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/result_size.rs"
+item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::ENTRY"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/query_runner/arms_read.rs"
+item = "shamir-engine::lib::query::batch::runner::query_runner::arms_read::QueryRunner::run_read_arm"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/result_size.rs"
+item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::value"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/runner/result_size.rs"
+item = "shamir-engine::lib::query::batch::runner::result_size::ResultSize::sequence"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/budgets/rowwise_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::budgets::rowwise_byte_budget_tests::intermediate_bytes_do_not_credit_uncharged_output"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/query/batch/tests/limits/budgets/rowwise_byte_budget_tests.rs"
+item = "shamir-engine::lib::query::batch::tests::limits::budgets::rowwise_byte_budget_tests::local_credit_does_not_consume_another_reads_charge"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/table/read/dispatch/collect.rs"
+item = "shamir-engine::lib::table::read::dispatch::collect::TableManager::read_collecting_from"
+reason = "BYTE-METER-DEDUP: body or signature now delegates to ValueBytes or names ScopeRowMeter"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes::SHELL"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes::ENTRY"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes::ROW_SHELL"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes::row_bytes"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes::value"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine-query/src/query/read/value_bytes.rs"
+item = "ValueBytes::sequence"
+reason = "BYTE-METER-DEDUP: the single byte estimate is public because shamir-engine reads it"
+owner = "<wave-byte-meter>"

@@ -12,7 +12,7 @@ use shamir_types::types::common::new_map;
 use shamir_types::types::value::QueryValue;
 
 use crate::query::batch::batch_execute::execute_batch_impl;
-use crate::query::batch::exec_scope::RowByteMeter;
+use crate::query::batch::exec_scope::ScopeRowMeter;
 use crate::query::batch::{BatchError, BatchResolver, ExecScope, TableResolver};
 use crate::query::read::{QueryRecord, QueryResult};
 use crate::query::TableRef;
@@ -232,7 +232,7 @@ async fn grouped_raw_input_stops_before_aggregate_materialization() {
 fn intermediate_bytes_do_not_credit_uncharged_output() {
     let limits = BatchLimits::default();
     let scope = ExecScope::root_with_result_size(&limits, true);
-    let meter = RowByteMeter::new(&scope).unwrap();
+    let meter = ScopeRowMeter::new(&scope).unwrap();
     meter.charge(10_296).unwrap();
     meter
         .finish(&QueryResult::records_only(vec![QueryRecord::Direct(
@@ -248,7 +248,7 @@ fn intermediate_bytes_do_not_credit_uncharged_output() {
 fn local_credit_does_not_consume_another_reads_charge() {
     let limits = BatchLimits::default();
     let scope = ExecScope::root_with_result_size(&limits, true);
-    let meter = RowByteMeter::new(&scope).unwrap();
+    let meter = ScopeRowMeter::new(&scope).unwrap();
     let row = QueryRecord::Direct(QueryValue::Str("x".into()));
     meter.charge_record(&row).unwrap(); // 48 + 24 + 1 = 73
     scope.charge_bytes(80).unwrap();
