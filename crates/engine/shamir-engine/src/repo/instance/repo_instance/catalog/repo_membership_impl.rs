@@ -35,7 +35,10 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<Option<TableManager>> {
         self.write_domain.debug_check_permit(permit);
-        let name = self.token_names.read_sync(&token, |_, name| name.clone());
+        let name = self
+            .catalog
+            .token_names
+            .read_sync(&token, |_, name| name.clone());
         match name {
             Some(name) => self
                 .get_table_admitted_unfenced(&name, permit)
@@ -53,7 +56,7 @@ impl RepoInstance {
     /// value is in-memory.
     pub async fn get_table(&self, table_name: &str) -> DbResult<TableManager> {
         self.check_table_rename_fence(table_name)?;
-        if let Some(table) = self.initialized_table(table_name) {
+        if let Some(table) = self.catalog.initialized_table(table_name) {
             return Ok(table);
         }
         let permit = self
@@ -80,7 +83,7 @@ impl RepoInstance {
     /// resolves a name for a user request. `pub` (not `pub(crate)`) because
     /// the seed-catalogue walker lives in the downstream `shamir-db` crate.
     pub async fn get_table_unfenced(&self, table_name: &str) -> DbResult<TableManager> {
-        if let Some(table) = self.initialized_table(table_name) {
+        if let Some(table) = self.catalog.initialized_table(table_name) {
             return Ok(table);
         }
         let permit = self
@@ -89,13 +92,6 @@ impl RepoInstance {
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
         Box::pin(self.get_table_ctx(table_name, &permit)).await
-    }
-
-    /// Returns an already initialized table without admitting or triggering
-    /// initialization. Callers must not retain a map guard across awaits.
-    fn initialized_table(&self, table_name: &str) -> Option<TableManager> {
-        let cell = self.tables.get(table_name)?;
-        cell.get().cloned()
     }
 
     /// Admitted twin of [`RepoInstance::get_table`]: requires the caller to
@@ -143,7 +139,8 @@ impl RepoInstance {
         // `OnceCell` itself provides the single-init serialization — the
         // shard lock only needs to protect the map insert, not the init.
         let cell = Arc::clone(
-            self.tables
+            self.catalog
+                .tables
                 .entry(table_name.to_string())
                 .or_insert_with(|| Arc::new(OnceCell::new()))
                 .value(),
@@ -158,7 +155,7 @@ impl RepoInstance {
         // cell empty so subsequent calls retry.
         let tbl = cell
             .get_or_try_init(|| async {
-                if !self.configs.contains_key(table_name) {
+                if !self.catalog.configs.contains_key(table_name) {
                     return Err(DbError::NotFound(format!(
                         "Table '{}' is not configured in this repository",
                         table_name
@@ -171,14 +168,15 @@ impl RepoInstance {
 
         // Close the insertion-to-OnceCell-completion window against DROP.
         // No map guard survives an await; rollback can only evict our Arc.
-        let current = self.tables.get(table_name);
-        if !self.configs.contains_key(table_name)
+        let current = self.catalog.tables.get(table_name);
+        if !self.catalog.configs.contains_key(table_name)
             || !current
                 .as_ref()
                 .is_some_and(|entry| Arc::ptr_eq(entry.value(), &cell))
         {
             if let Some(mvcc) = tbl.mvcc_store() {
                 let _ = self
+                    .catalog
                     .per_table_mvcc
                     .remove_if_sync(&table_token_for(table_name), |existing| {
                         Arc::ptr_eq(existing, &mvcc)
@@ -200,6 +198,7 @@ impl RepoInstance {
         permit: &RepoWritePermit,
     ) -> DbResult<TableManager> {
         let config = self
+            .catalog
             .configs
             .get(table_name)
             .map(|entry| entry.value().clone())
@@ -233,6 +232,7 @@ impl RepoInstance {
         // inert here and would yield no rows.
         let mvcc = Arc::new(shamir_tx::MvccStore::new(history_store, Arc::clone(&gate)));
         if self
+            .catalog
             .configs
             .get(table_name)
             .is_none_or(|current| current.value().store_id != id)
@@ -266,6 +266,7 @@ impl RepoInstance {
         // caller's `OnceCell::get_or_try_init` leaves the cell empty and a
         // retry re-attempts the attach cleanly.
         if self
+            .catalog
             .per_table_mvcc
             .insert_sync(token, Arc::clone(&mvcc))
             .is_err()
@@ -287,13 +288,14 @@ impl RepoInstance {
 
         // DROP may have removed/replaced our OnceCell while setup awaited.
         // Existence alone is insufficient after DROP + CREATE of the same name.
-        let current = self.tables.get(table_name);
-        if !self.configs.contains_key(table_name)
+        let current = self.catalog.tables.get(table_name);
+        if !self.catalog.configs.contains_key(table_name)
             || !current
                 .as_ref()
                 .is_some_and(|entry| Arc::ptr_eq(entry.value(), cell))
         {
             let _ = self
+                .catalog
                 .per_table_mvcc
                 .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
             return Err(DbError::NotFound(format!(
@@ -331,9 +333,9 @@ impl RepoInstance {
     fn add_table_inner(&self, config: TableConfig) {
         // Same synchronous DDL lock order as remove_table. This closes the
         // config/reverse-token re-add window without holding guards over await.
-        let _entry = self.tables.entry(config.name.clone());
-        crate::repo::version_provider::register_token(&self.token_names, &config.name);
-        self.configs.insert(config.name.clone(), config);
+        let _entry = self.catalog.tables.entry(config.name.clone());
+        crate::repo::version_provider::register_token(&self.catalog.token_names, &config.name);
+        self.catalog.configs.insert(config.name.clone(), config);
         self.fk_reverse_cache.invalidate();
     }
 
@@ -354,17 +356,19 @@ impl RepoInstance {
         // DDL-only synchronous critical section: tables -> configs -> scc.
         // Keep the table shard exclusive until owned MVCC cleanup completes,
         // so a replacement initializer cannot publish in the removal window.
-        let entry = self.tables.entry(table_name.to_string());
-        let removed = self.configs.remove(table_name).is_some();
+        let entry = self.catalog.tables.entry(table_name.to_string());
+        let removed = self.catalog.configs.remove(table_name).is_some();
         if removed {
             self.fk_reverse_cache.invalidate();
             let token = table_token_for(table_name);
             let _ = self
+                .catalog
                 .token_names
                 .remove_if_sync(&token, |existing| existing.as_str() == table_name);
             if let dashmap::mapref::entry::Entry::Occupied(entry) = &entry {
                 if let Some(mvcc) = entry.get().get().and_then(TableManager::mvcc_store) {
                     let _ = self
+                        .catalog
                         .per_table_mvcc
                         .remove_if_sync(&token, |existing| Arc::ptr_eq(existing, &mvcc));
                 }

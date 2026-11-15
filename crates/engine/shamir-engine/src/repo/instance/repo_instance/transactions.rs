@@ -277,7 +277,7 @@ impl RepoInstance {
         // checks pays only a thin `Arc` construction + clone, no behavior
         // change to Phase 2 (still gated on `isolation == Serializable`).
         let provider = std::sync::Arc::new(crate::repo::RepoVersionProvider {
-            per_table_mvcc: Arc::clone(&self.per_table_mvcc),
+            per_table_mvcc: Arc::clone(&self.catalog.per_table_mvcc),
         });
         tx.set_version_provider(provider);
 

@@ -5,8 +5,7 @@ use crate::repo::group_commit::GroupCommit;
 use crate::repo::repo_types::BoxRepo;
 use crate::repo::version_provider::register_token;
 pub use crate::repo::version_provider::repo_token;
-use crate::table::interner_manager::InternerManager;
-use crate::table::{TableConfig, TableManager};
+use crate::table::{TableCatalog, TableConfig, TableManager};
 use crate::tx::apply_replicated::follower_durability::receipt::{
     ApplyOutcome, ReceiptApplyJob, ReceiptLease,
 };
@@ -42,27 +41,15 @@ pub struct RepoInstance {
     name: String,
     commit_visibility_wait: VisibilityWait,
     pub(in crate::repo) repo: BoxRepo,
-    configs: Arc<TDashMap<String, TableConfig>>,
-    tables: Arc<TDashMap<String, Arc<OnceCell<TableManager>>>>,
+    /// Plain Arc-shared catalogue of this repo's tables; constructed below,
+    /// cloned shallowly.
+    catalog: TableCatalog,
     /// Lazy-initialized RepoTxGate. Created on first call to `tx_gate()`.
     tx_gate: Arc<OnceCell<Arc<shamir_tx::RepoTxGate>>>,
     /// Lazy-initialized RepoWalManager. Created on first call to `repo_wal()`.
     repo_wal: Arc<OnceCell<Arc<shamir_tx::RepoWalManager>>>,
     /// Shared initialized WAL coordinator for durable replication pulls.
     wal_group: Arc<OnceCell<Arc<shamir_wal::WalGroupCommit>>>,
-    /// Per-table MvccStore map for SSI version provider. Populated
-    /// on demand when `create_table_context` instantiates a
-    /// TableManager — both share the same data_store reference.
-    /// Key = `table_token_for(name)` (deterministic).
-    per_table_mvcc: Arc<scc::HashMap<u64, Arc<shamir_tx::MvccStore>, THasher>>,
-    /// Reverse index `table_token_for(name) → name`, maintained at table
-    /// *registration* time (`from_box_repo` + `add_table`), independent of
-    /// whether the table has been instantiated yet. Lets `table_by_token`
-    /// resolve a token in O(1) instead of scanning every config and
-    /// re-hashing its name under the per-repo `commit_lock` (III.1). The
-    /// token is a pure function of the name, so this is just a
-    /// pre-computed inverse of that function.
-    token_names: Arc<scc::HashMap<u64, String, THasher>>,
     /// In-doubt rename entries indexed by both involved names.
     rename_fence: Arc<
         scc::HashMap<
@@ -114,15 +101,6 @@ pub struct RepoInstance {
     pub(crate) worker_lifecycle:
         Option<Arc<ForegroundLifecycle<ReceiptApplyJob, DbResult<ApplyOutcome>>>>,
     pub(crate) receipt_worker: Arc<OnceCell<Arc<ReceiptLease>>>,
-    /// Per-repo string interner (Stage I — moved from per-table to per-repo).
-    /// Backed by the dedicated `"__interner__"` store. Built once on first
-    /// access (lazy) and shared via [`Arc::clone`] so every
-    /// [`TableManager`](crate::table::TableManager) in this repo shares the
-    /// same live [`Interner`](shamir_types::core::interner::Interner) and
-    /// id-namespace. This is what makes a field name resolve to ONE id across
-    /// every table in the repo, and what lets V2 WAL recovery resolve a single
-    /// interner instead of a per-table one.
-    repo_interner: Arc<OnceCell<InternerManager>>,
     /// D2 P1d-2b: repo liveness token. `Some(Arc<()>)` on every FOREGROUND
     /// clone (the strong count == number of live foreground clones); `None`
     /// on the single BACKGROUND clone the drain task owns
@@ -188,12 +166,9 @@ impl Clone for RepoInstance {
             name: self.name.clone(),
             commit_visibility_wait: self.commit_visibility_wait,
             repo: self.repo.clone(),
-            configs: Arc::clone(&self.configs),
-            tables: Arc::clone(&self.tables),
+            catalog: self.catalog.clone(),
             tx_gate: Arc::clone(&self.tx_gate),
             repo_wal: Arc::clone(&self.repo_wal),
-            per_table_mvcc: Arc::clone(&self.per_table_mvcc),
-            token_names: Arc::clone(&self.token_names),
             rename_fence: Arc::clone(&self.rename_fence),
             rename_fence_len: Arc::clone(&self.rename_fence_len),
             tx_metrics: Arc::clone(&self.tx_metrics),
@@ -207,7 +182,6 @@ impl Clone for RepoInstance {
             drainer: Arc::clone(&self.drainer),
             worker_lifecycle: self.worker_lifecycle.clone(),
             receipt_worker: Arc::clone(&self.receipt_worker),
-            repo_interner: Arc::clone(&self.repo_interner),
             // Foreground clone: carries a strong liveness ref. If `self` is
             // itself the background clone (`None`) this stays `None` — a clone
             // of the background handle must not resurrect liveness.
@@ -262,21 +236,25 @@ impl RepoInstance {
 
         let tables: TDashMap<String, Arc<OnceCell<TableManager>>> = new_dash_map_wc(100);
 
+        let catalog = TableCatalog {
+            configs: Arc::new(configs_map),
+            tables: Arc::new(tables),
+            token_names: Arc::new(token_names),
+            per_table_mvcc: Arc::new(scc::HashMap::with_capacity_and_hasher(
+                initial_cap,
+                THasher::default(),
+            )),
+            repo_interner: Arc::new(OnceCell::new()),
+        };
         let policy = DurabilityPolicy::default().for_wal_backend(wal_dir.is_some());
         let write_domain = RepoWriteDomain::new(name.clone());
         Self {
             name,
             commit_visibility_wait: VisibilityWait::Strict,
             repo,
-            configs: Arc::new(configs_map),
-            tables: Arc::new(tables),
+            catalog,
             tx_gate: Arc::new(OnceCell::new()),
             repo_wal: Arc::new(OnceCell::new()),
-            per_table_mvcc: Arc::new(scc::HashMap::with_capacity_and_hasher(
-                initial_cap,
-                THasher::default(),
-            )),
-            token_names: Arc::new(token_names),
             rename_fence: Arc::new(scc::HashMap::with_hasher(THasher::default())),
             rename_fence_len: Arc::new(AtomicUsize::new(0)),
             tx_metrics: Arc::new(shamir_tx::TxMetrics::new()),
@@ -290,7 +268,6 @@ impl RepoInstance {
             journal_publish_hook: Arc::new(arc_swap::ArcSwapOption::empty()),
             wal_dir,
             drainer: Arc::new(std::sync::OnceLock::new()),
-            repo_interner: Arc::new(OnceCell::new()),
             live: Some(Arc::new(())),
             marker_write_mutex: Arc::new(tokio::sync::Mutex::new(())),
             fk_reverse_cache: Arc::new(FkReverseCache::new()),

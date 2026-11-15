@@ -49,6 +49,7 @@ pub use migration_freeze_guard::MigrationFreezeGuard;
 pub use persistable::{PersistRegistry, Persistable};
 pub use record_counter::RecordCounter;
 pub(crate) use support::model::names::{new_table_store_id, table_store_names};
+pub(crate) use support::storage::catalog::TableCatalog;
 pub use table_config::TableConfig;
 pub(crate) use table_manager::MigrationFreezeError;
 pub use table_manager::{

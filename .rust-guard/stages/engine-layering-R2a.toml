@@ -1,0 +1,350 @@
+base = "a304e8e1b453f91fc3ef06b061364c44ff6e0cd4"
+
+
+[[removed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::initialized_table"
+reason = "R2a: item left its module"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::initialized_table"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::degraded_index_count"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::install_table_for_test"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::has_table"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::list_table_names"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::table_config"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::mapped_table_store_names"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::table_count"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "shamir-engine::lib::table::support::storage::catalog::TableCatalog::table_by_token_if_live"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[added]]
+path = "crates/engine/shamir-engine/src/table/support/storage/mod.rs"
+item = "shamir-engine::lib::table::support::storage::catalog"
+reason = "R2a: new item of the wave"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_ctx"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::create_table_context"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::table_by_token_admitted"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::add_table_inner"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::remove_table_inner"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog/repo_membership_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::repo_membership_impl::RepoInstance::get_table_unfenced"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_by_token"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_by_token_if_live"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::install_table_for_test"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::list_table_names"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::has_table"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_config"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::mapped_table_store_names"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::table_count"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::degraded_index_count"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::recover_table_rename_with"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_transition"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::rename_table_stores_admitted"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::prepare_table_rename_admitted"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/catalog.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::catalog::RepoInstance::commit_table_rename_admitted"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle/recovery/clean_horizon_shutdown_impl.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::recovery::clean_horizon_shutdown_impl::RepoInstance::flush_buffers"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::per_table_mvcc"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::install_repo_interner_for_test"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::repo_interner"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::flush_all_history"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/lifecycle.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::lifecycle::RepoInstance::run_gc"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::clone"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance::from_box_repo_with_wal_dir"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::RepoInstance"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/instance/repo_instance/transactions.rs"
+item = "shamir-engine::lib::repo::instance::repo_instance::transactions::RepoInstance::begin_tx"
+reason = "R2a: imports, bounds or signature follow the move"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::initialized_table"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::degraded_index_count"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::configs"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::tables"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::install_table_for_test"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::token_names"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::per_table_mvcc"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::repo_interner"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::has_table"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::list_table_names"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::table_config"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::mapped_table_store_names"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::table_count"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
+
+[[allow_widen]]
+path = "crates/engine/shamir-engine/src/table/support/storage/catalog.rs"
+item = "TableCatalog::table_by_token_if_live"
+reason = "R2a: item crosses a module or layer boundary"
+owner = "<wave-R2a>"
