@@ -1,7 +1,7 @@
 use super::repo_core::RepoCore;
 use crate::meta::recovery_marker;
 use crate::meta::repl::gate_provenance::with_follower_provenance as provenance_gate;
-use crate::repo::version_provider::repo_token;
+use crate::repo::meta::repo_identity::repo_token;
 use crate::repo::RepoWritePermit;
 use crate::table::interner_manager::InternerManager;
 use shamir_storage::error::{DbError, DbResult};

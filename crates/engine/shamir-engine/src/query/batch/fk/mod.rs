@@ -4,3 +4,4 @@
 pub(super) mod fk_actions;
 pub(super) mod fk_on_update;
 pub(super) mod fk_restrict;
+pub mod reverse_fk_scan;

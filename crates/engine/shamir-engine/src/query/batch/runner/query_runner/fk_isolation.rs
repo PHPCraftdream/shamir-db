@@ -118,7 +118,7 @@ pub(crate) async fn require_footprint_if_fk_child(
         .get_or_build_snapshot(|| {
             // Fn is re-callable after a generation CAS loss.
             let repo_name = repo_name.clone();
-            async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
+            async move { crate::query::batch::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
     {
@@ -217,7 +217,7 @@ pub(crate) async fn implicit_tx_isolation_for_fk_parent(
         .get_or_build_snapshot(|| {
             // Fn is re-callable after a generation CAS loss.
             let repo_name = repo_name.clone();
-            async move { crate::repo::build_reverse_fk_entries(resolver, &repo_name).await }
+            async move { crate::query::batch::build_reverse_fk_entries(resolver, &repo_name).await }
         })
         .await
     {

@@ -44,7 +44,15 @@ impl Drop for StageTimer<'_> {
     }
 }
 
-async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F::Output {
+/// Shutdown-stage timing helper shared by the tx-layer `RepoCore` commit
+/// path and the instance-layer clean-shutdown cluster
+/// (`clean_horizon_shutdown_impl.rs`, which imports this via
+/// `crate::tx::commit::core::timed_stage` — ENGINE-LAYERING R2d kept ONE
+/// implementation here instead of duplicating it on the shell). Logs
+/// `repo`/`stage` when it ran longer than `STAGE_WARN_THRESHOLD` — from
+/// `Drop`, so a stage that is CANCELLED by an enclosing deadline (the very
+/// stall being diagnosed) is reported too. Shutdown paths only.
+pub(crate) async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F::Output {
     let mut timer = StageTimer {
         repo,
         stage,

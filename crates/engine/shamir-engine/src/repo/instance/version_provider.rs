@@ -1,4 +1,3 @@
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -34,15 +33,11 @@ pub fn to_mvcc_retention(r: &shamir_query_types::admin::Retention) -> shamir_tx:
     }
 }
 
-/// Deterministic u64 token for a repository name.
-///
-/// Stage 4: `DefaultHasher(name)` placeholder.
-/// Stage 5: real repo-level interner ID.
-pub fn repo_token(name: &str) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    name.hash(&mut h);
-    h.finish()
-}
+/// ENGINE-LAYERING R2d: the implementation moved DOWN to the repo layer
+/// (`crate::repo::meta::repo_identity::repo_token` — the identity token of a
+/// repository); re-exported so `crate::repo::version_provider::repo_token`
+/// and `crate::repo::repo_token` keep working for all callers and tests.
+pub use crate::repo::meta::repo_identity::repo_token;
 
 /// Record `table_token_for(name) → name` in the reverse index, detecting
 /// the two non-trivial cases explicitly:

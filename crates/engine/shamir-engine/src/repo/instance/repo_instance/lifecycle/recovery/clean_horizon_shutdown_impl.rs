@@ -1,55 +1,9 @@
 //! Clean-shutdown method cluster for [`RepoInstance`]:
 //! `shutdown_clean`, `worker_reopen_required`, `flush_buffers`.
 
+use crate::tx::commit::core::timed_stage;
 use shamir_storage::error::{DbError, DbResult};
-use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
-
-/// Shutdown-stage timing threshold: stages slower than this are logged.
-const STAGE_WARN_THRESHOLD: Duration = Duration::from_secs(1);
-
-/// Logs `repo`/`stage` when it ran longer than [`STAGE_WARN_THRESHOLD`] —
-/// from `Drop`, so a stage that is CANCELLED by an enclosing deadline (the
-/// very stall being diagnosed) is reported too. Shutdown paths only.
-struct StageTimer<'a> {
-    repo: &'a str,
-    stage: &'a str,
-    start: tokio::time::Instant,
-    finished: bool,
-}
-
-impl Drop for StageTimer<'_> {
-    fn drop(&mut self) {
-        let elapsed = self.start.elapsed();
-        if elapsed >= STAGE_WARN_THRESHOLD {
-            let how = if self.finished {
-                "took"
-            } else {
-                "was cancelled or still running after"
-            };
-            log::warn!(
-                "shutdown stage slow: repo '{}' stage '{}' {} {:?}",
-                self.repo,
-                self.stage,
-                how,
-                elapsed
-            );
-        }
-    }
-}
-
-async fn timed_stage<F: Future>(repo: &str, stage: &str, fut: F) -> F::Output {
-    let mut timer = StageTimer {
-        repo,
-        stage,
-        start: tokio::time::Instant::now(),
-        finished: false,
-    };
-    let out = fut.await;
-    timer.finished = true;
-    out
-}
 
 use crate::tx::apply_replicated::follower_durability::receipt::{ApplyOutcome, ReceiptApplyJob};
 use crate::tx::cold_reconcile::lifecycle::{RepoWorkerLifecycle, WorkerTerminal};

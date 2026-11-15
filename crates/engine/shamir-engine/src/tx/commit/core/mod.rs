@@ -9,5 +9,6 @@ pub(crate) mod repo_core;
 pub(crate) mod tx_access;
 pub(crate) mod tx_horizon;
 
+pub(crate) use durability_access::timed_stage;
 pub(crate) use repo_core::RepoCore;
 pub(crate) use tx_horizon::TxHorizon;

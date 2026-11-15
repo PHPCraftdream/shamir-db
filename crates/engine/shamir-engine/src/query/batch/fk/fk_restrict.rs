@@ -65,10 +65,10 @@ use shamir_query_types::filter::Filter;
 use shamir_types::record_view::{scalar_ref_numeric_eq, RecordRef, ScalarRef};
 use shamir_types::types::value::{InnerValue, QueryValue};
 
+use super::reverse_fk_scan::build_reverse_fk_entries;
 use crate::query::batch::BatchResolver;
 use crate::query::filter::{compile_filter, FilterContext, FilterNode};
 use crate::query::TableRef;
-use crate::repo::build_reverse_fk_entries;
 use crate::repo::fk_reverse_cache::ReverseFkEntry;
 use crate::table::record_cow::RecordCow;
 use crate::table::TableManager;

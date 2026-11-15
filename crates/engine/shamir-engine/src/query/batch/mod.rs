@@ -150,6 +150,7 @@ pub(crate) use control::receipts;
 use control::{authorized, op_watchdog};
 pub(crate) use exec::exec_scope;
 use exec::{batch_execute, batch_validate, execution_deadline, executor_traits, interactive_tx};
+pub use fk::reverse_fk_scan::build_reverse_fk_entries;
 use fk::{fk_actions, fk_on_update, fk_restrict};
 use runner::{param_subst, query_runner, query_value_serializer, result_size};
 // Only the executor (which actually drives a TableManager) lives here.
