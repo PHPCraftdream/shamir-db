@@ -1,1 +1,25 @@
 base = "ab18e6d1ff28a6fbc3e5e85a390b1a4556fe792a"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/repo/journal/backend/durability_policy/durability_policy/commit_policy.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::entry::durability_completion::commit_wal_durability"
+reason = "R2e: takes the durability handle and the repository name instead of RepoCore, so the repo-layer item names no tx type"
+owner = "<wave-R2e>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/commit/pipeline/phase/commit/legacy_and_lockfree.rs"
+item = "shamir-engine::lib::tx::commit::pipeline::phase::commit::legacy_and_lockfree::commit_tx_lockfree"
+reason = "R2e: the call passes the durability handle and the repository name to commit_wal_durability"
+owner = "<wave-R2e>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/preparation/pre_commit/locked.rs"
+item = "shamir-engine::lib::tx::preparation::pre_commit::locked::pre_commit_locked"
+reason = "R2e: the call passes the durability handle and the repository name to commit_wal_durability"
+owner = "<wave-R2e>"
+
+[[changed]]
+path = "crates/engine/shamir-engine/src/tx/recovery/clean_horizon/tests/checkpoint_seam_tests.rs"
+item = "shamir-engine::lib::tx::recovery::clean_horizon::tests::checkpoint_seam_tests::checkpoint_failure_prevents_unlink_then_retry_catches_up"
+reason = "R2e: the test calls the owner of checkpoint_allocation_floor directly instead of the deleted test-only re-export"
+owner = "<wave-R2e>"
