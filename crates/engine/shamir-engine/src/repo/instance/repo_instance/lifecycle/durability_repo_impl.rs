@@ -80,13 +80,11 @@ impl RepoInstance {
     }
 
     pub(crate) async fn settle_unwritten_version(&self, version: u64) {
-        if let Ok(group) = self.wal_group().await {
-            group.settle(version);
-        }
+        self.core.settle_unwritten_version(version).await;
     }
 
     pub(crate) fn initialized_mem_wal(&self) -> bool {
-        self.core.durability_handle.initialized_mem_wal()
+        self.core.initialized_mem_wal()
     }
 
     /// Scrape initialized WAL and repo-owned pull observations; never opens stores.
@@ -98,7 +96,7 @@ impl RepoInstance {
     /// Snapshot read of the shared policy; pins the value against concurrent stores.
     #[must_use]
     pub fn durability_policy(&self) -> arc_swap::Guard<Arc<DurabilityPolicy>> {
-        self.core.durability_handle.durability_policy()
+        self.core.durability_policy()
     }
 
     /// Check whether an already-initialized transaction gate requires repo
@@ -149,13 +147,7 @@ impl RepoInstance {
     /// Used by the replication read path to sample `R` and coalesce syncs.
     /// Also exposes the recoverability watermark to embedded callers.
     pub async fn wal_group(&self) -> DbResult<Arc<shamir_wal::WalGroupCommit>> {
-        self.repo_wal().await?;
-        self.core
-            .durability_handle
-            .wal_group
-            .get()
-            .cloned()
-            .ok_or_else(|| DbError::Internal("wal group not initialized".to_string()))
+        self.core.wal_group().await
     }
 
     /// One replication journal page. `durable` (default) bounds it by
@@ -271,23 +263,6 @@ impl RepoInstance {
         &self,
         permit: &crate::repo::RepoWritePermit,
     ) -> DbResult<()> {
-        let store = self.tx_info_store().await?;
-        let record = crate::meta::repo_identity::load_state(&store).await?;
-        if !crate::meta::repo_identity::requires_unclean_bump(record) {
-            return Ok(());
-        }
-        // Negative-control seam: constant-false in production, branch elided.
-        if cfg!(test)
-            && crate::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST
-                .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Ok(());
-        }
-        self.bump_history_epoch_admitted(permit).await?;
-        self.core
-            .durability_handle
-            .durability_metrics
-            .note_epoch_bump();
-        Ok(())
+        self.core.note_unclean_open_bump(permit).await
     }
 }

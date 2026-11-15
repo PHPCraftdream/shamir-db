@@ -127,60 +127,18 @@ impl RepoInstance {
             .await
     }
 
-    /// cancel-safe: yes — one `scc::HashMap` read plus a single
-    /// `get_table` call. Cancellation leaves no state mutated (apart from
-    /// the cancel-safe `get_table` OnceCell init).
+    /// cancel-safe: yes — one `scc::HashMap` read plus a single unfenced
+    /// table lookup. Cancellation leaves no state mutated.
     ///
-    /// Look up the table whose token matches `token`. Used by V2 WAL
-    /// recovery to resolve ops by `table_id_interned`, and by the commit
-    /// pipeline (Phases 1, 2.6, 5b–5d) while holding the per-repo
-    /// `commit_lock`.
-    ///
-    /// O(1) (III.1): resolves through the `token_names` reverse index that
-    /// `add_table` maintains, instead of scanning every config and
-    /// re-hashing its name. The old O(N) scan grew the serialized
-    /// critical section linearly with schema size. `add_table` and
-    /// `remove_table` keep `token_names` in lock-step with `configs`, so a
-    /// resolved name always still has a config; `get_table` re-validates
-    /// against `configs` inside its init closure regardless.
-    ///
-    /// Since P34-03d the resolution goes through the unfenced accessor
-    /// (`get_table_unfenced`) so a fenced in-doubt source still resolves;
-    /// this replaced the old `get_table` call deliberately.
-    ///
-    /// Resolve a registered table token, initializing its table manager if needed.
-    ///
-    /// This lookup is intentionally unfenced: callers such as transaction prelock
-    /// must reach the manager to observe a rename freeze, while fencing this lookup
-    /// would make the drainer wait on work that cannot discover the freeze.
+    /// Look up the table whose token matches `token`; see
+    /// `RepoCore::table_by_token` for the resolution and deadlock notes.
     pub async fn table_by_token(&self, token: u64) -> DbResult<Option<TableManager>> {
-        // DEADLOCK FIX (same class as #589 / `cells` map commit `7a4abf62`,
-        // H1+H2 commit `621776bd`): `read_sync`, NOT `read_async`. The
-        // `token_names` map is also touched SYNCHRONOUSLY by `register_token`'s
-        // `insert_sync` + `read_sync` (DDL — table create/rename) and by
-        // drop-table's `remove_if_sync` (DDL). `read_async`'s wait is
-        // lock-HANDOFF: saa grants the shared bucket lock to the suspended
-        // reader TASK, which then holds it while unpolled in tokio's run queue;
-        // a DDL exclusive writer (create/rename/drop) racing sustained
-        // commit-pipeline / V2-WAL-recovery `read_async` traffic can park every
-        // worker behind that unpolled reader → whole-runtime deadlock.
-        // `read_sync`'s bucket lock is held only by a RUNNING thread for a few
-        // instructions (a `String` clone), bounding every wait. The fn stays
-        // `async`; this call no longer suspends.
-        match self
-            .core
-            .catalog
-            .token_names
-            .read_sync(&token, |_, name| name.clone())
-        {
-            Some(name) => self.get_table_unfenced(&name).await.map(Some),
-            None => Ok(None),
-        }
+        self.core.table_by_token(token).await
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub(crate) async fn table_by_token_if_live(&self, token: u64) -> Option<TableManager> {
-        self.core.catalog.table_by_token_if_live(token).await
+        self.core.table_by_token_if_live(token).await
     }
 
     /// Catalogue install; see `TableCatalog`.
@@ -191,12 +149,12 @@ impl RepoInstance {
 
     /// Catalogue read; see `TableCatalog`.
     pub fn list_table_names(&self) -> Vec<String> {
-        self.core.catalog.list_table_names()
+        self.core.list_table_names()
     }
 
     /// Catalogue read; see `TableCatalog`.
     pub fn has_table(&self, name: &str) -> bool {
-        self.core.catalog.has_table(name)
+        self.core.has_table(name)
     }
 
     /// Catalogue read; see `TableCatalog`.
@@ -206,7 +164,7 @@ impl RepoInstance {
 
     /// Catalogue read; see `TableCatalog`.
     pub(crate) fn mapped_table_store_names(&self, name: &str) -> Option<(String, String, String)> {
-        self.core.catalog.mapped_table_store_names(name)
+        self.core.mapped_table_store_names(name)
     }
 
     /// Catalogue read; see `TableCatalog`.
@@ -282,21 +240,7 @@ impl RepoInstance {
             .admit()
             .await
             .map_err(|error| DbError::Internal(error.to_string()))?;
-        self.bump_history_epoch_admitted(&permit).await
-    }
-
-    /// Advance the history epoch while holding repository write admission.
-    pub(crate) async fn bump_history_epoch_admitted(
-        &self,
-        permit: &RepoWritePermit,
-    ) -> DbResult<RepoIdentity> {
-        self.core
-            .durability_handle
-            .write_domain
-            .debug_check_permit(permit);
-        let _guard = self.core.durability_handle.marker_write_mutex.lock().await;
-        let store = self.tx_info_store().await?;
-        RepoIdentity::bump(&store, None).await
+        self.core.bump_history_epoch_admitted(&permit).await
     }
 
     /// Retry-safe even when a previous open bumped before marker removal.
@@ -574,7 +518,7 @@ impl RepoInstance {
         }
         self.check_table_rename_fence(from)?;
         self.check_table_rename_fence(to)?;
-        let source = self.get_table_admitted_unfenced(from, permit).await?;
+        let source = self.core.get_table_admitted_unfenced(from, permit).await?;
         let freeze = RenameFreeze::begin(source, permit).await?;
         freeze.await_visible(self, from).await?;
         let config = match self

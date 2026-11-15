@@ -33,16 +33,16 @@ impl RepoInstance {
     pub(crate) fn clean_horizon_test_state(
         &self,
     ) -> &std::sync::OnceLock<Arc<std::sync::Mutex<test_seam::State>>> {
-        &self.core.clean_horizon_test_state
+        self.core.clean_horizon_test_state()
     }
 
     pub(crate) fn wal_retention_gate(&self) -> &Arc<RetentionGate> {
-        self.core.durability_handle.wal_retention_gate()
+        self.core.wal_retention_gate()
     }
 
     #[inline]
     pub(crate) fn wal_retention_refuse_writes(&self) -> bool {
-        self.core.durability_handle.wal_retention_refuse_writes()
+        self.core.wal_retention_refuse_writes()
     }
 
     pub fn wal_retention_metrics(&self) -> [u64; 5] {
@@ -54,9 +54,6 @@ impl RepoInstance {
         info: &Arc<dyn Store>,
         minimum: u64,
     ) -> DbResult<u64> {
-        self.core
-            .durability_handle
-            .reserve_recovery_floor(info, minimum)
-            .await
+        self.core.reserve_recovery_floor(info, minimum).await
     }
 }

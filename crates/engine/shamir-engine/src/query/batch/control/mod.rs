@@ -2,5 +2,6 @@
 //! and write-receipt commit visibility propagation.
 
 pub(super) mod authorized;
+pub(super) mod implicit;
 pub(super) mod op_watchdog;
 pub(crate) mod receipts;

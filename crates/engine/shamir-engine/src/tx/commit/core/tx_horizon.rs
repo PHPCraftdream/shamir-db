@@ -49,6 +49,10 @@ impl TxHorizon {
         &self.tx_gate
     }
 
+    pub(crate) fn initialized_tx_gate(&self) -> Option<&shamir_tx::RepoTxGate> {
+        self.tx_gate_cell().get().map(|gate| gate.as_ref())
+    }
+
     pub(crate) fn tx_metrics(&self) -> &Arc<shamir_tx::TxMetrics> {
         &self.tx_metrics
     }

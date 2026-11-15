@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
 use shamir_storage::error::DbResult;
-use shamir_storage::types::{AtomicBatch, Repo as _, Store};
+#[cfg(all(test, feature = "fjall"))]
+use shamir_storage::types::Repo as _;
+use shamir_storage::types::{AtomicBatch, Store};
 
 use crate::repo::changelog_store::write_domain::RepoWritePermit;
 use crate::repo::RepoInstance;
 
 impl RepoInstance {
     pub(crate) async fn follower_journal_store(&self) -> DbResult<Arc<dyn Store>> {
-        self.core.repo.store_get("__changelog__").await
+        self.core.follower_journal_store().await
     }
 
     pub fn validate_repo_wide_atomic_batch(&self, destination: &str) -> DbResult<()> {
@@ -17,7 +19,7 @@ impl RepoInstance {
 
     /// Backend capability for the S5c-X PR6b-2 receipt apply protocol.
     pub(crate) fn storage_supports_atomic_batch(&self) -> bool {
-        self.core.repo.supports_atomic_batch()
+        self.core.storage_supports_atomic_batch()
     }
 
     /// Raw named-store access, test-only: every caller lives under `tests/`,
@@ -35,10 +37,6 @@ impl RepoInstance {
         &self,
         permit: &RepoWritePermit,
     ) -> DbResult<Box<dyn AtomicBatch>> {
-        self.core
-            .durability_handle
-            .write_domain
-            .debug_check_permit(permit);
-        self.core.repo.begin_atomic_batch().await
+        self.core.begin_repo_atomic_batch(permit).await
     }
 }

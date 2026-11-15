@@ -1,0 +1,278 @@
+use super::repo_core::RepoCore;
+use crate::meta::repo_identity::RepoIdentity;
+use crate::repo::changelog_store::write_domain::RepoWriteDomain;
+use crate::repo::durability_policy::DurabilityPolicy;
+use crate::repo::journal::backend::durability_handle::retention_gate::RetentionGate;
+use crate::repo::RepoWritePermit;
+use shamir_storage::error::{DbError, DbResult};
+use shamir_storage::types::{Repo as _, Store};
+use std::sync::Arc;
+
+impl RepoCore {
+    /// S5c-X PR6b-2a: this repository's write-admission domain (one per
+    /// repository instance, shared by every clone).
+    pub(crate) fn write_domain(&self) -> &Arc<RepoWriteDomain> {
+        &self.durability_handle.write_domain
+    }
+
+    /// cancel-safe: yes — `OnceCell::get_or_try_init` semantics. If
+    /// cancellation occurs during init, the cell remains uninitialised
+    /// and the next caller retries. Returned Arc clone is in-memory.
+    ///
+    /// Returns the per-repo WAL manager, lazily initialising it on first
+    /// call. Shares the `"__tx__"` info store with `tx_gate`.
+    ///
+    /// The `next_txn_id` counter is seeded from
+    /// `max(persisted_NextTxId, max_inflight_txn_id + 1)`. The floor is
+    /// computed from `recover()` (segment/Mem replay) — empty on a fresh
+    /// in-memory instance (safeguard inert), the durable entries on a disk
+    /// repo. The append-only segment keys entries by frame position and
+    /// recovery replays by the monotonically-floored `commit_version`, so
+    /// even a repeated txn_id after a crash carries no ordering ambiguity
+    /// or data loss; the floor is a belt-and-braces anti-collision guard.
+    pub(crate) async fn repo_wal(&self) -> DbResult<Arc<shamir_tx::RepoWalManager>> {
+        self.durability_handle
+            .repo_wal
+            .get_or_try_init(|| async {
+                let info_store = self.repo.store_get("__tx__").await?;
+                let initial_txn_id =
+                    crate::meta::recovery_marker::load_next_tx_id_snapshot(&info_store)
+                        .await
+                        .unwrap_or(None)
+                        .unwrap_or(1);
+                // F5e: build a `WalGroupCommit` for EVERY repo — `File` sink
+                // for disk repos (sibling `<name>.shamirwal/` directory via
+                // `file_name()` — NOT `OsString::push` on the full path, which
+                // breaks on trailing separators), `Mem` sink (in-RAM Vec) for
+                // in-memory repos. The group is always present, so the live
+                // commit path is one code path: `begin_grouped(Buffered)` to
+                // append, `recover()` (segment/Mem `replay()`) to recover.
+                // Only disk repos get a background fsync — the Mem sink's
+                // `sync` is a no-op, so a timer would be pointless.
+                let group = match &self.durability_handle.wal_dir {
+                    Some(dir) => {
+                        let wal_dir = match dir.file_name() {
+                            Some(name) => {
+                                let mut n = name.to_os_string();
+                                n.push(".shamirwal");
+                                dir.with_file_name(n)
+                            }
+                            None => dir.join("shamirwal"),
+                        };
+                        let wal_dir_for_blocking = wal_dir.clone();
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::create_dir_all(&wal_dir_for_blocking)
+                        })
+                        .await
+                        .map_err(|e| DbError::Storage(format!("wal dir join: {e}")))?
+                        .map_err(|e| DbError::Storage(format!("wal dir create: {e}")))?;
+                        // F6b: the WAL is a DIRECTORY of numbered segments
+                        // (`NNNNNNNN.wal`), not a single `repo.wal`. The
+                        // project is pre-release with an atomic flip (no
+                        // dual-recovery bridge — `wal-refactor.md` §4.4), so
+                        // there is no legacy `repo.wal` migration: `SegmentSet`
+                        // simply owns `<name>.shamirwal/` and rotates/truncates
+                        // segments inside it. `create_dir_all` above already
+                        // made the dir; `SegmentSet::open` opens the first
+                        // active `00000000.wal`.
+                        // F6c: the seal/rotate threshold is the
+                        // `WAL_SEGMENT_MAX_BYTES` tunable (8 MiB), overridable
+                        // per-process via `SHAMIR_WAL_SEGMENT_MAX_BYTES` (parsed
+                        // as `u64`; a malformed value falls back to the const).
+                        // This is a legitimate ops tunable (a small cap forces
+                        // rotation+seal so truncation/growth-limit tests can
+                        // reach segment boundaries without huge data volumes),
+                        // NOT a debug-only seam — left live in every build, but
+                        // Captured at construction so validation and rotation
+                        // cannot observe different environment values.
+                        let seg_max_bytes = self.wal_segment_bytes;
+                        let segset =
+                            shamir_wal::SegmentSet::open(wal_dir.clone(), seg_max_bytes).await?;
+                        let sink = shamir_wal::WalSink::File(segset);
+                        let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
+                        crate::repo::durability_policy::install_empty_coverage(&group)?;
+                        // RF1: 250 ms is the nominal background fsync timer,
+                        // not a hard power-loss bound; I/O errors and scheduling
+                        // delays can extend the unsynced window.
+                        const WAL_BG_FSYNC_MS: u64 = 250;
+                        group.spawn_background_fsync(std::time::Duration::from_millis(
+                            WAL_BG_FSYNC_MS,
+                        ));
+                        group
+                    }
+                    None => {
+                        // Successful OnceCell initialization logs once, never per commit.
+                        log::warn!(
+                            "repo '{}': Mem WAL sink is not durable — wal_commit policy tier is ignored for this in-memory/hybrid backend",
+                            self.name
+                        );
+                        let sink = shamir_wal::WalSink::mem();
+                        let group = Arc::new(shamir_wal::WalGroupCommit::new(Arc::new(sink)));
+                        crate::repo::durability_policy::install_empty_coverage(&group)?;
+                        group
+                    }
+                };
+                let mgr = shamir_tx::RepoWalManager::new(initial_txn_id, Arc::clone(&group));
+                // Publish the group for the replication read path's R bound.
+                let _ = self.durability_handle.wal_group.set(group);
+
+                // Anti-collision safeguard: floor next_txn_id above any
+                // inflight txn_id replayed from the WAL, so a fresh
+                // `fresh_txn_id` can never reuse an id a crashed entry already
+                // used. On a fresh Mem instance `recover()` is empty → inert;
+                // on a disk repo it returns the durable entries.
+                if let Ok(entries) = mgr.recover().await {
+                    if let Some(max_txn_id) = entries.iter().map(|e| e.txn_id).max() {
+                        mgr.seed_floor_at_least(max_txn_id + 1);
+                    }
+                }
+
+                Ok::<Arc<shamir_tx::RepoWalManager>, DbError>(Arc::new(mgr))
+            })
+            .await
+            .cloned()
+    }
+
+    /// The repo's `WalGroupCommit` (captured when `repo_wal` initializes).
+    /// Used by the replication read path to sample `R` and coalesce syncs.
+    /// Also exposes the recoverability watermark to embedded callers.
+    pub(crate) async fn wal_group(&self) -> DbResult<Arc<shamir_wal::WalGroupCommit>> {
+        self.repo_wal().await?;
+        self.durability_handle
+            .wal_group
+            .get()
+            .cloned()
+            .ok_or_else(|| DbError::Internal("wal group not initialized".to_string()))
+    }
+
+    pub(crate) async fn settle_unwritten_version(&self, version: u64) {
+        if let Ok(group) = self.wal_group().await {
+            group.settle(version);
+        }
+    }
+
+    pub(crate) fn initialized_mem_wal(&self) -> bool {
+        self.durability_handle.initialized_mem_wal()
+    }
+
+    /// Snapshot read of the shared policy; pins the value against concurrent stores.
+    pub(crate) fn durability_policy(&self) -> arc_swap::Guard<Arc<DurabilityPolicy>> {
+        self.durability_handle.durability_policy()
+    }
+
+    pub(crate) fn wal_retention_gate(&self) -> &Arc<RetentionGate> {
+        self.durability_handle.wal_retention_gate()
+    }
+
+    #[inline]
+    pub(crate) fn wal_retention_refuse_writes(&self) -> bool {
+        self.durability_handle.wal_retention_refuse_writes()
+    }
+
+    pub(crate) async fn reserve_recovery_floor(
+        &self,
+        info: &Arc<dyn Store>,
+        minimum: u64,
+    ) -> DbResult<u64> {
+        self.durability_handle
+            .reserve_recovery_floor(info, minimum)
+            .await
+    }
+
+    /// Backend capability: does this repo persist a WAL across reopen?
+    /// Read on the cold publication path only (replication DDL enforcement).
+    pub(crate) fn has_persistent_wal(&self) -> bool {
+        self.durability_handle.has_persistent_wal()
+    }
+
+    /// F6b (I2): flush every per-table `history` version-log to disk WITHOUT
+    /// draining the WAL.
+    ///
+    /// The truncation fsync-gate: the drainer calls this immediately before
+    /// `wal.truncate_below(durable)` so that every record in a to-be-deleted
+    /// sealed segment is physically durable in `history` before its WAL
+    /// segment is unlinked (I2 — closes the power-loss window). Distinct from
+    /// `flush_buffers`, which drains the WAL first
+    /// (`drain_all`) and flushes `data_store`/`info_store` — calling that from
+    /// the drainer would recurse. This seam is narrow: it touches ONLY each
+    /// MVCC store's `history`, and never the WAL.
+    ///
+    /// Every store is drained (`flush_history_drain`) and the repository then
+    /// issues ONE backend-wide durability barrier (`Repo::persist_once`): the
+    /// per-store `flush()` fsynced fjall's single per-Database journal once per
+    /// table, so a repository with N open tables paid N identical fsyncs.
+    ///
+    /// Best-effort over all tables: a per-store flush error is logged and the
+    /// first one returned after attempting them all.
+    pub(crate) async fn flush_all_history(&self) -> DbResult<()> {
+        let mut mvccs = Vec::new();
+        self.catalog.per_table_mvcc.iter_sync(|_, mvcc| {
+            mvccs.push(Arc::clone(mvcc));
+            true
+        });
+        let mut first_err: Option<DbError> = None;
+        let any = !mvccs.is_empty();
+        for mvcc in mvccs {
+            if let Err(e) = mvcc.flush_history_drain().await {
+                log::warn!("flush_all_history: {}: {}", self.name, e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        if any {
+            if let Err(e) = self.repo.persist_once().await {
+                log::warn!("flush_all_history: persist_once {}: {}", self.name, e);
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// Open-time unclean bump (called from `tx::recovery` AFTER
+    /// `certify_cold_start`): an Armed lifecycle record with no later Clean
+    /// certificate costs a history-epoch bump — followers must re-seed. The
+    /// CURRENT serve mode is deliberately NOT consulted (review finding 2a):
+    /// the Armed obligation survives a configuration change — a repo that
+    /// served speculatively and was switched to `durable` still loses its
+    /// served tail on an unclean restart, and under durable serving an
+    /// old-epoch follower bookmark is inert, so fencing REQUIRES the bump.
+    /// The armed record is left as-is: the obligation persists until the next
+    /// clean shutdown. A failed bump/flush propagates and blocks admission
+    /// (`?` at the caller).
+    pub(crate) async fn note_unclean_open_bump(&self, permit: &RepoWritePermit) -> DbResult<()> {
+        let store = self.tx_info_store().await?;
+        let record = crate::meta::repo_identity::load_state(&store).await?;
+        if !crate::meta::repo_identity::requires_unclean_bump(record) {
+            return Ok(());
+        }
+        // Negative-control seam: constant-false in production, branch elided.
+        if cfg!(test)
+            && crate::meta::repo_identity::SKIP_UNCLEAN_EPOCH_BUMP_FOR_TEST
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
+        self.bump_history_epoch_admitted(permit).await?;
+        self.durability_handle.durability_metrics.note_epoch_bump();
+        Ok(())
+    }
+
+    /// Advance the history epoch while holding repository write admission.
+    pub(crate) async fn bump_history_epoch_admitted(
+        &self,
+        permit: &RepoWritePermit,
+    ) -> DbResult<RepoIdentity> {
+        self.durability_handle
+            .write_domain
+            .debug_check_permit(permit);
+        let _guard = self.durability_handle.marker_write_mutex.lock().await;
+        let store = self.tx_info_store().await?;
+        RepoIdentity::bump(&store, None).await
+    }
+}

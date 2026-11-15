@@ -2,8 +2,6 @@ use super::super::ChangefeedHandle;
 #[cfg(test)]
 use crate::tx::clean_horizon::checkpoint::test_seam;
 use shamir_storage::error::{DbError, DbResult};
-use shamir_storage::types::{Repo, Store};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::super::RepoInstance;
@@ -58,109 +56,18 @@ impl RepoInstance {
     pub async fn certified_gap_interval(&self) -> DbResult<Option<(u64, u64)>> {
         Ok(self.changefeed().await?.feed.certified_gap_interval())
     }
-    pub(crate) async fn mark_changefeed_gap(&self, version: u64) -> DbResult<()> {
-        self.changefeed().await?.feed.mark_gap(version);
-        Ok(())
-    }
 
     // ============================================================================
     // Changefeed (Phase 3b): live broadcast + durable journal
     // ============================================================================
 
-    /// cancel-safe: yes — `OnceCell::get_or_try_init`. If cancellation
-    /// occurs during init the cell stays empty and the next caller retries;
-    /// the returned handle is an in-memory `Arc` clone.
-    ///
-    /// Lazily build (once per repo) the changefeed: a live broadcast sender
-    /// plus a background journal writer over the `"__changelog__"` store.
-    /// The feed is "always on" — the commit-path feeds the journal on every
-    /// non-empty commit regardless of live subscribers — so callers that
-    /// subscribed late can still catch up via [`read_changelog_from`].
-    ///
-    /// [`read_changelog_from`]: Self::read_changelog_from
+    /// cancel-safe: yes — `OnceCell::get_or_try_init`; the returned handle
+    /// is an in-memory `Arc` clone. Lazily builds the changefeed once per
+    /// repo (see the core method for the init contract).
     pub(crate) async fn changefeed(&self) -> DbResult<ChangefeedHandle> {
         #[cfg(test)]
         test_seam::record(self, "before_feed_init");
-        let handle = self
-            .core
-            .durability_handle
-            .changefeed
-            .get_or_try_init(|| async {
-                #[cfg(test)]
-                if let Some(hook) = self.core.journal_publish_hook.load_full() {
-                    if hook
-                        .init_failures
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-                        .is_ok()
-                    {
-                        return Err(DbError::Storage("injected changefeed init failure".into()));
-                    }
-                }
-                let store: Arc<dyn Store> = self.core.repo.store_get("__changelog__").await?;
-                let adapter = crate::repo::changelog_store::StoreChangelog::new(store);
-                let clean_horizon = adapter.load_clean_horizon().await?;
-                let (marker, repair_marker) = adapter.load_gap_marker().await?;
-                let cl_store: Arc<dyn shamir_tx::ChangelogStore> = Arc::new(adapter);
-                let pending = self
-                    .core
-                    .durability_handle
-                    .pending_changefeed_gap
-                    .load(Ordering::Acquire);
-                let restored = match (marker, pending) {
-                    (m, 0) => m,
-                    (None, p) => Some((p, p)),
-                    (Some((first, through)), p) => Some((first.min(p), through.max(p))),
-                };
-                #[cfg(test)]
-                if let Some(hook) = self.core.journal_publish_hook.load_full() {
-                    if hook.init_snapshot_armed.swap(false, Ordering::AcqRel) {
-                        hook.reached.notify_one();
-                        hook.resume.notified().await;
-                    }
-                }
-                // Seeds claim durability: flush pending/corrupt metadata before
-                // spawning the sole writer. Failed init leaves pending intact.
-                if repair_marker || restored != marker {
-                    if let Some(interval) = restored {
-                        cl_store
-                            .put(
-                                shamir_tx::changefeed::gap_marker_key(),
-                                shamir_tx::changefeed::encode_gap_marker(interval),
-                            )
-                            .await
-                            .map_err(|e| DbError::Storage(e.to_string()))?;
-                    }
-                }
-                let feed = shamir_tx::RepoChangefeed::new_with_metadata(
-                    Arc::clone(&cl_store),
-                    restored,
-                    clean_horizon,
-                );
-                Ok::<ChangefeedHandle, DbError>(ChangefeedHandle {
-                    feed,
-                    store: cl_store,
-                })
-            })
-            .await?
-            .clone();
-        // Recheck AFTER OnceCell publishes, not only inside its closure: a failed
-        // committer can store pending after the closure snapshot but before
-        // get() becomes Some. Together with the publisher's store+get recheck,
-        // either that publisher sees the feed or this path sees its minimum.
-        // RMW (not just an Acquire load) participates in the pending atomic's
-        // modification order. If the publisher's RMW is first, we see its gap;
-        // if ours is first, its Acquire observes our Release and therefore the
-        // already-published OnceCell. This closes the store-buffering schedule
-        // without SeqCst or another lock, including publication after snapshot.
-        let pending = self
-            .core
-            .durability_handle
-            .pending_changefeed_gap
-            .fetch_or(0, Ordering::AcqRel);
-        if pending != 0 {
-            handle.feed.mark_gap(pending);
-        }
-        Ok(handle)
+        self.core.changefeed().await
     }
 
     /// Resolve before entering the synchronous publish block. Failure is
@@ -172,39 +79,26 @@ impl RepoInstance {
         Arc<shamir_tx::ChangelogEvent>,
         Option<Arc<shamir_tx::RepoChangefeed>>,
     )> {
-        let event = Arc::new(event?);
-        let feed = match self.changefeed().await {
-            Ok(handle) => Some(handle.feed),
-            Err(e) => {
-                log::warn!("changefeed init failed for repo {}: {e}", self.name());
-                None
-            }
-        };
-        Some((event, feed))
+        self.core.prepare_journal_event(event).await
+    }
+
+    pub(crate) async fn mark_changefeed_gap(&self, version: u64) -> DbResult<()> {
+        self.core.mark_changefeed_gap(version).await
     }
 
     /// Synchronous publish-time fallback; minimum is shared across repo clones.
     pub(crate) fn record_pending_changefeed_gap(&self, version: u64) {
-        self.core
-            .durability_handle
-            .record_pending_changefeed_gap(version);
+        self.core.record_pending_changefeed_gap(version);
     }
 
     /// Live only: never re-enqueue an event already handled before publish.
     pub(crate) fn broadcast_changefeed_event(&self, event: Option<Arc<shamir_tx::ChangelogEvent>>) {
-        self.core
-            .durability_handle
-            .broadcast_changefeed_event(event);
+        self.core.broadcast_changefeed_event(event);
     }
 
     #[cfg(test)]
     pub(crate) async fn fire_post_publish_pre_broadcast_test_hook(&self) {
-        if let Some(hook) = self.core.journal_publish_hook.load_full() {
-            if hook.broadcast_armed.swap(false, Ordering::AcqRel) {
-                hook.reached.notify_one();
-                hook.resume.notified().await;
-            }
-        }
+        self.core.fire_post_publish_pre_broadcast_test_hook().await
     }
 
     /// Subscribe to this repo's live changefeed.

@@ -40,3 +40,15 @@ module = "crate::repo::journal::backend::durability_handle::retention_gate"
 # owner: <foreign-impl> — declared in the migration coordinator submodule.
 type = "MigrationCoordinator"
 module = "crate::table::table_manager::migration::coordinator"
+
+[[owned_impl]]
+# owner: <engine-layering-R2c1b> — the tx-layer aggregate; every inherent
+# impl must live in tx/commit/core (or a descendant module of it).
+type = "RepoCore"
+module = "crate::tx::commit::core"
+
+[[owned_impl]]
+# owner: <engine-layering-R2c1b> — the tx-horizon bundle; every inherent
+# impl must live in tx/commit/core (or a descendant module of it).
+type = "TxHorizon"
+module = "crate::tx::commit::core"
