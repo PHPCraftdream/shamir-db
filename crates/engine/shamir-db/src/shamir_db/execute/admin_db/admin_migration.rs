@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use crate::access::{Action, ResourcePath};
 use crate::engine::migration::{MigrationPhase, MigrationState};
+use crate::engine::repo::begin_migration_freeze_admitted;
 use crate::engine::repo::repo_types::BoxRepoFactory;
 use crate::engine::repo::RepoWriteDomain;
 use crate::engine::table::TableConfig;
@@ -147,8 +148,7 @@ impl ShamirAdminExecutor {
             // opening a write window between the dictionary copy and the
             // freeze. The already-held guard is passed INTO the factory —
             // no window where the guard is unowned.
-            let freeze = src_table
-                .begin_migration_freeze_admitted(&src_permit)
+            let freeze = begin_migration_freeze_admitted(&src_table, &src_permit)
                 .await
                 .map_err(shamir_storage::error::DbError::from)?;
 

@@ -8,3 +8,35 @@
 [[owned_impl]]
 type = "RepoInstance"
 module = "crate::repo::instance::repo_instance"
+
+[[owned_impl]]
+# owner: <foreign-impl> — impl blocks are deliberately split across the table
+# layer (read/, write/, admission/, table_manager/); layer-root ownership.
+type = "TableManager"
+module = "crate::table"
+
+[[owned_impl]]
+# owner: <foreign-impl> — declared and implemented in table/support/storage/catalog.
+type = "TableCatalog"
+module = "crate::table::support::storage::catalog"
+
+[[owned_impl]]
+# owner: <foreign-impl> — declared and implemented in the journal backend's
+# durability_handle module.
+type = "DurabilityHandle"
+module = "crate::repo::journal::backend::durability_handle"
+
+[[owned_impl]]
+# owner: <foreign-impl> — declared in the changefeed submodule.
+type = "ChangefeedHandle"
+module = "crate::repo::journal::backend::durability_handle::changefeed"
+
+[[owned_impl]]
+# owner: <foreign-impl> — declared in the retention_gate submodule.
+type = "RetentionGate"
+module = "crate::repo::journal::backend::durability_handle::retention_gate"
+
+[[owned_impl]]
+# owner: <foreign-impl> — declared in the migration coordinator submodule.
+type = "MigrationCoordinator"
+module = "crate::table::table_manager::migration::coordinator"
