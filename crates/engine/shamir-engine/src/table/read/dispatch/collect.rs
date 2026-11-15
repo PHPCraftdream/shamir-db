@@ -8,7 +8,7 @@ use crate::table::table_manager::TableManager;
 use bytes::Bytes;
 use shamir_engine_query::query::filter::eval::FilterNode;
 use shamir_engine_query::query::filter::eval_context::FilterContext;
-use shamir_engine_query::query::read::row_byte_meter::RowByteMeter;
+use shamir_engine_query::query::read::value_bytes::ValueBytes;
 use shamir_engine_query::query::read::{
     exec, CorruptRecordRef, QueryRecord, QueryResult, QueryStats, ReadQuery,
 };
@@ -210,7 +210,7 @@ impl TableManager {
                                 };
                                 let qv = projection.project_value(&view, interner)?;
                                 if let Some(meter) = ctx.row_byte_meter {
-                                    meter.charge(RowByteMeter::value_size(&qv))?;
+                                    meter.charge(ValueBytes::row_bytes(&qv))?;
                                 }
                                 heap.push(qv, tracking_versions.then_some(id));
                             } else if needs_raw {
@@ -259,7 +259,7 @@ impl TableManager {
                                 };
                                 let qv = projection.project_value(&record, interner)?;
                                 if let Some(meter) = ctx.row_byte_meter {
-                                    meter.charge(RowByteMeter::value_size(&qv))?;
+                                    meter.charge(ValueBytes::row_bytes(&qv))?;
                                 }
                                 heap.push(qv, tracking_versions.then_some(id));
                             } else if needs_raw {

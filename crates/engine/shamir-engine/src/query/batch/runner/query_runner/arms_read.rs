@@ -542,7 +542,7 @@ impl<'a> QueryRunner<'a> {
         // S-read: thread result_encoding into the read path so that
         // Id-encoding requests return id-keyed IdBytes rows instead of
         // de-interning on the server.
-        let meter = crate::query::batch::exec_scope::RowByteMeter::new(self.scope);
+        let meter = crate::query::batch::exec_scope::ScopeRowMeter::new(self.scope);
         let ctx = ctx
             .with_row_byte_meter(meter.as_ref().map(|m| m as &dyn ReadByteMeter))
             .with_read_visibility_scope(self.scope);
