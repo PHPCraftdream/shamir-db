@@ -30,7 +30,7 @@ You are an engineer on **S.H.A.M.I.R.** — a production-grade, self-contained, 
 `Cargo.toml` declares `members = ["crates/*/*", "vendor/hnsw_rs"]` and excludes
 `crates/client/shamir-client-ts` (pure TypeScript, no `Cargo.toml`, so the `crates/*/*` glob
 must not try to load it). Crates live in layer folders `crates/<group>/<crate>/`
-(see CLAUDE.md for the group table). The default workspace ships **38 crates** under `crates/` (including
+(see CLAUDE.md for the group table). The default workspace ships **39 crates** under `crates/` (including
 the `shamir-client-node` napi-rs binding, a regular member; MSVC-only on
 Windows) plus the vendored `vendor/hnsw_rs` member:
 
@@ -40,7 +40,7 @@ Windows) plus the vendored `vendor/hnsw_rs` member:
 `shamir-server`, `shamir-server-security`, `shamir-sync`, `shamir-transport-http`, `shamir-transport-ipc`, `shamir-transport-tcp`,
 `shamir-transport-ws`, `shamir-client`, `shamir-client-node`, `shamir-sdk`,
 `shamir-sdk-macros`, `shamir-tunables`, `shamir-wasm-host`, `shamir-index`,
-`shamir-numa`, `shamir-private-dir`, `shamir-bench-utils`, `shamir-proc-tree`,
+`shamir-numa`, `shamir-private-dir`, `shamir-metrics`, `shamir-bench-utils`, `shamir-proc-tree`,
 `shamir-index-core`, `shamir-vector`, `shamir-wasm-admission`, `shamir-e2e`,
 `shamir-test-diag`,
 `shamir-lang` (its `testsupport` module is behind the `testsupport` feature,

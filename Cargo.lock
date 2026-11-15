@@ -3772,6 +3772,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "shamir-metrics"
+version = "0.1.0-alpha.1"
+dependencies = [
+ "bench-scale-tool",
+ "loom",
+]
+
+[[package]]
 name = "shamir-numa"
 version = "0.1.0-alpha.1"
 dependencies = [
