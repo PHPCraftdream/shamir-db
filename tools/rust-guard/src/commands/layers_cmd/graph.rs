@@ -65,10 +65,12 @@ pub(crate) fn cfg_requires_test(attrs: &[syn::Attribute]) -> bool {
     false
 }
 
-/// Evaluates a cfg predicate: true only when it REQUIRES `test`/`loom`
-/// in every satisfying case — the bare ident, any `all(...)` conjunct,
-/// or an `any(...)` whose every alternative requires it. `not` negates
-/// recursively; `feature = ".."` and unknown predicates are neutral.
+/// Evaluates a cfg predicate: true only when it REQUIRES `test`/`loom`,
+/// i.e. is false whenever neither is set — the bare ident, any `all(...)`
+/// conjunct, or an `any(...)` whose every alternative requires it.
+/// `not(e)` requires them exactly when `e` is excluded by them (see
+/// [`expr_excludes_test`]); `feature = ".."` and unknown predicates are
+/// neutral.
 fn expr_requires_test(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Path(p) => p
@@ -82,9 +84,31 @@ fn expr_requires_test(expr: &syn::Expr) -> bool {
                 return false;
             };
             match name.as_str() {
-                "not" => c.args.len() == 1 && expr_requires_test(&c.args[0]),
+                "not" => c.args.len() == 1 && expr_excludes_test(&c.args[0]),
                 "all" => c.args.iter().any(expr_requires_test),
                 "any" => !c.args.is_empty() && c.args.iter().all(expr_requires_test),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Dual of [`expr_requires_test`]: true only when the predicate is false
+/// whenever `test`/`loom` is set (`not(test)`), so its negation requires
+/// them. A bare ident, `feature = ".."` and unknown predicates never
+/// exclude.
+fn expr_excludes_test(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(inner) => expr_excludes_test(&inner.expr),
+        syn::Expr::Call(c) => {
+            let Some(name) = call_ident(&c.func) else {
+                return false;
+            };
+            match name.as_str() {
+                "not" => c.args.len() == 1 && expr_requires_test(&c.args[0]),
+                "all" => c.args.iter().any(expr_excludes_test),
+                "any" => !c.args.is_empty() && c.args.iter().all(expr_excludes_test),
                 _ => false,
             }
         }
